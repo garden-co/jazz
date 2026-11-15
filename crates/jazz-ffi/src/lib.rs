@@ -8,7 +8,7 @@
 //! Rows, queries and deltas are plain JSON typed by the app's schema; see
 //! the crate's README for the shapes. Not supported yet (refused with
 //! `JazzError::Refused`): includes, connecting to a sync server as an end
-//! user with a JWT, writing enums with payloads, reads inside transactions
+//! user with a JWT, reads inside transactions
 //! (and transactions altogether), computed columns and transforms (the
 //! language's bindings implement them over the stored values).
 
@@ -17,6 +17,7 @@ mod convert;
 mod core;
 mod endpoint;
 mod error;
+mod gate;
 mod relational;
 
 use std::sync::Arc;
@@ -62,7 +63,9 @@ impl JazzHandle {
             .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
             .unwrap_or(1);
         let host = core::HostTokens(Arc::new(move |reason: &str| {
-            tokens.token(reason.to_owned())
+            tokens
+                .token(reason.to_owned())
+                .map_err(|error| error.to_string())
         }));
         let core = core::Core::open_with_tokens(&config_json, Some(Arc::new(host)))
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
@@ -262,8 +265,9 @@ impl JazzHandle {
         })())
     }
 
-    /// Writes the row with this id: inserts it, or replaces its columns.
-    /// `row_json` is a whole row, as for an insert. Returns the row.
+    /// Writes the row with this id: a new id inserts (`row_json` then holds
+    /// every required column), an existing one sets the columns `row_json`
+    /// names. Returns the row.
     pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
         self.core.surface(
             self.core
@@ -301,6 +305,7 @@ impl JazzHandle {
         Ok(Arc::new(Upload {
             handle: self,
             upload,
+            open: std::sync::atomic::AtomicBool::new(true),
         }))
     }
 
@@ -312,6 +317,7 @@ impl JazzHandle {
         authenticator: Arc<dyn Authenticator>,
         base_path: Option<String>,
         session_ttl_secs: Option<u64>,
+        max_sockets: Option<u32>,
     ) -> Result<Arc<Endpoint>> {
         let auth: Arc<endpoint::HostAuthFn> =
             Arc::new(move |request: &str| authenticator.authenticate(request.to_owned()));
@@ -320,6 +326,7 @@ impl JazzHandle {
             auth,
             base_path.as_deref(),
             session_ttl_secs,
+            max_sockets.map(|max| max as usize),
         ))?;
         Ok(Arc::new(Endpoint {
             inner,
@@ -580,10 +587,12 @@ impl std::fmt::Debug for JazzHandle {
 /// Where an end user's bearer tokens come from (the host's own sign-in).
 /// Called on a thread of its own, so it may block; `reason` is `connect`,
 /// `renew`, `expired` or `refresh` (the last two want a fresh token, not a
-/// cached one). `None` means no one is signed in.
+/// cached one). `None` means no one is signed in (the app stops); an error
+/// means the fetch failed (a network blip): the session stays signed in and
+/// asks again.
 #[uniffi::export(with_foreign)]
 pub trait TokenProvider: Send + Sync {
-    fn token(&self, reason: String) -> Option<String>;
+    fn token(&self, reason: String) -> Result<Option<String>>;
 }
 
 /// What a session or sync watch calls with each state (JSON).
@@ -613,6 +622,16 @@ impl Watch {
 pub struct Upload {
     handle: Arc<JazzHandle>,
     upload: u64,
+    /// Not yet finished or aborted: dropped, it aborts.
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        if self.open.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let _ = self.handle.core.upload_abort(self.upload);
+        }
+    }
 }
 
 #[uniffi::export]
@@ -625,6 +644,7 @@ impl Upload {
 
     /// Commits the row with its value; returns the row.
     pub fn finish(&self) -> Result<String> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
         self.handle.core.surface(
             self.handle
                 .core
@@ -633,6 +653,7 @@ impl Upload {
     }
 
     pub fn abort(&self) -> Result<()> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
         self.handle
             .core
             .surface(self.handle.core.upload_abort(self.upload))
@@ -724,7 +745,8 @@ pub struct Socket {
 
 #[uniffi::export]
 impl Socket {
-    /// A binary message from the client.
+    /// A message from the client: every data message, binary or text (TS
+    /// sends its prelude as text), as its bytes.
     pub fn push(&self, message: Vec<u8>) -> Result<()> {
         self.inner.push(message).map_err(JazzError::from)
     }

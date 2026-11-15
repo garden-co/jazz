@@ -271,6 +271,13 @@ pub unsafe extern "C" fn jazz_call(
                 )?
             }
             "uploadBegin" => {
+                // jazz-app streams outside transactions only: an upload
+                // that named one would escape it.
+                if args.get("tx").is_some_and(|tx| !tx.is_null()) {
+                    return Err(crate::error::unsupported(
+                        "streaming uploads inside a transaction",
+                    ));
+                }
                 let row = args
                     .get("row")
                     .filter(|r| !r.is_null())
@@ -293,7 +300,14 @@ pub unsafe extern "C" fn jazz_call(
                 core.upload_push(parse_tx(&string("upload")?)?, bytes)?;
                 "null".into()
             }
-            "uploadFinish" => core.upload_finish(parse_tx(&string("upload")?)?, &opts(false)?)?,
+            "uploadFinish" => {
+                if args.get("tx").is_some_and(|tx| !tx.is_null()) {
+                    return Err(crate::error::unsupported(
+                        "streaming uploads inside a transaction",
+                    ));
+                }
+                core.upload_finish(parse_tx(&string("upload")?)?, &opts(false)?)?
+            }
             "uploadAbort" => {
                 core.upload_abort(parse_tx(&string("upload")?)?)?;
                 "null".into()
@@ -442,21 +456,31 @@ pub unsafe extern "C" fn jazz_string_free(text: *mut c_char) {
 }
 
 /// A host's token callback: called on a thread of its own (it may block)
-/// with `reason` (`"connect"`, `"renew"`, `"expired"`, `"refresh"`); returns
-/// the token as a string allocated with `malloc` (Go's `C.CString`), which
-/// jazz frees, or NULL when no one is signed in.
-pub type JazzTokenCallback =
-    Option<unsafe extern "C" fn(ctx: *mut c_void, reason: *const c_char) -> *mut c_char>;
+/// with `reason` (`"connect"`, `"renew"`, `"expired"`, `"refresh"`). Returns
+/// 0 with `*token` set to the token, a `malloc`ed string (Go's `C.CString`)
+/// jazz frees, or to NULL when no one is signed in (the app stops); or
+/// non-zero when the fetch failed (a network blip): the session stays and
+/// asks again, and `*token`, if set, is the failure's message (freed too).
+pub type JazzTokenCallback = Option<
+    unsafe extern "C" fn(ctx: *mut c_void, reason: *const c_char, token: *mut *mut c_char) -> i32,
+>;
 
 unsafe extern "C" {
     fn free(pointer: *mut c_void);
 }
 
-struct TokenContext(*mut c_void);
-// SAFETY: the caller of `jazz_open_user` promises `ctx` may be used from
-// any thread (the header says so).
-unsafe impl Send for TokenContext {}
-unsafe impl Sync for TokenContext {}
+/// A C host's token callback and its `ctx`, while its handle is open.
+type TokenGate = crate::gate::Gate<(
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32,
+    TokenRef,
+)>;
+
+/// A host's `ctx`, shared by the gated calls.
+#[derive(Clone, Copy)]
+struct TokenRef(*mut c_void);
+// SAFETY: the host promises `ctx` may be used from any thread (header).
+unsafe impl Send for TokenRef {}
+unsafe impl Sync for TokenRef {}
 
 /// Opens an app as an end user who signs in with the app's bearer
 /// (`"auth": {"bearer": true}`): `token_cb` gives it.
@@ -481,26 +505,44 @@ pub unsafe extern "C" fn jazz_open_user(
             contract.set(version);
         }
         let cb = token_cb.ok_or_else(|| refused("the token callback is NULL"))?;
-        let ctx = std::sync::Arc::new(TokenContext(ctx));
+        // The callback and its ctx while the handle is open: `jazz_close`
+        // waits for a fetch in progress and clears it, so no fetch calls
+        // the host after close returns (a late one fails, without signing
+        // anyone out).
+        let gate: std::sync::Arc<TokenGate> =
+            std::sync::Arc::new(crate::gate::Gate::new((cb, TokenRef(ctx))));
+        let calling = gate.clone();
         let host = crate::core::HostTokens(std::sync::Arc::new(move |reason: &str| {
-            let ctx = &ctx;
-            let reason = CString::new(reason).unwrap_or_default();
-            // SAFETY: per `jazz_open_user`'s contract.
-            let token = unsafe { cb(ctx.0, reason.as_ptr()) };
-            if token.is_null() {
-                return None;
-            }
-            // SAFETY: the callback returns a NUL-terminated `malloc`ed string.
-            let text = unsafe { CStr::from_ptr(token) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { free(token.cast()) };
-            Some(text)
+            calling
+                .call(|&(cb, ctx)| {
+                    let reason = CString::new(reason).unwrap_or_default();
+                    let mut token: *mut c_char = ptr::null_mut();
+                    // SAFETY: per `jazz_open_user`'s contract, while the
+                    // handle (this gate) is open.
+                    let failed = unsafe { cb(ctx.0, reason.as_ptr(), &mut token) };
+                    let text = if token.is_null() {
+                        None
+                    } else {
+                        // SAFETY: the callback sets a NUL-terminated
+                        // `malloc`ed string.
+                        let text = unsafe { CStr::from_ptr(token) }
+                            .to_string_lossy()
+                            .into_owned();
+                        unsafe { free(token.cast()) };
+                        Some(text)
+                    };
+                    if failed != 0 {
+                        return Err(text.unwrap_or_else(|| "the token callback failed".into()));
+                    }
+                    Ok(text)
+                })
+                .unwrap_or_else(|| Err("the app is closed".into()))
         }));
-        Ok(Box::into_raw(Box::new(JazzHandle(Core::open_with_tokens(
-            config,
-            Some(std::sync::Arc::new(host)),
-        )?))))
+        let core = Core::open_with_tokens(config, Some(std::sync::Arc::new(host)))?;
+        // Closing waits for fetches in progress (but its own, when closed
+        // from inside the callback); no fetch calls the host after.
+        core.on_close(Box::new(move || gate.close()));
+        Ok(Box::into_raw(Box::new(JazzHandle(core))))
     })
 }
 
@@ -571,8 +613,16 @@ pub unsafe extern "C" fn jazz_generate_device_key(err: *mut *mut c_char) -> *mut
     })
 }
 
-/// A backend's `/jazz` endpoint (opaque to C).
-pub struct JazzEndpoint(crate::endpoint::EndpointCore);
+/// A backend's `/jazz` endpoint (opaque to C), with the gate on its host
+/// callback: cleared by `jazz_endpoint_free`, after which the callback is
+/// never called again (sockets still being served answer "no one").
+pub struct JazzEndpoint(crate::endpoint::EndpointCore, std::sync::Arc<AuthGate>);
+
+/// The host's `authenticate` and its `ctx`, while the endpoint lives.
+type AuthGate = crate::gate::Gate<(
+    unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+    TokenRef,
+)>;
 
 /// A socket an endpoint serves (opaque to C).
 pub struct JazzSocket(crate::endpoint::SocketCore);
@@ -593,7 +643,7 @@ pub type JazzSocketClosed =
     Option<unsafe extern "C" fn(ctx: *mut c_void, code: u16, reason: *const c_char)>;
 
 /// The `/jazz` endpoint of a backend handle. `options_json`:
-/// `{"basePath"?: "/jazz", "sessionTtlSecs"?}` (or NULL).
+/// `{"basePath"?: "/jazz", "sessionTtlSecs"?, "maxSockets"?}` (or NULL).
 ///
 /// # Safety
 /// `handle` is an open backend handle; `auth_cb` and `ctx` stay valid, from
@@ -621,30 +671,43 @@ pub unsafe extern "C" fn jazz_endpoint_new(
                 "options_json",
             )?
         };
-        let ctx = std::sync::Arc::new(TokenContext(ctx));
+        let gate: std::sync::Arc<AuthGate> =
+            std::sync::Arc::new(crate::gate::Gate::new((cb, TokenRef(ctx))));
+        let calling = gate.clone();
         let auth: std::sync::Arc<crate::endpoint::HostAuthFn> =
             std::sync::Arc::new(move |request: &str| {
-                let ctx = &ctx;
-                let request = CString::new(request).unwrap_or_default();
-                // SAFETY: per `jazz_endpoint_new`'s contract.
-                let answer = unsafe { cb(ctx.0, request.as_ptr()) };
-                if answer.is_null() {
-                    return None;
-                }
-                // SAFETY: the callback returns a NUL-terminated `malloc`ed string.
-                let text = unsafe { CStr::from_ptr(answer) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { free(answer.cast()) };
-                Some(text)
+                // Counted while it runs: `jazz_endpoint_free` waits for every
+                // running call, and once it closed the gate none starts.
+                calling
+                    .call(|&(cb, ctx)| {
+                        let request = CString::new(request).unwrap_or_default();
+                        // SAFETY: per `jazz_endpoint_new`'s contract, while
+                        // the endpoint (this gate) lives.
+                        let answer = unsafe { cb(ctx.0, request.as_ptr()) };
+                        if answer.is_null() {
+                            return None;
+                        }
+                        // SAFETY: the callback returns a NUL-terminated
+                        // `malloc`ed string.
+                        let text = unsafe { CStr::from_ptr(answer) }
+                            .to_string_lossy()
+                            .into_owned();
+                        unsafe { free(answer.cast()) };
+                        Some(text)
+                    })
+                    .flatten()
             });
         let endpoint = crate::endpoint::EndpointCore::new(
             core,
             auth,
             options.get("basePath").and_then(Json::as_str),
             options.get("sessionTtlSecs").and_then(Json::as_u64),
+            options
+                .get("maxSockets")
+                .and_then(Json::as_u64)
+                .and_then(|max| usize::try_from(max).ok()),
         )?;
-        Ok(Box::into_raw(Box::new(JazzEndpoint(endpoint))))
+        Ok(Box::into_raw(Box::new(JazzEndpoint(endpoint, gate))))
     })
 }
 
@@ -735,7 +798,7 @@ pub unsafe extern "C" fn jazz_endpoint_socket(
             on_message.ok_or_else(|| refused("on_message is NULL"))?,
             on_close.ok_or_else(|| refused("on_close is NULL"))?,
         );
-        let ctx = std::sync::Arc::new(TokenContext(ctx));
+        let ctx = std::sync::Arc::new(TokenRef(ctx));
         let closing = ctx.clone();
         let socket = endpoint.0.socket(
             upgrade,
@@ -755,7 +818,8 @@ pub unsafe extern "C" fn jazz_endpoint_socket(
     })
 }
 
-/// A binary message from the client. Returns 0, or -1 (with `*err`) once
+/// A message from the client: every data message, binary or text (TS
+/// sends its prelude as text), as its bytes. Returns 0, or -1 (with `*err`) once
 /// the socket has closed.
 ///
 /// # Safety
@@ -799,8 +863,10 @@ pub unsafe extern "C" fn jazz_socket_free(socket: *mut JazzSocket) {
     }));
 }
 
-/// Frees an endpoint: stops the client it acts as users with (its sockets
-/// end on their own).
+/// Frees an endpoint: stops the client it acts as users with. When it
+/// returns, the authenticate callback is not running and is never called
+/// again, so `ctx` may be freed; sockets still being served answer their
+/// requests as no one (free them with `jazz_socket_free`).
 ///
 /// # Safety
 /// `endpoint` is NULL or from `jazz_endpoint_new`, not yet freed.
@@ -812,6 +878,10 @@ pub unsafe extern "C" fn jazz_endpoint_free(endpoint: *mut JazzEndpoint) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: per the function's contract.
         let endpoint = unsafe { Box::from_raw(endpoint) };
+        // Waits for every running callback (but its own, when called from
+        // one), then no callback is ever called: the host may free `ctx`
+        // once this returns (from inside a callback: once that returns).
+        endpoint.1.close();
         let _ = endpoint.0.shutdown();
     }));
 }

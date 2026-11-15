@@ -1,7 +1,8 @@
 //! A backend's `/jazz` endpoint (jazz-app's [`jazz_app::Endpoint`], TS
 //! `createJazz`'s handler) for hosts whose own HTTP server serves it: the
 //! host passes each request in and writes the response out, upgrades the
-//! socket path itself and pumps its WebSocket's binary messages through a
+//! socket path itself and pumps every WebSocket data message (binary or text, as bytes)
+//! through a
 //! [`SocketCore`], and answers "who is this request's user" from its own
 //! sign-in through a callback.
 //!
@@ -27,6 +28,9 @@ const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::
 /// A host's `authenticate`: the request's JSON in, the answer's JSON (or
 /// none) out. Called on a thread of its own: it may block.
 pub(crate) type HostAuthFn = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+/// How long a host's `authenticate` may take before its request is no one.
+const AUTHENTICATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) fn request(json: &str) -> Result<Request> {
     let json: Json = serde_json::from_str(json)
@@ -97,6 +101,7 @@ impl EndpointCore {
         authenticate: Arc<HostAuthFn>,
         base_path: Option<&str>,
         session_ttl_secs: Option<u64>,
+        max_sockets: Option<usize>,
     ) -> Result<Self> {
         let auth = move |request: Request| {
             let callback = authenticate.clone();
@@ -113,7 +118,11 @@ impl EndpointCore {
             async move {
                 spawned
                     .map_err(|e| jazz_app::Error::Config(format!("cannot authenticate: {e}")))?;
-                let answer = receiver.await.map_err(|_| jazz_app::Error::Stopped)?;
+                // A host callback that hangs is no one, not a held socket.
+                let answer = match tokio::time::timeout(AUTHENTICATE_TIMEOUT, receiver).await {
+                    Ok(answer) => answer.map_err(|_| jazz_app::Error::Stopped)?,
+                    Err(_) => None,
+                };
                 match answer {
                     None => Ok(None),
                     Some(text) => serde_json::from_str::<Answer>(&text)
@@ -132,6 +141,10 @@ impl EndpointCore {
         }
         if let Some(secs) = session_ttl_secs {
             endpoint = endpoint.session_ttl(std::time::Duration::from_secs(secs));
+        }
+        // Sockets past it are refused with close 1013 (default 10 000).
+        if let Some(max) = max_sockets {
+            endpoint = endpoint.max_sockets(max);
         }
         let (jazz, schema, relations, has_server) = backend.parts();
         Ok(Self {
@@ -244,7 +257,8 @@ pub(crate) struct SocketCore {
 }
 
 impl SocketCore {
-    /// A binary message from the client.
+    /// A message from the client: every data message, binary or text (TS
+    /// sends its prelude as text), as its bytes.
     pub fn push(&self, message: Vec<u8>) -> Result<()> {
         match &*self.incoming.lock().unwrap_or_else(|e| e.into_inner()) {
             Some(sender) => sender

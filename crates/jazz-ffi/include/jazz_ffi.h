@@ -72,7 +72,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *               "id"?, "row"?}                               -> true|false|null
  *              (advisory: true does not promise the write succeeds; null =
  *              unknown, e.g. no server; not available inside a transaction)
- *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
+ *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names)
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
  *   "uploadPush"   {"upload", "bytes": base64}                -> null
@@ -128,16 +129,21 @@ void jazz_close(JazzHandle *handle);
 
 /*
  * An end user's token callback: called on a thread of its own (it may
- * block) with reason "connect" | "renew" | "expired" | "refresh"; returns
- * the token as a malloc'ed string (Go: C.CString), which jazz frees, or
- * NULL when no one is signed in.
+ * block) with reason "connect" | "renew" | "expired" | "refresh". Return 0
+ * with *token set to the token as a malloc'ed string (Go: C.CString), which
+ * jazz frees, or to NULL when no one is signed in (the app stops). Return
+ * non-zero when the fetch failed (e.g. a network blip): the session stays
+ * signed in and asks again; *token may hold the failure's message.
  */
-typedef char *(*JazzTokenCallback)(void *ctx, const char *reason);
+typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 
 /*
  * Opens an app as an end user signing in with the app's bearer
  * ("auth": {"bearer": true}); cb and ctx stay valid, from any thread, until
- * jazz_close returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
+ * jazz_close (or a "signOut" call) returns: that waits for a fetch in
+ * progress, and then the callback is never called again. Called from inside
+ * the callback, jazz_close returns at once and the callback stops once that
+ * call returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
  */
 JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
                            char **err);
@@ -172,7 +178,11 @@ typedef char *(*JazzAuthCallback)(void *ctx, const char *request_json);
 typedef void (*JazzSocketMessage)(void *ctx, const unsigned char *data, size_t len);
 typedef void (*JazzSocketClosed)(void *ctx, unsigned short code, const char *reason);
 
-/* options_json: {"basePath"?: "/jazz", "sessionTtlSecs"?} or NULL. */
+/*
+ * options_json: {"basePath"?: "/jazz", "sessionTtlSecs"?, "maxSockets"?
+ * (default 10000; past it a socket closes 1013)} or NULL. A client message
+ * over 2 MiB closes 1009; a refused prelude or sign-in closes 1008.
+ */
 JazzEndpoint *jazz_endpoint_new(JazzHandle *backend, JazzAuthCallback cb, void *ctx,
                                 const char *options_json, char **err);
 /* Answers an HTTP request with a response's JSON. */
@@ -189,10 +199,22 @@ JazzHandle *jazz_endpoint_for_user(JazzEndpoint *endpoint, const char *request_j
 JazzSocket *jazz_endpoint_socket(JazzEndpoint *endpoint, const char *upgrade_json,
                                  JazzSocketMessage on_message, JazzSocketClosed on_close,
                                  void *ctx, char **err);
-/* A binary message from the client: 0, or -1 once the socket closed. */
+/*
+ * A message from the client: pass every data message, binary or text (TS
+ * sends its prelude as text), as its bytes. 0, or -1 once the socket closed.
+ */
 int jazz_socket_push(JazzSocket *socket, const unsigned char *data, size_t len, char **err);
 /* The client's socket closed: ends it, waits for on_close, frees it. */
 void jazz_socket_free(JazzSocket *socket);
+/*
+ * Frees an endpoint. When it returns, the authenticate callback is not
+ * running and is never called again, so its ctx may be freed; sockets still
+ * being served then answer as no one (free them with jazz_socket_free). An
+ * authenticate call taking over 30 s is answered as no one, but free still
+ * waits for that call to return. Called from inside the authenticate
+ * callback, it waits for every other running call (not its own) and returns
+ * with the callback closed: ctx may be freed once that callback returns.
+ */
 void jazz_endpoint_free(JazzEndpoint *endpoint);
 
 /* Frees a string returned by, or stored in *err by, this API. */

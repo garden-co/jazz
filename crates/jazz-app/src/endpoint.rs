@@ -11,14 +11,16 @@
 //! - `<base>/apps/<id>/ws`: the user's sync socket, whose prelude the
 //!   backend admits on its own word and relays to the core, pinned to the
 //!   permissions bundle it published ([`Endpoint::serve_socket`]).
+//! - `POST <base>/apps/<id>/accounts/backend-link[/challenge]`: a device
+//!   account links to the user who signs up, proving its key on a
+//!   challenge issued for them.
 //!
 //! The endpoint is framework-neutral: the host's HTTP server passes requests
 //! to [`Endpoint::handle`], and the sockets it upgrades to
 //! [`Endpoint::serve_socket`]. With the `axum` feature, [`Endpoint::router`]
 //! does both.
 //!
-//! Not supported yet, as explicit answers: linking a device account to a
-//! user (`backend-link`, 501), trusted backend clients (`backendClients`,
+//! Not supported yet, as explicit answers: trusted backend clients (`backendClients`,
 //! 501), the HTTP-stream fallback for hosts without WebSockets (501),
 //! renewing a cookie session in place (sessions reconnect at their expiry
 //! instead), and local-first proofs signed for an endpoint URL rather than
@@ -64,6 +66,10 @@ const ACCOUNT_CACHE_LIMIT: usize = 10_000;
 const CORE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The close code of a socket ended for its credentials (policy violation).
 const CLOSE_POLICY: u16 = 1008;
+/// How long a link challenge holds.
+const LINK_CHALLENGE_TTL: Duration = Duration::from_secs(120);
+/// The core's refusal of every local-first identity, when it admits none.
+const LOCAL_FIRST_AUTH_DISABLED: &str = "local_first_auth_disabled";
 /// The largest prelude a socket may open with.
 const MAX_PRELUDE_BYTES: usize = 64 * 1024;
 /// The largest message a client may send: the core's own cap on a
@@ -239,6 +245,23 @@ pub enum Answer {
     DeviceAccount,
 }
 
+/// What becomes of a device key once it linked to a user, as TS
+/// `guestKeyAfterLink`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GuestKeyAfterLink {
+    /// The key stays a credential of the account (TS's default): the
+    /// device syncs on as before. A key that linked can link again, and
+    /// a second user it links to joins the same account and reads its
+    /// data, so only keep keys when a device is its user's alone.
+    #[default]
+    Keep,
+    /// The key is revoked once it linked: the device signs in as the user
+    /// from then on, a leaked key opens nothing, and it cannot link a
+    /// second user.
+    Revoke,
+}
+
 /// What [`Authenticate::authenticate`] returns.
 pub type AuthFuture = Pin<Box<dyn Future<Output = Result<Option<Answer>>> + Send>>;
 
@@ -296,6 +319,16 @@ impl Closed {
 /// The app's Jazz endpoint, served by its backend. `Clone + Send + Sync`:
 /// every clone serves the same endpoint.
 ///
+/// - **Linking device accounts** (`backend-link`): by default a device key
+///   that linked to a user stays a credential of their account
+///   ([`GuestKeyAfterLink::Keep`], TS's default). A key that linked can
+///   link again, and a second user it links to joins the same account. Use
+///   [`Endpoint::guest_key_after_link`] with [`GuestKeyAfterLink::Revoke`]
+///   unless a device is its user's alone.
+/// - **The admin secret must be random** (at least 32 bytes): link
+///   challenges, which every signed-in user receives, are MACs under a key
+///   derived from it, so a guessable secret could be found offline.
+///
 /// ```no_run
 /// # async fn serve(jazz: jazz_app::Jazz) -> jazz_app::Result<()> {
 /// use jazz_app::endpoint::{Answer, AuthUser, Endpoint, Request};
@@ -323,10 +356,14 @@ struct Inner {
     authenticate: Arc<dyn Authenticate>,
     base_path: String,
     session_ttl: Duration,
+    guest_key_after_link: GuestKeyAfterLink,
     max_sockets: usize,
     /// Sockets open now.
     sockets: Arc<std::sync::atomic::AtomicUsize>,
     http: reqwest::Client,
+    /// What link challenges are signed with: derived from the admin secret,
+    /// so every instance of the app's backend reads the others'.
+    challenge_key: Vec<u8>,
     /// Users' accounts, which never change once assigned, kept for a
     /// while so the core isn't asked on every request.
     accounts: Mutex<HashMap<String, (AccountId, Instant)>>,
@@ -379,6 +416,13 @@ impl Endpoint {
                     .into(),
             ));
         }
+        let challenge_key = {
+            use hmac::Mac as _;
+            let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(core.admin_secret.as_bytes())
+                .expect("HMAC takes a key of any length");
+            mac.update(format!("jazz-link-challenge-v1\0{}", core.app_id).as_bytes());
+            mac.finalize().into_bytes().to_vec()
+        };
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(CORE_TIMEOUT)
@@ -393,9 +437,11 @@ impl Endpoint {
                 authenticate: Arc::new(authenticate),
                 base_path: DEFAULT_BASE_PATH.into(),
                 session_ttl: DEFAULT_SESSION_TTL,
+                guest_key_after_link: GuestKeyAfterLink::Keep,
                 max_sockets: DEFAULT_MAX_SOCKETS,
                 sockets: Arc::default(),
                 http,
+                challenge_key,
                 accounts: Mutex::new(HashMap::new()),
             }),
         })
@@ -410,6 +456,12 @@ impl Endpoint {
     /// The longest a sync session runs before its client is asked to
     /// reconnect (TS `sessionTtlSeconds`, default an hour), and how long a
     /// user's account is cached.
+    /// What becomes of a device key once it linked to a user
+    /// (`backend-link`; TS `guestKeyAfterLink`). See [`GuestKeyAfterLink`].
+    pub fn guest_key_after_link(self, after: GuestKeyAfterLink) -> Self {
+        self.reconfigure(|inner| inner.guest_key_after_link = after)
+    }
+
     pub fn session_ttl(self, ttl: Duration) -> Self {
         self.reconfigure(|inner| inner.session_ttl = ttl)
     }
@@ -431,9 +483,11 @@ impl Endpoint {
                 authenticate: shared.authenticate.clone(),
                 base_path: shared.base_path.clone(),
                 session_ttl: shared.session_ttl,
+                guest_key_after_link: shared.guest_key_after_link,
                 max_sockets: shared.max_sockets,
                 sockets: shared.sockets.clone(),
                 http: shared.http.clone(),
+                challenge_key: shared.challenge_key.clone(),
                 accounts: Mutex::new(HashMap::new()),
             },
         };
@@ -469,6 +523,8 @@ impl Endpoint {
         let result = match route {
             Route::SignIn => self.post(&request, Self::backend_sign_in).await,
             Route::User => self.post(&request, Self::backend_user).await,
+            Route::LinkChallenge => self.post(&request, Self::backend_link_challenge).await,
+            Route::Link => self.post(&request, Self::backend_link).await,
             Route::Socket => return Response::text(426, "upgrade to a WebSocket"),
             Route::Public(path) => return self.public(&request, &path).await,
             Route::NotYet(what) => {
@@ -508,9 +564,8 @@ impl Endpoint {
             _ if rest.starts_with("schema/") && !rest["schema/".len()..].contains('/') => {
                 Route::Public(rest.to_owned())
             }
-            "accounts/backend-link" | "accounts/backend-link/challenge" => {
-                Route::NotYet("linking a device account to a user (backend-link)")
-            }
+            "accounts/backend-link" => Route::Link,
+            "accounts/backend-link/challenge" => Route::LinkChallenge,
             "backend/admit" | "backend/user-session" => {
                 Route::NotYet("trusted backend clients (backendClients)")
             }
@@ -593,6 +648,164 @@ impl Endpoint {
             "account": account.map(|account| account.0.to_string()),
             "identity": identity(&user.user_id),
             "claims": user.claims,
+        })))
+    }
+
+    /// A challenge for a device account to sign before it links to the
+    /// signed-in user (TS `backendLinkChallenge`).
+    async fn backend_link_challenge(&self, request: &Request) -> Result<Response> {
+        let Some(user) = self.authenticate(request).await? else {
+            return Ok(Response::text(401, "signed_out"));
+        };
+        let expires_at = unix_now() + LINK_CHALLENGE_TTL.as_secs();
+        let nonce = jazz::tools::ObjectId::new().to_string();
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+            &json!({ "v": 1, "sub": user.user_id, "nonce": nonce, "exp": expires_at }),
+        )?);
+        let mac = self.challenge_mac(&payload);
+        Ok(Response::json(&json!({
+            "challenge": format!("{payload}.{mac}"),
+            "expiresAt": expires_at,
+        })))
+    }
+
+    fn challenge_mac(&self, payload: &str) -> String {
+        use hmac::Mac as _;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.inner.challenge_key)
+            .expect("HMAC takes a key of any length");
+        mac.update(payload.as_bytes());
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    }
+
+    /// The nonce of a challenge this endpoint issued for `user_id`, still
+    /// fresh.
+    fn read_link_challenge(&self, challenge: &str, user_id: &str) -> Option<String> {
+        use hmac::Mac as _;
+        if challenge.len() > 1024 {
+            return None;
+        }
+        let (payload, mac) = challenge.split_once('.')?;
+        if mac.contains('.') {
+            return None;
+        }
+        let given = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(mac)
+            .ok()?;
+        let mut expected = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.inner.challenge_key)
+            .expect("HMAC takes a key of any length");
+        expected.update(payload.as_bytes());
+        expected.verify_slice(&given).ok()?;
+        let claims: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .ok()?,
+        )
+        .ok()?;
+        (claims["v"] == json!(1)
+            && claims["sub"].as_str() == Some(user_id)
+            && claims["exp"].as_u64().is_some_and(|exp| exp > unix_now()))
+        .then(|| claims["nonce"].as_str().map(str::to_owned))
+        .flatten()
+    }
+
+    /// Links a device account to the user `authenticate` now names, so the
+    /// account and its data carry over to them (TS `backendLink`). The
+    /// device proves its key by signing a challenge issued for this user,
+    /// never with its sync token, so a proof links once and only to them.
+    async fn backend_link(&self, request: &Request) -> Result<Response> {
+        let Some(user) = self.authenticate(request).await? else {
+            return Ok(Response::text(401, "signed_out"));
+        };
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            return Ok(Response::text(400, "local_first_proof_required"));
+        };
+        let Some(challenge) = body["challenge"].as_str() else {
+            return Ok(Response::text(400, "invalid_link_challenge"));
+        };
+        let Some(nonce) = self.read_link_challenge(challenge, &user.user_id) else {
+            return Ok(Response::text(400, "invalid_link_challenge"));
+        };
+        let proof = body["proof"].as_str().unwrap_or_default();
+        let Ok(subject) = jazz::tools::identity::verify_local_first_challenge(proof, challenge)
+        else {
+            return Ok(Response::text(401, "invalid_local_first_proof"));
+        };
+        // The device's account follows from its key and the app it was
+        // founded in. Accounts founded for an endpoint URL are not
+        // supported yet.
+        let app = self.inner.core.app_id;
+        match &body["audience"] {
+            Value::Null => {}
+            Value::String(audience) if *audience == app.to_string() => {}
+            _ => return Ok(Response::text(401, "invalid_local_first_proof")),
+        }
+        let subject = subject.to_string();
+        let account = jazz::account_registry::local_first_account_id(*app.uuid(), &subject);
+        let guest = json!({ "issuer": LOCAL_FIRST_ISSUER, "subject": subject });
+        let user_is = async |expected: AccountId| matches!(self.accounts("resolve", &user.user_id).await, Ok(found) if found == expected);
+        let linked = async {
+            match self
+                .admin("found-local-first", json!({ "identity": guest }))
+                .await
+            {
+                Ok(_) => {}
+                // A device key an earlier link retired: only that link's own
+                // user gets an answer (the retry of a link whose response
+                // was lost).
+                Err(Refused::Coded(403, code))
+                    if code != LOCAL_FIRST_AUTH_DISABLED && user_is(account).await =>
+                {
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            }
+            match self
+                .admin(
+                    "link",
+                    json!({ "from": guest, "to": identity(&user.user_id), "nonce": nonce }),
+                )
+                .await
+            {
+                Ok(_) => Ok(false),
+                // Linking is idempotent for this device and this user: a
+                // 403 means the link that won already retired the key.
+                Err(Refused::Coded(status @ (409 | 403), _)) if user_is(account).await => {
+                    Ok(status == 403)
+                }
+                Err(error) => Err(error),
+            }
+        };
+        let revoked = match linked.await {
+            Ok(revoked) => revoked,
+            Err(Refused::Coded(_, code)) if code == LOCAL_FIRST_AUTH_DISABLED => {
+                return Ok(Response::text(503, LOCAL_FIRST_AUTH_DISABLED));
+            }
+            // The core's own refusals refuse the link for good.
+            Err(Refused::Coded(400 | 403 | 404 | 409, _)) => {
+                return Ok(Response::text(409, "link_refused"));
+            }
+            Err(_) => return Ok(Response::text(503, "account_registry_unavailable")),
+        };
+        if self.inner.guest_key_after_link == GuestKeyAfterLink::Revoke && !revoked {
+            // The link already stands. If the revoke fails, the key stays
+            // usable until the device retries the link (idempotent, and it
+            // revokes then): a server error, not a silent success.
+            let revoke = self
+                .admin(
+                    "revoke",
+                    json!({ "approver": identity(&user.user_id), "target": guest }),
+                )
+                .await;
+            if revoke.is_err() {
+                return Ok(Response::text(500, "guest_key_revoke_failed"));
+            }
+        }
+        self.remember(&user.user_id, account);
+        Ok(Response::json(&json!({
+            "account": account.0.to_string(),
+            "identity": identity(&user.user_id),
+            "claims": user.claims,
+            "expiresAt": unix_now() + self.inner.session_ttl.as_secs(),
         })))
     }
 
@@ -767,28 +980,17 @@ impl Endpoint {
         operation: &str,
         user_id: &str,
     ) -> std::result::Result<AccountId, Refused> {
-        let core = &self.inner.core;
-        let response = self
-            .inner
-            .http
-            .post(format!(
-                "{}/apps/{}/admin/accounts/{operation}",
-                core.server.trim_end_matches('/'),
-                core.app_id
-            ))
-            .header("X-Jazz-Admin-Secret", &core.admin_secret)
-            .json(&json!({ "identity": identity(user_id) }))
-            .send()
+        let body = match self
+            .admin(operation, json!({ "identity": identity(user_id) }))
             .await
-            .map_err(|error| Refused::Unreachable(error.to_string()))?;
-        let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        if status == 404 && body.contains("identity_not_assigned") {
-            return Err(Refused::NotAssigned);
-        }
-        if status != 200 {
-            return Err(Refused::Status(status));
-        }
+        {
+            Ok(body) => body,
+            Err(Refused::Coded(404, code)) if code == "identity_not_assigned" => {
+                return Err(Refused::NotAssigned);
+            }
+            Err(Refused::Coded(status, _)) => return Err(Refused::Status(status)),
+            Err(error) => return Err(error),
+        };
         #[derive(Deserialize)]
         struct Assigned {
             account: AccountId,
@@ -801,6 +1003,32 @@ impl Endpoint {
             ));
         }
         Ok(assigned.account)
+    }
+
+    /// One admin account request to the core (`/admin/accounts/<operation>`),
+    /// vouched for with the admin secret: its body, or the core's status and
+    /// refusal code.
+    async fn admin(&self, operation: &str, body: Value) -> std::result::Result<String, Refused> {
+        let core = &self.inner.core;
+        let response = self
+            .inner
+            .http
+            .post(format!(
+                "{}/apps/{}/admin/accounts/{operation}",
+                core.server.trim_end_matches('/'),
+                core.app_id
+            ))
+            .header("X-Jazz-Admin-Secret", &core.admin_secret)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| Refused::Unreachable(error.to_string()))?;
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        if status / 100 != 2 {
+            return Err(Refused::Coded(status, refusal_code(&body)));
+        }
+        Ok(body)
     }
 
     /// Serves an upgraded sync socket (`<base>/apps/<id>/ws`): `request` is
@@ -1150,6 +1378,8 @@ impl Drop for SocketSlot {
 enum Route {
     SignIn,
     User,
+    LinkChallenge,
+    Link,
     Socket,
     Public(String),
     NotYet(&'static str),
@@ -1160,6 +1390,8 @@ enum Route {
 enum Refused {
     NotAssigned,
     Status(u16),
+    /// The core's status and refusal code.
+    Coded(u16, String),
     Unreachable(String),
 }
 
@@ -1167,7 +1399,7 @@ impl From<Refused> for Error {
     fn from(refused: Refused) -> Self {
         match refused {
             Refused::NotAssigned => Error::Server("the user has no account".into()),
-            Refused::Status(status) => {
+            Refused::Status(status) | Refused::Coded(status, _) => {
                 Error::Server(format!("the account registry refused ({status})"))
             }
             Refused::Unreachable(error) => {
@@ -1180,6 +1412,19 @@ impl From<Refused> for Error {
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
         Error::Server(error.to_string())
+    }
+}
+
+/// The code of a core's refusal: its body, or the `error`/`code` of a JSON
+/// body.
+fn refusal_code(body: &str) -> String {
+    match serde_json::from_str::<Value>(body) {
+        Ok(Value::Object(body)) => ["code", "error"]
+            .iter()
+            .find_map(|key| body.get(*key).and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_owned(),
+        _ => body.trim().to_owned(),
     }
 }
 

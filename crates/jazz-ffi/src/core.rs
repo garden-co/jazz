@@ -34,6 +34,8 @@ pub(crate) struct Core {
     /// The contract version the host speaks (`"contract"` in the config):
     /// 1 unless it says 2.
     pub(crate) contract: u64,
+    /// Run first when the app closes: a C host's callbacks stop here.
+    close_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// How a call runs: inside a transaction, and/or at a durability or read
@@ -249,6 +251,7 @@ impl Core {
             next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
             has_server,
             contract,
+            close_hook: Mutex::new(None),
         }
     }
 
@@ -338,10 +341,17 @@ impl Core {
         opts: &Opts,
         limit: Option<usize>,
     ) -> Result<Vec<Json>> {
-        let mut lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
-        if let Some(limit) = limit {
-            lowered.query.limit = Some(lowered.query.limit.map_or(limit, |l| l.min(limit)));
-        }
+        // A limit goes in before lowering: a relation query carries its
+        // window inside the relation, not as an ordinary clause.
+        let limited;
+        let query = match limit {
+            Some(limit) => {
+                limited = crate::relational::with_limit(query, limit);
+                &limited
+            }
+            None => query,
+        };
+        let lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
         let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
         let core_query = lowered.query.clone();
         let reads_deleted = lowered.reads_deleted;
@@ -420,9 +430,9 @@ impl Core {
         Ok(row.to_string())
     }
 
-    /// Writes the row with this id: inserts it if there is none, otherwise
-    /// replaces its columns. `row_json` is a whole row, as for an insert
-    /// (TS's `upsert`). Returns the row as stored.
+    /// Writes the row with this id: inserts it if there is none (then
+    /// `row_json` is a whole row, as for an insert), otherwise sets the
+    /// columns `row_json` names (a partial row updates). Returns the row.
     pub fn upsert(
         &self,
         table_name: &str,
@@ -463,7 +473,13 @@ impl Core {
         let id = convert::parse_id(id, "the id")?;
         let table = self.table(table_name)?.clone();
         let cells = match patch_json {
-            Some(patch) => Some(convert::cells(&table, table_name, patch, "the patch")?.1),
+            Some(patch) => {
+                let (named, cells) = convert::cells(&table, table_name, patch, "the patch")?;
+                if named.is_some_and(|named| named != id) {
+                    return Err(refused("a restore's patch cannot name another row's id"));
+                }
+                Some(cells)
+            }
             None => None,
         };
         let name = table_name.to_owned();
@@ -783,7 +799,15 @@ impl Core {
             ));
         }
         let cells = match row_json {
-            Some(row) => convert::cells(&table, table_name, row, "the row")?.1,
+            Some(row) => {
+                let (named, cells) = convert::cells(&table, table_name, row, "the row")?;
+                if named.is_some() {
+                    return Err(refused(
+                        "an upload's row takes no \"id\": give it as the upload's id (update/upsert)",
+                    ));
+                }
+                cells
+            }
             None => Vec::new(),
         };
         let upload_id = self.next_tx.fetch_add(1, Ordering::Relaxed);
@@ -989,6 +1013,8 @@ impl Core {
         }
         block_on(jazz.sign_out())?;
         self.closed.store(true, Ordering::Release);
+        // Signed out, the app has ended: no token callback after this.
+        self.run_close_hook();
         Ok(())
     }
 
@@ -1045,7 +1071,27 @@ impl Core {
 
     /// Closes the app: the calls already made finish, subscriptions end,
     /// and every later call fails with `Closed`. Closing again does nothing.
+    /// Runs `hook` first when the app closes (once).
+    pub(crate) fn on_close(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.close_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// Runs the close hook if it hasn't run (whichever way the app ends).
+    fn run_close_hook(&self) {
+        let hook = self
+            .close_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     pub fn close(&self) -> Result<()> {
+        // Even when signing out already ended the app: the host's callbacks
+        // stop here.
+        self.run_close_hook();
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -1326,8 +1372,10 @@ impl jazz_app::TokenProvider for Tokens {
 /// or `refresh`.
 pub(crate) struct HostTokens(pub Arc<HostTokenFn>);
 
-/// A host's token callback: the reason in, the token (or none) out.
-pub(crate) type HostTokenFn = dyn Fn(&str) -> Option<String> + Send + Sync;
+/// A host's token callback: the reason in, the token (or none: signed out)
+/// out, or an error (the fetch failed: the session stays, and asks again).
+pub(crate) type HostTokenFn =
+    dyn Fn(&str) -> std::result::Result<Option<String>, String> + Send + Sync;
 
 impl jazz_app::TokenProvider for HostTokens {
     fn token(&self, reason: jazz_app::TokenReason) -> jazz_app::TokenFuture {
@@ -1340,16 +1388,22 @@ impl jazz_app::TokenProvider for HostTokens {
         let spawned = std::thread::Builder::new()
             .name("jazz-token".into())
             .spawn(move || {
+                // A panicking callback is a failed fetch, not a sign-out.
                 let token =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&reason)))
-                        .unwrap_or(None);
+                        .unwrap_or_else(|_| Err("the token provider panicked".into()));
                 let _ = sender.send(token);
             });
         Box::pin(async move {
             spawned.map_err(|error| {
                 jazz_app::Error::Config(format!("cannot ask for a token: {error}"))
             })?;
-            receiver.await.map_err(|_| jazz_app::Error::Stopped)
+            receiver
+                .await
+                .map_err(|_| jazz_app::Error::Stopped)?
+                .map_err(|reason| {
+                    jazz_app::Error::Server(format!("the token provider failed: {reason}"))
+                })
         })
     }
 }
