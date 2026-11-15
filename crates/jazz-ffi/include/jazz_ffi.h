@@ -68,6 +68,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              (edits: text / splice / jsonSet, see the README)
  *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
  *               "id"?, "row"?}                               -> true|false|null
+ *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
+ *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
  *                     | null (a local app or a backend)
  *   "syncStatus" {} -> {"link": ...}

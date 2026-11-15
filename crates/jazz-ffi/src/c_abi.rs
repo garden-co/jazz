@@ -250,6 +250,24 @@ pub unsafe extern "C" fn jazz_call(
                 core.sign_out()?;
                 "null".into()
             }
+            "upsert" => core.upsert(
+                &string("table")?,
+                &string("id")?,
+                &field("row")?.to_string(),
+                &opts(false)?,
+            )?,
+            "restore" => {
+                let patch = args
+                    .get("patch")
+                    .filter(|p| !p.is_null())
+                    .map(Json::to_string);
+                core.restore(
+                    &string("table")?,
+                    &string("id")?,
+                    patch.as_deref(),
+                    &opts(false)?,
+                )?
+            }
             "txBegin" => {
                 let serializable = match args.get("serializable") {
                     None | Some(Json::Null) => true,

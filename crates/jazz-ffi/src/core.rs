@@ -322,6 +322,64 @@ impl Core {
         Ok(row.to_string())
     }
 
+    /// Writes the row with this id: inserts it if there is none, otherwise
+    /// replaces its columns. `row_json` is a whole row, as for an insert
+    /// (TS's `upsert`). Returns the row as stored.
+    pub fn upsert(
+        &self,
+        table_name: &str,
+        id: &str,
+        row_json: &str,
+        opts: &Opts,
+    ) -> Result<String> {
+        self.reachable(opts.write_tier)?;
+        let id = convert::parse_id(id, "the id")?;
+        let table = self.table(table_name)?.clone();
+        let (given, cells) = convert::cells(&table, table_name, row_json, "the row")?;
+        if given.is_some_and(|given| given != id) {
+            return Err(refused("the row's id must be the upserted id"));
+        }
+        let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
+        let row = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await?;
+            read_back(&client, &table, &name, id).await
+        }))?;
+        Ok(row.to_string())
+    }
+
+    /// Brings back a deleted row, as it was or with `row_json` as its new
+    /// content (a whole row: the engine replaces the content atomically).
+    /// Returns the row.
+    pub fn restore(
+        &self,
+        table_name: &str,
+        id: &str,
+        patch_json: Option<&str>,
+        opts: &Opts,
+    ) -> Result<String> {
+        self.reachable(opts.write_tier)?;
+        let id = convert::parse_id(id, "the id")?;
+        let table = self.table(table_name)?.clone();
+        let cells = match patch_json {
+            Some(patch) => Some(convert::cells(&table, table_name, patch, "the patch")?.1),
+            None => None,
+        };
+        let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
+        let row = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let committed = client.restore(&name, id, cells)?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await?;
+            read_back(&client, &table, &name, id).await
+        }))?;
+        Ok(row.to_string())
+    }
+
     pub fn update(&self, table_name: &str, id: &str, patch_json: &str, opts: &Opts) -> Result<()> {
         self.reachable(opts.write_tier)?;
         let id = convert::parse_id(id, "the id")?;
@@ -782,6 +840,32 @@ impl Drop for EndGuard {
             let _ = sender.send(Some(Event::Error(JazzError::Closed)));
         }
     }
+}
+
+/// The row with this id as the writer now sees it.
+async fn read_back(
+    client: &JazzClient,
+    table: &TableSchema,
+    name: &str,
+    id: jazz_app::ObjectId,
+) -> jazz_app::Result<Json> {
+    use jazz_app::jazz::query as q;
+    let mut query = q::Query::from(name);
+    query.filters.push(q::eq(
+        q::col("id"),
+        q::lit(jazz_app::jazz::records::Value::Uuid(*id.uuid())),
+    ));
+    let row = client
+        .query(query, ReadTier::LocalFirst)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| jazz_app::Error::Config(format!("no {name} row {id}")))?;
+    Ok(convert::row_json(
+        &convert::Shape::of(table.clone()),
+        id,
+        row.fields,
+    ))
 }
 
 /// Resolves splice pages given as the whole value to the value's current

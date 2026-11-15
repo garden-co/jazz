@@ -164,6 +164,12 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
   take `id`; `update` takes `id` and an optional `row` patch. `null` (no
   server, or no decision) means unknown. Not inside a transaction.
+- **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
+  `upsert {table, id, row}` write the row with this id: an insert if there is
+  none, else its columns replaced; `row` is a whole row, as for an insert.
+  `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
+  deleted row as it was, or with `patch` (a whole row) as its content. Both
+  return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`

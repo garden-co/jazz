@@ -247,6 +247,26 @@ impl JazzHandle {
         })())
     }
 
+    /// Writes the row with this id: inserts it, or replaces its columns.
+    /// `row_json` is a whole row, as for an insert. Returns the row.
+    pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
+        self.core.surface(
+            self.core
+                .upsert(&table, &id, &row_json, &Default::default()),
+        )
+    }
+
+    /// Brings back a deleted row, as it was or with `patch_json` (a whole
+    /// row) as its new content. Returns the row.
+    pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
+        self.core.surface(self.core.restore(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &Default::default(),
+        ))
+    }
+
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
@@ -441,6 +461,23 @@ impl Transaction {
             &id,
             patch_json.as_deref(),
             &edits_json,
+            &self.opts(),
+        ))
+    }
+
+    pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
+        self.handle.core.surface(
+            self.handle
+                .core
+                .upsert(&table, &id, &row_json, &self.opts()),
+        )
+    }
+
+    pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
+        self.handle.core.surface(self.handle.core.restore(
+            &table,
+            &id,
+            patch_json.as_deref(),
             &self.opts(),
         ))
     }
