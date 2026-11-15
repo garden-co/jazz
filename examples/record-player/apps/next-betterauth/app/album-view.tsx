@@ -13,7 +13,7 @@ import { Spinner } from "@astryxdesign/core/Spinner";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Table, pixel, proportional } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import type { PlayableTrack } from "../src/audio-stream";
 import { ALBUM_TRACK_LIMIT, positionBetween } from "../src/record-player";
 import { CoverArt } from "./cover-art";

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { JazzClientConfig } from "jazz-tools";
 import { JazzProvider, useAll, useSession } from "jazz-tools/react";
 import { AppShell, Button, Center, EmptyState, Spinner } from "@astryxdesign/core";
-import { app, type Profile } from "../schema";
+import { app, type Profile } from "../jazz.generated";
 import { ThemeProvider } from "../components/theme-provider";
 import { JoinRoom } from "./components/JoinRoom";
 import { NewRoomDialog } from "./components/NewRoomDialog";

@@ -16,7 +16,7 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { app, type GrantRole, type Invite } from "@/schema";
+import { app, type PageGrantRole as GrantRole, type Invite } from "@/jazz.generated";
 import { createInviteToken } from "@/src/lib/invites";
 import { GRANT_LABELS, memberName, ROLE_LABELS, useWorkspace } from "./workspace-context";
 

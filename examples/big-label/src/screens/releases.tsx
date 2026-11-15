@@ -18,7 +18,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { useAll, useOne } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { ReleaseDialog } from "../components/forms";
 import {
   ListPagination,

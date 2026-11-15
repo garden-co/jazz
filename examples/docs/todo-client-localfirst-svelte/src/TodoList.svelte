@@ -1,7 +1,7 @@
 <!-- #region read-write-svelte -->
 <script lang="ts">
 	import { QuerySubscription } from 'jazz-tools/svelte';
-	import { app } from '../schema.js';
+	import { app } from '../jazz.generated.js';
 
   // #region reading-reactive-svelte
   const todos = new QuerySubscription(app.todos);

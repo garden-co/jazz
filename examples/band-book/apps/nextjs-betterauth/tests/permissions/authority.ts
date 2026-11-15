@@ -1,8 +1,8 @@
 import { expect } from "vitest";
 import type { Db } from "jazz-tools";
 import { createPolicyTestApp } from "jazz-tools/testing";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 
 /**
  * A local Jazz authority with BandBook's schema and policies, plus the two

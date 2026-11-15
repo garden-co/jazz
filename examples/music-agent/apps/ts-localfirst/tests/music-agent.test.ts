@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { createJazzClient, type Db } from "jazz-tools";
 import { definePermissions } from "jazz-tools/permissions";
 import { startTestJazz, type TestJazz } from "jazz-tools/testing";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { memoryAccountStore } from "../../../../testing/accounts.js";
 import {
   DeterministicMusicAgent,

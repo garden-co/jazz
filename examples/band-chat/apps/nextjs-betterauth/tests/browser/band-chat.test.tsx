@@ -11,8 +11,8 @@ import {
   startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import { memoryAccountStore } from "../../../../../testing/accounts";
-import permissions from "../../permissions";
-import { app } from "../../schema";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated";
 import { BandChatPreview } from "../../src/BandChat";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

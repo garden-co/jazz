@@ -1,6 +1,7 @@
 import { Effect, Fiber, Stream } from "effect";
 import type { JazzDb } from "jazz-tools/effect";
-import { app, TASK_STATUSES, type Crew, type Show, type Task, type TaskStatus } from "../schema";
+import { app, type Crew, type Show, type Task } from "../jazz.generated";
+import { TASK_STATUSES, type TaskStatus } from "../app-extras";
 import { field, h } from "./dom";
 import { addTask, createShow, moveTask, rankAfter, STATUS_LABELS, type Me } from "./model";
 

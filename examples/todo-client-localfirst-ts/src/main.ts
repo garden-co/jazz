@@ -1,7 +1,7 @@
 import { sessionConfig, type SessionOverrides } from "./account.js";
 import { createJazzClient } from "jazz-tools/client";
 import type { Db } from "jazz-tools";
-import { app, type Todo } from "../schema.js";
+import { app, type Todo } from "../jazz.generated.js";
 
 function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
   const todoIds = new Set(todos.map((todo) => todo.id));
