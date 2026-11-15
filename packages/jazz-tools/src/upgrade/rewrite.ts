@@ -17,10 +17,13 @@ import { notSupportedYet } from "./errors.js";
 import type { MovedExport } from "./extras.js";
 import type { TableTypeNames } from "./names.js";
 import type { Project } from "./project.js";
+import type { PackageAliases } from "./aliases.js";
 
 type Ts = typeof TS;
 
 export interface RewriteInput {
+  /** package.json `imports` aliases the rewrite retargets. */
+  aliases: PackageAliases;
   project: Project;
   /** Where each export of schema.ts lives now. */
   exports: Map<string, MovedExport>;
@@ -140,11 +143,12 @@ function rewriteModule(
       changes.push(`${at(decl)}: ${rewritten.summary}`);
       for (const name of rewritten.appNames) appNames.add(name);
       generatedSpecifier ??= {
-        text: specifierFor(spec.text, input.generatedFile, file, project),
+        text: specifierFor(spec.text, input.generatedFile, file, project, input.aliases),
         quote: q,
       };
-    } else if (project.permissionsFile && target === project.permissionsFile) {
-      const rewritten = rewritePermissionsImport(ts, decl, spec.text, q, at);
+    } else if (project.permissionsSources.includes(target)) {
+      const json = permissionsSpecifier(spec.text, file, project, input.aliases, target);
+      const rewritten = rewritePermissionsImport(ts, decl, json, q, at);
       edits.push({ start: decl.getStart(source), end: decl.getEnd(), text: rewritten });
       changes.push(`${at(decl)}: permissions now come from jazz.permissions.json`);
       importsJson = true;
@@ -170,10 +174,10 @@ function rewriteModule(
       const spec = node.arguments[0];
       const target = resolveImport(project, spec.text, file);
       if (target === project.schemaFile) {
-        const next = specifierFor(spec.text, input.generatedFile, file, project);
+        const next = specifierFor(spec.text, input.generatedFile, file, project, input.aliases);
         edits.push({ start: spec.getStart(source) + 1, end: spec.getEnd() - 1, text: next });
         changes.push(`${at(node)}: import("${spec.text}") → import("${next}")`);
-      } else if (project.permissionsFile && target === project.permissionsFile) {
+      } else if (target && project.permissionsSources.includes(target)) {
         manual.push(
           `${at(node)}: a dynamic import of permissions.ts; import jazz.permissions.json instead`,
         );
@@ -347,7 +351,7 @@ function rewriteSchemaImport(
     computed: input.computedFile,
   };
   const spec = (module: keyof typeof moduleFile) =>
-    specifierFor(specifier, moduleFile[module], file, project);
+    specifierFor(specifier, moduleFile[module], file, project, input.aliases);
   const isExport = ts.isExportDeclaration(decl);
   const clauseTypeOnly = isExport ? decl.isTypeOnly : (decl.importClause?.isTypeOnly ?? false);
   let elements: readonly TS.ImportSpecifier[] | readonly TS.ExportSpecifier[] = [];
@@ -427,7 +431,7 @@ function rewritePermissionsImport(
   q: string,
   at: (node: TS.Node) => string,
 ): string {
-  const json = specifierLike(specifier, "jazz.permissions.json", false);
+  const json = specifier;
   if (ts.isImportDeclaration(decl)) {
     const clause = decl.importClause;
     if (!clause?.name || clause.namedBindings) {
@@ -536,11 +540,44 @@ export function resolveImport(
 }
 
 /** The specifier for `target`, written in the style of `like` when it named the old file by basename. */
-function specifierFor(like: string, target: string, file: string, project: Project): string {
+function specifierFor(
+  like: string,
+  target: string,
+  file: string,
+  project: Project,
+  aliases?: PackageAliases,
+  from: string = project.schemaFile,
+): string {
+  if (like.startsWith("#")) {
+    if (aliases?.retarget(like, file, from, target)) return like;
+    return relativeSpecifier(file, target, project);
+  }
   const base = target.slice(target.lastIndexOf(sep) + 1).replace(/\.ts$/, "");
   const last = like.slice(like.lastIndexOf("/") + 1).replace(/\.(js|ts|mjs|mts|jsx|tsx)$/, "");
   if (last === "schema" || last === "permissions") return specifierLike(like, base);
   return relativeSpecifier(file, target, project, like.endsWith(".js"));
+}
+
+/** How `file` imports jazz.permissions.json, in the style it imported permissions.ts. */
+function permissionsSpecifier(
+  like: string,
+  file: string,
+  project: Project,
+  aliases: PackageAliases,
+  from: string,
+): string {
+  const target = project.permissionsJsonFile;
+  if (like.startsWith("#")) {
+    if (aliases.retarget(like, file, from, target)) return like;
+  } else {
+    const last = like.slice(like.lastIndexOf("/") + 1).replace(/\.(js|ts|mjs|mts)$/, "");
+    if (last === "permissions" && from === project.permissionsFile) {
+      return specifierLike(like, "jazz.permissions.json", false);
+    }
+  }
+  let path = relative(dirname(file), target).split(sep).join("/");
+  if (!path.startsWith(".")) path = `./${path}`;
+  return path;
 }
 
 function relativeSpecifier(file: string, target: string, _project: Project, js = false): string {

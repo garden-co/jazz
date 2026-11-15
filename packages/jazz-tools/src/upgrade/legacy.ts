@@ -14,6 +14,7 @@ import {
   APP_FILE,
   PERMISSIONS_FILE,
   packageVersion,
+  SCHEMA_ROOTS,
   runningPackageRoot,
   type Project,
 } from "./project.js";
@@ -41,7 +42,7 @@ export function dslAlpha(version: string): number | null {
  * validate bundles schema.ts against it, and the checker reads its types.
  */
 export function findLegacyJazzTools(project: Project): LegacyJazzTools {
-  const require = createRequire(join(project.root, "package.json"));
+  const require = createRequire(join(project.schemaDir, "package.json"));
   let manifest: string;
   try {
     manifest = require.resolve("jazz-tools/package.json");
@@ -84,6 +85,13 @@ export function legacyEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out as NodeJS.ProcessEnv;
 }
 
+/** What the old validate takes as `--schema-dir`: the root it searches (., src, src/lib), or schema.ts's own directory. */
+function validateDir(project: Project): string {
+  return SCHEMA_ROOTS.some((r) => join(project.root, r) === project.schemaDir)
+    ? project.root
+    : project.schemaDir;
+}
+
 /** Run the old `validate --check`, refusing what it refuses. */
 export function checkLegacyFiles(project: Project, legacy: LegacyJazzTools): string[] {
   for (const file of [project.appFile, project.permissionsJsonFile]) {
@@ -99,7 +107,7 @@ export function checkLegacyFiles(project: Project, legacy: LegacyJazzTools): str
   const bin = join(legacy.dir, "bin", "jazz-tools.js");
   const result = spawnSync(
     process.execPath,
-    [bin, "validate", "--check", "--schema-dir", project.root],
+    [bin, "validate", "--check", "--schema-dir", validateDir(project)],
     {
       cwd: project.root,
       encoding: "utf8",

@@ -195,7 +195,8 @@ export function convertComputed(input: ComputedInput): ComputedConversion {
         ctx.location(arg),
       );
     }
-    edits.transforms[name] = { stored, view: typed.spec } satisfies TransformDecl;
+    // A transform's types carry no `?`: the column it is named on says whether it is optional.
+    edits.transforms[name] = { stored, view: required(typed.spec) } satisfies TransformDecl;
     (edits.columnTransforms[found.table] ??= {})[found.field] = name;
     ctx.move(arg);
     transformEntries[name] = arg.getText(source);
@@ -238,6 +239,13 @@ export function convertComputed(input: ComputedInput): ComputedConversion {
     lines.push("} satisfies AppTransforms;");
   }
   return { ...edits, computedFile: `${lines.join("\n")}\n`, movedExports, notes, todos };
+}
+
+/** A type without its `?` / `optional`. */
+function required(spec: TypeSpec): TypeSpec {
+  if (typeof spec === "string") return spec.replace(/\?$/, "");
+  const { optional: _optional, ...rest } = spec;
+  return rest;
 }
 
 function propertyKey(name: string): string {

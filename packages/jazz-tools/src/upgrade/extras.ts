@@ -45,6 +45,8 @@ export interface ExtrasInput {
   movedToComputed: string[];
   /** Whether relative imports in this project carry `.js` (`./schema.js`). */
   jsExtensions: boolean;
+  /** Where to put notes for the report. */
+  notes: string[];
   /** Names of schema.ts other project files import, to tell dead DSL exports from live ones. */
   importedNames: Set<string>;
 }
@@ -133,6 +135,7 @@ export function convertExtras(input: ExtrasInput): ExtrasResult {
       where(source.statements[0] ?? source),
     );
   }
+  refuseMissingMigrations(ts, checker, defined as TS.VariableDeclaration, where, input.notes);
   const isApp = (node: TS.Node): boolean =>
     ts.isIdentifier(node) && appSymbols.has(checker.getSymbolAtLocation(node)!);
 
@@ -406,6 +409,70 @@ export function convertExtras(input: ExtrasInput): ExtrasResult {
     lines.push(text.replace(/^\s*\n/, ""));
   }
   return { exports, extrasFile: `${lines.join("\n")}\n`, dropped };
+}
+
+/**
+ * An app ships its history through the migrations module schema.ts passes
+ * to s.defineApp: alpha.64's validate writes it only then, and otherwise
+ * just warns. Without it, stores may hold versions jazz.app.json doesn't
+ * carry, so upgrade refuses rather than start the history empty. An explicit
+ * `migrations: "none"` is the app saying it keeps no history.
+ */
+function refuseMissingMigrations(
+  ts: Ts,
+  checker: TS.TypeChecker,
+  declaration: TS.VariableDeclaration,
+  where: (node: TS.Node) => string,
+  notes: string[],
+): void {
+  const call = unwrap(ts, declaration.initializer!) as TS.CallExpression;
+  const options = call.arguments[1] && unwrap(ts, call.arguments[1]);
+  const property =
+    options && ts.isObjectLiteralExpression(options)
+      ? options.properties.find(
+          (p) =>
+            (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+            p.name.getText() === "migrations",
+        )
+      : undefined;
+  const value =
+    property && ts.isPropertyAssignment(property)
+      ? unwrap(ts, property.initializer)
+      : property && ts.isShorthandPropertyAssignment(property)
+        ? property.name
+        : undefined;
+  if (value && ts.isStringLiteral(value) && value.text === "none") {
+    notes.push(
+      'schema.ts declares `migrations: "none"`: jazz.app.json starts with no history, as the app shipped none.',
+    );
+    return;
+  }
+  // The value must come from an import of the migrations module.
+  let imported = false;
+  if (value && ts.isIdentifier(value)) {
+    const symbol =
+      property && ts.isShorthandPropertyAssignment(property)
+        ? checker.getShorthandAssignmentValueSymbol(property)
+        : checker.getSymbolAtLocation(value);
+    const declarationNode = symbol?.declarations?.[0];
+    let importDecl: TS.Node | undefined = declarationNode;
+    while (importDecl && !ts.isImportDeclaration(importDecl)) importDecl = importDecl.parent;
+    if (
+      importDecl &&
+      ts.isImportDeclaration(importDecl) &&
+      ts.isStringLiteral(importDecl.moduleSpecifier)
+    ) {
+      imported = /(^|\/)migrations(\/index)?(\.[mc]?[jt]s)?$/.test(importDecl.moduleSpecifier.text);
+    }
+  }
+  if (imported) return;
+  throw new UpgradeRefusal(
+    "schema.ts doesn't pass its migrations module to s.defineApp, so alpha.64 shipped no schema history and a store may " +
+      'hold versions jazz.app.json doesn\'t record. Add `import { migrations } from "./migrations";` and ' +
+      "`s.defineApp(schema, { migrations })`, run `npx jazz-tools validate` with the app's alpha.64 (it writes the history " +
+      'into jazz.app.json), commit, then upgrade again. If the app really keeps no history, say `{ migrations: "none" }`.',
+    where(call),
+  );
 }
 
 function unwrap(ts: Ts, node: TS.Expression): TS.Expression {

@@ -248,6 +248,33 @@ describe("jazz-tools upgrade: refusals", () => {
     await refused(dir, /`true` inside anyOf\/allOf at tables\.messages\.read\.anyOf\[0\]/);
   });
 
+  it("refuses an app whose schema.ts doesn't pass its migrations, which ships no history", async () => {
+    const dir = fixture("backend-history");
+    const schema = join(dir, "schema.ts");
+    writeFileSync(
+      schema,
+      readFileSync(schema, "utf8")
+        // Migrations that aren't the generated module: validate only warns.
+        .replace(
+          'import { migrations } from "./migrations/index.js";',
+          "const migrations = { schemas: [], migrations: [] };",
+        ),
+    );
+    // alpha.64's validate writes the files for it and only warns that the app ships none of its versions.
+    execFileSync(
+      process.execPath,
+      [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
+      {
+        cwd: dir,
+        stdio: "pipe",
+      },
+    );
+    await refused(
+      dir,
+      /schema\.ts:\d+: schema\.ts doesn't pass its migrations module to s\.defineApp/,
+    );
+  });
+
   it("refuses a project without jazz.app.json", async () => {
     const dir = fixture("backend-history");
     rmSync(join(dir, "jazz.app.json"));

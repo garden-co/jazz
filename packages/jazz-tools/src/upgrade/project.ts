@@ -4,7 +4,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import type * as TS from "typescript";
 import { UpgradeRefusal } from "./errors.js";
 
@@ -61,6 +61,12 @@ export interface Project {
   schemaDir: string;
   schemaFile: string;
   permissionsFile: string | undefined;
+  /**
+   * permissions.ts and the modules whose default export it re-exports
+   * (`export { default } from "./src/db/access"`): importing any of them
+   * imports the permissions.
+   */
+  permissionsSources: string[];
   migrationsDir: string | undefined;
   appFile: string;
   permissionsJsonFile: string;
@@ -73,24 +79,12 @@ export interface Project {
   sources: string[];
 }
 
-export function locateProject(root: string): Project {
+export function locateProject(root: string, schemaDirOption?: string): Project {
   root = resolve(root);
   if (!existsSync(root) || !statSync(root).isDirectory()) {
     throw new UpgradeRefusal(`${root} is not a directory`);
   }
-  const schemaDir = SCHEMA_ROOTS.map((r) => join(root, r)).find((dir) =>
-    existsSync(join(dir, "schema.ts")),
-  );
-  if (!schemaDir) {
-    if (SCHEMA_ROOTS.some((r) => existsSync(join(root, r, APP_FILE)))) {
-      throw new UpgradeRefusal(
-        `${root} has jazz.app.json but no schema.ts: it is already on files as source, nothing to upgrade`,
-      );
-    }
-    throw new UpgradeRefusal(
-      `no schema.ts in ${root}, ${join(root, "src")} or ${join(root, "src", "lib")}: run upgrade in the app's directory (or pass --dir)`,
-    );
-  }
+  const schemaDir = findSchemaDir(root, schemaDirOption);
   const file = (name: string) =>
     existsSync(join(schemaDir, name)) ? join(schemaDir, name) : undefined;
   const ts = loadTypeScript(root);
@@ -109,7 +103,8 @@ export function locateProject(root: string): Project {
     tsconfig,
     compilerOptions: options,
     configFileNames: fileNames,
-    sources: listSources(root),
+    sources: listSources(root, schemaDir),
+    permissionsSources: permissionsSources(ts, file("permissions.ts")),
   };
 }
 
@@ -163,7 +158,93 @@ function readTsconfig(
   };
 }
 
-function listSources(root: string): string[] {
+/**
+ * Where schema.ts is: `--schema-dir`, else where validate looks (., src,
+ * src/lib), else the one directory under the project holding both schema.ts
+ * and jazz.app.json (an Expo app's `jazz/`, say).
+ */
+function findSchemaDir(root: string, option: string | undefined): string {
+  if (option) {
+    const dir = resolve(root, option);
+    if (!existsSync(join(dir, "schema.ts"))) {
+      throw new UpgradeRefusal(`--schema-dir ${option}: no schema.ts in ${dir}`);
+    }
+    return dir;
+  }
+  const known = SCHEMA_ROOTS.map((r) => join(root, r)).find((dir) =>
+    existsSync(join(dir, "schema.ts")),
+  );
+  if (known) return known;
+  const found: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 3) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    if (entries.some((e) => e.name === "schema.ts") && entries.some((e) => e.name === APP_FILE))
+      found.push(dir);
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith(".") && !SKIPPED_DIRS.has(entry.name)) {
+        walk(join(dir, entry.name), depth + 1);
+      }
+    }
+  };
+  walk(root, 0);
+  if (found.length === 1) return found[0]!;
+  if (found.length > 1) {
+    throw new UpgradeRefusal(
+      `${root} holds several apps (schema.ts beside jazz.app.json in ${found.map((d) => relative(root, d)).join(", ")}): pass --schema-dir for the one to upgrade`,
+    );
+  }
+  if (SCHEMA_ROOTS.some((r) => existsSync(join(root, r, APP_FILE)))) {
+    throw new UpgradeRefusal(
+      `${root} has jazz.app.json but no schema.ts: it is already on files as source, nothing to upgrade`,
+    );
+  }
+  throw new UpgradeRefusal(
+    `no schema.ts in ${root}, ${join(root, "src")} or ${join(root, "src", "lib")}: run upgrade in the app's directory (or pass --dir, and --schema-dir where schema.ts lives elsewhere)`,
+  );
+}
+
+function permissionsSources(ts: Ts, permissionsFile: string | undefined): string[] {
+  const out: string[] = [];
+  for (let file = permissionsFile; file && !out.includes(file); ) {
+    out.push(file);
+    const source = ts.createSourceFile(
+      file,
+      readFileSync(file, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    let next: string | undefined;
+    for (const statement of source.statements) {
+      if (
+        ts.isExportDeclaration(statement) &&
+        statement.moduleSpecifier &&
+        ts.isStringLiteral(statement.moduleSpecifier) &&
+        statement.moduleSpecifier.text.startsWith(".") &&
+        statement.exportClause &&
+        ts.isNamedExports(statement.exportClause) &&
+        statement.exportClause.elements.some((e) => (e.propertyName ?? e.name).text === "default")
+      ) {
+        const base = join(dirname(file), statement.moduleSpecifier.text).replace(
+          /\.(js|mjs|ts|mts)$/,
+          "",
+        );
+        next = [`${base}.ts`, `${base}.mts`, `${base}.tsx`, join(base, "index.ts")].find((c) =>
+          existsSync(c),
+        );
+      }
+    }
+    file = next;
+  }
+  return out;
+}
+
+function listSources(root: string, schemaDir: string): string[] {
   const out: string[] = [];
   const walk = (dir: string, top: boolean): void => {
     let entries;
@@ -172,8 +253,16 @@ function listSources(root: string): string[] {
     } catch {
       return;
     }
-    // A nested app with its own package.json is its own project.
-    if (!top && entries.some((e) => e.name === "package.json")) return;
+    // A nested package is part of this app (a backend, a shared `jazz/`
+    // folder) unless it is an app of its own, with its own schema.
+    if (!top && entries.some((e) => e.name === "package.json") && !isWithin(schemaDir, dir)) {
+      if (
+        SCHEMA_ROOTS.some(
+          (r) => existsSync(join(dir, r, "schema.ts")) || existsSync(join(dir, r, APP_FILE)),
+        )
+      )
+        return;
+    }
     for (const entry of entries) {
       if (entry.name.startsWith(".")) continue;
       const path = join(dir, entry.name);
@@ -190,6 +279,11 @@ function listSources(root: string): string[] {
   };
   walk(root, true);
   return out.sort();
+}
+
+function isWithin(path: string, dir: string): boolean {
+  const rel = relative(dir, path);
+  return rel === "" || (!rel.startsWith("..") && !rel.startsWith(sep));
 }
 
 /** The version of the jazz-tools package at `dir`. */

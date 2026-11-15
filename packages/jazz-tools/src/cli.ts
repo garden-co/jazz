@@ -383,6 +383,9 @@ function printHelp(): void {
   console.log("  --name <name>         migrations create: the migration's name");
   console.log("\nUpgrade options:");
   console.log("  --dir <path>          The app's directory (default: .)");
+  console.log(
+    "  --schema-dir <path>   Where schema.ts is, if not ., ./src, ./src/lib or found below --dir",
+  );
   console.log("  --dry-run             Report what would change, write nothing");
   console.log("  --skip-typecheck      Don't typecheck the converted project");
   console.log("\nMigration graph options:");
@@ -465,6 +468,7 @@ if (isMainModule()) {
           dir: resolve(process.cwd(), getFlagValue(commandArgs, "--dir") ?? "."),
           dryRun,
           skipTypecheck: commandArgs.includes("--skip-typecheck"),
+          schemaDir: getFlagValue(commandArgs, "--schema-dir"),
         });
         console.log(formatReport(report, dryRun));
         if (report.typeErrors.length > 0 || report.todos > 0) process.exitCode = 1;

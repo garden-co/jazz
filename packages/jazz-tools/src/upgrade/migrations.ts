@@ -4,7 +4,7 @@
  * them there), since upgrade deletes migrations/.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { entriesOf, isObject, type JsonObject } from "./app-json.js";
 import { UpgradeRefusal } from "./errors.js";
 
@@ -49,7 +49,7 @@ function migrationFiles(migrationsDir: string): Array<{ file: string; from: stri
 }
 
 /** The short hashes `migrations/index.ts` ships (its `"hash"` entries). */
-function shippedHashes(migrationsDir: string): string[] {
+export function shippedHashes(migrationsDir: string): string[] {
   const index = join(migrationsDir, "index.ts");
   if (!existsSync(index)) return [];
   const text = readFileSync(index, "utf8");
@@ -104,4 +104,41 @@ export function checkMigrations(
     );
   }
   return { versions: history.length + 1, migrations: entries.length, unshipped };
+}
+
+/**
+ * Snapshot files of this app's versions outside its migrations/: alpha.64's
+ * `migrations create --schema-dir <elsewhere>` writes them under the
+ * directory it ran in. They go with migrations/; others stay.
+ */
+export function straySnapshots(
+  root: string,
+  migrationsDir: string | undefined,
+  versions: Set<string>,
+): string[] {
+  const out: string[] = [];
+  const skip = new Set(["node_modules", ".git", "dist", "build", ".next", ".expo"]);
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || skip.has(entry.name)) continue;
+      const path = join(dir, entry.name);
+      if (entry.name === "snapshots" && basename(dir) === "migrations" && dir !== migrationsDir) {
+        for (const name of readdirSync(path)) {
+          const match = /^(?:\d{8}T\d{6}-)?([0-9a-f]{12})\.json$/i.exec(name);
+          if (match && versions.has(match[1]!.toLowerCase())) out.push(join(path, name));
+        }
+      } else {
+        walk(path, depth + 1);
+      }
+    }
+  };
+  walk(root, 0);
+  return out;
 }

@@ -42,7 +42,7 @@ import { convertComputed } from "./computed.js";
 import { UpgradeRefusal, notSupportedYet } from "./errors.js";
 import { convertExtras } from "./extras.js";
 import { checkLegacyFiles, dslAlpha, findLegacyJazzTools } from "./legacy.js";
-import { checkMigrations } from "./migrations.js";
+import { checkMigrations, shippedHashes, straySnapshots } from "./migrations.js";
 import { pascal, readGeneratedNames, rowTypeName, type TableTypeNames } from "./names.js";
 import { createProgram, typeErrors } from "./program.js";
 import {
@@ -56,12 +56,15 @@ import {
 } from "./project.js";
 import { refuseDroppedConditions, refuseEnvironmentReads } from "./permissions-check.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
+import { PackageAliases } from "./aliases.js";
 
 export { UpgradeRefusal } from "./errors.js";
 
 export interface UpgradeOptions {
   /** The app's directory (default: cwd). */
   dir?: string;
+  /** Where schema.ts is, when not in `dir`, `dir/src` or `dir/src/lib` (and not found below `dir`). */
+  schemaDir?: string;
   /** Plan and report, write nothing. */
   dryRun?: boolean;
   /** Skip the closing typecheck. */
@@ -91,7 +94,7 @@ export interface UpgradeReport {
 }
 
 export async function upgradeProject(options: UpgradeOptions = {}): Promise<UpgradeReport> {
-  const project = locateProject(options.dir ?? process.cwd());
+  const project = locateProject(options.dir ?? process.cwd(), options.schemaDir);
   const { ts } = project;
   const rel = (path: string) => relative(project.root, path) || path;
   const notes: string[] = [];
@@ -167,12 +170,24 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
       movedToComputed: computed.movedExports,
       jsExtensions: scan.jsExtensions,
       importedNames: scan.schemaNames,
+      notes,
     });
     for (const name of extras.dropped)
       notes.push(
         `Dropped \`${name}\` from schema.ts's exports: it was schema DSL, and nothing imports it.`,
       );
     var deleted = deletedFiles(project, scan);
+    const versions = new Set([
+      ...(isObject(app.history) ? Object.keys(app.history) : []),
+      ...(project.migrationsDir ? shippedHashes(project.migrationsDir) : []),
+    ]);
+    const stray = straySnapshots(project.root, project.migrationsDir, versions);
+    for (const file of stray) deleted.add(file);
+    if (stray.length > 0) {
+      notes.push(
+        `Deleted this app's schema snapshots outside migrations/ too: ${stray.map((f) => relative(project.root, f)).join(", ")}.`,
+      );
+    }
   } finally {
     schemaProgram.dispose();
   }
@@ -188,7 +203,9 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
       );
     }
   }
+  const aliases = new PackageAliases(project.root);
   const rewrites = rewriteProject({
+    aliases,
     project,
     exports: extras.exports,
     tables: names.tables,
@@ -203,6 +220,10 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     deleted,
   );
   const manifest = manifestEdit(project);
+  // package.json `imports` aliases, on top of the root manifest's edits.
+  const aliasEdits = aliases.apply(
+    manifest ? new Map([[manifest.file, manifest.text]]) : undefined,
+  );
 
   const report: UpgradeReport = {
     dir: project.root,
@@ -212,6 +233,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
       ...rewrites.files.flatMap((f) => f.changes),
       ...config.changes,
       ...(manifest?.changes ?? []),
+      ...[...aliasEdits.values()].flatMap((e) => e.changes),
     ],
     manual: rewrites.manual,
     notes,
@@ -239,7 +261,8 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   }
   for (const file of rewrites.files) writes.push([file.file, file.text]);
   if (config.file) writes.push([config.file, config.text]);
-  if (manifest) writes.push([manifest.file, manifest.text]);
+  if (manifest && !aliasEdits.has(manifest.file)) writes.push([manifest.file, manifest.text]);
+  for (const [file, edit] of aliasEdits) writes.push([file, edit.text]);
   report.written = writes.map(([path]) => rel(path));
 
   if (options.dryRun) return report;
@@ -334,7 +357,7 @@ async function rustBindings(appJson: string): Promise<string | { reason: string 
 function installedJazzTools(project: Project): string | undefined {
   try {
     return dirname(
-      createRequire(join(project.root, "package.json")).resolve("jazz-tools/package.json"),
+      createRequire(join(project.schemaDir, "package.json")).resolve("jazz-tools/package.json"),
     );
   } catch {
     return undefined;
@@ -397,7 +420,7 @@ function scanImports(project: Project): ImportScan {
         const target = resolveImport(project, spec.text, file);
         if (target) {
           targets.add(target);
-          if (target === project.schemaFile && file !== project.permissionsFile) {
+          if (target === project.schemaFile && !project.permissionsSources.includes(file)) {
             if (spec.text.startsWith(".")) spec.text.endsWith(".js") ? js++ : plain++;
             if (ts.isImportDeclaration(node)) {
               const bindings = node.importClause?.namedBindings;
@@ -420,7 +443,7 @@ function scanImports(project: Project): ImportScan {
 /** schema.ts, permissions.ts and the project files they import, transitively. */
 function schemaSources(project: Project, scan: ImportScan): string[] {
   const out = new Set<string>();
-  const queue = [project.schemaFile, ...(project.permissionsFile ? [project.permissionsFile] : [])];
+  const queue = [project.schemaFile, ...project.permissionsSources];
   while (queue.length > 0) {
     const file = queue.pop()!;
     if (
@@ -444,7 +467,7 @@ const DSL_IMPORT =
  */
 function deletedFiles(project: Project, scan: ImportScan): Set<string> {
   const deleted = new Set<string>([project.schemaFile]);
-  if (project.permissionsFile) deleted.add(project.permissionsFile);
+  for (const file of project.permissionsSources) deleted.add(file);
   if (project.migrationsDir) {
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
