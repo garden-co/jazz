@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 3. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
@@ -122,6 +122,7 @@ pub struct ActivityUpdate {
 
 impl ::jazz_app::Table for Activity {
     const NAME: &'static str = "activity";
+    const COLUMNS: &'static [&'static str] = &["showId", "taskId", "actorId", "kind", "detail"];
     type New = NewActivity;
     type Update = ActivityUpdate;
 
@@ -293,6 +294,7 @@ pub struct ChecklistItemUpdate {
 
 impl ::jazz_app::Table for ChecklistItem {
     const NAME: &'static str = "checklistItems";
+    const COLUMNS: &'static [&'static str] = &["title", "done", "ownerAccount"];
     type New = NewChecklistItem;
     type Update = ChecklistItemUpdate;
 
@@ -428,6 +430,7 @@ pub struct CommentUpdate {
 
 impl ::jazz_app::Table for Comment {
     const NAME: &'static str = "comments";
+    const COLUMNS: &'static [&'static str] = &["taskId", "authorId", "body"];
     type New = NewComment;
     type Update = CommentUpdate;
 
@@ -563,6 +566,7 @@ pub struct CrewUpdate {
 
 impl ::jazz_app::Table for Crew {
     const NAME: &'static str = "crew";
+    const COLUMNS: &'static [&'static str] = &["account", "name"];
     type New = NewCrew;
     type Update = CrewUpdate;
 
@@ -707,6 +711,7 @@ pub struct ShowCrewUpdate {
 
 impl ::jazz_app::Table for ShowCrew {
     const NAME: &'static str = "showCrew";
+    const COLUMNS: &'static [&'static str] = &["showId", "crewId", "account", "role", "inviteCode"];
     type New = NewShowCrew;
     type Update = ShowCrewUpdate;
 
@@ -869,6 +874,7 @@ pub struct ShowInviteUpdate {
 
 impl ::jazz_app::Table for ShowInvite {
     const NAME: &'static str = "showInvites";
+    const COLUMNS: &'static [&'static str] = &["showId", "code"];
     type New = NewShowInvite;
     type Update = ShowInviteUpdate;
 
@@ -1002,6 +1008,7 @@ pub struct ShowUpdate {
 
 impl ::jazz_app::Table for Show {
     const NAME: &'static str = "shows";
+    const COLUMNS: &'static [&'static str] = &["name", "venue", "date", "doors", "chiefAccount"];
     type New = NewShow;
     type Update = ShowUpdate;
 
@@ -1193,6 +1200,7 @@ pub struct TaskUpdate {
 
 impl ::jazz_app::Table for Task {
     const NAME: &'static str = "tasks";
+    const COLUMNS: &'static [&'static str] = &["showId", "title", "status", "assigneeId", "notes", "rank"];
     type New = NewTask;
     type Update = TaskUpdate;
 
@@ -1324,7 +1332,7 @@ pub mod tasks {
     }
 
     /// Relation `assignee`: the `crew` row `assigneeId` references.
-    pub fn assignee() -> ::jazz_app::One<Task, Crew> {
+    pub fn assignee() -> ::jazz_app::One<Task, Crew, ::jazz_app::Nullable> {
         ::jazz_app::One::new("assigneeId")
     }
 

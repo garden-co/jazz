@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 3. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
@@ -37,6 +37,7 @@ pub struct ProjectUpdate {
 
 impl ::jazz_app::Table for Project {
     const NAME: &'static str = "projects";
+    const COLUMNS: &'static [&'static str] = &["name"];
     type New = NewProject;
     type Update = ProjectUpdate;
 
@@ -155,6 +156,7 @@ pub struct TodoUpdate {
 
 impl ::jazz_app::Table for Todo {
     const NAME: &'static str = "todos";
+    const COLUMNS: &'static [&'static str] = &["title", "done", "description", "parent", "project"];
     type New = NewTodo;
     type Update = TodoUpdate;
 
@@ -269,12 +271,12 @@ pub mod todos {
     }
 
     /// Relation `parentRelation`: the `todos` row `parent` references.
-    pub fn parent_relation() -> ::jazz_app::One<Todo, Todo> {
+    pub fn parent_relation() -> ::jazz_app::One<Todo, Todo, ::jazz_app::Nullable> {
         ::jazz_app::One::new("parent")
     }
 
     /// Relation `projectRelation`: the `projects` row `project` references.
-    pub fn project_relation() -> ::jazz_app::One<Todo, Project> {
+    pub fn project_relation() -> ::jazz_app::One<Todo, Project, ::jazz_app::Nullable> {
         ::jazz_app::One::new("project")
     }
 

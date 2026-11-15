@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 3. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
@@ -41,6 +41,7 @@ pub struct NoteUpdate {
 
 impl ::jazz_app::Table for Note {
     const NAME: &'static str = "notes";
+    const COLUMNS: &'static [&'static str] = &["owner", "body"];
     type New = NewNote;
     type Update = NoteUpdate;
 
