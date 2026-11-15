@@ -233,3 +233,35 @@ fn kotlin_refuses_computed_fields_and_edited_bindings() {
     assert!(error.to_string().contains("was edited"), "{error}");
     assert!(bindings::read(Lang::Kotlin, "// something else\n").is_err());
 }
+
+#[test]
+fn kotlin_bindings_read_back_with_columns_named_as_their_constants() {
+    let app = br#"{ "format": 1, "tables": { "items": { "columns": { "source": "string", "app": "string?", "APP": "int" } } } }"#;
+    let loaded = App::load(app).unwrap();
+    let generated = generate(Lang::Kotlin, app).unwrap();
+    let recorded = bindings::read(Lang::Kotlin, &generated).unwrap();
+    assert_eq!(recorded.source, loaded.source);
+    assert_eq!(
+        bindings::staleness(&loaded, Lang::Kotlin, Some(&generated)).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn kotlin_refuses_tables_that_would_shadow_types_it_uses() {
+    for (table, ty) in [
+        ("results", "Result"),
+        ("lists", "List"),
+        ("pairs", "Pair"),
+        ("units", "Unit"),
+    ] {
+        let app = format!(
+            r#"{{ "format": 1, "tables": {{ "{table}": {{ "columns": {{ "a": "string" }} }} }} }}"#
+        );
+        let error = generate(Lang::Kotlin, app.as_bytes()).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("Kotlin type `{ty}`")),
+            "{error}"
+        );
+    }
+}
