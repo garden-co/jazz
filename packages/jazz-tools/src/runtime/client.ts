@@ -172,7 +172,13 @@ export interface Runtime {
    */
   waitForPendingWrites?(
     tier?: string,
-    options?: { throughOutage?: boolean; inFlightStreams?: AbortSignal; signal?: AbortSignal },
+    options?: {
+      throughOutage?: boolean;
+      inFlightStreams?: AbortSignal;
+      signal?: AbortSignal;
+      /** Wait as `waitForSync` for this session's writes (none: the runtime's own). */
+      sync?: { writeContext?: string | null };
+    },
   ): Promise<void>;
   /** @internal Close mutation admission and report the foreground TxTime high-water. */
   quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
@@ -1609,6 +1615,20 @@ export class JazzClient {
       ...resolved,
       openTransactionId: options.openTransactionId,
     };
+  }
+
+  /**
+   * @internal `db.waitForSync` for the writes `session` makes through this
+   * client (none: its own), on the runtime's native path.
+   */
+  async waitForSyncAs(session: Session | undefined, signal?: AbortSignal): Promise<void> {
+    if (!this.runtime.waitForPendingWrites)
+      throw new Error("Runtime does not support waiting for sync");
+    await this.runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal,
+      sync: { writeContext: this.writeContext(session) ?? null },
+    });
   }
 
   /**
