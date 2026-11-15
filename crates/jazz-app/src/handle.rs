@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use futures_util::FutureExt as _;
 use jazz::account_registry::AccountId;
+use jazz::db::ReadOpts;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
     Session, TableName, TransactionId,
@@ -24,6 +25,7 @@ use crate::auth::{Auth, DEVICE_TOKEN_TTL_SECS, TokenReason};
 use crate::backend;
 use crate::config::{Config, Storage};
 use crate::error::{Error, Result};
+use crate::include::Row;
 use crate::query::Query;
 use crate::session::{
     self as user_session, Credential, Session as UserSession, SyncStatus, User, UserKind,
@@ -121,6 +123,16 @@ impl Jazz {
                     .into(),
             ));
         }
+        if config.user.is_some()
+            && !config.allow_insecure_http
+            && config.sends_credentials_in_plain_text()
+        {
+            return Err(Error::Config(
+                "an end user's credentials would cross the network in plain text: use \
+                 https://, or Config::allow_insecure_http for a dev server"
+                    .into(),
+            ));
+        }
         if config.server_url.is_some() && config.backend.is_none() && config.user.is_none() {
             return Err(Error::Config(
                 "a server needs someone to connect as: the app's backend (Config::backend) \
@@ -133,7 +145,12 @@ impl Jazz {
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
             .name("jazz-client".into())
-            .spawn(move || run(files, config, receiver, ready))
+            .spawn({
+                // The session stops the client through this, without keeping
+                // it alive: it stops with its last handle all the same.
+                let stopper = commands.downgrade();
+                move || run(files, config, receiver, ready, stopper)
+            })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let Opened {
             bundle,
@@ -206,16 +223,17 @@ impl Jazz {
     }
 
     /// Every row `query` matches, reading local data first.
-    pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
+    pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
         self.all_with(query, ReadTier::LocalFirst).await
     }
 
     /// Every row `query` matches, read at `tier`.
-    pub async fn all_with<T: Table>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
-        let query = query.into_untyped();
+    pub async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
-            let rows = client.query(query, tier).await?;
+            let rows = client.query_with_opts(query, opts).await?;
             rows.into_iter()
                 .map(|row| decode_result::<T>(row, &implementations))
                 .collect()
@@ -224,7 +242,7 @@ impl Jazz {
     }
 
     /// The first row `query` matches.
-    pub async fn one<T: Table>(&self, query: Query<T>) -> Result<Option<T>> {
+    pub async fn one<T: Row>(&self, query: Query<T>) -> Result<Option<T>> {
         Ok(self.all(query.limit(1)).await?.into_iter().next())
     }
 
@@ -273,21 +291,27 @@ impl Jazz {
 
     /// Subscribes to `query`: a stream of its changes, starting with the
     /// rows it matches now.
-    pub async fn subscribe<T: Table>(&self, query: Query<T>) -> Result<Subscription<T>> {
+    pub async fn subscribe<T: Row>(&self, query: Query<T>) -> Result<Subscription<T>> {
         self.subscribe_with(query, ReadTier::LocalFirst).await
     }
 
     /// [`Jazz::subscribe`] at `tier`.
-    pub async fn subscribe_with<T: Table>(
+    pub async fn subscribe_with<T: Row>(
         &self,
         query: Query<T>,
         tier: ReadTier,
     ) -> Result<Subscription<T>> {
-        let query = query.into_untyped();
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
+        if jazz::schema::history::is_history_table(&query.table) {
+            return Err(Error::Unsupported(
+                "subscribing to history; read it with Jazz::all".into(),
+            ));
+        }
         let (sender, receiver) = mpsc::unbounded_channel();
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
-            let stream = client.subscribe_with_read_tier(query, tier).await?;
+            let stream = client.subscribe_with_opts(query, opts).await?;
             tokio::task::spawn_local(subscription::forward::<T>(stream, sender, implementations));
             Ok(())
         })
@@ -309,6 +333,13 @@ impl Jazz {
         }
         done.await.unwrap_or(Ok(()))
     }
+}
+
+/// The read options of `query` at `tier`.
+pub(crate) fn read_opts<T: Row>(query: &Query<T>, tier: ReadTier) -> ReadOpts {
+    let mut opts = ReadOpts::for_read_tier(tier);
+    opts.read_view.include_deleted = query.reads_deleted();
+    opts
 }
 
 /// Inserts `new`, returning it as stored and its write (none when staged in
@@ -337,12 +368,12 @@ pub(crate) fn insert<N: Insert>(
     Ok((table::decode(id, fields, implementations)?, written))
 }
 
-pub(crate) fn decode_result<T: Table>(
+pub(crate) fn decode_result<T: Row>(
     row: QueryResult,
     implementations: &Implementations,
 ) -> Result<T> {
     let id = row.key.row_id().ok_or_else(|| Error::Decode {
-        table: T::NAME,
+        table: <T::Table as Table>::NAME,
         message: "a joined result is not a row".into(),
     })?;
     table::decode(id, row.fields, implementations)
@@ -353,6 +384,7 @@ fn run(
     config: Config,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
+    stopper: mpsc::WeakUnboundedSender<Command>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -368,7 +400,7 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let (client, opened) = match connect(files, config).await {
+        let (client, opened) = match connect(files, config, stopper).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
@@ -458,7 +490,11 @@ struct Opened {
     sync: watch::Receiver<SyncStatus>,
 }
 
-async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)> {
+async fn connect(
+    files: AppFiles,
+    config: Config,
+    stopper: mpsc::WeakUnboundedSender<Command>,
+) -> Result<(JazzClient, Opened)> {
     let loaded = files.load()?;
     let (storage, data_dir) = match config.storage {
         Storage::Memory => (ClientStorage::Memory, std::env::temp_dir()),
@@ -511,12 +547,19 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)
     };
     let sync = user_session::watch_sync(client.clone());
     let session = user.map(|(user, credential)| {
+        let stop = Box::new(move || {
+            if let Some(commands) = stopper.upgrade() {
+                let (reply, _) = oneshot::channel();
+                let _ = commands.send(Command::Shutdown(reply));
+            }
+        });
         user_session::start(
             client.clone(),
             user,
             credential,
             config.server_url.as_deref().unwrap_or_default(),
             sync.clone(),
+            stop,
         )
     });
     Ok((

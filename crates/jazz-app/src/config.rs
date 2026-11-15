@@ -44,6 +44,10 @@ pub struct Config {
     pub backend: Option<Backend>,
     /// Open as an end user of the app, signed in with this.
     pub user: Option<Auth>,
+    /// Lets an end user's credentials travel over plain `http://` to a
+    /// host other than this machine (a dev server on the LAN). Off: they
+    /// go over `https://`, or to `localhost`.
+    pub allow_insecure_http: bool,
 }
 
 impl Config {
@@ -55,6 +59,7 @@ impl Config {
             storage: Storage::Memory,
             backend: None,
             user: None,
+            allow_insecure_http: false,
         }
     }
 
@@ -76,6 +81,31 @@ impl Config {
     pub fn user(mut self, auth: Auth) -> Self {
         self.user = Some(auth);
         self
+    }
+
+    /// See [`Config::allow_insecure_http`].
+    pub fn allow_insecure_http(mut self) -> Self {
+        self.allow_insecure_http = true;
+        self
+    }
+
+    /// Whether an end user's credentials would cross the network in plain
+    /// text: `http://` to a host other than this machine.
+    pub(crate) fn sends_credentials_in_plain_text(&self) -> bool {
+        let Some(url) = self.server_url.as_deref() else {
+            return false;
+        };
+        let Ok(url) = reqwest::Url::parse(url) else {
+            return false;
+        };
+        let host = url.host_str().unwrap_or_default();
+        let loopback = host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        url.scheme() == "http" && !loopback
     }
 }
 

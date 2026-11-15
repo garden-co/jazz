@@ -270,6 +270,14 @@ impl Core {
     }
 
     pub fn one(&self, query_json: &str, opts: &Opts) -> Result<Option<String>> {
+        let parsed = convert::parse(query_json, "the query")?;
+        if crate::relational::is_relational(&parsed) {
+            return Ok(self
+                .relational_rows(&parsed, opts, Some(1))?
+                .into_iter()
+                .next()
+                .map(|row| row.to_string()));
+        }
         // Validated as given (a bad `limit` is refused), then limited to 1.
         let (_, mut query, shape) = convert::query(
             &self.schema,
@@ -285,8 +293,37 @@ impl Core {
     }
 
     fn rows(&self, query: &Json, opts: &Opts) -> Result<Vec<Json>> {
+        if crate::relational::is_relational(query) {
+            return self.relational_rows(query, opts, None);
+        }
         let (_, query, shape) = convert::query(&self.schema, &self.relations, query)?;
         self.run_query(shape, query, opts)
+    }
+
+    /// hopTo / gather / union / history / includeDeleted queries.
+    fn relational_rows(
+        &self,
+        query: &Json,
+        opts: &Opts,
+        limit: Option<usize>,
+    ) -> Result<Vec<Json>> {
+        let mut lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
+        if let Some(limit) = limit {
+            lowered.query.limit = Some(lowered.query.limit.map_or(limit, |l| l.min(limit)));
+        }
+        let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
+        let core_query = lowered.query.clone();
+        let reads_deleted = lowered.reads_deleted;
+        let results = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let mut read = jazz_app::jazz::db::ReadOpts::for_read_tier(tier);
+            read.read_view.include_deleted = reads_deleted;
+            Ok(client.query_with_opts(core_query, read).await?)
+        }))?;
+        results
+            .into_iter()
+            .map(|row| crate::relational::row(&lowered, row))
+            .collect()
     }
 
     fn run_query(
@@ -507,16 +544,26 @@ impl Core {
             return Err(unsupported("subscribing inside a transaction"));
         }
         let tier = opts.read_tier.unwrap_or(ReadTier::LocalFirst);
-        let (_, query, table) = convert::query(
-            &self.schema,
-            &self.relations,
-            &convert::parse(query_json, "the query")?,
-        )?;
+        let parsed = convert::parse(query_json, "the query")?;
+        let (query, table, reads_deleted) = if crate::relational::is_relational(&parsed) {
+            let lowered = crate::relational::lower(&self.schema, &self.relations, &parsed)?;
+            if lowered.history {
+                return Err(unsupported(
+                    "subscribing to history: all versions of a row share its id",
+                ));
+            }
+            (lowered.query, lowered.shape, lowered.reads_deleted)
+        } else {
+            let (_, query, shape) = convert::query(&self.schema, &self.relations, &parsed)?;
+            (query, shape, false)
+        };
         let (events, received) = mpsc::channel::<Option<Event>>();
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         let forward = events.clone();
         block_on(self.open_jazz()?.with_client(move |client| async move {
-            let mut stream = client.subscribe_with_read_tier(query, tier).await?;
+            let mut read = jazz_app::jazz::db::ReadOpts::for_read_tier(tier);
+            read.read_view.include_deleted = reads_deleted;
+            let mut stream = client.subscribe_with_opts(query, read).await?;
             // Forwards on the client's thread until cancelled, the stream
             // ends, or the delivery thread is gone.
             tokio::task::spawn_local(async move {
@@ -1294,6 +1341,7 @@ fn config(
     let mut admin_secret = None;
     let mut session = None;
     let mut auth = None;
+    let mut insecure = false;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -1315,6 +1363,13 @@ fn config(
             "adminSecret" => admin_secret = Some(text()?),
             "session" => session = Some(value.clone()),
             "auth" => auth = Some(value.clone()),
+            // An end user over plain http:// to a host other than
+            // localhost, for development only.
+            "allowInsecureHttp" => {
+                insecure = value
+                    .as_bool()
+                    .ok_or_else(|| refused("config.allowInsecureHttp must be true or false"))?;
+            }
             // Read by `Core::open`; checked here.
             "contract" => match value.as_u64() {
                 Some(1 | 2) => {}
@@ -1425,6 +1480,9 @@ fn config(
             }
         };
         result = result.user(auth);
+        if insecure {
+            result = result.allow_insecure_http();
+        }
     } else if result.server_url.is_some() {
         return Err(refused(
             "a \"serverUrl\" needs \"permissions\" (a backend) or \"auth\" (an end user)",
