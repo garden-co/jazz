@@ -267,6 +267,39 @@ describe("cli generate", () => {
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
   });
 
+  it("warns for each table jazz.permissions.json gives no policy", async () => {
+    const { root } = await createWorkspace();
+    await writeAppFiles(root, todosApp(), { format: 1, tables: {} });
+
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
+
+    const warning = (table: string) =>
+      `table "${table}" has no policies in jazz.permissions.json, so users can't read, insert, update or delete its rows. ` +
+      "Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: " +
+      `write \`"${table}": { "read": "false" }\` to say so and silence this warning. ` +
+      "Don't add allow rules just to silence it.";
+    expect(logs.filter((line) => line.includes("has no policies"))).toEqual([
+      warning("projects"),
+      warning("todos"),
+    ]);
+  });
+
+  it("treats true and false as explicit policies", async () => {
+    const { root } = await createWorkspace();
+    await writeAppFiles(root, todosApp(), {
+      format: 1,
+      tables: {
+        projects: { read: "false" },
+        todos: { read: "true", insert: "false", update: "false", delete: "false" },
+      },
+    });
+
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
+
+    expect(logs.filter((line) => line.includes("has no policies"))).toEqual([]);
+    expect(logs.join("\n")).toMatch(/Checked jazz\.app\.json and jazz\.permissions\.json/);
+  });
+
   it("fails when jazz.permissions.json is missing", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), null);

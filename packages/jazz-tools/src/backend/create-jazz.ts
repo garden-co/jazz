@@ -1095,6 +1095,8 @@ async function applyBundle(
     /** What the Rust loader built from the app's bindings and jazz.permissions.json. */
     loaded: LoadedBackendApp;
     allowDroppingHistory?: boolean;
+    /** A test harness's backend: print no warnings. */
+    quiet?: boolean;
   },
 ): Promise<string> {
   // Published, never activated: this backend's sessions are pinned to its
@@ -1122,6 +1124,13 @@ async function applyBundle(
   // An older core answers a publish without the bundle it made.
   if (!deployed.bundle) {
     throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
+  }
+  // The loader's own warnings were printed when the permissions loaded; the
+  // rest (tables without policies) are the publish's.
+  if (!options.quiet) {
+    for (const warning of deployed.warnings ?? []) {
+      if (!options.loaded.warnings.includes(warning)) console.warn(`jazz: ${warning}`);
+    }
   }
   return deployed.bundle;
 }
@@ -1608,6 +1617,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       loaded: compiled.get(next)!,
       appId,
       adminSecret: core.adminSecret,
+      quiet: testHarnessOptions.has(next),
     });
   };
 

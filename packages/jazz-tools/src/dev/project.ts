@@ -24,6 +24,8 @@ import {
   migrationsCreate,
   validateBindings,
 } from "./codegen-napi.js";
+import type { DeploymentBody } from "./catalogue-api.js";
+import { permissionCoverageWarnings } from "./catalogue.js";
 import type { LocalMigrationGraph } from "./migration-graph.js";
 
 export interface GenerateOptions {
@@ -61,8 +63,13 @@ async function checkFiles(
         `start from \`{ "format": 1, "tables": {} }\`, which denies everything.`,
     );
   }
-  const loaded = (await loadAppFiles(project.app, project.permissions)) as {
+  const files = (await loadAppFiles(project.app, project.permissions)) as {
+    deployment: DeploymentBody;
     warnings?: string[];
+  };
+  // What a backend would publish says which tables users can't reach at all.
+  const loaded = {
+    warnings: [...(files.warnings ?? []), ...permissionCoverageWarnings(files.deployment)],
   };
   // The bindings are current when their `source` and format match, whatever a
   // formatter did to them; stale ones are what generate rewrites.

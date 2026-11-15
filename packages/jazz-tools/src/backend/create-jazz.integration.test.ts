@@ -25,7 +25,7 @@ import { generateSecret, identityOf, signChallenge, signToken } from "../local-f
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { testApp, testPermissions } from "../testing/index.js";
+import { startTestJazz, testApp, testPermissions } from "../testing/index.js";
 import { decodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
@@ -1742,6 +1742,51 @@ describe("createJazz", () => {
 
   // An Expo app is a CommonJS package: an ESM backend importing its
   // permissions.ts by default gets the whole module.exports, `{ default }`.
+  describe("tables jazz.permissions.json gives no policy", () => {
+    const coverageApp = testApp({
+      tables: {
+        notes: { columns: { body: "string" } },
+        audit: { columns: { body: "string" } },
+      },
+    });
+    const coveragePermissions = { format: 1, tables: { audit: { read: "false" } } };
+    const coverageWarnings = (warn: { mock: { calls: unknown[][] } }) =>
+      warn.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes("has no policies"));
+
+    it("are each warned once when createJazz publishes", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      cleanups.push(async () => warn.mockRestore());
+      const jazz = createJazz({
+        app: coverageApp,
+        permissions: coveragePermissions,
+        store: memory(),
+      });
+      cleanups.push(() => jazz.close());
+      await jazz.ready();
+      await jazz.ready();
+      expect(coverageWarnings(warn)).toEqual([
+        `jazz: table "notes" has no policies in jazz.permissions.json, so users can't read, insert, update or delete its rows. ` +
+          "Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: " +
+          'write `"notes": { "read": "false" }` to say so and silence this warning. ' +
+          "Don't add allow rules just to silence it.",
+      ]);
+    });
+
+    it("are not warned by a test server", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      cleanups.push(async () => warn.mockRestore());
+      const server = await startTestJazz({
+        app: coverageApp,
+        permissions: coveragePermissions,
+        coreOptions: { inMemory: true },
+      });
+      cleanups.push(() => server.stop());
+      expect(coverageWarnings(warn)).toEqual([]);
+    });
+  });
+
   it.each([
     ["no permissions", undefined],
     ["the engine's compiled policies", clientPermissions],
