@@ -531,3 +531,48 @@ async fn mergeable_and_serializable_transactions() {
         }
     }
 }
+
+/// A transaction driven call by call (TS's `beginTransaction`): a `Send`
+/// handle that commits, rolls back, or rolls back when dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_transactions() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+
+    let tx = jazz.begin_transaction().await.unwrap();
+    let a = tx.insert(new_todo("a")).await.unwrap();
+    // Held across an await in another task: the handle is Send.
+    let tx = tokio::spawn(async move {
+        tx.update(
+            a.id,
+            TodoUpdate {
+                done: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        tx
+    })
+    .await
+    .unwrap();
+    assert_eq!(tx.get::<Todo>(a.id).await.unwrap().unwrap().done, true);
+    tx.commit().await.unwrap();
+    assert!(jazz.get::<Todo>(a.id).await.unwrap().unwrap().done);
+
+    let tx = jazz.begin_serializable_transaction().await.unwrap();
+    tx.insert(new_todo("rolled back")).await.unwrap();
+    tx.rollback().await.unwrap();
+
+    let tx = jazz.begin_transaction().await.unwrap();
+    tx.insert(new_todo("dropped")).await.unwrap();
+    drop(tx);
+
+    let titles: Vec<_> = jazz
+        .all(todos::query())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|todo| todo.title)
+        .collect();
+    assert_eq!(titles, ["a"]);
+}
