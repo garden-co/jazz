@@ -12,10 +12,10 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-/** A Swift package of the Jazz Swift runtime: its bindings are JazzApp.swift. */
+/** A Swift package of the Jazz Swift runtime (it uses the `Jazz` product): its bindings are JazzApp.swift. */
 function isSwiftApp(dir) {
   const manifest = join(root, dir, "Package.swift");
-  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
+  return existsSync(manifest) && usesJazzSwift(readFileSync(manifest, "utf8"));
 }
 
 /**
@@ -64,3 +64,8 @@ test("no example keeps an alpha.64 schema source beside its files", () => {
     `jazz.app.json and jazz.permissions.json are the app's only source; \`jazz-tools upgrade\` removes these:\n${leftovers.join("\n")}`,
   );
 });
+
+/** As jazz-codegen's `swift::is_app_manifest`: the `Jazz` product, or the jazz-swift package. */
+function usesJazzSwift(manifest) {
+  return /\.product\(\s*name:\s*"Jazz"/.test(manifest) || /["/]jazz-swift(\.git)?"/.test(manifest);
+}
