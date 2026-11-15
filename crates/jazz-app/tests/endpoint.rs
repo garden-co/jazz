@@ -682,11 +682,9 @@ async fn a_missing_expired_or_foreign_jwt_is_refused() {
     app.stop().await;
 }
 
-/// What reaches the core is built by the endpoint: the backend secret and
-/// exactly one identity, read from `auth` only. A credential stated
-/// anywhere else (a top-level `jwt_token` beside the secret the endpoint
-/// adds would have read as the backend's own trusted link) refuses the
-/// socket.
+/// Only the credential the endpoint vouched for, inside `auth`, is
+/// forwarded to the core, beside the backend secret; other prelude fields
+/// are refused or dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_the_vouched_credential_reaches_the_core() {
     let app = App::start().await;
@@ -761,8 +759,7 @@ async fn only_the_vouched_credential_reaches_the_core() {
     assert_eq!(keys(&ts_shaped), ["auth", "bundle", "peer_identity"]);
     assert_eq!(keys(&ts_shaped["auth"]), ["backend_secret", "jwt_token"]);
 
-    // Credentials outside `auth` that differ from it, secrets, or requests
-    // only a backend makes.
+    // Refused shapes.
     let refused = [
         json!({ "jwt_token": device_token, "auth": {} }),
         json!({ "jwt_token": device_token }),
