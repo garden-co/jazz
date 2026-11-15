@@ -90,6 +90,37 @@ columns (`merge: "text"`) take plain string writes.
   ANDed. Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `contains` (string or
   array column), `in`, `isNull`, `isNotNull`. Columns also include `id`,
   `$createdAt` and `$updatedAt`.
+- **Include:** `"include": [{ "relation": "<name>", "required"?: bool,
+"query"?: { "where", "orderBy", "limit", "select", "include" } }]`, at the
+  root or nested in an include's `query`, which has no `table` and no
+  `offset`. Relations are the ones `jazz.app.json` declares. In a row, an
+  included relation sits under its name: a forward relation as a row or
+  `null`, a reverse one as an array. `required` (as TS's `requireIncludes`)
+  keeps only rows whose target is readable, for forward relations through a
+  non-optional column. Subscriptions deliver included rows too, and deliver
+  an `updated` row when its related rows change.
+- **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
+  always) instead of all of them, at the root or in an include.
+- **Transactions:** UniFFI `JazzHandle.begin() -> Transaction` (`all`,
+  `one`, `insert`, `update`, `delete`, `commit(tier?)`, `rollback`; dropped
+  uncommitted, it rolls back). C ABI: `jazz_call` methods `txBegin`
+  `{serializable?}` → `{tx}`, `"tx"` in the args of any read or write, then
+  `txCommit {tx, tier?}` or `txRollback {tx}`. Transactions are
+  serializable: reads see a snapshot plus their own writes; writes commit
+  together or not at all. A transaction that only read just ends. Closing
+  the app rolls back open transactions.
+- **Tiers:** reads and subscriptions take `"local"`, `"localFirst"`
+  (default) or `"remote"`; writes and commits take `"local"` or `"global"`,
+  the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
+  `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
+  `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
+- **Contract version:** `"contract": 1 | 2` in the open config (default 1).
+  With 2, errors have three more kinds: `permission` (the app's permissions
+  refuse it, e.g. a write waiting for global durability), `notSupported`
+  (anything "not supported yet") and `conflict` (a serializable transaction
+  lost to another write; retry it). UniFFI: `JazzError.Permission`,
+  `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
+  these as `refused`, as before.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",
@@ -99,7 +130,12 @@ columns (`merge: "text"`) take plain string writes.
   positions, so an ordered subscription re-sorts locally. A row that only
   moved is left out.
 
-After the app closes, each open subscription gets one last error, `Closed`
+Every way a subscription ends, other than being cancelled, ends with one
+last error, after which no callback comes: a rejection (`Refused`), or
+`Closed` when the app closes or the stream ends for any other reason (the
+client stopping, the server ending the query). A row that permissions stop
+granting arrives as `removed`; the subscription goes on. After the app
+closes, each open subscription gets one last error, `Closed`
 (kind `"closed"` on the C ABI). `jazz_unsubscribe` returns only once no
 callback is running, so the host may free `ctx` right after. Called from
 inside the callback, it doesn't wait. A subscription may be freed before or
@@ -119,7 +155,8 @@ call.
 These are refused with `Refused`, and the message starts with "not supported
 yet":
 
-- includes (nested related rows);
+- `offset` in an include, and `required` on reverse relations or on optional
+  references;
 - connecting to a sync server as an end user (with a JWT);
 - writing enums with payloads;
 - a session issuer other than `jazz:backend`;
