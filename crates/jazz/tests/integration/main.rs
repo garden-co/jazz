@@ -199,6 +199,8 @@ mod streaming_transaction;
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_backlog.rs"]
+mod subscription_backlog;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]

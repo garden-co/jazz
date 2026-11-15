@@ -376,6 +376,8 @@ export interface BrowserWorkerInitOptions {
   appId: string;
   /** Slow-query log threshold for the worker's store; 0 turns the log off. */
   slowQueryThresholdMs?: number;
+  /** Subscription backlog limit for the worker's store, in changed rows. */
+  subscriptionBacklogRows?: number;
   /** Non-secret logical owner pinned to an explicitly selected physical IDB root. */
   storageOwner: string;
   authSessionKey: string;

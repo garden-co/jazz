@@ -366,6 +366,11 @@ pub enum SubscriptionEvent {
         removed: Vec<RemovedRow>,
         settled: bool,
         tier: DurabilityTier,
+        /// A reset that stands for deltas the reader fell too far behind
+        /// to be told one by one (see
+        /// [`Db::set_subscription_backlog_limit`]): the current result,
+        /// which supersedes them. Always `false` on other deltas.
+        coalesced: bool,
     },
     /// The subscription ended with an error: `code` says what kind,
     /// `message` is the error's own message, `reason` the error as text
@@ -584,7 +589,17 @@ impl SubscriptionStream {
             }
             return Some(event);
         }
-        self.queue.borrow_mut().pop_front()
+        let group = self.group.upgrade();
+        let group = group.as_ref().and_then(|group| group.try_borrow().ok());
+        self.queue
+            .borrow_mut()
+            .pop_front(group.as_ref().map(|group| group.rows.as_slice()))
+    }
+
+    /// Changed rows its undelivered deltas hold: at most its backlog limit
+    /// ([`Db::set_subscription_backlog_limit`]), past which they coalesce.
+    pub fn backlog_rows(&self) -> usize {
+        self.queue.borrow().backlog_rows()
     }
 
     pub async fn close(self) -> Result<(), Error> {
@@ -3047,6 +3062,17 @@ impl Db {
             .set_threshold(threshold);
     }
 
+    /// How many changed rows a subscription's undelivered deltas may hold
+    /// before they are coalesced into one reset of its current result
+    /// (marked `coalesced`), for reads that set no
+    /// [`ReadOpts::backlog_rows`]. Defaults to
+    /// [`fanout::DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT`]. It cannot be turned
+    /// off: a reader that stops reading holds at most this many changed
+    /// rows plus its result, however fast others write.
+    pub fn set_subscription_backlog_limit(&self, limit: std::num::NonZeroUsize) {
+        self.inner.borrow_mut().fan.backlog_limit = Some(limit);
+    }
+
     /// Diagnostics: SQLite's query plan for the INSERT check a commit
     /// would run on `row` of `table` as `author`, with `grounded` rows of
     /// that table overlaid as a later grounding round sees them.
@@ -3252,22 +3278,24 @@ impl Db {
         };
         let include_deleted = read.include_deleted;
         let mut inner = self.inner();
-        let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
-            Ok(member) => member,
-            Err(error) => {
-                drop(inner);
-                if let (Some(_), Some(reach)) = (&remote, reach) {
-                    self.detach_remote(
-                        &prepared.query,
-                        &prepared.binding,
-                        include_deleted,
-                        &view,
-                        reach,
-                    );
+        let backlog = fanout::Backlog::Reader(opts.backlog_rows);
+        let (queue, group) =
+            match inner.subscribe_member(prepared, identity, read, settled, backlog) {
+                Ok(member) => member,
+                Err(error) => {
+                    drop(inner);
+                    if let (Some(_), Some(reach)) = (&remote, reach) {
+                        self.detach_remote(
+                            &prepared.query,
+                            &prepared.binding,
+                            include_deleted,
+                            &view,
+                            reach,
+                        );
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         Ok(SubscriptionStream {
             queue,
             dropped: inner.fan.dropped.clone(),
@@ -4489,6 +4517,7 @@ fn delta(
         removed,
         settled: true,
         tier: DurabilityTier::Local,
+        coalesced: false,
     }
 }
 

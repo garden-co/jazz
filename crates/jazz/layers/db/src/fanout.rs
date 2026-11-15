@@ -38,8 +38,161 @@ use super::*;
 use crate::schema::history::{history_source_table, is_history_table};
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 
-pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
+pub(super) type Queue = Rc<RefCell<EventQueue>>;
+
+/// The default for [`crate::db::Db::set_subscription_backlog_limit`]: how
+/// many changed rows a subscription's undelivered deltas may hold before
+/// they are coalesced into one reset of the current result.
+pub const DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT: NonZeroUsize = NonZeroUsize::new(10_000).unwrap();
+
+/// One member's undelivered events.
+///
+/// A local reader's queue is bounded: once its deltas hold more than
+/// `limit` changed rows, they are dropped and the reader is told the
+/// current result instead, as one reset marked `coalesced` (built when it
+/// next reads, from the group's rows then). A result is a set, so the
+/// current one supersedes every delta that led to it: what the reader
+/// holds is never more than its limit plus the result it asked for. A
+/// reset counts for nothing, as the result is that size anyway.
+///
+/// A replica's queue (a sync session's) is not bounded here: it is drained
+/// every tick, and must see every removal, which a reset would not list.
+pub(super) struct EventQueue {
+    events: VecDeque<SubscriptionEvent>,
+    /// Changed rows the queued deltas hold (a delta counts at least one).
+    rows: usize,
+    /// `None`: never coalesced (a replica's).
+    limit: Option<NonZeroUsize>,
+    /// Coalesced: the next read is a reset of the current result, stamped
+    /// with the last dropped delta's settlement.
+    stale: Option<(bool, DurabilityTier)>,
+    /// Counts coalescings, for [`FanoutStats::coalesced`].
+    coalesced: Rc<std::cell::Cell<u64>>,
+}
+
+impl EventQueue {
+    fn new(
+        limit: Option<NonZeroUsize>,
+        coalesced: Rc<std::cell::Cell<u64>>,
+        first: Option<SubscriptionEvent>,
+    ) -> Self {
+        let mut queue = Self {
+            events: VecDeque::new(),
+            rows: 0,
+            limit,
+            stale: None,
+            coalesced,
+        };
+        if let Some(first) = first {
+            queue.events.push_back(first);
+        }
+        queue
+    }
+
+    fn weight(event: &SubscriptionEvent) -> usize {
+        match event {
+            SubscriptionEvent::Delta { reset: true, .. } => 0,
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                ..
+            } => (added.len() + updated.len() + removed.len()).max(1),
+            _ => 0,
+        }
+    }
+
+    pub(super) fn push_back(&mut self, event: SubscriptionEvent, table: &str) {
+        if let SubscriptionEvent::Delta { settled, tier, .. } = &event
+            && let Some(stale) = &mut self.stale
+        {
+            // Superseded by the reset the reader is told next.
+            *stale = (*settled, *tier);
+            return;
+        }
+        self.rows += Self::weight(&event);
+        let stamp = match &event {
+            SubscriptionEvent::Delta { settled, tier, .. } => Some((*settled, *tier)),
+            _ => None,
+        };
+        self.events.push_back(event);
+        let (Some(limit), Some(stamp)) = (self.limit, stamp) else {
+            return;
+        };
+        if self.rows <= limit.get() {
+            return;
+        }
+        let dropped = self.rows;
+        // Deltas go; an error or close that ends the stream stays, after
+        // the reset.
+        self.events
+            .retain(|event| !matches!(event, SubscriptionEvent::Delta { .. }));
+        self.rows = 0;
+        self.stale = Some(stamp);
+        self.coalesced.set(self.coalesced.get() + 1);
+        tracing::warn!(
+            target: "jazz::subscription",
+            table,
+            rows = dropped,
+            limit = limit.get(),
+            "subscription reader fell behind: its undelivered changes are coalesced \
+             into one reset of the current result",
+        );
+    }
+
+    /// The next event; a coalesced backlog reads as a reset of `rows`.
+    ///
+    /// `rows` is `None` when the group cannot be read now: a coalesced
+    /// reset then waits for the next read instead of being lost.
+    pub(super) fn pop_front(&mut self, rows: Option<&[CurrentRow]>) -> Option<SubscriptionEvent> {
+        if let Some((settled, tier)) = self.stale {
+            let rows = rows?;
+            self.stale = None;
+            {
+                let mut event = opening(rows);
+                if let SubscriptionEvent::Delta {
+                    settled: s,
+                    tier: t,
+                    coalesced,
+                    ..
+                } = &mut event
+                {
+                    *s = settled;
+                    *t = tier;
+                    *coalesced = true;
+                }
+                return Some(event);
+            }
+        }
+        let event = self.events.pop_front()?;
+        self.rows = self.rows.saturating_sub(Self::weight(&event));
+        Some(event)
+    }
+
+    /// Every queued event, for a replica's tick (never coalesced).
+    pub(super) fn drain_all(&mut self) -> Vec<SubscriptionEvent> {
+        debug_assert!(self.stale.is_none(), "a replica's queue is not coalesced");
+        self.rows = 0;
+        self.events.drain(..).collect()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.events.clear();
+        self.rows = 0;
+        self.stale = None;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.stale.is_none()
+    }
+
+    /// Changed rows the queued deltas hold, for tests.
+    pub(super) fn backlog_rows(&self) -> usize {
+        self.rows
+    }
+}
 
 /// What a group reads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -168,8 +321,18 @@ struct GroupKey {
     position: String,
 }
 
+/// Whose queue a member's events go to.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Backlog {
+    /// A local reader's ([`crate::db::SubscriptionStream`]): bounded at its
+    /// read's limit, or the store's ([`Fanout::backlog_limit`]).
+    Reader(Option<NonZeroUsize>),
+    /// A sync session's: drained every tick, never coalesced.
+    Replica,
+}
+
 struct Member {
-    queue: Weak<RefCell<VecDeque<SubscriptionEvent>>>,
+    queue: Weak<RefCell<EventQueue>>,
     shape: Shape,
     bound: bool,
     /// Where this member's `settled` flag comes from, and the tier it was
@@ -302,6 +465,9 @@ pub struct FanoutStats {
     /// skipped: no occurrence of it in the group's policies could see the
     /// change.
     pub unevidenced: u64,
+    /// Times a local reader's undelivered deltas passed its backlog limit
+    /// and were coalesced into one reset.
+    pub coalesced: u64,
 }
 
 #[derive(Default)]
@@ -317,6 +483,10 @@ pub(super) struct Fanout {
     stats: FanoutStats,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
+    /// Bumped by every coalesced backlog ([`EventQueue`]).
+    coalesced: Rc<std::cell::Cell<u64>>,
+    /// A local reader's backlog limit when its read sets none.
+    pub(super) backlog_limit: Option<NonZeroUsize>,
 }
 
 /// The canonical form of a stored SQL value, for watch matching.
@@ -453,6 +623,7 @@ impl Fanout {
     pub(super) fn stats(&self) -> FanoutStats {
         FanoutStats {
             groups: self.groups.len(),
+            coalesced: self.coalesced.get(),
             ..self.stats.clone()
         }
     }
@@ -484,7 +655,7 @@ impl Fanout {
                         *settled = true;
                         *tier = now;
                     }
-                    queue.borrow_mut().push_back(event);
+                    queue.borrow_mut().push_back(event, &group.query().table);
                 }
             }
         }
@@ -499,7 +670,24 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: ReadSpec,
         settled: sync::SettledBy,
+        backlog: Backlog,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
+        let limit = match backlog {
+            Backlog::Replica => None,
+            Backlog::Reader(limit) => Some(
+                limit
+                    .or(self.fan.backlog_limit)
+                    .unwrap_or(DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT),
+            ),
+        };
+        let coalesced = self.fan.coalesced.clone();
+        let new_queue = |first: Option<SubscriptionEvent>| -> Queue {
+            Rc::new(RefCell::new(EventQueue::new(
+                limit,
+                coalesced.clone(),
+                first,
+            )))
+        };
         self.check_splices(&prepared.query, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
@@ -550,11 +738,7 @@ impl Inner {
             // While the group awaits chunks its rows may be stale: the
             // joiner opens with the group's next successful run instead.
             let opened = group.opened && !group.awaiting;
-            let queue: Queue = Rc::new(RefCell::new(if opened {
-                VecDeque::from([open(&group.rows)])
-            } else {
-                VecDeque::new()
-            }));
+            let queue = new_queue(opened.then(|| open(&group.rows)));
             group.members.push(member(&queue, opened));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
@@ -600,11 +784,7 @@ impl Inner {
         );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
-        let queue: Queue = Rc::new(RefCell::new(if awaiting {
-            VecDeque::new()
-        } else {
-            VecDeque::from([open(&rows)])
-        }));
+        let queue = new_queue((!awaiting).then(|| open(&rows)));
         let gid = self.fan.next;
         self.fan.next += 1;
         self.fan.index(gid, &watches);
@@ -2152,7 +2332,7 @@ impl Group {
                 }
                 member.told.set(told);
             }
-            queue.borrow_mut().push_back(event);
+            queue.borrow_mut().push_back(event, &query.table);
         }
     }
 }

@@ -67,6 +67,11 @@ export type SubscriptionDelta<T> =
       delta: RowDelta<T>[];
       /** True when this delta replaces all previously observed state. */
       reset: true;
+      /**
+       * `"backlog"`: the subscriber fell too far behind to be told every
+       * change, so this reset stands for the changes it missed.
+       */
+      reason?: "backlog";
     };
 
 const ABSENT: unique symbol = Symbol("jazz.subscriptionManager.absent");
@@ -587,6 +592,8 @@ export class SubscriptionManager<T extends { id: string }> {
         if (!this.currentResults.has(id)) this.terminalOccurrenceAddresses.delete(address);
       }
       this.commitTransaction();
+      if (result.reset && delta.reason === "backlog")
+        return { ...result, reason: "backlog" as const };
       return result;
     } catch (error) {
       this.rollBackTransaction();

@@ -207,6 +207,32 @@ async fn subscriptions_stream_typed_deltas() {
     drop(changes);
 }
 
+/// A subscriber that stops reading while the app writes holds a bounded
+/// stream: its forwarder stops taking events once the stream is full, and
+/// they wait in the core (which coalesces a backlog past its limit). When
+/// the subscriber reads again, the rest is forwarded as it makes room, and
+/// it converges on every row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscriber_that_falls_behind_catches_up() {
+    let jazz = Jazz::open(client_files(), Config::new(AppId::random()))
+        .await
+        .unwrap();
+    let mut changes = jazz.subscribe(todos::query()).await.unwrap();
+    let mut rows = Rows::default();
+    rows.apply(next(&mut changes).await);
+    for n in 0..200 {
+        jazz.insert(new_todo(&format!("todo {n}"))).await.unwrap();
+    }
+    while rows.as_slice().len() < 200 {
+        rows.apply(next(&mut changes).await);
+    }
+    let mut titles: Vec<String> = rows.into_vec().into_iter().map(|todo| todo.title).collect();
+    titles.sort();
+    let mut expected: Vec<String> = (0..200).map(|n| format!("todo {n}")).collect();
+    expected.sort();
+    assert_eq!(titles, expected);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
     let app_id = AppId::random();

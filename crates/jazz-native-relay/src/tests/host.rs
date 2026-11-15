@@ -1500,3 +1500,60 @@ fn a_store_is_rebuilt_once_per_schema_version() {
         "the refusal is reported for the app"
     );
 }
+
+/// A foreground that stops draining its subscription holds a bounded relay
+/// buffer: past it, events wait in the core (which coalesces a backlog
+/// past its limit) and each drain returns at most the buffer's worth,
+/// refilling from the core, until the foreground has every row.
+#[test]
+fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("buffer.sqlite"), "alice", 0x31);
+    let alice = fixture.open(&capability);
+    let ForegroundDbCommandResponse::Subscribed { subscription } = fixture.execute(
+        alice,
+        ForegroundDbCommandRequest::Subscribe {
+            query: todos_query(),
+            options_json: r#"{"backlog_rows":100000}"#.into(),
+        },
+    ) else {
+        panic!("subscription opens");
+    };
+    for n in 0..40u8 {
+        fixture.insert_todo(alice, [0x40 + n; 16], &format!("todo {n}"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..100 {
+        let ForegroundDbCommandResponse::SubscriptionEvents { events } = fixture.execute(
+            alice,
+            ForegroundDbCommandRequest::DrainSubscription { subscription },
+        ) else {
+            panic!("drain answers events");
+        };
+        assert!(
+            events.len() <= crate::relay::FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS,
+            "a drain returned {} events",
+            events.len()
+        );
+        for event in events {
+            let (ForegroundSubscriptionEvent::Delta { delta, .. }
+            | ForegroundSubscriptionEvent::StructuredDelta { delta, .. }) = event
+            else {
+                panic!("unexpected event: {event:?}");
+            };
+            let (added, _) = decode_subscription_delta_rows(&delta).unwrap();
+            seen.extend(
+                added
+                    .into_iter()
+                    .flat_map(|batch| batch.rows)
+                    .map(|row| row.row_id),
+            );
+        }
+        if seen.len() == 40 {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 40, "every row reaches the foreground");
+    fixture.close(alice);
+}

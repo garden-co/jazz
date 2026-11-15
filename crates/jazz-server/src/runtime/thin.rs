@@ -741,11 +741,14 @@ fn encode_response(
 /// A live query's event as a response body, and whether it ends the query.
 fn event_body(event: SubscriptionEvent) -> (ThinBody, bool) {
     match event_chunk(event) {
+        // A coalesced backlog reaches a thin client as a plain reset: the
+        // thin wire carries no such flag yet.
         Ok(EventChunk::Delta {
             delta,
             reset,
             settled,
             tier,
+            coalesced: _,
         }) => (
             ThinBody::Event {
                 delta,

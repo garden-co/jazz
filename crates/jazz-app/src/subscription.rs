@@ -23,6 +23,11 @@ pub struct Delta<T> {
     /// The server has not yet confirmed what the query matches: the rows
     /// so far are local.
     pub pending: bool,
+    /// The subscription fell too far behind to be told every change: this
+    /// delta removes every row held and adds the current ones, standing
+    /// for the changes it missed. [`Rows::apply`] handles it like any
+    /// other.
+    pub coalesced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,12 +100,12 @@ impl<T: Table> Rows<T> {
 /// A subscription's changes. It holds the app open while it lives, and
 /// ends its query on the server when dropped.
 pub struct Subscription<T> {
-    receiver: mpsc::UnboundedReceiver<Result<Delta<T>>>,
+    receiver: mpsc::Receiver<Result<Delta<T>>>,
     _jazz: Jazz,
 }
 
 impl<T> Subscription<T> {
-    pub(crate) fn new(receiver: mpsc::UnboundedReceiver<Result<Delta<T>>>, jazz: Jazz) -> Self {
+    pub(crate) fn new(receiver: mpsc::Receiver<Result<Delta<T>>>, jazz: Jazz) -> Self {
         Self {
             receiver,
             _jazz: jazz,
@@ -116,11 +121,15 @@ impl<T> Stream for Subscription<T> {
     }
 }
 
+/// Deltas a [`Subscription`] holds before its forwarder waits for the
+/// subscriber to read.
+pub(crate) const SUBSCRIPTION_ITEMS: usize = 16;
+
 /// Runs on the client's thread: forwards `stream`'s deltas, typed, until
 /// either side ends.
 pub(crate) async fn forward<T: Table>(
     mut stream: SubscriptionStream,
-    sender: mpsc::UnboundedSender<Result<Delta<T>>>,
+    sender: mpsc::Sender<Result<Delta<T>>>,
     implementations: Implementations,
 ) {
     loop {
@@ -136,7 +145,9 @@ pub(crate) async fn forward<T: Table>(
             }
         };
         let failed = delta.is_err();
-        if sender.send(delta).is_err() || failed {
+        // Waits while the subscriber's stream is full: deltas then wait
+        // in the core, which coalesces a backlog past its limit.
+        if sender.send(delta).await.is_err() || failed {
             return;
         }
     }
@@ -188,5 +199,6 @@ fn typed<T: Table>(delta: OrderedRowDelta, implementations: &Implementations) ->
             })
             .collect::<Result<_>>()?,
         pending: delta.pending,
+        coalesced: delta.coalesced,
     })
 }
