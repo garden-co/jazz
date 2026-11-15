@@ -216,8 +216,8 @@ pub async fn group_todo_writes(
     existing_todo_id: ObjectId,
 ) -> ::jazz_app::Result<ObjectId> {
     // Committed together if the closure returns `Ok`, rolled back if it
-    // returns `Err`.
-    jazz.transaction(move |tx| {
+    // returns `Err`. Reads inside it see the transaction's snapshot.
+    jazz.transaction(move |tx| async move {
         let created = tx.insert(NewTodo::new("Write transaction docs", false))?;
         tx.update(
             existing_todo_id,
