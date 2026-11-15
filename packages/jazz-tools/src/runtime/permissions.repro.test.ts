@@ -289,6 +289,9 @@ const joinSeed =
 const hopSeed =
   "from user_team_edges join teams as __hop_0 on user_team_edges.team = __hop_0.id " +
   "where user_team_edges.user_id = session.user select __hop_0.id as id";
+/** The engine's refusal of `joinSeed`, which the `it.fails` repro expects. */
+const JOIN_SEED_REFUSAL =
+  "Gather seeds other than a filtered table scan are not supported in policies yet";
 const reachableTeamsFrom = (seed: string) =>
   `from recursive(seed: ${seed}, ` +
   "step: from team_team_edges where team_team_edges.administrator = bool(false) " +
@@ -619,13 +622,21 @@ describe("runtime permission repros for recursive gather and qualified predicate
   // The target behaviour of the repro above, end to end: all five rules,
   // including "grant-target" (teams a reachable team holds a grant on), with
   // the gather seeded on the join. Known failing while the engine refuses
-  // join seeds in policies ("not supported in policies yet"); when it starts
-  // accepting them, this flips and should become a plain `it`.
+  // join seeds in policies. It fails only with that exact refusal: any other
+  // error (a typo, a wrong result once the limit is lifted) and a pass both
+  // turn it red. When the engine accepts the seed, make it a plain `it`.
   it.fails("supports the full alpha.33 grant-closure repro end to end", async () => {
-    const context = await createReproContext(grantClosurePermissions(joinSeed));
-    seedScenario(context);
+    try {
+      const context = await createReproContext(grantClosurePermissions(joinSeed));
+      seedScenario(context);
 
-    expect(await aliceTeamNames(context)).toEqual(ALL_ALICE_TEAMS);
+      expect(await aliceTeamNames(context)).toEqual(ALL_ALICE_TEAMS);
+    } catch (error) {
+      // The expected failure: rethrown, so `it.fails` passes.
+      if (error instanceof Error && error.message.includes(JOIN_SEED_REFUSAL)) throw error;
+      // Anything else returns normally, so `it.fails` fails.
+      console.error("grant-closure repro failed for another reason:", error);
+    }
   });
 
   // The same five rules with the seed written as the supported hop (from the
