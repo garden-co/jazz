@@ -606,6 +606,11 @@ func (tasksTable) Update(ctx context.Context, db jazz.Querier, id string, patch 
 	return jazz.Update(ctx, db, "tasks", id, patch, opts...)
 }
 
+// EditTitle edits `tasks.title`, a mergeable text: positions are UTF-8 byte offsets.
+func (tasksTable) EditTitle(ctx context.Context, db jazz.Querier, id string, edits ...jazz.TextEdit) error {
+	return jazz.EditText(ctx, db, "tasks", id, "title", edits...)
+}
+
 // History starts a query of `tasks`'s history: every accepted version of its rows.
 func (tasksTable) History() *jazz.Query[jazz.Version[Task]] {
 	return jazz.History(jazz.NewQuery[Task]("tasks"))

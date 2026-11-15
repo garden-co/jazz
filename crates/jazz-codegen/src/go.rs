@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use jazz::tools::public_schema::ColumnType;
+use jazz::tools::public_schema::{ColumnMergeStrategy, ColumnType};
 
 use crate::CodegenError;
 use crate::model::{App, Column, RelationKind, Table};
@@ -591,6 +591,32 @@ impl<'a> Writer<'a> {
             ));
             computed.push((ident, ty, method, args));
         }
+        // Mergeable text columns get an edit method.
+        let mut text_edits = Vec::new();
+        for column in &table.columns {
+            if !matches!(
+                column.merge,
+                Some(
+                    ColumnMergeStrategy::Text
+                        | ColumnMergeStrategy::Markdown
+                        | ColumnMergeStrategy::Html
+                )
+            ) {
+                continue;
+            }
+            let f = fields
+                .iter()
+                .find(|f| f.name == column.name)
+                .expect("a field per column");
+            let method = format!("Edit{}", f.ident);
+            if !idents.insert(method.clone()) {
+                return Err(CodegenError::unsupported(format!(
+                    "`{}.{}`'s edit method `{method}` is the Go name of a column, a relation or a method of `{value}`",
+                    table.name, column.name
+                )));
+            }
+            text_edits.push((method, column.name.clone()));
+        }
         let needs_computed = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
         let hooks = needs_computed || fields.iter().any(|f| f.union.is_some());
         if hooks {
@@ -946,6 +972,18 @@ impl<'a> Writer<'a> {
             out,
             "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}, opts ...jazz.WriteOption) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch, opts...)\n}}\n"
         );
+        for (method, column) in &text_edits {
+            let _ = writeln!(
+                out,
+                "// {method} edits `{}.{column}`, a mergeable text: positions are UTF-8 byte offsets.",
+                table.name
+            );
+            let _ = writeln!(
+                out,
+                "func ({ty}) {method}(ctx context.Context, db jazz.Querier, id string, edits ...jazz.TextEdit) error {{\n\treturn jazz.EditText(ctx, db, {table_name}, id, {}, edits...)\n}}\n",
+                go_string(column)
+            );
+        }
         let _ = writeln!(
             out,
             "// History starts a query of `{}`'s history: every accepted version of its rows.",
