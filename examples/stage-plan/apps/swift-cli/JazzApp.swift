@@ -170,6 +170,20 @@ public enum JazzApp {
             self.detail = detail
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.taskId == b.taskId && a.actorId == b.actorId && a.kind == b.kind && a.detail == b.detail
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(taskId)
+            hasher.combine(actorId)
+            hasher.combine(kind)
+            hasher.combine(detail)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case showId = "showId"
@@ -381,6 +395,18 @@ public enum JazzApp {
             self.body = body
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.taskId == b.taskId && a.authorId == b.authorId && a.body == b.body
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(taskId)
+            hasher.combine(authorId)
+            hasher.combine(body)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case taskId = "taskId"
@@ -472,6 +498,17 @@ public enum JazzApp {
             self.id = id
             self.account = account
             self.name = name
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.account == b.account && a.name == b.name
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(account)
+            hasher.combine(name)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
@@ -569,6 +606,20 @@ public enum JazzApp {
             self.account = account
             self.role = role
             self.inviteCode = inviteCode
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.crewId == b.crewId && a.account == b.account && a.role == b.role && a.inviteCode == b.inviteCode
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(crewId)
+            hasher.combine(account)
+            hasher.combine(role)
+            hasher.combine(inviteCode)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
@@ -686,6 +737,17 @@ public enum JazzApp {
             self.code = code
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.code == b.code
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(code)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case showId = "showId"
@@ -774,6 +836,20 @@ public enum JazzApp {
             self.date = date
             self.doors = doors
             self.chiefAccount = chiefAccount
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.name == b.name && a.venue == b.venue && a.date == b.date && a.doors == b.doors && a.chiefAccount == b.chiefAccount
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(name)
+            hasher.combine(venue)
+            hasher.combine(date)
+            hasher.combine(doors)
+            hasher.combine(chiefAccount)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
@@ -913,6 +989,21 @@ public enum JazzApp {
             self.assigneeId = assigneeId
             self.notes = notes
             self.rank = rank
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.title == b.title && a.status == b.status && a.assigneeId == b.assigneeId && a.notes == b.notes && a.rank == b.rank
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(title)
+            hasher.combine(status)
+            hasher.combine(assigneeId)
+            hasher.combine(notes)
+            hasher.combine(rank)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
