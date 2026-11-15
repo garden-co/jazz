@@ -22,7 +22,7 @@ export function normalizeRuntimeSchema(schema: unknown): WasmSchema {
   if (!isRecord(schema)) {
     throw new Error("Invalid runtime schema value.");
   }
-  return schema;
+  return schema as WasmSchema;
 }
 
 /**
