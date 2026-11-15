@@ -544,8 +544,8 @@ You can use these edit metadata magic columns directly in `jazz.permissions.json
 
 Compare `$createdBy.account` with `session.user` to scope a rule to the row's creator. `session.user` is
 the account, so the rule matches rows written through any identity linked to it, including
-alpha.59 rows whose author was imported with an account.
-{/* FILES-GAP: alpha.64 could match only the exact login that wrote the row ($createdBy.identity against session.identity); jazz.permissions.json has no expression for it yet. */} `session.claims`
+alpha.59 rows whose author was imported with an account. To match only the exact login that wrote
+the row, compare `$createdBy.identity = session.identity` (its issuer and subject). `session.claims`
 holds the claims your `authenticate` returned, not a raw JWT payload; with
 [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider), `session.identity` is
 `{ issuer: "jazz:backend", subject }`, not your provider's `iss`. Claims never replace the

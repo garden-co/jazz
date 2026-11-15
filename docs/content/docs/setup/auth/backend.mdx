@@ -293,8 +293,8 @@ user your backend signed in; `identity.subject` is your own user ID.
 - **Ownership** compares `session.user`. Linked identities share one account, so this is
   what "rows this user owns" should use: `$createdBy.account = session.user` or
   `owner_id = session.user`, also inside `exists` rules.
-- **Exact authorship** compares `session.identity`, issuer and subject included.
-  {/* FILES-GAP: the policy expression grammar has `session.identity.subject` and `session.identity.issuer` but no way to compare `$createdBy.identity` with the whole `session.identity` (was `{ "$createdBy.identity": session.identity }`). */}
+- **Exact authorship** compares `session.identity`, issuer and subject included:
+  `$createdBy.identity = session.identity`.
   Jazz stamps `$createdBy` and `$updatedBy` with the
   full author record, `{ account, identity }`, along with edit timestamps. This tells apart writes
   by the same account made through your auth (`jazz:backend`), through a device account's key

@@ -97,9 +97,16 @@ Commit `jazz.app.json` and `jazz.generated.ts` together. Two branches that each 
 from the same version both change `history` and `migrations`: keep both versions' entries when you
 merge, then see [Handling concurrent migrations](#handling-concurrent-migrations).
 
-Index changes don't need a migration: they change how rows are found, not the rows, so the backend
-deploys them as they are. Neither do [computed fields](/docs/schemas/column-types#computed-columns),
-which aren't stored.
+Index changes, `"history": "latest"`, a column's `merge` and the column order are part of the
+schema version too, so `generate` asks for a migration. Run `migrations create` as usual: for an
+index change it writes an empty step, with nothing to decide:
+
+```json
+"tasks": { "$comment": "Rows pass unchanged: only indexes changed." }
+```
+
+[Computed fields](/docs/schemas/column-types#computed-columns) aren't stored, so adding or
+changing one needs no migration.
 
 Permission-only changes in `jazz.permissions.json` don't need a migration; they go live when your
 main backend restarts with them. See [Declarative Permissions](/docs/schemas/policies) for details.

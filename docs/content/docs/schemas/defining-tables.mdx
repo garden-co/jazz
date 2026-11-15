@@ -150,7 +150,8 @@ single-column index, an array of names a composite index, which may end in `$cre
 }
 ```
 
-Index changes don't need a migration.
+Indexes are part of the schema version, so changing them is a schema change: `generate` asks for
+a migration, and `migrations create` writes an empty step for the table (rows pass unchanged).
 
 ## Latest-only tables
 
