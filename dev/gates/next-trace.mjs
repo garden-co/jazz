@@ -41,9 +41,19 @@ export function shouldRun({ env = process.env, git = runGit } = {}) {
     : { run: false, why: "the PR touches nothing the trace test guards" };
 }
 
+const root = fileURLToPath(new URL("../..", import.meta.url));
+
+// In CI the decide step runs before setup marks the container's checkout a
+// safe directory (actions/checkout only does so while it runs), so git would
+// refuse the repository as owned by someone else: name it safe here.
 function runGit(args) {
-  const result = spawnSync("git", args, { encoding: "utf8" });
-  return result.status === 0 ? result.stdout : null;
+  const result = spawnSync("git", ["-c", `safe.directory=${root}`, ...args], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status === 0) return result.stdout;
+  console.error(`next-trace: git ${args.join(" ")} failed: ${result.stderr || result.error}`);
+  return null;
 }
 
 const STEPS = [
@@ -76,7 +86,6 @@ const STEPS = [
 ];
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const root = fileURLToPath(new URL("../..", import.meta.url));
   process.chdir(root);
   if (process.argv[2] === "--decide") {
     const decision = shouldRun();
