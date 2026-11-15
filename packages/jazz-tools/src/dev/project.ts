@@ -5,8 +5,9 @@
  * `jazz.app.json`. Both go through Jazz's Rust loader and generator
  * (jazz-napi), the same code the `jazz` binary runs. Node only.
  */
-import { writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import {
   APP_FILE,
   GENERATED_FILE,
@@ -17,6 +18,7 @@ import {
 import {
   BINDINGS_STALE,
   compileApp,
+  generateRust,
   generateTs,
   loadAppFiles,
   migrationsCreate,
@@ -33,10 +35,15 @@ export interface ValidateOptions {
 
 export interface ValidateResult {
   dir: string;
-  /** Whether `jazz.generated.ts` was (re)written. */
+  /** Whether `jazz.generated.ts` (or a Rust crate's `src/jazz_app.rs`) was (re)written. */
   wrote: boolean;
+  /** The bindings files, relative to `dir`: jazz.generated.ts, and src/jazz_app.rs for a Rust crate. */
+  bindings: string[];
   warnings: string[];
 }
+
+/** Where a Rust crate beside jazz.app.json keeps its generated bindings. */
+export const RUST_BINDINGS_FILE = join("src", "jazz_app.rs");
 
 function codeOf(error: unknown): unknown {
   return (error as { code?: unknown } | null)?.code;
@@ -74,15 +81,28 @@ function shown(project: { dir: string }, file: string): string {
 export async function validateApp(options: ValidateOptions): Promise<ValidateResult> {
   const project = await readAppProject(options.cwd);
   const warnings = await checkFiles(project, options.check ?? false);
-  const generated = await generateTs(project.app);
-  if (project.bindings === generated) return { dir: project.dir, wrote: false, warnings };
-  if (options.check) {
-    throw new Error(
-      `bindings out of date: ${shown(project, GENERATED_FILE)} is not what ${APP_FILE} generates. Run \`npx jazz-tools validate\` and commit it.`,
-    );
+  const outputs: Array<{ file: string; text: string }> = [
+    { file: GENERATED_FILE, text: await generateTs(project.app) },
+  ];
+  // A Rust crate beside the files (a `jazz-app` backend) gets its bindings too.
+  if (existsSync(join(project.dir, "Cargo.toml"))) {
+    outputs.push({ file: RUST_BINDINGS_FILE, text: await generateRust(project.app) });
   }
-  await writeFile(join(project.dir, GENERATED_FILE), generated);
-  return { dir: project.dir, wrote: true, warnings };
+  let wrote = false;
+  for (const { file, text } of outputs) {
+    const path = join(project.dir, file);
+    const committed = await readFile(path, "utf8").catch(() => null);
+    if (committed === text) continue;
+    if (options.check) {
+      throw new Error(
+        `bindings out of date: ${shown(project, file)} is not what ${APP_FILE} generates. Run \`npx jazz-tools validate\` and commit it.`,
+      );
+    }
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text);
+    wrote = true;
+  }
+  return { dir: project.dir, wrote, bindings: outputs.map(({ file }) => file), warnings };
 }
 
 export interface CreateMigrationOptions {
@@ -119,6 +139,9 @@ export async function createAppMigration(
   await writeFile(join(project.dir, APP_FILE), created.app);
   if (created.todos.length === 0) {
     await writeFile(join(project.dir, GENERATED_FILE), await generateTs(created.app));
+    if (existsSync(join(project.dir, "Cargo.toml"))) {
+      await writeFile(join(project.dir, RUST_BINDINGS_FILE), await generateRust(created.app));
+    }
   }
   return { dir: project.dir, changed: true, todos: created.todos };
 }

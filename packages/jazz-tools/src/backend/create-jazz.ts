@@ -41,12 +41,7 @@ import { resolveSchemaSource } from "../schema-source.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp } from "../dev/codegen-napi.js";
 import { boundApp } from "../typed-app.js";
-import { computeSchemaHash } from "../schema-hash.js";
-import {
-  mergePermissionsIntoWasmSchema,
-  type CompiledPermissionsMap,
-} from "../schema-permissions.js";
-import type { WasmSchema } from "../drivers/types.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { deployApp } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
