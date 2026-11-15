@@ -272,6 +272,25 @@ jsdom can't run a syncing client: it has no Web Locks, and its WebSocket sends a
 backend refuses. Run component tests that need sync in a real browser (Vitest browser mode or
 Playwright), and keep jsdom for components you render with test data.
 
+### Closing sessions between tests
+
+A session a test leaves open keeps its worker, sockets and timers running into the next test.
+`closeJazzSessions()` closes every session still open: each one from `createJazzClient`, and each
+one a `<JazzProvider config>` opened. Register it once in a setup file (Vitest `setupFiles`, Jest
+`setupFilesAfterEnv`):
+
+```ts title="vitest.setup.ts"
+import { afterEach } from "vitest";
+import { closeJazzSessions } from "jazz-tools/testing/sessions";
+
+afterEach(closeJazzSessions);
+```
+
+Only sessions opened after `jazz-tools/testing/sessions` is imported are tracked, so import it
+before your tests open any. It waits for every session to close and then, if any failed to, throws
+an `AggregateError` with their errors. It runs in the browser too. `createJazz()` backends and
+`startTestJazz()` keep their own `close()` and `stop()`.
+
 ### Testing sync
 
 Several clients on the same `startTestJazz` let you test anything that crosses clients, such as

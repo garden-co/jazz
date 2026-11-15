@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { createJazzClient, type Db } from "jazz-tools";
 import { definePermissions } from "jazz-tools/permissions";
 import { startTestJazz, type TestJazz } from "jazz-tools/testing";
+import { closeJazzSessions } from "jazz-tools/testing/sessions";
 import { app } from "../schema.js";
 import { memoryAccountStore } from "../../../../testing/accounts.js";
 import {
@@ -11,8 +12,6 @@ import {
   type MusicStore,
 } from "../src/music-agent.js";
 
-const sessions: Awaited<ReturnType<typeof createJazzClient>>[] = [];
-
 /** Bytes columns stream Uint8Array chunks (text columns take strings). */
 async function* byteChunks(parts: readonly string[]): AsyncIterable<Uint8Array> {
   for (const part of parts) yield new TextEncoder().encode(part);
@@ -20,7 +19,7 @@ async function* byteChunks(parts: readonly string[]): AsyncIterable<Uint8Array> 
 let server: TestJazz | undefined;
 
 afterEach(async () => {
-  await Promise.all(sessions.splice(0).map((session) => session.close()));
+  await closeJazzSessions();
   await server?.stop();
   server = undefined;
 });
@@ -40,7 +39,6 @@ async function openDb(serverUrl: string | null = null): Promise<Db> {
     client: loadLocalFirst,
     localFirst: "now",
   });
-  sessions.push(session);
   return session.db;
 }
 

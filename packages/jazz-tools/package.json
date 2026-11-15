@@ -126,6 +126,10 @@
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
     },
+    "./testing/sessions": {
+      "types": "./dist/testing/sessions.d.ts",
+      "default": "./dist/testing/sessions.js"
+    },
     "./dev": {
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
