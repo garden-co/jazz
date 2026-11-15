@@ -51,7 +51,7 @@ public let implementationsKey = CodingUserInfoKey(rawValue: "jazz.implementation
 /// them while coding rows: what `JazzApp.open(_:computed:)` was given.
 public func implementations<T>(of type: T.Type, in userInfo: [CodingUserInfoKey: Any]) throws -> T {
     guard let implementations = userInfo[implementationsKey] as? T else {
-        throw JazzError.decoding(
+        throw JazzError.refused(
             "no \(T.self) to compute fields and transforms with: open the app with JazzApp.open(_:computed:)")
     }
     return implementations
@@ -110,9 +110,9 @@ enum Coding {
         String(decoding: try encoder(userInfo).encode(value), as: UTF8.self)
     }
 
-    static func value<T: Encodable>(_ value: T) throws -> JSONValue {
+    static func value<T: Encodable>(_ value: T, _ userInfo: [CodingUserInfoKey: any Sendable] = [:]) throws -> JSONValue {
         // Through an array, so a top-level `nil` or scalar encodes everywhere.
-        let data = try encoder().encode([value])
+        let data = try encoder(userInfo).encode([value])
         let array = try decoder().decode([JSONValue].self, from: data)
         return array[0]
     }
