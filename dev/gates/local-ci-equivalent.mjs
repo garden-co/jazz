@@ -45,6 +45,7 @@ export const ciPartitionJobs = Object.freeze({
   "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
   "react-native": "test-react-native",
+  kotlin: "test-kotlin",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -296,6 +297,11 @@ export const ciPartitions = Object.freeze({
       "--features",
       "jazz/durable-object-limits",
     ]),
+  ]),
+  // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI end to end
+  // against `jazz-tools server`, on the JVM.
+  kotlin: Object.freeze([
+    command("Kotlin runtime and example", "bash", ["dev/scripts/test-kotlin.sh"]),
   ]),
 });
 
