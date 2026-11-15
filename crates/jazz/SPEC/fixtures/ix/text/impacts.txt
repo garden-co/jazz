@@ -1,0 +1,282 @@
+# jazz-ix-text/1 postings (SPEC 20.10.1). Per case: `analyzer`, one
+# `field <weight> <utf8 hex>` per field, then `posting <term utf8 hex> <impact>`
+# in term byte order.
+
+analyzer jazz-text/1:en
+field 1 6a617a7a  # "jazz"
+posting 6a617a7a 26  # "jazz"
+
+analyzer jazz-text/1:en
+field 4 4a617a7a  # "Jazz"
+field 1 6a617a7a20616e6420626c756573  # "jazz and blues"
+posting 616e64 25  # "and"
+posting 626c7565 25  # "blue"
+posting 6a617a7a 131  # "jazz"
+
+analyzer jazz-text/1:en
+field 15 6a617a7a206a617a7a206a617a7a  # "jazz jazz jazz"
+field 15 6a617a7a  # "jazz"
+posting 6a617a7a 255  # "jazz"
+
+analyzer jazz-text/1:en
+field 2 74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672074686520656e64  # "the quick brown fox jumps over the lazy dog the end"
+posting 62726f776e 43  # "brown"
+posting 646f67 43  # "dog"
+posting 656e64 43  # "end"
+posting 666f78 43  # "fox"
+posting 6a756d70 43  # "jump"
+posting 6c617a69 43  # "lazi"
+posting 6f766572 43  # "over"
+posting 717569636b 43  # "quick"
+posting 746865 58  # "the"
+
+analyzer jazz-text/1:en
+field 1   # ""
+field 3 f09f8eb7  # "🎷"
+
+analyzer jazz-text/1:en
+field 1 52756e6e696e672072756e6e65722072756e732072616e  # "Running runner runs ran"
+posting 72616e 24  # "ran"
+posting 72756e 29  # "run"
+posting 72756e6e6572 24  # "runner"
+
+analyzer jazz-text/1:simple
+field 1 6a617a7a  # "jazz"
+posting 6a617a7a 26  # "jazz"
+
+analyzer jazz-text/1:simple
+field 4 4a617a7a  # "Jazz"
+field 1 6a617a7a20616e6420626c756573  # "jazz and blues"
+posting 616e64 25  # "and"
+posting 626c756573 25  # "blues"
+posting 6a617a7a 131  # "jazz"
+
+analyzer jazz-text/1:simple
+field 15 6a617a7a206a617a7a206a617a7a  # "jazz jazz jazz"
+field 15 6a617a7a  # "jazz"
+posting 6a617a7a 255  # "jazz"
+
+analyzer jazz-text/1:simple
+field 2 74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672074686520656e64  # "the quick brown fox jumps over the lazy dog the end"
+posting 62726f776e 43  # "brown"
+posting 646f67 43  # "dog"
+posting 656e64 43  # "end"
+posting 666f78 43  # "fox"
+posting 6a756d7073 43  # "jumps"
+posting 6c617a79 43  # "lazy"
+posting 6f766572 43  # "over"
+posting 717569636b 43  # "quick"
+posting 746865 58  # "the"
+
+analyzer jazz-text/1:simple
+field 1   # ""
+field 3 f09f8eb7  # "🎷"
+
+analyzer jazz-text/1:simple
+field 1 52756e6e696e672072756e6e65722072756e732072616e  # "Running runner runs ran"
+posting 72616e 24  # "ran"
+posting 72756e6e6572 24  # "runner"
+posting 72756e6e696e67 24  # "running"
+posting 72756e73 24  # "runs"
+
+# impact(w, f, L) over a grid: `impact <w> <f> <L> <impact>`.
+impact 1 1 1 26
+impact 1 1 2 25
+impact 1 1 8 23
+impact 1 1 31 16
+impact 1 1 32 16
+impact 1 1 33 15
+impact 1 1 100 8
+impact 1 1 1000 1
+impact 1 1 10000 0
+impact 1 2 2 29
+impact 1 2 8 27
+impact 1 2 31 22
+impact 1 2 32 22
+impact 1 2 33 21
+impact 1 2 100 13
+impact 1 2 1000 2
+impact 1 2 10000 0
+impact 1 3 8 29
+impact 1 3 31 25
+impact 1 3 32 25
+impact 1 3 33 24
+impact 1 3 100 17
+impact 1 3 1000 3
+impact 1 3 10000 0
+impact 1 5 8 31
+impact 1 5 31 28
+impact 1 5 32 28
+impact 1 5 33 28
+impact 1 5 100 21
+impact 1 5 1000 5
+impact 1 5 10000 0
+impact 1 10 31 31
+impact 1 10 32 31
+impact 1 10 33 31
+impact 1 10 100 26
+impact 1 10 1000 9
+impact 1 10 10000 1
+impact 1 100 100 34
+impact 1 100 1000 27
+impact 1 100 10000 9
+impact 2 1 1 53
+impact 2 1 2 51
+impact 2 1 8 46
+impact 2 1 31 32
+impact 2 1 32 32
+impact 2 1 33 31
+impact 2 1 100 17
+impact 2 1 1000 2
+impact 2 1 10000 0
+impact 2 2 2 59
+impact 2 2 8 55
+impact 2 2 31 44
+impact 2 2 32 44
+impact 2 2 33 43
+impact 2 2 100 27
+impact 2 2 1000 4
+impact 2 2 10000 0
+impact 2 3 8 59
+impact 2 3 31 50
+impact 2 3 32 50
+impact 2 3 33 49
+impact 2 3 100 34
+impact 2 3 1000 6
+impact 2 3 10000 0
+impact 2 5 8 63
+impact 2 5 31 57
+impact 2 5 32 56
+impact 2 5 33 56
+impact 2 5 100 43
+impact 2 5 1000 10
+impact 2 5 10000 1
+impact 2 10 31 63
+impact 2 10 32 62
+impact 2 10 33 62
+impact 2 10 100 53
+impact 2 10 1000 18
+impact 2 10 10000 2
+impact 2 100 100 68
+impact 2 100 1000 54
+impact 2 100 10000 18
+impact 4 1 1 106
+impact 4 1 2 103
+impact 4 1 8 92
+impact 4 1 31 64
+impact 4 1 32 64
+impact 4 1 33 63
+impact 4 1 100 34
+impact 4 1 1000 4
+impact 4 1 10000 0
+impact 4 2 2 119
+impact 4 2 8 111
+impact 4 2 31 88
+impact 4 2 32 88
+impact 4 2 33 87
+impact 4 2 100 55
+impact 4 2 1000 9
+impact 4 2 10000 0
+impact 4 3 8 119
+impact 4 3 31 101
+impact 4 3 32 100
+impact 4 3 33 99
+impact 4 3 100 69
+impact 4 3 1000 13
+impact 4 3 10000 1
+impact 4 5 8 127
+impact 4 5 31 114
+impact 4 5 32 113
+impact 4 5 33 113
+impact 4 5 100 86
+impact 4 5 1000 21
+impact 4 5 10000 2
+impact 4 10 31 126
+impact 4 10 32 125
+impact 4 10 33 125
+impact 4 10 100 107
+impact 4 10 1000 36
+impact 4 10 10000 4
+impact 4 100 100 136
+impact 4 100 1000 109
+impact 4 100 10000 36
+impact 8 1 1 212
+impact 8 1 2 207
+impact 8 1 8 184
+impact 8 1 31 129
+impact 8 1 32 128
+impact 8 1 33 126
+impact 8 1 100 68
+impact 8 1 1000 9
+impact 8 1 10000 0
+impact 8 2 2 239
+impact 8 2 8 223
+impact 8 2 31 177
+impact 8 2 32 176
+impact 8 2 33 174
+impact 8 2 100 110
+impact 8 2 1000 18
+impact 8 2 10000 1
+impact 8 3 8 239
+impact 8 3 31 202
+impact 8 3 32 201
+impact 8 3 33 199
+impact 8 3 100 138
+impact 8 3 1000 26
+impact 8 3 10000 2
+impact 8 5 8 254
+impact 8 5 31 228
+impact 8 5 32 227
+impact 8 5 33 226
+impact 8 5 100 173
+impact 8 5 1000 42
+impact 8 5 10000 4
+impact 8 10 31 252
+impact 8 10 32 251
+impact 8 10 33 250
+impact 8 10 100 214
+impact 8 10 1000 73
+impact 8 10 10000 9
+impact 8 100 100 255
+impact 8 100 1000 219
+impact 8 100 10000 73
+impact 15 1 1 255
+impact 15 1 2 255
+impact 15 1 8 255
+impact 15 1 31 243
+impact 15 1 32 239
+impact 15 1 33 236
+impact 15 1 100 128
+impact 15 1 1000 17
+impact 15 1 10000 1
+impact 15 2 2 255
+impact 15 2 8 255
+impact 15 2 31 255
+impact 15 2 32 255
+impact 15 2 33 255
+impact 15 2 100 206
+impact 15 2 1000 34
+impact 15 2 10000 3
+impact 15 3 8 255
+impact 15 3 31 255
+impact 15 3 32 255
+impact 15 3 33 255
+impact 15 3 100 255
+impact 15 3 1000 50
+impact 15 3 10000 5
+impact 15 5 8 255
+impact 15 5 31 255
+impact 15 5 32 255
+impact 15 5 33 255
+impact 15 5 100 255
+impact 15 5 1000 78
+impact 15 5 10000 9
+impact 15 10 31 255
+impact 15 10 32 255
+impact 15 10 33 255
+impact 15 10 100 255
+impact 15 10 1000 137
+impact 15 10 10000 18
+impact 15 100 100 255
+impact 15 100 1000 255
+impact 15 100 10000 138

@@ -1,0 +1,65 @@
+# jazz-ix-text/1 query terms (SPEC 20.5, 20.10.1). Per case: `analyzer`,
+# `query <prefix 0|1> <utf8 hex>`, then `term <utf8 hex>` per exact slot and
+# `prefix <exact hex> <lo hex> <hi hex or ->`, or `error empty`.
+
+analyzer jazz-text/1:en
+query 0 4a617a7a206a617a7a2072756e6e696e67  # "Jazz jazz running"
+term 6a617a7a  # "jazz"
+term 72756e  # "run"
+
+analyzer jazz-text/1:en
+query 1 6a617a7a2052756e6e69  # "jazz Runni"
+term 6a617a7a  # "jazz"
+prefix 72756e6e69 72756e6e69 72756e6e6a  # "runni" "runni"
+
+analyzer jazz-text/1:en
+query 1 52756e6e696e67  # "Running"
+prefix 72756e 72756e6e696e67 72756e6e696e68  # "run" "running"
+
+analyzer jazz-text/1:en
+query 1 436166c3a9cc81  # "Café\u{301}"
+prefix 63616665 63616665 63616666  # "cafe" "cafe"
+
+analyzer jazz-text/1:en
+query 1 e69db1e4baac  # "東京"
+term e69db1  # "東"
+prefix e4baac e4baac e4baad  # "京" "京"
+
+analyzer jazz-text/1:en
+query 0 f09f8eb720e28094202121  # "🎷 — !!"
+error empty
+
+analyzer jazz-text/1:en
+query 1 202020  # "   "
+error empty
+
+analyzer jazz-text/1:simple
+query 0 4a617a7a206a617a7a2072756e6e696e67  # "Jazz jazz running"
+term 6a617a7a  # "jazz"
+term 72756e6e696e67  # "running"
+
+analyzer jazz-text/1:simple
+query 1 6a617a7a2052756e6e69  # "jazz Runni"
+term 6a617a7a  # "jazz"
+prefix 72756e6e69 72756e6e69 72756e6e6a  # "runni" "runni"
+
+analyzer jazz-text/1:simple
+query 1 52756e6e696e67  # "Running"
+prefix 72756e6e696e67 72756e6e696e67 72756e6e696e68  # "running" "running"
+
+analyzer jazz-text/1:simple
+query 1 436166c3a9cc81  # "Café\u{301}"
+prefix 63616665 63616665 63616666  # "cafe" "cafe"
+
+analyzer jazz-text/1:simple
+query 1 e69db1e4baac  # "東京"
+term e69db1  # "東"
+prefix e4baac e4baac e4baad  # "京" "京"
+
+analyzer jazz-text/1:simple
+query 0 f09f8eb720e28094202121  # "🎷 — !!"
+error empty
+
+analyzer jazz-text/1:simple
+query 1 202020  # "   "
+error empty
