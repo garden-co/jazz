@@ -841,9 +841,6 @@ fn type_label(ty: &ColumnType) -> &'static str {
     match ty {
         ColumnType::TransactionId => "transaction id",
         ColumnType::Row { .. } => "nested row",
-        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
-            "enum-with-payload"
-        }
         ColumnType::ScalarEnum { .. } => "catalogue enum",
         _ => "these",
     }
