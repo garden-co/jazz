@@ -13,6 +13,8 @@ use axum::{
     },
     routing::get,
 };
+use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared};
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -54,8 +56,29 @@ pub struct UpdateTodoRequest {
     pub description: Option<String>,
 }
 
-/// The API over the open app.
+/// Resolves when the service is stopping: the live streams end then, so a
+/// graceful shutdown isn't held open by them.
+pub type Stopping = Shared<BoxFuture<'static, ()>>;
+
+#[derive(Clone)]
+struct AppState {
+    jazz: Jazz,
+    stopping: Stopping,
+}
+
+impl axum::extract::FromRef<AppState> for Jazz {
+    fn from_ref(state: &AppState) -> Jazz {
+        state.jazz.clone()
+    }
+}
+
+/// The API over the open app, serving until the process ends.
 pub fn router(jazz: Jazz) -> Router {
+    router_until(jazz, std::future::pending().boxed().shared())
+}
+
+/// The API over the open app; its live streams end once `stopping` resolves.
+pub fn router_until(jazz: Jazz, stopping: Stopping) -> Router {
     Router::new()
         .route("/todos", get(list_todos).post(create_todo))
         .route("/todos/live", get(todos_live))
@@ -64,7 +87,7 @@ pub fn router(jazz: Jazz) -> Router {
             get(get_todo).put(update_todo).delete(delete_todo),
         )
         .route("/health", get(health))
-        .with_state(jazz)
+        .with_state(AppState { jazz, stopping })
 }
 
 fn failed(error: ::jazz_app::Error) -> Response {
@@ -155,9 +178,9 @@ async fn health() -> impl IntoResponse {
 /// Every todo, sent again whenever one changes: the subscription's deltas
 /// applied to the list it holds.
 async fn todos_live(
-    State(jazz): State<Jazz>,
+    State(state): State<AppState>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
-    let changes = jazz.subscribe(todos::query()).await.map_err(failed)?;
+    let changes = state.jazz.subscribe(todos::query()).await.map_err(failed)?;
     let lists = changes
         .scan(Rows::default(), |rows, delta| {
             let list = delta.map(|delta| {
@@ -171,6 +194,7 @@ async fn todos_live(
             // A failed subscription ends the stream.
             std::future::ready(list.ok())
         })
-        .map(|list| Ok(Event::default().data(serde_json::to_string(&list).unwrap_or_default())));
+        .map(|list| Ok(Event::default().data(serde_json::to_string(&list).unwrap_or_default())))
+        .take_until(state.stopping);
     Ok(Sse::new(lists))
 }

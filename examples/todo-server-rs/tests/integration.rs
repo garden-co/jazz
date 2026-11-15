@@ -10,7 +10,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use jazz_server::JazzServer;
 use tempfile::TempDir;
-use todo_server::{CreateTodoRequest, Todo, UpdateTodoRequest, jazz_app, router};
+use todo_server::{CreateTodoRequest, Todo, UpdateTodoRequest, jazz_app, router, router_until};
 use tower::ServiceExt;
 
 async fn local(data: &TempDir) -> Jazz {
@@ -297,4 +297,44 @@ fn bindings_are_current() {
 
 fn jazz_app_source(file: &[u8]) -> String {
     ::jazz_app::jazz::tools::deployment::artifact::source_hash(file)
+}
+
+/// Stopping ends the live streams, so a graceful shutdown isn't held open
+/// by a client still listening.
+#[tokio::test]
+async fn stopping_ends_live_streams() {
+    use futures_util::{FutureExt, StreamExt};
+    use reqwest_eventsource::{Event, EventSource};
+
+    let data = TempDir::new().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let stopping = async move {
+        let _ = stopped.await;
+    }
+    .boxed()
+    .shared();
+    let app = router_until(local(&data).await, stopping.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopping)
+            .await
+            .unwrap()
+    });
+
+    let mut events = EventSource::get(format!("{base}/todos/live"));
+    loop {
+        match events.next().await {
+            Some(Ok(Event::Open)) => continue,
+            Some(Ok(Event::Message(_))) => break,
+            other => panic!("no first list: {other:?}"),
+        }
+    }
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("the server stops with a live stream open")
+        .unwrap();
+    events.close();
 }
