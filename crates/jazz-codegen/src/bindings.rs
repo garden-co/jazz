@@ -281,15 +281,7 @@ pub fn staleness(
     {
         // An index changes the schema's hash, not its version or its rows
         // (#5494): regenerating is enough, no migration.
-        let current = app
-            .compiled
-            .schemas
-            .iter()
-            .find(|(h, _)| *h == app.compiled.current)
-            .map(|(_, schema)| schema);
-        if current.is_some_and(|current| {
-            without_indexes(current) == without_indexes(&recorded.current_schema)
-        }) {
+        if differs_only_in_indexes(&recorded.current_schema, app.compiled.current_schema()) {
             return Ok(Some(Staleness::OutOfDate));
         }
         return Ok(Some(Staleness::SchemaChanged));
@@ -298,6 +290,13 @@ pub fn staleness(
         return Ok(Some(Staleness::OutOfDate));
     }
     Ok(None)
+}
+
+/// Whether `from` and `to` differ only in their tables' `indexed_columns`
+/// and `composite_indexes`, which change the schema's hash but not its
+/// runtime version or its rows.
+pub(crate) fn differs_only_in_indexes(from: &Schema, to: &Schema) -> bool {
+    without_indexes(from) == without_indexes(to)
 }
 
 /// `schema` with every table's indexes removed.

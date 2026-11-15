@@ -146,6 +146,17 @@ fn an_index_only_edit_needs_no_migration() {
             "{indexes}"
         );
     }
+    // `migrations create` agrees: it writes nothing and says why.
+    let created = migrate(
+        TODOS,
+        r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title", ["done", "title"]] } }"#,
+    );
+    assert!(!created.changed);
+    assert!(created.todos.is_empty());
+    assert_eq!(
+        created.note.as_deref(),
+        Some("only indexes changed: no migration needed; run `jazz-tools generate`")
+    );
     let indexed_and_more = App::load(
         file(r#"{ "todos": { "columns": { "title": "string", "done": "boolean", "n": "int?" }, "indexes": ["title"] } }"#)
             .as_bytes(),
@@ -357,10 +368,8 @@ fn a_change_that_keeps_every_row_needs_an_empty_step() {
             r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "history": "latest" } }"#,
             "history retention",
         ),
-        (
-            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title", ["done", "title"]] } }"#,
-            "indexes",
-        ),
+        // Indexes alone need no migration at all (#5494): see
+        // `an_index_only_edit_needs_no_migration`.
         (
             r#"{ "todos": { "columns": { "title": { "type": "string", "merge": "text" }, "done": "boolean" } } }"#,
             "merge strategies",
