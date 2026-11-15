@@ -427,6 +427,11 @@ unsafe extern "C" {
 
 struct TokenContext(*mut c_void);
 
+thread_local! {
+    /// Set while this thread runs a host's token callback.
+    static IN_TOKEN_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// A C host's token callback and its `ctx`, while its handle is open.
 type TokenGate = std::sync::RwLock<
     Option<(
@@ -474,6 +479,16 @@ pub unsafe extern "C" fn jazz_open_user(
             let Some((cb, ctx)) = gate.as_ref() else {
                 return Err("the app is closed".into());
             };
+            // `jazz_close` from inside this callback must not wait for the
+            // read lock this thread holds.
+            IN_TOKEN_CALLBACK.with(|flag| flag.set(true));
+            struct Leave;
+            impl Drop for Leave {
+                fn drop(&mut self) {
+                    IN_TOKEN_CALLBACK.with(|flag| flag.set(false));
+                }
+            }
+            let _leave = Leave;
             let reason = CString::new(reason).unwrap_or_default();
             let mut token: *mut c_char = ptr::null_mut();
             // SAFETY: per `jazz_open_user`'s contract, while the handle (this
@@ -496,7 +511,15 @@ pub unsafe extern "C" fn jazz_open_user(
         }));
         let core = Core::open_with_tokens(config, Some(std::sync::Arc::new(host)))?;
         core.on_close(Box::new(move || {
-            gate.write().unwrap_or_else(|e| e.into_inner()).take();
+            if IN_TOKEN_CALLBACK.with(std::cell::Cell::get) {
+                // Closed from the callback itself: the gate closes once that
+                // call returns.
+                std::thread::spawn(move || {
+                    gate.write().unwrap_or_else(|e| e.into_inner()).take();
+                });
+            } else {
+                gate.write().unwrap_or_else(|e| e.into_inner()).take();
+            }
         }));
         Ok(Box::into_raw(Box::new(JazzHandle(core))))
     })
