@@ -548,10 +548,25 @@ async fn the_endpoint_refuses_what_it_should() {
         json!({ "issuer": "jazz:backend", "subject": "carol" })
     );
     assert_eq!(signed_in["claims"], json!({ "role": "member" }));
+    // Another app id in the path (a TS client derives one from its
+    // endpoint URL) is served as this endpoint's own app, as by createJazz.
     let other = format!("/jazz/apps/{}/accounts/backend-sign-in", AppId::random());
+    let served = app
+        .endpoint
+        .handle(Request::new("POST", &other).header("authorization", "Bearer token-carol"))
+        .await;
+    assert_eq!(served.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&served.body).unwrap()["identity"]["subject"],
+        json!("carol")
+    );
+    assert!(
+        app.endpoint
+            .is_socket(&format!("/jazz/apps/{}/ws", AppId::random()))
+    );
     assert_eq!(
         app.endpoint
-            .handle(Request::new("POST", other))
+            .handle(Request::new("POST", "/jazz/apps//accounts/backend-sign-in"))
             .await
             .status,
         404
@@ -1262,5 +1277,39 @@ async fn the_axum_router_admits_a_ts_clients_text_prelude() {
     let served = tokio::spawn(async move { axum::serve(listener, router).await });
     a_ts_shaped_socket_is_admitted(&app, &ws).await;
     served.abort();
+    app.stop().await;
+}
+
+/// A client that names another app id (a TS client derives its own from
+/// the endpoint URL) signs in and syncs: the endpoint serves its own app.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_naming_another_app_id_syncs_with_the_endpoints_app() {
+    let app = App::start().await;
+    let derived = AppId::random();
+    assert_ne!(derived, app.app_id);
+    let uma = Jazz::open(
+        client_files(),
+        Config::new(derived)
+            .server(&app.url)
+            .user(bearer("token-uma")),
+    )
+    .await
+    .expect("sign in through the endpoint under another app id");
+    let todo = uma
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo::new("Under a derived id", false))
+        .await
+        .unwrap();
+    let seen = eventually(async || {
+        let rows = app
+            .backend
+            .all_with(todos::query(), ReadTier::Remote)
+            .await
+            .unwrap();
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert_eq!(seen, vec![todo]);
+    uma.shutdown().await.unwrap();
     app.stop().await;
 }
