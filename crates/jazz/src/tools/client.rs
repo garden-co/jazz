@@ -1866,6 +1866,12 @@ impl JazzClient {
         self.shared.db.set_slow_query_threshold(threshold);
     }
 
+    /// This client's uploads: commits awaiting the server's verdict (since
+    /// when), and those it refused since the client opened.
+    pub fn upload_status(&self) -> crate::db::UploadStatus {
+        self.shared.db.upload_status()
+    }
+
     /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
         self.shared.state.borrow().upstream.is_some()
