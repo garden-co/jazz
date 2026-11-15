@@ -51,6 +51,12 @@ Commit `JazzApp.kt`. Per table it gives you:
   `Tasks.where(Tasks.showId eq id).orderBy(Tasks.rank.asc())`;
 - an `enum class` per enum column (`TaskStatus`).
 
+Names are the ones `jazz.app.json` uses: a `showId` column is `showId`, and a `due_at` column stays
+`due_at` (only names that aren't Kotlin identifiers are camel-cased). Values are plain Kotlin types:
+`uuid` is a `String`, `int` an `Int`, `bigint` a `Long`, `float` a `Double`, `timestamp` a `Long`
+(milliseconds since the epoch), `bytea` a `ByteArray`, `json` a `JsonElement`, and an optional
+column is nullable.
+
 ## Open the app
 
 <include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
@@ -87,7 +93,7 @@ In Kotlin, Jazz doesn't support these yet:
 - transactions;
 - choosing a durability tier for reads or writes;
 - payload enums, nested rows and catalogue enums in bindings;
-- text merge for `merge: "text"` columns (like StagePlan's `tasks.notes`): a write sets the whole
-  string;
+- text merge for `merge: "text"` columns (like StagePlan's `tasks.notes`): a write replaces the
+  whole string;
 - files and blobs;
 - publishing `jazz-kotlin` to Maven Central: build it from the repository.
