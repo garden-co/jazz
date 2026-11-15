@@ -70,8 +70,8 @@ async function createOwnedDataDir(): Promise<string> {
  * Start a local Jazz sync server.
  *
  * To initialize an app, pass its schema and permissions. Omit both to deploy later.
- * An app that ships migrations (`defineApp(schema, { migrations })`) is
- * published with all of them, as `createJazz` publishes it.
+ * The app (its generated bindings, or `testApp`'s) is published with every
+ * schema version and migration it ships, as `createJazz` publishes it.
  *
  * When no port is provided, an available localhost port is chosen automatically.
  * When no data directory is provided, the server owns a temporary directory and

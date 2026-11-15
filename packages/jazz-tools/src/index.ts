@@ -32,7 +32,7 @@ export {
   anyOf,
   allOf,
 } from "./removed-schema-api.js";
-export type { JsonValue, JsonSchema, JsonSchemaToTs, ColumnMergeStrategy } from "./schema.js";
+export type { JsonValue, JsonPrimitive } from "./json-value.js";
 
 export type {
   RelColumnRef,
