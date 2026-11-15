@@ -19,6 +19,13 @@ export type Language = {
    * out by name; a test fails if one is missing.
    */
   bindings?: BindingsSource;
+  /**
+   * Whether the language can run your app's backend (createJazz or its
+   * equivalent, serving end users, publishing permissions). Client-only
+   * languages (Swift, Kotlin in .65) get no tabs on pages whose frontmatter
+   * says `languageTabs: backend`.
+   */
+  backend: boolean;
   enabled: boolean;
 };
 
@@ -30,9 +37,10 @@ export const LANGUAGES: readonly Language[] = [
       lang: "ts",
       symbols: ["TaskStatus", "Task", "TaskInsert"],
     },
+    backend: true,
     enabled: true,
   },
-  { label: "Effect", enabled: true },
+  { label: "Effect", backend: true, enabled: true },
   {
     label: "Rust",
     bindings: {
@@ -41,6 +49,7 @@ export const LANGUAGES: readonly Language[] = [
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
     setupPage: "setup/rust",
+    backend: true,
     enabled: true,
   },
   {
@@ -51,6 +60,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "swift",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
+    backend: false,
     enabled: false,
   },
   {
@@ -61,6 +71,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "kotlin",
       symbols: ["TaskStatus", "Task", "TaskInsert"],
     },
+    backend: false,
     enabled: false,
   },
   {
@@ -71,6 +82,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "go",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
+    backend: true,
     enabled: false,
   },
 ];
@@ -103,6 +115,8 @@ export function filterLanguageTabs(
 ): string {
   const order = new Map(languages.map((l, i) => [l.label, i]));
   const enabled = new Set(languages.filter((l) => l.enabled).map((l) => l.label));
+  const backendPage = /^---\n[\s\S]*?^languageTabs:\s*backend\s*$[\s\S]*?^---$/m.test(source);
+  const clientOnly = new Set(languages.filter((l) => !l.backend).map((l) => l.label));
 
   type Block = {
     open: { start: number; end: number; attrs: string };
@@ -163,6 +177,13 @@ export function filterLanguageTabs(
       if (!order.has(label))
         throw new Error(
           `${file}: ${LANGUAGE_TABS_GROUP} tab "${label}" isn't in docs/lib/languages`,
+        );
+    }
+    if (backendPage) {
+      const client = labels.filter((l) => clientOnly.has(l));
+      if (client.length)
+        throw new Error(
+          `${file}: a backend page (languageTabs: backend) has tabs for client-only ${client.join(", ")}`,
         );
     }
     for (let i = 1; i < labels.length; i++) {
