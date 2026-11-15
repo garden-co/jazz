@@ -9,7 +9,11 @@ description = "Typed, Send + Clone Rust handle for a Jazz app opened from its ja
 axum = ["dep:axum"]
 
 [dependencies]
-axum = { version = "0.8.9", optional = true, default-features = false, features = ["http1", "tokio", "ws"] }
+axum = { version = "0.8.9", optional = true, default-features = false, features = [
+  "http1",
+  "tokio",
+  "ws",
+] }
 jazz = { workspace = true, features = ["runtime"] }
 jazz-native-transport.workspace = true
 base64 = "0.22"
@@ -21,7 +25,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
+  "connect",
+  "rustls-tls-native-roots",
+] }
 
 [dev-dependencies]
 hmac = "0.12"
@@ -32,7 +39,10 @@ futures = "0.3"
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
+  "connect",
+  "handshake",
+] }
 
 [[example]]
 name = "endpoint_server"

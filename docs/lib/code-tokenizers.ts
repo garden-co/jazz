@@ -1,6 +1,6 @@
 /**
  * Syntax tokenizers for languages Astryx `CodeBlock` does not highlight
- * itself (Rust, Svelte, Vue). Each returns flat tokens with absolute offsets,
+ * itself (Rust, Swift, Kotlin, Go, Svelte, Vue). Each returns flat tokens with absolute offsets,
  * the shape `CodeBlock`'s `tokenizer` prop takes, and uses Astryx's token
  * types so the theme's syntax colours apply.
  */
@@ -61,6 +61,45 @@ const rust = tokenizerFor([
   { type: "plain", regex: /\b[A-Za-z_][\w]*\b/ },
 ]);
 
+/** A C-family language: comments, strings, numbers, keywords, calls and types. */
+function cFamily(keywords: RegExp, extra: Pattern[] = []) {
+  return tokenizerFor([
+    { type: "comment", regex: /\/\*[\s\S]*?\*\// },
+    { type: "comment", regex: /\/\/[^\n]*/ },
+    ...extra,
+    { type: "string", regex: /"""[\s\S]*?"""/ },
+    { type: "string", regex: /"(?:[^"\\\n]|\\.)*"/ },
+    {
+      type: "number",
+      regex: /\b(?:0[xX][\da-fA-F_]+|\d[\d_]*(?:\.[\d_]+)?(?:[eE][+-]?\d+)?)[fFLuU]?\b/,
+    },
+    { type: "keyword", regex: keywords },
+    { type: "function", regex: /\b[a-z_][\w]*(?=\s*(?:<[^<>()]*>)?\()/ },
+    { type: "type", regex: /\b[A-Z][A-Za-z0-9_]*\b/ },
+    { type: "operator", regex: /[+\-*/%=!<>&|^~?:]+/ },
+    { type: "punctuation", regex: /[{}()[\];,.]/ },
+    { type: "plain", regex: /\b[A-Za-z_][\w]*\b/ },
+  ]);
+}
+
+const swift = cFamily(
+  /\b(actor|any|as|associatedtype|async|await|break|case|catch|class|continue|default|defer|deinit|do|else|enum|extension|fallthrough|false|fileprivate|for|func|guard|if|import|in|init|inout|internal|is|let|mutating|nil|nonisolated|open|operator|private|protocol|public|repeat|rethrows|return|self|Self|some|static|struct|subscript|super|switch|throw|throws|true|try|typealias|var|where|while)\b/,
+  [{ type: "constant", regex: /@[A-Za-z_]\w*/ }],
+);
+
+const kotlin = cFamily(
+  /\b(abstract|annotation|as|break|by|catch|class|companion|const|continue|data|do|else|enum|false|final|finally|for|fun|if|import|in|init|inline|interface|internal|is|lateinit|null|object|open|operator|out|override|package|private|protected|public|return|sealed|suspend|super|this|throw|true|try|typealias|val|value|var|vararg|when|where|while)\b/,
+  [{ type: "constant", regex: /@[A-Za-z_][\w.]*/ }],
+);
+
+const go = cFamily(
+  /\b(break|case|chan|const|continue|default|defer|else|fallthrough|false|for|func|go|goto|if|import|interface|iota|map|nil|package|range|return|select|struct|switch|true|type|var)\b/,
+  [
+    { type: "string", regex: /`[^`]*`/ },
+    { type: "string", regex: /'(?:[^'\\]|\\.)'/ },
+  ],
+);
+
 const JS_KEYWORDS =
   /\b(const|let|var|function|class|if|else|for|while|return|import|export|from|default|async|await|try|catch|throw|new|typeof|instanceof|interface|type|enum|extends|implements|switch|case|break|continue|do|in|of|void|null|undefined|true|false|this|super|yield|as|keyof)\b/;
 
@@ -90,6 +129,11 @@ const component = tokenizerFor([
 const tokenizers: Record<string, (code: string) => Token[]> = {
   rs: rust,
   rust,
+  swift,
+  kotlin,
+  kt: kotlin,
+  go,
+  golang: go,
   svelte: component,
   vue: component,
 };
@@ -105,6 +149,10 @@ export function codeLanguage(language: string | undefined): string {
       return "plaintext";
     case "rs":
       return "rust";
+    case "kt":
+      return "kotlin";
+    case "golang":
+      return "go";
     default:
       return language;
   }

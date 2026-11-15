@@ -5,7 +5,7 @@
 // deletes those, and a leftover would read as a second source of truth.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -56,5 +56,54 @@ test("no example keeps an alpha.64 schema source beside its files", () => {
     leftovers,
     [],
     `jazz.app.json and jazz.permissions.json are the app's only source; \`jazz-tools upgrade\` removes these:\n${leftovers.join("\n")}`,
+  );
+});
+
+function tracked(...patterns) {
+  return execFileSync("git", ["ls-files", "--", ...patterns], { cwd: root, encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean);
+}
+
+/**
+ * Found independently of jazz.app.json, so a deleted one is caught: every
+ * jazz.generated.ts or jazz.permissions.json is generated from or checked
+ * against the jazz.app.json beside it.
+ */
+test("every committed app file has its jazz.app.json beside it", () => {
+  const orphans = tracked(
+    "examples/**/jazz.generated.ts",
+    "examples/**/jazz.permissions.json",
+    "dev/stress-tests/**/jazz.generated.ts",
+    "dev/stress-tests/**/jazz.permissions.json",
+  ).filter((file) => !existsSync(join(root, dirname(file), "jazz.app.json")));
+  assert.deepEqual(
+    orphans,
+    [],
+    `These have no jazz.app.json, the app's source, beside them:\n${orphans.join("\n")}`,
+  );
+});
+
+/** Example packages: a package.json that depends on jazz-tools. */
+function jazzPackages() {
+  return tracked("examples/**/package.json", "dev/stress-tests/**/package.json")
+    .filter((file) => {
+      const manifest = JSON.parse(readFileSync(join(root, file), "utf8"));
+      return ["dependencies", "devDependencies", "peerDependencies"].some(
+        (field) => manifest[field]?.["jazz-tools"],
+      );
+    })
+    .map(dirname);
+}
+
+test("every example package that depends on jazz-tools commits a jazz.app.json", () => {
+  const packages = jazzPackages();
+  assert.ok(packages.length > 30, `found only ${packages.length} jazz-tools packages`);
+  const apps = tracked("examples/**/jazz.app.json", "dev/stress-tests/**/jazz.app.json");
+  const without = packages.filter((dir) => !apps.some((file) => file.startsWith(`${dir}/`)));
+  assert.deepEqual(
+    without,
+    [],
+    `These depend on jazz-tools but commit no jazz.app.json:\n${without.join("\n")}`,
   );
 });

@@ -68,15 +68,28 @@ public enum JazzApp {
         public static let table = "folders"
         public let id: Jazz.ID
         public var name: Swift.String
+        /// Relation `notesViaFolder`: the `Note` rows, when the query includes them.
+        public var notesViaFolder: [Note]? = nil
 
         public init(id: Jazz.ID, name: Swift.String) {
             self.id = id
             self.name = name
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.name == b.name
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(name)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case name = "name"
+            case notesViaFolder = "notesViaFolder"
         }
     }
 
@@ -114,7 +127,6 @@ public enum JazzApp {
     }
 
     /// Queries of `folders` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum folders {
         /// Every row of `folders`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Folder> { Jazz.Query() }
@@ -123,6 +135,8 @@ public enum JazzApp {
         public static let id = Jazz.Column<Folder, Jazz.ID>("id")
         /// Column `name`.
         public static let name = Jazz.Column<Folder, Swift.String>("name")
+        /// Relation `notesViaFolder`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let notesViaFolder = Jazz.Relation<Folder, Note>("notesViaFolder")
     }
 
     /// A row of `notes`.
@@ -132,6 +146,12 @@ public enum JazzApp {
         public var body: Swift.String
         public var pinned: Swift.Bool
         public var folderId: Jazz.ID?
+        /// Relation `folder`: the `Folder` row, when the query includes it (and it exists).
+        public var folder: Folder? {
+            get { _folder?.value }
+            set { _folder = newValue.map { Jazz.Included($0) } }
+        }
+        private var _folder: Jazz.Included<Folder>? = nil
 
         public init(id: Jazz.ID, body: Swift.String, pinned: Swift.Bool, folderId: Jazz.ID?) {
             self.id = id
@@ -140,11 +160,24 @@ public enum JazzApp {
             self.folderId = folderId
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.body == b.body && a.pinned == b.pinned && a.folderId == b.folderId
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(body)
+            hasher.combine(pinned)
+            hasher.combine(folderId)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case body = "body"
             case pinned = "pinned"
             case folderId = "folderId"
+            case _folder = "folder"
         }
     }
 
@@ -196,7 +229,6 @@ public enum JazzApp {
     }
 
     /// Queries of `notes` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum notes {
         /// Every row of `notes`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Note> { Jazz.Query() }
@@ -209,5 +241,7 @@ public enum JazzApp {
         public static let pinned = Jazz.Column<Note, Swift.Bool>("pinned")
         /// Column `folderId`.
         public static let folderId = Jazz.Column<Note, Jazz.ID?>("folderId")
+        /// Relation `folder`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let folder = Jazz.Relation<Note, Folder>("folder")
     }
 }
