@@ -1,0 +1,249 @@
+name: Go module tag
+
+# Tags the Go module (packages/jazz-go, module path
+# github.com/garden-co/jazz/packages/jazz-go/v2) for a release. Go fetches
+# a module from its tag, and jazz-go embeds Jazz's core (libjazz_ffi's
+# shared library, loaded with purego: no cgo), so the tag points at a
+# release-only child of v<version>'s commit that adds the libraries; main
+# carries none. Dispatched after attach-language-artifacts.yml attached the
+# libjazz_ffi-<os>-<arch>.tar.gz archives to the draft release v<version>.
+#
+#   1. Download the archives and SHA256SUMS from the draft release; check
+#      them.
+#   2. Run dev/scripts/go-embed-ffi-libraries.sh on v<version>'s commit and
+#      commit the result as its child.
+#   3. Verify: build the module zip as the Go proxy would (its size within
+#      Go's 500 MiB limit), and build and run an app from it with
+#      CGO_ENABLED=0 and nothing else.
+#   4. Unless dry-run: push packages/jazz-go/v<version> to that commit, in
+#      the publish environment (Anselm approves), refusing if it exists.
+#
+# A pull request changing this file runs it dry, on its own head, or on
+# feat/go-parity while main has no packages/jazz-go yet, with archives it
+# builds itself (linux-x86_64 only) instead of a release's.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/go-module-tag.yml
+      - dev/scripts/go-embed-ffi-libraries.sh
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release, e.g. 2.0.0-alpha.65: v<version> must exist, and its draft release must hold the libjazz_ffi archives."
+        required: true
+        type: string
+      dry-run:
+        description: "Do everything but push the tag."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-module-tag-${{ inputs.version || github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version || '2.0.0-alpha.0' }}
+  DRY_RUN: ${{ github.event_name == 'pull_request' || inputs.dry-run }}
+  GO_VERSION: "1.23.4"
+  GO_SHA256: 6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
+  MODULE: github.com/garden-co/jazz/packages/jazz-go/v2
+
+jobs:
+  prepare:
+    name: Embed the core and verify the module
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 45
+    # A draft release's assets are visible only with write access; this job
+    # pushes nothing (the push job does, behind the publish environment).
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || format('v{0}', inputs.version) }}
+          fetch-depth: 0
+
+      - name: Check the tags
+        if: github.event_name != 'pull_request'
+        run: |
+          git rev-parse --verify "v${VERSION}^{commit}" >/dev/null || { echo "::error::v${VERSION} doesn't exist"; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/packages/jazz-go/v${VERSION}" >/dev/null; then
+            echo "::error::packages/jazz-go/v${VERSION} already exists: tags are never moved"
+            exit 1
+          fi
+
+      # The PR proof needs jazz-go: from feat/go-parity until main has it.
+      - name: Use a branch with jazz-go (pull request only)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ ! -d packages/jazz-go ]; then
+            git fetch --depth=1 origin feat/go-parity
+            git checkout --detach FETCH_HEAD
+            git checkout "${GITHUB_SHA}" -- dev/scripts/go-embed-ffi-libraries.sh
+          fi
+
+      - name: Install Go
+        run: |
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o "${RUNNER_TEMP}/go.tgz"
+          echo "${GO_SHA256}  ${RUNNER_TEMP}/go.tgz" | sha256sum -c -
+          tar -C "${RUNNER_TEMP}" -xzf "${RUNNER_TEMP}/go.tgz"
+          echo "${RUNNER_TEMP}/go/bin" >> "${GITHUB_PATH}"
+
+      - name: Download the release's archives
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/art"
+          cd "${RUNNER_TEMP}/art"
+          gh release download "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --pattern 'libjazz_ffi-*.tar.gz' --pattern SHA256SUMS
+          for archive in libjazz_ffi-*.tar.gz; do
+            grep " ${archive}\$" SHA256SUMS > "${archive}.sum" || { echo "::error::${archive} is not in SHA256SUMS"; exit 1; }
+            sha256sum -c "${archive}.sum"
+          done
+          ls -la
+
+      # The PR proof: a linux-x86_64 archive shaped as the release's.
+      - uses: ./.github/actions/setup-build
+        if: github.event_name == 'pull_request'
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+      - name: Build an archive (pull request only)
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo build --release -p jazz-ffi --lib
+          mkdir -p "${RUNNER_TEMP}/art" "${RUNNER_TEMP}/pack"
+          cp target/release/libjazz_ffi.so "${RUNNER_TEMP}/pack/"
+          strip "${RUNNER_TEMP}/pack/libjazz_ffi.so"
+          tar -czf "${RUNNER_TEMP}/art/libjazz_ffi-linux-x86_64.tar.gz" -C "${RUNNER_TEMP}/pack" libjazz_ffi.so
+
+      - name: Embed and commit
+        id: commit
+        run: |
+          base="$(git rev-parse HEAD)"
+          dev/scripts/go-embed-ffi-libraries.sh "${RUNNER_TEMP}/art" | tee "${RUNNER_TEMP}/embedded.txt"
+          git add -f packages/jazz-go/lib packages/jazz-go/embed_*.go
+          git -c user.name="jazz-release" -c user.email="release@jazz.tools" \
+            commit -q -m "jazz-go ${VERSION}: embed libjazz_ffi for the module tag" \
+            -m "Release-only child of v${VERSION} (${base}); main carries no binaries."
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          git bundle create "${RUNNER_TEMP}/jazz-go.bundle" "${base}..HEAD"
+
+      # As the Go proxy would serve it: the zip, then an app built from it
+      # with no cgo and no environment, run from outside the repository.
+      - name: Verify the module
+        run: |
+          proxy="${RUNNER_TEMP}/proxy"
+          python3 - "${proxy}" "v${VERSION}" <<'PY'
+          import json, os, sys, zipfile
+          proxy, ver = sys.argv[1], sys.argv[2]
+          mod = os.environ["MODULE"]
+          src = "packages/jazz-go"
+          d = os.path.join(proxy, mod, "@v")
+          os.makedirs(d)
+          open(os.path.join(d, "list"), "w").write(ver + "\n")
+          open(os.path.join(d, ver + ".info"), "w").write(json.dumps({"Version": ver}))
+          open(os.path.join(d, ver + ".mod"), "w").write(open(os.path.join(src, "go.mod")).read())
+          path = os.path.join(d, ver + ".zip")
+          with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+              for root, _, files in os.walk(src):
+                  for f in files:
+                      full = os.path.join(root, f)
+                      z.write(full, f"{mod}@{ver}/" + os.path.relpath(full, src))
+          size = os.path.getsize(path)
+          unpacked = sum(i.file_size for i in zipfile.ZipFile(path).infolist())
+          print(f"module zip: {size / 2**20:.1f} MiB ({unpacked / 2**20:.1f} MiB unpacked)")
+          if size > 500 * 2**20 or unpacked > 500 * 2**20:
+              sys.exit("the module exceeds Go's 500 MiB limit")
+          PY
+          app="${RUNNER_TEMP}/app"
+          mkdir -p "${app}/jazzapp"
+          cp examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go "${app}/jazzapp/"
+          cat > "${app}/main.go" <<'GO'
+          package main
+
+          import (
+          	"context"
+          	"fmt"
+          	"log"
+
+          	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
+
+          	"example.com/app/jazzapp"
+          )
+
+          func main() {
+          	ctx := context.Background()
+          	db, err := jazzapp.Open(ctx, jazz.Config{Storage: jazz.StorageMemory})
+          	if err != nil {
+          		log.Fatal(err)
+          	}
+          	defer db.Close()
+          	if _, err := jazzapp.Shows.Insert(ctx, db, jazzapp.NewShow{Name: "Tag check", Venue: "-", Date: "-", Doors: "-", ChiefAccount: "00000000-0000-0000-0000-000000000000"}); err != nil {
+          		log.Fatal(err)
+          	}
+          	shows, err := jazzapp.Shows.Query().All(ctx, db)
+          	if err != nil || len(shows) != 1 {
+          		log.Fatalf("read back: %v %v", shows, err)
+          	}
+          	fmt.Println("module works")
+          }
+          GO
+          printf 'module example.com/app\n\ngo 1.22\n' > "${app}/go.mod"
+          cd "${app}"
+          export GOPROXY="file://${proxy},https://proxy.golang.org" GOFLAGS=-mod=mod GONOSUMDB=github.com/garden-co GONOSUMCHECK=1 GOSUMDB=off
+          go get "${MODULE}@v${VERSION}"
+          CGO_ENABLED=0 go build -o app .
+          cd / && env -u JAZZ_FFI_LIBRARY "${app}/app"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-go-bundle
+          path: ${{ runner.temp }}/jazz-go.bundle
+          if-no-files-found: error
+
+  push:
+    name: Push packages/jazz-go/v${{ inputs.version }}
+    needs: prepare
+    if: github.event_name != 'pull_request' && !inputs.dry-run
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 10
+    environment: publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: v${{ inputs.version }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-go-bundle
+          path: ${{ runner.temp }}
+      - name: Push the tag
+        env:
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          git fetch -q "${RUNNER_TEMP}/jazz-go.bundle" "${COMMIT}"
+          test "$(git rev-parse "${COMMIT}^")" = "$(git rev-parse "v${VERSION}^{commit}")" \
+            || { echo "::error::the commit isn't a child of v${VERSION}"; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/packages/jazz-go/v${VERSION}" >/dev/null; then
+            echo "::error::packages/jazz-go/v${VERSION} already exists: tags are never moved"
+            exit 1
+          fi
+          git push origin "${COMMIT}:refs/tags/packages/jazz-go/v${VERSION}"
+          echo "Pushed packages/jazz-go/v${VERSION} → ${COMMIT}"
