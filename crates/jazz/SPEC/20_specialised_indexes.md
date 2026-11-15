@@ -103,6 +103,18 @@ value has the wrong length or holds a NaN or infinity is refused at
 admission. Jazz never computes embeddings: they are ordinary values the
 application or a backend writes.
 
+In the engine a vector value is a byte value (`Value::Bytes`, public
+`Value::Bytea`) of exactly `4n` bytes; there is no vector value variant, so
+value encodings are unchanged and only types are new. A record field of type
+`vector(n)` is variable-width and its payload is the `f32le/1` bytes with no
+stored-scalar header (a vector is never a large value, 19); the persisted
+record descriptor names it with node 27 (`Vector`, field `dimensions: u32`),
+and the binding descriptor with type tag 19 and the dimensions. A vector is
+not a tuple member, an array element, a payload-enum field or a B-tree index
+column. As a filter operand it compares as a whole value, bit for bit (6.1.1);
+nearness is only a search (20.4). The dimensions are part of the type, so
+changing them is a type change, refused like any other to or from `vector`.
+
 Specialised indexes are part of a table's version id (a new schema-id
 domain, `SchemaHash` only; the ids of schemas without specialised indexes are
 unchanged), not of its compatibility id, as composite indexes are; the
@@ -490,6 +502,11 @@ All are typed, name the table and index, and carry no data about rows:
   per row.
 - **Query:** text, the postings of the query terms; geo, the cells of the
   cover; vector, the candidates read and scored (at most `VECTOR_EXACT_MAX`).
+  Scoring is latency-bound by the sequential `f64` sum (about 1.5 ns per
+  element on a 2.9 GHz x86 core, natively and in V8's wasm32 alike), so a
+  full `VECTOR_EXACT_MAX` scan of 384 dimensions costs about 30 ms in Rust,
+  plus reading the 77 MB of shadow rows (about 60 ms warm natively; more in
+  a browser's OPFS-backed SQLite), and 1536 dimensions about four times that.
 - **Bundle:** each kind is a cargo feature of `jazz-index`, on by default in
   every build, so each one's size is measured and can be dropped.
 
