@@ -9,7 +9,8 @@
 //! - `{ "table", "where"?, "gather": { "relation", "maxDepth"? } }`: the seed
 //!   rows and every row reached along a self relation (default depth 10).
 //! - `{ "union": [Q, ...], "orderBy"?, "limit"?, "offset"? }`: every arm's
-//!   rows (arms read one table, with `where` only).
+//!   rows, a row once per arm that matches it, as TS's union (arms read one
+//!   table, with `where` only).
 //! - `{ "table", "history": true, "where"?, "orderBy"?, "limit"? }`: the
 //!   table's versions, each row with `"$history": { "transactionId",
 //!   "acceptedAt" }`.
