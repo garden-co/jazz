@@ -148,3 +148,30 @@ func TestTransactionsAndTiers(t *testing.T) {
 		t.Fatalf("remote read: %d, %v", len(remote), err)
 	}
 }
+
+func TestWaitForSyncAndPermissionErrors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	alice := openTest(t, srv, "alice")
+	bob := openTest(t, srv, "bob")
+	show, err := ensureShow(ctx, alice, "Sync Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := addTask(ctx, alice, show.ID, "Load-in"); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.WaitForSync(ctx, jazz.WriteGlobal); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bob is neither chief nor crew of Alice's show: waiting for the
+	// server makes its refusal an error at the call.
+	_, err = jazzapp.Tasks.Insert(ctx, bob, jazzapp.NewTask{
+		ShowID: show.ID, Title: "Sneaky", Status: jazzapp.TaskStatusTodo, Rank: 9,
+	}, jazz.WaitFor(jazz.WriteGlobal))
+	if !errors.Is(err, jazz.ErrPermission) {
+		t.Fatalf("bob's write: %v", err)
+	}
+}
