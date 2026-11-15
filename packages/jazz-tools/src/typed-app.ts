@@ -1521,21 +1521,56 @@ export type ComputedImpl<TTypes extends SchemaLike> = {
  * transform on an optional column, which handled null itself and which
  * `jazz-tools upgrade` moves here unchanged, keeps typechecking.
  */
-export type TransformImpl<TTransforms extends TransformTypes> = {
+/**
+ * Whether every column stored through the transform `TName` is nullable: only
+ * then may its callbacks return `null` (an alpha.64 transform on an optional
+ * column that handled null itself). Jazz never calls a transform with null.
+ */
+type TransformColumnsNullable<TTypes extends SchemaLike, TName> = false extends {
+  [TTable in TableName<TTypes>]: TableTypesOf<TTypes, TTable> extends {
+    readonly transforms: infer TColumns extends Record<string, string>;
+  }
+    ? {
+        [TColumn in keyof TColumns]: TColumns[TColumn] extends TName
+          ? TColumn extends StoredColumnName<TTypes, TTable>
+            ? ColumnOf<TTypes, TTable, TColumn>["nullable"]
+            : never
+          : never;
+      }[keyof TColumns]
+    : never;
+}[TableName<TTypes>]
+  ? false
+  : true;
+
+/**
+ * The transforms an app implements (in `jazz.computed.ts`): per name, `from`
+ * turns a stored value into the value the app sees, `to` turns it back.
+ * Jazz passes `null` through without calling either. With the app's types
+ * (`TTypes`), a callback may return `null` only when every column stored
+ * through it is nullable; without them, `null` is allowed and `bindApp`, which
+ * has the types, checks it.
+ */
+export type TransformImpl<TTransforms extends TransformTypes, TTypes extends SchemaLike = never> = {
   readonly [TName in keyof TTransforms]: TTransforms[TName] extends {
     readonly stored: infer TStored;
     readonly view: infer TView;
   }
-    ? { from(stored: TStored): TView | null; to(view: TView): TStored | null }
+    ? [TTypes] extends [never]
+      ? { from(stored: TStored): TView | null; to(view: TView): TStored | null }
+      : TransformColumnsNullable<TTypes, TName> extends true
+        ? { from(stored: TStored): TView | null; to(view: TView): TStored | null }
+        : { from(stored: TStored): TView; to(view: TView): TStored }
     : never;
 };
 
 type ComputedOption<TTypes extends SchemaLike> = [TablesWithComputed<TTypes>] extends [never]
   ? { readonly computed?: undefined }
   : { readonly computed: ComputedImpl<TTypes> };
-type TransformsOption<TTransforms extends TransformTypes> = [keyof TTransforms] extends [never]
+type TransformsOption<TTypes extends SchemaLike, TTransforms extends TransformTypes> = [
+  keyof TTransforms,
+] extends [never]
   ? { readonly transforms?: undefined }
-  : { readonly transforms: TransformImpl<TTransforms> };
+  : { readonly transforms: TransformImpl<TTransforms, TTypes> };
 
 /** What `jazz.generated.ts` passes to {@link bindApp}. */
 export type BindAppOptions<TTypes extends SchemaLike, TTransforms extends TransformTypes = {}> = {
@@ -1544,7 +1579,7 @@ export type BindAppOptions<TTypes extends SchemaLike, TTransforms extends Transf
   readonly schema: CompiledAppSchema;
   readonly relations?: CompiledRelations;
 } & ComputedOption<TTypes> &
-  TransformsOption<TTransforms>;
+  TransformsOption<TTypes, TTransforms>;
 
 /**
  * Where `bindApp` records what the bindings passed it on the app's schema,
@@ -1709,9 +1744,24 @@ function columnTransforms(
         );
       }
       used.add(name);
+      // Null passes through uncalled. A callback that returns null for a
+      // required column is refused, as the types refuse it.
+      const nullable =
+        wasmSchema[table]!.columns.find((descriptor) => descriptor.name === column)?.nullable ??
+        true;
+      const checked = (direction: "from" | "to", result: unknown): unknown => {
+        if (!nullable && (result === null || result === undefined)) {
+          throw new TypeError(
+            `The transform "${name}" returned ${String(result)} from \`${direction}\` for ${table}.${column}, which is required: return a value, or make the column nullable in jazz.app.json.`,
+          );
+        }
+        return result;
+      };
       tableTransforms(table)[column] = {
-        from: (value) => (value === null || value === undefined ? value : transform.from(value)),
-        to: (value) => (value === null || value === undefined ? value : transform.to(value)),
+        from: (value) =>
+          value === null || value === undefined ? value : checked("from", transform.from(value)),
+        to: (value) =>
+          value === null || value === undefined ? value : checked("to", transform.to(value)),
       };
     }
   }

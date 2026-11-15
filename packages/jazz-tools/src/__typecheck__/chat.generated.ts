@@ -80,7 +80,7 @@ interface Transforms {
   isoDate: { stored: Date; view: string };
 }
 export type AppComputed = ComputedImpl<Types>;
-export type AppTransforms = TransformImpl<Transforms>;
+export type AppTransforms = TransformImpl<Transforms, Types>;
 
 declare const computed: AppComputed;
 declare const transforms: AppTransforms;

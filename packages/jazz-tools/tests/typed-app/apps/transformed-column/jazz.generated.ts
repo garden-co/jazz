@@ -35,7 +35,7 @@ interface Transforms {
   urgency: { stored: number; view: "low" | "high" };
 }
 
-export type AppTransforms = TransformImpl<Transforms>;
+export type AppTransforms = TransformImpl<Transforms, Types>;
 
 // The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
 // biome-ignore format: generated JSON

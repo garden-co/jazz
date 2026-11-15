@@ -272,7 +272,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
 
   // The project's errors before the conversion, against its own jazz-tools,
   // so the closing typecheck tells upgrade's errors from ones it found there.
-  let before: Set<string> | undefined;
+  let before: Map<string, number> | undefined;
   if (!options.skipTypecheck && !isRustApp(project.schemaDir)) {
     const roots = new Set(project.configFileNames);
     for (const file of rewrites.files)
@@ -280,7 +280,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     if (roots.size > 0) {
       const handle = createProgram(ts, [...roots], project.compilerOptions, undefined);
       try {
-        before = new Set(typeErrors(ts, handle.program, project.root).map((e) => e.key));
+        before = countTypeErrors(typeErrors(ts, handle.program, project.root));
       } finally {
         handle.dispose();
       }
@@ -315,11 +315,9 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
         : undefined;
     const handle = createProgram(ts, [...roots], project.compilerOptions, override);
     try {
-      for (const error of typeErrors(ts, handle.program, project.root)) {
-        (before?.has(error.key) ? report.preexistingTypeErrors : report.typeErrors).push(
-          error.text,
-        );
-      }
+      const split = splitTypeErrors(before, typeErrors(ts, handle.program, project.root));
+      report.typeErrors = split.added;
+      report.preexistingTypeErrors = split.preexisting;
       report.typechecked = true;
     } finally {
       handle.dispose();
@@ -729,3 +727,35 @@ export function formatReport(report: UpgradeReport, dryRun = false): string {
 }
 
 export { notSupportedYet };
+
+/** How many times each error (file, code, first message line) occurs. */
+export function countTypeErrors(errors: readonly { key: string }[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const { key } of errors) counts.set(key, (counts.get(key) ?? 0) + 1);
+  return counts;
+}
+
+/**
+ * The closing typecheck's errors, split into the ones the conversion added
+ * and the ones the project had before (`before`, counted per key). Each error
+ * before excuses one identical error after, whatever line it moved to, so a
+ * second identical error the conversion adds to the same file still counts.
+ */
+export function splitTypeErrors(
+  before: ReadonlyMap<string, number> | undefined,
+  after: readonly { key: string; text: string }[],
+): { added: string[]; preexisting: string[] } {
+  const excused = new Map(before);
+  const added: string[] = [];
+  const preexisting: string[] = [];
+  for (const error of after) {
+    const left = excused.get(error.key) ?? 0;
+    if (left > 0) {
+      excused.set(error.key, left - 1);
+      preexisting.push(error.text);
+    } else {
+      added.push(error.text);
+    }
+  }
+  return { added, preexisting };
+}

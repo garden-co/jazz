@@ -11,7 +11,13 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { formatReport, upgradeProject, type UpgradeReport } from "./index.js";
+import {
+  countTypeErrors,
+  formatReport,
+  splitTypeErrors,
+  upgradeProject,
+  type UpgradeReport,
+} from "./index.js";
 import {
   copyFixture,
   FIXTURES,
@@ -191,6 +197,20 @@ describe("jazz-tools upgrade: conversions", () => {
     expect(readFileSync(join(dir, "jazz.generated.ts"), "utf8")).toContain(
       'export type IssueKind = { type: "bug"; severity: number } | { type: "feature"; area: string };',
     );
+  });
+
+  it("counts an identical error the conversion adds to a file that already had one", () => {
+    const key = "server/jazz.ts\0TS2322\0Type 'string' is not assignable to type 'number'.";
+    const error = (line: number) => ({ key, text: `server/jazz.ts:${line}:14: TS2322 …` });
+    const before = countTypeErrors([error(3)]);
+    // The rewrite moved the old error to line 5 and added the same one on line 9.
+    expect(splitTypeErrors(before, [error(5), error(9)])).toEqual({
+      preexisting: ["server/jazz.ts:5:14: TS2322 …"],
+      added: ["server/jazz.ts:9:14: TS2322 …"],
+    });
+    // Without errors before, every one counts; with none after, nothing does.
+    expect(splitTypeErrors(undefined, [error(5)]).added).toHaveLength(1);
+    expect(splitTypeErrors(before, [])).toEqual({ added: [], preexisting: [] });
   });
 
   it("reports type errors the project already had apart, and doesn't count them", async () => {

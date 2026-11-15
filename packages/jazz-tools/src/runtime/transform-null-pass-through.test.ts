@@ -54,4 +54,34 @@ describe("column transforms and null", () => {
     const [cleared] = await db.all(app.tasks.where({ id: dated.id }));
     expect(cleared?.dueAt).toBeNull();
   });
+
+  it("refuses null from a transform for a required column, in both directions", async () => {
+    const app = testApp(
+      {
+        tables: {
+          tags: { columns: { label: { type: "string", transform: "trimmed" } } },
+        },
+        transforms: { trimmed: { stored: "string", view: "string" } },
+      },
+      {
+        transforms: {
+          trimmed: {
+            from: (v: string) => (v === "blank" ? null : v),
+            to: (v: string) => (v.trim() === "" ? null : v.trim()),
+          },
+        },
+      },
+    );
+    db = await createDb({
+      ...(await localAccountConfig("transform-null-required")),
+      driver: { type: "memory" },
+    });
+    expect(() => db!.insert(app.tags, { label: "   " })).toThrow(
+      /The transform "trimmed" returned null from `to` for tags\.label, which is required/,
+    );
+    // The insert reads its row back through `from`, which refuses there.
+    expect(() => db!.insert(app.tags, { label: "blank" })).toThrow(
+      /The transform "trimmed" returned null from `from` for tags\.label, which is required/,
+    );
+  });
 });
