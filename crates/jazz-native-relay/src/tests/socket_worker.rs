@@ -210,6 +210,86 @@ fn connected(host: &NativeRelayHost, scope: &RelayScope) -> bool {
     host.private_scope_workers[scope].connected()
 }
 
+static WAKES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe extern "C" fn count_wake(_: *mut std::ffi::c_void, _: u64, _: u8, _: u64) {
+    WAKES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+/// Over a live link to a server that never answers, alice's local-first
+/// opening with a first-load wait is released when the wait runs out, with
+/// nothing but the relay's own wakes ticking her foreground: the relay's
+/// owner sleeps until the core's next deadline instead of polling.
+///
+/// ```text
+/// alice ──subscribe(local-first, wait 300ms)──► relay ══socket══► edge (silent)
+///                                                 │
+///                           owner sleeps until the wait's end, ticks, serves
+///                                                 ▼
+/// alice ◄──wake──── opening from the relay's store
+/// ```
+#[test]
+fn a_first_load_wait_on_a_silent_live_link_is_released_on_time() {
+    let root = tempfile::tempdir().unwrap();
+    let (connect, connected_now) = tokio::sync::oneshot::channel();
+    let connector = ScriptedConnector::new([Step::ConnectWhenReleased(connected_now)]);
+    let (mut host, _, alice) = scripted_foreground(root.path(), "first-load-deadline", connector);
+    let scope = host.foregrounds[&alice].scope.clone();
+    connect.send(()).unwrap();
+    wait_for(&host, "the link is live", |host| connected(host, &scope));
+    host.set_foreground_wake_callback(alice, Some(count_wake), 0)
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let ForegroundDbCommandResponse::Subscribed { subscription } = host
+        .execute_foreground_command(
+            alice,
+            ForegroundDbCommandRequest::Subscribe {
+                query: postcard::to_allocvec(&jazz::query::Query::from("todos")).unwrap(),
+                options_json: r#"{"tier":"local-first","first_load_remote_wait_ms":300}"#.into(),
+            },
+        )
+        .unwrap()
+    else {
+        panic!("subscription opens");
+    };
+    let mut opened_after = None;
+    while started.elapsed() < Duration::from_secs(5) {
+        if WAKES.swap(0, std::sync::atomic::Ordering::AcqRel) > 0 {
+            host.tick_foreground(alice).unwrap();
+        }
+        let ForegroundDbCommandResponse::SubscriptionEvents { events } = host
+            .execute_foreground_command(
+                alice,
+                ForegroundDbCommandRequest::DrainSubscription { subscription },
+            )
+            .unwrap()
+        else {
+            panic!("drain answers events");
+        };
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                ForegroundSubscriptionEvent::Delta { .. }
+                    | ForegroundSubscriptionEvent::StructuredDelta { .. }
+            )
+        }) {
+            opened_after = Some(started.elapsed());
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let opened_after = opened_after.expect("the opening arrives once the wait runs out");
+    assert!(
+        opened_after >= Duration::from_millis(250),
+        "the opening waited for the server first: {opened_after:?}"
+    );
+    assert!(
+        opened_after < Duration::from_secs(2),
+        "the relay released it at the wait's end, not much later: {opened_after:?}"
+    );
+}
+
 /// Losing an established upstream link that the worker is retrying is
 /// connection state, not a foreground failure (#3630), even when the
 /// transport classifies the loss as non-retryable. Alice's foreground keeps

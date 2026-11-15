@@ -2253,6 +2253,11 @@ impl Db {
         if let Some(code) = self.inner().failing_ticks.pop_front() {
             return Err(Error::new(code, "a tick failure injected by a test"));
         }
+        // The host ticked: whatever it was asked to wake for is spent, even
+        // if its timer fired a little early (Node's timers run on the
+        // event loop's cached clock). Every check still waiting reports its
+        // deadline again this tick or on its next poll.
+        self.inner().wakes.host_ticked();
         self.sync_tick()?;
         {
             let mut inner = self.inner();
@@ -3162,6 +3167,13 @@ impl Db {
                 let deadline =
                     sync::remote_deadline(&opts, non_durable, sync::may_wait(hint.get()));
                 let live = hint.get().hint == RemoteLinkHint::Live;
+                // An opening released by time alone needs a tick then, even
+                // if nothing polls its stream first.
+                if let Some(Some(at)) = deadline {
+                    let inner = self.inner();
+                    inner.wakes.wake_at(at);
+                    inner.wakes.note_link(hint.get());
+                }
                 deadline.map(|deadline| sync::Gate {
                     answered: answered.clone(),
                     global: global.clone(),

@@ -2509,9 +2509,10 @@ impl Gate {
 /// here, and the host is asked to tick at the earliest one, so no deadline
 /// depends on unrelated traffic happening to drive a tick.
 ///
-/// Only the earliest deadline is armed with the host. A waiting check
-/// reports its deadline again on every tick or poll, so a later one that an
-/// earlier one displaced is armed again once that earlier one has passed.
+/// Only the earliest deadline is armed with the host, until the host next
+/// ticks. A waiting check reports its deadline again on every tick or poll,
+/// so a later one that an earlier one displaced, or one whose timer fired a
+/// little early, is asked for again after that tick.
 #[derive(Default)]
 pub(crate) struct Wakes {
     /// The deadline the host was last asked to wake for.
@@ -2548,6 +2549,12 @@ impl Wakes {
         if link.hint == RemoteLinkHint::Attempting {
             self.wake_at(link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW);
         }
+    }
+
+    /// The host ran a tick: the wake it was asked for is no longer owed,
+    /// so the next deadline reported is asked for again, even the same one.
+    pub(crate) fn host_ticked(&self) {
+        self.armed.set(None);
     }
 
     pub(crate) fn set_hook(&self, hook: Option<Box<dyn Fn(Instant)>>) {
@@ -13056,6 +13063,13 @@ impl Db {
                             read: viewed.clone(),
                         },
                     );
+                    // Its wait may end with nothing else ticking this store:
+                    // ask for that tick now, not on the next serve.
+                    let inner = self.inner.borrow();
+                    inner.wakes.wake_at(until);
+                    if let Some(client) = inner.client.as_ref() {
+                        inner.wakes.note_link(client.hint.get());
+                    }
                 }
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
@@ -13340,12 +13354,14 @@ impl Db {
                         span: ReadSpan::Once { at },
                     };
                     client.outbox.push(ask.clone());
+                    let until = wait.and_then(wait_until);
+                    let link = client.hint.get();
                     client.relayed_fetches.push(RelayedFetch {
                         upstream,
                         session: index,
                         ask,
                         strict,
-                        until: wait.and_then(wait_until),
+                        until,
                         message: SyncMessage::Read {
                             id,
                             query,
@@ -13358,6 +13374,14 @@ impl Db {
                             span: ReadSpan::Once { at },
                         },
                     });
+                    // Served from this store once its wait runs out, with
+                    // nothing else ticking it: ask for that tick now.
+                    if !strict {
+                        if let Some(until) = until {
+                            inner.wakes.wake_at(until);
+                        }
+                        inner.wakes.note_link(link);
+                    }
                     return Ok(());
                 }
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);

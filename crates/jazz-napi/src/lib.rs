@@ -1387,6 +1387,40 @@ impl Transport {
             .collect()
     }
 
+    /// Call `callback` (on the JS thread, at most once per turn) whenever
+    /// the database queues a frame for this link, so the host drains it
+    /// then instead of after every tick.
+    #[napi(
+        js_name = "setOutboundScheduler",
+        ts_args_type = "callback: () => void"
+    )]
+    pub fn set_outbound_scheduler(&self, callback: Function<'_, (), ()>) -> js::Result<()> {
+        let queued = Arc::new(AtomicBool::new(false));
+        let delivered = Arc::clone(&queued);
+        let callback = callback
+            .build_threadsafe_function::<()>()
+            .callee_handled::<false>()
+            .build_callback(move |_| {
+                // Clear before calling JS: a frame it queues re-arms.
+                delivered.store(false, Ordering::Release);
+                Ok(())
+            })?;
+        self.link.set_outbound_ready(Some(Box::new(move || {
+            if queued.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            if callback.call((), ThreadsafeFunctionCallMode::NonBlocking) != napi::Status::Ok {
+                queued.store(false, Ordering::Release);
+            }
+        })));
+        Ok(())
+    }
+
+    #[napi(js_name = "clearOutboundScheduler")]
+    pub fn clear_outbound_scheduler(&self) {
+        self.link.set_outbound_ready(None);
+    }
+
     /// Tick the database this link belongs to: apply received frames, send
     /// what is due. Returns the number of frames waiting to be sent.
     #[napi]
