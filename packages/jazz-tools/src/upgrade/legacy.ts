@@ -71,7 +71,7 @@ export function findLegacyJazzTools(project: Project): LegacyJazzTools {
  * this release's engine, which writes different files (no `slices`).
  */
 export function legacyEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = {};
+  const out: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(env)) {
     if (
       key.startsWith("JAZZ_CORRECTNESS_") ||
@@ -81,7 +81,7 @@ export function legacyEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
       continue;
     out[key] = value;
   }
-  return out;
+  return out as NodeJS.ProcessEnv;
 }
 
 /** Run the old `validate --check`, refusing what it refuses. */
