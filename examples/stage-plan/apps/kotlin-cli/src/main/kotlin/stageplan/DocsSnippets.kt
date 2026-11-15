@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
 import tools.jazz.JazzConfig
 import tools.jazz.JazzRow
+import tools.jazz.ReadTier
+import tools.jazz.WriteTier
 import tools.jazz.include
 import tools.jazz.select
 import jazzapp.Comments
@@ -179,5 +181,44 @@ object DocsSnippets {
         val titles = rows.map { it[Tasks.title] to it[Tasks.status] }
         // #endregion reading-select-kotlin
         return titles
+    }
+
+    suspend fun transaction(jazz: Jazz, showId: String): Boolean {
+        // #region writing-transaction-kotlin
+        // Move the show's first open task to "doing", reading and writing in one
+        // transaction: it commits when the block returns, and rolls back if it throws.
+        val moved: Boolean = jazz.transaction { tx ->
+            val next = tx.one(
+                Tasks.where(Tasks.showId eq showId, Tasks.status eq TaskStatus.Todo).orderBy(Tasks.rank.asc()),
+            ) ?: return@transaction false
+            tx.update(Tasks, next.id) { status(TaskStatus.Doing) }
+            true
+        }
+        // #endregion writing-transaction-kotlin
+        return moved
+    }
+
+    suspend fun writeTier(jazz: Jazz, showId: String): Task {
+        // #region writing-durability-tier-kotlin
+        // Returns once the sync server accepted the write; a write its permissions
+        // refuse throws JazzException.Permission instead of quietly rolling back.
+        val task = jazz.insert(
+            Tasks,
+            NewTask(showId = showId, title = "Strike", status = TaskStatus.Todo, rank = 99.0),
+            tier = WriteTier.Global,
+        )
+        jazz.update(Tasks, task.id, tier = WriteTier.Global) { status(TaskStatus.Doing) }
+        // Or write locally, then wait for everything so far to reach the server.
+        jazz.waitForSync(WriteTier.Global)
+        // #endregion writing-durability-tier-kotlin
+        return task
+    }
+
+    suspend fun readTier(jazz: Jazz, showId: String): List<Task> {
+        // #region reading-durability-tier-kotlin
+        // As the sync server has it, rather than what this process has locally.
+        val tasks = jazz.all(Tasks.where(Tasks.showId eq showId), tier = ReadTier.Remote)
+        // #endregion reading-durability-tier-kotlin
+        return tasks
     }
 }

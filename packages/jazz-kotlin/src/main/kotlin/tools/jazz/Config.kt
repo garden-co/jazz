@@ -5,6 +5,27 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+/** How fresh a read must be. */
+public enum class ReadTier(internal val wire: String) {
+    /** What this process has, now. */
+    Local("local"),
+
+    /** What this process has, after first syncing what the query needs (the default). */
+    LocalFirst("localFirst"),
+
+    /** As the sync server has it. */
+    Remote("remote"),
+}
+
+/** How far a write must get before the call returns. */
+public enum class WriteTier(internal val wire: String) {
+    /** Stored in this process (the default: it syncs in the background). */
+    Local("local"),
+
+    /** Accepted by the sync server: a write its permissions refuse fails with [JazzException.Permission]. */
+    Global("global"),
+}
+
 /** Where the app keeps its data. */
 public enum class Storage {
     /** In memory, gone when the handle closes. */
@@ -29,10 +50,14 @@ public data class JazzConfig(
     val adminSecret: String? = null,
     /** The user a backend acts as (issuer `jazz:backend`). */
     val sessionSubject: String? = null,
+    /** Where the blocking native calls run; every call is main-safe either way. */
+    val dispatcher: kotlinx.coroutines.CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
 ) {
     internal fun toJson(app: String): String {
         val json: JsonObject = buildJsonObject {
             put("app", app)
+            // jazz-ffi contract 2: typed error kinds (Permission, NotSupported, Conflict).
+            put("contract", 2)
             permissions?.let { put("permissions", it) }
             appId?.let { put("appId", it) }
             serverUrl?.let { put("serverUrl", it) }

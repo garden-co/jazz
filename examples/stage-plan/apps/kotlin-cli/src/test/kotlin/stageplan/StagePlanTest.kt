@@ -164,4 +164,35 @@ class StagePlanTest {
         kotlin.test.assertTrue(ended.exceptionOrNull() is tools.jazz.JazzException.Closed, "$ended")
         kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { tasksOf(jazz, show) }
     }
+
+    @Test
+    fun transactions_tiers_and_permission_errors(): Unit = runBlocking {
+        open("user-5").use { jazz ->
+            val me = jazz.account()!!
+            val show = showNamed(jazz, "Gala")
+            val a = addTask(jazz, show, "A")
+            addTask(jazz, show, "B")
+            // Commits: the first todo moves to doing.
+            assertEquals(true, DocsSnippets.transaction(jazz, show.id))
+            assertEquals(TaskStatus.Doing, jazz.one(Tasks.where(Tasks.id eq a.id))!!.status)
+            // Rolls back when the block throws, and rethrows.
+            val error = kotlin.test.assertFailsWith<IllegalStateException> {
+                jazz.transaction { tx ->
+                    tx.update(Tasks, a.id) { title("renamed") }
+                    assertEquals("renamed", tx.one(Tasks.where(Tasks.id eq a.id))!!.title)
+                    error("changed my mind")
+                }
+            }
+            assertEquals("changed my mind", error.message)
+            assertEquals("A", jazz.one(Tasks.where(Tasks.id eq a.id))!!.title)
+            // Global writes and reads.
+            val strike = DocsSnippets.writeTier(jazz, show.id)
+            assertEquals(TaskStatus.Doing, DocsSnippets.readTier(jazz, show.id).single { it.id == strike.id }.status)
+            // A global write the permissions refuse throws: Ada isn't in the show's crew.
+            val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"), tier = tools.jazz.WriteTier.Global)
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Permission> {
+                jazz.update(Tasks, a.id, tier = tools.jazz.WriteTier.Global) { assigneeId(ada.id) }
+            }
+        }
+    }
 }

@@ -85,7 +85,7 @@ class JazzTest {
     @Test
     fun config_json_names_the_contract_fields() {
         assertEquals(
-            """{"app":"A","permissions":"P","appId":"id","serverUrl":"http://s","storage":"memory","backendSecret":"b",""" +
+            """{"app":"A","contract":2,"permissions":"P","appId":"id","serverUrl":"http://s","storage":"memory","backendSecret":"b",""" +
                 """"adminSecret":"a","session":{"issuer":"jazz:backend","subject":"u1"}}""",
             JazzConfig(appId = "id", serverUrl = "http://s", permissions = "P", backendSecret = "b", adminSecret = "a", sessionSubject = "u1").toJson("A"),
         )

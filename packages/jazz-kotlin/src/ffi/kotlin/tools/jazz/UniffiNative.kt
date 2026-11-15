@@ -25,6 +25,9 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
                 is FfiException.Refused -> JazzException.Refused(e.reason)
                 is FfiException.Io -> JazzException.Io(e.reason)
                 is FfiException.Closed -> JazzException.Closed()
+                is FfiException.Permission -> JazzException.Permission(e.reason)
+                is FfiException.NotSupported -> JazzException.NotSupported(e.reason)
+                is FfiException.Conflict -> JazzException.Conflict(e.reason)
             }
         }
     }
@@ -36,22 +39,49 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun update(table: String, id: String, patchJson: String): Unit = live { handle.update(table, id, patchJson) }
     override fun delete(table: String, id: String): Unit = live { handle.delete(table, id) }
 
-    override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String) -> Unit): () -> Unit {
-        val subscription = live {
-            handle.subscribe(
-                queryJson,
-                object : SubscriptionListener {
-                    override fun onDelta(deltaJson: String) = onDelta(deltaJson)
-                    override fun onError(message: String) = onError(message)
-                },
-            )
+    override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String) -> Unit): () -> Unit =
+        listen(onDelta, onError) { handle.subscribe(queryJson, it) }
+
+    private inline fun listen(
+        crossinline onDelta: (String) -> Unit,
+        crossinline onError: (String) -> Unit,
+        subscribe: (SubscriptionListener) -> uniffi.jazz_ffi.Subscription,
+    ): () -> Unit {
+        val listener = object : SubscriptionListener {
+            override fun onDelta(deltaJson: String) = onDelta(deltaJson)
+            override fun onError(message: String) = onError(message)
         }
+        val subscription = live { subscribe(listener) }
         return {
             try {
                 subscription.cancel()
             } finally {
                 subscription.destroy()
             }
+        }
+    }
+
+    override fun allAt(queryJson: String, tier: String): String = live { handle.allAt(queryJson, tier) }
+    override fun oneAt(queryJson: String, tier: String): String? = live { handle.oneAt(queryJson, tier) }
+    override fun insertAt(table: String, rowJson: String, tier: String): String = live { handle.insertAt(table, rowJson, tier) }
+    override fun updateAt(table: String, id: String, patchJson: String, tier: String): Unit =
+        live { handle.updateAt(table, id, patchJson, tier) }
+    override fun deleteAt(table: String, id: String, tier: String): Unit = live { handle.deleteAt(table, id, tier) }
+    override fun waitForSync(tier: String): Unit = live { handle.waitForSync(tier) }
+
+    override fun subscribeAt(queryJson: String, tier: String, onDelta: (String) -> Unit, onError: (String) -> Unit): () -> Unit =
+        listen(onDelta, onError) { handle.subscribeAt(queryJson, tier, it) }
+
+    override fun begin(): NativeTransaction {
+        val tx = live { handle.begin() }
+        return object : NativeTransaction {
+            override fun all(queryJson: String): String = call { tx.all(queryJson) }
+            override fun one(queryJson: String): String? = call { tx.one(queryJson) }
+            override fun insert(table: String, rowJson: String): String = call { tx.insert(table, rowJson) }
+            override fun update(table: String, id: String, patchJson: String): Unit = call { tx.update(table, id, patchJson) }
+            override fun delete(table: String, id: String): Unit = call { tx.delete(table, id) }
+            override fun commit(tier: String?): Unit = try { call { tx.commit(tier) } } finally { tx.destroy() }
+            override fun rollback(): Unit = try { call { tx.rollback() } } finally { tx.destroy() }
         }
     }
 
