@@ -261,10 +261,61 @@ pub(super) async fn revoke_for_admin(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The message a revoked session closes with. `createJazz` reads its prefix
+/// to end the browser's session as refused by `jazz.revokeUser`.
+pub(super) const SESSION_REVOKED: &str =
+    "session revoked: jazz.revokeUser ended this user's sessions";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AdminRevokeSessions {
+    identity: Principal,
+    /// Unix milliseconds on the backend's clock: sessions its `authenticate`
+    /// admitted before this end.
+    #[serde(rename = "revokedBefore")]
+    revoked_before: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RevokeSessionsResponse {
+    identity: Principal,
+    /// The mark now in force: never earlier than one recorded before.
+    #[serde(rename = "revokedBefore")]
+    revoked_before: u64,
+}
+
+/// `jazz.revokeUser`: end the identity's sessions authenticated before
+/// `revokedBefore`, on every backend instance. Each live session of the
+/// user closes as revoked, and the core refuses those the backend states
+/// later with an older `authenticatedAt`. The assignment is untouched: the
+/// user signs in again as before.
+pub(super) async fn revoke_sessions_for_admin(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<AdminRevokeSessions>,
+) -> Result<Json<RevokeSessionsResponse>, Failure> {
+    crate::middleware::auth::validate_admin_secret(
+        super::http::admin_secret_header(&headers),
+        &state.auth_config,
+    )?;
+    let revoked_before = owner(&state)?
+        .revoke_sessions(request.identity.clone(), request.revoked_before)
+        .await
+        .map_err(failure)?;
+    Ok(Json(RevokeSessionsResponse {
+        identity: request.identity,
+        revoked_before,
+    }))
+}
+
 /// Authentication denial and temporary registry availability are different wire outcomes.
 #[derive(Debug)]
 pub(super) enum AdmissionError {
     Denied(String),
+    /// The user's sessions were revoked after this one was authenticated:
+    /// the backend asks its `authenticate` again.
+    Revoked,
     Unavailable,
     AuthenticationUnavailable(String),
 }
@@ -273,6 +324,7 @@ impl std::fmt::Display for AdmissionError {
         match self {
             Self::Denied(message) => f.write_str(message),
             Self::Unavailable => f.write_str("account registry unavailable"),
+            Self::Revoked => f.write_str(SESSION_REVOKED),
             Self::AuthenticationUnavailable(message) => f.write_str(message),
         }
     }
@@ -316,6 +368,11 @@ impl AdmissionError {
             Self::Denied(message) => {
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message)
             }
+            Self::Revoked => WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterAuth,
+                SESSION_REVOKED,
+            ),
             Self::AuthenticationUnavailable(message) => {
                 WireError::new(WireErrorCode::NotReady, WireRetry::Later, message)
             }

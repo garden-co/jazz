@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS _jazz_host_account_links (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_host_account_links_open_by_expiry
     ON _jazz_host_account_links (expires_at) WHERE completed = 0;
+CREATE TABLE IF NOT EXISTS _jazz_host_account_session_revocations (
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    revoked_before_ms INTEGER NOT NULL,
+    PRIMARY KEY (issuer, subject)
+) WITHOUT ROWID;
 ";
 
 pub(crate) struct StoredAccountRegistry {
@@ -129,6 +135,65 @@ impl StoredAccountRegistry {
                 },
             )
             .map_err(unavailable)?
+    }
+}
+
+impl StoredAccountRegistry {
+    /// Record that `principal`'s sessions authenticated before `before_ms`
+    /// (Unix milliseconds, the app backend's clock) are revoked. A later
+    /// mark never moves back: the stored mark is the latest one given.
+    /// Returns the mark now in force. Kept in its own table, which a core
+    /// without session revocation never reads.
+    pub(crate) fn revoke_sessions(
+        &mut self,
+        principal: &Principal,
+        before_ms: u64,
+    ) -> Result<u64, RegistryError> {
+        let principal = principal.clone();
+        self.storage
+            .write(move |conn| {
+                conn.prepare_cached(
+                    "INSERT INTO _jazz_host_account_session_revocations \
+                     (issuer, subject, revoked_before_ms) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT (issuer, subject) DO UPDATE SET revoked_before_ms = \
+                     max(revoked_before_ms, excluded.revoked_before_ms) \
+                     RETURNING revoked_before_ms",
+                )
+                .and_then(|mut statement| {
+                    statement.query_row(
+                        params![principal.issuer, principal.subject, signed(before_ms)?],
+                        |row| row.get::<_, i64>(0),
+                    )
+                })
+                .map_err(storage_error)
+            })
+            .map_err(unavailable)
+            .and_then(unsigned)
+    }
+
+    /// The latest session revocation mark recorded for `principal`.
+    pub(crate) fn sessions_revoked_before(
+        &mut self,
+        principal: &Principal,
+    ) -> Result<Option<u64>, RegistryError> {
+        self.storage
+            .read(|conn| {
+                conn.prepare_cached(
+                    "SELECT revoked_before_ms FROM _jazz_host_account_session_revocations \
+                     WHERE issuer = ?1 AND subject = ?2",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_row(params![principal.issuer, principal.subject], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .optional()
+                })
+                .map_err(storage_error)
+            })
+            .map_err(unavailable)?
+            .map(unsigned)
+            .transpose()
     }
 }
 

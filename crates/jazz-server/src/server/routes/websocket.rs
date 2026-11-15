@@ -230,6 +230,51 @@ struct WebSocketAdmission {
     /// The published permissions bundle the backend pinned this session
     /// to (see [`jazz::catalogue`]).
     bundle: Option<jazz::catalogue::BundleId>,
+    /// A user session the app's backend stated: `jazz.revokeUser` can end
+    /// it from any backend instance (see [`SessionRevocation`]).
+    revocation: Option<SessionRevocation>,
+}
+
+/// What a backend-stated user session is checked against: the user's
+/// session revocation mark in the account registry. The session ends once
+/// the mark is past the time the backend's `authenticate` started for it
+/// (`authenticatedAt` in the stated session, on the backend's clock), so a
+/// revocation from one backend instance reaches sessions another holds, and
+/// refuses those it admits later on an answer from before the revocation.
+#[derive(Clone, Debug)]
+struct SessionRevocation {
+    principal: jazz::account_registry::Principal,
+    /// Unix milliseconds. A backend that doesn't state it (older than this
+    /// check) gets the time the core admitted the session.
+    authenticated_at_ms: u64,
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// Whether `revocation`'s session is still admitted: no revocation mark for
+/// its user is past the time it was authenticated.
+async fn session_not_revoked(
+    state: &ServerState,
+    revocation: Option<&SessionRevocation>,
+) -> Result<(), super::accounts::AdmissionError> {
+    let (Some(revocation), Some(registry)) = (revocation, state.accounts.as_ref()) else {
+        return Ok(());
+    };
+    match registry
+        .sessions_revoked_before(revocation.principal.clone())
+        .await?
+    {
+        Some(before) if before > revocation.authenticated_at_ms => {
+            Err(super::accounts::AdmissionError::Revoked)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Authentication class selected by the prelude, independently of the
@@ -553,9 +598,17 @@ async fn ws_admission(
             // Served with full access; sessions it acts for are governed by
             // the bundle.
             bundle,
+            revocation: None,
         });
     }
 
+    // When the backend's `authenticate` started for a session it states
+    // (Unix ms): what a revocation mark is compared with.
+    let stated_authenticated_at = auth
+        .backend_session
+        .as_ref()
+        .and_then(|session| session.get("authenticatedAt"))
+        .and_then(serde_json::Value::as_u64);
     let mut headers = request_headers.clone();
     if let Some(jwt) = auth.jwt_token.as_deref() {
         let value = axum::http::HeaderValue::from_str(&format!("Bearer {jwt}"))
@@ -623,6 +676,7 @@ async fn ws_admission(
             // The backend's own link: the sessions it acts for (its
             // `forReqUser` reads and writes) are governed by its bundle.
             bundle,
+            revocation: None,
         });
     }
 
@@ -659,6 +713,13 @@ async fn ws_admission(
         session.account_id = Some(account);
     }
     ws_validate_session_identity(&session, peer_identity)?;
+    let revocation = backend_stated.then(|| SessionRevocation {
+        principal: jazz::account_registry::Principal {
+            issuer: session.issuer.clone(),
+            subject: session.user_id.clone(),
+        },
+        authenticated_at_ms: stated_authenticated_at.unwrap_or_else(unix_now_ms),
+    });
     Ok(WebSocketAdmission {
         identity: peer_identity,
         claims: session_claims(session)?,
@@ -670,6 +731,7 @@ async fn ws_admission(
         },
         requested_link,
         bundle,
+        revocation,
     })
 }
 
@@ -1113,7 +1175,18 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let mut activity_rx = core_server_shell.subscribe_activity();
     // Subscribe before checking: a revocation concurrent with this check must
     // remain visible even if no application traffic arrives afterward.
-    if let Err(error) = account_still_admitted(&state, account_identity).await {
+    // A user session the backend stated watches session revocations alone,
+    // subscribed before its first check for the same reason.
+    let session_revocation = admission.revocation.clone();
+    let mut revocations = session_revocation
+        .as_ref()
+        .and(state.accounts.as_ref())
+        .map(|registry| registry.subscribe_revocations());
+    let admitted = match account_still_admitted(&state, account_identity).await {
+        Ok(()) => session_not_revoked(&state, session_revocation.as_ref()).await,
+        refused => refused,
+    };
+    if let Err(error) = admitted {
         send_ws_error(&mut socket, error.into_wire()).await;
         let _ = socket.close().await;
         core_server_shell.close(session);
@@ -1174,6 +1247,25 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         let stall_at = thin_reader.stall_deadline();
         tokio::select! {
             _ = &mut writer_terminal => break,
+            // `jazz.revokeUser`, from any backend instance: an idle session
+            // ends at once too, not on its next message. A closed watch (the
+            // registry owner is gone) fails the lookup, and the session ends.
+            _ = async {
+                match &mut revocations {
+                    Some(revocations) => {
+                        let _ = revocations.changed().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(revocations) = &mut revocations {
+                    revocations.borrow_and_update();
+                }
+                if let Err(error) = session_not_revoked(&state, session_revocation.as_ref()).await {
+                    queue_ws_error(&writer_tx, error.into_wire());
+                    break;
+                }
+            }
             _ = keepalive.tick() => {
                 // A connection waiting for room reads nothing, its peer's
                 // pongs included: that is not the peer going quiet.
@@ -4134,6 +4226,184 @@ mod tests {
             .expect("local-first author")
             .with_account(account);
         (token, identity, subject)
+    }
+
+    /// A user session the app's backend states, for `subject` (enrolled
+    /// first), authenticated at `authenticated_at_ms`: the socket, and the
+    /// frames it got after its prelude and Hello.
+    #[cfg(feature = "embedded-server")]
+    async fn stated_session(
+        core: &crate::server::testing::JazzServer,
+        subject: &str,
+        authenticated_at_ms: u64,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Vec<WireFrame>,
+    ) {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER};
+        let account = enroll(core, subject).await;
+        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, subject)
+            .expect("external author")
+            .with_account(account);
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{}/apps/{}/ws",
+            core.port(),
+            core.app_id()
+        ))
+        .await
+        .expect("connect");
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": {
+                "backend_secret": JazzServer::BACKEND_SECRET,
+                "backend_session": {
+                    "account_id": account,
+                    "issuer": TEST_JWT_ISSUER,
+                    "user_id": subject,
+                    "claims": {},
+                    "authMode": "external",
+                    "authenticatedAt": authenticated_at_ms,
+                },
+            },
+            "bundle": core.latest_bundle(),
+        });
+        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+            .await
+            .expect("send prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
+        let mut frames = Vec::new();
+        // The Hello, and an admission error right behind it if there is one.
+        let until = tokio::time::Instant::now() + Duration::from_millis(500);
+        while let Ok(Some(Ok(message))) = tokio::time::timeout_at(until, ws.next()).await {
+            frames.extend(decode_ws_message(&message));
+            if frames
+                .iter()
+                .any(|frame| matches!(frame, WireFrame::Error(_)))
+            {
+                break;
+            }
+        }
+        (ws, frames)
+    }
+
+    #[cfg(feature = "embedded-server")]
+    async fn revoke_sessions(
+        core: &crate::server::testing::JazzServer,
+        subject: &str,
+        revoked_before: u64,
+    ) -> u64 {
+        let response = admin_accounts(
+            core,
+            "revoke-sessions",
+            serde_json::json!({
+                "identity": {
+                    "issuer": crate::server::testing::TEST_JWT_ISSUER,
+                    "subject": subject,
+                },
+                "revokedBefore": revoked_before,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.expect("revocation response");
+        body["revokedBefore"].as_u64().expect("revokedBefore")
+    }
+
+    fn is_revoked(frame: &WireFrame) -> bool {
+        matches!(
+            frame,
+            WireFrame::Error(WireError {
+                code: WireErrorCode::AuthFailed,
+                retry: WireRetry::AfterAuth,
+                message,
+            }) if message == super::super::accounts::SESSION_REVOKED
+        )
+    }
+
+    /// `jazz.revokeUser` on one backend instance reaches the sessions any
+    /// other instance holds: a revocation mark in the registry closes the
+    /// user's live stated sessions at once (with no traffic on them), leaves
+    /// other users alone, refuses sessions stated later on an older
+    /// `authenticate`, and admits a fresh sign-in.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn revoking_a_users_sessions_ends_stated_sessions_from_any_backend() {
+        use crate::server::testing::JazzServer;
+
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::start_with_schema(schema)
+            .await
+            .expect("start test server");
+        let now = unix_now_ms();
+
+        let (mut alice, frames) = stated_session(&core, "alice", now - 1_000).await;
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_)]),
+            "Alice is admitted: {frames:?}"
+        );
+        let (mut bob, frames) = stated_session(&core, "bob", now - 1_000).await;
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_)]),
+            "{frames:?}"
+        );
+
+        assert_eq!(revoke_sessions(&core, "alice", now).await, now);
+        let revoked = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(message)) = alice.next().await {
+                if decode_ws_message(&message).iter().any(is_revoked) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("Alice's idle socket ends promptly");
+        assert!(revoked, "Alice's socket ends as revoked");
+
+        // Bob's session is untouched.
+        let quiet_until = tokio::time::Instant::now() + Duration::from_millis(300);
+        while let Ok(message) = tokio::time::timeout_at(quiet_until, bob.next()).await {
+            let message = message
+                .expect("Bob stays open")
+                .expect("Bob stays readable");
+            assert!(
+                !decode_ws_message(&message)
+                    .iter()
+                    .any(|frame| matches!(frame, WireFrame::Error(_))),
+                "another user's revocation leaves Bob alone"
+            );
+        }
+
+        // An earlier mark never moves the recorded one back.
+        assert_eq!(revoke_sessions(&core, "alice", now - 5_000).await, now);
+
+        // A session another instance admits on an `authenticate` answer from
+        // before the revocation (a slow sign-in, a cached answer) is refused.
+        let (_late, frames) = stated_session(&core, "alice", now - 1).await;
+        assert!(
+            frames.iter().any(is_revoked),
+            "stale admission refused: {frames:?}"
+        );
+
+        // Signing in again afterwards works.
+        let (_fresh, frames) = stated_session(&core, "alice", now + 1).await;
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_)]),
+            "a fresh sign-in is admitted: {frames:?}"
+        );
+        let _ = bob.close(None).await;
     }
 
     /// Alice holds a live account websocket. An unrelated registry change

@@ -764,19 +764,23 @@ export interface Jazz {
    */
   createAccountFor(userId: string): Promise<string>;
   /**
-   * End `userId`'s open sync sessions on this backend instance now, as
+   * End `userId`'s open sync sessions now, on every backend instance, as
    * refused: each client asks your backend who is signed in, and signs out
    * if `authenticate` no longer names that user (or reconnects if it still
    * does). Call it from your sign-out handler or your auth provider's
    * session-revoked webhook, so a sign-out reaches open sessions before
-   * their `expiresAt`. A session still signing in when you call it (its
-   * `authenticate` may have read the cookie you just ended) is refused too
-   * if it signs in as `userId`. Sessions served by other instances end at
-   * their `expiresAt`; an HTTP stream session there also asks
-   * `authenticate` again on a send at least every `streamAuthReuseSeconds`
-   * (a minute by default), so it ends within that long if `authenticate` no
-   * longer names the user. Returns how
-   * many open sessions it ended.
+   * their `expiresAt`. On serverless hosts the call usually runs on another
+   * instance than the user's sessions: it records the revocation at the
+   * core, which ends the sessions any instance serves, and refuses those an
+   * instance admits afterwards on an `authenticate` answer from before the
+   * call (a sign-in still running, or an HTTP stream's reused answer). A
+   * sign-in that starts after the call is admitted as usual. Times are
+   * compared on your backend instances' clocks.
+   *
+   * Resolves with how many open sessions it ended on this instance (it
+   * can't count the others), once the core has recorded the revocation.
+   * Against a core older than this (no session revocation), it ends this
+   * instance's sessions only, and warns once: upgrade the core.
    */
   revokeUser(userId: string): Promise<number>;
   /**
@@ -860,6 +864,11 @@ const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
  * `LOCAL_FIRST_AUTH_DISABLED_MESSAGE` before 2.0.0-alpha.62).
  */
 const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
+// The core's refusal of a user session `jazz.revokeUser` ended (its
+// `SESSION_REVOKED`), and a bound on the size of the error batch carrying
+// it, so larger sync batches aren't searched for it.
+const CORE_REVOKED_SESSION = "session revoked: jazz.revokeUser ended this user's sessions";
+const CORE_REVOKED_FRAME_MAX_BYTES = 512;
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
@@ -1773,8 +1782,22 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     );
   }
 
+  let warnedNoCoreRevocation = false;
+  function warnNoCoreRevocation() {
+    if (warnedNoCoreRevocation) return;
+    warnedNoCoreRevocation = true;
+    console.error(
+      "createJazz: the core has no session revocation (it runs an older jazz-tools), so jazz.revokeUser ends only the sessions this backend instance serves; sessions on other instances end at their expiresAt. Upgrade the core (a vercel() core is restarted on the newer version by the next deployment).",
+    );
+  }
+
   /** One admin account request to the core: this backend vouches for the identities. */
   async function adminAccounts(operation: string, body: unknown): Promise<{ account: string }> {
+    const parsed = (await adminAccountsCall(operation, body)) as { account: unknown };
+    return { ...parsed, account: String(parsed.account) };
+  }
+
+  async function adminAccountsCall(operation: string, body: unknown): Promise<unknown> {
     const response = await core.handle(
       "POST",
       `/apps/${encodeURIComponent(accountAppId(appId))}/admin/accounts/${operation}`,
@@ -1795,8 +1818,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         },
       );
     }
-    const parsed = JSON.parse(text) as { account: unknown };
-    return { ...parsed, account: String(parsed.account) };
+    return JSON.parse(text) as unknown;
   }
 
   const identity = (userId: string) => ({ issuer, subject: userId });
@@ -2400,7 +2422,25 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       // accounts at all: the client only goes offline, so say why here.
       // The core refuses in its first message, so only that one is looked at.
       let firstFromCore = admitted.guest === true;
+      // A user's session the core ends because `revokeUser` ran, on this
+      // instance or another: refused here as `revokeUser` refuses it, and
+      // nothing more from the core reaches the client.
+      let revokedByCore = false;
       const relay: typeof onEvent = (error, event) => {
+        if (revokedByCore) return;
+        if (
+          admitted.user &&
+          event.kind === "message" &&
+          event.data &&
+          event.data.byteLength <= CORE_REVOKED_FRAME_MAX_BYTES
+        ) {
+          const { buffer, byteOffset, byteLength } = event.data;
+          if (Buffer.from(buffer, byteOffset, byteLength).includes(CORE_REVOKED_SESSION)) {
+            revokedByCore = true;
+            clientSession.revoke("revokeUser");
+            return;
+          }
+        }
         if (firstFromCore && event.kind === "message" && event.data) {
           firstFromCore = false;
           const { buffer, byteOffset, byteLength } = event.data;
@@ -2636,6 +2676,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     for (const credential of ["backend_secret", "admin_secret"]) {
       if (parsed[credential] != null || auth[credential] != null) return null;
     }
+    // The core compares this with the user's revocation mark: a
+    // `revokeUser` on any instance after this moment ends the session, and
+    // one before it refuses the session (see `revokeUser`).
+    const authenticatedAt = Date.now();
     const user = await authenticate(request);
     if (!user || user.userId !== stated.user_id) return null;
     // A browser states a user's session only once its sign-in (or link)
@@ -2647,7 +2691,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (error instanceof NoJazzAccountError) return null;
       throw error;
     }
-    const vouched = { backend_secret: core.backendSecret, backend_session: session };
+    const vouched = {
+      backend_secret: core.backendSecret,
+      backend_session: { ...session, authenticatedAt },
+    };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
@@ -3569,6 +3616,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     async revokeUser(userId) {
       if (typeof userId !== "string" || userId === "")
         throw new Error("revokeUser: pass the user's id, as your authenticate names it");
+      // Sessions whose `authenticate` started before now end, wherever they
+      // are served.
+      const revokedBefore = Date.now();
       let ended = 0;
       for (const { session } of [...liveSessions]) {
         if (session.trusted) continue;
@@ -3578,6 +3628,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         if (session.userId !== userId) continue;
         session.revoke("revokeUser");
         ended += 1;
+      }
+      // The core ends the sessions other instances serve (on serverless,
+      // usually not this one), and refuses any they admit later on an
+      // `authenticate` answer from before now.
+      try {
+        await adminAccountsCall("revoke-sessions", { identity: identity(userId), revokedBefore });
+      } catch (error) {
+        // A core without the route: only this instance's sessions end.
+        const { status, code } = error as { status?: number; code?: string };
+        if (status !== 404 || code !== "") throw error;
+        warnNoCoreRevocation();
       }
       return ended;
     },

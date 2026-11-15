@@ -24,6 +24,11 @@ enum Request {
         Principal,
         oneshot::Sender<Result<Assignment, RegistryError>>,
     ),
+    RevokeSessions(Principal, u64, oneshot::Sender<Result<u64, RegistryError>>),
+    SessionsRevokedBefore(
+        Principal,
+        oneshot::Sender<Result<Option<u64>, RegistryError>>,
+    ),
     Close(mpsc::Sender<Result<(), String>>),
 }
 
@@ -34,6 +39,10 @@ pub(crate) struct AccountRegistryOwner {
     /// watch closes (and every subscriber re-checks and fails closed) if that
     /// thread exits for any reason, including a panic.
     changes: tokio::sync::watch::Receiver<u64>,
+    /// Like `changes`, for session revocations alone: live user sessions
+    /// watch this one, so sign-ups and links don't send every socket to the
+    /// owner thread.
+    revocations: tokio::sync::watch::Receiver<u64>,
     #[cfg(test)]
     failpoint: Failpoint,
 }
@@ -43,6 +52,7 @@ impl AccountRegistryOwner {
     pub(crate) fn open(storage: HostSql) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
         let (notify, changes) = tokio::sync::watch::channel(0u64);
+        let (notify_revocation, revocations) = tokio::sync::watch::channel(0u64);
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
@@ -96,6 +106,17 @@ impl AccountRegistryOwner {
                             // A lookup never mutates: nothing to announce.
                             let _ = response.send(registry.login(&principal));
                         }
+                        Request::RevokeSessions(principal, before_ms, response) => {
+                            let result = registry.revoke_sessions(&principal, before_ms);
+                            // As for commands: an `Unavailable` failure may
+                            // come after the write committed.
+                            notify_revocation
+                                .send_modify(|revision| *revision = revision.wrapping_add(1));
+                            let _ = response.send(result);
+                        }
+                        Request::SessionsRevokedBefore(principal, response) => {
+                            let _ = response.send(registry.sessions_revoked_before(&principal));
+                        }
                         Request::Close(response) => {
                             drop(registry);
                             let _ = response.send(Ok(()));
@@ -112,6 +133,7 @@ impl AccountRegistryOwner {
         Ok(Self {
             sender,
             changes,
+            revocations,
             closed: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             failpoint: _failpoint,
@@ -142,6 +164,39 @@ impl AccountRegistryOwner {
         let mut changes = self.changes.clone();
         changes.mark_unchanged();
         changes
+    }
+
+    /// Session revocations, as `subscribe` gives registry changes.
+    pub(crate) fn subscribe_revocations(&self) -> tokio::sync::watch::Receiver<u64> {
+        let mut revocations = self.revocations.clone();
+        revocations.mark_unchanged();
+        revocations
+    }
+
+    /// End `principal`'s sessions authenticated before `before_ms`; returns
+    /// the mark in force (never earlier than one recorded before).
+    pub(crate) async fn revoke_sessions(
+        &self,
+        principal: Principal,
+        before_ms: u64,
+    ) -> Result<u64, RegistryError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Request::RevokeSessions(principal, before_ms, reply))
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    /// The latest session revocation mark for `principal`, if any.
+    pub(crate) async fn sessions_revoked_before(
+        &self,
+        principal: Principal,
+    ) -> Result<Option<u64>, RegistryError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Request::SessionsRevokedBefore(principal, reply))
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {
