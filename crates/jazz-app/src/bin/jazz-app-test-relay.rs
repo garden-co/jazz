@@ -5,8 +5,8 @@
 //!
 //! ```text
 //! cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay
-//! jazz-app-test-relay --core <url> --app-id <uuid> \
-//!     --backend-secret <s> --admin-secret <s> --bundle <id>
+//! JAZZ_BACKEND_SECRET=<s> JAZZ_ADMIN_SECRET=<s> \
+//!     jazz-app-test-relay --core <url> --app-id <uuid> --bundle <id>
 //! ```
 //!
 //! It prints the endpoint URL (`http://127.0.0.1:<port>/jazz`, a client's
@@ -14,7 +14,10 @@
 //! cleanly on SIGTERM or SIGINT.
 //!
 //! - `--core`: the core's base URL (a running `jazz-server`).
-//! - `--backend-secret`, `--admin-secret`: the core's secrets for the app.
+//! - `JAZZ_BACKEND_SECRET`, `JAZZ_ADMIN_SECRET`: the core's secrets for the
+//!   app, as `jazz-tools server` reads them. `--backend-secret <s>` and
+//!   `--admin-secret <s>` work too, but put them in argv, where `ps` shows
+//!   them.
 //! - `--bundle`: the bundle the relay admits end users' sockets to. Get it by
 //!   opening a backend (jazz-ffi, or jazz-app's `Backend`) on the core with
 //!   the app's permissions (e.g. StagePlan's `jazz.permissions.json`) and
@@ -32,8 +35,9 @@ use std::process::ExitCode;
 
 use jazz_app::AppId;
 
-const USAGE: &str = "usage: jazz-app-test-relay --core <url> --app-id <uuid> \
-    --backend-secret <s> --admin-secret <s> --bundle <id>";
+const USAGE: &str = "usage: JAZZ_BACKEND_SECRET=<s> JAZZ_ADMIN_SECRET=<s> \
+    jazz-app-test-relay --core <url> --app-id <uuid> --bundle <id> \
+    [--backend-secret <s>] [--admin-secret <s>]";
 
 struct Args {
     core: String,
@@ -63,13 +67,18 @@ fn parse_args() -> Result<Args, String> {
     }
     let need =
         |value: Option<String>, flag: &str| value.ok_or_else(|| format!("missing {flag}\n{USAGE}"));
+    let secret = |value: Option<String>, flag: &str, env: &str| {
+        value
+            .or_else(|| std::env::var(env).ok())
+            .ok_or_else(|| format!("missing {env} (or {flag})\n{USAGE}"))
+    };
     let app_id = need(app_id, "--app-id")?;
     Ok(Args {
         core: need(core, "--core")?,
         app_id: AppId::from_string(&app_id)
             .map_err(|error| format!("--app-id {app_id:?}: {error}"))?,
-        backend_secret: need(backend_secret, "--backend-secret")?,
-        admin_secret: need(admin_secret, "--admin-secret")?,
+        backend_secret: secret(backend_secret, "--backend-secret", "JAZZ_BACKEND_SECRET")?,
+        admin_secret: secret(admin_secret, "--admin-secret", "JAZZ_ADMIN_SECRET")?,
         bundle: need(bundle, "--bundle")?,
     })
 }
