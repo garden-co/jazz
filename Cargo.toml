@@ -15,6 +15,8 @@ members = [
   "crates/jazz-native-transport",
   "crates/jazz-native-relay",
   "crates/jazz-app",
+  # JSON-in/JSON-out bindings of jazz-app: UniFFI (Swift, Kotlin), C ABI (Go).
+  "crates/jazz-ffi",
   "crates/jazz-cli",
   "crates/jazz-codegen",
   "crates/jazz-server",
