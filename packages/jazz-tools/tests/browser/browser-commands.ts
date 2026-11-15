@@ -6,20 +6,30 @@ import {
 } from "./transport-control-commands.js";
 
 import type { JazzServerInfo } from "./testing-server.js";
-import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
-import type { ClientMigrations } from "../../src/runtime/client-migrations.js";
+import type { BoundApp } from "../../src/typed-app.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
+  /**
+   * Optional: only configs whose tests deploy permissions register it.
+   * The engine's policies for a `jazz.permissions.json`, compiled in Node
+   * against what the app's bindings passed to `bindApp` (the browser can't
+   * load jazz-napi, which compiles them).
+   */
+  jazzTestPermissions?(
+    bound: BoundApp,
+    permissions: TestPermissionsFile,
+  ): Promise<CompiledPermissionsMap>;
   jazzAppFront(
     coreUrl: string,
     app: {
-      schema: WasmSchema;
-      /** What the app ships (`defineApp(schema, { migrations })`): a command drops the schema's own record of it. */
-      migrations?: ClientMigrations;
-      permissions: CompiledPermissionsMap;
+      /** What the app's bindings passed to `bindApp`: its schema, history and migrations. */
+      bound: BoundApp;
+      /** Its `jazz.permissions.json`. */
+      permissions: TestPermissionsFile;
       pageOrigin: string;
     },
   ): Promise<string>;
