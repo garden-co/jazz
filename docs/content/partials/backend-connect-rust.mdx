@@ -1,0 +1,61 @@
+The `jazz-app` crate isn't on crates.io yet, so depend on it from the Jazz repository:
+
+```toml title="Cargo.toml"
+[dependencies]
+jazz-app = { git = "https://github.com/garden-co/jazz" }
+tokio = { version = "1", features = ["full"] }
+```
+
+**Generate the bindings.**
+With a `Cargo.toml` that depends on `jazz-app` beside `jazz.app.json`, `jazz-tools generate` writes
+`src/jazz_app.rs`:
+
+```bash
+npx jazz-tools generate            # checks the files, writes src/jazz_app.rs
+npx jazz-tools generate --check    # in CI: fails if src/jazz_app.rs is stale
+```
+
+Commit `src/jazz_app.rs` and declare it with `mod jazz_app;`. Per table it gives you:
+
+- a row struct (`Todo`), with snake_case fields;
+- `NewTodo`, where `NewTodo::new(…)` takes the required columns;
+- `TodoUpdate`;
+- a module (`todos`) with `query()`, typed columns and relations.
+
+If your app declares computed fields or transforms, the bindings also declare a `Computed` trait,
+and `open` takes your implementation of it.
+
+To generate the bindings at build time instead, call `jazz_codegen::rust::build()` from `build.rs`
+and `include!` its output.
+
+**Open the app.**
+
+<include cwd lang="rust" meta='title="src/main.rs"'>
+  ../examples/docs/todo-server-rs/src/main.rs#backend-open-rust
+</include>
+
+`jazz_app::Jazz` is `Send + Clone`, so it can sit in shared state, such as an Axum router's. The
+client runs on a thread of its own. Before the process exits, call `jazz.shutdown().await`, so that
+the calls already made finish and the local store closes.
+
+The backend needs the sync server's admin secret, to publish the bundle, and its backend secret, to
+vouch for the user it acts as. Keep both on the server.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Rust tab
+for each example. `examples/todo-server-rs` in the repository is a complete service.
+
+**Device accounts need the app id your clients derive.** A TypeScript client names no app: it
+derives the app id from its `serverUrl`, the UUIDv5, in the DNS namespace, of the endpoint URL as
+the client resolves it (origin and path, `ws(s)` read as `http(s)`, no trailing slash, such as
+`https://app.example.com/jazz`). Your endpoint serves its app under any app id in the path, so users
+who sign in with your app's own auth (a bearer token or cookie) just work. A device account's
+token, though, is signed for the derived id: to let device accounts in, run the core under that id,
+or, when the id is fixed, as an app's on Jazz Cloud is, set your clients' `scope` to it
+(`<JazzProvider config={{ serverUrl: "/jazz", scope: "<app id>" }}>`).
+
+```rust
+// The URL your clients sync with, exactly as they resolve it.
+let app_id = AppId::from_name("https://app.example.com/jazz");
+```
+
+What Rust's backend doesn't do yet is listed in [Language support](/docs/reference/language-support#rust).

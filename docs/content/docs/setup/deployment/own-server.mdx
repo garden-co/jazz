@@ -11,28 +11,50 @@ This page sets up your **main backend**: the backend that runs `createJazz`, ser
 browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
 [backend clients](/docs/setup/backend-client).
 
-Rust and Go backends can't run Jazz's core in their own process yet: run them against
-[Jazz Cloud](/docs/setup/deployment/jazz-cloud#connect-your-backend) or a Jazz server.
-
 <include>../../../partials/install-alpha.mdx</include>
 
 ## Create Jazz once
 
-```ts title="jazz.server.ts"
-import { createJazz, sqlite } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
-import permissions from "./jazz.permissions.json" with { type: "json" };
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    ```ts title="jazz.server.ts"
+    import { createJazz, sqlite } from "jazz-tools/backend";
+    import { app } from "./jazz.generated";
+    import permissions from "./jazz.permissions.json" with { type: "json" };
 
-export const jazz = createJazz({
-  app,
-  permissions,
-  store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
-  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
-  authenticate: async (request) => null,
-});
-```
+    export const jazz = createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
+      // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+      authenticate: async (request) => null,
+    });
+    ```
 
-<include>../../../partials/main-backend-config.mdx</include>
+    <include>../../../partials/main-backend-config.mdx</include>
+
+  </Tab>
+  <Tab value="Rust">
+    A Rust backend can't run Jazz's core in its own process yet, so on your own server it keeps the
+    data in [Jazz Cloud](/docs/setup/deployment/jazz-cloud): get an app ID there, and set
+    `JAZZ_APP_ID`, `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` as that page says.
+
+    <include>../../../partials/backend-connect-rust.mdx</include>
+
+    <include>../../../partials/backend-serve-rust.mdx</include>
+
+  </Tab>
+  <Tab value="Go">
+    A Go backend can't run Jazz's core in its own process yet, so on your own server it keeps the
+    data in [Jazz Cloud](/docs/setup/deployment/jazz-cloud): get an app ID there, and set
+    `JAZZ_APP_ID`, `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` as that page says.
+
+    <include>../../../partials/backend-connect-go.mdx</include>
+
+    <include>../../../partials/backend-serve-go.mdx</include>
+
+  </Tab>
+</Tabs>
 
 The examples on this page are ES modules and use top-level `await`, so the backend package needs
 `"type": "module"` (or `.mts` files). `jazz.generated.ts` must be an ES module too. In a CommonJS
