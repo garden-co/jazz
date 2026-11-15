@@ -44,6 +44,8 @@ export JAZZ_BACKEND_SECRET="<BACKEND_SECRET>"
 cargo run -p todo-server
 ```
 
+On Ctrl-C it stops serving, then calls `jazz.shutdown()`: with a persistent store, call `shutdown` before the process exits, so the calls already made finish and the store closes.
+
 The service runs as one configured user. HTTP requests don't select separate Jazz identities, and its HTTP API has no sign-in of its own, so serve it only where your own infrastructure authenticates callers.
 
 | Variable              | Default                                |

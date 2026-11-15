@@ -73,12 +73,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jazz = jazz_app::open(config).await?;
     info!("Published bundle {}", jazz.bundle().unwrap_or("-"));
 
-    let app = router(jazz)
+    let app = router(jazz.clone())
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("Listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+    // With a persistent store, stop the client before exiting: the writes
+    // already made finish and the store closes.
+    info!("Shutting down");
+    jazz.shutdown().await?;
     Ok(())
 }
