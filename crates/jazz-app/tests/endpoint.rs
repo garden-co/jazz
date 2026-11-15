@@ -113,6 +113,7 @@ impl App {
 
     async fn stop(self) {
         self.host.abort();
+        self.endpoint.shutdown().await.unwrap();
         self.backend.shutdown().await.unwrap();
         self.server.shutdown().await;
     }
