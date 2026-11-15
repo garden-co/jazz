@@ -153,7 +153,7 @@ describe("cli migrations", () => {
     app.migrations![0]!.migrate = { todos: { body: { renameFrom: "notes" } } };
     await writeFile(join(root, "jazz.app.json"), JSON.stringify(app, null, 2));
     await expect(generate({ schemaDir: root })).rejects.toThrow(
-      /table "todos".*"body" comes out optional but is required/,
+      /^jazz\.app\.json: migrations: invalid migration from [0-9a-f]{64} to [0-9a-f]{64}: invalid catalogue update: the migration does not produce the columns of table "todos" \("body" comes out optional but is required\); a migration can add, drop or rename a column, but a column it keeps or renames must keep its type and optionality$/,
     );
   });
 

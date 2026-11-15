@@ -26,6 +26,7 @@
 //! JWT), reads inside transactions, subscribing to history, and partial
 //! reads of large values.
 
+mod advice;
 mod app;
 mod backend;
 mod config;
@@ -44,6 +45,7 @@ pub mod untyped;
 mod value;
 mod writes;
 
+pub use advice::Advice;
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
