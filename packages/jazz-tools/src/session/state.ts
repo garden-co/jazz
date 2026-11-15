@@ -16,6 +16,7 @@ import type { Db } from "../runtime/db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import type { DbReplacedReason } from "../runtime/db-replaced-error.js";
+import { JazzSessionOperationError } from "./session-operation-error.js";
 
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
@@ -28,6 +29,8 @@ type WipeableClient = {
     deleteClientStorage?(): Promise<void>;
     getSyncStatus?(): { pendingUploads: number };
     isUsable?(): boolean;
+    abortGracefulShutdown?(): void;
+    onSyncStatusChange?(listener: (status: { link: { state: string } }) => void): () => void;
   };
 };
 
@@ -50,7 +53,14 @@ export type SessionCoreOperation =
   | "logout"
   | "retry";
 export interface SessionCoreSnapshot<Client> {
-  readonly status: "ready" | "signed-out" | "transitioning" | "error" | "closed";
+  /**
+   * `signing-out`: signed out on this device (no account, no client), while
+   * the signed-out user's client still uploads its last writes: the sign-out
+   * couldn't reach the server (offline). It moves on to `signed-out` once
+   * they have uploaded (or the server refused them); `error` says why it
+   * waits. Nothing signs in meanwhile.
+   */
+  readonly status: "ready" | "signed-out" | "transitioning" | "signing-out" | "error" | "closed";
   readonly account?: AccountHandle;
   readonly client?: Client;
   readonly pending?: SessionCoreOperation;
@@ -113,6 +123,24 @@ type ClientReplacer = (
 ) => Promise<void>;
 const replacers = new WeakMap<object, ClientReplacer>();
 const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>();
+const signOutCounts = new WeakMap<object, () => number>();
+
+/**
+ * @internal How many sign-outs (`logout`) the session has started. Work that
+ * began before a sign-out (a backend check) compares it to drop its late
+ * result instead of signing someone in again after the sign-out.
+ */
+export function jazzSessionSignOuts(session: SessionCore<unknown>): number {
+  return signOutCounts.get(session)?.() ?? 0;
+}
+
+/**
+ * The first wait before a `signing-out` session tries its upload again
+ * (it doubles, up to {@link SIGN_OUT_RETRY_MAX_MS}); it also tries again
+ * whenever the client reconnects.
+ */
+export const SIGN_OUT_RETRY_MS = 2_000;
+const SIGN_OUT_RETRY_MAX_MS = 60_000;
 const upgradeListeners = new WeakMap<object, Set<() => void>>();
 
 /**
@@ -247,6 +275,19 @@ export async function createJazzSessionOwner<
   let busy: Promise<void> | undefined;
   let closing: Promise<void> | undefined;
   let loggingOut: Promise<void> | undefined;
+  let signOuts = 0;
+  // A sign-out that couldn't reach the server (`signing-out`): the
+  // signed-out user's client, still open so it can upload its last writes.
+  let draining:
+    | {
+        readonly client: Client;
+        error: Error;
+        attempt?: Promise<void>;
+        timer?: ReturnType<typeof setTimeout>;
+        waitMs: number;
+        stopStatus?: () => void;
+      }
+    | undefined;
   let closed = false;
   const publish = (next: SessionCoreSnapshot<Client>) => {
     snapshot = Object.freeze({ ...next });
@@ -293,7 +334,7 @@ export async function createJazzSessionOwner<
       done: Promise.race([Promise.all(waits), deadline]).then(() => clearTimeout(timer)),
     };
   };
-  const superseded = () => new Error("Jazz session operation was superseded");
+  const superseded = () => new JazzSessionOperationError("superseded");
   const perform = async (
     operation: SessionCoreOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
@@ -313,6 +354,8 @@ export async function createJazzSessionOwner<
     let heldElsewhere = false;
     const previousSelected = signsOut ? selected : undefined;
     let thinSignOut = false;
+    // A sign-out whose local part is done, uploading the user's last writes.
+    let uploadingSignOut = false;
     await (detached ??
       detach({ status: "transitioning", account: selected, pending: operation }).done);
     if (token !== generation) throw superseded();
@@ -347,6 +390,8 @@ export async function createJazzSessionOwner<
         } else {
           // A client the server refuses (this user's sign-in ended) can't
           // upload, and the session is moving on from it either way.
+          // What's left of a sign-out is the server's part: the upload.
+          uploadingSignOut = operation === "logout";
           await stopPastRefusal(
             client,
             signsOut ? "Jazz signed out" : "Jazz closed the previous client",
@@ -359,38 +404,57 @@ export async function createJazzSessionOwner<
       }
     } catch (cause) {
       if (token !== generation) throw cause;
-      if (stillUsable(client, cause)) {
-        // The step failed before the client's teardown began (offline, a
-        // storage delete the worker couldn't start): it keeps working, and
-        // the app may try the operation again.
-        publish({
-          status: "ready",
-          account: selected,
-          client,
-          error: toError(cause),
-          recovery: "action",
-        });
-        throw cause;
+      if (
+        uploadingSignOut &&
+        cause instanceof GracefulShutdownSyncError &&
+        stillUsable(client, cause)
+      ) {
+        // Offline: the sign-out's local part is done (the server neither
+        // refused the user nor took their last writes). Sign out now, and
+        // keep the client open, out of sight, to upload them once the
+        // server is back (`signing-out`).
+        (client as WipeableClient).db?.markReplaced?.("signed-out");
+        draining = { client: client!, error: toError(cause), waitMs: SIGN_OUT_RETRY_MS };
+        client = undefined;
+      } else {
+        if (stillUsable(client, cause)) {
+          // The step failed before the client's teardown began (offline, a
+          // storage delete the worker couldn't start): it keeps working, and
+          // the app may try the operation again.
+          publish({
+            status: "ready",
+            account: selected,
+            client,
+            error: toError(cause),
+            recovery: "action",
+          });
+          throw cause;
+        }
+        if (operation !== "logout") {
+          // Its teardown began, so it can't be offered again. Unknown teardown
+          // failures retain the client privately as a shutdown barrier: never
+          // publish a potentially stopped runtime or enroll over it.
+          publish({
+            status: "error",
+            account: selected,
+            error: toError(cause),
+            recovery: "action",
+          });
+          throw cause;
+        }
+        // A sign-out whose teardown began and failed still signs out: the
+        // user asked to leave, and did. The failure is logged, and published
+        // as the session's error only when a clearOnSignOut wipe may not have
+        // finished. Code that kept the half-closed client's Db learns it is gone.
+        console.error("Jazz signed out, but closing the signed-out client failed.", cause);
+        if (options.clearOnSignOut && !wiped && !isThinDb((client as WipeableClient).db as Db))
+          unfinishedWipe = new Error(
+            "Jazz signed out, but couldn't finish wiping this device's data (clearOnSignOut). Some of the signed-out user's data may still be on this device.",
+            { cause },
+          );
+        (client as WipeableClient).db?.markReplaced?.("signed-out");
+        client = undefined;
       }
-      if (operation !== "logout") {
-        // Its teardown began, so it can't be offered again. Unknown teardown
-        // failures retain the client privately as a shutdown barrier: never
-        // publish a potentially stopped runtime or enroll over it.
-        publish({ status: "error", account: selected, error: toError(cause), recovery: "action" });
-        throw cause;
-      }
-      // A sign-out whose teardown began and failed still signs out: the
-      // user asked to leave, and did. The failure is logged, and published
-      // as the session's error only when a clearOnSignOut wipe may not have
-      // finished. Code that kept the half-closed client's Db learns it is gone.
-      console.error("Jazz signed out, but closing the signed-out client failed.", cause);
-      if (options.clearOnSignOut && !wiped && !isThinDb((client as WipeableClient).db as Db))
-        unfinishedWipe = new Error(
-          "Jazz signed out, but couldn't finish wiping this device's data (clearOnSignOut). Some of the signed-out user's data may still be on this device.",
-          { cause },
-        );
-      (client as WipeableClient).db?.markReplaced?.("signed-out");
-      client = undefined;
     }
     if (token !== generation) throw superseded();
     if (signsOut && options.clearOnSignOut && previousSelected) {
@@ -437,9 +501,16 @@ export async function createJazzSessionOwner<
     } catch (cause) {
       if (token === generation)
         publish({ status: "error", account: selected, error: toError(cause), recovery: "session" });
+      // A sign-out that left its upload pending still uploads it.
+      if (draining && !client) watchDrain(draining);
       throw cause;
     }
     if (token !== generation) throw superseded();
+    if (draining && !client) {
+      publish({ status: "signing-out", error: draining.error, recovery: "action" });
+      watchDrain(draining);
+      return;
+    }
     publish({
       status: client ? "ready" : "signed-out",
       account: selected,
@@ -447,14 +518,69 @@ export async function createJazzSessionOwner<
       ...(unfinishedWipe ? { error: unfinishedWipe, recovery: "session" as const } : {}),
     });
   };
+  type Drain = NonNullable<typeof draining>;
+  /** Try the next upload on a backoff, and as soon as the client reconnects. */
+  const watchDrain = (drain: Drain) => {
+    drain.stopStatus ??= (drain.client as WipeableClient).db?.onSyncStatusChange?.((status) => {
+      if (status.link.state === "connected") void drainNow().catch(() => {});
+    });
+    if (drain.timer) clearTimeout(drain.timer);
+    const wait = drain.waitMs;
+    drain.waitMs = Math.min(wait * 2, SIGN_OUT_RETRY_MAX_MS);
+    drain.timer = setTimeout(() => {
+      drain.timer = undefined;
+      void drainNow().catch(() => {});
+    }, wait);
+  };
+  const endDrain = (drain: Drain) => {
+    if (drain.timer) clearTimeout(drain.timer);
+    drain.stopStatus?.();
+    if (draining === drain) draining = undefined;
+  };
+  /**
+   * A `signing-out` session's upload, tried now (one at a time). It ends
+   * the sign-out once the writes uploaded, or when the server refused them
+   * (as `stopPastRefusal` decides), and rejects while the server stays out
+   * of reach.
+   */
+  const drainNow = (): Promise<void> => {
+    const drain = draining;
+    if (!drain || closed) return Promise.resolve();
+    if (drain.attempt) return drain.attempt;
+    const attempt = stopPastRefusal(drain.client, "Jazz signed out").then(
+      () => {
+        if (draining !== drain) return;
+        endDrain(drain);
+        publish({ status: "signed-out" });
+      },
+      (cause: unknown) => {
+        drain.attempt = undefined;
+        if (draining !== drain || closed) throw cause;
+        // Still out of reach. The drain failed before teardown began, so
+        // the client is open (it reads as unusable only because the session
+        // marked it replaced): wait for the next try.
+        if (cause instanceof GracefulShutdownSyncError) {
+          watchDrain(drain);
+          throw cause;
+        }
+        // Its teardown began and failed: signed out all the same, as a
+        // sign-out whose teardown fails is.
+        console.error("Jazz signed out, but closing the signed-out client failed.", cause);
+        endDrain(drain);
+        publish({ status: "signed-out" });
+      },
+    );
+    drain.attempt = attempt;
+    return attempt;
+  };
   const run = (
     operation: SessionCoreOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     signsOut?: boolean,
   ): Promise<void> => {
     if (closed) return Promise.reject(new Error("Jazz session is closed"));
-    if (busy || loggingOut)
-      return Promise.reject(new Error("A Jazz session operation is already pending"));
+    if (loggingOut || draining) return Promise.reject(new JazzSessionOperationError("signing-out"));
+    if (busy) return Promise.reject(new JazzSessionOperationError("pending"));
     const token = ++generation;
     // Publish "transitioning" as the operation becomes pending, so no one
     // sees a settled session that would refuse their operation as busy. It
@@ -504,11 +630,15 @@ export async function createJazzSessionOwner<
     keptLocalFirstKey: () => keptDeviceKey(accounts).known(),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
-    retry: () => run("retry", () => selected),
+    // Signing out: try the upload now.
+    retry: () => (draining ? drainNow() : run("retry", () => selected)),
     logout: () => {
       if (closed) return Promise.reject(new Error("Jazz session is closed"));
       if (loggingOut) return loggingOut;
+      // Signed out here already; its upload goes on (`signing-out`).
+      if (draining) return Promise.resolve();
       const token = ++generation;
+      ++signOuts;
       const pending = busy;
       const task = Promise.resolve().then(async () => {
         await barrier.done;
@@ -545,11 +675,27 @@ export async function createJazzSessionOwner<
         const old = client;
         client = undefined;
         await old?.shutdown();
+        // Closed while signing out: stop the upload. A persistent client
+        // keeps the writes on this device, under that account.
+        const drain = draining;
+        if (drain) {
+          endDrain(drain);
+          const db = (drain.client as WipeableClient).db;
+          db?.abortGracefulShutdown?.();
+          await drain.attempt?.catch(() => {});
+          const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
+          if (writes > 0)
+            console.warn(
+              `Jazz closed while signing out, with ${writes} write(s) of the signed-out user not uploaded yet. A persistent client keeps them on this device and uploads them when that account signs in again; one that keeps nothing loses them.`,
+            );
+          await drain.client.shutdown();
+        }
       });
       const barrier = detach({ status: "closed" });
       return closing;
     },
   };
+  signOutCounts.set(session, () => signOuts);
   switchers.set(session, async (from) => {
     // An operation that published its outcome may still be finishing.
     while (busy || loggingOut) {

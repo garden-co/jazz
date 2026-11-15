@@ -1,6 +1,7 @@
 import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { switchJazzSessionUser, type SessionCore } from "./state.js";
+import { jazzSessionSignOuts, switchJazzSessionUser, type SessionCore } from "./state.js";
+import { JazzSessionOperationError } from "./session-operation-error.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -314,10 +315,21 @@ export function watchBackendUser<Client>(
     const attempt = (run: Promise<unknown>) =>
       asked ? run.then(() => {}) : run.then(() => {}, retryLater);
     const busy = () => (asked && !stopped ? "again" : undefined);
+    // A sign-out since this check began takes over: its answer was asked
+    // for the session before it, so following it could sign the user back
+    // in. An asked check (a refresh) fails as superseded, without asking
+    // again; a plain one just ends.
+    const signOutsAtStart = jazzSessionSignOuts(session as SessionCore<unknown>);
+    const signedOutSince = () =>
+      jazzSessionSignOuts(session as SessionCore<unknown>) !== signOutsAtStart;
+    const dropped = () => {
+      if (asked) throw new JazzSessionOperationError("superseded");
+    };
     if (quiet(asked)) return busy();
     // Only this account is signed out on the answer this check gets.
     const startedWith = session.getSnapshot().account;
     let signedIn = await ask();
+    if (signedOutSince()) return dropped();
     if (signedIn !== null && "failed" in signedIn) {
       if (!asked) {
         // A 404 has its own retry (see `notFoundAnswer`).
@@ -379,6 +391,7 @@ export function watchBackendUser<Client>(
         const from = session.getSnapshot().account!;
         let switched = true;
         await attempt(switchJazzSessionUser(session, from).then((done) => (switched = done)));
+        if (!switched && signedOutSince()) return dropped();
         // The session moved on while an operation finished: ask again.
         return switched ? undefined : busy();
       }
@@ -405,6 +418,7 @@ export function watchBackendUser<Client>(
         } catch (cause) {
           if (linking === link) linking = undefined;
           if (stopped) return;
+          if (signedOutSince()) return dropped();
           const who = `${signedIn.issuer}\0${signedIn.subject}`;
           if (signedOutMeanwhile(cause) && signedOutLink !== who) {
             signedOutLink = who;
@@ -427,6 +441,7 @@ export function watchBackendUser<Client>(
             cause,
           );
         }
+        if (signedOutSince()) return dropped();
         if (quiet(asked)) return busy();
       }
       return attempt(session.loginWithBackend());
@@ -440,6 +455,7 @@ export function watchBackendUser<Client>(
       // `clearOnSignOut`, is wiped), instead of staying open in memory.
       if (current?.issuer !== LOCAL_FIRST_ISSUER || !startedWith || !options.forgotten) return;
       const forgotten = await options.forgotten(startedWith).catch(() => false);
+      if (signedOutSince()) return dropped();
       if (!forgotten) return;
       if (quiet(asked)) return busy();
       forgottenGuest = true;
@@ -455,6 +471,7 @@ export function watchBackendUser<Client>(
       await new Promise((resolve) => setTimeout(resolve, confirmMs));
       if (quiet()) return;
       signedIn = await ask();
+      if (signedOutSince()) return dropped();
       if (quiet()) return;
       if (signedIn !== null) {
         // Someone is signed in after all (the app refreshed its session):
@@ -469,6 +486,7 @@ export function watchBackendUser<Client>(
     if (session.getSnapshot().account !== startedWith) return busy();
     if (!forgottenGuest) {
       if ((await askSignedOut()) === "keep" || quiet(asked)) return;
+      if (signedOutSince()) return dropped();
       if (session.getSnapshot().account !== startedWith) return busy();
     }
     return attempt(session.logout());
@@ -557,7 +575,13 @@ export function watchBackendUser<Client>(
   }
   const unsubscribe = session.subscribe(() => {
     const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" && snapshot.status !== "signed-out") return;
+    // Signing out (its upload pending) is signed out here already.
+    if (
+      snapshot.status !== "ready" &&
+      snapshot.status !== "signed-out" &&
+      snapshot.status !== "signing-out"
+    )
+      return;
     if (snapshot.account === announced) return;
     announced = snapshot.account;
     resetRefusal();

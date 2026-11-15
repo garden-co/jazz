@@ -159,7 +159,9 @@ export function JazzProvider(props: JazzProviderProps) {
       keyed
       fallback={
         <Switch fallback={props.loading ?? <p role="status">Loading...</p>}>
-          <Match when={snapshot().status === "signed-out"}>{props.signedOut}</Match>
+          <Match when={snapshot().status === "signed-out" || snapshot().status === "signing-out"}>
+            {props.signedOut}
+          </Match>
           <Match when={snapshot().status === "closed"}>{props.closed}</Match>
         </Switch>
       }

@@ -291,15 +291,84 @@ describe("Jazz session lifecycle", () => {
     expect(client.shutdown.mock.calls).toEqual([[{ waitForSync: true }], []]);
     await session.close();
   });
-  it("keeps a sign-out failing while its writes may still upload (an outage)", async () => {
-    const { session, clients, old } = await setup();
+  it("signs out offline, then uploads the signed-out user's writes once the server is back", async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, clients, enrollment, openClient } = await setup();
+      const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+      let onStatus: ((status: { link: { state: string } }) => void) | undefined;
+      let replaced = false;
+      client.db = {
+        getAuthState: () => ({}),
+        // As a Db reads: unusable once the session marked it replaced.
+        isUsable: () => !replaced,
+        markReplaced: vi.fn(() => (replaced = true)),
+        onSyncStatusChange: (listener: typeof onStatus) => {
+          onStatus = listener;
+          return () => (onStatus = undefined);
+        },
+      };
+      const failure = new GracefulShutdownSyncError(new Error("websocket transport error"));
+      client.shutdown.mockRejectedValue(failure);
+      // The local part is done: the sign-out resolves, and the session
+      // shows that the server's part waits.
+      await session.logout();
+      expect(enrollment.logout).toHaveBeenCalled();
+      expect(session.getSnapshot()).toMatchObject({
+        status: "signing-out",
+        error: failure,
+        recovery: "action",
+      });
+      expect(session.getSnapshot().account).toBeUndefined();
+      expect(session.getSnapshot().client).toBeUndefined();
+      expect(
+        (client.db as { markReplaced: ReturnType<typeof vi.fn> }).markReplaced,
+      ).toHaveBeenCalledWith("signed-out");
+      // Nothing signs in meanwhile, and signing out again joins it.
+      await expect(session.createLocalFirst()).rejects.toMatchObject({
+        name: "JazzSessionOperationError",
+        reason: "signing-out",
+      });
+      await expect(session.loginWithBackend()).rejects.toMatchObject({ reason: "signing-out" });
+      await session.logout();
+      expect(openClient).toHaveBeenCalledTimes(1);
+      // Still offline: the backoff tries again, and it keeps waiting.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(client.shutdown).toHaveBeenCalledTimes(2);
+      expect(session.getSnapshot().status).toBe("signing-out");
+      // Back online: reconnecting uploads the writes and ends the sign-out.
+      client.shutdown.mockResolvedValue(undefined);
+      onStatus?.({ link: { state: "connected" } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.shutdown).toHaveBeenLastCalledWith({ waitForSync: true });
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      expect(onStatus).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(client.shutdown).toHaveBeenCalledTimes(3);
+      await session.createLocalFirst();
+      expect(session.getSnapshot().status).toBe("ready");
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("tries a pending sign-out's upload on retry, and stops it on close", async () => {
+    const { session, clients } = await setup();
     const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
-    client.db = { getAuthState: () => ({}) };
+    const abortGracefulShutdown = vi.fn();
+    client.db = { getAuthState: () => ({}), abortGracefulShutdown };
     const failure = new GracefulShutdownSyncError(new Error("websocket transport error"));
-    client.shutdown.mockRejectedValueOnce(failure);
-    await expect(session.logout()).rejects.toBe(failure);
-    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: old, error: failure });
+    client.shutdown.mockRejectedValue(failure);
+    await session.logout();
+    await expect(session.retry()).rejects.toBe(failure);
+    expect(session.getSnapshot().status).toBe("signing-out");
+    client.shutdown.mockResolvedValue(undefined);
     await session.close();
+    expect(abortGracefulShutdown).toHaveBeenCalled();
+    // Closing shuts it down without waiting for the server.
+    expect(client.shutdown).toHaveBeenLastCalledWith();
+    expect(session.getSnapshot().status).toBe("closed");
   });
   it("failed link reopens old selection and preserves primary error", async () => {
     const { session, clients, enrollment, old } = await setup();
@@ -437,7 +506,9 @@ describe("Jazz session lifecycle", () => {
     let attempted: Promise<void> | undefined;
     const stop = session.subscribe(() => {
       if (!attempted)
-        attempted = expect(session.loginWithBackend()).rejects.toThrow("already pending");
+        attempted = expect(session.loginWithBackend()).rejects.toMatchObject({
+          reason: "signing-out",
+        });
     });
     await session.logout();
     await attempted;
