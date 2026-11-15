@@ -68,7 +68,10 @@ export function checkLegacyFiles(project: Project, legacy: LegacyJazzTools): str
   for (const file of [project.appFile, project.permissionsJsonFile]) {
     if (!existsSync(file)) {
       throw new UpgradeRefusal(
-        `${file.slice(project.root.length + 1)} is missing: run \`npx jazz-tools validate\` with jazz-tools ${legacy.version} and commit ${APP_FILE} and ${PERMISSIONS_FILE} first`,
+        `${file.slice(project.root.length + 1)} is missing: run \`npx jazz-tools validate\` with jazz-tools ${legacy.version} and commit ${APP_FILE} and ${PERMISSIONS_FILE} first` +
+          (project.permissionsFile
+            ? ""
+            : " (that validate needs a permissions.ts, even for an app without a backend; a minimal one will do)"),
       );
     }
   }

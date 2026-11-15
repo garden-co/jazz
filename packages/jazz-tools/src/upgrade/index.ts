@@ -54,6 +54,7 @@ import {
   runningPackageRoot,
   type Project,
 } from "./project.js";
+import { refuseDroppedConditions, refuseEnvironmentReads } from "./permissions-check.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
 
 export { UpgradeRefusal } from "./errors.js";
@@ -98,6 +99,10 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   // 1. The app files must be current.
   const legacy = findLegacyJazzTools(project);
   notes.push(...checkLegacyFiles(project, legacy));
+  const scan = scanImports(project);
+  // Fail closed on policies alpha.64 compiled from values the source doesn't hold.
+  refuseEnvironmentReads(project, schemaSources(project, scan));
+  refuseDroppedConditions(project);
 
   const appText = readFileSync(project.appFile, "utf8");
   const app = parseAppJson(appText);
@@ -153,7 +158,6 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     var names = generatedText ? readGeneratedNames(generatedText) : fallbackNames(edited.app);
 
     // 4. What schema.ts exported besides the schema.
-    const scan = scanImports(project);
     extras = convertExtras({
       ts,
       program: schemaProgram.program,
@@ -365,6 +369,24 @@ function scanImports(project: Project): ImportScan {
     imports.set(file, targets);
   }
   return { imports, schemaNames, jsExtensions: js > plain };
+}
+
+/** schema.ts, permissions.ts and the project files they import, transitively. */
+function schemaSources(project: Project, scan: ImportScan): string[] {
+  const out = new Set<string>();
+  const queue = [project.schemaFile, ...(project.permissionsFile ? [project.permissionsFile] : [])];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (
+      out.has(file) ||
+      relative(project.root, file).startsWith("..") ||
+      file.includes("node_modules")
+    )
+      continue;
+    out.add(file);
+    queue.push(...(scan.imports.get(file) ?? []));
+  }
+  return [...out];
 }
 
 const DSL_IMPORT =

@@ -1,6 +1,6 @@
 // The computed fields and transforms jazz.app.json declares, implemented
 // in TypeScript. Written by `jazz-tools upgrade` from schema.ts; edit freely.
-import { type AppComputed, type AppTransforms } from "./jazz.generated";
+import type { AppComputed, AppTransforms } from "./jazz.generated.js";
 import { clamp } from "./src/clamp";
 
 export type Priority = "low" | "medium" | "high";
