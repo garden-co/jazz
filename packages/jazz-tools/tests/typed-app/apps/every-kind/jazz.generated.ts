@@ -11,12 +11,6 @@ import { computed, transforms } from "./jazz.computed.js";
 
 export type ThingStatus = "todo" | "done";
 export type ThingMaybeStatus = "low" | "high";
-export type ThingEvent =
-  | { type: "created"; by: string }
-  | { type: "moved"; to: number; note: string | null; reason: string };
-export type ThingEventInit =
-  | { type: "created"; by: string }
-  | { type: "moved"; to: number; note?: string | null; reason?: string };
 export type ThingMaybeLabel = "x" | "y";
 
 export type Owner = {
@@ -49,8 +43,6 @@ export type Thing = {
   body: string;
   status: ThingStatus;
   maybeStatus: ThingMaybeStatus | null;
-  event: ThingEvent;
-  events: ({ type: "ping"; at: Date | null } | { type: "pong" })[];
   statuses: ("a" | "b")[];
   data: JsonValue;
   maybeData: JsonValue | null;
@@ -83,8 +75,6 @@ export type ThingInsert = {
   body: string;
   status?: ThingStatus;
   maybeStatus?: ThingMaybeStatus | null;
-  event: ThingEventInit;
-  events: ({ type: "ping"; at?: Date | null } | { type: "pong" })[];
   statuses: ("a" | "b")[];
   data: JsonValue;
   maybeData?: JsonValue | null;
@@ -129,12 +119,6 @@ interface Types extends AppTypes {
       body: { kind: "string"; nullable: false; value: string };
       status: { kind: "enum"; nullable: false; value: ThingStatus };
       maybeStatus: { kind: "enum"; nullable: true; value: ThingMaybeStatus };
-      event: { kind: "enum"; nullable: false; value: ThingEvent };
-      events: {
-        kind: "array";
-        nullable: false;
-        value: ({ type: "ping"; at: Date | null } | { type: "pong" })[];
-      };
       statuses: { kind: "array"; nullable: false; value: ("a" | "b")[] };
       data: { kind: "json"; nullable: false; value: JsonValue };
       maybeData: { kind: "json"; nullable: true; value: JsonValue };
@@ -176,12 +160,12 @@ export type AppTransforms = TransformImpl<Transforms, Types>;
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types, Transforms>({
-  "source": "sha256:0ecd2b0f4cae1c620f0a24ed577384f1f98921f3a5da3a4df627134ed95be920",
+  "source": "sha256:bb332172a8c6d8bcdfde606e09230c8a7d6cfe2f67569b84aca00649b5f5542b",
   "schema": {
-    "current": "215b9375ac28f8bf0a5de0ddc9d6a708f011bdca8dcb7e7010d3fd7bd89fc133",
+    "current": "9dbeae3aed82d0129c0c4060c930c57095bfd201e5a7d0ef33c7f02071de1e8f",
     "schemas": [
       {
-        "hash": "215b9375ac28f8bf0a5de0ddc9d6a708f011bdca8dcb7e7010d3fd7bd89fc133",
+        "hash": "9dbeae3aed82d0129c0c4060c930c57095bfd201e5a7d0ef33c7f02071de1e8f",
         "schema": {
           "tables": {
             "owners": {
@@ -256,57 +240,6 @@ export const app = bindApp<Types, Transforms>({
                   "column_type": { "type": "Enum", "variants": ["low", "high"] },
                   "name": "maybeStatus",
                   "nullable": true,
-                },
-                {
-                  "column_type": {
-                    "cases": [
-                      {
-                        "fields": [
-                          { "column_type": { "type": "Uuid" }, "name": "by", "nullable": false },
-                        ],
-                        "name": "created",
-                      },
-                      {
-                        "fields": [
-                          { "column_type": { "type": "Integer" }, "name": "to", "nullable": false },
-                          { "column_type": { "type": "Text" }, "name": "note", "nullable": true },
-                          {
-                            "column_type": { "type": "Text" },
-                            "default": { "type": "Text", "value": "none" },
-                            "name": "reason",
-                            "nullable": false,
-                          },
-                        ],
-                        "name": "moved",
-                      },
-                    ],
-                    "type": "EnumPayload",
-                  },
-                  "name": "event",
-                  "nullable": false,
-                },
-                {
-                  "column_type": {
-                    "element": {
-                      "cases": [
-                        {
-                          "fields": [
-                            {
-                              "column_type": { "type": "Timestamp" },
-                              "name": "at",
-                              "nullable": true,
-                            },
-                          ],
-                          "name": "ping",
-                        },
-                        { "fields": [], "name": "pong" },
-                      ],
-                      "type": "EnumPayload",
-                    },
-                    "type": "Array",
-                  },
-                  "name": "events",
-                  "nullable": false,
                 },
                 {
                   "column_type": {
