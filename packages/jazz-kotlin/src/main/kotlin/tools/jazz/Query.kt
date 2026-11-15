@@ -2,6 +2,7 @@ package tools.jazz
 
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -138,22 +139,77 @@ public data class Query<Row : Any>(
     val columns: List<JsonElement>? = null,
     /** The table object it reads, for its transforms and computed fields. */
     val source: Table<*, *, *>? = null,
+    /** For [hopTo]: the query it hops from (whose rows' relations it follows), and the relations. */
+    val hopFrom: Query<*>? = null,
+    val hops: List<String> = emptyList(),
+    /** For [gather]: the relation followed recursively, and how deep. */
+    val gatherRelation: String? = null,
+    val gatherDepth: Int? = null,
+    /** For [union]: the queries whose rows it reads. */
+    val unionOf: List<Query<*>>? = null,
+    /** For [history]: the versions the server accepted, not the current rows. */
+    val history: Boolean = false,
+    /** Deleted rows too. */
+    val includeDeleted: Boolean = false,
 ) {
     public fun where(vararg conditions: Condition): Query<Row> = copy(conditions = this.conditions + conditions)
     public fun orderBy(vararg orders: Order): Query<Row> = copy(orders = this.orders + orders)
     public fun limit(limit: Int): Query<Row> = copy(limit = limit)
     public fun offset(offset: Int): Query<Row> = copy(offset = offset)
 
+    /** Deleted rows too (as TS's `includeDeleted`). */
+    public fun includeDeleted(): Query<Row> = copy(includeDeleted = true)
+
     /** The contract's query JSON. */
-    public fun toJson(): String = buildJsonObject {
-        put("table", table)
-        if (conditions.isNotEmpty()) put("where", whereJson(conditions))
-        if (orders.isNotEmpty()) put("orderBy", orderJson(orders))
-        limit?.let { put("limit", it) }
-        offset?.let { put("offset", it) }
-        columns?.let { c -> put("select", JsonArray(c)) }
-        if (includes.isNotEmpty()) put("include", JsonArray(includes.map { it.spec() }))
-    }.toString()
+    public fun toJson(): String = toJsonObject().toString()
+
+    internal fun toJsonObject(): JsonObject {
+        unionOf?.let { arms ->
+            return buildJsonObject {
+                put("union", JsonArray(arms.map { it.toJsonObject() }))
+                if (orders.isNotEmpty()) put("orderBy", orderJson(orders))
+                limit?.let { put("limit", it) }
+                offset?.let { put("offset", it) }
+                if (includeDeleted) put("includeDeleted", true)
+            }
+        }
+        val from = hopFrom
+        if (from != null) {
+            // The hopped-from query, then `after`: what this query adds to the rows it hops to.
+            val base = from.toJsonObject().toMutableMap()
+            base["hopTo"] = if (hops.size == 1) JsonPrimitive(hops[0]) else JsonArray(hops.map(::JsonPrimitive))
+            val after = buildJsonObject {
+                if (conditions.isNotEmpty()) put("where", whereJson(conditions))
+                if (orders.isNotEmpty()) put("orderBy", orderJson(orders))
+                limit?.let { put("limit", it) }
+                offset?.let { put("offset", it) }
+                columns?.let { c -> put("select", JsonArray(c)) }
+            }
+            if (after.isNotEmpty()) base["after"] = after
+            if (includeDeleted) base["includeDeleted"] = JsonPrimitive(true)
+            return JsonObject(base)
+        }
+        return buildJsonObject {
+            put("table", table)
+            if (conditions.isNotEmpty()) put("where", whereJson(conditions))
+            if (orders.isNotEmpty()) put("orderBy", orderJson(orders))
+            limit?.let { put("limit", it) }
+            offset?.let { put("offset", it) }
+            columns?.let { c -> put("select", JsonArray(c)) }
+            if (includes.isNotEmpty()) put("include", JsonArray(includes.map { it.spec() }))
+            gatherRelation?.let { r ->
+                put(
+                    "gather",
+                    buildJsonObject {
+                        put("relation", r)
+                        gatherDepth?.let { put("maxDepth", it) }
+                    },
+                )
+            }
+            if (history) put("history", true)
+            if (includeDeleted) put("includeDeleted", true)
+        }
+    }
 
     /** Orders raw rows as [orders] says (subscription deltas carry no positions). */
     internal fun sort(rows: List<JsonObject>): List<JsonObject> {
@@ -263,4 +319,66 @@ internal fun prepareRow(table: Table<*, *, *>?, includes: List<Relation<*, *>>, 
     }
     out = JsonObject(fields)
     return out
+}
+
+/**
+ * The rows [relation] leads to from this query's rows (TS's `hopTo`): e.g.
+ * the crew assigned to a show's open tasks,
+ * `Tasks.where(Tasks.showId eq id, Tasks.status ne Done).hopTo(Tasks.assignee)`.
+ * Filters, sorting and limits after the hop apply to those rows.
+ */
+public fun <Row : Any, Target : Any> Query<Row>.hopTo(relation: Relation<Row, Target>): Query<Target> {
+    val target = relation.target
+    // Hop again straight from a hop with nothing after it: one hop path.
+    if (hopFrom != null && conditions.isEmpty() && orders.isEmpty() && limit == null && offset == null && columns == null) {
+        return Query(target.tableName, target.rowSerializer, source = target, hopFrom = hopFrom, hops = hops + relation.name)
+    }
+    return Query(target.tableName, target.rowSerializer, source = target, hopFrom = this, hops = listOf(relation.name))
+}
+
+/**
+ * These rows and, recursively, the rows [relation] leads to from them, up to
+ * [maxDepth] hops (TS's `gather`): e.g. a task with all its subtasks.
+ */
+public fun <Row : Any> Query<Row>.gather(relation: Relation<Row, Row>, maxDepth: Int? = null): Query<Row> =
+    copy(gatherRelation = relation.name, gatherDepth = maxDepth)
+
+/** Every row of this query and of [others], of the same table; sort and limit the union with [Query.orderBy]/[Query.limit]. */
+public fun <Row : Any> Query<Row>.union(vararg others: Query<Row>): Query<Row> =
+    Query(table, rowSerializer, source = source, unionOf = listOf(this) + others)
+
+/** A version of a row the server accepted: the row as it was, and when. */
+public data class HistoryRow<Row : Any>(val row: Row, val transactionId: String, val acceptedAt: Long)
+
+internal class HistoryRowSerializer<Row : Any>(private val base: KSerializer<Row>) : KSerializer<HistoryRow<Row>> {
+    override val descriptor: kotlinx.serialization.descriptors.SerialDescriptor = JsonObject.serializer().descriptor
+
+    override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): HistoryRow<Row> {
+        val json = (decoder as kotlinx.serialization.json.JsonDecoder).decodeJsonElement() as JsonObject
+        val meta = json["\$history"] as? JsonObject
+            ?: throw kotlinx.serialization.SerializationException("a history row needs \"\$history\": $json")
+        return HistoryRow(
+            row = jazzJson.decodeFromJsonElement(base, JsonObject(json - "\$history")),
+            transactionId = (meta["transactionId"] as JsonPrimitive).content,
+            acceptedAt = (meta["acceptedAt"] as JsonPrimitive).content.toLong(),
+        )
+    }
+
+    override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: HistoryRow<Row>): Unit =
+        throw kotlinx.serialization.SerializationException("history rows are read only")
+}
+
+/**
+ * The versions of this query's rows the server accepted, oldest first
+ * (sort by [JazzColumns.acceptedAt]): read them at [ReadTier.Remote]; they can't be
+ * subscribed to yet.
+ */
+public fun <Row : Any> Query<Row>.history(): Query<HistoryRow<Row>> =
+    Query(table, HistoryRowSerializer(rowSerializer), conditions, orders, limit, offset, source = source, history = true, includeDeleted = includeDeleted)
+
+/** Columns every table has: when a row was created and last updated (ms since the epoch), and, for [history] rows, when the server accepted a version. */
+public object JazzColumns {
+    public val createdAt: Column<Long> = Column("\$createdAt", Long.serializer())
+    public val updatedAt: Column<Long> = Column("\$updatedAt", Long.serializer())
+    public val acceptedAt: Column<Long> = Column("\$acceptedAt", Long.serializer())
 }

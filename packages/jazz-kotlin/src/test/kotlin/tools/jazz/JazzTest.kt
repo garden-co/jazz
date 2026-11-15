@@ -224,4 +224,36 @@ class JazzTest {
 object RefusingNative {
     @JvmStatic
     fun open(config: String): Native = throw JazzException.Refused("no app")
+
+    @Test
+    fun hops_gather_union_history_and_deleted_rows_emit_the_contract_json() {
+        val parentOf = Many<Item, Item>("children") { Items }
+        val tagOwner = One<Item, Item>("parent") { Items }
+        assertEquals(
+            """{"table":"items","where":[{"column":"kind","op":"eq","value":"c"}],"hopTo":"parent","after":{"where":[{"column":"title","op":"ne","value":"x"}],"limit":5}}""",
+            Items.where(Items.kind eq ItemKind.C).hopTo(tagOwner).where(Items.title ne "x").limit(5).toJson(),
+        )
+        assertEquals(
+            """{"table":"items","hopTo":["parent","parent"]}""",
+            Items.query().hopTo(tagOwner).hopTo(tagOwner).toJson(),
+        )
+        assertEquals(
+            """{"table":"items","where":[{"column":"title","op":"eq","value":"root"}],"gather":{"relation":"children","maxDepth":3}}""",
+            Items.where(Items.title eq "root").gather(parentOf, maxDepth = 3).toJson(),
+        )
+        assertEquals(
+            """{"union":[{"table":"items","where":[{"column":"kind","op":"eq","value":"c"}]},{"table":"items","where":[{"column":"note","op":"isNull"}]}],"orderBy":[{"column":"rank","direction":"asc"}],"limit":10}""",
+            Items.where(Items.kind eq ItemKind.C).union(Items.where(Items.note.isNull())).orderBy(Items.rank.asc()).limit(10).toJson(),
+        )
+        assertEquals(
+            """{"table":"items","orderBy":[{"column":"${'$'}acceptedAt","direction":"desc"}],"history":true}""",
+            Items.query().orderBy(JazzColumns.acceptedAt.desc()).history().toJson(),
+        )
+        assertEquals("""{"table":"items","includeDeleted":true}""", Items.query().includeDeleted().toJson())
+        val h = jazzJson.decodeFromString(
+            HistoryRowSerializer(Item.serializer()),
+            """{"id":"i","title":"a","rank":1,"kind":"c","${'$'}history":{"transactionId":"t1","acceptedAt":42}}""",
+        )
+        assertEquals(HistoryRow(Item("i", "a", 1.0, ItemKind.C), "t1", 42), h)
+    }
 }

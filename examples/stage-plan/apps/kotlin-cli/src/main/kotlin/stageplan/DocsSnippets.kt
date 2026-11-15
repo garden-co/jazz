@@ -11,7 +11,12 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
 import tools.jazz.JazzAuth
+import tools.jazz.HistoryRow
+import tools.jazz.JazzColumns
 import tools.jazz.JazzConfig
+import tools.jazz.hopTo
+import tools.jazz.history
+import tools.jazz.union
 import tools.jazz.chunks
 import tools.jazz.Link
 import tools.jazz.SessionState
@@ -27,6 +32,7 @@ import jazzapp.Comment
 import jazzapp.Comments
 import jazzapp.NewComment
 import jazzapp.Crew
+import jazzapp.CrewTable
 import jazzapp.Shows
 import jazzapp.Task
 
@@ -376,5 +382,49 @@ object DocsSnippets {
         )?.get(Tasks.notes)
         // #endregion reading-partial-value-kotlin
         return preview
+    }
+
+    suspend fun hopTo(jazz: Jazz, showId: String): List<String> {
+        // #region reading-hop-to-kotlin
+        // The crew members assigned to the show's unfinished tasks: follow the tasks'
+        // `assignee` relation; what comes after the hop filters the crew.
+        val busy: List<Crew> = jazz.all(
+            Tasks.where(Tasks.showId eq showId, Tasks.status ne TaskStatus.Done)
+                .hopTo(Tasks.assignee)
+                .orderBy(CrewTable.name.asc()),
+        )
+        // #endregion reading-hop-to-kotlin
+        return busy.map { it.name }
+    }
+
+    suspend fun union(jazz: Jazz, showId: String): List<Task> {
+        // #region reading-union-kotlin
+        // Blocked tasks and unassigned tasks, as one list.
+        val attention = jazz.all(
+            Tasks.where(Tasks.showId eq showId, Tasks.status eq TaskStatus.Blocked)
+                .union(Tasks.where(Tasks.showId eq showId, Tasks.assigneeId.isNull()))
+                .orderBy(Tasks.rank.asc()),
+        )
+        // #endregion reading-union-kotlin
+        return attention
+    }
+
+    suspend fun history(jazz: Jazz, taskId: String): List<HistoryRow<Task>> {
+        // #region reading-history-kotlin
+        // Every version of a task the server accepted, newest first.
+        val versions: List<HistoryRow<Task>> = jazz.all(
+            Tasks.where(Tasks.id eq taskId).orderBy(JazzColumns.acceptedAt.desc()).history(),
+            tier = ReadTier.Remote,
+        )
+        // #endregion reading-history-kotlin
+        return versions
+    }
+
+    suspend fun includeDeleted(jazz: Jazz, showId: String): List<Task> {
+        // #region reading-include-deleted-kotlin
+        // Deleted rows too, e.g. for an undo list.
+        val withDeleted = jazz.all(Tasks.where(Tasks.showId eq showId).includeDeleted())
+        // #endregion reading-include-deleted-kotlin
+        return withDeleted
     }
 }

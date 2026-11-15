@@ -244,11 +244,12 @@ class StagePlanTest {
         val backend = open("endpoint-backend")
         val bundle = checkNotNull(backend.bundle())
         val endpointProcess = ProcessBuilder(
-            System.getenv("JAZZ_APP_TEST_RELAY"),
-            "--core", url, "--app-id", appId,
-            "--backend-secret", backendSecret, "--admin-secret", adminSecret,
-            "--bundle", bundle,
-        ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
+            System.getenv("JAZZ_APP_TEST_RELAY"), "--core", url, "--app-id", appId, "--bundle", bundle,
+        ).redirectError(ProcessBuilder.Redirect.INHERIT).apply {
+            // Secrets through the environment, out of `ps`.
+            environment()["JAZZ_BACKEND_SECRET"] = backendSecret
+            environment()["JAZZ_ADMIN_SECRET"] = adminSecret
+        }.start()
         try {
             val endpoint = endpointProcess.inputStream.bufferedReader().readLine() ?: error("the endpoint didn't start")
 
@@ -284,6 +285,34 @@ class StagePlanTest {
         } finally {
             endpointProcess.destroy()
             backend.close()
+        }
+    }
+
+    @Test
+    fun hops_unions_history_and_deleted_rows(): Unit = runBlocking {
+        open("user-7").use { jazz ->
+            val me = jazz.account()!!
+            val show = showNamed(jazz, "Tour")
+            val bo = jazz.insert(CrewTable, NewCrew(account = me, name = "Bo"), tier = tools.jazz.WriteTier.Global)
+            jazz.insert(
+                jazzapp.ShowCrewTable,
+                jazzapp.NewShowCrew(showId = show.id, crewId = bo.id, account = me, role = jazzapp.ShowCrewRole.Chief),
+                tier = tools.jazz.WriteTier.Global,
+            )
+            val a = addTask(jazz, show, "Rig")
+            val b = addTask(jazz, show, "Pack")
+            val c = addTask(jazz, show, "Drive")
+            jazz.update(Tasks, a.id, tier = tools.jazz.WriteTier.Global) { assigneeId(bo.id) }
+            jazz.update(Tasks, b.id, tier = tools.jazz.WriteTier.Global) { status(TaskStatus.Blocked); assigneeId(bo.id) }
+            assertEquals(listOf("Bo"), DocsSnippets.hopTo(jazz, show.id))
+            assertEquals(listOf("Pack", "Drive"), DocsSnippets.union(jazz, show.id).map { it.title })
+            val versions = DocsSnippets.history(jazz, b.id)
+            kotlin.test.assertTrue(versions.size >= 2, "$versions")
+            assertEquals(TaskStatus.Blocked, versions.first().row.status)
+            kotlin.test.assertTrue(versions.first().acceptedAt >= versions.last().acceptedAt)
+            jazz.delete(Tasks, c.id, tier = tools.jazz.WriteTier.Global)
+            assertEquals(2, tasksOf(jazz, show).size)
+            kotlin.test.assertTrue(DocsSnippets.includeDeleted(jazz, show.id).any { it.id == c.id })
         }
     }
 }
