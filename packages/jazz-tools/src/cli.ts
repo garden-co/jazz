@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
-import { createAppMigration, localMigrationGraph, validateApp } from "./dev/project.js";
+import { createAppMigration, localMigrationGraph, generateApp } from "./dev/project.js";
 import {
   combineMigrationGraphs,
   fetchMigrationGraph,
@@ -19,7 +19,7 @@ import { runInspectCommand } from "./inspect/cli.js";
 export interface BuildOptions {
   /** The project directory: jazz.app.json in it, ./src or ./src/lib. */
   schemaDir: string;
-  /** Write nothing; fail if jazz.generated.ts isn't what validate would write. */
+  /** Write nothing; fail if jazz.generated.ts isn't what generate would write. */
   check?: boolean;
 }
 
@@ -42,6 +42,10 @@ const SERVER_REMOVED =
   "`createJazz({ store: sqlite({ path }) })` serves sync from your own server, and " +
   "`createJazz({ store: remote({ url, appId, secret }) })` uses Jazz Cloud.";
 
+export const VALIDATE_RENAMED =
+  "`jazz-tools validate` was renamed to `jazz-tools generate` in alpha.65: it checks jazz.app.json and " +
+  "jazz.permissions.json and writes jazz.generated.ts. Use `jazz-tools generate --check` in CI.";
+
 const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
 
 const MIGRATE_ALPHA59_MOVED =
@@ -58,12 +62,15 @@ function parseArgs(args: string[]): { command: string; options: BuildOptions } {
       "--strict-provenance was removed: jazz.app.json's loader always refuses columns that duplicate Jazz's provenance columns.",
     );
   }
-  return { command, options: { schemaDir: resolve(process.cwd(), schemaDir), check: args.includes("--check") } };
+  return {
+    command,
+    options: { schemaDir: resolve(process.cwd(), schemaDir), check: args.includes("--check") },
+  };
 }
 
-/** `jazz-tools validate [--check]`: check jazz.app.json and jazz.permissions.json, regenerate jazz.generated.ts. */
-export async function validate(options: BuildOptions): Promise<void> {
-  const result = await validateApp({ cwd: options.schemaDir, check: options.check });
+/** `jazz-tools generate [--check]`: check jazz.app.json and jazz.permissions.json, write the bindings. */
+export async function generate(options: BuildOptions): Promise<void> {
+  const result = await generateApp({ cwd: options.schemaDir, check: options.check });
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
   }
@@ -74,8 +81,8 @@ export async function validate(options: BuildOptions): Promise<void> {
     options.check
       ? `jazz.app.json, jazz.permissions.json and ${shown} are up to date.`
       : result.wrote
-        ? `Validated jazz.app.json and jazz.permissions.json; wrote ${shown}. Commit it.`
-        : `Validated jazz.app.json and jazz.permissions.json; ${shown} is up to date.`,
+        ? `Checked jazz.app.json and jazz.permissions.json; wrote ${shown}. Commit it.`
+        : `Checked jazz.app.json and jazz.permissions.json; ${shown} is up to date.`,
   );
   console.log(DEPLOY_NOTE);
 }
@@ -312,10 +319,14 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     console.log("No schema changes since jazz.generated.ts was generated: no migration needed.");
     return null;
   }
-  console.log(`Recorded the previous version in ${file}'s history and wrote the migration "${options.name}".`);
+  console.log(
+    `Recorded the previous version in ${file}'s history and wrote the migration "${options.name}".`,
+  );
   if (result.todos.length > 0) {
     console.log("");
-    console.log(`Resolve ${result.todos.length} TODO${result.todos.length === 1 ? "" : "s"} in ${file}, then run \`jazz-tools validate\`:`);
+    console.log(
+      `Resolve ${result.todos.length} TODO${result.todos.length === 1 ? "" : "s"} in ${file}, then run \`jazz-tools generate\`:`,
+    );
     for (const todo of result.todos) console.log(`  ${todo}`);
   } else {
     console.log("Review the migration, then commit jazz.app.json and jazz.generated.ts.");
@@ -345,12 +356,20 @@ function isMainModule(): boolean {
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
-  console.log("  validate              Check jazz.app.json and jazz.permissions.json and regenerate jazz.generated.ts");
-  console.log("                        (--check: write nothing, fail if jazz.generated.ts is out of date)");
+  console.log(
+    "  generate              Check jazz.app.json and jazz.permissions.json and write jazz.generated.ts",
+  );
+  console.log(
+    "                        (--check: write nothing, fail if the bindings are out of date; for CI)",
+  );
   console.log("  migrations create     Record a schema change in jazz.app.json (--name <name>)");
   console.log("  migrations graph      Visualize the full migration graph");
-  console.log("  upgrade               Convert an alpha.64 app (schema.ts, permissions.ts, migrations/) to the files");
-  console.log("  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON");
+  console.log(
+    "  upgrade               Convert an alpha.64 app (schema.ts, permissions.ts, migrations/) to the files",
+  );
+  console.log(
+    "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",
+  );
   console.log("  login | logout | whoami");
   console.log("                        Sign in to Jazz Cloud with your dashboard account");
   console.log("  teams, apps           Manage Jazz Cloud teams and apps (see `apps --help`)");
@@ -358,8 +377,14 @@ function printHelp(): void {
     "  inspect <command>     Read and change an app's data through its backend (see `inspect --help`)",
   );
   console.log("\nOptions:");
-  console.log("  --schema-dir <path>   Project directory holding jazz.app.json (default: .; also ./src, ./src/lib)");
+  console.log(
+    "  --schema-dir <path>   Project directory holding jazz.app.json (default: .; also ./src, ./src/lib)",
+  );
   console.log("  --name <name>         migrations create: the migration's name");
+  console.log("\nUpgrade options:");
+  console.log("  --dir <path>          The app's directory (default: .)");
+  console.log("  --dry-run             Report what would change, write nothing");
+  console.log("  --skip-typecheck      Don't typecheck the converted project");
   console.log("\nMigration graph options:");
   console.log(
     "  <appId>               Required (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
@@ -429,8 +454,25 @@ if (isMainModule()) {
       stderr: (text) => process.stderr.write(text),
       env: process.env,
     }).then((code) => process.exit(code));
+  } else if (command === "generate") {
+    exitOnError(Promise.resolve().then(() => generate(parseArgs(args).options)));
+  } else if (command === "upgrade") {
+    const commandArgs = args.slice(1);
+    const dryRun = commandArgs.includes("--dry-run");
+    exitOnError(
+      import("./upgrade/index.js").then(async ({ upgradeProject, formatReport }) => {
+        const report = await upgradeProject({
+          dir: resolve(process.cwd(), getFlagValue(commandArgs, "--dir") ?? "."),
+          dryRun,
+          skipTypecheck: commandArgs.includes("--skip-typecheck"),
+        });
+        console.log(formatReport(report, dryRun));
+        if (report.typeErrors.length > 0 || report.todos > 0) process.exitCode = 1;
+      }),
+    );
   } else if (command === "validate") {
-    exitOnError(Promise.resolve().then(() => validate(parseArgs(args).options)));
+    console.error(VALIDATE_RENAMED);
+    process.exit(1);
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
     if (subcommand === "compile") {
@@ -459,13 +501,10 @@ if (isMainModule()) {
     if (subcommand === "create") {
       const commandArgs = args.slice(2);
       task = (async () => {
-        assertFlagPairs(
-          commandArgs,
-          ["--schema-dir", "--name"],
-          (arg) =>
-            ["--fromHash", "--toHash", "--migrations-dir"].includes(arg)
-              ? `${arg} was removed: migrations go from the version in jazz.generated.ts to jazz.app.json's tables.`
-              : `Unknown migrations create argument: ${arg}.`,
+        assertFlagPairs(commandArgs, ["--schema-dir", "--name"], (arg) =>
+          ["--fromHash", "--toHash", "--migrations-dir"].includes(arg)
+            ? `${arg} was removed: migrations go from the version in jazz.generated.ts to jazz.app.json's tables.`
+            : `Unknown migrations create argument: ${arg}.`,
         );
         await createMigration({
           schemaDir: resolve(process.cwd(), getFlagValue(commandArgs, "--schema-dir") ?? "."),

@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
 import type { Db } from "jazz-tools";
 import { useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 
 const TOTAL_PROJECTS = 10_000;
 const TOTAL_TODOS = 50_000;

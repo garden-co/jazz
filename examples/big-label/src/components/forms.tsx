@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { DateInput, Selector, TextInput } from "@astryxdesign/core";
 import { useAll, useDb } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { artistStatuses, genres, releaseFormats, releaseStatuses, searchKey } from "../fixtures";
 import { CatalogNumberTakenError, nextCatalogNumber, saveRelease } from "../lib/mutations";
 import { useOrganization } from "../lib/organization";

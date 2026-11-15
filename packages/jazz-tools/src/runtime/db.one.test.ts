@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { Db, getDbSubscriptionSource, type DbConfig } from "./db.js";
 import { isInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import type { JazzClient, Row } from "./client.js";
@@ -7,17 +7,7 @@ import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { ownerPreparation } from "./write-preparation.js";
 
-const todoSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
-type TodoSchema = s.Schema<typeof todoSchema>;
-const app: s.App<TodoSchema> = s.defineApp(todoSchema, { migrations: "none" });
+const app = testApp({ tables: { todos: { columns: { title: "string", done: "boolean" } } } });
 
 const todoRow: Row = {
   id: "todo-1",

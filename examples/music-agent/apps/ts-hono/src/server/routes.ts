@@ -1,4 +1,4 @@
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { agentLabel } from "@/src/agent/config";
 import { queueAssistantTurn, runTurn } from "@/src/agent/runner";
 import { auth } from "@/src/lib/auth";

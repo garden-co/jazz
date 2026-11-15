@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Db } from "jazz-tools";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { createFixture, type FixtureProfile } from "../fixtures";
 
 export const demoProfiles = ["smoke", "small"] as const satisfies readonly FixtureProfile[];

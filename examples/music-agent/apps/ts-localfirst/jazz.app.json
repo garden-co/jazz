@@ -1,0 +1,43 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "attachments": {
+      "columns": {
+        "turn_id": "uuid",
+        "filename": "string",
+        "media_type": "string",
+        "payload": "bytes",
+        "byte_length": "int"
+      },
+      "relations": { "turn": { "rel": "turns", "column": "turn_id" } }
+    },
+    "conversations": {
+      "columns": { "title": "string", "created_at": "timestamp" },
+      "relations": { "turnsViaConversation": { "reverse": "turns", "relation": "conversation" } }
+    },
+    "tool_calls": {
+      "columns": {
+        "turn_id": "uuid",
+        "name": "string",
+        "arguments_json": "string",
+        "result_json": "string"
+      },
+      "relations": { "turn": { "rel": "turns", "column": "turn_id" } }
+    },
+    "turns": {
+      "columns": {
+        "conversation_id": "uuid",
+        "role": { "enum": ["user", "assistant", "tool"] },
+        "ordinal": "int",
+        "body": "string",
+        "created_at": "timestamp"
+      },
+      "relations": {
+        "attachmentsViaTurn": { "reverse": "attachments", "relation": "turn" },
+        "conversation": { "rel": "conversations", "column": "conversation_id" },
+        "tool_callsViaTurn": { "reverse": "tool_calls", "relation": "turn" }
+      }
+    }
+  }
+}

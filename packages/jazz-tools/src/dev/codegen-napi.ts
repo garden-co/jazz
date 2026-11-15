@@ -5,6 +5,8 @@
  * Node only.
  */
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
+import { boundApp } from "../typed-app.js";
 
 /** What `loadBackendApp` makes of the bindings' schema and `jazz.permissions.json`. */
 export interface LoadedBackendApp {
@@ -106,4 +108,35 @@ export async function loadBackendApp(
 /** The options `jazz.generated.ts` would pass to `bindApp`, for tests that define apps inline. */
 export async function compileApp(appJson: string): Promise<Record<string, unknown>> {
   return JSON.parse((await codegen()).compileApp(appJson)) as Record<string, unknown>;
+}
+
+/** A `jazz.permissions.json`, as imported or written inline. */
+export type PermissionsFile = { readonly format: number } & Readonly<Record<string, unknown>>;
+
+/** Whether `permissions` is a `jazz.permissions.json` rather than the engine's policies. */
+export function isPermissionsFile(permissions: unknown): permissions is PermissionsFile {
+  return (
+    typeof permissions === "object" &&
+    permissions !== null &&
+    typeof (permissions as { format?: unknown }).format === "number"
+  );
+}
+
+/**
+ * The engine's policies for `permissions`: a `jazz.permissions.json` is
+ * checked and compiled against the app's bindings by the Rust loader; engine
+ * policies (what a previous load returned) pass through.
+ */
+export async function enginePermissions(
+  app: SchemaSourceInput,
+  permissions: PermissionsFile | CompiledPermissionsMap,
+): Promise<CompiledPermissionsMap> {
+  if (!isPermissionsFile(permissions)) return permissions;
+  const bound = boundApp(resolveSchemaSource(app));
+  if (!bound) {
+    throw new Error(
+      "the app must come from jazz.generated.ts (or testApp) to check jazz.permissions.json against it",
+    );
+  }
+  return (await loadBackendApp(bound, JSON.stringify(permissions))).permissions;
 }

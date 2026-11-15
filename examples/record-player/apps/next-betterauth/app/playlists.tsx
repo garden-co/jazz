@@ -14,7 +14,7 @@ import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Table, pixel, proportional } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import type { PlayableTrack } from "../src/audio-stream";
 import { positionBetween } from "../src/record-player";
 import { countLabel, formatDuration } from "./format";

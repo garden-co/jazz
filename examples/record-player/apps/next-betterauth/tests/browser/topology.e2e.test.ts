@@ -20,8 +20,8 @@ import {
   startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import { betterAuthPermissions, betterAuthSchema } from "../../auth-schema.js";
-import permissions from "../../permissions.js";
-import { app } from "../../schema.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated.js";
 import {
   ALBUM_TRACK_LIMIT,
   JazzRecordPlayerStore,

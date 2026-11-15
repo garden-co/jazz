@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../schema-namespace.js";
 import type { Db } from "../runtime/db.js";
+import { testApp } from "../testing/test-app.js";
 import { jazzAdapter } from "./index.js";
-import { legacyDefinition, currentDefinition } from "./fixtures/issuer-upgrade-schema.js";
+import { currentAppFile, legacyAppFile } from "./fixtures/issuer-upgrade.js";
 
-const legacyApp = s.defineApp(legacyDefinition, { migrations: "none" });
-const currentApp = s.defineApp(currentDefinition, { migrations: "none" });
+const legacyApp = testApp(legacyAppFile);
+const currentApp = testApp(currentAppFile);
 
 function fakeDb(accounts: Record<string, unknown>[]): Db {
   return { all: async () => accounts } as unknown as Db;

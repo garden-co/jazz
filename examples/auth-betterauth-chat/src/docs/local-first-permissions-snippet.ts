@@ -1,5 +1,5 @@
 import { definePermissions } from "jazz-tools/permissions";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 
 // #region local-first-permissions
 export default definePermissions(app, ({ policy, allOf, session }) => {

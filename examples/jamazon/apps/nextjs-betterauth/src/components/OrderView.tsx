@@ -21,7 +21,7 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { useAll } from "jazz-tools/react";
 import NextLink from "next/link";
-import { app, type Order, type OrderEvent, type OrderStatus } from "@/schema";
+import { app, type Order, type OrderEvent, type OrderStatus } from "@/jazz.generated";
 import { SHIPPING, formatMoney } from "@/src/store/pricing";
 import { OrderSummary } from "./OrderSummary";
 import { Page } from "./Page";

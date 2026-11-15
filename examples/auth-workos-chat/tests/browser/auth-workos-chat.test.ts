@@ -24,8 +24,8 @@ import {
   startJazzApp,
   type JazzServerInfo,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../../constants.js";
 
 /** A test user's client: its Db, and how to close it. */

@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { CATEGORIES, PRODUCTS } from "@/src/catalogue/catalogue";
 import { ids } from "@/src/lib/ids";
 

@@ -349,7 +349,7 @@ pub fn client_migrations_module(source: &str) -> Result<crate::db::Migrations, S
         .map(|(_, rest)| rest.trim().trim_end_matches(';').trim_end())
         .ok_or("migrations module: no `export const migrations: ClientMigrations =`")?;
     lowered_client_migrations(Some(json.as_bytes())).map_err(|error| {
-        format!("{error} (was the module reformatted? regenerate it with `jazz-tools validate`)")
+        format!("{error} (was the module reformatted? regenerate it with `jazz-tools generate`)")
     })
 }
 

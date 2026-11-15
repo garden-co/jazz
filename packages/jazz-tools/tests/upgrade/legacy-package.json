@@ -1,0 +1,10 @@
+{
+  "name": "jazz-upgrade-legacy-fixture",
+  "private": true,
+  "description": "The DSL-era jazz-tools upgrade's tests read fixture apps with. alpha.63 has the same DSL surface as alpha.64.",
+  "dependencies": {
+    "jazz-tools": "npm:jazz-tools@2.0.0-alpha.63",
+    "jazz-napi": "npm:jazz-napi@2.0.0-alpha.63",
+    "typescript": "6.0.2"
+  }
+}

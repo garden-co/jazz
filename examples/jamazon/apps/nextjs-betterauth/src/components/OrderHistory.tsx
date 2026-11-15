@@ -18,7 +18,7 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { useAll } from "jazz-tools/react";
 import NextLink from "next/link";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { formatMoney } from "@/src/store/pricing";
 import { STATUS_BADGE, STATUS_LABEL } from "./OrderView";
 import { Page } from "./Page";

@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app as schemaApp, type Todo } from "../schema.js";
+import { app as schemaApp, type Todo } from "../jazz.generated.js";
 
 export function renderTodoItem(todo: Todo, db: Db, app: typeof schemaApp) {
   const li = Object.assign(document.createElement("li"), {
