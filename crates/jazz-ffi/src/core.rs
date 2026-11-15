@@ -509,7 +509,10 @@ impl Core {
     /// writes are durable locally once they return, so `Local` has nothing
     /// to wait for; `GlobalServer` waits for the server to have them all
     /// and fails if it rejected one (the core's `wait_for_sync`, as TS's
-    /// `waitForSync`). Without a server there is nothing to wait for.
+    /// `waitForSync`). Without a server there is nothing to wait for. It
+    /// checks up to the last 4096 writes individually; older ones rely on
+    /// the core wait, which (until jazz#5728) can miss a refusal that is
+    /// not among the writes still pending.
     pub fn wait_for_sync(&self, tier: DurabilityTier) -> Result<()> {
         if tier == DurabilityTier::Local {
             self.open_jazz()?;
@@ -613,9 +616,9 @@ async fn settle(
                     // Bounded for hosts that never call waitForSync: the
                     // oldest unchecked writes are left to the core's wait.
                     if unsynced.len() >= MAX_UNSYNCED {
-                        unsynced.remove(0);
+                        unsynced.pop_front();
                     }
-                    unsynced.push(committed);
+                    unsynced.push_back(committed);
                 });
                 if let Some(tier) = tier {
                     client.wait_for_transaction(committed, tier).await?;
@@ -631,8 +634,8 @@ const MAX_UNSYNCED: usize = 4096;
 
 thread_local! {
     /// The writes this app's client committed since its last waitForSync.
-    static UNSYNCED: RefCell<Vec<jazz_app::jazz::tools::TransactionId>> =
-        const { RefCell::new(Vec::new()) };
+    static UNSYNCED: RefCell<std::collections::VecDeque<jazz_app::jazz::tools::TransactionId>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
 }
 
 pub(crate) struct SubscriptionCore {
