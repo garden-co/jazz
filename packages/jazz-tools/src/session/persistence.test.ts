@@ -402,8 +402,14 @@ it("finishes a discard another tab held off on the next page load, forgetting th
     list: () => [...pending],
   };
   let otherTabOpen = true;
-  const deleteSignedOutStore = vi.fn(async (_account: string) =>
-    otherTabOpen ? ("held" as const) : ("deleted" as const),
+  // As the browser host's wipe does, inside the store's lock.
+  const deleteSignedOutStore = vi.fn(
+    async (_account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+      if (otherTabOpen) return "held" as const;
+      if (finishing && !finishing.wanted()) return "cancelled" as const;
+      await finishing?.forget();
+      return "deleted" as const;
+    },
   );
   const openClient = vi.fn(async () => ({ shutdown: async () => {} }));
   const first = await createJazzSessionOwner({
@@ -429,7 +435,7 @@ it("finishes a discard another tab held off on the next page load, forgetting th
     pendingDiscards,
   });
   await settle();
-  expect(deleteSignedOutStore).toHaveBeenLastCalledWith(account);
+  expect(deleteSignedOutStore).toHaveBeenLastCalledWith(account, expect.anything());
   expect(pending.size).toBe(0);
   expect(next.keptLocalFirstKey()).toBeUndefined();
   await expect(next.reopenLocalFirst()).rejects.toThrow("keeps no device account");

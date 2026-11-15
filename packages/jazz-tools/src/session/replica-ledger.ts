@@ -435,15 +435,31 @@ export async function wipeAccountStoreNow(
   account: string,
   deleteStore: (account: string) => Promise<"deleted" | "held">,
   locks: Locks | undefined = webLocks(),
-): Promise<"deleted" | "held"> {
+  /**
+   * A pending discard being finished, decided inside the lock: `wanted()`
+   * false (someone signed in as the account since) cancels it, and
+   * `forget()` runs once the store is gone, before any tab can open it.
+   */
+  finishing?: { wanted(): boolean; forget(): Promise<void> },
+): Promise<"deleted" | "held" | "cancelled"> {
   const ledger = replicaLedger(registry);
-  const outcome = await whileNoTabHolds(locks, registry, account, async () => {
-    ledger.markWiping(account, true);
-    const deleted = await deleteStore(account);
-    if (deleted === "deleted") ledger.forget(account);
-    else ledger.markWiping(account, false);
-    return deleted;
-  });
+  const outcome = await whileNoTabHolds(
+    locks,
+    registry,
+    account,
+    async (): Promise<"deleted" | "held" | "cancelled"> => {
+      if (finishing && !finishing.wanted()) return "cancelled";
+      ledger.markWiping(account, true);
+      const deleted = await deleteStore(account);
+      if (deleted !== "deleted") {
+        ledger.markWiping(account, false);
+        return deleted;
+      }
+      ledger.forget(account);
+      await finishing?.forget();
+      return deleted;
+    },
+  );
   return outcome ?? "held";
 }
 

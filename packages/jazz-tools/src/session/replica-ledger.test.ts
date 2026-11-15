@@ -927,3 +927,27 @@ describe("pendingDiscardLedger", () => {
     }
   });
 });
+
+describe("wipeAccountStoreNow finishing a pending discard", () => {
+  it("re-checks it and forgets the key inside the store's lock", async () => {
+    const locks = new LockManager();
+    const deleteStore = vi.fn(async () => "deleted" as const);
+    let lockedWhileForgetting = false;
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me"), {
+        wanted: () => false,
+        forget: async () => {},
+      }),
+    ).resolves.toBe("cancelled");
+    expect(deleteStore).not.toHaveBeenCalled();
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me"), {
+        wanted: () => true,
+        forget: async () => {
+          lockedWhileForgetting = locks.isExclusive(aliceLock);
+        },
+      }),
+    ).resolves.toBe("deleted");
+    expect(lockedWhileForgetting).toBe(true);
+  });
+});

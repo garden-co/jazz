@@ -361,7 +361,10 @@ describe("Jazz session lifecycle", () => {
   // credential is revoked, it stops waiting for sync and tears itself down.
   async function realEnrollmentSetup(
     hostOptions: {
-      deleteSignedOutStore?: (account: string) => Promise<"deleted" | "held">;
+      deleteSignedOutStore?: (
+        account: string,
+        finishing?: { wanted(): boolean; forget(): Promise<void> },
+      ) => Promise<"deleted" | "held" | "cancelled">;
       pendingDiscards?: {
         record(account: string): void;
         clear(account: string): void;
@@ -583,7 +586,7 @@ describe("Jazz session lifecycle", () => {
     // That tab closed: retrying wipes it.
     holder = "deleted";
     await session.retry();
-    expect(deleteSignedOutStore).toHaveBeenLastCalledWith(a.id);
+    expect(deleteSignedOutStore).toHaveBeenLastCalledWith(a.id, expect.anything());
     expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
     expect(session.getSnapshot().error).toBeUndefined();
     await session.close();
@@ -618,6 +621,42 @@ describe("Jazz session lifecycle", () => {
     await session.retry();
     expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
     expect(session.getSnapshot().error).toBeUndefined();
+    await session.close();
+  });
+  it("doesn't wipe a pending account someone signed in as while a pass was busy with another", async () => {
+    // Two discards earlier pages left pending, on a page that starts signed out.
+    const pending = new Set(["discarded-1", "discarded-2"]);
+    const pendingDiscards = {
+      record: (account: string) => void pending.add(account),
+      clear: (account: string) => void pending.delete(account),
+      list: () => [...pending],
+    };
+    const first = deferred();
+    const deleted: string[] = [];
+    const forgotten: string[] = [];
+    const deleteSignedOutStore = vi.fn(
+      async (account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+        if (account === "discarded-1") await first.promise;
+        // As the browser host does, inside the store's exclusive lock.
+        if (finishing && !finishing.wanted()) return "cancelled" as const;
+        deleted.push(account);
+        await finishing?.forget();
+        forgotten.push(account);
+        return "deleted" as const;
+      },
+    );
+    const { session } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+    await tick();
+    expect(deleteSignedOutStore).toHaveBeenCalledWith("discarded-1", expect.anything());
+    // Meanwhile another tab signs in as the second account (clearing its
+    // entry), and lets go of its store again.
+    pendingDiscards.clear("discarded-2");
+    first.resolve();
+    await tick();
+    await tick();
+    expect(deleted).toEqual(["discarded-1"]);
+    expect(forgotten).toEqual(["discarded-1"]);
+    expect(pending.size).toBe(0);
     await session.close();
   });
   it("saves a selection that failed during an offline sign-out on retry, back to signing-out", async () => {
