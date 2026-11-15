@@ -299,6 +299,19 @@ pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> 
     Ok(crate::db::Migrations { schemas, lenses })
 }
 
+/// [`load_client`], with the current schema: what a client that has no
+/// other copy of the schema opens with.
+pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations), ArtifactError> {
+    let app_file = read_app(json)?;
+    let history = check_history(&app_file)?;
+    let (schemas, lenses) = lower_client_migrations(history.bundle())
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    Ok((
+        history.current_schema().clone(),
+        crate::db::Migrations { schemas, lenses },
+    ))
+}
+
 /// What a binding's open configuration ships (a `jazz.app.json`, see
 /// [`load_client`]), lowered for a store; none ships nothing.
 pub fn client_migrations(app: Option<&[u8]>) -> Result<crate::db::Migrations, String> {

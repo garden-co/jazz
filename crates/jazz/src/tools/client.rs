@@ -2388,9 +2388,7 @@ impl Decoder<'_> {
             TransactionId([0; 16]),
             self.provenance(&row.row)?,
         );
-        #[cfg(feature = "testing")]
-        let public = public.with_fields(self.values(&row.row)?);
-        Ok(public)
+        Ok(public.with_fields(self.values(&row.row)?))
     }
 }
 

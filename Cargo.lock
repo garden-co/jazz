@@ -1943,6 +1943,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-app"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "futures-core",
+ "jazz",
+ "jazz-native-transport",
+ "jazz-server",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "jazz-benchmark-guard"
 version = "0.1.0"
 dependencies = [
