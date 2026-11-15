@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
-import type { CompiledPermissions } from "../permissions/index.js";
+import type { CompiledPermissionsMap as CompiledPermissions } from "../schema-permissions.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
 import { setFlagsFromString } from "node:v8";

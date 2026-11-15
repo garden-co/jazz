@@ -1,7 +1,8 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { schema as s, type WasmSchema } from "jazz-tools";
+import type { WasmSchema } from "jazz-tools";
+import { testApp } from "jazz-tools/testing";
 import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
 import type { InspectorRuntimeContext } from "./contexts/host-link";
 import { InspectorApp } from "./inspector-app";
@@ -143,17 +144,11 @@ describe("InspectorApp", () => {
     readHostConfigMock.mockReset();
     createAttachmentClientMock.mockReset();
     const schema = (largeCount: bigint): WasmSchema =>
-      s.defineApp(
-        {
-          metrics: s.table(
-            {
-              largeCount: s.bigint().default(largeCount),
-            },
-            {},
-          ),
+      testApp({
+        tables: {
+          metrics: { columns: { largeCount: { type: "bigint", default: String(largeCount) } } },
         },
-        { migrations: "none" },
-      ).wasmSchema;
+      }).wasmSchema;
     const initialContext = context("metrics", localFirstPhysicalDbName);
     initialContext.schema = schema(9007199254740993n);
     const equalContext = {

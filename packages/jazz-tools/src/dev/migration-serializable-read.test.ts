@@ -1,34 +1,25 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { migration as m } from "../migration-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { appMigrations } from "../testing/client-migrations.js";
-import { startTestJazz } from "../testing/index.js";
+import { startTestJazz, testApp } from "../testing/index.js";
 
 it("accepts a serializable read of an unchanged table after migration", async () => {
-  const projects = s.table({ title: s.string() }, {});
-  const before = { projects, notes: s.table({ title: s.string() }, {}) };
-  const after = { projects, notes: s.table({ body: s.string() }, {}) };
-  const migration = m.defineMigration({
-    from: before,
-    to: after,
-    migrate: { notes: { body: m.renameFrom("title") } },
+  const projects = { columns: { title: "string" } };
+  const before = { projects, notes: { columns: { title: "string" } } };
+  const after = { projects, notes: { columns: { body: "string" } } };
+  const oldApp = testApp({ tables: before });
+  const newApp = testApp({
+    tables: after,
+    history: { v1: { tables: before } },
+    migrations: [{ from: "v1", migrate: { notes: { body: { renameFrom: "title" } } } }],
   });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
-  });
-  const permissions = (app: typeof oldApp | typeof newApp) =>
-    definePermissions(app, ({ policy }) => {
-      policy.projects.allowRead.always();
-      policy.projects.allowInsert.always();
-      policy.notes.allowRead.always();
-    });
+  const permissions = {
+    format: 1,
+    tables: { projects: { read: "true", insert: "true" }, notes: { read: "true" } },
+  };
   const server = await startTestJazz({
     app: oldApp,
-    permissions: permissions(oldApp),
+    permissions,
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -38,7 +29,7 @@ it("accepts a serializable read of an unchanged table after migration", async ()
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: permissions(newApp), migration });
+    await server.redeploy({ app: newApp, permissions });
     db = await createDb(account);
     const query = newApp.projects.where({ id: project.id });
     expect(await db.one(query, { tier: "remote" })).toEqual(project);
@@ -52,25 +43,16 @@ it("accepts a serializable read of an unchanged table after migration", async ()
 }, 30_000);
 
 it("preserves serializable conflict detection after renaming the queried table", async () => {
-  const before = { projects: s.table({ title: s.string() }, {}) };
-  const after = { initiatives: s.table({ title: s.string() }, {}) };
-  const migration = m.defineMigration({
-    from: before,
-    to: after,
-    renameTables: { initiatives: m.renameTableFrom("projects") },
+  const before = { projects: { columns: { title: "string" } } };
+  const after = { initiatives: { columns: { title: "string" } } };
+  const oldApp = testApp({ tables: before });
+  const newApp = testApp({
+    tables: after,
+    history: { v1: { tables: before } },
+    migrations: [{ from: "v1", renameTables: { initiatives: "projects" } }],
   });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
-  });
-  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-  });
-  const newPermissions = definePermissions(newApp, ({ policy }) => {
-    policy.initiatives.allowRead.always();
-    policy.initiatives.allowInsert.always();
-  });
+  const oldPermissions = { format: 1, tables: { projects: { read: "true", insert: "true" } } };
+  const newPermissions = { format: 1, tables: { initiatives: { read: "true", insert: "true" } } };
   const server = await startTestJazz({
     app: oldApp,
     permissions: oldPermissions,
@@ -84,7 +66,7 @@ it("preserves serializable conflict detection after renaming the queried table",
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
+    await server.redeploy({ app: newApp, permissions: newPermissions });
     db = await createDb(account);
     writer = await createDb(await localAccountConfig(server.appId, server.url));
     expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
