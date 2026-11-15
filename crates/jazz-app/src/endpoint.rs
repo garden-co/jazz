@@ -66,6 +66,17 @@ const ACCOUNT_CACHE_LIMIT: usize = 10_000;
 const CORE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The close code of a socket ended for its credentials (policy violation).
 const CLOSE_POLICY: u16 = 1008;
+/// The largest prelude a socket may open with.
+const MAX_PRELUDE_BYTES: usize = 64 * 1024;
+/// The largest message a client may send: the core's own cap on a
+/// WebSocket message (one wire frame).
+const MAX_CLIENT_MESSAGE_BYTES: usize = jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
+/// The largest request body the account routes read.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+/// How long connecting to the core may take.
+const CORE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many sockets an endpoint serves at once, by default.
+const DEFAULT_MAX_SOCKETS: usize = 10_000;
 
 /// An HTTP request as the host's server received it: what
 /// [`Authenticate`] reads (cookies, `Authorization`), and what
@@ -314,6 +325,9 @@ struct Inner {
     authenticate: Arc<dyn Authenticate>,
     base_path: String,
     session_ttl: Duration,
+    max_sockets: usize,
+    /// Sockets open now.
+    sockets: Arc<std::sync::atomic::AtomicUsize>,
     http: reqwest::Client,
     /// Users' accounts, which never change once assigned, kept for a
     /// while so the core isn't asked on every request.
@@ -381,6 +395,8 @@ impl Endpoint {
                 authenticate: Arc::new(authenticate),
                 base_path: DEFAULT_BASE_PATH.into(),
                 session_ttl: DEFAULT_SESSION_TTL,
+                max_sockets: DEFAULT_MAX_SOCKETS,
+                sockets: Arc::default(),
                 http,
                 accounts: Mutex::new(HashMap::new()),
             }),
@@ -400,6 +416,12 @@ impl Endpoint {
         self.reconfigure(|inner| inner.session_ttl = ttl)
     }
 
+    /// How many sockets this endpoint serves at once (default 10 000): one
+    /// more is closed with 1013, try again later.
+    pub fn max_sockets(self, max: usize) -> Self {
+        self.reconfigure(|inner| inner.max_sockets = max)
+    }
+
     fn reconfigure(self, change: impl FnOnce(&mut Inner)) -> Self {
         let mut inner = match Arc::try_unwrap(self.inner) {
             Ok(inner) => inner,
@@ -411,6 +433,8 @@ impl Endpoint {
                 authenticate: shared.authenticate.clone(),
                 base_path: shared.base_path.clone(),
                 session_ttl: shared.session_ttl,
+                max_sockets: shared.max_sockets,
+                sockets: shared.sockets.clone(),
                 http: shared.http.clone(),
                 accounts: Mutex::new(HashMap::new()),
             },
@@ -441,6 +465,9 @@ impl Endpoint {
         let Some(route) = self.route(&request) else {
             return Response::text(404, "Not found");
         };
+        if request.body.len() > MAX_BODY_BYTES {
+            return Response::text(413, "request body too large");
+        }
         let result = match route {
             Route::SignIn => self.post(&request, Self::backend_sign_in).await,
             Route::User => self.post(&request, Self::backend_user).await,
@@ -498,10 +525,13 @@ impl Endpoint {
 
     /// The user `request` is for, as the app's `authenticate` says. A
     /// device-account answer names no user.
+    ///
+    /// An answer whose `expires_at` has passed names no one, here and on
+    /// every route: the user is signed out.
     pub async fn authenticate(&self, request: &Request) -> Result<Option<AuthUser>> {
         match self.ask(request.clone()).await? {
-            Some(Answer::User(user)) => Ok(Some(user)),
-            Some(Answer::DeviceAccount) | None => Ok(None),
+            Some(Answer::User(user)) if user.expires_at > unix_now() => Ok(Some(user)),
+            Some(Answer::User(_) | Answer::DeviceAccount) | None => Ok(None),
         }
     }
 
@@ -817,6 +847,15 @@ impl Endpoint {
         if !matches!(self.route(request), Some(Route::Socket)) {
             return Closed::policy("not this endpoint's socket");
         }
+        let _slot = match SocketSlot::take(&self.inner.sockets, self.inner.max_sockets) {
+            Some(slot) => slot,
+            None => {
+                return Closed {
+                    code: 1013,
+                    reason: "too many sockets; try again later".into(),
+                };
+            }
+        };
         let prelude = match tokio::time::timeout(PRELUDE_DEADLINE, incoming.next()).await {
             Ok(Some(prelude)) => prelude,
             Ok(None) => return Closed::normal(),
@@ -867,7 +906,9 @@ impl Endpoint {
             core.server.trim_end_matches('/').replacen("http", "ws", 1),
             core.app_id
         );
-        let Ok((socket, _)) = tokio_tungstenite::connect_async(url).await else {
+        let Ok(Ok((socket, _))) =
+            tokio::time::timeout(CORE_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url)).await
+        else {
             return Closed {
                 code: 1011,
                 reason: "the sync server is unreachable".into(),
@@ -886,6 +927,11 @@ impl Endpoint {
         let closed = loop {
             tokio::select! {
                 message = incoming.next() => match message {
+                    // More than the core takes in one message: it would
+                    // close the link, so the endpoint does, for this socket.
+                    Some(message) if message.len() > MAX_CLIENT_MESSAGE_BYTES => {
+                        break Closed { code: 1009, reason: "message too big".into() };
+                    }
                     Some(message) => {
                         if to_core.send(Message::Binary(message.into())).await.is_err() {
                             break Closed { code: 1011, reason: "the sync server went away".into() };
@@ -925,38 +971,68 @@ impl Endpoint {
     /// `admitPrelude`: a device account's own proof, or the session of the
     /// user `authenticate` names, rewritten to the backend's word and pinned
     /// to its bundle.
+    ///
+    /// What reaches the core is built here, never copied from the client:
+    /// `peer_identity` and `requested_link` from the prelude, the pinned
+    /// `bundle`, and an `auth` holding the backend secret and exactly one
+    /// identity (the device's token, or the vouched session). Credentials
+    /// are read from `auth` only: one stated anywhere else, a field `auth`
+    /// does not define, or a request only a backend makes
+    /// (`bootstrap_catalogue`, `local_first_audience`) refuses the socket.
     async fn admit(&self, request: &Request, prelude: &[u8]) -> Result<Admission> {
-        let Ok(Value::Object(mut parsed)) = serde_json::from_slice::<Value>(prelude) else {
+        if prelude.len() > MAX_PRELUDE_BYTES {
+            return Ok(Admission::Unverified);
+        }
+        let Ok(Value::Object(parsed)) = serde_json::from_slice::<Value>(prelude) else {
             return Ok(Admission::Missing);
         };
-        parsed.remove(SESSION_RENEWAL_PRELUDE_FIELD);
-        let auth = match parsed.get("auth") {
-            Some(Value::Object(auth)) => auth.clone(),
-            _ => parsed.clone(),
+        let mut forwarded = Map::new();
+        for (key, value) in &parsed {
+            match key.as_str() {
+                "auth" | SESSION_RENEWAL_PRELUDE_FIELD => {}
+                // The core checks it against the session it admits.
+                "peer_identity" if value.is_string() => {
+                    forwarded.insert(key.clone(), value.clone());
+                }
+                "requested_link" if value.is_string() => {
+                    forwarded.insert(key.clone(), value.clone());
+                }
+                // Replaced by the backend's pin.
+                "bundle" => {}
+                "bootstrap_catalogue" if value == &json!(false) => {}
+                // Null credentials, as browser transports send them.
+                "jwt_token" | "backend_secret" | "admin_secret" | "backend_session"
+                    if value.is_null() => {}
+                _ => return Ok(Admission::Unverified),
+            }
+        }
+        let Some(Value::Object(auth)) = parsed.get("auth") else {
+            return Ok(Admission::Missing);
         };
-        let stated = |key: &str| {
-            !parsed.get(key).unwrap_or(&Value::Null).is_null()
-                || !auth.get(key).unwrap_or(&Value::Null).is_null()
-        };
+        let stated = |key: &str| auth.get(key).is_some_and(|value| !value.is_null());
+        if auth.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "jwt_token" | "backend_secret" | "admin_secret" | "backend_session"
+            )
+        }) || stated("backend_secret")
+            || stated("admin_secret")
+        {
+            return Ok(Admission::Unverified);
+        }
         let secret = Value::String(self.inner.core.backend_secret.clone());
         let now = Instant::now();
-        // A real token, not the `jwt_token: null` browser transports send.
-        let token = auth
-            .get("jwt_token")
-            .or_else(|| parsed.get("jwt_token"))
-            .filter(|token| !token.is_null())
-            .cloned();
-        if let Some(token) = token {
-            let alone = ["backend_secret", "admin_secret", "backend_session"]
-                .iter()
-                .all(|key| !stated(key));
-            let claims = token.as_str().and_then(token_claims);
+        if stated("jwt_token") {
+            if stated("backend_session") {
+                return Ok(Admission::Unverified);
+            }
+            let Some(token) = auth.get("jwt_token").and_then(Value::as_str) else {
+                return Ok(Admission::Unverified);
+            };
+            let claims = token_claims(token);
             let local_first = claims
                 .as_ref()
                 .is_some_and(|claims| claims.get("iss") == Some(&json!(LOCAL_FIRST_ISSUER)));
-            if !local_first || !alone || stated("local_first_audience") {
-                return Ok(Admission::Unverified);
-            }
             // The core verifies the token itself; the backend only checks
             // it is for this app. Proofs for an endpoint URL are not
             // supported yet.
@@ -969,28 +1045,26 @@ impl Endpoint {
                     Value::Array(auds) => auds.iter().any(|aud| aud.as_str() == Some(&app)),
                     _ => false,
                 });
-            if !for_this_app || !self.accepts_device_account(request).await? {
+            if !local_first || !for_this_app || !self.accepts_device_account(request).await? {
                 return Ok(Admission::Unverified);
             }
-            let mut auth = auth;
-            auth.insert("backend_secret".into(), secret);
-            parsed.insert("auth".into(), Value::Object(auth));
+            forwarded.insert(
+                "auth".into(),
+                json!({ "jwt_token": token, "backend_secret": secret }),
+            );
             return Ok(Admission::Admitted {
-                prelude: self.pinned(parsed),
+                prelude: self.pinned(forwarded),
                 who: Admitted::DeviceAccount,
                 until: now + self.inner.session_ttl,
             });
         }
-        let Some(Value::Object(session)) = auth.get("backend_session") else {
+        let Some(Value::Object(stated_session)) = auth.get("backend_session") else {
             return Ok(Admission::Missing);
         };
-        if stated("backend_secret") || stated("admin_secret") {
-            return Ok(Admission::Missing);
-        }
         let Some(user) = self.authenticate(request).await? else {
             return Ok(Admission::Missing);
         };
-        if session.get("user_id").and_then(Value::as_str) != Some(user.user_id.as_str()) {
+        if stated_session.get("user_id").and_then(Value::as_str) != Some(user.user_id.as_str()) {
             return Ok(Admission::Missing);
         }
         // A client states a user's session only once its sign-in gave them
@@ -1011,14 +1085,12 @@ impl Endpoint {
             "claims": session.claims,
             "authMode": "external",
         });
-        let mut auth = auth;
-        for target in [&mut parsed, &mut auth] {
-            target.insert("backend_secret".into(), secret.clone());
-            target.insert("backend_session".into(), session.clone());
-        }
-        parsed.insert("auth".into(), Value::Object(auth));
+        forwarded.insert(
+            "auth".into(),
+            json!({ "backend_secret": secret, "backend_session": session }),
+        );
         Ok(Admission::Admitted {
-            prelude: self.pinned(parsed),
+            prelude: self.pinned(forwarded),
             who: Admitted::User(user.user_id),
             until,
         })
@@ -1032,6 +1104,20 @@ impl Endpoint {
         serde_json::to_vec(&prelude).unwrap_or_default()
     }
 
+    /// The prelude the core would get for this socket, if admitted: for
+    /// tests.
+    #[doc(hidden)]
+    pub async fn forwarded_prelude(
+        &self,
+        request: &Request,
+        prelude: &[u8],
+    ) -> Result<Option<Value>> {
+        Ok(match self.admit(request, prelude).await? {
+            Admission::Admitted { prelude, .. } => serde_json::from_slice(&prelude).ok(),
+            _ => None,
+        })
+    }
+
     /// Who a socket would be admitted as, without opening it: for tests and
     /// the host's logs.
     #[doc(hidden)]
@@ -1040,6 +1126,26 @@ impl Endpoint {
             Admission::Admitted { who, .. } => Some(who),
             _ => None,
         })
+    }
+}
+
+/// One of an endpoint's socket slots, given back when dropped.
+struct SocketSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl SocketSlot {
+    fn take(open: &Arc<std::sync::atomic::AtomicUsize>, max: usize) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        open.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < max).then_some(n + 1)
+        })
+        .ok()
+        .map(|_| Self(open.clone()))
+    }
+}
+
+impl Drop for SocketSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
