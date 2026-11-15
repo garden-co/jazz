@@ -2,9 +2,9 @@
 // backend: the page's API calls go to `jazz.handle`, as they would over HTTP.
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { schema as s } from "jazz-tools";
 import { createJazz, memory, type InspectGrant, type Jazz } from "jazz-tools/backend";
 import { inspectorLink } from "jazz-tools/inspect";
+import { testApp } from "jazz-tools/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GenericQueryBuilder } from "../utility/generic-query-builder.js";
 import { createInspectorCall, InspectorApiError } from "./api.js";
@@ -12,27 +12,25 @@ import { decodeRow, toInspectQuery, toWriteOps } from "./api-data.js";
 import { ApprovalPage } from "./ApprovalPage.js";
 import { BackendApp, initialRouteFor } from "./BackendApp.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-        owner: s.string(),
-        rank: s.bigint().optional(),
-        due: s.timestamp().optional(),
+const app = testApp({
+  tables: {
+    todos: {
+      columns: {
+        title: "string",
+        done: "boolean",
+        owner: "string",
+        rank: "bigint?",
+        due: "timestamp?",
       },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.todos.allowRead.where({ owner: "alice" });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.always();
-  policy.todos.allowDelete.always();
 });
+const permissions = {
+  format: 1,
+  tables: {
+    todos: { read: "owner = 'alice'", insert: "true", update: "true", delete: "true" },
+  },
+};
 
 const PAGE = "http://localhost:3000/jazz/inspect/";
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -186,9 +184,7 @@ describe("the Inspector a backend serves", () => {
     // string, so the policy reads the claim alone.)
     const jazz = await createJazz({
       app,
-      permissions: s.definePermissions(app, ({ policy, session }) => {
-        policy.todos.allowRead.where(session.where({ "claims.role": "manager" }));
-      }),
+      permissions: { format: 1, tables: { todos: { read: "session.claims.role = 'manager'" } } },
       store: memory(),
       authenticate: () => null,
       inspect: staff,
