@@ -53,6 +53,7 @@ function codeOf(error: unknown): unknown {
 async function checkFiles(
   project: AppProject,
   check: boolean,
+  tsBindings = true,
 ): Promise<{ warnings: string[]; stale: boolean }> {
   if (project.permissions === null) {
     throw new Error(
@@ -66,6 +67,7 @@ async function checkFiles(
   // The bindings are current when their `source` and format match, whatever a
   // formatter did to them; stale ones are what generate rewrites.
   let stale = false;
+  if (!tsBindings) return { warnings: loaded.warnings ?? [], stale };
   try {
     await validateBindings(project.app, project.bindings);
   } catch (error) {
@@ -86,15 +88,21 @@ function shown(project: { dir: string }, file: string): string {
  */
 export async function generateApp(options: GenerateOptions): Promise<GenerateResult> {
   const project = await readAppProject(options.cwd);
-  const { warnings, stale } = await checkFiles(project, options.check ?? false);
-  const bindings = [GENERATED_FILE];
+  const crate = existsSync(join(project.dir, "Cargo.toml"));
+  // A Rust-only app (a crate without TS bindings) gets only its Rust ones.
+  const ts = !crate || project.bindings !== null;
+  const { warnings, stale } = await checkFiles(project, options.check ?? false, ts);
+  const bindings: string[] = [];
   let wrote = false;
-  if (stale) {
-    await writeFile(join(project.dir, GENERATED_FILE), await generateTs(project.app));
-    wrote = true;
+  if (ts) {
+    bindings.push(GENERATED_FILE);
+    if (stale) {
+      await writeFile(join(project.dir, GENERATED_FILE), await generateTs(project.app));
+      wrote = true;
+    }
   }
   // A Rust crate beside the files (a `jazz-app` backend) gets its bindings too.
-  if (existsSync(join(project.dir, "Cargo.toml"))) {
+  if (crate) {
     bindings.push(RUST_BINDINGS_FILE);
     const path = join(project.dir, RUST_BINDINGS_FILE);
     const text = await generateRust(project.app);

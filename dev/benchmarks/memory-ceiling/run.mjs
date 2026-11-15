@@ -396,7 +396,7 @@ async function runScenario(name, scenariosLeft) {
       appId,
       serverUrl: server.url,
       adminSecret,
-      schema: adapter.app,
+      app: adapter.app,
       permissions: adapter.permissions,
     }));
 
