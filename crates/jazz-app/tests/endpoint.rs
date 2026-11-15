@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bindings::{NewProject, NewTodo, Todo, projects, todos};
 use futures::{SinkExt, StreamExt};
-use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, Request};
+use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, GuestKeyAfterLink, Request};
 use jazz_app::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, DurabilityTier, Error, Jazz, ReadTier,
     SessionState, TokenReason,
@@ -999,5 +999,171 @@ async fn malformed_and_oversized_input_is_refused_and_the_endpoint_serves_on() {
         .await
         .unwrap();
     kim.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// A device key's seed, from its `jazz-auth-v1:` form.
+fn seed_of(key: &DeviceKey) -> [u8; 32] {
+    use base64::Engine as _;
+    let text = key.to_string();
+    let encoded = text
+        .strip_prefix("jazz-auth-v1:")
+        .unwrap()
+        .trim_end_matches('=');
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+fn sign(seed: &[u8; 32], challenge: &str) -> String {
+    jazz_app::jazz::tools::identity::sign_local_first_challenge(seed, challenge).unwrap()
+}
+
+/// A link challenge `endpoint` issues for `user`.
+async fn challenge_for(app: &App, endpoint: &Endpoint, user: &str) -> String {
+    let issued = endpoint
+        .handle(
+            Request::new("POST", app.path("accounts/backend-link/challenge"))
+                .header("authorization", format!("Bearer token-{user}")),
+        )
+        .await;
+    assert_eq!(issued.status, 200);
+    assert!(
+        issued
+            .headers
+            .contains(&("cache-control".into(), "no-store".into())),
+        "a challenge is never cached"
+    );
+    serde_json::from_slice::<Value>(&issued.body).unwrap()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Links the device with `seed` to `user`, proving it on `proven` and
+/// presenting `presented`.
+async fn link_as(
+    app: &App,
+    endpoint: &Endpoint,
+    user: &str,
+    seed: &[u8; 32],
+    proven: &str,
+    presented: &str,
+) -> jazz_app::endpoint::Response {
+    let mut request = Request::new("POST", app.path("accounts/backend-link"))
+        .header("authorization", format!("Bearer token-{user}"));
+    request.body = serde_json::to_vec(&json!({
+        "challenge": presented,
+        "proof": sign(seed, proven),
+    }))
+    .unwrap();
+    endpoint.handle(request).await
+}
+
+async fn link(app: &App, endpoint: &Endpoint, user: &str, seed: &[u8; 32]) -> (u16, Value) {
+    let challenge = challenge_for(app, endpoint, user).await;
+    let response = link_as(app, endpoint, user, seed, &challenge, &challenge).await;
+    let body = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    (response.status, body)
+}
+
+/// By default (TS's `keep`), a key that linked can link a second user into
+/// its account; with `Revoke` it is retired once it linked, so it can't,
+/// and the first link still answers on a retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_key_links_a_second_user_unless_the_endpoint_revokes_it() {
+    let app = App::start().await;
+
+    // Keep: the second user joins the device's account.
+    let key = DeviceKey::generate().unwrap();
+    let seed = seed_of(&key);
+    let (status, first) = link(&app, &app.endpoint, "lena", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        first["account"],
+        json!(key.account(app.app_id).0.to_string())
+    );
+    let (status, second) = link(&app, &app.endpoint, "max", &seed).await;
+    assert_eq!(status, 200, "keep lets a linked key link again");
+    assert_eq!(second["account"], first["account"]);
+
+    // Revoke: the key links once.
+    let revoking = app
+        .endpoint
+        .clone()
+        .guest_key_after_link(GuestKeyAfterLink::Revoke);
+    let key = DeviceKey::generate().unwrap();
+    let seed = seed_of(&key);
+    let (status, first) = link(&app, &revoking, "nia", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        first["account"],
+        json!(key.account(app.app_id).0.to_string())
+    );
+    let (status, _) = link(&app, &revoking, "otto", &seed).await;
+    assert_eq!(status, 409, "a revoked key links no second user");
+    let other = Request::new("POST", app.path("accounts/backend-user"))
+        .header("authorization", "Bearer token-otto");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&revoking.handle(other).await.body).unwrap()["account"],
+        Value::Null,
+        "otto has no account"
+    );
+    // A retry of nia's link (its answer lost) still answers.
+    let (status, again) = link(&app, &revoking, "nia", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(again["account"], first["account"]);
+    app.stop().await;
+}
+
+/// An expired challenge, and a proof made over another challenge, link
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_or_mismatched_challenge_links_nothing() {
+    use base64::Engine as _;
+    use hmac::Mac as _;
+    let app = App::start().await;
+    let seed = seed_of(&DeviceKey::generate().unwrap());
+
+    // A proof over challenge A, presented with challenge B.
+    let a = challenge_for(&app, &app.endpoint, "pia").await;
+    let b = challenge_for(&app, &app.endpoint, "pia").await;
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &a, &b).await;
+    assert_eq!(
+        (response.status, response.text_body().as_str()),
+        (401, "invalid_local_first_proof")
+    );
+
+    // A challenge signed with the endpoint's own key, but expired.
+    let key = {
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(app.server.admin_secret().as_bytes())
+                .unwrap();
+        mac.update(format!("jazz-link-challenge-v1\0{}", app.app_id).as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    };
+    let signed = |exp: u64| {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({ "v": 1, "sub": "pia", "nonce": jazz_app::ObjectId::new().to_string(), "exp": exp })
+                .to_string(),
+        );
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).unwrap();
+        mac.update(payload.as_bytes());
+        let mac =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        format!("{payload}.{mac}")
+    };
+    let expired = signed(now() - 1);
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &expired, &expired).await;
+    assert_eq!(
+        (response.status, response.text_body().as_str()),
+        (400, "invalid_link_challenge")
+    );
+    // Its fresh twin links: only the expiry refused it.
+    let fresh = signed(now() + 60);
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &fresh, &fresh).await;
+    assert_eq!(response.status, 200);
     app.stop().await;
 }

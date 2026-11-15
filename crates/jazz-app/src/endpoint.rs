@@ -245,6 +245,23 @@ pub enum Answer {
     DeviceAccount,
 }
 
+/// What becomes of a device key once it linked to a user, as TS
+/// `guestKeyAfterLink`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GuestKeyAfterLink {
+    /// The key stays a credential of the account (TS's default): the
+    /// device syncs on as before. A key that linked can link again, and
+    /// a second user it links to joins the same account and reads its
+    /// data, so only keep keys when a device is its user's alone.
+    #[default]
+    Keep,
+    /// The key is revoked once it linked: the device signs in as the user
+    /// from then on, a leaked key opens nothing, and it cannot link a
+    /// second user.
+    Revoke,
+}
+
 /// What [`Authenticate::authenticate`] returns.
 pub type AuthFuture = Pin<Box<dyn Future<Output = Result<Option<Answer>>> + Send>>;
 
@@ -302,6 +319,16 @@ impl Closed {
 /// The app's Jazz endpoint, served by its backend. `Clone + Send + Sync`:
 /// every clone serves the same endpoint.
 ///
+/// - **Linking device accounts** (`backend-link`): by default a device key
+///   that linked to a user stays a credential of their account
+///   ([`GuestKeyAfterLink::Keep`], TS's default). A key that linked can
+///   link again, and a second user it links to joins the same account. Use
+///   [`Endpoint::guest_key_after_link`] with [`GuestKeyAfterLink::Revoke`]
+///   unless a device is its user's alone.
+/// - **The admin secret must be random** (at least 32 bytes): link
+///   challenges, which every signed-in user receives, are MACs under a key
+///   derived from it, so a guessable secret could be found offline.
+///
 /// ```no_run
 /// # async fn serve(jazz: jazz_app::Jazz) -> jazz_app::Result<()> {
 /// use jazz_app::endpoint::{Answer, AuthUser, Endpoint, Request};
@@ -329,6 +356,7 @@ struct Inner {
     authenticate: Arc<dyn Authenticate>,
     base_path: String,
     session_ttl: Duration,
+    guest_key_after_link: GuestKeyAfterLink,
     max_sockets: usize,
     /// Sockets open now.
     sockets: Arc<std::sync::atomic::AtomicUsize>,
@@ -409,6 +437,7 @@ impl Endpoint {
                 authenticate: Arc::new(authenticate),
                 base_path: DEFAULT_BASE_PATH.into(),
                 session_ttl: DEFAULT_SESSION_TTL,
+                guest_key_after_link: GuestKeyAfterLink::Keep,
                 max_sockets: DEFAULT_MAX_SOCKETS,
                 sockets: Arc::default(),
                 http,
@@ -427,6 +456,12 @@ impl Endpoint {
     /// The longest a sync session runs before its client is asked to
     /// reconnect (TS `sessionTtlSeconds`, default an hour), and how long a
     /// user's account is cached.
+    /// What becomes of a device key once it linked to a user
+    /// (`backend-link`; TS `guestKeyAfterLink`). See [`GuestKeyAfterLink`].
+    pub fn guest_key_after_link(self, after: GuestKeyAfterLink) -> Self {
+        self.reconfigure(|inner| inner.guest_key_after_link = after)
+    }
+
     pub fn session_ttl(self, ttl: Duration) -> Self {
         self.reconfigure(|inner| inner.session_ttl = ttl)
     }
@@ -448,6 +483,7 @@ impl Endpoint {
                 authenticate: shared.authenticate.clone(),
                 base_path: shared.base_path.clone(),
                 session_ttl: shared.session_ttl,
+                guest_key_after_link: shared.guest_key_after_link,
                 max_sockets: shared.max_sockets,
                 sockets: shared.sockets.clone(),
                 http: shared.http.clone(),
@@ -719,7 +755,7 @@ impl Endpoint {
                 Err(Refused::Coded(403, code))
                     if code != LOCAL_FIRST_AUTH_DISABLED && user_is(account).await =>
                 {
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(error) => return Err(error),
             }
@@ -730,14 +766,17 @@ impl Endpoint {
                 )
                 .await
             {
-                Ok(_) => Ok(()),
-                // Linking is idempotent for this device and this user.
-                Err(Refused::Coded(409 | 403, _)) if user_is(account).await => Ok(()),
+                Ok(_) => Ok(false),
+                // Linking is idempotent for this device and this user: a
+                // 403 means the link that won already retired the key.
+                Err(Refused::Coded(status @ (409 | 403), _)) if user_is(account).await => {
+                    Ok(status == 403)
+                }
                 Err(error) => Err(error),
             }
         };
-        match linked.await {
-            Ok(()) => {}
+        let revoked = match linked.await {
+            Ok(revoked) => revoked,
             Err(Refused::Coded(_, code)) if code == LOCAL_FIRST_AUTH_DISABLED => {
                 return Ok(Response::text(503, LOCAL_FIRST_AUTH_DISABLED));
             }
@@ -746,6 +785,20 @@ impl Endpoint {
                 return Ok(Response::text(409, "link_refused"));
             }
             Err(_) => return Ok(Response::text(503, "account_registry_unavailable")),
+        };
+        if self.inner.guest_key_after_link == GuestKeyAfterLink::Revoke && !revoked {
+            // The link already stands. If the revoke fails, the key stays
+            // usable until the device retries the link (idempotent, and it
+            // revokes then): a server error, not a silent success.
+            let revoke = self
+                .admin(
+                    "revoke",
+                    json!({ "approver": identity(&user.user_id), "target": guest }),
+                )
+                .await;
+            if revoke.is_err() {
+                return Ok(Response::text(500, "guest_key_revoke_failed"));
+            }
         }
         self.remember(&user.user_id, account);
         Ok(Response::json(&json!({
