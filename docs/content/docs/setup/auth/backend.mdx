@@ -494,6 +494,11 @@ down gracefully with its writes synced, and only then signs in and opens the new
   upload. Jazz tries again with backoff and when the connection returns (`retry()` tries now), then
   the session is `signed-out`. `close()` meanwhile stops the upload: a persistent store keeps the
   writes for that account's next sign-in.
+- `signOut({ discardUnsynced: true })` signs out without waiting for the server. **It loses that
+  user's writes the server hasn't confirmed**: it wipes their local data from this device, and the
+  session is `signed-out` at once. Call it while `signing-out` (still offline) to give up the upload
+  so someone else can sign in. Writes the server already has stay there. Plain `signOut()` never
+  drops writes.
 
 ### Reactive state
 

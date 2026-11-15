@@ -80,10 +80,12 @@ async function setup() {
       events.push(`open:${selected.id}`);
       if (openFailure) throw new Error("open unavailable");
       return {
-        async shutdown() {
+        async shutdown(options?: { waitForSync?: boolean }) {
           events.push(`flush:${selected.id}`);
           if (unknownShutdownFailure) throw new Error("unknown shutdown failure");
-          if (shutdownFailure) throw new GracefulShutdownSyncError(new Error("offline"));
+          // Offline: only the wait for sync fails, as a Db's does.
+          if (shutdownFailure && options?.waitForSync)
+            throw new GracefulShutdownSyncError(new Error("offline"));
         },
       };
     },
@@ -784,6 +786,44 @@ describe("JazzSession operation slot", () => {
     await linking;
     await refreshing;
     expect(f.probes()).toBe(probesBefore + 1);
+    await app.close();
+  });
+  it("drops a refresh queued behind a backend check when a sign-out comes first", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await settle();
+    await app.createDeviceAccount();
+    f.backend.user = "one";
+    const release = f.holdProbe();
+    // A focus check is in flight; the refresh queues behind it.
+    f.focus();
+    await tick();
+    const refreshed = expect(app.refresh()).rejects.toMatchObject({ reason: "superseded" });
+    await tick();
+    await app.signOut();
+    release();
+    await refreshed;
+    await settle();
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", user: null });
+    expect(f.events).not.toContain("admit:one");
+    await app.close();
+  });
+  it("discards a signing-out user's writes on request, then lets another sign in", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await tick();
+    await app.createDeviceAccount();
+    f.failShutdown(true);
+    // The default stays safe: it waits for the server.
+    await app.signOut();
+    expect(app.getSnapshot().status).toBe("signing-out");
+    await expect(app.createDeviceAccount()).rejects.toMatchObject({ reason: "signing-out" });
+    // Still offline: give the writes up and sign out now.
+    await app.signOut({ discardUnsynced: true });
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", user: null });
+    expect(app.getSnapshot().error).toBeUndefined();
+    await app.createDeviceAccount();
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", user: { kind: "device" } });
     await app.close();
   });
   it("coalesces refreshes asked while one runs into one more", async () => {

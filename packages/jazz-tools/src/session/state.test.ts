@@ -7,7 +7,11 @@ import {
   replaceJazzSessionClient,
   switchJazzSessionUser,
 } from "./state.js";
-import type { JWTAuth } from "../accounts/enrollment.js";
+import {
+  createAccountManagerWithRuntime,
+  onAccountInvalidated,
+  type JWTAuth,
+} from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import {
   isStoreHeldByAnotherTabError,
@@ -351,6 +355,129 @@ describe("Jazz session lifecycle", () => {
       await session.close();
     } finally {
       vi.useRealTimers();
+    }
+  });
+  // As the hosts' account Db does (accounts/context.ts): when its account's
+  // credential is revoked, it stops waiting for sync and tears itself down.
+  async function realEnrollmentSetup() {
+    const accounts = createAccountManagerWithRuntime({
+      registry: "https://core.example/apps/test/accounts",
+      localFirst: {
+        create: () => ({
+          accountId: "00000000-0000-4000-8000-000000000001",
+          identity: { issuer: "urn:jazz:local-first", subject: "local" },
+          auth: "e30.e30.signature",
+        }),
+      },
+    });
+    const net = { online: false };
+    const opened: {
+      torn: boolean;
+      invalidated: boolean;
+      uploaded: boolean;
+      deleted: boolean;
+      shutdown: ReturnType<typeof vi.fn>;
+      db: Record<string, unknown>;
+    }[] = [];
+    const session = await createJazzSessionOwner({
+      accounts,
+      openClient: async (account) => {
+        const client = {
+          torn: false,
+          invalidated: false,
+          uploaded: false,
+          deleted: false,
+          db: {
+            getAuthState: () => ({}),
+            getSyncStatus: () => ({ pendingUploads: client.uploaded ? 0 : 1 }),
+            deleteClientStorage: vi.fn(async () => {
+              client.deleted = true;
+            }),
+            abortGracefulShutdown: () => {},
+          },
+          shutdown: vi.fn(async (options?: { waitForSync?: boolean }) => {
+            // A torn-down client uploads nothing more.
+            if (client.torn) return;
+            if (options?.waitForSync) {
+              if (!net.online)
+                throw new GracefulShutdownSyncError(new Error("websocket transport error"));
+              client.uploaded = true;
+            }
+            client.torn = true;
+          }),
+        };
+        onAccountInvalidated(account, () => {
+          client.invalidated = true;
+          void client.shutdown();
+        });
+        opened.push(client);
+        return client;
+      },
+    });
+    return { session, net, opened };
+  }
+  it("keeps a signing-out client's credential until its writes uploaded", async () => {
+    const { session, net, opened } = await realEnrollmentSetup();
+    await session.createLocalFirst();
+    const client = opened.at(-1)!;
+    await session.logout();
+    // Signed out, but the revocation waits for the upload: the client is
+    // still open, not torn down by its account's invalidation.
+    expect(session.getSnapshot().status).toBe("signing-out");
+    expect(client.invalidated).toBe(false);
+    expect(client.torn).toBe(false);
+    await expect(session.retry()).rejects.toBeInstanceOf(GracefulShutdownSyncError);
+    expect(session.getSnapshot().status).toBe("signing-out");
+    net.online = true;
+    await session.retry();
+    expect(client.uploaded).toBe(true);
+    expect(session.getSnapshot().status).toBe("signed-out");
+    // Revoked once the upload ended.
+    expect(client.invalidated).toBe(true);
+    await session.close();
+  });
+  it("discards a signing-out user's unsynced writes and signs out, so another can sign in", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { session, opened } = await realEnrollmentSetup();
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      await session.logout();
+      expect(session.getSnapshot().status).toBe("signing-out");
+      await session.logout({ discardUnsynced: true });
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      expect(client.uploaded).toBe(false);
+      expect(client.deleted).toBe(true);
+      expect(client.torn).toBe(true);
+      expect(client.invalidated).toBe(true);
+      expect(warned).toHaveBeenCalledWith(
+        expect.stringMatching(/wiped 1 write\(s\).*discardUnsynced/),
+      );
+      // Someone else signs in, still offline.
+      await session.createLocalFirst();
+      expect(session.getSnapshot().status).toBe("ready");
+      expect(session.getSnapshot().client).toBe(opened.at(-1));
+      expect(opened.at(-1)).not.toBe(client);
+      await session.close();
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("discards unsynced writes on sign-out without waiting for the server", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { session, opened } = await realEnrollmentSetup();
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      await session.logout({ discardUnsynced: true });
+      expect(session.getSnapshot().status).toBe("signed-out");
+      expect(client.shutdown).not.toHaveBeenCalledWith({ waitForSync: true });
+      expect(client.deleted).toBe(true);
+      expect(client.torn).toBe(true);
+      await session.close();
+    } finally {
+      warned.mockRestore();
     }
   });
   it("tries a pending sign-out's upload on retry, and stops it on close", async () => {

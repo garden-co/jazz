@@ -233,6 +233,11 @@ export function watchBackendUser<Client>(
   // A signed-in user the backend said has no account any more, signed in
   // again once: kept per user until the backend says they have one.
   let lostAccount: string | undefined;
+  // Sign-outs this watch made itself, following the backend. The others
+  // (the app's own `signOut()`) supersede checks and refreshes asked before
+  // them: their answer was about the session before the sign-out.
+  let followedSignOuts = 0;
+  const appSignOuts = () => jazzSessionSignOuts(session as SessionCore<unknown>) - followedSignOuts;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -241,7 +246,9 @@ export function watchBackendUser<Client>(
   // `reauthenticate` callers not yet answered. An asked check takes the ones
   // waiting when it starts, so each is answered by a probe made after it
   // called, and settles them once it has followed (or failed to follow) it.
-  type Waiter = { resolve(): void; reject(error: Error): void };
+  // Each keeps the session's sign-out count as it asked: one a sign-out
+  // came after is superseded, never answered by a check after it.
+  type Waiter = { resolve(): void; reject(error: Error): void; signOuts: number };
   let waiters: Waiter[] = [];
   // Settles once a check that may sign someone in (not a refused one) has
   // followed the backend's answer, or the watch stopped.
@@ -319,9 +326,8 @@ export function watchBackendUser<Client>(
     // for the session before it, so following it could sign the user back
     // in. An asked check (a refresh) fails as superseded, without asking
     // again; a plain one just ends.
-    const signOutsAtStart = jazzSessionSignOuts(session as SessionCore<unknown>);
-    const signedOutSince = () =>
-      jazzSessionSignOuts(session as SessionCore<unknown>) !== signOutsAtStart;
+    const signOutsAtStart = appSignOuts();
+    const signedOutSince = () => appSignOuts() !== signOutsAtStart;
     const dropped = () => {
       if (asked) throw new JazzSessionOperationError("superseded");
     };
@@ -489,7 +495,11 @@ export function watchBackendUser<Client>(
       if (signedOutSince()) return dropped();
       if (session.getSnapshot().account !== startedWith) return busy();
     }
-    return attempt(session.logout());
+    // Following the backend's answer: not a sign-out that supersedes refreshes.
+    const before = jazzSessionSignOuts(session as SessionCore<unknown>);
+    const signingOut = session.logout();
+    followedSignOuts += jazzSessionSignOuts(session as SessionCore<unknown>) - before;
+    return attempt(signingOut);
   }
   /** The app's `onSignedOut` decision; a hook that fails signs out. */
   async function askSignedOut(): Promise<SignedOutDecision> {
@@ -541,7 +551,17 @@ export function watchBackendUser<Client>(
       };
       return;
     }
-    const batch = asked ? waiters.splice(0) : [];
+    let batch = asked ? waiters.splice(0) : [];
+    if (asked) {
+      const now = appSignOuts();
+      const stale = batch.filter((waiter) => waiter.signOuts !== now);
+      if (stale.length > 0) {
+        settle(stale, new JazzSessionOperationError("superseded"));
+        batch = batch.filter((waiter) => waiter.signOuts === now);
+        // Only refreshes from before a sign-out asked: none is left to answer.
+        if (batch.length === 0) return;
+      }
+    }
     const retriesBefore = retries;
     let retry = false;
     let failure: Error | undefined;
@@ -604,7 +624,10 @@ export function watchBackendUser<Client>(
     reauthenticate() {
       // Never answer as if the session followed the backend when nothing asks it.
       if (stopped) return Promise.reject(stopReason);
-      const done = new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
+      const signOuts = appSignOuts();
+      const done = new Promise<void>((resolve, reject) =>
+        waiters.push({ resolve, reject, signOuts }),
+      );
       whenSettled(() => check(false, true));
       return done;
     },

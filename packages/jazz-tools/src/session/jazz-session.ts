@@ -196,8 +196,14 @@ export interface JazzSession<Client> {
    * back in. Calls while one runs share it. Resolves once signed out here:
    * if the server can't take the user's last writes yet (offline), the
    * session is `signing-out` until it has.
+   *
+   * `discardUnsynced: true` doesn't wait for the server: it **loses the
+   * signed-out user's writes the server hasn't confirmed**, wipes their local
+   * data from this device, and signs out at once, to `signed-out`. It also
+   * ends a `signing-out` session (offline) that way, so someone else can
+   * sign in. What the server already has stays there.
    */
-  signOut(): Promise<void>;
+  signOut(options?: { discardUnsynced?: boolean }): Promise<void>;
   /** Try again after an error: see `snapshot.recovery`. Restarts a failed startup. */
   retry(): Promise<void>;
   /** Shut the client down; the session can't be used after. */
@@ -559,19 +565,27 @@ export function ownJazzSession<Config, Client>(
         throw new Error("exportDeviceKey(): this session isn't signed in as a device account");
       return exportLocalFirstSecret(account);
     },
-    async signOut() {
-      if (slot.kind === "signing-out") return slot.done;
+    async signOut(options: { discardUnsynced?: boolean } = {}) {
+      const discard = options.discardUnsynced === true;
+      // A sign-out running: share it, or (discarding) follow it with one
+      // that drops what it would still wait to upload.
+      const join = async (running: Busy) => {
+        if (!discard) return running.done;
+        await running.done.catch(noop);
+        return session.signOut(options);
+      };
+      if (slot.kind === "signing-out") return join(slot);
       if (!core && pending) await pending;
       const current = requireCore();
       // Joined, if one started while this waited for startup.
       const now = slot as Slot;
-      if (now.kind === "signing-out") return now.done;
+      if (now.kind === "signing-out") return join(now);
       // Sign-out takes over from any operation running (see `operate`).
       ++signOuts;
       return operate(
         "signing-out",
-        () => current.logout(),
-        (error) => ({ error, repeat: session.signOut }),
+        () => current.logout({ discardUnsynced: discard }),
+        (error) => ({ error, repeat: () => session.signOut(options) }),
       );
     },
     retry() {
