@@ -6,7 +6,6 @@ import { app, type Todo } from "./apps/alpha-public/jazz.generated.js";
 import permissions from "./apps/alpha-public/jazz.permissions.json";
 import { app as richApp, type Todo as RichTodo } from "./apps/alpha-public-rich/jazz.generated.js";
 import richPermissions from "./apps/alpha-public-rich/jazz.permissions.json";
-import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -15,7 +14,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { compileTestPermissions, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
@@ -879,7 +878,7 @@ async function publishSchemaAndPermissions(
   await deploy({
     ...core,
     app: schemaApp,
-    permissions: await compileTestPermissions(schemaApp, permissions),
+    permissions: permissions,
   });
   // Clients sync through the app's backend; return its URL.
   return (await startJazzApp(core, { schema: schemaApp, permissions })).serverUrl;

@@ -64,8 +64,8 @@ describe("adding an enum variant in a migration", () => {
   async function start(permissionsV2: typeof allowAll | typeof onlyBlocked) {
     const core = await startLocalJazzServer({ inMemory: true });
     const deployment = { serverUrl: core.url, appId: core.appId, adminSecret: core.adminSecret };
-    await deploy({ ...deployment, app: v1, permissions: testPermissions(v1, allowAll) });
-    await deploy({ ...deployment, app: v2, permissions: testPermissions(v2, permissionsV2) });
+    await deploy({ ...deployment, app: v1, permissions: allowAll });
+    await deploy({ ...deployment, app: v2, permissions: permissionsV2 });
     server = await startTestJazz({ app: v2, permissions: permissionsV2, core });
   }
 

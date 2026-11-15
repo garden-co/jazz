@@ -45,7 +45,7 @@ describe("offline persistent schema bootstrap", () => {
       let server = await startLocalJazzServer({
         ...settings,
         schema: oldApp,
-        permissions: oldPermissions,
+        permissions: oldPermissionsFile,
       });
       type Session = Awaited<ReturnType<typeof createJazzClient>>;
       const sessions = new Set<Session>();
@@ -92,7 +92,7 @@ describe("offline persistent schema bootstrap", () => {
           ...settings,
           serverUrl: server.url,
           app: oldApp,
-          permissions: oldPermissions,
+          permissions: oldPermissionsFile,
         });
         await redeployFront(oldApp, oldPermissionsFile);
         // The app's backend seeds the row.
@@ -106,7 +106,7 @@ describe("offline persistent schema bootstrap", () => {
           ...settings,
           serverUrl: server.url,
           app: newApp,
-          permissions: newPermissions,
+          permissions: newPermissionsFile,
         });
         if (restart) {
           const port = server.port;

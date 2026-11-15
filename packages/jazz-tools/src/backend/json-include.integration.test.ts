@@ -31,7 +31,7 @@ describe("JSON parent includes through the native backend", () => {
           appId: server.appId,
           adminSecret: server.adminSecret,
           app,
-          permissions: {},
+          permissions: { format: 1, tables: {} },
         });
         owner = await startTestJazz({ app, permissions: { format: 1, tables: {} }, core: server });
         const db = owner.jazz.db;

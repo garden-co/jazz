@@ -8,8 +8,31 @@ export type OrderStatus = "placed" | "paid" | "payment_failed" | "shipped";
 export type OrderShippingMethod = "standard" | "express";
 export type PaymentProvider = "sandbox" | "stripe";
 export type PaymentStatus = "requires_payment" | "succeeded" | "failed";
-export type ProductHue = "gray" | "blue" | "cyan" | "green" | "orange" | "pink" | "purple" | "red" | "teal" | "yellow";
-export type ProductArt = "guitar" | "bass" | "keys" | "synth" | "drum" | "cymbal" | "mic" | "headphones" | "amp" | "pedal" | "cable" | "strings" | "picks";
+export type ProductHue =
+  | "gray"
+  | "blue"
+  | "cyan"
+  | "green"
+  | "orange"
+  | "pink"
+  | "purple"
+  | "red"
+  | "teal"
+  | "yellow";
+export type ProductArt =
+  | "guitar"
+  | "bass"
+  | "keys"
+  | "synth"
+  | "drum"
+  | "cymbal"
+  | "mic"
+  | "headphones"
+  | "amp"
+  | "pedal"
+  | "cable"
+  | "strings"
+  | "picks";
 
 export type BetterAuthAccount = {
   readonly id: string;

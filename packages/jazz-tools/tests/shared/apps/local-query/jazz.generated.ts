@@ -1,50 +1,50 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface BundleItem {
+export type BundleItem = {
   readonly id: string;
   label: string;
-}
+};
 
-export interface BundleItemInsert {
+export type BundleItemInsert = {
   label: string;
-}
+};
 
-export interface Bundle {
+export type Bundle = {
   readonly id: string;
   name: string;
   items: string[];
-}
+};
 
-export interface BundleInsert {
+export type BundleInsert = {
   name: string;
   items: string[];
-}
+};
 
-export interface Org {
+export type Org = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface OrgInsert {
+export type OrgInsert = {
   name: string;
-}
+};
 
-export interface Team {
+export type Team = {
   readonly id: string;
   name: string;
   org_id: string | null;
   parent_id: string | null;
-}
+};
 
-export interface TeamInsert {
+export type TeamInsert = {
   name: string;
   org_id?: string | null;
   parent_id?: string | null;
-}
+};
 
-export interface Todo {
+export type Todo = {
   readonly id: string;
   title: string;
   done: boolean;
@@ -52,27 +52,27 @@ export interface Todo {
   owner_id: string | null;
   tags: string[];
   payload: Uint8Array | null;
-}
+};
 
-export interface TodoInsert {
+export type TodoInsert = {
   title: string;
   done: boolean;
   priority?: number | null;
   owner_id?: string | null;
   tags: string[];
   payload?: Uint8Array | null;
-}
+};
 
-export interface User {
+export type User = {
   readonly id: string;
   name: string;
   team_id: string | null;
-}
+};
 
-export interface UserInsert {
+export type UserInsert = {
   name: string;
   team_id?: string | null;
-}
+};
 
 interface Types extends AppTypes {
   bundle_items: {

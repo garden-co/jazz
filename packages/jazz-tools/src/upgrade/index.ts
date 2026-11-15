@@ -255,7 +255,10 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     return report;
   }
   // 6b. Typecheck against this jazz-tools (a Rust app has no TS to check).
-  if (rustApp) report.notes.push("This is a Rust app: run `cargo check` to typecheck it against the new bindings.");
+  if (rustApp)
+    report.notes.push(
+      "This is a Rust app: run `cargo check` to typecheck it against the new bindings.",
+    );
   if (!options.skipTypecheck && !rustApp) {
     const roots = new Set(project.configFileNames.filter((f) => !deleted.has(f)));
     for (const [path] of writes) if (/\.(ts|tsx|mts|cts)$/.test(path)) roots.add(path);
@@ -315,11 +318,15 @@ export function isRustApp(dir: string): boolean {
 /** The `jazz-app` crate's bindings, or why this jazz-napi can't generate them. */
 async function rustBindings(appJson: string): Promise<string | { reason: string }> {
   try {
-    const napi = (await import("jazz-napi")) as unknown as { generate?: (lang: string, app: string) => string };
+    const napi = (await import("jazz-napi")) as unknown as {
+      generate?: (lang: string, app: string) => string;
+    };
     if (typeof napi.generate !== "function") return { reason: "this jazz-napi has no `generate`" };
     return napi.generate("rust", appJson);
   } catch (error) {
-    return { reason: (error instanceof Error ? error.message : String(error)).replace(/[.\s]*$/, "") };
+    return {
+      reason: (error instanceof Error ? error.message : String(error)).replace(/[.\s]*$/, ""),
+    };
   }
 }
 

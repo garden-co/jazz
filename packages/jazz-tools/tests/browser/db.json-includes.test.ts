@@ -1,19 +1,13 @@
 import { expect, it } from "vitest";
 import { generateAuthSecret } from "../../src/index.js";
 import { createBrowserTestDb } from "./support.js";
-import { deploy } from "../../src/dev/catalogue.js";
-import {
-  compileTestPermissions,
-  getJazzServerInfo,
-  startJazzApp,
-  stopJazzServer,
-} from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 import { app } from "./apps/json-includes/jazz.generated.js";
 import permissions from "./apps/json-includes/jazz.permissions.json";
 
 it("reads JSON forward and reverse includes offline before and after persistent reopen", async () => {
   const core = await getJazzServerInfo(crypto.randomUUID());
-  await deploy({ ...core, app, permissions: await compileTestPermissions(app, permissions) });
+  await deploy({ ...core, app, permissions: permissions });
   const server = await startJazzApp(core, { schema: app, permissions });
   const config = {
     appId: server.appId,

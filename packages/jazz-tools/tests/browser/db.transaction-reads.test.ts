@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Db } from "../../src/index.js";
 import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
-import { deploy } from "../../src/dev/catalogue.js";
-import { compileTestPermissions, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import { app, type Todo } from "./apps/transaction-reads/jazz.generated.js";
 import permissions from "./apps/transaction-reads/jazz.permissions.json";
 
@@ -427,7 +426,7 @@ describe("db serializable transaction reads browser integration", () => {
 
   it("reads a cold remote row", async () => {
     const core = await getJazzServerInfo(uniqueDbName("serializable-cold-read"));
-    await deploy({ ...core, app, permissions: await compileTestPermissions(app, permissions) });
+    await deploy({ ...core, app, permissions: permissions });
     const { appId, serverUrl } = await startJazzApp(core, { schema: app, permissions });
 
     const writer = await createDb({

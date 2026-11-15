@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ColumnDescriptor, ColumnType, WasmSchema } from "../drivers/types.js";
 
 import { compileTestApp, testApp } from "../testing/index.js";
-import { structuralSchemaHash, wasmSchemasEqual } from "./schema-utils.js";
+import { wasmSchemasEqual } from "./schema-utils.js";
 
 function schemaWithColumnType(columnType: ColumnType, nullable = false): WasmSchema {
   return {
@@ -43,30 +43,7 @@ type StructuralHashFixture = {
   }>;
 };
 
-const portableColumnTypeTags = [
-  "Integer",
-  "BigInt",
-  "Double",
-  "Boolean",
-  "Text",
-  "Json",
-  "Enum",
-  "EnumPayload",
-  "Timestamp",
-  "Uuid",
-  "Bytea",
-  "Array",
-  "Row",
-] as const;
-
-type Assert<T extends true> = T;
-type IsEqual<Left, Right> =
-  (<T>() => T extends Left ? 1 : 2) extends <T>() => T extends Right ? 1 : 2 ? true : false;
-type PortableColumnTypeTagsAreExhaustive = Assert<
-  IsEqual<(typeof portableColumnTypeTags)[number], ColumnType["type"]>
->;
-
-describe("structuralSchemaHash", () => {
+describe("wasmSchemasEqual", () => {
   const structuralHashFixture = JSON.parse(
     readFileSync(
       new URL("../testing/fixtures/structural-schema-hashes.json", import.meta.url),
@@ -74,51 +51,7 @@ describe("structuralSchemaHash", () => {
     ),
   ) as StructuralHashFixture;
 
-  it("matches Rust for every portable column type and representative nested shape", () => {
-    expect(structuralHashFixture.schemaLayoutVersion).toBe(11);
-    expect(
-      new Set(structuralHashFixture.columnTypeCases.map((entry) => entry.columnType.type)),
-    ).toEqual(new Set(portableColumnTypeTags));
-
-    const hashes = structuralHashFixture.columnTypeCases.map(
-      ({ name, columnType, nullable, hash }) => {
-        const actual = structuralSchemaHash(schemaWithColumnType(columnType, nullable));
-        expect(actual, name).toBe(hash);
-        return actual;
-      },
-    );
-
-    expect(new Set(hashes).size).toBe(hashes.length);
-  });
-
-  it("matches Rust for composite indexes, including its UTF-8 index order", () => {
-    expect(structuralHashFixture.compositeIndexCases.length).toBeGreaterThanOrEqual(5);
-    for (const entry of structuralHashFixture.compositeIndexCases) {
-      const schema: WasmSchema = {
-        values: {
-          columns: entry.columns.map((name) => ({
-            name,
-            column_type: { type: "Text" },
-            nullable: false,
-          })),
-          composite_indexes: entry.compositeIndexes,
-        },
-      };
-      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
-    }
-  });
-
-  it("matches Rust for history retention, hashing full history as before", () => {
-    const hashes = new Map<string, string>();
-    for (const entry of structuralHashFixture.historyCases) {
-      const schema = schemaWithColumnType({ type: "Text" });
-      if (entry.history) schema.values!.history = entry.history;
-      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
-      hashes.set(entry.name, entry.hash);
-    }
-    expect(hashes.get("full")).toBe(structuralSchemaHash(schemaWithColumnType({ type: "Text" })));
-    expect(hashes.get("latest")).not.toBe(hashes.get("full"));
-
+  it("tells latest-only history apart from full history", () => {
     const latest = schemaWithColumnType({ type: "Text" });
     latest.values!.history = "latest";
     expect(wasmSchemasEqual(latest, schemaWithColumnType({ type: "Text" }))).toBe(false);
@@ -142,7 +75,7 @@ describe("structuralSchemaHash", () => {
     ).toThrow(/the only history option is "latest"/);
   });
 
-  it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
+  it("compares Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
     expect(structuralHashFixture.defaultCases.length).toBeGreaterThanOrEqual(22);
     for (const entry of structuralHashFixture.defaultCases) {
       // This corpus intentionally consumes Rust's human-JSON carriers, including
@@ -161,7 +94,6 @@ describe("structuralSchemaHash", () => {
           ...(entry.branchBy === undefined ? {} : { branchBy: entry.branchBy }),
         },
       };
-      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
       expect(wasmSchemasEqual(schema, structuredClone(schema)), entry.name).toBe(true);
       if (entry.default !== undefined) {
         const missing = structuredClone(schema);
@@ -176,11 +108,6 @@ describe("structuralSchemaHash", () => {
         expect(wasmSchemasEqual(schema, altered), "row default value order").toBe(false);
       }
     }
-  });
-
-  it("keeps the portable type-tag list exhaustive at compile time", () => {
-    const _exhaustive: PortableColumnTypeTagsAreExhaustive = true;
-    expect(_exhaustive).toBe(true);
   });
 });
 

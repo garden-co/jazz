@@ -82,6 +82,7 @@ describe("jazz-tools wrapper", () => {
   it("does not advertise the removed documentation MCP server", () => {
     const help = execFileSync(process.execPath, [wrapper, "--help"], { encoding: "utf8" });
 
+    // bin/jazz-tools.js's help still lists `validate` (not yet renamed to `generate`).
     expect(help).toContain("validate");
     expect(help).not.toMatch(/\bmcp\b/i);
   });

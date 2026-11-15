@@ -8,7 +8,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
   createBrowserTestDb as createDb,
@@ -17,7 +16,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { compileTestPermissions, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import { app } from "./apps/large-value-relay/jazz.generated.js";
 import permissions from "./apps/large-value-relay/jazz.permissions.json";
 import { app as transactionApp } from "./apps/large-value-relay-transaction/jazz.generated.js";
@@ -51,7 +50,7 @@ describe("browser persistent-worker large-value relay", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app,
-      permissions: await compileTestPermissions(app, permissions),
+      permissions: permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
 
@@ -151,7 +150,7 @@ describe("browser persistent-worker large-value relay", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: transactionApp,
-      permissions: await compileTestPermissions(transactionApp, transactionPermissions),
+      permissions: transactionPermissions,
     });
     const server = await startJazzApp(core, {
       schema: transactionApp,

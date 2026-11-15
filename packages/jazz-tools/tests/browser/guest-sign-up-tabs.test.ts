@@ -1,6 +1,5 @@
 import { afterEach, expect, it } from "vitest";
 import { server } from "vitest/browser";
-import { deploy } from "../../src/dev/catalogue.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
@@ -13,7 +12,7 @@ import {
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
 import {
-  compileTestPermissions,
+  deploy,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppVisitor,
@@ -47,7 +46,7 @@ async function signUpWhileAnotherTabIsTheGuest(name: string, clearOnSignOut: boo
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },

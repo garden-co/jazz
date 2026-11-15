@@ -3,8 +3,15 @@ import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.j
 import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db, QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, type Project, type Todo, type User } from "./apps/basic/jazz.generated.js";
+import type { RowOf } from "../../src/index.js";
+import { app } from "./apps/basic/jazz.generated.js";
 import { insertProject, insertTodo, insertUser } from "./factories.js";
+
+// The rows queries return. FILES-AS-SOURCE: these keep `id` writable, where
+// the generated `Project` / `Todo` / `User` aliases mark it readonly.
+type Project = RowOf<typeof app.projects>;
+type Todo = RowOf<typeof app.todos>;
+type User = RowOf<typeof app.users>;
 
 function makeFriends(db: Db, user1: User, user2: User) {
   const user1Friends = [...user1.friendsIds, user2.id];

@@ -1,5 +1,4 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { deploy } from "../../src/dev/catalogue.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
@@ -13,7 +12,7 @@ import {
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
 import {
-  compileTestPermissions,
+  deploy,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -40,7 +39,7 @@ async function appAt(name: string, user: string) {
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },

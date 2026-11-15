@@ -729,8 +729,8 @@ describe("TS Query API history schema migrations", () => {
   beforeEach(async () => {
     const core = await startLocalJazzServer({ inMemory: true });
     const deployment = { serverUrl: core.url, appId: core.appId, adminSecret: core.adminSecret };
-    await deploy({ ...deployment, app: v1, permissions: testPermissions(v1, permissionsV1) });
-    await deploy({ ...deployment, app: v2, permissions: testPermissions(v2, permissionsV2) });
+    await deploy({ ...deployment, app: v1, permissions: permissionsV1 });
+    await deploy({ ...deployment, app: v2, permissions: permissionsV2 });
     // Clients reach the core through the app's backend, which runs the latest deploy.
     server = await startTestJazz({ app: v2, permissions: permissionsV2, core });
     writer = await createDb({

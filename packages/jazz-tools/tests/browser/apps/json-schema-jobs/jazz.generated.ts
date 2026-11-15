@@ -1,17 +1,17 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type JobMeta = { code: string; count?: number; [key: string]: unknown };
 
-export interface Job {
+export type Job = {
   readonly id: string;
   meta: JobMeta;
-}
+};
 
-export interface JobInsert {
+export type JobInsert = {
   meta: JobMeta;
-}
+};
 
 interface Types extends AppTypes {
   jobs: {

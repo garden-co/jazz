@@ -12,7 +12,7 @@ function shippedSources(dir = srcRoot): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      return /^(fixtures|__fixtures__|testing|client-tests)$/.test(entry.name)
+      return /^(fixtures|__fixtures__|__typecheck__|testing|client-tests)$/.test(entry.name)
         ? []
         : shippedSources(path);
     }
@@ -90,13 +90,12 @@ const PURE_CALLS = new Set([
  */
 const REVIEWED_CALLS = new Set([
   // Generated bindings bind their app, a value the module exports.
-  "__typecheck__/chat.generated.ts: bindApp",
-  "__typecheck__/tasks/jazz.generated.ts: bindApp",
   "backend/vercel-store.ts: <value>.repeat",
   "classic-api.ts: classicFunction",
   "classic-api.ts: classicNamespace",
   "dev/app-files.ts: join",
   "dev/project.ts: join",
+  "upgrade/index.ts: join",
   "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
   "inspect/mcp.ts: WHERE_OPERATORS.join",

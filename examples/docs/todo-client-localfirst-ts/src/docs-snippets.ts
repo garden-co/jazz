@@ -1,9 +1,4 @@
-import {
-  PersistedWriteRejectedError,
-  ReadTier,
-  type Db,
-  type RowAuthor,
-} from "jazz-tools";
+import { PersistedWriteRejectedError, ReadTier, type Db, type RowAuthor } from "jazz-tools";
 import { app } from "../jazz.generated.js";
 import { app as requiredReferences } from "./recipes/required-references/jazz.generated.js";
 

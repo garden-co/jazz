@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { computeSchemaHash } from "../schema-hash.js";
-import { testApp, testPermissions } from "../testing/index.js";
+import { testApp } from "../testing/index.js";
+import { boundApp } from "../typed-app.js";
 import { deployApp } from "./catalogue.js";
 import { fetchMigrationGraph } from "./migration-graph.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
-import type { DeploymentRequest } from "./catalogue-api.js";
+import type { DeploymentBody } from "./catalogue-api.js";
 
 let server: LocalJazzServerHandle | undefined;
 afterEach(async () => {
@@ -24,8 +24,8 @@ it("validates all branches before writing, deploys the converged history, and se
       columns: Object.fromEntries(["title", ...columns[index]!].map((c) => [c, "string"])),
     },
   });
-  const hashes = await Promise.all(
-    columns.map((_, index) => computeSchemaHash(testApp({ tables: tables(index) }).wasmSchema)),
+  const hashes = columns.map(
+    (_, index) => boundApp(testApp({ tables: tables(index) }).wasmSchema)!.schema.current,
   );
   const history = {
     v0: { tables: tables(0) },
@@ -36,15 +36,17 @@ it("validates all branches before writing, deploys the converged history, and se
   const toV1 = { from: "v0", to: "v1", migrate: { notes: add("a") } };
   const toV2 = { from: "v1", to: "v2", migrate: { notes: add("tmp") } };
   const deploy = (app: ReturnType<typeof testApp>, permissions: object = { tables: {} }) =>
-    deployApp({ ...options, app, permissions: testPermissions(app, permissions as never) });
+    deployApp({ ...options, app, permissions: { format: 1, ...permissions } });
 
   expect((await deploy(testApp({ tables: tables(0) }))).changed).toBe(true);
   const initial = await fetchMigrationGraph(options);
 
   // v3 with no migration into it: refused, and the store is left as it was.
-  await expect(
-    (async () => deploy(testApp({ tables: tables(3), history, migrations: [toV1, toV2] })))(),
-  ).rejects.toThrow("disconnected roots");
+  // The app's loader refuses it now, before anything is sent (the server's
+  // "disconnected roots" check used to be the one that caught it).
+  expect(() => testApp({ tables: tables(3), history, migrations: [toV1, toV2] })).toThrow(
+    /history\.v\d: no migration leads from it to the current `tables`/,
+  );
   expect(await fetchMigrationGraph(options)).toEqual(initial);
 
   const app = testApp({
@@ -61,7 +63,7 @@ it("validates all branches before writing, deploys the converged history, and se
     ],
   });
 
-  const requests: DeploymentRequest[] = [];
+  const requests: DeploymentBody[] = [];
   const fetch = globalThis.fetch;
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
     if (init?.method === "POST") {

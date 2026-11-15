@@ -58,7 +58,7 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(

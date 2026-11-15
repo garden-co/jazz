@@ -157,7 +157,7 @@ describe("virtual computed columns", () => {
     ]);
     expectTypeOf<ItemPriority>().toEqualTypeOf<Priority>();
     expectTypeOf<RowOf<typeof priorityApp.items>>().toEqualTypeOf<{
-      readonly id: string;
+      id: string;
       score: number;
       readonly priority: Priority;
       storedPriority: Priority;
@@ -168,7 +168,7 @@ describe("virtual computed columns", () => {
     }>();
     const selected = priorityApp.items.select("priority");
     expectTypeOf<RowOf<typeof selected>>().toEqualTypeOf<{
-      readonly id: string;
+      id: string;
       readonly priority: Priority;
     }>();
   });

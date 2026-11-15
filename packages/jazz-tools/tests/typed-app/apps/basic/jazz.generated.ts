@@ -1,4 +1,4 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
@@ -6,25 +6,25 @@ export type TableWithConstraintData = { datetime?: string; integer?: number; str
 export type TableWithDefaultEnum = "a" | "b" | "c";
 export type TableWithDefaultJson = { age?: number; name: string };
 
-export interface Project {
+export type Project = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   name: string;
-}
+};
 
-export interface TableWithConstraint {
+export type TableWithConstraint = {
   readonly id: string;
   data: TableWithConstraintData;
-}
+};
 
-export interface TableWithConstraintInsert {
+export type TableWithConstraintInsert = {
   data: TableWithConstraintData;
-}
+};
 
-export interface TableWithDefault {
+export type TableWithDefault = {
   readonly id: string;
   integer: number;
   float: number;
@@ -39,9 +39,9 @@ export interface TableWithDefault {
   nullable: string | null;
   nullableInteger: number | null;
   refId: string | null;
-}
+};
 
-export interface TableWithDefaultInsert {
+export type TableWithDefaultInsert = {
   integer?: number;
   float?: number;
   bytes?: Uint8Array;
@@ -55,9 +55,9 @@ export interface TableWithDefaultInsert {
   nullable?: string | null;
   nullableInteger?: number | null;
   refId?: string | null;
-}
+};
 
-export interface Todo {
+export type Todo = {
   readonly id: string;
   title: string;
   done: boolean;
@@ -65,27 +65,27 @@ export interface Todo {
   projectId: string;
   ownerId: string | null;
   assigneesIds: string[];
-}
+};
 
-export interface TodoInsert {
+export type TodoInsert = {
   title: string;
   done?: boolean;
   tags?: string[];
   projectId: string;
   ownerId?: string | null;
   assigneesIds?: string[];
-}
+};
 
-export interface User {
+export type User = {
   readonly id: string;
   name: string;
   friendsIds: string[];
-}
+};
 
-export interface UserInsert {
+export type UserInsert = {
   name: string;
   friendsIds: string[];
-}
+};
 
 interface Types extends AppTypes {
   projects: {

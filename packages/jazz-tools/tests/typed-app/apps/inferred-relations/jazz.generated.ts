@@ -1,26 +1,26 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Analyse {
+export type Analyse = {
   readonly id: string;
   summary: string;
-}
+};
 
-export interface AnalyseInsert {
+export type AnalyseInsert = {
   summary: string;
-}
+};
 
-export interface Category {
+export type Category = {
   readonly id: string;
   label: string;
-}
+};
 
-export interface CategoryInsert {
+export type CategoryInsert = {
   label: string;
-}
+};
 
-export interface Entry {
+export type Entry = {
   readonly id: string;
   category_id: string;
   personId: string;
@@ -31,9 +31,9 @@ export interface Entry {
   person_ids: string[];
   analysis_ids: string[];
   status_ids: string[];
-}
+};
 
-export interface EntryInsert {
+export type EntryInsert = {
   category_id: string;
   personId: string;
   team_id: string;
@@ -43,34 +43,34 @@ export interface EntryInsert {
   person_ids: string[];
   analysis_ids: string[];
   status_ids: string[];
-}
+};
 
-export interface Person {
+export type Person = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface PersonInsert {
+export type PersonInsert = {
   name: string;
-}
+};
 
-export interface Status {
+export type Status = {
   readonly id: string;
   label: string;
-}
+};
 
-export interface StatusInsert {
+export type StatusInsert = {
   label: string;
-}
+};
 
-export interface Team {
+export type Team = {
   readonly id: string;
   category_id: string;
-}
+};
 
-export interface TeamInsert {
+export type TeamInsert = {
   category_id: string;
-}
+};
 
 interface Types extends AppTypes {
   analyses: {

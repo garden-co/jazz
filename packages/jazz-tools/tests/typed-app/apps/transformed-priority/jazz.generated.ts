@@ -1,20 +1,20 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type TransformImpl } from "jazz-tools";
-import { transforms } from "./jazz.computed";
+import { transforms } from "./jazz.computed.js";
 
 export type PriorityScore = "low" | "medium" | "high";
 
-export interface Priority {
+export type Priority = {
   readonly id: string;
   label: string;
   score: PriorityScore;
-}
+};
 
-export interface PriorityInsert {
+export type PriorityInsert = {
   label: string;
   score: PriorityScore;
-}
+};
 
 interface Types extends AppTypes {
   priorities: {

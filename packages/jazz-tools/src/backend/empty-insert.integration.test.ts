@@ -34,7 +34,7 @@ describe("inserting with every optional column omitted through the native backen
         appId: server.appId,
         adminSecret: server.adminSecret,
         app,
-        permissions: {},
+        permissions: { format: 1, tables: {} },
       });
       const writer = await openSession();
 

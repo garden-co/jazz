@@ -1,46 +1,46 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface CheckNote {
+export type CheckNote = {
   readonly id: string;
   body: string;
   user_check_id: string;
-}
+};
 
-export interface CheckNoteInsert {
+export type CheckNoteInsert = {
   body: string;
   user_check_id: string;
-}
+};
 
-export interface Org {
+export type Org = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface OrgInsert {
+export type OrgInsert = {
   name: string;
-}
+};
 
-export interface Todo {
+export type Todo = {
   readonly id: string;
   title: string;
   org_id: string;
-}
+};
 
-export interface TodoInsert {
+export type TodoInsert = {
   title: string;
   org_id: string;
-}
+};
 
-export interface UserCheck {
+export type UserCheck = {
   readonly id: string;
   todo_id: string;
-}
+};
 
-export interface UserCheckInsert {
+export type UserCheckInsert = {
   todo_id: string;
-}
+};
 
 interface Types extends AppTypes {
   check_notes: {

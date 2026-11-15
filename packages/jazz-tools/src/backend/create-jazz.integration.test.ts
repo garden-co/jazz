@@ -1762,13 +1762,8 @@ describe("createJazz", () => {
       () => undefined,
       (e: unknown) => e as Error,
     );
-    expect(error?.message).toMatch(
-      /^createJazz: `app` must be the app that jazz\.generated\.ts exports/,
-    );
-    // The cause names the CommonJS wrapper, not an unknown table `default`.
-    expect((error?.cause as Error | undefined)?.message).toBe(
-      commonJsWrapperError("jazz.generated.ts").message,
-    );
+    // It names the CommonJS wrapper and its fix, not an unknown table `default`.
+    expect(error?.message).toBe(`createJazz: ${commonJsWrapperError("jazz.generated.ts").message}`);
   }, 30_000);
 
   it("refuses a sync session for a user without an account, until they sign in", async () => {

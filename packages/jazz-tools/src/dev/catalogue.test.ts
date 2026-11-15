@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { testApp, testPermissions } from "../testing/index.js";
+import { testApp } from "../testing/index.js";
+import { boundApp } from "../typed-app.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
 
@@ -15,6 +16,7 @@ const todosApp = testApp({
   tables: { todos: { columns: { title: "string", ownerId: "string" } } },
 });
 const todosPermissions = {
+  format: 1,
   tables: { todos: { read: "ownerId = session.identity.subject" } },
 };
 
@@ -96,8 +98,8 @@ describe("dev catalogue push behavior", () => {
   it.each(["initial", "permissions", "unchanged"])(
     "deploy reports %s publication without separate push requests",
     async (kind) => {
-      const { computeSchemaHash, deploy } = await import("./catalogue.js");
-      const hash = await computeSchemaHash(todosApp.wasmSchema);
+      const { deploy } = await import("./catalogue.js");
+      const hash = boundApp(todosApp.wasmSchema)!.schema.current;
       let body: any;
       const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
         if (input.endsWith("/migrations/graph"))
@@ -123,7 +125,7 @@ describe("dev catalogue push behavior", () => {
         serverUrl: SERVER_URL,
         adminSecret: ADMIN_SECRET,
         app: todosApp,
-        permissions: testPermissions(todosApp, todosPermissions),
+        permissions: todosPermissions,
       });
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(body.targetSchemaHash).toBe(hash);
@@ -139,10 +141,11 @@ describe("dev catalogue push behavior", () => {
 
   it("deploy rejects policies compiled against an outdated schema before contacting the server", async () => {
     const { deploy } = await import("./catalogue.js");
-    const oldApp = testApp({ tables: { todos: { columns: { owner: "string" } } } });
-    const permissions = testPermissions(oldApp, {
+    // Permissions written for a column the schema no longer has.
+    const permissions = {
+      format: 1,
       tables: { todos: { read: "owner = session.identity.subject" } },
-    });
+    };
     const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -158,12 +161,7 @@ describe("dev catalogue push behavior", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // QUESTION: deploy() used to refuse a call without permissions with "explicit
-  // permissions bundle" before any request. deployApp has no such check: a call
-  // without `permissions` still fails before fetching, but only with a TypeError
-  // from mergePermissionsIntoWasmSchema. Restore the explicit refusal (source
-  // change in catalogue.ts), or drop this test?
-  it.skip("deploy rejects omitted in-code permissions before contacting the server", async () => {
+  it("deploy rejects omitted permissions before contacting the server", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const { deploy } = await import("./catalogue.js");
@@ -175,7 +173,7 @@ describe("dev catalogue push behavior", () => {
         adminSecret: ADMIN_SECRET,
         app: testApp({ tables: { todos: { columns: { title: "string" } } } }),
       }),
-    ).rejects.toThrow("explicit permissions bundle");
+    ).rejects.toThrow(/deploy requires the app's jazz.permissions.json/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

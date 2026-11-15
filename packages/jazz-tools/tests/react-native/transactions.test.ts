@@ -113,7 +113,7 @@ it("waits for native upstream authority before accepting a serializable commit",
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(

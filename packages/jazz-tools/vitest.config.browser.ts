@@ -22,7 +22,7 @@ import { playwright } from "@vitest/browser-playwright";
 import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifact-store.mjs";
 import {
   jazzAppFront,
-  jazzTestPermissions,
+  jazzTestDeployment,
   jazzAppUser,
   jazzAppSignOut,
   jazzAppVisitor,
@@ -257,8 +257,8 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
-        jazzTestPermissions: async (_context, bound, permissions) =>
-          jazzTestPermissions(bound, permissions),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),

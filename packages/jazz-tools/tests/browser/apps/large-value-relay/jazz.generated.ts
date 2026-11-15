@@ -1,21 +1,21 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Value {
+export type Value = {
   readonly id: string;
   name: string;
   text: string | null;
   bytes: Uint8Array | null;
   control: boolean;
-}
+};
 
-export interface ValueInsert {
+export type ValueInsert = {
   name: string;
   text?: string | null;
   bytes?: Uint8Array | null;
   control: boolean;
-}
+};
 
 interface Types extends AppTypes {
   values: {

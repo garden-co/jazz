@@ -30,7 +30,6 @@ import { app } from "./apps/indexeddb-corpus/jazz.generated.js";
 import permissions from "./apps/indexeddb-corpus/jazz.permissions.json";
 import { app as corruptionApp } from "./apps/indexeddb-corruption/jazz.generated.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createBrowserPhysicalDatabaseName } from "../../src/runtime/browser-worker-config.js";
 import { type Db } from "../../src/runtime/db.js";
@@ -45,7 +44,7 @@ import {
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
 import {
-  compileTestPermissions,
+  deploy,
   createJazzServerTransportControl,
   getJazzServerInfo,
   startJazzApp,
@@ -148,7 +147,7 @@ describe("browser Jazz storage compatibility corpus", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app,
-      permissions: await compileTestPermissions(app, permissions),
+      permissions: permissions,
     });
     const server = await startJazzApp(core, {
       schema: app,

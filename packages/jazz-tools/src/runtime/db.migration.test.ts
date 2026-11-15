@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { bindApp } from "../typed-app.js";
+import { bindApp, boundApp } from "../typed-app.js";
 import { compileTestApp, testApp, testPermissions, type TestAppFile } from "../testing/test-app.js";
 import {
   deploy,
@@ -18,17 +18,10 @@ import { waitForRows } from "./testing/support.js";
 import { shippedMigrations } from "./client-migrations.js";
 import type { WasmSchema } from "../drivers/types.js";
 
-import { computeSchemaHash } from "../dev/catalogue.js";
 import { generateTs, migrationsCreate } from "../dev/codegen-napi.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
+import { wasmSchemasEqual } from "../dev/schema-utils.js";
 import { fetchStoredWasmSchema } from "../dev/catalogue-api.js";
-
-/** `schema` without relations, which a stored schema doesn't carry (and wasmSchemasEqual ignores). */
-function withoutRelations(schema: WasmSchema): WasmSchema {
-  return Object.fromEntries(
-    Object.entries(schema).map(([name, { relations: _relations, ...table }]) => [name, table]),
-  ) as WasmSchema;
-}
 
 /** Every operation allowed on each of `tables`, as a `jazz.permissions.json`. */
 function allowAll(tables: string[], ops = ["read", "insert", "update", "delete"]) {
@@ -79,7 +72,7 @@ describe("schema migrations", () => {
       appId,
       adminSecret,
       app: oldApp,
-      permissions: testPermissions(oldApp, oldPermissions),
+      permissions: oldPermissions,
     });
 
     await deploy({
@@ -87,7 +80,7 @@ describe("schema migrations", () => {
       appId,
       adminSecret,
       app: newApp,
-      permissions: testPermissions(newApp, newPermissions),
+      permissions: newPermissions,
     });
     front = await startTestJazz({ app: newApp, permissions: newPermissions, core: server });
 
@@ -287,7 +280,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
     const deployed = await deploy({
       ...catalogue,
       app: beforeApp,
-      permissions: testPermissions(beforeApp, permissionsBefore),
+      permissions: permissionsBefore,
     });
     front = await startTestJazz({ app: beforeApp, permissions: permissionsBefore, core: server });
     oldDb = await createDb(await localAccountConfig(appId, front.url));
@@ -303,10 +296,13 @@ it("publishes generated default-bearing relation migrations and preserves them a
       })
       .wait({ tier: "global" });
     const fromHash = deployed.schema.hash;
-    const toHash = await computeSchemaHash(afterApp.wasmSchema);
+    const toHash = boundApp(afterApp.wasmSchema)!.schema.current;
     expect(toHash).not.toBe(fromHash);
-    expect(await computeSchemaHash(beforeApp.wasmSchema)).toBe(fromHash);
-    expect(await computeSchemaHash(afterApp.wasmSchema)).toBe(toHash);
+    expect(boundApp(beforeApp.wasmSchema)!.schema.current).toBe(fromHash);
+    // The new version ships the deployed one, under the same hash.
+    expect(boundApp(afterApp.wasmSchema)!.schema.schemas.map((version) => version.hash)).toEqual(
+      expect.arrayContaining([fromHash, toHash]),
+    );
     // The migration ships the previous version's schema, defaults included:
     // a shipped version whose defaults differ from what its hash names is
     // refused, and nothing is published.
@@ -338,7 +334,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
       await deploy({
         ...catalogue,
         app: afterApp,
-        permissions: testPermissions(afterApp, permissionsAfter),
+        permissions: permissionsAfter,
       }),
     ).toMatchObject({ changed: true, published: { migrations: [{ fromHash, toHash }] } });
     expect((await fetchMigrationGraph(catalogue)).migrations).toContainEqual(
@@ -361,11 +357,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
       [toHash, afterApp.wasmSchema],
     ] as const) {
       const stored = await fetchStoredWasmSchema(server.url, { appId, adminSecret, schemaHash });
-      // TODO(files-as-source): wasmSchemasEqual compares column types by key
-      // order, and the compiled schema writes `{ element, type }` where the
-      // stored one has `{ type, element }`; toEqual compares the content.
-      expect(stored.schema).toEqual(withoutRelations(expected));
-      expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
+      expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
     }
     // The app as it ships after `migrations create`: its jazz.app.json now
     // holds the previous version and the generated migration.

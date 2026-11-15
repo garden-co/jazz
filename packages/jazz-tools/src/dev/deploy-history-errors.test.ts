@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { computeSchemaHash } from "../schema-hash.js";
-import { testApp, testPermissions } from "../testing/index.js";
+import { testApp } from "../testing/index.js";
+import { boundApp } from "../typed-app.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import { deployApp } from "./catalogue.js";
 
@@ -11,12 +11,9 @@ const v1 = { notes: { columns: { title: "string" } } };
 const v2 = { notes: { columns: { title: "string", body: "string?" } } };
 const appV1 = testApp({ tables: v1 });
 const appV2 = testApp({ tables: v2 });
-const short = async (app: { wasmSchema: Parameters<typeof computeSchemaHash>[0] }) =>
-  (await computeSchemaHash(app.wasmSchema)).slice(0, 12);
+const short = async (app: typeof appV1) => boundApp(app.wasmSchema)!.schema.current.slice(0, 12);
 // Everyone may read notes, in either version.
 const readNotes = { format: 1, tables: { notes: { read: "true" } } };
-const readV1 = testPermissions(appV1, readNotes);
-const readV2 = testPermissions(appV2, readNotes);
 
 const servers: LocalJazzServerHandle[] = [];
 afterEach(async () => {
@@ -45,8 +42,8 @@ describe("a deploy whose migrations don't match the store's history", () => {
   // version and the fix, which this pins.
   it("refuses a deploy with no migration from the stored version, naming it", async () => {
     const deploy = await store();
-    await deploy(appV1, readV1);
-    const refused = deploy(appV2, readV2);
+    await deploy(appV1, readNotes);
+    const refused = deploy(appV2, readNotes);
     await expect(refused).rejects.toThrow(/migration history has disconnected roots: /);
     await expect(refused).rejects.toThrow(await short(appV1));
     await expect(refused).rejects.toThrow("jazz-tools migrations create");
@@ -54,13 +51,13 @@ describe("a deploy whose migrations don't match the store's history", () => {
 
   it("names both first versions when the store started from another one", async () => {
     const deploy = await store();
-    await deploy(appV2, readV2);
+    await deploy(appV2, readNotes);
     const migrated = testApp({
       tables: v2,
       history: { v1: { tables: v1 } },
       migrations: [{ from: "v1", migrate: { notes: { body: { add: "string", default: null } } } }],
     });
-    await expect(deploy(migrated, testPermissions(migrated, readNotes))).rejects.toThrow(
+    await expect(deploy(migrated, readNotes)).rejects.toThrow(
       `this store's history starts at schema ${await short(appV2)}, but the app's migrations start at ${await short(appV1)}`,
     );
   }, 20_000);

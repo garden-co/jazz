@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { generateAuthSecret, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { app } from "./apps/fresh-subscriber-first-sync/jazz.generated.js";
 import permissions from "./apps/fresh-subscriber-first-sync/jazz.permissions.json";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { compileTestPermissions, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 // The app (apps/fresh-subscriber-first-sync): docs every user may read and insert.
 
@@ -27,7 +26,7 @@ describe("fresh subscriber first sync", () => {
       serverUrl: coreUrl,
       adminSecret,
       app,
-      permissions: await compileTestPermissions(app, permissions),
+      permissions: permissions,
     });
     const { serverUrl } = await startJazzApp(
       { appId, serverUrl: coreUrl, adminSecret },

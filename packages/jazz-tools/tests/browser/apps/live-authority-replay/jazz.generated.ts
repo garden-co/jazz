@@ -1,57 +1,57 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Author {
+export type Author = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface AuthorInsert {
+export type AuthorInsert = {
   name: string;
-}
+};
 
-export interface Item {
+export type Item = {
   readonly id: string;
   title: string;
   parent_id: string;
   author_id: string;
   label_id: string;
-}
+};
 
-export interface ItemInsert {
+export type ItemInsert = {
   title: string;
   parent_id: string;
   author_id: string;
   label_id: string;
-}
+};
 
-export interface Label {
+export type Label = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface LabelInsert {
+export type LabelInsert = {
   name: string;
-}
+};
 
-export interface Parent {
+export type Parent = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface ParentInsert {
+export type ParentInsert = {
   name: string;
-}
+};
 
-export interface Unrelated {
+export type Unrelated = {
   readonly id: string;
   value: string;
-}
+};
 
-export interface UnrelatedInsert {
+export type UnrelatedInsert = {
   value: string;
-}
+};
 
 interface Types extends AppTypes {
   authors: {
