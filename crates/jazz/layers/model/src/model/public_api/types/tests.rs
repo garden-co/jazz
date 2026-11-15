@@ -386,9 +386,6 @@ fn schema_hash_matches_portable_column_types_cross_runtime_fixture() {
             "json",
             "enum",
             "enum-reordered",
-            "enum-payload",
-            "enum-payload-reordered",
-            "enum-payload-nullable-field",
             "timestamp",
             "uuid",
             "bytea",
@@ -526,25 +523,6 @@ fn schema_hash_matches_default_values_cross_runtime_fixture() {
                 variants: vec!["draft".into(), "active".into()],
             },
             Some(Value::Text("active".into())),
-        ),
-        (
-            "enum-payload",
-            ColumnType::EnumPayload {
-                cases: vec![
-                    EnumCaseDescriptor {
-                        name: "created".into(),
-                        fields: vec![ColumnDescriptor::new("title", ColumnType::Text)],
-                    },
-                    EnumCaseDescriptor {
-                        name: "deleted".into(),
-                        fields: vec![],
-                    },
-                ],
-            },
-            Some(Value::Enum {
-                case: "created".into(),
-                values: vec![Value::Text("hello".into())],
-            }),
         ),
         ("null", ColumnType::Text, Some(Value::Null)),
         ("absent", ColumnType::Text, None),
@@ -1068,13 +1046,9 @@ fn value_json_shape_is_pinned() {
             id: None,
             values: vec![],
         },
-        Value::Enum {
-            case: "c".into(),
-            values: vec![Value::Array(vec![Value::Integer(2)])],
-        },
         Value::Null,
     ]);
-    let json = r#"{"type":"Array","value":[{"type":"Integer","value":-1},{"type":"BigInt","value":"-9223372036854775808"},{"type":"Double","value":0.5},{"type":"Boolean","value":false},{"type":"Text","value":"t"},{"type":"Timestamp","value":9},{"type":"Uuid","value":"07070707-0707-0707-0707-070707070707"},{"type":"TransactionId","value":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]},{"type":"Bytea","value":[0,255]},{"type":"Row","value":{"id":"07070707-0707-0707-0707-070707070707","values":[{"type":"Null"}]}},{"type":"Row","value":{"values":[]}},{"type":"Enum","value":{"case":"c","values":[{"type":"Array","value":[{"type":"Integer","value":2}]}]}},{"type":"Null"}]}"#;
+    let json = r#"{"type":"Array","value":[{"type":"Integer","value":-1},{"type":"BigInt","value":"-9223372036854775808"},{"type":"Double","value":0.5},{"type":"Boolean","value":false},{"type":"Text","value":"t"},{"type":"Timestamp","value":9},{"type":"Uuid","value":"07070707-0707-0707-0707-070707070707"},{"type":"TransactionId","value":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]},{"type":"Bytea","value":[0,255]},{"type":"Row","value":{"id":"07070707-0707-0707-0707-070707070707","values":[{"type":"Null"}]}},{"type":"Row","value":{"values":[]}},{"type":"Null"}]}"#;
     assert_eq!(serde_json::to_string(&value).unwrap(), json);
     assert_eq!(serde_json::from_str::<Value>(json).unwrap(), value);
     let row = |values| Value::Row { id: None, values };
@@ -1082,13 +1056,6 @@ fn value_json_shape_is_pinned() {
         (
             r#"{"value":[{"value":{"values":[{"type":"Null"}]},"type":"Row"}],"type":"Array"}"#,
             Value::Array(vec![row(vec![Value::Null])]),
-        ),
-        (
-            r#"{"value":[{"value":["c",[]],"type":"Enum"}],"type":"Array"}"#,
-            Value::Array(vec![Value::Enum {
-                case: "c".into(),
-                values: vec![],
-            }]),
         ),
         (
             r#"{"type":"Row","value":{"values":[],"extra":1}}"#,
@@ -1113,13 +1080,9 @@ fn value_json_shape_is_pinned() {
             "missing field `values` at line 1 column 33",
         ),
         (
-            r#"{"type":"Enum","value":{"values":[]}}"#,
-            "missing field `case` at line 1 column 36",
-        ),
-        (
             r#"{"type":"Nope"}"#,
             "unknown variant `Nope`, expected one of `Integer`, `BigInt`, `Double`, `Boolean`, \
-             `Text`, `Timestamp`, `Uuid`, `TransactionId`, `Bytea`, `Array`, `Row`, `Enum`, \
+             `Text`, `Timestamp`, `Uuid`, `TransactionId`, `Bytea`, `Array`, `Row`, \
              `Null` at line 1 column 14",
         ),
         (

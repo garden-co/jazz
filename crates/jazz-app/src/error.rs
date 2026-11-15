@@ -33,6 +33,16 @@ pub enum Error {
     #[error("subscription rejected: {0}")]
     Rejected(String),
 
+    /// No one is signed in: the token provider gave no bearer, or the app's
+    /// backend named no user from it.
+    #[error("signed out")]
+    SignedOut,
+
+    /// The user has no Jazz account yet: they get one when they sign in
+    /// from a client, or with [`crate::Endpoint::create_account_for`].
+    #[error("user {0:?} has no Jazz account yet")]
+    NoAccount(String),
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
