@@ -34,11 +34,11 @@ grep -F -- '--workspace --' "$log" >/dev/null
 : >"$log"
 output=$(PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
   sh "$root/dev/scripts/clippy-staged.sh" \
-    "examples/todo-server-rs/src/file with spaces.rs")
+    "examples/docs/todo-server-rs/src/file with spaces.rs")
 grep -F -- '--workspace --' "$log" >/dev/null
 : >"$log"
 PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
-  sh "$root/dev/scripts/clippy-staged.sh" examples/todo-server-rs/src/main.rs >/dev/null
+  sh "$root/dev/scripts/clippy-staged.sh" examples/docs/todo-server-rs/src/main.rs >/dev/null
 grep -F -- '--workspace --' "$log" >/dev/null
 if [ "$(grep -c -- '--package' "$log")" -ne 0 ]; then
   echo "root Cargo.toml must not be mixed with package mode" >&2
