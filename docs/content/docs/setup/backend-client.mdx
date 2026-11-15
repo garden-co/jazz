@@ -68,33 +68,44 @@ A token from a listed issuer that fails any check is refused. It never reaches `
 On the machine, open a Jazz session against your main backend and pass a function that returns a
 fresh token. Jazz calls it for every request and socket, so short-lived tokens just work:
 
-```ts title="import-job.ts"
-import { createJazzClient } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
-import permissions from "./jazz.permissions.json" with { type: "json" };
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    ```ts title="import-job.ts"
+    import { createJazzClient } from "jazz-tools/backend";
+    import { app } from "./jazz.generated";
+    import permissions from "./jazz.permissions.json" with { type: "json" };
 
-const session = await createJazzClient({
-  app,
-  permissions,
-  serverUrl: "https://my-app.com/jazz",
-  driver: { type: "memory" },
-  credential: githubOidcToken,
-});
+    const session = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: "https://my-app.com/jazz",
+      driver: { type: "memory" },
+      credential: githubOidcToken,
+    });
 
-await session.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
-await session.close(); // uploads queued writes first, for up to 10 seconds
+    await session.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
+    await session.close(); // uploads queued writes first, for up to 10 seconds
 
-// GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
-async function githubOidcToken() {
-  const url = `${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=jazz:my-app`;
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
-    },
-  });
-  return (await response.json()).value as string;
-}
-```
+    // GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
+    async function githubOidcToken() {
+      const url = `${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=jazz:my-app`;
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
+        },
+      });
+      return (await response.json()).value as string;
+    }
+    ```
+  </Tab>
+  <Tab value="Rust">
+    Not in Rust yet. See [Language support](/docs/reference/language-support#rust).
+  </Tab>
+  <Tab value="Go">
+    Not in Go yet. A Go process can sign in to your backend's `/jazz` as an end user (`jazz.Token`,
+    `jazz.DeviceAccount`): see [Language support](/docs/reference/language-support#go).
+  </Tab>
+</Tabs>
 
 `session.close()` first waits for the writes the client holds to reach the backend, for up to
 10 seconds (`close({ timeoutMs })`). With the memory driver, writes that still haven't arrived are
