@@ -184,6 +184,11 @@ export interface Runtime {
   /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
+  /**
+   * @internal Whether open transaction `id` staged any write; `undefined`
+   * when this runtime can't tell (the transaction then commits as asked).
+   */
+  hasStagedTransactionWrites?(id: OpenTransactionId): boolean | undefined;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   readonly preparationOwner?: object;
@@ -1039,6 +1044,32 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 }
 
 /**
+ * Returned by a `db.transaction(callback)` whose callback wrote nothing: the
+ * transaction was rolled back, as there was nothing to commit, so `wait()`
+ * resolves at once with the callback's value. It has no transaction id:
+ * `txId` rejects.
+ */
+export class EmptyTransactionWriteResult<T> extends WriteResult<T> {
+  constructor(value: T, client: JazzClient) {
+    super(
+      value,
+      Promise.reject(new Error("This transaction wrote nothing, so it has no transaction id")),
+      client,
+    );
+  }
+
+  override async wait(options: WriteWaitOptions): Promise<T> {
+    resolveWriteWaitTier(options.tier);
+    validateWriteWaitTimeout(options.timeoutMs);
+    return this.value;
+  }
+
+  override mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
+    return new EmptyTransactionWriteResult(transformValue(this.value), this.client());
+  }
+}
+
+/**
  * Returned by explicitly-committed serializable transactions.
  *
  * Serializable transactions are accepted or rejected by the global authority, so
@@ -1474,6 +1505,12 @@ export class JazzClient {
       },
     );
     return new WriteHandle(this.reportCommittedWrite(txId, state), this);
+  }
+
+  /** @internal See {@link Runtime.hasStagedTransactionWrites}. */
+  hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
+    if (this.transactionPreparations.get(id)?.unopened) return false;
+    return this.runtime.hasStagedTransactionWrites?.(id);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {

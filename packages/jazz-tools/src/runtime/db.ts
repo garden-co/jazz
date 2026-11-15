@@ -26,6 +26,7 @@ import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../dr
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   SerializableWriteHandle,
+  EmptyTransactionWriteResult,
   SerializableWriteResult,
   WriteResult,
   JazzClient,
@@ -1832,7 +1833,17 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   }
   let committed: TransactionCommitHandle<TKind>;
   try {
-    committed = await transaction.commit();
+    // A callback that wrote nothing has nothing to commit: its result
+    // resolves at once (an explicit `commit()` of an empty mergeable
+    // transaction still refuses).
+    const outcome = await transaction.commitUnlessEmpty();
+    if (outcome === "empty") {
+      return new EmptyTransactionWriteResult(
+        resolvedValue,
+        resultClient(),
+      ) as unknown as TransactionWriteResult<Awaited<TResult>, TKind>;
+    }
+    committed = outcome;
   } catch (error) {
     try {
       await transaction.rollback();
@@ -1977,6 +1988,25 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       return new SerializableWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
     }
     return new WriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
+  }
+
+  /**
+   * @internal The callback form's commit: a mergeable transaction that staged
+   * no write is rolled back instead, as there is nothing to commit, and
+   * `"empty"` is returned. Anything else commits as {@link commit} does.
+   */
+  async commitUnlessEmpty(): Promise<TransactionCommitHandle<TKind> | "empty"> {
+    if (this.kind === "mergeable") {
+      const { ownerClient, openTransactionId, preparation } = this.requireBinding("commit");
+      // Writes still being prepared stage first: only then is it known
+      // whether the transaction staged anything.
+      await Promise.all([preparation.drain(), ...this.pendingReads]);
+      if (ownerClient.hasStagedTransactionWrites(openTransactionId) === false) {
+        await this.rollback();
+        return "empty";
+      }
+    }
+    return this.commit();
   }
 
   /**
