@@ -15,7 +15,13 @@ fn file(tables: &str) -> String {
 /// Bindings generated from `before`, then `migrations create` on `after`.
 fn migrate(before: &str, after: &str) -> Created {
     let bindings = generate(Lang::TypeScript, file(before).as_bytes()).unwrap();
-    create(file(after).as_bytes(), Some(&bindings), "change").unwrap()
+    create(
+        Lang::TypeScript,
+        file(after).as_bytes(),
+        Some(&bindings),
+        "change",
+    )
+    .unwrap()
 }
 
 /// The migration the stub wrote, as canonical text.
@@ -29,9 +35,14 @@ fn migration(created: &Created) -> String {
 
 fn refused(before: &str, after: &str) -> String {
     let bindings = generate(Lang::TypeScript, file(before).as_bytes()).unwrap();
-    create(file(after).as_bytes(), Some(&bindings), "change")
-        .expect_err("must be refused")
-        .to_string()
+    create(
+        Lang::TypeScript,
+        file(after).as_bytes(),
+        Some(&bindings),
+        "change",
+    )
+    .expect_err("must be refused")
+    .to_string()
 }
 
 const TODOS: &str = r#"{ "todos": { "columns": { "title": "string", "done": "boolean" } } }"#;
@@ -61,11 +72,17 @@ fn a_new_version_moves_the_old_one_into_history_and_loads() {
     // regenerating is needed.
     let old_bindings = generate(Lang::TypeScript, file(TODOS).as_bytes()).unwrap();
     assert_eq!(
-        bindings::staleness(&app, Some(&old_bindings)).unwrap(),
+        bindings::staleness(&app, Lang::TypeScript, Some(&old_bindings)).unwrap(),
         Some(Staleness::OutOfDate)
     );
     // Running it again changes nothing.
-    let again = create(created.app.as_bytes(), Some(&old_bindings), "change").unwrap();
+    let again = create(
+        Lang::TypeScript,
+        created.app.as_bytes(),
+        Some(&old_bindings),
+        "change",
+    )
+    .unwrap();
     assert!(!again.changed);
     assert_eq!(again.app, created.app);
 }
@@ -81,16 +98,16 @@ fn an_edit_without_a_migration_is_caught_against_the_bindings() {
     )
     .unwrap();
     assert_eq!(
-        bindings::staleness(&edited, Some(&bindings)).unwrap(),
+        bindings::staleness(&edited, Lang::TypeScript, Some(&bindings)).unwrap(),
         Some(Staleness::SchemaChanged)
     );
     assert!(
         Staleness::SchemaChanged
-            .message()
+            .message(Lang::TypeScript)
             .contains("migrations create --name")
     );
     // Without bindings there is nothing to migrate from.
-    let created = create(file(TODOS).as_bytes(), None, "x").unwrap();
+    let created = create(Lang::TypeScript, file(TODOS).as_bytes(), None, "x").unwrap();
     assert!(!created.changed);
     // A change outside the engine schema (a relation, a computed field)
     // only needs regenerating.
@@ -100,7 +117,7 @@ fn an_edit_without_a_migration_is_caught_against_the_bindings() {
     )
     .unwrap();
     assert_eq!(
-        bindings::staleness(&relabelled, Some(&bindings)).unwrap(),
+        bindings::staleness(&relabelled, Lang::TypeScript, Some(&bindings)).unwrap(),
         Some(Staleness::OutOfDate)
     );
 }
@@ -252,6 +269,7 @@ fn type_and_optionality_changes_are_not_supported_yet() {
     );
     let bindings = generate(Lang::TypeScript, file(TODOS).as_bytes()).unwrap();
     let error = create(
+        Lang::TypeScript,
         file(r#"{ "todos": { "columns": { "title": "int", "done": "boolean" } } }"#).as_bytes(),
         Some(&bindings),
         "x",
@@ -315,7 +333,13 @@ fn a_change_the_diff_cant_describe_is_a_todo() {
 
 #[test]
 fn bindings_that_arent_the_generators_are_refused() {
-    let error = create(file(TODOS).as_bytes(), Some("export const app = {};"), "x").unwrap_err();
+    let error = create(
+        Lang::TypeScript,
+        file(TODOS).as_bytes(),
+        Some("export const app = {};"),
+        "x",
+    )
+    .unwrap_err();
     assert!(
         error
             .to_string()
@@ -324,7 +348,7 @@ fn bindings_that_arent_the_generators_are_refused() {
     );
     let bindings = generate(Lang::TypeScript, file(TODOS).as_bytes()).unwrap();
     let edited = bindings.replace("\"current\": \"", "\"current\": \"00");
-    let error = create(file(TODOS).as_bytes(), Some(&edited), "x").unwrap_err();
+    let error = create(Lang::TypeScript, file(TODOS).as_bytes(), Some(&edited), "x").unwrap_err();
     assert!(error.to_string().contains("schema.current"), "{error}");
 }
 

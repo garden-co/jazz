@@ -89,7 +89,25 @@ impl Lang {
         }
     }
 
-    /// The file the bindings go in, beside `jazz.app.json`.
+    /// Every language, in the order `jazz-tools generate` handles them.
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript];
+
+    /// The file whose presence beside `jazz.app.json` says the app is
+    /// written in this language, so `validate` writes its bindings.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Lang::TypeScript => "package.json",
+        }
+    }
+
+    /// The version of the bindings' shape this generator writes.
+    pub fn format(self) -> u32 {
+        match self {
+            Lang::TypeScript => ts::FORMAT,
+        }
+    }
+
+    /// The file the bindings go in, relative to `jazz.app.json`'s directory.
     pub fn file(self) -> &'static str {
         match self {
             Lang::TypeScript => ts::FILE,

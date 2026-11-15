@@ -61,11 +61,10 @@ pub fn singular(name: &str) -> String {
         keep_case(one)
     } else if lower.len() > 3 && lower.ends_with("ies") {
         format!("{}y", &word[..word.len() - 3])
-    } else if lower.ends_with("ses") && S_SINGULARS.contains(&&lower[..lower.len() - 2]) {
-        word[..word.len() - 2].to_string()
-    } else if ["sses", "ches", "shes", "xes", "zes"]
-        .iter()
-        .any(|end| lower.ends_with(end))
+    } else if (lower.ends_with("ses") && S_SINGULARS.contains(&&lower[..lower.len() - 2]))
+        || ["sses", "ches", "shes", "xes", "zes"]
+            .iter()
+            .any(|end| lower.ends_with(end))
     {
         word[..word.len() - 2].to_string()
     } else if lower.len() > 1
