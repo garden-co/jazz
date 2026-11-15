@@ -34,7 +34,7 @@ mod table;
 mod value;
 
 pub use app::AppFiles;
-pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider};
+pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
 pub use error::{Error, Result};
 pub use handle::{Jazz, Transaction};

@@ -14,7 +14,7 @@ use bindings::{NewTodo, Todo, todos};
 use futures::StreamExt;
 use jazz_app::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, Error, Jazz, Link, ReadTier, SessionState,
-    Storage, UserKind,
+    Storage, TokenReason, UserKind,
 };
 use jazz_server::JazzServer;
 
@@ -127,7 +127,7 @@ async fn a_device_account_syncs_across_its_devices() {
     .await
     .expect("open as a device account");
     let session = phone.session().expect("an end user's session").clone();
-    let SessionState::SignedIn(user) = session.state() else {
+    let SessionState::SignedIn { user } = session.state() else {
         panic!("signed in: {:?}", session.state());
     };
     assert_eq!(user.kind, UserKind::Device);
@@ -195,9 +195,9 @@ async fn a_bearer_signs_in_the_user_the_backend_names() {
     let fresh = Arc::new(AtomicUsize::new(0));
     let provider = {
         let (token, fresh) = (token.clone(), fresh.clone());
-        move |is_fresh: bool| {
+        move |reason: TokenReason| {
             let token = token.lock().unwrap().clone();
-            if is_fresh {
+            if reason == TokenReason::Refresh {
                 fresh.fetch_add(1, Ordering::SeqCst);
             }
             async move { Ok(token) }
@@ -207,7 +207,7 @@ async fn a_bearer_signs_in_the_user_the_backend_names() {
         .await
         .expect("open as the bearer's user");
     let session = alice.session().unwrap().clone();
-    let SessionState::SignedIn(user) = session.state() else {
+    let SessionState::SignedIn { user } = session.state() else {
         panic!("signed in: {:?}", session.state());
     };
     assert_eq!(user.kind, UserKind::Backend);

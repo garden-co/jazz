@@ -19,7 +19,7 @@ use jazz::tools::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::app::AppFiles;
-use crate::auth::{Auth, DEVICE_TOKEN_TTL_SECS};
+use crate::auth::{Auth, DEVICE_TOKEN_TTL_SECS, TokenReason};
 use crate::backend;
 use crate::config::{Config, Storage};
 use crate::error::{Error, Result};
@@ -575,7 +575,10 @@ async fn connect_user(
             Ok((client, user, Credential::Device { key, app }))
         }
         Auth::Bearer(provider) => {
-            let token = provider.token(false).await?.ok_or(Error::SignedOut)?;
+            let token = provider
+                .token(TokenReason::Connect)
+                .await?
+                .ok_or(Error::SignedOut)?;
             let signed_in = backend::sign_in(endpoint, app, &token)
                 .await?
                 .ok_or(Error::SignedOut)?;

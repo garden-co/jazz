@@ -15,17 +15,60 @@ use jazz::link::{AuthFailureReason, LinkPhase, LinkStatus};
 use jazz::tools::{AppId, JazzClient};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::auth::{Bearer, DEVICE_TOKEN_TTL_SECS, DeviceKey, jwt_expiry};
+use crate::auth::{Bearer, DEVICE_TOKEN_TTL_SECS, DeviceKey, TokenReason, jwt_expiry};
 use crate::error::{Error, Result};
 
-/// Why the server refused a credential.
-pub type AuthFailure = AuthFailureReason;
+/// Why the server refused a credential, as TypeScript's `AuthFailureReason`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthFailure {
+    Expired,
+    Missing,
+    Invalid,
+    Disabled,
+    Revoked,
+}
 
-/// Who is signed in, and whether their credential still holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl AuthFailure {
+    /// Whether a new credential can fix it (a revoked or disabled account
+    /// cannot).
+    pub fn is_renewable(self) -> bool {
+        AuthFailureReason::from(self).is_renewable()
+    }
+}
+
+impl From<AuthFailureReason> for AuthFailure {
+    fn from(reason: AuthFailureReason) -> Self {
+        match reason {
+            AuthFailureReason::Expired => Self::Expired,
+            AuthFailureReason::Missing => Self::Missing,
+            AuthFailureReason::Invalid => Self::Invalid,
+            AuthFailureReason::Disabled => Self::Disabled,
+            AuthFailureReason::Revoked => Self::Revoked,
+        }
+    }
+}
+
+impl From<AuthFailure> for AuthFailureReason {
+    fn from(reason: AuthFailure) -> Self {
+        match reason {
+            AuthFailure::Expired => Self::Expired,
+            AuthFailure::Missing => Self::Missing,
+            AuthFailure::Invalid => Self::Invalid,
+            AuthFailure::Disabled => Self::Disabled,
+            AuthFailure::Revoked => Self::Revoked,
+        }
+    }
+}
+
+/// Who is signed in, and whether their credential still holds. Serializes
+/// as `{"status": "signedIn", "user": {..}}`, `{"status": "expired", "user":
+/// {..}, "reason": "expired"}` or `{"status": "signedOut"}`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
 pub enum SessionState {
     /// Signed in; the client renews the credential before it expires.
-    SignedIn(User),
+    SignedIn { user: User },
     /// The server refused the credential, and a fresh one did not help (or
     /// cannot: a revoked or disabled account). The data stays readable
     /// locally; [`Session::refresh`] tries again.
@@ -38,14 +81,15 @@ pub enum SessionState {
 impl SessionState {
     pub fn user(&self) -> Option<&User> {
         match self {
-            Self::SignedIn(user) | Self::Expired { user, .. } => Some(user),
+            Self::SignedIn { user } | Self::Expired { user, .. } => Some(user),
             Self::SignedOut => None,
         }
     }
 }
 
 /// A signed-in user of the app, as TypeScript's `JazzUser`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct User {
     pub account: AccountId,
     /// `urn:jazz:local-first` for a device account, `jazz:backend` for a
@@ -57,7 +101,8 @@ pub struct User {
     pub kind: UserKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum UserKind {
     /// A local-first device account ([`crate::Auth::Device`]).
     Device,
@@ -66,14 +111,17 @@ pub enum UserKind {
 }
 
 /// How the client syncs, as TypeScript's `SyncStatus`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
 pub struct SyncStatus {
     pub link: Link,
 }
 
-/// The upstream link, as TypeScript's `SyncStatus.link`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The upstream link, as TypeScript's `SyncStatus.link`. Serializes as
+/// `{"state": "connected"}`, `{"state": "offline", "reason": "network",
+/// "retrying": true, "message": ".."}` and so on.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
 pub enum Link {
     /// No server: the app runs locally.
     LocalOnly,
@@ -88,7 +136,9 @@ pub enum Link {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Why the link is offline: `"network"`, `{"auth": "expired"}`, `"stopped"`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Offline {
     /// The network failed or the server is unreachable.
     Network,
@@ -116,7 +166,9 @@ impl SyncStatus {
             LinkPhase::Live => Link::Connected,
             LinkPhase::Backoff => offline(Offline::Network, true),
             LinkPhase::Offline => offline(Offline::Network, false),
-            LinkPhase::AwaitingCredential(reason) => offline(Offline::Auth(*reason), false),
+            LinkPhase::AwaitingCredential(reason) => {
+                offline(Offline::Auth((*reason).into()), false)
+            }
             LinkPhase::Stopped => offline(Offline::Stopped, false),
         };
         Self { link }
@@ -203,7 +255,7 @@ impl Session {
     }
 
     /// Renews the credential now: a fresh device token, or a fresh bearer
-    /// from the token provider (`fresh = true`). Signs out if the provider
+    /// from the token provider ([`TokenReason::Refresh`]). Signs out if the provider
     /// names no one.
     pub async fn refresh(&self) -> Result<()> {
         let (reply, done) = oneshot::channel();
@@ -246,7 +298,7 @@ pub(crate) fn start(
     credential: Credential,
     sync: watch::Receiver<SyncStatus>,
 ) -> Session {
-    let (state, receiver) = watch::channel(SessionState::SignedIn(user.clone()));
+    let (state, receiver) = watch::channel(SessionState::SignedIn { user: user.clone() });
     let (commands, inbox) = mpsc::unbounded_channel();
     let machine = Machine {
         client,
@@ -303,7 +355,7 @@ impl Machine {
                 }
                 () = sleep(until_renewal) => {
                     // Ahead of expiry: a failure here is retried on refusal.
-                    match self.renew(false).await {
+                    match self.renew(TokenReason::Renew).await {
                         Ok(Renewed::SignedOut) => return self.signed_out(),
                         Ok(Renewed::Renewed) => {}
                         Err(_) => self.renew_at = None,
@@ -311,11 +363,15 @@ impl Machine {
                 }
                 command = inbox.recv() => match command {
                     Some(Command::Refresh(reply)) => {
-                        let result = self.renew(true).await;
+                        let result = self.renew(TokenReason::Refresh).await;
+                        // The state changes before the caller hears back.
                         let signed_out = matches!(result, Ok(Renewed::SignedOut));
+                        if signed_out {
+                            self.signed_out();
+                        }
                         let _ = reply.send(result.map(|_| ()));
                         if signed_out {
-                            return self.signed_out();
+                            return;
                         }
                     }
                     Some(Command::SignOut(reply)) => {
@@ -333,7 +389,9 @@ impl Machine {
         match link {
             Link::Connected => {
                 self.renewed_since_live = false;
-                self.set(SessionState::SignedIn(self.user.clone()));
+                self.set(SessionState::SignedIn {
+                    user: self.user.clone(),
+                });
             }
             Link::Offline {
                 reason: Offline::Auth(reason),
@@ -341,7 +399,7 @@ impl Machine {
             } => {
                 if reason.is_renewable() && !self.renewed_since_live {
                     self.renewed_since_live = true;
-                    match self.renew(true).await {
+                    match self.renew(TokenReason::Expired).await {
                         Ok(Renewed::Renewed) => return std::ops::ControlFlow::Continue(()),
                         Ok(Renewed::SignedOut) => {
                             self.signed_out();
@@ -361,18 +419,18 @@ impl Machine {
     }
 
     /// Gives the client a new credential.
-    async fn renew(&mut self, fresh: bool) -> Result<Renewed> {
+    async fn renew(&mut self, reason: TokenReason) -> Result<Renewed> {
         let now = SystemTime::now();
         match &mut self.credential {
             Credential::Device { key, app } => {
                 let token = key.mint(*app, DEVICE_TOKEN_TTL_SECS)?;
                 self.client.update_auth_token(token)?;
             }
-            Credential::Bearer { provider, token } => match provider.token(fresh).await? {
+            Credential::Bearer { provider, token } => match provider.token(reason).await? {
                 None => return Ok(Renewed::SignedOut),
                 Some(next) => {
                     // An unchanged bearer needs no new connection.
-                    if fresh || next != *token {
+                    if reason.is_fresh() || next != *token {
                         self.client.update_bearer(next.clone())?;
                     }
                     *token = next;

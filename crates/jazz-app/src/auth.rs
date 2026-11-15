@@ -26,12 +26,12 @@ pub enum Auth {
 
 impl Auth {
     /// Signs in with the app's bearer, as `provider` gives it: see
-    /// [`TokenProvider`]. A closure `|fresh| async { .. }` is one.
+    /// [`TokenProvider`]. A closure `|reason| async { .. }` is one.
     ///
     /// ```no_run
     /// # async fn access_token(_fresh: bool) -> Option<String> { None }
-    /// let auth = jazz_app::Auth::bearer(|fresh| async move {
-    ///     Ok(access_token(fresh).await)
+    /// let auth = jazz_app::Auth::bearer(|reason: jazz_app::TokenReason| async move {
+    ///     Ok(access_token(reason.is_fresh()).await)
     /// });
     /// ```
     pub fn bearer(provider: impl TokenProvider + 'static) -> Self {
@@ -42,26 +42,50 @@ impl Auth {
 /// A token on its way, from a [`TokenProvider`].
 pub type TokenFuture = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send>>;
 
+/// Why a [`TokenProvider`] is asked for a token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TokenReason {
+    /// Opening the client.
+    Connect,
+    /// Ahead of the last token's expiry (at 80% of a JWT's life, as the
+    /// TypeScript client renews): a cached token still valid will do.
+    Renew,
+    /// The backend refused the last token: give a new one, not from cache.
+    Expired,
+    /// The app asked for a fresh one ([`crate::Session::refresh`]).
+    Refresh,
+}
+
+impl TokenReason {
+    /// Whether a cached token must not be given (TypeScript's
+    /// `getToken({ fresh: true })`).
+    pub fn is_fresh(self) -> bool {
+        matches!(self, Self::Expired | Self::Refresh)
+    }
+}
+
 /// Where an app's bearer tokens come from: the host's own auth (an OAuth
-/// client, a platform account), asked whenever a token is needed. On open,
-/// before a JWT bearer expires (at 80% of its life, as the TypeScript client
-/// renews), and with `fresh = true` when the backend refused the last one,
-/// so a cached token must not be given again. `None` means no one is signed
-/// in. It never blocks the client: the session waits for the future.
+/// client, a platform account), asked whenever a token is needed, with why
+/// ([`TokenReason`]). `None` means no one is signed in.
 ///
-/// Closures `Fn(bool) -> impl Future<Output = Result<Option<String>>>`
+/// `token` is called on the client's thread and must return at once; the
+/// work belongs in the future, which the session awaits as a task of its
+/// own, so the client's other calls run on meanwhile.
+///
+/// Closures `Fn(TokenReason) -> impl Future<Output = Result<Option<String>>>`
 /// implement it; FFI layers implement it over a host callback.
 pub trait TokenProvider: Send + Sync {
-    fn token(&self, fresh: bool) -> TokenFuture;
+    fn token(&self, reason: TokenReason) -> TokenFuture;
 }
 
 impl<F, Fut> TokenProvider for F
 where
-    F: Fn(bool) -> Fut + Send + Sync,
+    F: Fn(TokenReason) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Option<String>>> + Send + 'static,
 {
-    fn token(&self, fresh: bool) -> TokenFuture {
-        Box::pin(self(fresh))
+    fn token(&self, reason: TokenReason) -> TokenFuture {
+        Box::pin(self(reason))
     }
 }
 
@@ -70,8 +94,8 @@ where
 pub struct Bearer(Arc<dyn TokenProvider>);
 
 impl Bearer {
-    pub(crate) async fn token(&self, fresh: bool) -> Result<Option<String>> {
-        self.0.token(fresh).await
+    pub(crate) async fn token(&self, reason: TokenReason) -> Result<Option<String>> {
+        self.0.token(reason).await
     }
 }
 
@@ -105,6 +129,40 @@ impl DeviceKey {
         getrandom::fill(&mut seed)
             .map_err(|error| Error::Config(format!("no randomness for a device key: {error}")))?;
         Ok(Self(seed))
+    }
+
+    /// The key kept in the file at `path`, or a new one written there
+    /// (readable by this user only): for hosts without a keychain, such as a
+    /// CLI or a server-side test. Apps with a platform keychain keep the
+    /// key's text form there instead.
+    pub fn load_or_create(path: &std::path::Path) -> Result<Self> {
+        let io = |error: std::io::Error| {
+            Error::Config(format!("device key at {}: {error}", path.display()))
+        };
+        match std::fs::read_to_string(path) {
+            Ok(text) => return text.parse(),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io(error)),
+            Err(_) => {}
+        }
+        let key = Self::generate()?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(path) {
+            Ok(mut file) => {
+                std::io::Write::write_all(&mut file, key.to_string().as_bytes()).map_err(io)?;
+                Ok(key)
+            }
+            // Another process made it first: theirs is the key.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::read_to_string(path).map_err(io)?.parse()
+            }
+            Err(error) => Err(io(error)),
+        }
     }
 
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
@@ -181,6 +239,22 @@ mod tests {
         assert_eq!(text.parse::<DeviceKey>().unwrap(), key);
         assert!("jazz-auth-v1:short".parse::<DeviceKey>().is_err());
         assert!(!format!("{key:?}").contains(&text[KEY_PREFIX.len()..]));
+    }
+
+    #[test]
+    fn a_device_key_kept_in_a_file_is_the_same_key_next_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys/device.key");
+        let key = DeviceKey::load_or_create(&path).unwrap();
+        assert_eq!(DeviceKey::load_or_create(&path).unwrap(), key);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::write(&path, "junk").unwrap();
+        assert!(DeviceKey::load_or_create(&path).is_err());
     }
 
     #[test]
