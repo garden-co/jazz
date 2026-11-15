@@ -462,7 +462,18 @@ impl Core {
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let edits = whole_pages(&client, &name, id, edits).await?;
-            let committed = client.update_with_edits(&name, id, cells, edits)?;
+            let committed = client
+                .update_with_edits(&name, id, cells, edits)
+                .map_err(|error| match error {
+                    // As jazz-app reports an edit of a row this client
+                    // cannot see.
+                    jazz_app::jazz::tools::JazzError::Write(message)
+                        if message.contains("NotObserved") =>
+                    {
+                        jazz_app::Error::Config(format!("no {name} row {id}"))
+                    }
+                    other => other.into(),
+                })?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
@@ -595,6 +606,8 @@ impl Core {
     /// The server's advice on whether this user may do `op` (`read`,
     /// `insert`, `update`, `delete`) without doing it: `Some(true)`,
     /// `Some(false)`, or `None` when no server can say (TS's `canRead` …).
+    /// Advisory: `true` doesn't promise the write will succeed (the data or
+    /// the permissions may change before it runs). Not in a transaction.
     /// `insert` takes `row_json`; `read` and `delete` take `id`; `update`
     /// takes `id` and an optional `row_json` patch.
     pub fn can(
@@ -614,7 +627,15 @@ impl Core {
         };
         let cells = |what: &str| -> Result<Vec<(String, Value)>> {
             match row_json {
-                Some(row) => Ok(convert::cells(table, table_name, row, what)?.1),
+                Some(row) => {
+                    let (given, cells) = convert::cells(table, table_name, row, what)?;
+                    if given.is_some() {
+                        return Err(refused(format!(
+                            "can {op}: {what} takes no \"id\" (advice is about the row's columns)"
+                        )));
+                    }
+                    Ok(cells)
+                }
                 None => Ok(Vec::new()),
             }
         };
