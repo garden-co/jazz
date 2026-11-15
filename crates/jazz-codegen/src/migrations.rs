@@ -11,9 +11,9 @@
 use jazz::tools::deployment::artifact::{self, json::Json};
 use jazz::tools::public_schema::{ColumnDescriptor, ColumnType, Schema, SchemaHash, TableSchema};
 
-use crate::CodegenError;
 use crate::bindings;
 use crate::model::App;
+use crate::{CodegenError, Lang};
 
 /// What [`create`] did.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,10 +26,11 @@ pub struct Created {
     pub todos: Vec<String>,
 }
 
-/// Write the migration from the version `bindings` (the committed module)
-/// were generated from to the file's current `tables`. `name` is recorded
-/// as the migration's `name`.
+/// Write the migration from the version `bindings` (the committed file in
+/// `lang`) were generated from to the file's current `tables`. `name` is
+/// recorded as the migration's `name`.
 pub fn create(
+    lang: Lang,
     app_json: &[u8],
     bindings: Option<&str>,
     name: &str,
@@ -46,7 +47,7 @@ pub fn create(
         // No bindings: the app has no earlier version yet.
         return Ok(unchanged());
     };
-    let recorded = bindings::read(bindings)?;
+    let recorded = bindings::read(lang, bindings)?;
     if app
         .compiled
         .schemas

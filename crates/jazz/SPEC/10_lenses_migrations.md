@@ -676,7 +676,7 @@ schema version.
   one.
 - The app's lenses make the names agree. An app ships its schema versions
   and the lenses between them (`DbConfig::with_migrations`; the JSON a
-  deployment publishes, which `jazz-tools validate` and `deploy` write to
+  deployment publishes, which `jazz-tools generate` and `deploy` write to
   `migrations/index.ts` beside `schema.ts`, and which TypeScript apps pass
   to `defineApp`). A store opening, or viewing, a version it has not
   admitted first admits the versions on a lens path to it, starting at one
@@ -796,7 +796,7 @@ An app is described by two readable JSON files beside its `schema.ts`:
 
 The files are meant to be read by people and agents, and later written by
 them (see **Bindings** below for alpha.65, where they are the source). In
-stage 1 (alpha.63) they are an IR: `jazz-tools validate` and
+stage 1 (alpha.63) they are an IR: `jazz-tools generate` and
 `jazz-tools migrations create` compile the TS DSL (`schema.ts`,
 `permissions.ts`, `migrations/*.ts`) to them through the Rust writer
 (`jazz::tools::deployment::artifact::write`), and `validate --check` fails
@@ -1155,7 +1155,7 @@ only the bindings loads its permissions against their compiled app
 (`artifact::load_backend`), with every check `load` runs.
 
 The bindings also record the version the app last generated against, which
-is how `jazz-tools validate` (and the `jazz-tools` binary's `validate`)
+is how `jazz-tools generate` (and the `jazz-tools` binary's `validate`)
 tells edits apart: when the file's versions don't include the bindings'
 current schema, `tables` changed without a migration, and validate refuses
 ("the schema changed since the last version: run `jazz-tools migrations

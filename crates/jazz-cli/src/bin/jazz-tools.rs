@@ -76,18 +76,26 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Check jazz.app.json (and jazz.permissions.json) and regenerate the
-    /// committed bindings; with --check, fail when they are stale instead.
-    Validate {
+    /// Check jazz.app.json (and jazz.permissions.json) and write the
+    /// committed bindings; with --check (for CI), fail when they are stale
+    /// and change nothing.
+    Generate {
         /// The directory holding jazz.app.json.
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
-        /// The bindings' language.
-        #[arg(long, default_value = "ts")]
-        lang: String,
-        /// Fail when the bindings are stale instead of rewriting them.
+        /// The bindings' language (repeatable); by default each whose
+        /// marker (package.json, Cargo.toml) sits beside jazz.app.json.
+        #[arg(long)]
+        lang: Vec<String>,
+        /// Fail when the files or bindings are stale; change nothing.
         #[arg(long)]
         check: bool,
+    },
+    /// Renamed to `generate`.
+    #[command(hide = true)]
+    Validate {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Manage the migrations in jazz.app.json.
     Migrations {
@@ -300,9 +308,10 @@ enum MigrationsAction {
         /// The directory holding jazz.app.json.
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
-        /// The bindings' language.
-        #[arg(long, default_value = "ts")]
-        lang: String,
+        /// The bindings' language (repeatable); by default each whose
+        /// marker (package.json, Cargo.toml) sits beside jazz.app.json.
+        #[arg(long)]
+        lang: Vec<String>,
     },
 }
 
@@ -326,8 +335,12 @@ fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
     std::process::exit(code)
 }
 
-fn lang(name: &str) -> Result<jazz_codegen::Lang, String> {
-    jazz_codegen::Lang::parse(name).map_err(|error| error.to_string())
+fn langs(dir: &std::path::Path, names: &[String]) -> Result<Vec<jazz_codegen::Lang>, String> {
+    let given = names
+        .iter()
+        .map(|name| jazz_codegen::Lang::parse(name).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    jazz_cli::app_files::languages(dir, &given)
 }
 
 #[derive(Subcommand)]
@@ -369,12 +382,15 @@ async fn run() {
             shutdown_tracing();
             std::process::exit(code);
         }
-        Commands::Validate {
+        Commands::Validate { .. } => finish_app_files(Err(
+            "`jazz-tools validate` is renamed to `jazz-tools generate` (`--check` for CI)".into(),
+        )),
+        Commands::Generate {
             dir,
             lang: name,
             check,
         } => finish_app_files(
-            lang(&name).and_then(|lang| jazz_cli::app_files::validate(&dir, lang, check)),
+            langs(&dir, &name).and_then(|langs| jazz_cli::app_files::generate(&dir, &langs, check)),
         ),
         Commands::Migrations {
             action:
@@ -384,8 +400,8 @@ async fn run() {
                     lang: language,
                 },
         } => finish_app_files(
-            lang(&language)
-                .and_then(|lang| jazz_cli::app_files::migrations_create(&dir, lang, &name)),
+            langs(&dir, &language)
+                .and_then(|langs| jazz_cli::app_files::migrations_create(&dir, &langs, &name)),
         ),
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {

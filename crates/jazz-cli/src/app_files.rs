@@ -1,4 +1,4 @@
-//! `jazz-tools validate` and `jazz-tools migrations create` on an app's two
+//! `jazz-tools generate` and `jazz-tools migrations create` on an app's two
 //! files and its committed bindings, without Node: what an app in any
 //! language runs after editing `jazz.app.json`.
 
@@ -33,11 +33,37 @@ fn bindings_path(dir: &Path, lang: Lang) -> PathBuf {
     dir.join(lang.file())
 }
 
+/// The languages `dir`'s app is written in: those given, or else each
+/// whose marker (`package.json`, `Cargo.toml`) or bindings sit in `dir`.
+pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Lang>, String> {
+    if !given.is_empty() {
+        return Ok(given.to_vec());
+    }
+    let found: Vec<Lang> = Lang::ALL
+        .iter()
+        .copied()
+        .filter(|lang| dir.join(lang.marker()).exists() || bindings_path(dir, *lang).exists())
+        .collect();
+    if found.is_empty() {
+        return Err(format!(
+            "{}: no {} beside {APP_FILE} says which language to generate bindings in; pass --lang",
+            dir.display(),
+            Lang::ALL
+                .iter()
+                .map(|l| l.marker())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        ));
+    }
+    Ok(found)
+}
+
 /// Check `dir`'s `jazz.app.json` (and `jazz.permissions.json`, when there
-/// is one) and its bindings in `lang`. With `check`, refuse stale bindings;
-/// otherwise regenerate them, unless `tables` changed without a migration
-/// (the bindings hold the only copy of the version to migrate from).
-pub fn validate(dir: &Path, lang: Lang, check: bool) -> Result<Outcome, String> {
+/// is one) and its bindings in each of `langs`. With `check`, refuse stale
+/// bindings; otherwise regenerate them, unless `tables` changed without a
+/// migration (the bindings hold the only copy of the version to migrate
+/// from), which is refused before any file is written.
+pub fn generate(dir: &Path, langs: &[Lang], check: bool) -> Result<Outcome, String> {
     let mut outcome = Outcome::default();
     let app_json = read(&dir.join(APP_FILE))?;
     let app = App::load(&app_json).map_err(|error| error.to_string())?;
@@ -45,48 +71,67 @@ pub fn validate(dir: &Path, lang: Lang, check: bool) -> Result<Outcome, String> 
     if let Some(permissions) = read_optional(&dir.join(PERMISSIONS_FILE))? {
         artifact::load(&app_json, permissions.as_bytes()).map_err(|error| error.to_string())?;
     }
-    let path = bindings_path(dir, lang);
-    let committed = read_optional(&path)?;
-    let staleness = bindings::staleness(&app, committed.as_deref()).map_err(|e| e.to_string())?;
-    match staleness {
-        None => {
-            outcome
+    let mut stale = Vec::new();
+    for &lang in langs {
+        let path = bindings_path(dir, lang);
+        let committed = read_optional(&path)?;
+        match bindings::staleness(&app, lang, committed.as_deref()).map_err(|e| e.to_string())? {
+            None => outcome
                 .notes
-                .push(format!("{} and {} are up to date", APP_FILE, lang.file()));
-            Ok(outcome)
-        }
-        Some(Staleness::SchemaChanged) => Err(Staleness::SchemaChanged.message()),
-        Some(stale) if check => Err(stale.message()),
-        Some(_) => {
-            let generated =
-                jazz_codegen::generate_app(lang, &app).map_err(|error| error.to_string())?;
-            std::fs::write(&path, generated)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            outcome.notes.push(format!("wrote {}", path.display()));
-            Ok(outcome)
+                .push(format!("{} is up to date", path.display())),
+            Some(Staleness::SchemaChanged) => {
+                return Err(format!(
+                    "{}: {}",
+                    path.display(),
+                    Staleness::SchemaChanged.message(lang)
+                ));
+            }
+            Some(staleness) => stale.push((lang, path, staleness)),
         }
     }
+    for (lang, path, staleness) in stale {
+        if check {
+            return Err(format!("{}: {}", path.display(), staleness.message(lang)));
+        }
+        let generated =
+            jazz_codegen::generate_app(lang, &app).map_err(|error| error.to_string())?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+        std::fs::write(&path, generated).map_err(|error| format!("{}: {error}", path.display()))?;
+        outcome.notes.push(format!("wrote {}", path.display()));
+    }
+    Ok(outcome)
 }
 
-/// Write the migration from the version `dir`'s bindings were generated
-/// from to its edited `tables`, named `name`, and regenerate the bindings
-/// once the migration has no TODOs left.
-pub fn migrations_create(dir: &Path, lang: Lang, name: &str) -> Result<Outcome, String> {
+/// Write the migration from the version `dir`'s committed bindings were
+/// generated from to its edited `tables`, named `name`, and regenerate the
+/// bindings in each of `langs` once the migration has no TODOs left.
+pub fn migrations_create(dir: &Path, langs: &[Lang], name: &str) -> Result<Outcome, String> {
     let mut outcome = Outcome::default();
     let app_path = dir.join(APP_FILE);
     let app_json = read(&app_path)?;
-    let path = bindings_path(dir, lang);
-    let committed = read_optional(&path)?;
-    let created = jazz_codegen::migrations::create(&app_json, committed.as_deref(), name)
+    // Every language's bindings record the same version; the first there is
+    // tells it.
+    let mut committed = None;
+    for &lang in langs {
+        if let Some(text) = read_optional(&bindings_path(dir, lang))? {
+            committed = Some((lang, text));
+            break;
+        }
+    }
+    let Some((lang, text)) = committed else {
+        outcome.notes.push(
+            "no committed bindings, so no earlier version to migrate from: run `jazz-tools generate`"
+                .into(),
+        );
+        return Ok(outcome);
+    };
+    let created = jazz_codegen::migrations::create(lang, &app_json, Some(&text), name)
         .map_err(|error| error.to_string())?;
     if !created.changed {
-        outcome.notes.push(match committed {
-            None => format!(
-                "no {}, so no earlier version to migrate from: run `jazz-tools validate`",
-                lang.file()
-            ),
-            Some(_) => "no schema change to migrate".into(),
-        });
+        outcome.notes.push("no schema change to migrate".into());
         return Ok(outcome);
     }
     std::fs::write(&app_path, &created.app)
@@ -96,10 +141,10 @@ pub fn migrations_create(dir: &Path, lang: Lang, name: &str) -> Result<Outcome, 
         app_path.display()
     ));
     if created.todos.is_empty() {
-        outcome.notes.extend(validate(dir, lang, false)?.notes);
+        outcome.notes.extend(generate(dir, langs, false)?.notes);
     } else {
         outcome.notes.push(format!(
-            "resolve {} TODO{} in {}, then run `jazz-tools validate`:",
+            "resolve {} TODO{} in {}, then run `jazz-tools generate`:",
             created.todos.len(),
             if created.todos.len() == 1 { "" } else { "s" },
             APP_FILE
@@ -131,18 +176,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_writes_checks_and_refuses_an_unmigrated_edit() {
+    fn generate_writes_checks_and_refuses_an_unmigrated_edit() {
         let dir = dir();
         std::fs::write(dir.join(APP_FILE), V1).unwrap();
         let ts = Lang::TypeScript;
-        // No bindings: --check refuses, validate writes them.
+        // No bindings: --check refuses, generate writes them.
         assert!(
-            validate(&dir, ts, true)
+            generate(&dir, &[ts], true)
                 .unwrap_err()
-                .contains("run `jazz-tools validate`")
+                .contains("run `jazz-tools generate`")
         );
-        validate(&dir, ts, false).unwrap();
-        validate(&dir, ts, true).unwrap();
+        generate(&dir, &[ts], false).unwrap();
+        generate(&dir, &[ts], true).unwrap();
         // Reformatting the bindings doesn't make them stale.
         let path = dir.join(ts.file());
         let text = std::fs::read_to_string(&path).unwrap();
@@ -151,15 +196,15 @@ mod tests {
             text.replace("  readonly id: string;", "    readonly id: string;"),
         )
         .unwrap();
-        validate(&dir, ts, true).unwrap();
-        // Editing `tables` needs a migration first, and validate leaves the
+        generate(&dir, &[ts], true).unwrap();
+        // Editing `tables` needs a migration first, and generate leaves the
         // bindings alone until there is one.
         std::fs::write(dir.join(APP_FILE), V2).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
-        let error = validate(&dir, ts, false).unwrap_err();
+        let error = generate(&dir, &[ts], false).unwrap_err();
         assert!(error.contains("migrations create --name"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-        let outcome = migrations_create(&dir, ts, "done-flag").unwrap();
+        let outcome = migrations_create(&dir, &[ts], "done-flag").unwrap();
         assert!(
             outcome
                 .notes
@@ -167,14 +212,14 @@ mod tests {
                 .any(|n| n.contains("wrote migration `done-flag`")),
             "{outcome:?}"
         );
-        validate(&dir, ts, true).unwrap();
+        generate(&dir, &[ts], true).unwrap();
         // A permissions file is checked too.
         std::fs::write(
             dir.join(PERMISSIONS_FILE),
             r#"{ "format": 1, "tables": { "todo": {} } }"#,
         )
         .unwrap();
-        let error = validate(&dir, ts, true).unwrap_err();
+        let error = generate(&dir, &[ts], true).unwrap_err();
         assert!(error.contains("did you mean `todos`?"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -183,13 +228,13 @@ mod tests {
     fn migrations_create_lists_the_todos_it_leaves() {
         let dir = dir();
         std::fs::write(dir.join(APP_FILE), V1).unwrap();
-        validate(&dir, Lang::TypeScript, false).unwrap();
+        generate(&dir, &[Lang::TypeScript], false).unwrap();
         std::fs::write(
             dir.join(APP_FILE),
             r#"{ "format": 1, "tables": { "todos": { "columns": { "title": "string", "owner": "uuid" } } } }"#,
         )
         .unwrap();
-        let outcome = migrations_create(&dir, Lang::TypeScript, "owner").unwrap();
+        let outcome = migrations_create(&dir, &[Lang::TypeScript], "owner").unwrap();
         assert!(
             outcome.notes.iter().any(|n| n.contains("resolve 1 TODO")),
             "{outcome:?}"
@@ -201,8 +246,18 @@ mod tests {
                 .any(|n| n == "  migrations[0].migrate.todos.owner.default"),
             "{outcome:?}"
         );
-        let error = validate(&dir, Lang::TypeScript, false).unwrap_err();
+        let error = generate(&dir, &[Lang::TypeScript], false).unwrap_err();
         assert!(error.contains("1 unresolved TODO"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn languages_come_from_the_files_beside_the_app() {
+        let dir = dir();
+        let error = languages(&dir, &[]).unwrap_err();
+        assert!(error.contains("pass --lang"), "{error}");
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        assert_eq!(languages(&dir, &[]).unwrap(), vec![Lang::TypeScript]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

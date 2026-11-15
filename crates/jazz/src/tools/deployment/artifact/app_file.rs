@@ -171,6 +171,19 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
     if let Some(versions) = root.get("history") {
         for (name, version) in object(versions, "history")? {
             let path = format!("history.{name}");
+            // JavaScript moves integer keys below 2^32 - 1 first in every
+            // object, so a tool round-tripping the file would reorder such
+            // versions. (A 12-hex short hash never is one: twelve digits
+            // are either at least 10^11 or start with a zero.)
+            if is_array_index(name) {
+                return Err(refuse(
+                    &path,
+                    format!(
+                        "`{name}` can't name a version: JavaScript reorders integer keys, so \
+                         `history`'s order wouldn't survive a JS tool; use e.g. `v{name}`"
+                    ),
+                ));
+            }
             let fields = object(version, &path)?;
             only_keys(fields, &["tables"], &path)?;
             let tables = version
@@ -208,6 +221,13 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
         codegen,
         warnings,
     })
+}
+
+/// Whether JavaScript treats `key` as an array index (a canonical integer
+/// below 2^32 - 1), which objects order before every other key.
+fn is_array_index(key: &str) -> bool {
+    key.parse::<u32>()
+        .is_ok_and(|n| n < u32::MAX && n.to_string() == key)
 }
 
 fn read_tables(
