@@ -155,6 +155,20 @@ async fn hop_to_follows_forward_and_reverse_relations() {
         .unwrap();
     assert_eq!(titles(&open), ["Buy milk", "Skimmed"]);
 
+    // A window after a hop applies to the rows it reached.
+    let skipped: Vec<Todo> = jazz
+        .all(
+            projects::query()
+                .id(f.home.id)
+                .hop_to(projects::todos_via_project())
+                .order_by(todos::title(), Order::Asc)
+                .offset(1)
+                .limit(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(titles(&skipped), ["Buy milk"]);
+
     // Hops chain: low-fat's parent's project.
     let chained: Vec<Project> = jazz
         .all(
@@ -240,6 +254,8 @@ async fn gather_walks_a_relation_up_to_a_depth() {
     assert_eq!(titles(&one), ["Low-fat", "Skimmed"]);
     let seed: Vec<Todo> = jazz.all(ancestors(0)).await.unwrap();
     assert_eq!(titles(&seed), ["Low-fat"]);
+    let skipped: Vec<Todo> = jazz.all(ancestors(10).offset(1)).await.unwrap();
+    assert_eq!(titles(&skipped), ["Low-fat", "Skimmed"]);
 
     // Filters after the gather narrow what it gathered; a step's filter
     // narrows the rows it steps through.
@@ -278,6 +294,18 @@ async fn union_reads_each_querys_rows() {
         .await
         .unwrap();
     assert_eq!(titles(&rows), ["Buy bread", "Buy milk"]);
+    let skipped: Vec<Todo> = jazz
+        .all(
+            Query::union([
+                todos::query().filter(todos::done().eq(true)),
+                todos::query().filter(todos::title().contains("milk")),
+            ])
+            .order_by(todos::title(), Order::Asc)
+            .offset(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(titles(&skipped), ["Buy milk"]);
 
     // Arms can hop, and the union takes a window.
     let rows: Vec<Todo> = jazz
@@ -394,6 +422,37 @@ async fn history_lists_a_rows_accepted_versions() {
             .await
             .unwrap();
     assert!(before.is_empty());
+    // Bounds, inclusive and exclusive, against the decoded times.
+    let (first, last) = (versions[0].accepted_at, versions[2].accepted_at);
+    let expect = |within: &dyn Fn(Timestamp) -> bool| {
+        versions.iter().filter(|v| within(v.accepted_at)).count()
+    };
+    let closed = remote(&jazz, todos::history().id(f.milk.id).accepted(first..=last))
+        .await
+        .unwrap();
+    assert_eq!(closed.len(), expect(&|at| first <= at && at <= last));
+    assert_eq!(closed.len(), 3);
+    let half_open = remote(&jazz, todos::history().id(f.milk.id).accepted(first..last))
+        .await
+        .unwrap();
+    assert_eq!(half_open.len(), expect(&|at| first <= at && at < last));
+    let after_first = remote(
+        &jazz,
+        todos::history()
+            .id(f.milk.id)
+            .accepted((std::ops::Bound::Excluded(first), std::ops::Bound::Unbounded)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after_first.len(), expect(&|at| first < at));
+    let only_first = remote(
+        &jazz,
+        todos::history().id(f.milk.id).accepted(first..=first),
+    )
+    .await
+    .unwrap();
+    assert_eq!(only_first.len(), expect(&|at| at == first));
+    assert!(!only_first.is_empty());
     let until: Vec<Version<Todo>> = remote(&jazz, todos::history().id(f.milk.id).accepted(..=now))
         .await
         .unwrap();
@@ -648,5 +707,52 @@ async fn untyped_queries_lower_the_same_way() {
 
     assert!(untyped::accepted_at(&jazz_app::jazz::tools::Value::Text("x".into())).is_none());
     let _ = (&f.home, &f.milk);
+    jazz.shutdown().await.unwrap();
+}
+
+#[allow(dead_code)]
+#[path = "bindings/tasks.rs"]
+mod task_bindings;
+
+/// A hop over an array relation (`uuid[]`) reaches every row it
+/// references, as TypeScript's `hopTo` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hop_to_follows_an_array_relation() {
+    use task_bindings::{NewStep, NewTask, Task, steps, tasks};
+    struct NoComputed;
+    impl task_bindings::Computed for NoComputed {
+        fn tasks_urgent(&self, _: i32, _: task_bindings::TaskPriority) -> bool {
+            false
+        }
+        fn iso_date_view(&self, stored: Timestamp) -> String {
+            stored.0.to_string()
+        }
+        fn iso_date_stored(&self, view: String) -> Timestamp {
+            Timestamp(view.parse().unwrap())
+        }
+    }
+    let jazz = task_bindings::open(Config::new(AppId::random()), NoComputed)
+        .await
+        .unwrap();
+    let a = jazz.insert(NewTask::new("A", 1, Vec::new())).await.unwrap();
+    let b = jazz.insert(NewTask::new("B", 2, Vec::new())).await.unwrap();
+    let _c = jazz.insert(NewTask::new("C", 3, Vec::new())).await.unwrap();
+    jazz.insert(NewStep::new("both", a.id, vec![a.id, b.id]))
+        .await
+        .unwrap();
+    jazz.insert(NewStep::new("none", a.id, Vec::new()))
+        .await
+        .unwrap();
+    let blockers: Vec<Task> = jazz
+        .all(
+            steps::query()
+                .filter(steps::label().eq("both"))
+                .hop_to(steps::blocker_rows())
+                .order_by(tasks::title(), Order::Asc),
+        )
+        .await
+        .unwrap();
+    let got: Vec<_> = blockers.iter().map(|task| task.title.as_str()).collect();
+    assert_eq!(got, ["A", "B"]);
     jazz.shutdown().await.unwrap();
 }

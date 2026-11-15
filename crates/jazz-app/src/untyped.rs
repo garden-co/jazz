@@ -69,6 +69,9 @@ pub enum Hop {
     Forward { column: String, to: Table },
     /// To the rows of `to` whose `column` references each row.
     Reverse { column: String, to: Table },
+    /// To the rows of `to` that each row's array `column` (`uuid[]`)
+    /// references.
+    ForwardArray { column: String, to: Table },
 }
 
 /// How a [`Query::gather`] goes from a row to the next.
@@ -294,7 +297,7 @@ impl Query {
     pub fn hop_to(self, hop: Hop) -> Self {
         let include_deleted = self.include_deleted;
         let (column, to, forward) = match hop {
-            Hop::Forward { column, to } => (column, to, true),
+            Hop::Forward { column, to } | Hop::ForwardArray { column, to } => (column, to, true),
             Hop::Reverse { column, to } => (column, to, false),
         };
         let mut query = Self::table(to);

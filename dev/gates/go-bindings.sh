@@ -26,6 +26,8 @@ cargo build -p jazz-cli --bin jazz-tools
 cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings
 
 test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
+# The module ships jazz-ffi's header for builds from the module cache.
+cmp crates/jazz-ffi/include/jazz_ffi.h packages/jazz-go/include/jazz_ffi.h
 (cd packages/jazz-go && go vet ./...)
 (cd examples/stage-plan/apps/go-cli && go vet ./...)
 

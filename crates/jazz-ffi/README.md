@@ -204,8 +204,11 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   - `{"table", "where"?, "gather": {"relation", "maxDepth"?}}`: the rows
     matching `where` and every row reached along a forward relation of the
     table to itself, up to `maxDepth` (default 10).
-  - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows;
-    arms read one table, with `where` only.
+  - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows,
+    as TS's union: a row matched by two arms comes twice, and `limit` /
+    `offset` count every occurrence; arms read one table, with `where` only.
+    Subscribing to a union whose arms overlap can mis-apply removals (deltas
+    name rows by id), as in jazz-app.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
     versions the server accepted, each row with `"$history":
 {"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at

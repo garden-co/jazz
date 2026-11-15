@@ -344,6 +344,14 @@ func TestHopUnionAndHistory(t *testing.T) {
 	if err != nil || len(ends) != 2 || ends[0].Title != "Load-in" || ends[1].Title != "Soundcheck" {
 		t.Fatalf("union: %+v %v", ends, err)
 	}
+	// As in TS (UNION ALL), a row two arms keep comes back once per arm.
+	overlap, err := jazz.Union(
+		jazzapp.Tasks.Query().Where(jazzapp.Tasks.ShowID.Eq(show.ID), jazzapp.Tasks.Rank.Lte(1)),
+		jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(first.ID)),
+	).All(ctx, db)
+	if err != nil || len(overlap) != 2 || overlap[0].ID != first.ID || overlap[1].ID != first.ID || overlap[0].Comments != nil {
+		t.Fatalf("overlapping union: %+v %v", overlap, err)
+	}
 
 	// The first task's versions, as the server accepted them.
 	if err := moveTask(ctx, db, first.ID, jazzapp.TaskStatusDoing); err != nil {
