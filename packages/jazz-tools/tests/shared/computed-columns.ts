@@ -183,60 +183,6 @@ export function testComputedColumns(create: () => Promise<Db>) {
       },
     );
 
-    // FILES-AS-SOURCE: jazz.app.json can't express this case. Its transforms are
-    // `{ stored, view }` pairs whose `from`/`to` take the value only (no
-    // `dependsOn` context), and a computed field's `from` names stored columns
-    // only: the loader refuses `nested` computed from `summary` ("`summary` is
-    // a computed field; a computed field is computed from stored columns
-    // only"). The original test, for when the format can say it:
-    // it("uses app-facing transformed dependencies and stored contexts independently", async () => {
-    //   const base = s.table(
-    //     {
-    //       amount: s.int().transform({
-    //         dependsOn: ["factor"],
-    //         from: (value, context: { readonly factor: number }) => value / context.factor,
-    //         to: (value: number, context: { readonly factor: string }) =>
-    //           value * Number(context.factor.slice(1)),
-    //       }),
-    //       factor: s
-    //         .int()
-    //         .default(100)
-    //         .transform({
-    //           from: (value) => `x${value}`,
-    //           to: (value: string) => Number(value.slice(1)),
-    //         }),
-    //     },
-    //     {},
-    //   );
-    //   const columns = s.table(base.columns, {
-    //     ...base.relations,
-    //     summary: s.computed((row) => `${row.amount}:${row.factor}`),
-    //   });
-    //   const models = s.defineApp(
-    //     {
-    //       rows: s.table(columns.columns, {
-    //         ...columns.relations,
-    //         nested: s.computed((row) => `[${row.summary}]`),
-    //       }),
-    //     },
-    //     { migrations: "none" },
-    //   );
-    //   const db = await open();
-    //   const { value: row } = db.insert(models.rows, { amount: 2, factor: "x100" });
-    //   expect(row.nested).toBe("[2:x100]");
-    //   await expect(db.one(models.rows.where({ id: row.id }).select("nested"))).resolves.toEqual({
-    //     id: row.id,
-    //     nested: "[2:x100]",
-    //   });
-    //   const unchanged = s.defineApp({ rows: base }, { migrations: "none" });
-    //   await expect(db.one(unchanged.rows.where({ id: row.id }))).resolves.toEqual({
-    //     id: row.id,
-    //     amount: 2,
-    //     factor: "x100",
-    //   });
-    // });
-    it.skip("uses app-facing transformed dependencies and stored contexts independently", () => {});
-
     it("gives computations full values while retaining partial public values", async () => {
       const models = fullValues;
       const db = await open();
@@ -380,38 +326,6 @@ export function testComputedColumns(create: () => Promise<Db>) {
         parsed: expected,
       });
     });
-
-    // FILES-AS-SOURCE: a computed field's `from` names stored columns only; the
-    // loader refuses `parsed` computed from the computed `textValue` ("`textValue`
-    // is a computed field; a computed field is computed from stored columns
-    // only"). The original test, for when the format can say it:
-    // it("retries a caught missing dependency through an earlier computed field", async () => {
-    //   const earlier = s.table(stored.columns, {
-    //     textValue: s.computed((row) => row.text),
-    //   });
-    //   const models = s.defineApp(
-    //     {
-    //       rows: s.table(earlier.columns, {
-    //         parsed: s.computed((row): unknown => {
-    //           try {
-    //             return JSON.parse(row.textValue);
-    //           } catch {
-    //             return row.textValue;
-    //           }
-    //         }),
-    //       }),
-    //     },
-    //     { migrations: "none" },
-    //   );
-    //   const safe = s.defineApp({ rows: stored }, { migrations: "none" });
-    //   const db = await open();
-    //   const { value: row } = db.insert(safe.rows, { text: "plain text" });
-    //   await expect(db.one(models.rows.select("parsed"))).resolves.toEqual({
-    //     id: row.id,
-    //     parsed: "plain text",
-    //   });
-    // });
-    it.skip("retries a caught missing dependency through an earlier computed field", () => {});
 
     it("retries missing dependencies when the callback wraps errors", async () => {
       const models = parseWrapped;
