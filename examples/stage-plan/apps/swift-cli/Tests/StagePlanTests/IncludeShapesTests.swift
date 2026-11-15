@@ -67,6 +67,9 @@ final class IncludeShapesTests: XCTestCase {
         let show = try await app.show(named: "Nested")
         let me = try await app.jazz.account()
         let crew = try await app.jazz.insert(JazzApp.NewCrew(account: me, name: "Sam"))
+        // Permissions let a task be assigned only to the show's crew.
+        try await app.jazz.insert(
+            JazzApp.NewShowCrew(showId: show.id, crewId: crew.id, account: me, role: .chief))
         let task = try await app.addTask("Load in", to: show)
         try await app.jazz.update(task.id, JazzApp.TaskPatch(assigneeId: .set(crew.id)))
         try await app.addTask("Unassigned", to: show)
