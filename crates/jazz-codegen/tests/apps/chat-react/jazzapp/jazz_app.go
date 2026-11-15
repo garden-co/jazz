@@ -123,6 +123,31 @@ func (canvasesTable) Update(ctx context.Context, db jazz.Querier, id string, pat
 	return jazz.Update(ctx, db, "canvases", id, patch, opts...)
 }
 
+// History starts a query of `canvases`'s history: every accepted version of its rows.
+func (canvasesTable) History() *jazz.Query[jazz.Version[Canvas]] {
+	return jazz.History(jazz.NewQuery[Canvas]("canvases"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `canvases`.
+func (canvasesTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "canvases", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `canvases`.
+func (canvasesTable) CanInsert(ctx context.Context, db jazz.Querier, row NewCanvas) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "canvases", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `canvases`.
+func (canvasesTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch CanvasPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "canvases", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `canvases`.
+func (canvasesTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "canvases", id)
+}
+
 // Delete deletes the row of `canvases` with id.
 func (canvasesTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
 	return jazz.Delete(ctx, db, "canvases", id, opts...)
@@ -191,6 +216,31 @@ func (chatMembersTable) Insert(ctx context.Context, db jazz.Querier, row NewChat
 // Update changes the fields patch sets of the row of `chatMembers` with id.
 func (chatMembersTable) Update(ctx context.Context, db jazz.Querier, id string, patch ChatMemberPatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "chatMembers", id, patch, opts...)
+}
+
+// History starts a query of `chatMembers`'s history: every accepted version of its rows.
+func (chatMembersTable) History() *jazz.Query[jazz.Version[ChatMember]] {
+	return jazz.History(jazz.NewQuery[ChatMember]("chatMembers"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `chatMembers`.
+func (chatMembersTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "chatMembers", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `chatMembers`.
+func (chatMembersTable) CanInsert(ctx context.Context, db jazz.Querier, row NewChatMember) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "chatMembers", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `chatMembers`.
+func (chatMembersTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch ChatMemberPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "chatMembers", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `chatMembers`.
+func (chatMembersTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "chatMembers", id)
 }
 
 // Delete deletes the row of `chatMembers` with id.
@@ -269,6 +319,31 @@ func (chatsTable) Update(ctx context.Context, db jazz.Querier, id string, patch 
 	return jazz.Update(ctx, db, "chats", id, patch, opts...)
 }
 
+// History starts a query of `chats`'s history: every accepted version of its rows.
+func (chatsTable) History() *jazz.Query[jazz.Version[Chat]] {
+	return jazz.History(jazz.NewQuery[Chat]("chats"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `chats`.
+func (chatsTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "chats", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `chats`.
+func (chatsTable) CanInsert(ctx context.Context, db jazz.Querier, row NewChat) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "chats", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `chats`.
+func (chatsTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch ChatPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "chats", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `chats`.
+func (chatsTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "chats", id)
+}
+
 // Delete deletes the row of `chats` with id.
 func (chatsTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
 	return jazz.Delete(ctx, db, "chats", id, opts...)
@@ -345,6 +420,31 @@ func (messagesTable) Update(ctx context.Context, db jazz.Querier, id string, pat
 	return jazz.Update(ctx, db, "messages", id, patch, opts...)
 }
 
+// History starts a query of `messages`'s history: every accepted version of its rows.
+func (messagesTable) History() *jazz.Query[jazz.Version[Message]] {
+	return jazz.History(jazz.NewQuery[Message]("messages"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `messages`.
+func (messagesTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "messages", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `messages`.
+func (messagesTable) CanInsert(ctx context.Context, db jazz.Querier, row NewMessage) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "messages", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `messages`.
+func (messagesTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch MessagePatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "messages", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `messages`.
+func (messagesTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "messages", id)
+}
+
 // Delete deletes the row of `messages` with id.
 func (messagesTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
 	return jazz.Delete(ctx, db, "messages", id, opts...)
@@ -415,6 +515,31 @@ func (profilesTable) Update(ctx context.Context, db jazz.Querier, id string, pat
 	return jazz.Update(ctx, db, "profiles", id, patch, opts...)
 }
 
+// History starts a query of `profiles`'s history: every accepted version of its rows.
+func (profilesTable) History() *jazz.Query[jazz.Version[Profile]] {
+	return jazz.History(jazz.NewQuery[Profile]("profiles"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `profiles`.
+func (profilesTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "profiles", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `profiles`.
+func (profilesTable) CanInsert(ctx context.Context, db jazz.Querier, row NewProfile) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "profiles", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `profiles`.
+func (profilesTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch ProfilePatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "profiles", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `profiles`.
+func (profilesTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "profiles", id)
+}
+
 // Delete deletes the row of `profiles` with id.
 func (profilesTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
 	return jazz.Delete(ctx, db, "profiles", id, opts...)
@@ -483,6 +608,31 @@ func (reactionsTable) Insert(ctx context.Context, db jazz.Querier, row NewReacti
 // Update changes the fields patch sets of the row of `reactions` with id.
 func (reactionsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ReactionPatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "reactions", id, patch, opts...)
+}
+
+// History starts a query of `reactions`'s history: every accepted version of its rows.
+func (reactionsTable) History() *jazz.Query[jazz.Version[Reaction]] {
+	return jazz.History(jazz.NewQuery[Reaction]("reactions"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `reactions`.
+func (reactionsTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "reactions", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `reactions`.
+func (reactionsTable) CanInsert(ctx context.Context, db jazz.Querier, row NewReaction) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "reactions", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `reactions`.
+func (reactionsTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch ReactionPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "reactions", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `reactions`.
+func (reactionsTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "reactions", id)
 }
 
 // Delete deletes the row of `reactions` with id.
@@ -559,6 +709,31 @@ func (strokesTable) Insert(ctx context.Context, db jazz.Querier, row NewStroke, 
 // Update changes the fields patch sets of the row of `strokes` with id.
 func (strokesTable) Update(ctx context.Context, db jazz.Querier, id string, patch StrokePatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "strokes", id, patch, opts...)
+}
+
+// History starts a query of `strokes`'s history: every accepted version of its rows.
+func (strokesTable) History() *jazz.Query[jazz.Version[Stroke]] {
+	return jazz.History(jazz.NewQuery[Stroke]("strokes"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `strokes`.
+func (strokesTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "strokes", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `strokes`.
+func (strokesTable) CanInsert(ctx context.Context, db jazz.Querier, row NewStroke) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "strokes", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `strokes`.
+func (strokesTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch StrokePatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "strokes", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `strokes`.
+func (strokesTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "strokes", id)
 }
 
 // Delete deletes the row of `strokes` with id.

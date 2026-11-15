@@ -82,12 +82,11 @@ func (c Column[R, V]) columnName() string { return c.name }
 // define whose json tags name the selected columns. A field of P that is
 // neither id nor selected is refused when the query runs.
 func Select[P, R any](q *Query[R], cols ...Named[R]) *Query[P] {
-	p := &Query[P]{table: q.table, limit: q.limit, offset: q.offset, raw: q.toJSON().cloneParts()}
+	p := &Query[P]{table: q.table, raw: q.toJSON().cloneParts(), afterHop: q.afterHop}
 	p.selected = []string{}
 	for _, c := range cols {
 		p.selected = append(p.selected, c.columnName())
 	}
-	p.raw.Select = p.selected
 	return p
 }
 
@@ -130,6 +129,16 @@ type queryJSON struct {
 	Offset  *int          `json:"offset,omitempty"`
 	Select  []string      `json:"select,omitempty"`
 	Include []includeJSON `json:"include,omitempty"`
+	History bool          `json:"history,omitempty"`
+	Gather  *gatherJSON   `json:"gather,omitempty"`
+	HopTo   []string      `json:"hopTo,omitempty"`
+	After   *queryJSON    `json:"after,omitempty"`
+	Union   []queryJSON   `json:"union,omitempty"`
+}
+
+type gatherJSON struct {
+	Relation string `json:"relation"`
+	MaxDepth int    `json:"maxDepth"`
 }
 
 type condJSON struct {
@@ -154,5 +163,7 @@ func (j queryJSON) cloneParts() *queryJSON {
 	c.Where = append([]condJSON(nil), j.Where...)
 	c.OrderBy = append([]orderJSON(nil), j.OrderBy...)
 	c.Include = append([]includeJSON(nil), j.Include...)
+	c.Union = append([]queryJSON(nil), j.Union...)
+	c.HopTo = append([]string(nil), j.HopTo...)
 	return &c
 }

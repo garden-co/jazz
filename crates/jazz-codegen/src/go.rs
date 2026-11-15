@@ -55,7 +55,18 @@ const RESERVED: &[&str] = &["App", "Source", "Open"];
 
 /// Method names of a table value or a patch struct, which no column may
 /// take as its Go name.
-const TABLE_METHODS: &[&str] = &["Query", "Insert", "Update", "Delete", "MarshalJSON"];
+const TABLE_METHODS: &[&str] = &[
+    "Query",
+    "History",
+    "Insert",
+    "Update",
+    "Delete",
+    "CanRead",
+    "CanInsert",
+    "CanUpdate",
+    "CanDelete",
+    "MarshalJSON",
+];
 
 /// Words Go spells in capitals inside a name (`userID`, `avatarURL`).
 const INITIALISMS: &[&str] = &[
@@ -935,6 +946,52 @@ impl<'a> Writer<'a> {
             out,
             "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}, opts ...jazz.WriteOption) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch, opts...)\n}}\n"
         );
+        let _ = writeln!(
+            out,
+            "// History starts a query of `{}`'s history: every accepted version of its rows.",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "func ({ty}) History() *jazz.Query[jazz.Version[{row}]] {{\n\treturn jazz.History(jazz.NewQuery[{row}]({table_name}))\n}}\n"
+        );
+        for (method, doc, params, call) in [
+            (
+                "CanRead",
+                "reading the row with id",
+                "id string".to_owned(),
+                "jazz.CanRead(ctx, db, TABLE, id)",
+            ),
+            (
+                "CanInsert",
+                "inserting row",
+                format!("row {new}"),
+                "jazz.CanInsert(ctx, db, TABLE, row)",
+            ),
+            (
+                "CanUpdate",
+                "applying patch to the row with id",
+                format!("id string, patch {patch}"),
+                "jazz.CanUpdate(ctx, db, TABLE, id, patch)",
+            ),
+            (
+                "CanDelete",
+                "deleting the row with id",
+                "id string".to_owned(),
+                "jazz.CanDelete(ctx, db, TABLE, id)",
+            ),
+        ] {
+            let _ = writeln!(
+                out,
+                "// {method} advises whether the app's permissions allow {doc} in `{}`.",
+                table.name
+            );
+            let _ = writeln!(
+                out,
+                "func ({ty}) {method}(ctx context.Context, db jazz.Querier, {params}) (jazz.Advice, error) {{\n\treturn {}\n}}\n",
+                call.replace("TABLE", &table_name)
+            );
+        }
         let _ = writeln!(
             out,
             "// Delete deletes the row of `{}` with id.",

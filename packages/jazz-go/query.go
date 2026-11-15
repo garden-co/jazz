@@ -85,6 +85,9 @@ type Query[R any] struct {
 	include  []Include[R]
 	selected []string
 	tier     ReadTier
+	// afterHop: the typed parts apply to the rows a hop (raw.HopTo)
+	// reached, so they go under "after".
+	afterHop bool
 	// raw holds the parts of a query Select made from a query of another
 	// row type; the typed parts above add to it.
 	raw *queryJSON
@@ -130,14 +133,7 @@ func (q *Query[R]) Offset(n int) *Query[R] {
 }
 
 func (q *Query[R]) toJSON() queryJSON {
-	out := queryJSON{Table: q.table, Limit: q.limit, Offset: q.offset, Select: q.selected}
-	if q.raw != nil {
-		out = *q.raw.cloneParts()
-		out.Limit, out.Offset = q.limit, q.offset
-		if q.selected != nil {
-			out.Select = q.selected
-		}
-	}
+	typed := queryJSON{Limit: q.limit, Offset: q.offset, Select: q.selected}
 	for _, w := range q.where {
 		c := condJSON{Column: w.column, Op: w.op}
 		if w.hasVal {
@@ -147,13 +143,52 @@ func (q *Query[R]) toJSON() queryJSON {
 			}
 			c.Value = raw
 		}
-		out.Where = append(out.Where, c)
+		typed.Where = append(typed.Where, c)
 	}
 	for _, o := range q.order {
-		out.OrderBy = append(out.OrderBy, orderJSON{o.column, o.direction})
+		typed.OrderBy = append(typed.OrderBy, orderJSON{o.column, o.direction})
 	}
 	for _, i := range q.include {
-		out.Include = append(out.Include, includeJSON{Relation: i.relation, Required: i.required, Query: i.child})
+		typed.Include = append(typed.Include, includeJSON{Relation: i.relation, Required: i.required, Query: i.child})
+	}
+	if q.raw == nil {
+		typed.Table = q.table
+		return typed
+	}
+	out := *q.raw.cloneParts()
+	if q.afterHop {
+		if !typed.empty() {
+			after := typed
+			if out.After != nil {
+				after = out.After.merged(typed)
+			}
+			out.After = &after
+		}
+		return out
+	}
+	return out.merged(typed)
+}
+
+func (j queryJSON) empty() bool {
+	return len(j.Where) == 0 && len(j.OrderBy) == 0 && j.Limit == nil && j.Offset == nil &&
+		j.Select == nil && len(j.Include) == 0
+}
+
+// merged is j with typed's parts added: conditions, orders and includes
+// after j's, typed's limit, offset and select over j's.
+func (j queryJSON) merged(typed queryJSON) queryJSON {
+	out := *j.cloneParts()
+	out.Where = append(out.Where, typed.Where...)
+	out.OrderBy = append(out.OrderBy, typed.OrderBy...)
+	out.Include = append(out.Include, typed.Include...)
+	if typed.Limit != nil {
+		out.Limit = typed.Limit
+	}
+	if typed.Offset != nil {
+		out.Offset = typed.Offset
+	}
+	if typed.Select != nil {
+		out.Select = typed.Select
 	}
 	return out
 }
