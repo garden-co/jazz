@@ -1508,11 +1508,7 @@ impl<'a> Ctx<'a> {
         array: &ArraySubquery,
         parent: &Value,
     ) -> Result<(Compiled, Option<usize>), Error> {
-        let elements = match parent {
-            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
-            value => matches!(value, Value::Array(_)),
-        };
-        self.children(array, elements, Parents::One(parent))
+        self.children(array, is_ref_array(parent), Parents::One(parent))
     }
 
     /// One array relation for many parents at once: the rows `array`
@@ -3559,6 +3555,15 @@ fn chain(parts: &[String], op: &str) -> String {
 /// a parameter per value: Durable Object SQLite caps a statement at 100
 /// bound parameters.
 pub(crate) const BOUND_LIST_MAX: usize = 16;
+
+/// Whether a relation's parent value is an array of references (possibly
+/// nullable) rather than a scalar: the two compile to different SQL.
+pub(crate) fn is_ref_array(parent: &Value) -> bool {
+    match parent {
+        Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+        value => matches!(value, Value::Array(_)),
+    }
+}
 
 /// A `SELECT` of `values` from the JSON array bound at `mark`, and that
 /// array; `None` when the values have no exact shared JSON form (reals, or

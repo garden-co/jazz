@@ -1053,12 +1053,11 @@ fn json_item_len(value: &Sql) -> Option<usize> {
     }
 }
 
-/// One read's nesting of its relations (`Inner::node`), shared by every row
-/// it nests: one read, as one identity, through one view and cut. Its
-/// relations' rows depend only on the relation and the parent value, so
-/// the run builds each relation's SQL (and each parent-cell read) once and
-/// rebinds only the parent, and reads each (relation, parent value) once
-/// where values repeat (relations keyed by a parent's column).
+/// One read's nesting of its relations ([`Inner::nest`]), shared by every
+/// level it nests: one read, as one identity, through one view and cut.
+/// A level reads each distinct parent value once ([`Inner::relation_level`]);
+/// where it reads per parent value, the run builds each relation's SQL once
+/// and rebinds only the parent.
 ///
 /// It lives for one call and dies with it, so nothing it holds outlives the
 /// read: relations are keyed by address, valid while the run borrows the
@@ -1067,23 +1066,12 @@ struct RelationRun<'q> {
     prepared: &'q PreparedQuery,
     read: &'q ReadSpec,
     sessions: (Option<Session>, Session),
-    /// Whether to reuse at all (always, outside tests that compare with the
-    /// uncached path).
-    reuse: bool,
     /// Per relation and parent shape (an array of references or a scalar):
     /// its compiled children and the parameter holding the parent.
     sql: HashMap<(*const crate::query::ArraySubquery, bool), (Compiled, usize)>,
-    /// Per relation: the read of its parent cell.
-    cells: HashMap<*const crate::query::ArraySubquery, crate::compile::CellRead>,
-    /// Per relation keyed by a parent's column, parent shape and bound
-    /// parent value: its children.
-    children:
-        HashMap<(*const crate::query::ArraySubquery, bool, Option<ParentKey>), Vec<ResultNode>>,
     /// Whether to nest a level's rows with one statement per relation
     /// ([`Inner::nest_level`]) rather than per row (always, outside tests
     /// that compare the two).
-    /// Each relation is then read once per run, so there is nothing to
-    /// cache for it.
     batch: bool,
 }
 
@@ -1098,10 +1086,7 @@ impl<'q> RelationRun<'q> {
             prepared,
             read,
             sessions: inner.read_sessions(prepared, identity),
-            reuse: relation_reuse(),
             sql: HashMap::new(),
-            cells: HashMap::new(),
-            children: HashMap::new(),
             batch: relation_batch(),
         }
     }
@@ -1132,30 +1117,6 @@ impl ParentKey {
             Sql::Blob(v) => Self::Blob(v.clone()),
         }
     }
-}
-
-#[cfg(any(test, feature = "testing"))]
-thread_local! {
-    static RELATION_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-}
-
-/// Whether relation nesting reuses SQL and rows within a read.
-fn relation_reuse() -> bool {
-    #[cfg(any(test, feature = "testing"))]
-    {
-        RELATION_REUSE.with(std::cell::Cell::get)
-    }
-    #[cfg(not(any(test, feature = "testing")))]
-    {
-        true
-    }
-}
-
-/// Tests only: nest relations without reusing SQL or rows within a read
-/// (`false`), on this thread, to compare with the reusing path.
-#[cfg(any(test, feature = "testing"))]
-pub fn set_relation_reuse_for_test(reuse: bool) {
-    RELATION_REUSE.with(|cell| cell.set(reuse));
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -1195,6 +1156,20 @@ thread_local! {
 #[cfg(any(test, feature = "testing"))]
 pub fn take_vm_steps_for_test() -> u64 {
     VM_STEPS.with(|cell| cell.replace(0))
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static QUERY_STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: the row-reading query statements (roots and relation
+/// children, not parent-cell reads) this thread has run since the last
+/// call, then zero, so a test can tell a level read in one statement from
+/// one read per parent.
+#[cfg(any(test, feature = "testing"))]
+pub fn take_query_statements_for_test() -> u64 {
+    QUERY_STATEMENTS.with(|cell| cell.replace(0))
 }
 
 /// The application tables a store holds, by their stored columns.
@@ -5315,6 +5290,7 @@ impl Inner {
         {
             let steps = statement.reset_status(rusqlite::StatementStatus::VmStep) as u64;
             VM_STEPS.with(|cell| cell.set(cell.get() + steps));
+            QUERY_STATEMENTS.with(|cell| cell.set(cell.get() + 1));
         }
         if blocked {
             return Err(crate::large::missing());
@@ -5689,35 +5665,39 @@ impl Inner {
     /// relations: what [`Inner::relation`] returns for each, read with one
     /// statement for all distinct parent values (per [`BATCH_BYTES`] of
     /// them, as bound). A parent that binds as SQL `NULL` (or not at all,
-    /// NaN) has no children, as `= NULL` matches no row. These fall back
-    /// to [`Inner::relation`]: a parent value too large to share a bound
-    /// list (over [`BATCH_BYTES`] encoded), and for the whole level,
-    /// parents with no exact shared JSON form (reals, text that is not
-    /// UTF-8, blobs mixed with other values), of mixed shapes, or children
-    /// too wide to batch (see [`crate::compile::Ctx::compile_children_batch`]).
+    /// NaN) has no children, as `= NULL` matches no row. These are read
+    /// with one statement per distinct value instead: a value too large to
+    /// share a bound list (over [`BATCH_BYTES`] encoded), and for the whole
+    /// level, parents with no exact shared JSON form (reals, text that is
+    /// not UTF-8, blobs mixed with other values), of mixed shapes, or
+    /// children too wide to batch (see
+    /// [`crate::compile::Ctx::compile_children_batch`]). Either way the
+    /// children of the whole level then nest together, so the level below
+    /// batches again.
     fn relation_level(
         &self,
         run: &mut RelationRun<'_>,
         array: &crate::query::ArraySubquery,
         parents: &[Value],
     ) -> Result<Vec<Vec<ResultNode>>, Error> {
-        let mut index: HashMap<ParentKey, usize> = HashMap::new();
-        // Each distinct bound value, and a parent that binds it.
+        let mut index: HashMap<(bool, ParentKey), usize> = HashMap::new();
+        // Each distinct bound value (per shape), and a parent that binds it.
         let mut values: Vec<(Sql, &Value)> = Vec::new();
         let mut of_parent: Vec<Option<usize>> = Vec::with_capacity(parents.len());
         let mut shape = None;
+        let mut blobs = None;
         let mut batchable = true;
         for parent in parents {
-            let elements = match parent {
-                Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
-                value => matches!(value, Value::Array(_)),
-            };
+            let elements = crate::compile::is_ref_array(parent);
             match crate::values::to_sql(parent)? {
                 None | Some(Sql::Null) => of_parent.push(None),
                 Some(sql) => {
                     batchable &= *shape.get_or_insert(elements) == elements;
+                    // A bound list holds blobs or other values, not both.
+                    let blob = matches!(sql, Sql::Blob(_));
+                    batchable &= *blobs.get_or_insert(blob) == blob;
                     let next = values.len();
-                    let at = *index.entry(ParentKey::of(&sql)).or_insert(next);
+                    let at = *index.entry((elements, ParentKey::of(&sql))).or_insert(next);
                     if at == next {
                         values.push((sql, parent));
                     }
@@ -5726,9 +5706,10 @@ impl Inner {
             }
         }
         let elements = shape.unwrap_or(false);
+        let blobs = blobs.unwrap_or(false);
         let (_, max_bytes) = batch_limits();
         // Chunks of distinct values, each bound as one list of at most
-        // `max_bytes` (as encoded); values alone over it read per parent.
+        // `max_bytes` (as encoded); values alone over it read by themselves.
         let mut chunks: Vec<Vec<usize>> = Vec::new();
         let mut alone: Vec<usize> = Vec::new();
         if batchable {
@@ -5754,6 +5735,7 @@ impl Inner {
                 chunks.push(chunk);
             }
         }
+        // The level's children, and for each the value it belongs to.
         let mut rows = Vec::new();
         let mut keys = Vec::new();
         for (n, chunk) in chunks.iter().enumerate() {
@@ -5761,7 +5743,6 @@ impl Inner {
                 break;
             }
             let list: Vec<&Sql> = chunk.iter().map(|at| &values[*at].0).collect();
-            let blobs = list.iter().any(|value| matches!(value, Sql::Blob(_)));
             let Some((_, list)) = crate::compile::json_list(&list, "?") else {
                 batchable = false;
                 break;
@@ -5786,18 +5767,19 @@ impl Inner {
             }
         }
         if !batchable {
-            return parents
-                .iter()
-                .map(|parent| self.relation(run, array, parent))
-                .collect();
+            rows.clear();
+            keys.clear();
+            alone = (0..values.len()).collect();
+        }
+        for at in alone {
+            let children = self.relation_rows(run, array, values[at].1)?;
+            keys.extend(std::iter::repeat_n(at, children.len()));
+            rows.extend(children);
         }
         let nodes = self.nest(run, &array.table, &array.nested_arrays, rows)?;
         let mut groups: Vec<Vec<ResultNode>> = (0..values.len()).map(|_| Vec::new()).collect();
         for (at, node) in keys.into_iter().zip(nodes) {
             groups[at].push(node);
-        }
-        for at in alone {
-            groups[at] = self.relation(run, array, values[at].1)?;
         }
         // A value shared by several parents gives each a copy; its last
         // parent takes the original.
@@ -5830,21 +5812,7 @@ impl Inner {
         array: &crate::query::ArraySubquery,
         id: RowUuid,
     ) -> Result<Value, Error> {
-        let key = array as *const crate::query::ArraySubquery;
-        let cell = match run.reuse.then(|| run.cells.get(&key)).flatten() {
-            Some(cached) => {
-                let mut cell = cached.clone();
-                cell.params[cell.id_param] = Sql::Blob(id.0.as_bytes().to_vec());
-                cell
-            }
-            None => {
-                let cell = run.ctx(self).compile_cell(table, &array.outer_column, id)?;
-                if run.reuse {
-                    run.cells.insert(key, cell.clone());
-                }
-                cell
-            }
-        };
+        let cell = run.ctx(self).compile_cell(table, &array.outer_column, id)?;
         let value: Option<Sql> = self
             .conn
             .cached_row(&cell.sql, params_from_iter(cell.params.iter()), |r| {
@@ -5862,59 +5830,48 @@ impl Inner {
     }
 
     /// The children `array` relates to `parent`, each with its own
-    /// relations. Within one run the same relation of the same parent value
-    /// reads the same rows, so a relation keyed by a parent's column (a
-    /// forward reference, or an array of them) reads them once. One keyed
-    /// by the parent's own id meets each parent once, so it is not kept.
+    /// relations (nested by [`Inner::nest`], so a level below reads in
+    /// one statement where it can).
     fn relation(
         &self,
         run: &mut RelationRun<'_>,
         array: &crate::query::ArraySubquery,
         parent: &Value,
     ) -> Result<Vec<ResultNode>, Error> {
-        let key = array as *const crate::query::ArraySubquery;
-        let elements = match parent {
-            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
-            value => matches!(value, Value::Array(_)),
-        };
+        let children = self.relation_rows(run, array, parent)?;
+        self.nest(run, &array.table, &array.nested_arrays, children)
+    }
+
+    /// The rows `array` relates to `parent`, without their relations, in
+    /// one statement for this parent. Only the parent's own parameter
+    /// differs between parents of one shape (a scalar, or an array of
+    /// references), so the run compiles it once per relation and shape.
+    fn relation_rows(
+        &self,
+        run: &mut RelationRun<'_>,
+        array: &crate::query::ArraySubquery,
+        parent: &Value,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let key = (
+            array as *const crate::query::ArraySubquery,
+            crate::compile::is_ref_array(parent),
+        );
         let bound = crate::values::to_sql(parent)?;
-        let memo = (key, elements, bound.as_ref().map(ParentKey::of));
-        let memoise = run.reuse && array.outer_column != "id";
-        if memoise && let Some(nodes) = run.children.get(&memo) {
-            return Ok(nodes.clone());
-        }
-        // Only the parent's own parameter differs between parents of one
-        // shape (a scalar, or an array of references).
-        let compiled = match run
-            .reuse
-            .then(|| run.sql.get(&(key, elements)))
-            .flatten()
-            .zip(bound.as_ref())
-        {
+        let compiled = match run.sql.get(&key).zip(bound) {
             Some(((cached, at), bound)) => {
                 let mut compiled = cached.clone();
-                compiled.params[*at] = bound.clone();
+                compiled.params[*at] = bound;
                 compiled
             }
             None => {
                 let (compiled, at) = run.ctx(self).compile_children(array, parent)?;
-                if run.reuse
-                    && let Some(at) = at
-                {
-                    run.sql.insert((key, elements), (compiled.clone(), at));
+                if let Some(at) = at {
+                    run.sql.insert(key, (compiled.clone(), at));
                 }
                 compiled
             }
         };
-        let children = self.execute(&compiled, &array.table)?;
-        let mut nodes = Vec::with_capacity(children.len());
-        for child in children {
-            nodes.push(self.node(run, &array.table, &array.nested_arrays, child)?);
-        }
-        if memoise {
-            run.children.insert(memo, nodes.clone());
-        }
-        Ok(nodes)
+        self.execute(&compiled, &array.table)
     }
 
     // ---- write primitives ---------------------------------------------
