@@ -191,12 +191,16 @@ impl JazzHandle {
         opts: core::Opts,
         listener: Arc<dyn SubscriptionListener>,
     ) -> Result<Arc<Subscription>> {
+        let contract = self.core.contract;
         let inner = self.core.surface(self.core.subscribe(
             &query_json,
             &opts,
             Box::new(move |event| match event {
                 core::Event::Delta(json) => listener.on_delta(json),
-                core::Event::Error(error) => listener.on_error(error.to_string()),
+                core::Event::Error(error) => {
+                    let error = error.for_contract(contract);
+                    listener.on_error(error.kind().to_owned(), error.to_string())
+                }
             }),
         ))?;
         Ok(Arc::new(Subscription { inner }))
@@ -318,8 +322,11 @@ impl std::fmt::Debug for JazzHandle {
 #[uniffi::export(with_foreign)]
 pub trait SubscriptionListener: Send + Sync {
     fn on_delta(&self, delta_json: String);
-    /// The subscription failed and ends.
-    fn on_error(&self, message: String);
+    /// The subscription ended: its last call. `kind` is the error JSON's
+    /// kind (`"closed"` when its app closed or its stream ended; `"refused"`;
+    /// with contract 2 also `"permission"`, …), so hosts need not match on
+    /// `message`.
+    fn on_error(&self, kind: String, message: String);
 }
 
 /// A live subscription; it ends when cancelled or dropped.

@@ -87,7 +87,13 @@ pub(crate) fn refused(message: impl Into<String>) -> JazzErrorKind {
 
 /// `Refused` for what jazz-app (or this layer) cannot do yet.
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> JazzErrorKind {
-    JazzErrorKind::NotSupported(format!("not supported yet: {what}"))
+    let what = what.to_string();
+    // jazz-app's own messages may already say it.
+    if what.starts_with("not supported yet") {
+        JazzErrorKind::NotSupported(what)
+    } else {
+        JazzErrorKind::NotSupported(format!("not supported yet: {what}"))
+    }
 }
 
 /// Whether a rejection's reason is a permission denial, or a serializable
@@ -104,6 +110,14 @@ pub(crate) fn rejection(reason: &str, otherwise: String) -> JazzErrorKind {
     } else {
         JazzErrorKind::Refused(otherwise)
     }
+}
+
+/// jazz-app's `NotFound` displays as `no {table} row {id}`.
+fn is_not_found(message: &str) -> bool {
+    message.contains("not found")
+        || message
+            .strip_prefix("no ")
+            .is_some_and(|rest| rest.contains(" row "))
 }
 
 impl From<jazz_app::Error> for JazzErrorKind {
@@ -135,10 +149,22 @@ impl From<jazz_app::Error> for JazzErrorKind {
             // until this layer names them: an edit of a missing row
             // (`NotFound`) is a refusal; anything else, such as a host
             // stream's failure (`Upload`), is I/O.
-            _ if message.contains("not found") || message.contains("no row") => {
-                Self::Refused(message)
-            }
+            _ if is_not_found(&message) => Self::Refused(message),
             _ => Self::Io(message),
         }
+    }
+}
+
+/// White-box: jazz-app's `NotFound` doesn't exist on main yet, so its
+/// message shape is checked directly.
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn not_found_messages_are_recognised() {
+        assert!(super::is_not_found(
+            "no tasks row 01a1e10a-d57a-7b12-830f-67c6d339645c"
+        ));
+        assert!(super::is_not_found("row not found"));
+        assert!(!super::is_not_found("no connection to the server"));
     }
 }

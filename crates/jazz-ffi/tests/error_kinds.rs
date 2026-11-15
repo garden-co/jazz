@@ -132,6 +132,8 @@ async fn a_write_the_permissions_refuse_is_permission() {
             matches!(synced, Err(JazzError::Permission { .. })),
             "{synced:?}"
         );
+        // Reported once: the next sync has nothing left to report.
+        bob.wait_for_sync("global".into()).unwrap();
         alice.shutdown().unwrap();
         bob.shutdown().unwrap();
     })
