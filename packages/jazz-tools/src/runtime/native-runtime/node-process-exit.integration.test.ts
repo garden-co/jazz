@@ -21,7 +21,7 @@ function runToExit(
   child.stderr?.on("data", (chunk) => (output += chunk));
   return new Promise((resolve) => {
     let stoppedAt: number | undefined;
-    let timer: NodeJS.Timeout | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const watchStopped = () => {
       if (stoppedAt !== undefined || !output.includes("stopped\n")) return;
       stoppedAt = Date.now();
