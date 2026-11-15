@@ -2259,6 +2259,7 @@ name = "jazz-index"
 version = "0.1.0"
 dependencies = [
  "jazz-text",
+ "serde_json",
 ]
 
 [[package]]
