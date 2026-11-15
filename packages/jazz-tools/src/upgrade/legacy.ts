@@ -74,7 +74,7 @@ export function legacyEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(env)) {
     if (
-      key.startsWith('JAZZ_CORRECTNESS_') ||
+      key.startsWith("JAZZ_CORRECTNESS_") ||
       key === "NAPI_RS_NATIVE_LIBRARY_PATH" ||
       key === "NAPI_RS_FORCE_WASI"
     )
