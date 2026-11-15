@@ -442,7 +442,7 @@ async fn the_endpoint_refuses_what_it_should() {
     let app = App::start().await;
     let sign_in = app.path("accounts/backend-sign-in");
 
-    // HTTP: no one signed in, wrong methods, other apps, not yet supported.
+    // HTTP: no one signed in (also for linking), wrong methods, other apps.
     let response = app.endpoint.handle(Request::new("POST", &sign_in)).await;
     assert_eq!(
         (response.status, response.text_body().as_str()),
@@ -480,7 +480,7 @@ async fn the_endpoint_refuses_what_it_should() {
     let link = app.path("accounts/backend-link");
     assert_eq!(
         app.endpoint.handle(Request::new("POST", link)).await.status,
-        501
+        401
     );
     assert_eq!(
         app.endpoint
@@ -527,5 +527,89 @@ async fn the_endpoint_refuses_what_it_should() {
     );
     let forged = serde_json::to_vec(&json!({ "auth": { "jwt_token": "a.b.c" } })).unwrap();
     assert_eq!(app.endpoint.admits(&as_carol, &forged).await.unwrap(), None);
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_account_links_to_the_user_who_signs_up() {
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let device = Jazz::open(client_files(), app.user(Auth::Device(key.clone())))
+        .await
+        .unwrap();
+    let written = device
+        .insert(NewTodo::new("Before signing up", false))
+        .await
+        .unwrap();
+    let session = device.session().unwrap().clone();
+
+    // Dana signs up with the app's own auth, and keeps her device's data.
+    let dana = session
+        .link("token-dana")
+        .await
+        .expect("link the device account");
+    assert_eq!(dana.account, key.account(app.app_id));
+    assert_eq!(dana.subject, "dana");
+    assert!(matches!(
+        session.link("not-a-token").await,
+        Err(Error::SignedOut)
+    ));
+
+    // Signed in with her bearer elsewhere, she reaches the same account.
+    let laptop = Jazz::open(client_files(), app.user(bearer("token-dana")))
+        .await
+        .unwrap();
+    assert_eq!(laptop.account(), Some(dana.account));
+    let seen = eventually(async || {
+        let rows = laptop
+            .all_with(todos::query(), ReadTier::Remote)
+            .await
+            .unwrap();
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert_eq!(seen, vec![written]);
+
+    // A challenge links only its own user, and only with a proof of it.
+    let as_erin = |route: &str| {
+        Request::new("POST", app.path(route)).header("authorization", "Bearer token-erin")
+    };
+    let issued = app
+        .endpoint
+        .handle(as_erin("accounts/backend-link/challenge"))
+        .await;
+    assert_eq!(issued.status, 200);
+    let challenge = serde_json::from_slice::<Value>(&issued.body).unwrap()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let with = |body: Value| {
+        let mut request = as_erin("accounts/backend-link");
+        request.body = serde_json::to_vec(&body).unwrap();
+        request
+    };
+    let forged = app
+        .endpoint
+        .handle(with(json!({ "challenge": challenge, "proof": "a.b" })))
+        .await;
+    assert_eq!(forged.status, 401);
+    let as_frank = Request {
+        headers: vec![("authorization".into(), "Bearer token-frank".into())],
+        ..with(json!({ "challenge": challenge, "proof": "a.b" }))
+    };
+    let foreign = app.endpoint.handle(as_frank).await;
+    assert_eq!(
+        (foreign.status, foreign.text_body().as_str()),
+        (400, "invalid_link_challenge")
+    );
+    let tampered = format!("{challenge}x");
+    let tampered = app
+        .endpoint
+        .handle(with(json!({ "challenge": tampered, "proof": "a.b" })))
+        .await;
+    assert_eq!(tampered.status, 400);
+
+    laptop.shutdown().await.unwrap();
+    device.shutdown().await.unwrap();
     app.stop().await;
 }
