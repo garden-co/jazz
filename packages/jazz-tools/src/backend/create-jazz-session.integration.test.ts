@@ -21,12 +21,14 @@ const app = testApp({
   },
 });
 // Notes are read-only: their insert, update and delete are denied.
-const permissions = testPermissions(app, {
+const permissionsFile = {
+  format: 1,
   tables: {
     posts: { read: "true", insert: "true", update: "true", delete: "true" },
     notes: { read: "true" },
   },
-});
+};
+const permissions = testPermissions(app, permissionsFile);
 
 /** A user the app's backend signed in, and the session it acts as them with. */
 async function appUser(
@@ -166,7 +168,7 @@ describe("Node shared backend session", () => {
       appId,
       adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     const session = await openJazzSession({
       appId,
@@ -246,7 +248,7 @@ describe("Node shared backend session", () => {
         appId,
         adminSecret,
         app,
-        permissions,
+        permissions: permissionsFile,
       });
       session = await openJazzSession({
         appId,
@@ -327,7 +329,7 @@ describe("Node shared backend session", () => {
         appId,
         adminSecret: server.adminSecret,
         app,
-        permissions,
+        permissions: permissionsFile,
       });
       const db = writer.getSnapshot().client!.db;
       await db.insert(app.posts, { text: "before outage" }).wait({ tier: "global" });

@@ -48,7 +48,7 @@ describe("finite concurrent local write convergence", () => {
           return session.jazz.db;
         }
         try {
-          await deploy({ ...settings, app, permissions, serverUrl: server.url });
+          await deploy({ ...settings, app, permissions: permissionsFile, serverUrl: server.url });
           const writer = await open();
           const id = randomUUID();
           await writer
