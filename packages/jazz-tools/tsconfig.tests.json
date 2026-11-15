@@ -14,12 +14,13 @@
       "jazz-tools/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*", "tests/ts-dsl/**/*.ts"],
+  "include": ["src/**/*", "tests/typed-app/**/*.ts"],
   "exclude": [
     "node_modules",
     "dist",
     "src/solid/**/*",
     "src/**/*.svelte.test.ts",
-    "src/svelte/test-helpers.svelte.ts"
+    "src/svelte/test-helpers.svelte.ts",
+    "tests/typed-app/frameworks/**/*"
   ]
 }

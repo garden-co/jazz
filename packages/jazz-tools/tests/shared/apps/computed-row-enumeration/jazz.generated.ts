@@ -1,0 +1,85 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// Bindings format 1. Formatters may reformat this file, except `app` below.
+import { bindApp, type AppTypes, type ComputedImpl, type JsonValue } from "jazz-tools";
+import { computed } from "./jazz.computed";
+
+export interface Row {
+  readonly id: string;
+  score: number;
+  text: string;
+  readonly json: string;
+  readonly copy: JsonValue;
+  readonly keys: string[];
+  readonly tag: string;
+}
+
+export interface RowInsert {
+  score?: number;
+  text?: string;
+}
+
+interface Types extends AppTypes {
+  rows: {
+    row: Row;
+    insert: RowInsert;
+    columns: {
+      score: { kind: "int"; nullable: false; value: number };
+      text: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {};
+    computed: {
+      json: { from: { id: string; score: number; text: string }; value: string };
+      copy: { from: { id: string; score: number; text: string }; value: JsonValue };
+      keys: { from: { id: string; score: number; text: string }; value: string[] };
+      tag: { from: { id: string; score: number; text: string }; value: string };
+    };
+  };
+}
+
+export type AppComputed = ComputedImpl<Types>;
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types>({
+  "source": "sha256:9a79d4085f13f7c52a402067dfb12f1988965b9a5d3d1ecb13dc62faed42ab42",
+  "schema": {
+    "current": "ecaaf702a031bb75dd374854fcb35120ff3157b2f157f8747f54319c0089cb62",
+    "schemas": [
+      {
+        "hash": "ecaaf702a031bb75dd374854fcb35120ff3157b2f157f8747f54319c0089cb62",
+        "schema": {
+          "tables": {
+            "rows": {
+              "columns": [
+                {
+                  "column_type": { "type": "Integer" },
+                  "default": { "type": "Integer", "value": 5 },
+                  "name": "score",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "type": "Text" },
+                  "default": { "type": "Text", "value": "hello" },
+                  "name": "text",
+                  "nullable": false,
+                },
+              ],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+    "computed": {
+      "rows": {
+        "json": ["id", "score", "text"],
+        "copy": ["id", "score", "text"],
+        "keys": ["id", "score", "text"],
+        "tag": ["id", "score", "text"],
+      },
+    },
+  },
+  "relations": { "rows": {} },
+  computed,
+});

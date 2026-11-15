@@ -1,0 +1,45 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "bundle_items": {
+      "columns": { "label": "string" },
+      "relations": { "bundlesViaItems": { "reverse": "bundles", "relation": "itemsRelation" } }
+    },
+    "bundles": {
+      "columns": { "name": "string", "items": { "array": "uuid" } },
+      "relations": { "itemsRelation": { "rel": "bundle_items", "column": "items" } }
+    },
+    "orgs": {
+      "columns": { "name": "string" },
+      "relations": { "teamsViaOrg": { "reverse": "teams", "relation": "org" } }
+    },
+    "teams": {
+      "columns": { "name": "string", "org_id": "uuid?", "parent_id": "uuid?" },
+      "relations": {
+        "org": { "rel": "orgs", "column": "org_id" },
+        "parent": { "rel": "teams", "column": "parent_id" },
+        "teamsViaParent": { "reverse": "teams", "relation": "parent" },
+        "usersViaTeam": { "reverse": "users", "relation": "team" }
+      }
+    },
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "priority": "int?",
+        "owner_id": "uuid?",
+        "tags": { "array": "string" },
+        "payload": "bytes?"
+      },
+      "relations": { "owner": { "rel": "users", "column": "owner_id" } }
+    },
+    "users": {
+      "columns": { "name": "string", "team_id": "uuid?" },
+      "relations": {
+        "team": { "rel": "teams", "column": "team_id" },
+        "todosViaOwner": { "reverse": "todos", "relation": "owner" }
+      }
+    }
+  }
+}

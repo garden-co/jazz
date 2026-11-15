@@ -1,0 +1,91 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "$comment": "The realistic benchmark's project board (dev/benchmarks/realistic/schema/project_board.schema.json), with its relations.",
+  "format": 1,
+  "tables": {
+    "activity_events": {
+      "columns": {
+        "project_id": "uuid",
+        "task_id": "uuid?",
+        "actor_id": "uuid",
+        "kind": "string",
+        "created_at": "timestamp",
+        "payload": "string"
+      },
+      "relations": {
+        "project": { "rel": "projects", "column": "project_id" },
+        "task": { "rel": "tasks", "column": "task_id" },
+        "actor": { "rel": "users", "column": "actor_id" }
+      }
+    },
+    "memberships": {
+      "columns": { "organization_id": "uuid", "user_id": "uuid", "role": "string" },
+      "relations": {
+        "organization": { "rel": "organizations", "column": "organization_id" },
+        "user": { "rel": "users", "column": "user_id" }
+      }
+    },
+    "organizations": {
+      "columns": { "name": "string", "created_at": "timestamp" },
+      "relations": {
+        "membershipsViaOrganization": { "reverse": "memberships", "relation": "organization" },
+        "projectsViaOrganization": { "reverse": "projects", "relation": "organization" }
+      }
+    },
+    "projects": {
+      "columns": {
+        "organization_id": "uuid",
+        "name": "string",
+        "archived": "boolean",
+        "updated_at": "timestamp"
+      },
+      "relations": {
+        "organization": { "rel": "organizations", "column": "organization_id" },
+        "tasksViaProject": { "reverse": "tasks", "relation": "project" },
+        "activity_eventsViaProject": { "reverse": "activity_events", "relation": "project" }
+      }
+    },
+    "task_comments": {
+      "columns": { "task_id": "uuid", "author_id": "uuid", "body": "string", "created_at": "timestamp" },
+      "relations": {
+        "task": { "rel": "tasks", "column": "task_id" },
+        "author": { "rel": "users", "column": "author_id" }
+      }
+    },
+    "task_watchers": {
+      "columns": { "task_id": "uuid", "user_id": "uuid" },
+      "relations": {
+        "task": { "rel": "tasks", "column": "task_id" },
+        "user": { "rel": "users", "column": "user_id" }
+      }
+    },
+    "tasks": {
+      "columns": {
+        "project_id": "uuid",
+        "title": "string",
+        "status": "string",
+        "priority": "int",
+        "assignee_id": "uuid",
+        "updated_at": "timestamp",
+        "due_at": "timestamp?"
+      },
+      "relations": {
+        "project": { "rel": "projects", "column": "project_id" },
+        "assignee": { "rel": "users", "column": "assignee_id" },
+        "task_commentsViaTask": { "reverse": "task_comments", "relation": "task" },
+        "task_watchersViaTask": { "reverse": "task_watchers", "relation": "task" },
+        "activity_eventsViaTask": { "reverse": "activity_events", "relation": "task" }
+      }
+    },
+    "users": {
+      "columns": { "display_name": "string", "email": "string" },
+      "relations": {
+        "membershipsViaUser": { "reverse": "memberships", "relation": "user" },
+        "tasksViaAssignee": { "reverse": "tasks", "relation": "assignee" },
+        "task_commentsViaAuthor": { "reverse": "task_comments", "relation": "author" },
+        "task_watchersViaUser": { "reverse": "task_watchers", "relation": "user" },
+        "activity_eventsViaActor": { "reverse": "activity_events", "relation": "actor" }
+      }
+    }
+  }
+}

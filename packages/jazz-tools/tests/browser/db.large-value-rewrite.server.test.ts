@@ -6,7 +6,12 @@ import {
   largeValueRewriteApp as app,
   largeValueRewritePermissions,
 } from "./large-value-rewrite-schema.js";
-import { getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
+import {
+  compileTestPermissions,
+  getJazzServerInfo,
+  startJazzApp,
+  type JazzServerInfo,
+} from "./testing-server.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -53,13 +58,13 @@ describe("browser subscriptions while the backend rewrites a row", () => {
       const info = await getJazzServerInfo(uniqueDbName("large-value-rewrite"));
       await deploy({
         ...info,
-        schema: app.wasmSchema,
-        permissions: largeValueRewritePermissions,
+        app,
+        permissions: await compileTestPermissions(app, largeValueRewritePermissions),
       });
       backendAppId = info.appId;
       await withTimeout(backend.largeValueRewriteBackendOpen(info), 20_000, "backend open");
       const front = await startJazzApp(info, {
-        schema: app.wasmSchema,
+        schema: app,
         permissions: largeValueRewritePermissions,
       });
 

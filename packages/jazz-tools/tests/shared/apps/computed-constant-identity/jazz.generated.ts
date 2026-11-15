@@ -1,0 +1,58 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// Bindings format 1. Formatters may reformat this file, except `app` below.
+import { bindApp, type AppTypes, type ComputedImpl } from "jazz-tools";
+import { computed } from "./jazz.computed";
+
+export interface Row {
+  readonly id: string;
+  text: string;
+  readonly constant: number;
+  readonly identity: string;
+}
+
+export interface RowInsert {
+  text: string;
+}
+
+interface Types extends AppTypes {
+  rows: {
+    row: Row;
+    insert: RowInsert;
+    columns: {
+      text: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {};
+    computed: {
+      constant: { from: {}; value: number };
+      identity: { from: { id: string }; value: string };
+    };
+  };
+}
+
+export type AppComputed = ComputedImpl<Types>;
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types>({
+  "source": "sha256:4e46fde88cd27ddaea80b8f3d8bbede2a3e59da1e18de5424edf82733c58f22e",
+  "schema": {
+    "current": "31c160318a9bda8d3979295142bbd2a488ac13256630062a937da084831e9198",
+    "schemas": [
+      {
+        "hash": "31c160318a9bda8d3979295142bbd2a488ac13256630062a937da084831e9198",
+        "schema": {
+          "tables": {
+            "rows": {
+              "columns": [{ "column_type": { "type": "Text" }, "name": "text", "nullable": false }],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+    "computed": { "rows": { "constant": [], "identity": ["id"] } },
+  },
+  "relations": { "rows": {} },
+  computed,
+});
