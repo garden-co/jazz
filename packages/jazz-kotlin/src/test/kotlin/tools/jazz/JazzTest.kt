@@ -1,6 +1,7 @@
 package tools.jazz
 
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
@@ -180,10 +181,43 @@ class JazzTest {
     }
 
     @Test
-    fun non_finite_doubles_are_refused_before_they_reach_the_core() = runBlocking {
+    fun non_finite_doubles_are_refused_before_they_reach_the_core(): Unit = runBlocking {
         val jazz = open()
         assertFailsWith<SerializationException> { jazz.insert(Items, ItemInsert(title = "x", rank = Double.NaN, kind = ItemKind.C)) }
         assertFailsWith<SerializationException> { Items.where(Items.rank gt Double.POSITIVE_INFINITY).toJson() }
+        // jazz-ffi reads a stored non-finite float as null: a non-null Double column then fails to decode.
+        assertFailsWith<SerializationException> {
+            jazzJson.decodeFromString(Item.serializer(), """{"id":"i","title":"x","rank":null,"kind":"c"}""")
+        }
+    }
+
+    @Test
+    fun close_is_idempotent_and_ends_watches_with_closed(): Unit = runBlocking {
+        val fake = FakeNative()
+        val jazz = open(fake)
+        jazz.insert(Items, ItemInsert(title = "a", rank = 1.0, kind = ItemKind.C))
+        val results = Channel<Int>(Channel.UNLIMITED)
+        val watching = async { runCatching { jazz.watch(Items.query()).collect { results.send(it.size) } } }
+        assertEquals(1, results.receive())
+        jazz.close()
+        jazz.close()
+        assertTrue(withTimeout(5_000) { watching.await() }.exceptionOrNull() is JazzException.Closed)
+        assertFailsWith<JazzException.Closed> { jazz.all(Items.query()) }
+    }
+
+    @Test
+    fun cancelling_while_subscribing_still_unsubscribes(): Unit = runBlocking {
+        val fake = FakeNative()
+        val gate = java.util.concurrent.CountDownLatch(1)
+        fake.subscribeGate = gate
+        val jazz = open(fake)
+        val job = launch(Dispatchers.Default) { jazz.subscribe(Items.query()).collect {} }
+        // The collector is cancelled while the native subscribe is still running.
+        withTimeout(5_000) { while (fake.subs.isEmpty() && fake.errorCallbacks.isEmpty()) { delay(5); if (gate.count == 1L) break } }
+        job.cancel()
+        gate.countDown()
+        job.join()
+        withTimeout(5_000) { while (fake.subs.isNotEmpty()) delay(10) }
     }
 }
 
