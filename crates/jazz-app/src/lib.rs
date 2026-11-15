@@ -37,6 +37,7 @@ mod query;
 mod relation;
 mod subscription;
 mod table;
+pub mod untyped;
 mod value;
 
 pub use app::AppFiles;

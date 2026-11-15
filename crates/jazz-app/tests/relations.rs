@@ -553,3 +553,100 @@ async fn relations_and_history_through_a_server() {
     reader.shutdown().await.unwrap();
     server.shutdown().await;
 }
+
+/// The same queries by name, as bindings in other languages build them,
+/// read through the low-level client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn untyped_queries_lower_the_same_way() {
+    use jazz_app::jazz::query::{self as q, OrderDirection};
+    use jazz_app::untyped::{self, GatherStep, Hop, Table};
+
+    let jazz = local().await;
+    let f = fixture(&jazz).await;
+    let todos_table = || {
+        Table::new(
+            "todos",
+            ["title", "done", "description", "parent", "project"],
+        )
+    };
+    let projects_table = Table::new("projects", ["name"]);
+    let by_id = |id: jazz_app::ObjectId| {
+        q::eq(
+            q::col("id"),
+            q::lit(jazz_app::jazz::records::Value::Uuid(*id.uuid())),
+        )
+    };
+    let read = |query: untyped::Query| {
+        let deleted = query.reads_deleted();
+        let query = query.into_core();
+        jazz.with_client(move |client| async move {
+            let mut opts = jazz_app::jazz::db::ReadOpts::default();
+            opts.read_view.include_deleted = deleted;
+            let rows = client.query_with_opts(query?, opts).await?;
+            Ok::<_, Error>(
+                rows.into_iter()
+                    .map(|row| {
+                        row.fields
+                            .into_iter()
+                            .find(|field| field.name == "title" || field.name == "name")
+                            .map(|field| format!("{:?}", field.value))
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+    };
+
+    let projects = read(
+        untyped::Query::table(todos_table())
+            .filter(by_id(f.lowfat.id))
+            .hop_to(Hop::Forward {
+                column: "parent".into(),
+                to: todos_table(),
+            })
+            .hop_to(Hop::Forward {
+                column: "project".into(),
+                to: projects_table,
+            }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        projects,
+        [format!(
+            "{:?}",
+            jazz_app::jazz::tools::Value::Text("Home".into())
+        )]
+    );
+
+    let gathered = read(
+        untyped::Query::table(todos_table())
+            .filter(by_id(f.lowfat.id))
+            .gather(
+                GatherStep::Along {
+                    column: "parent".into(),
+                    filters: Vec::new(),
+                },
+                10,
+            )
+            .order_by("title", OrderDirection::Asc),
+    )
+    .await
+    .unwrap();
+    assert_eq!(gathered.len(), 3);
+
+    let refused = read(untyped::Query::union(
+        todos_table(),
+        [(
+            "a".to_owned(),
+            untyped::Query::table(Table::new("projects", ["name"])),
+        )],
+    ))
+    .await
+    .unwrap_err();
+    assert!(unsupported(refused).contains("arms must read todos"));
+
+    assert!(untyped::accepted_at(&jazz_app::jazz::tools::Value::Text("x".into())).is_none());
+    let _ = (&f.home, &f.milk);
+    jazz.shutdown().await.unwrap();
+}
