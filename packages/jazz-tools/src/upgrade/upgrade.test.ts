@@ -152,6 +152,10 @@ describe("jazz-tools upgrade: conversions", () => {
     expect(report.rewrites.join("\n")).toContain(
       'full.slice("cards") → full (schema slicing is gone)',
     );
+    // Inline module scripts in .html files are rewritten too.
+    expect(readFileSync(join(dir, "app", "demo.html"), "utf8")).toContain(
+      'import { app } from "../jazz.generated.js";',
+    );
     expectGolden("slices-next", dir, report);
   });
 

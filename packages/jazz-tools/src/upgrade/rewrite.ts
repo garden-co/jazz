@@ -64,7 +64,7 @@ export function rewriteProject(input: RewriteInput): RewriteResult {
     const changes: string[] = [];
     let importsJson = false;
     const blocks: Array<{ offset: number; code: string }> = [];
-    if (ext === ".svelte" || ext === ".vue") {
+    if (ext === ".svelte" || ext === ".vue" || ext === ".html") {
       for (const match of text.matchAll(SCRIPT_BLOCK)) {
         blocks.push({ offset: match.index! + match[1]!.length, code: match[2]! });
       }

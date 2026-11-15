@@ -1,5 +1,5 @@
 // Every example and fixture app is its files (SPEC 10.10): jazz.app.json,
-// jazz.permissions.json and the jazz.generated.ts `jazz-tools validate`
+// jazz.permissions.json and the jazz.generated.ts `jazz-tools generate`
 // writes from the first, all committed. None keeps an alpha.64 source
 // (schema.ts, permissions.ts, migrations/) beside them: `jazz-tools upgrade`
 // deletes those, and a leftover would read as a second source of truth.
@@ -40,7 +40,7 @@ test("every example app commits its files and its bindings", () => {
   assert.deepEqual(
     missing,
     [],
-    `Run \`jazz-tools validate\` in these and commit what it writes:\n${missing.join("\n")}`,
+    `Run \`jazz-tools generate\` in these and commit what it writes:\n${missing.join("\n")}`,
   );
 });
 
