@@ -497,8 +497,11 @@ down gracefully with its writes synced, and only then signs in and opens the new
 - `signOut({ discardUnsynced: true })` signs out without waiting for the server. **It loses that
   user's writes the server hasn't confirmed**: it wipes their local data from this device, and the
   session is `signed-out` at once. Call it while `signing-out` (still offline) to give up the upload
-  so someone else can sign in. Writes the server already has stay there. Plain `signOut()` never
-  drops writes.
+  so someone else can sign in. Writes the server already has stay there, and the device forgets a
+  device account's key with its data, so `reopenDeviceAccount()` can't open it again. Plain
+  `signOut()` never drops writes. In a browser, a store another tab still has open stays for that
+  tab. On Node, a persistent store isn't deleted (only its client closes); a memory store keeps
+  nothing.
 
 ### Reactive state
 

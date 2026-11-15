@@ -41,6 +41,7 @@ import {
 import {
   holdReplicaStore,
   replicaLedger,
+  wipeAccountStoreNow,
   replicaLifecycle,
   type ReplicaLifecycle,
 } from "./replica-ledger.js";
@@ -407,6 +408,13 @@ export async function openBrowserSessionCore(
     initial: coreInitial(initial),
     // A memory-only client has no storage to wipe.
     clearOnSignOut: wipesOnSignOut,
+    // `signOut({ discardUnsynced })` wipes by account, under the store's lock.
+    ...(loadLocalFirst
+      ? {
+          deleteSignedOutStore: (account: AccountHandle) =>
+            wipeAccountStoreNow(registry, account.id, deleteStore),
+        }
+      : {}),
     ...(replicas
       ? {
           wipeSignedOut,

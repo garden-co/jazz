@@ -359,7 +359,11 @@ describe("Jazz session lifecycle", () => {
   });
   // As the hosts' account Db does (accounts/context.ts): when its account's
   // credential is revoked, it stops waiting for sync and tears itself down.
-  async function realEnrollmentSetup() {
+  async function realEnrollmentSetup(
+    hostOptions: {
+      deleteSignedOutStore?: (account: AccountHandle) => Promise<"deleted" | "held">;
+    } = {},
+  ) {
     const accounts = createAccountManagerWithRuntime({
       registry: "https://core.example/apps/test/accounts",
       localFirst: {
@@ -381,6 +385,7 @@ describe("Jazz session lifecycle", () => {
     }[] = [];
     const session = await createJazzSessionOwner({
       accounts,
+      ...hostOptions,
       openClient: async (account) => {
         const client = {
           torn: false,
@@ -388,6 +393,7 @@ describe("Jazz session lifecycle", () => {
           uploaded: false,
           deleted: false,
           db: {
+            getConfig: (): { driver?: { type?: string } } => ({ driver: { type: "persistent" } }),
             getAuthState: () => ({}),
             getSyncStatus: () => ({ pendingUploads: client.uploaded ? 0 : 1 }),
             deleteClientStorage: vi.fn(async () => {
@@ -475,6 +481,68 @@ describe("Jazz session lifecycle", () => {
       expect(client.shutdown).not.toHaveBeenCalledWith({ waitForSync: true });
       expect(client.deleted).toBe(true);
       expect(client.torn).toBe(true);
+      await session.close();
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("discards a memory client's writes without a wipe, from ready and from signing-out", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const from of ["ready", "signing-out"] as const) {
+        const { session, net, opened } = await realEnrollmentSetup();
+        await session.createLocalFirst();
+        const client = opened.at(-1)!;
+        // As Node and React Native's memory driver: nothing to delete, and
+        // deleting throws.
+        client.db.getConfig = () => ({ driver: { type: "memory" } });
+        client.db.deleteClientStorage = vi.fn(async () => {
+          throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
+        });
+        net.online = false;
+        if (from === "signing-out") {
+          await session.logout();
+          expect(session.getSnapshot().status).toBe("signing-out");
+        }
+        await session.logout({ discardUnsynced: true });
+        expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+        expect(session.getSnapshot().error).toBeUndefined();
+        expect(client.db.deleteClientStorage).not.toHaveBeenCalled();
+        expect(client.torn).toBe(true);
+        await session.close();
+      }
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("wipes by account after the client closed, even when the upload finished as discard was asked", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const deleteSignedOutStore = vi.fn(async (_account: AccountHandle) => "deleted" as const);
+      const { session, net, opened } = await realEnrollmentSetup({ deleteSignedOutStore });
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      const account = session.getSnapshot().account!;
+      await session.logout();
+      // The next upload goes through, and finishes just as the app discards.
+      const upload = deferred();
+      client.shutdown.mockImplementationOnce(async (options?: { waitForSync?: boolean }) => {
+        await upload.promise;
+        client.uploaded = !!options?.waitForSync;
+        client.torn = true;
+      });
+      net.online = true;
+      const retrying = session.retry();
+      const discarding = session.logout({ discardUnsynced: true });
+      upload.resolve();
+      await retrying.catch(() => {});
+      await discarding;
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      // Through the host, by account, once the client was down: no
+      // delete through a client that may be shutting down.
+      expect(deleteSignedOutStore).toHaveBeenCalledWith(account);
+      expect(client.db.deleteClientStorage).not.toHaveBeenCalled();
       await session.close();
     } finally {
       warned.mockRestore();

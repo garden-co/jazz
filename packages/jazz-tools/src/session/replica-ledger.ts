@@ -354,6 +354,29 @@ async function whileNoTabHolds<T>(
   return result;
 }
 
+/**
+ * @internal Delete `account`'s store now, as `signOut({ discardUnsynced })`
+ * asks, under the store's exclusive lock: `"held"`, deleting nothing, while
+ * a tab still has it open. Its ledger entry (if any) goes with it; a mark
+ * left by a crash mid-delete lets a later page finish.
+ */
+export async function wipeAccountStoreNow(
+  registry: string,
+  account: string,
+  deleteStore: (account: string) => Promise<"deleted" | "held">,
+  locks: Locks | undefined = webLocks(),
+): Promise<"deleted" | "held"> {
+  const ledger = replicaLedger(registry);
+  const outcome = await whileNoTabHolds(locks, registry, account, async () => {
+    ledger.markWiping(account, true);
+    const deleted = await deleteStore(account);
+    if (deleted === "deleted") ledger.forget(account);
+    else ledger.markWiping(account, false);
+    return deleted;
+  });
+  return outcome ?? "held";
+}
+
 /** As the backend watch confirms a signed-out answer before it signs anyone out. */
 export const CONFIRM_SIGNED_OUT_MS = 2_000;
 

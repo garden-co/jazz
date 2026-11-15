@@ -1,5 +1,6 @@
 import {
   ensureAutomaticLocalFirst,
+  forgetDeviceAccount,
   keepDeviceKeyOnSignOut,
   keptDeviceKey,
 } from "../accounts/persistence.js";
@@ -30,6 +31,7 @@ type WipeableClient = {
     getSyncStatus?(): { pendingUploads: number };
     isUsable?(): boolean;
     abortGracefulShutdown?(): void;
+    getConfig?(): { driver?: { type?: string } };
     onSyncStatusChange?(listener: (status: { link: { state: string } }) => void): () => void;
   };
 };
@@ -260,6 +262,13 @@ export async function createJazzSessionOwner<
    * device account's key is kept for the last tab out to decide.
    */
   storeHeldElsewhere?(account: AccountHandle): Promise<boolean>;
+  /**
+   * @internal For `signOut({ discardUnsynced })`: delete `account`'s local
+   * store by id, after its client shut down (the browser: under the store's
+   * lock, `"held"` while another tab has it open). Without it the session
+   * deletes through the client (`db.deleteClientStorage()`) before closing it.
+   */
+  deleteSignedOutStore?(account: AccountHandle): Promise<"deleted" | "held">;
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: SessionCore<Client>): Extra;
 }): Promise<SessionCore<Client> & Extra> {
@@ -383,7 +392,19 @@ export async function createJazzSessionOwner<
         // A thin client keeps nothing in the browser, so there is nothing to wipe.
         const thin = isThinDb((client as WipeableClient).db as Db);
         thinSignOut = thin;
-        if (signsOut && options.clearOnSignOut && !thin && options.wipeSignedOut && selected) {
+        if (signsOut && discard) {
+          // The app gives the unsynced writes up: no wait for the server.
+          const outcome = await discardLocal(client, selected);
+          wiped = !outcome.held;
+          heldElsewhere = outcome.held;
+          unfinishedWipe = outcome.unfinished;
+        } else if (
+          signsOut &&
+          options.clearOnSignOut &&
+          !thin &&
+          options.wipeSignedOut &&
+          selected
+        ) {
           // False: another tab still has the account open, and decides.
           try {
             wiped = (await options.wipeSignedOut(client, selected)) !== false;
@@ -393,23 +414,15 @@ export async function createJazzSessionOwner<
             throw error;
           }
           heldElsewhere = !wiped;
-        } else if (signsOut && (options.clearOnSignOut || discard) && !thin) {
+        } else if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;
-          // Upload what the server still accepts before wiping the rest
-          // (unless the app asked to discard it now).
-          if (!discard) await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          // Upload what the server still accepts before wiping the rest.
+          await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
           // Say what the wipe took, as a sign-out past refused writes does.
           const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
           await db?.deleteClientStorage?.();
           wiped = true;
-          warnDiscarded(writes, discard ? "signOut({ discardUnsynced: true })" : "clearOnSignOut");
-          await client.shutdown();
-        } else if (signsOut && discard) {
-          // Thin: nothing on the device to wipe; its unsent writes go with it.
-          warnDiscarded(
-            (client as WipeableClient).db?.getSyncStatus?.().pendingUploads ?? 0,
-            "signOut({ discardUnsynced: true })",
-          );
+          warnDiscarded(writes, "clearOnSignOut");
           await client.shutdown();
         } else {
           // A client the server refuses (this user's sign-in ended) can't
@@ -535,6 +548,13 @@ export async function createJazzSessionOwner<
       throw cause;
     }
     if (token !== generation) throw superseded();
+    // Discarded: nothing on this device reopens that account, as with
+    // clearOnSignOut (unless another tab still has it open: it decides).
+    if (discard && previousSelected && !heldElsewhere)
+      await forgetDeviceAccount(accounts, previousSelected.id).catch((error: unknown) =>
+        console.warn("Jazz couldn't forget the signed-out device account's key.", error),
+      );
+    if (token !== generation) throw superseded();
     if (draining && !client) {
       publish({ status: "signing-out", error: draining.error, recovery: "action" });
       watchDrain(draining);
@@ -549,6 +569,74 @@ export async function createJazzSessionOwner<
   };
   type Drain = NonNullable<typeof draining>;
   /**
+   * A sign-out that left its upload pending but couldn't save the signed-out
+   * selection shows `error`: save it again first, so a reload can't reopen
+   * the account, and show `signing-out` again once it landed.
+   */
+  const resumeDrain = async () => {
+    const drain = draining;
+    if (!drain || snapshot.status !== "error") return;
+    await accounts.settleSelection(true);
+    if (draining === drain && !closed)
+      publish({ status: "signing-out", error: drain.error, recovery: "action" });
+  };
+  /**
+   * `signOut({ discardUnsynced })`'s teardown of `client`: drop its writes
+   * the server hasn't confirmed and `account`'s local data, and shut it
+   * down without waiting for sync. A thin or memory client keeps nothing
+   * on the device: it just closes. `attempt`: an upload being given up
+   * (`signing-out`). Never throws: a wipe that couldn't finish is returned
+   * (`unfinished`), and the sign-out goes on; `held`: another tab still has
+   * the store open, so it stays (that tab decides).
+   */
+  const discardLocal = async (
+    client: Client,
+    account: AccountHandle | undefined,
+    attempt?: Promise<void>,
+  ): Promise<{ unfinished?: Error; held: boolean }> => {
+    const db = (client as WipeableClient).db;
+    const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
+    const keepsNothing = isThinDb(db as Db) || db?.getConfig?.().driver?.type === "memory";
+    let failure: unknown;
+    let held = false;
+    // Through the client, while it is still open: before an upload being
+    // given up can finish and tear it down.
+    if (!keepsNothing && !options.deleteSignedOutStore)
+      await db?.deleteClientStorage?.().catch((cause: unknown) => (failure = cause));
+    db?.abortGracefulShutdown?.();
+    await attempt?.catch(() => {});
+    try {
+      await client.shutdown();
+    } catch (cause) {
+      console.error("Jazz signed out, but closing the signed-out client failed.", cause);
+    }
+    // By account, once nothing of this page holds the store: whether or not
+    // an upload got as far as closing the client, and a thin tab's store
+    // from an earlier session too.
+    if (options.deleteSignedOutStore && account)
+      try {
+        held = (await options.deleteSignedOutStore(account)) === "held";
+      } catch (cause) {
+        failure ??= cause;
+      }
+    if (held)
+      console.warn(
+        "Jazz signed out and dropped this tab's unsynced writes, but another tab still has this account open, so its data stays on this device for that tab.",
+      );
+    else warnDiscarded(writes, "signOut({ discardUnsynced: true })");
+    return {
+      held,
+      ...(failure === undefined
+        ? {}
+        : {
+            unfinished: new Error(
+              "Jazz signed out, but couldn't finish wiping the signed-out user's data from this device (discardUnsynced). Some of it may still be on this device.",
+              { cause: failure },
+            ),
+          }),
+    };
+  };
+  /**
    * `logout({ discardUnsynced })` while `signing-out`: stop the upload, wipe
    * the signed-out user's local data with their unsynced writes (a thin
    * client keeps none), and finish the sign-out now. Nothing signs in until
@@ -557,31 +645,20 @@ export async function createJazzSessionOwner<
   const discardDrain = (drain: Drain): Promise<void> => {
     const task = (async () => {
       endDrain(drain, false);
-      const db = (drain.client as WipeableClient).db;
-      db?.abortGracefulShutdown?.();
-      await drain.attempt?.catch(() => {});
-      let unfinished: Error | undefined;
+      let outcome: Awaited<ReturnType<typeof discardLocal>>;
       try {
-        const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
-        if (!isThinDb(db as Db)) await db?.deleteClientStorage?.();
-        warnDiscarded(writes, "signOut({ discardUnsynced: true })");
-      } catch (cause) {
-        unfinished = new Error(
-          "Jazz signed out, but couldn't finish wiping the signed-out user's data from this device (discardUnsynced).",
-          { cause },
-        );
-      }
-      try {
-        await drain.client.shutdown();
-      } catch (cause) {
-        console.error("Jazz signed out, but closing the signed-out client failed.", cause);
+        outcome = await discardLocal(drain.client, drain.account, drain.attempt);
       } finally {
         drain.release?.();
       }
+      if (drain.account && !outcome.held)
+        await forgetDeviceAccount(accounts, drain.account.id).catch((error: unknown) =>
+          console.warn("Jazz couldn't forget the signed-out device account's key.", error),
+        );
       if (closed) return;
       publish({
         status: "signed-out",
-        ...(unfinished ? { error: unfinished, recovery: "session" as const } : {}),
+        ...(outcome.unfinished ? { error: outcome.unfinished, recovery: "session" as const } : {}),
       });
     })();
     loggingOut = task;
@@ -705,8 +782,8 @@ export async function createJazzSessionOwner<
     keptLocalFirstKey: () => keptDeviceKey(accounts).known(),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
-    // Signing out: try the upload now.
-    retry: () => (draining ? drainNow() : run("retry", () => selected)),
+    // Signing out: save a selection that failed to land, then try the upload now.
+    retry: () => (draining ? resumeDrain().then(drainNow) : run("retry", () => selected)),
     logout: (logoutOptions = {}) => {
       if (closed) return Promise.reject(new Error("Jazz session is closed"));
       const discard = logoutOptions.discardUnsynced === true;
@@ -718,7 +795,10 @@ export async function createJazzSessionOwner<
           : loggingOut;
       // Signed out here already; its upload goes on (`signing-out`), unless
       // the app gives it up.
-      if (draining) return discard ? discardDrain(draining) : Promise.resolve();
+      if (draining) {
+        const drain = draining;
+        return resumeDrain().then(() => (discard ? discardDrain(drain) : undefined));
+      }
       const token = ++generation;
       ++signOuts;
       const pending = busy;

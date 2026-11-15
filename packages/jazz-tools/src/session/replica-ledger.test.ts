@@ -3,6 +3,7 @@ import {
   holdReplicaStore,
   replicaLedger,
   replicaLifecycle,
+  wipeAccountStoreNow,
   type Locks,
   type ReplicaEntry,
   type ReplicaLifecycle,
@@ -836,4 +837,31 @@ describe("the lifecycle, under random interleavings", () => {
       expect([...b.stores.keys()].filter((account) => !kept(account))).toEqual([]);
     },
   );
+});
+
+describe("wipeAccountStoreNow (signOut({ discardUnsynced }))", () => {
+  it("deletes a store no tab holds, and leaves one another tab holds", async () => {
+    const locks = new LockManager();
+    const deleteStore = vi.fn(async () => "deleted" as const);
+    // Another tab holds alice's store: nothing is deleted.
+    let releaseOther!: () => void;
+    const otherHolds = locks
+      .view("other")
+      .request(
+        aliceLock,
+        { mode: "shared" },
+        () => new Promise<void>((resolve) => (releaseOther = resolve)),
+      );
+    await Promise.resolve();
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me")),
+    ).resolves.toBe("held");
+    expect(deleteStore).not.toHaveBeenCalled();
+    releaseOther();
+    await otherHolds;
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me")),
+    ).resolves.toBe("deleted");
+    expect(deleteStore).toHaveBeenCalledWith(alice.id);
+  });
 });

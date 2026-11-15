@@ -346,3 +346,33 @@ it("logout forgets the remembered user", async () => {
   expect(next.statuses).toEqual(["signed-out:-"]);
   await next.session.close();
 });
+
+it("forgets a device account's key when its sign-out discards unsynced writes", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const accounts = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store: {
+      read: async () => value,
+      update: async (transform) => {
+        value = transform(value);
+      },
+    },
+    mintToken: () =>
+      `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+  });
+  const openClient = vi.fn(async () => ({ shutdown: async () => {} }));
+  const session = await createJazzSessionOwner({ accounts, openClient });
+  // A plain sign-out keeps the key: the device account can be reopened.
+  await session.createLocalFirst();
+  await session.logout();
+  expect(session.keptLocalFirstKey()).toBeDefined();
+  await session.reopenLocalFirst();
+  // Discarding forgets it: the next person can't reopen that guest.
+  await session.logout({ discardUnsynced: true });
+  await settle();
+  expect(session.keptLocalFirstKey()).toBeUndefined();
+  await expect(session.reopenLocalFirst()).rejects.toThrow("keeps no device account");
+  await session.close();
+});

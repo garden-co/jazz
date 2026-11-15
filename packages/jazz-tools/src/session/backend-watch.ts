@@ -496,6 +496,9 @@ export function watchBackendUser<Client>(
       if (session.getSnapshot().account !== startedWith) return busy();
     }
     // Following the backend's answer: not a sign-out that supersedes refreshes.
+    // An app `signOut()` that joins this one while it runs isn't counted
+    // either: harmless, since this sign-out already drops every refresh's
+    // late answer the same way.
     const before = jazzSessionSignOuts(session as SessionCore<unknown>);
     const signingOut = session.logout();
     followedSignOuts += jazzSessionSignOuts(session as SessionCore<unknown>) - before;

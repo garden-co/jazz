@@ -261,6 +261,25 @@ export function keepDeviceKeyOnSignOut(accounts: AccountManager<JWTAuth>): void 
   keepNextSignedOutKey.add(accounts);
 }
 
+const deviceAccountForgetters = new WeakMap<
+  AccountManager<JWTAuth>,
+  (account: string) => Promise<void>
+>();
+
+/**
+ * @internal Forget device account `account`'s key on this device now, as
+ * `clearOnSignOut` does on sign-out: nothing here reopens it
+ * (`reopenDeviceAccount()`), and other tabs see it tombstoned. For
+ * `signOut({ discardUnsynced })`, which wiped its data. A manager without
+ * a kept store has nothing to forget.
+ */
+export async function forgetDeviceAccount(
+  accounts: AccountManager<JWTAuth>,
+  account: string,
+): Promise<void> {
+  await deviceAccountForgetters.get(accounts)?.(account);
+}
+
 const keptAccountReaders = new WeakMap<
   AccountManager<JWTAuth>,
   (account: string) => Promise<boolean>
@@ -547,6 +566,18 @@ export async function prepareAccountManager(options: {
     }),
   });
   restoringStartup = false;
+  deviceAccountForgetters.set(manager, (account) => {
+    unforgetting.delete(account);
+    forgetting.add(account);
+    const index = stored.roots.findIndex((root) => rootAccount(root) === account);
+    if (index >= 0) {
+      if (stored.selected === index) stored.selected = null;
+      else if (stored.selected !== null && stored.selected > index) stored.selected--;
+      stored.roots.splice(index, 1);
+    }
+    if (stored.recentDevice === account) delete stored.recentDevice;
+    return save();
+  });
   forgottenReaders.set(manager, async (account) =>
     (decode(await options.store.read()).forgottenAccounts ?? []).includes(account),
   );
