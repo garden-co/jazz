@@ -24,6 +24,7 @@ git config --global --add safe.directory "${root}" || true
 cargo build -p jazz-ffi
 cargo build -p jazz-cli --bin jazz-tools
 cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings
+(cd examples/stage-plan/apps/go-cli && ../../../../target/debug/jazz-tools generate --check)
 
 test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
 # The module ships jazz-ffi's header for builds from the module cache.

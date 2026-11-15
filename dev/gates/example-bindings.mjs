@@ -28,10 +28,6 @@ export function exampleAppDirs(cwd = root) {
       .split("\n")
       .filter(Boolean)
       .map((file) => dirname(file))
-      // Go apps: Go is switched off in `jazz-tools generate` until its
-      // bindings reach parity; jazz-codegen's golden tests check that their
-      // committed jazzapp/jazz_app.go is current.
-      .filter((dir) => !existsSync(join(resolve(cwd, dir), "go.mod")))
       .sort()
   );
 }
