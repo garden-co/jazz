@@ -167,10 +167,9 @@ impl App {
     /// Read and check `jazz.app.json` as `jazz validate` does.
     pub fn load(file: &[u8]) -> Result<App, ArtifactError> {
         let definition = artifact::load_app(file)?;
-        Ok(App::from_definition(
-            artifact::source_hash(file),
-            &definition,
-        ))
+        let mut app = App::from_definition(artifact::source_hash(file), &definition);
+        app.file = String::from_utf8_lossy(file).replace("\r\n", "\n");
+        Ok(app)
     }
 
     fn from_definition(source: String, definition: &AppDefinition) -> App {
