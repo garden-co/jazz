@@ -3,4 +3,4 @@ t8-native-backend: security gate for the .65 native `/jazz` endpoint (Rust `jazz
 - `probe-auth.ts` — item 1 (refusals), HTTP.
 - `probe-frames.ts` — item 4: junk/empty/truncated first frames, an oversized (>64 KiB) prelude, and with `PRELUDE=<json>` a junk frame and a 2 MiB + 1 frame after a valid prelude (expect 1009); server must still answer after each.
 - `probe-raw.ts` — item 4, raw RFC 6455 frames `ws` cannot send (unmasked, RSV bits, unknown opcode, oversized/fragmented control, stray continuation, text, bad close code, 64-bit length just over the cap; default CAP 2 MiB = Jazz sync-message limit): expects the documented close codes and a live `HEALTH` after each.
-- Items 2–3 (permissions, second user can't read private rows): `smoke-stageplan.ts`, written once the StagePlan app files + start commands are known (asked #jazz-app-backend-handler and #go).
+- `smoke-stageplan.ts` — items 2–3: two JWT users through the native backend with a TS client; alice creates a show, task and checklist item; bob reads none of them and cannot insert/update into her show or forge her as chief.

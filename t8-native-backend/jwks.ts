@@ -3,9 +3,9 @@
 import { createServer } from "node:http";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 const PORT = Number(process.env.JWKS_PORT ?? 8690);
-const ISSUER = process.env.ISSUER ?? process.env.JAZZ_JWT_ISSUER ?? `http://localhost:${PORT}`;
+const ISSUER = process.env.ISSUER ?? process.env.APP_JWT_ISSUER ?? process.env.JAZZ_JWT_ISSUER ?? `http://localhost:${PORT}`;
 const AUD = process.env.AUDIENCE; // optional
-const HS = process.env.JAZZ_JWT_SECRET; // set -> HS256 mode (Rust example), else RS256 + JWKS
+const HS = process.env.APP_JWT_SECRET ?? process.env.JAZZ_JWT_SECRET; // set -> HS256 mode (Rust example), else RS256 + JWKS
 const { publicKey, privateKey } = await generateKeyPair("RS256");
 const hsKey = HS ? new TextEncoder().encode(HS) : undefined;
 const hsWrong = new TextEncoder().encode("wrong-secret-for-bad-sig-0000000000");
