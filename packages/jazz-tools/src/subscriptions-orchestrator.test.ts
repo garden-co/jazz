@@ -993,6 +993,46 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       }
     });
 
+    it("a returning listener hears a failed resubscription once", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const failure = new Error("resubscribe failed");
+        harness.setThrowOnSubscribe(failure);
+        const onError = vi.fn();
+        const onfulfilled = vi.fn();
+        const off = harness.manager.getCacheEntry<Todo>(key).subscribe({ onError, onfulfilled });
+        expect(onError).toHaveBeenCalledOnce();
+        expect(onError).toHaveBeenCalledWith(failure);
+        expect(onfulfilled).not.toHaveBeenCalled();
+        expect(harness.manager.peekState<Todo>(key)).toMatchObject({ status: "rejected" });
+        off();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("a returning listener hears an asynchronous resubscription failure once", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const failure = new Error("admission refused");
+        harness.setNextReadiness(Promise.reject(failure));
+        const onError = vi.fn();
+        const off = harness.manager.getCacheEntry<Todo>(key).subscribe({ onError });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(onError).toHaveBeenCalledOnce();
+        expect(onError).toHaveBeenCalledWith(failure);
+        off();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
     it("still cleans up a parked entry at its unused deadline", async () => {
       vi.useFakeTimers();
       const harness = createUnitHarness();
