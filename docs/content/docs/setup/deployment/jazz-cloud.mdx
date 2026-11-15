@@ -109,6 +109,20 @@ Cloud; a Rust or Go backend connects to the same sync URL with the same admin se
     The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Rust tab
     for each example. `examples/todo-server-rs` in the repository is a complete service.
 
+    **Run the core under the app id your clients use.** A TypeScript client names no app: it derives
+    the app id from its `serverUrl`, and its account routes are `<serverUrl>/apps/<that id>/…`. The
+    id is the UUIDv5, in the DNS namespace, of the endpoint URL as the client resolves it: origin and
+    path, `ws(s)` read as `http(s)`, no trailing slash, such as `https://app.example.com/jazz`. If the
+    core behind your backend runs under any other id, every account route answers 404. (TypeScript's
+    `createJazz` maps between the two for you; Rust and Go don't yet.) So either run the core under
+    the derived id, or, when the id is fixed, as an app's on Jazz Cloud is, set your clients'
+    `scope` to it: `<JazzProvider config={{ serverUrl: "/jazz", scope: "<app id>" }}>`.
+
+    ```rust
+    // The URL your clients sync with, exactly as they resolve it.
+    let app_id = AppId::from_name("https://app.example.com/jazz");
+    ```
+
     What Rust's backend doesn't do yet is listed in [Language support](/docs/reference/language-support#rust).
 
   </Tab>
@@ -205,6 +219,22 @@ Cloud; a Rust or Go backend connects to the same sync URL with the same admin se
     The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Go tab
     for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan
     command-line app.
+
+    **Run the core under the app id your clients use.** A TypeScript client names no app: it derives
+    the app id from its `serverUrl`, and its account routes are `<serverUrl>/apps/<that id>/…`. The
+    id is the UUIDv5, in the DNS namespace, of the endpoint URL as the client resolves it: origin and
+    path, `ws(s)` read as `http(s)`, no trailing slash, such as `https://app.example.com/jazz`. If the
+    core behind your backend runs under any other id, every account route answers 404. (TypeScript's
+    `createJazz` maps between the two for you; Rust and Go don't yet.) So either run the core under
+    the derived id, or, when the id is fixed, as an app's on Jazz Cloud is, set your clients'
+    `scope` to it: `<JazzProvider config={{ serverUrl: "/jazz", scope: "<app id>" }}>`.
+
+    ```go
+    import "github.com/google/uuid"
+
+    // The URL your clients sync with, exactly as they resolve it.
+    appID := uuid.NewSHA1(uuid.NameSpaceDNS, []byte("https://app.example.com/jazz")).String()
+    ```
 
     What Go's backend doesn't do yet is listed in [Language support](/docs/reference/language-support#go).
 
