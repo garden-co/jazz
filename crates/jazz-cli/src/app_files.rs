@@ -55,7 +55,8 @@ impl From<Lang> for Selected {
 
 /// The languages `dir`'s app is written in: those given, or else each that
 /// [`Lang::detected_in`] finds there (a `package.json`; a `Cargo.toml` of
-/// a crate depending on `jazz-app`) or whose bindings are committed there.
+/// a crate depending on `jazz-app`; a `go.mod` requiring `jazz-go`) or
+/// whose bindings are committed there.
 pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
     if !given.is_empty() {
         return Ok(given.iter().copied().map(Selected::from).collect());
@@ -77,7 +78,7 @@ pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, or the Cargo.toml of a crate depending on jazz-app); pass --lang",
+             (a package.json, the Cargo.toml of a crate depending on jazz-app, or a go.mod requiring jazz-go); pass --lang",
             dir.display(),
         ));
     }

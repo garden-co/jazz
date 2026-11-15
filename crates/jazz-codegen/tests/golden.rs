@@ -296,11 +296,10 @@ fn go_names_never_shadow_the_bindings_or_go() {
 }
 
 #[test]
-fn go_is_switched_off_in_the_cli() {
-    let error = Lang::parse("go").unwrap_err();
-    assert!(error.is_unsupported(), "{error}");
-    assert!(error.to_string().contains("not available yet"), "{error}");
-    assert!(!Lang::ALL.contains(&Lang::Go));
+fn go_is_a_language_the_cli_selects() {
+    assert_eq!(Lang::parse("go").unwrap(), Lang::Go);
+    assert!(Lang::ALL.contains(&Lang::Go));
+    assert_eq!(Lang::Go.marker(), "go.mod");
 }
 
 /// Each app's Swift bindings, committed beside it as `JazzApp.swift`; an
