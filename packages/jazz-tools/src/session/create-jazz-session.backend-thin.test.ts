@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { createJazz, memory, type Jazz } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
@@ -16,14 +16,13 @@ import { decodeThinResponse, isThinResponse } from "../thin/wire.js";
 // The browser session against an app's own backend (`createJazz`), which
 // signs users in from their cookies: the hero examples' setup.
 
-const app = s.defineApp(
-  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+const permissions = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {

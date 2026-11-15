@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Regenerate it after changing jazz.app.json.
+// Bindings format 2. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
@@ -13,10 +13,20 @@ pub struct Project {
     pub name: ::std::string::String,
 }
 
-/// A new row of `projects`.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A new row of `projects`: [`NewProject::new`] takes the columns it requires.
+#[derive(Debug, Clone, PartialEq)]
 pub struct NewProject {
     pub name: ::std::string::String,
+}
+
+impl NewProject {
+    /// A new row with the columns it requires, in this order: `name`. The others
+    /// are left out; set them with `NewProject { column: …, ..NewProject::new(…) }`.
+    pub fn new(name: impl ::std::convert::Into<::std::string::String>) -> Self {
+        Self {
+            name: name.into(),
+        }
+    }
 }
 
 /// Changes to a row of `projects`: a `None` field leaves its column as it is.
@@ -82,6 +92,11 @@ pub mod projects {
         ::jazz_app::Query::all()
     }
 
+    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app::Column<Project, ::jazz_app::ObjectId> {
+        ::jazz_app::id()
+    }
+
     /// Column `name`.
     pub fn name() -> ::jazz_app::Column<Project, ::std::string::String> {
         ::jazz_app::Column::new("name")
@@ -104,14 +119,28 @@ pub struct Todo {
     pub project: ::std::option::Option<::jazz_app::ObjectId>,
 }
 
-/// A new row of `todos`.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A new row of `todos`: [`NewTodo::new`] takes the columns it requires.
+#[derive(Debug, Clone, PartialEq)]
 pub struct NewTodo {
     pub title: ::std::string::String,
     pub done: bool,
     pub description: ::std::option::Option<::std::string::String>,
     pub parent: ::std::option::Option<::jazz_app::ObjectId>,
     pub project: ::std::option::Option<::jazz_app::ObjectId>,
+}
+
+impl NewTodo {
+    /// A new row with the columns it requires, in this order: `title`, `done`. The others
+    /// are left out; set them with `NewTodo { column: …, ..NewTodo::new(…) }`.
+    pub fn new(title: impl ::std::convert::Into<::std::string::String>, done: impl ::std::convert::Into<bool>) -> Self {
+        Self {
+            title: title.into(),
+            done: done.into(),
+            description: ::std::option::Option::None,
+            parent: ::std::option::Option::None,
+            project: ::std::option::Option::None,
+        }
+    }
 }
 
 /// Changes to a row of `todos`: a `None` field leaves its column as it is.
@@ -207,6 +236,11 @@ pub mod todos {
     /// Every row of `todos`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Todo> {
         ::jazz_app::Query::all()
+    }
+
+    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app::Column<Todo, ::jazz_app::ObjectId> {
+        ::jazz_app::id()
     }
 
     /// Column `title`.

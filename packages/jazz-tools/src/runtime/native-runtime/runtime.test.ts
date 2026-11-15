@@ -1,4 +1,4 @@
-import { schema as s } from "../../schema-namespace.js";
+import { testApp } from "../../testing/test-app.js";
 import { authorColumnType } from "../../magic-columns.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
@@ -1960,10 +1960,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each(["query", "subscription"] as const)(
     "installs client correlation claims before opening a %s without preparing a native plan",
     async (kind) => {
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       let releaseClaims!: () => void;
       const installed = new Promise<void>((resolve) => {
         releaseClaims = resolve;
@@ -2824,10 +2821,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               close,
             };
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -2875,10 +2869,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               },
             });
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const handle = runtime.createSubscription(app.todos._build());
       const replacement = vi.fn();
       const callback = vi.fn(() => {
@@ -2973,7 +2964,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       return { runtime, native, queues, failures, drain, readAll, pump };
     }
 
-    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+    const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
     const row = (n: number) => ({
       table: "todos",
       rowId: uuidBytes(`00000000-0000-0000-0000-00000000000${n}`),
@@ -3111,10 +3102,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       const runtime = runtimeWithSubscriptionSource({
         getReader: () => ({ read: () => pending, cancel }),
       });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -6125,7 +6113,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 });
 describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+  const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
   const query = app.todos.where({ title: "lifecycle" })._build();
   const openRuntime = (overrides: Partial<NativeDbForTest>) =>
     new NativeRuntimeAdapter(
@@ -6946,18 +6934,11 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
-const bigintQuerySchema = s.defineApp(
-  {
-    metrics: s.table(
-      {
-        largeCount: s.bigint(),
-        largeCounts: s.array(s.bigint()),
-      },
-      {},
-    ),
+const bigintQuerySchema = testApp({
+  tables: {
+    metrics: { columns: { largeCount: "bigint", largeCounts: { array: "bigint" } } },
   },
-  { migrations: "none" },
-).wasmSchema;
+}).wasmSchema;
 
 // Capture native bytes for valid queries through the serialized adapter interface.
 async function captureNativeQuery(schema: WasmSchema, query: object): Promise<Uint8Array> {
@@ -8565,7 +8546,7 @@ it("isolates throwing callbacks when replaying a deferred subscription failure",
 });
 
 it("passes different claims independently on same-query reads", async () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+  const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
   const rows = [
     { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
     { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },

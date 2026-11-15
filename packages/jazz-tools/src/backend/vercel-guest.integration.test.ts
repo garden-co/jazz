@@ -8,8 +8,7 @@ import {
 import { connect, type AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { generateSecret, signToken } from "../local-first-auth/index.js";
 import { acceptDeviceAccounts, createJazz, createJazzClient, vercel, type Jazz } from "./index.js";
@@ -28,13 +27,16 @@ vi.mock("ws", () => {
   });
 });
 
-const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+// Updates and deletes are denied.
+const permissionsFile = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
+/** The engine's permissions, for the clients. */
+const permissions = testPermissions(app, permissionsFile);
 
 /** The app's auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {
@@ -297,7 +299,7 @@ async function deployment(
   const instance = async () => {
     const jazz = await createJazz({
       app,
-      permissions,
+      permissions: permissionsFile,
       authenticate: auth,
       store: vercel({
         namespace: ({ environment }) => environment,

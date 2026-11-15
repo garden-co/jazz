@@ -10,7 +10,7 @@ import { Grid } from "@astryxdesign/core/Grid";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { AccountId } from "@/components/account-id";
 import { PageColumn } from "@/components/page-column";
 import { NewSessionDialog } from "@/components/new-session-dialog";

@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "resolveJsonModule": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["server", "jazz.generated.ts"]
+}

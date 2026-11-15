@@ -4,7 +4,7 @@
 // on whatever a deep link names: `#q=` (a query), `#table=`, `#row=`, `#as=`,
 // or `#grant=` (an agent's request for a token).
 
-import type { TablePolicies, WasmSchema } from "jazz-tools";
+import type { WasmSchema } from "jazz-tools";
 import {
   decodeGrant,
   inspectorLink,
@@ -29,6 +29,9 @@ import {
   type BackendContextValue,
   type ViewAs,
 } from "./backend-context.js";
+
+// jazz-tools no longer exports TablePolicies from its root: a table's policies, as a schema carries them.
+type TablePolicies = NonNullable<WasmSchema[string]["policies"]>;
 
 interface SchemaAnswer {
   tables: Record<string, WasmSchema[string] & { redacted?: string[] }>;

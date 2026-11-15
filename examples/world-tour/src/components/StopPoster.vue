@@ -12,7 +12,7 @@
 </template>
 
 <script setup lang="ts">
-import type { StopWithVenue } from "../../schema.js";
+import type { StopWithVenue } from "../../app-extras.js";
 import { formatLongDate } from "../lib/format.js";
 import Dialog from "./ui/Dialog.vue";
 

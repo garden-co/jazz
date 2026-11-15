@@ -1265,6 +1265,11 @@ export class ThinRuntime implements Runtime {
     return id;
   }
 
+  hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
+    const transaction = this.transactions.get(id);
+    return transaction ? transaction.staged : undefined;
+  }
+
   commitTransaction(id: OpenTransactionId): Promise<TxId> {
     const transaction = this.transactions.get(id);
     if (!transaction) {

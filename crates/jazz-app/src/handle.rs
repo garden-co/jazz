@@ -11,6 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use futures_util::FutureExt as _;
 use jazz::account_registry::AccountId;
 use jazz::tools::{
     AppContext, ClientStorage, JazzClient, ObjectId, QueryResult, ReadTier, Session, TableName,
@@ -140,7 +141,15 @@ impl Jazz {
         let (reply, answer) = oneshot::channel();
         let job: Job = Box::new(move |client| {
             Box::pin(async move {
-                let _ = reply.send(job(client).await);
+                // A panic in the job is its caller's error, not the end of
+                // the client: the other jobs and the client run on.
+                // Calling `job` happens inside the guard too: a closure
+                // that panics before returning its future is caught.
+                let result = std::panic::AssertUnwindSafe(async move { job(client).await })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|panic| Err(Error::Panicked(panic_message(&*panic))));
+                let _ = reply.send(result);
             })
         });
         self.commands
@@ -429,6 +438,14 @@ fn run(
             });
         }
     });
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic without a message".to_owned())
 }
 
 type Opened = (Option<String>, Option<AccountId>);

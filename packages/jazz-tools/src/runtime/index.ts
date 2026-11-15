@@ -6,6 +6,7 @@ export {
   type PermissionAdvice,
   PersistedWriteRejectedError,
   WriteWaitTimeoutError,
+  EmptyTransactionError,
   type WriteWaitOptions,
   type DurabilityTier,
   ReadTier,

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "build": "node ../../packages/jazz-tools/dist/cli.js generate && vite build",
     "preview": "vite preview",
     "test": "pnpm run test:unit && pnpm run test:browser",
     "test:unit": "vitest run --config vitest.config.ts",

@@ -5,7 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NapiDb } from "jazz-napi";
-import { schema as s } from "../../packages/jazz-tools/src/schema-namespace.js";
+import { testApp, testPermissions } from "../../packages/jazz-tools/src/testing/test-app.js";
 import { createJazzContext } from "../../packages/jazz-tools/src/backend/create-jazz-context.js";
 
 const ticks: { start: number; duration: number }[] = [];
@@ -28,21 +28,14 @@ NapiDb.prototype.setTickScheduler = function (callback) {
   });
 };
 
-const app = s.defineApp(
-  {
-    drafts: s.table({ text: s.string() }, {}),
-    messages: s.table({ channel: s.string(), text: s.string() }, {}),
+const app = testApp({
+  tables: {
+    drafts: { columns: { text: "string" } },
+    messages: { columns: { channel: "string", text: "string" } },
   },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  for (const table of [policy.drafts, policy.messages]) {
-    table.allowRead.always();
-    table.allowInsert.always();
-    table.allowUpdate.always();
-    table.allowDelete.always();
-  }
 });
+const allowAll = { read: "true", insert: "true", update: "true", delete: "true" };
+const permissions = testPermissions(app, { tables: { drafts: allowAll, messages: allowAll } });
 const path = mkdtempSync(join(tmpdir(), "jazz-node-startup-"));
 const context = createJazzContext({
   appId: "00000000-0000-0000-0000-000000002979",

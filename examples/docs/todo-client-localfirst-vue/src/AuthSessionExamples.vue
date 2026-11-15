@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useAll, useSession } from "jazz-tools/vue";
-import { app } from "../session-app.js";
+import { app } from "../session-app/jazz.generated.js";
 
 // #region auth-session-vue-hook
 const session = useSession();

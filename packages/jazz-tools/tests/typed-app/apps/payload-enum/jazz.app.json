@@ -1,0 +1,29 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "events": {
+      "columns": {
+        "event": {
+          "enum": {
+            "message": {
+              "requiredText": "string",
+              "nullableText": "string?",
+              "defaultedText": { "type": "string", "default": "default" }
+            }
+          }
+        },
+        "optionalEvent": {
+          "enum": {
+            "message": {
+              "requiredText": "string",
+              "nullableText": "string?",
+              "defaultedText": { "type": "string", "default": "default" }
+            }
+          },
+          "optional": true
+        }
+      }
+    }
+  }
+}
