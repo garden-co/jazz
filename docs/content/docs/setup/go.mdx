@@ -65,7 +65,8 @@ Mergeable text columns (`merge: "text"`, `"markdown"`, `"html"`) get an edit met
 UTF-8 byte offsets, which merge with concurrent edits. `jazz.InsertStreaming` streams an
 `io.Reader` into a `bytes` column and `jazz.OpenBytes` reads one a page at a time (`jazz.Range` and
 `jazz.JSONAt` select part of a large value), `jazzapp.Tasks.Upsert` and `Restore` upsert and
-restore rows, and `jazzapp.Tasks.CanInsert(ctx, db, row)` (and `CanRead`,
+restore rows (`jazz.IncludeDeleted(q)` reads deleted ones), `jazz.HopTo`, `jazz.Gather`
+(recursive queries), `jazz.Union` and `jazz.History` cover the graph and history queries, and `jazzapp.Tasks.CanInsert(ctx, db, row)` (and `CanRead`,
 `CanUpdate`, `CanDelete`) advise what the app's permissions allow.
 
 Errors match their kind with `errors.Is`: `jazz.ErrPermission`, `jazz.ErrRefused`,
@@ -112,9 +113,8 @@ to keep it in the OS keychain.
 - serving end users from a Go backend: a Go program can sign in as an end user, but there is no Go
   equivalent of `createJazz`'s `/jazz` endpoint yet (serve it from a TypeScript backend);
 - guest (anonymous) users;
-- `hopTo`, `gather` (recursive queries), `union` and history queries: the Go API
-  (`jazz.HopTo`, `jazz.Gather`, `jazz.Union`, `jazz.History`) is there, but Jazz refuses them until
-  the native core supports them;
+- history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
+  select columns or be subscribed to yet;
 - writing and filtering by payload enums (enums with fields): they read as sealed interfaces, and a
   write or an `Eq` on one is refused;
 - nested rows and catalogue enums;
