@@ -1,6 +1,7 @@
-//! Snippets for the docs' Rust main backend: the app's Jazz endpoint at
-//! `/jazz`, and routes acting as the request's user. The docs include them
-//! by region; this crate only has to compile.
+//! Snippets for the docs: a Rust main backend serving the app's Jazz endpoint
+//! at `/jazz`, routes acting as the request's user, and a backend client of a
+//! main backend. The docs include them by region; this crate only has to
+//! compile.
 
 use todo_server_docs::jazz_app;
 
@@ -77,3 +78,31 @@ async fn my_todos(
     Ok(Json(todos.into_iter().map(|todo| todo.title).collect()))
 }
 // #endregion backend-for-user-rust
+
+/// A backend client of a main backend: a machine that connects to the main
+/// backend's `/jazz` with its workload's OIDC token, as a scoped machine.
+pub async fn backend_client() -> ::jazz_app::Result<()> {
+    // #region backend-client-rust
+    use ::jazz_app::{AppId, Auth, Config, Storage, TokenReason};
+    use jazz_app::todos; // the generated bindings
+
+    // The main backend trusts this workload as a user:
+    // `backendClients: [trustWorkload({ issuer, audience, claims, as: (claims) => ({ userId }) })]`.
+    let config = Config::new(AppId::from_name("todos"))
+        .server("https://app.example/jazz") // the main backend's Jazz endpoint
+        .storage(Storage::Memory)
+        .user(Auth::bearer(|_reason: TokenReason| async move {
+            // The workload's OIDC token, read fresh each time it is asked for.
+            Ok(std::fs::read_to_string("/var/run/secrets/jazz/token")
+                .ok()
+                .map(|token| token.trim().to_owned()))
+        }));
+    let jazz = jazz_app::open(config).await?;
+    let open = jazz
+        .all(todos::query().filter(todos::done().eq(false)))
+        .await?;
+    println!("{} open todos", open.len());
+    jazz.shutdown().await?;
+    // #endregion backend-client-rust
+    Ok(())
+}
