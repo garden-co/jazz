@@ -6,6 +6,7 @@ export const computed = {
     priority: (row) => {
       expectTypeOf(row.score).toEqualTypeOf<number>();
       expectTypeOf(row.storedPriority).toEqualTypeOf<ItemPriority>();
+      expectTypeOf(row.id).toEqualTypeOf<string>();
       return row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low";
     },
   },

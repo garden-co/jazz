@@ -61,6 +61,17 @@ async fn typed_snippets_run() {
 
     let created = snippets::group_todo_writes(&jazz, parent.id).await.unwrap();
     assert!(jazz.get::<jazz_app::Todo>(created).await.unwrap().is_some());
+    // The serializable snippet finishes an open todo once.
+    assert!(
+        snippets::finish_todo_serializably(&jazz, created)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !snippets::finish_todo_serializably(&jazz, created)
+            .await
+            .unwrap()
+    );
     let parent_now = jazz
         .get::<jazz_app::Todo>(parent.id)
         .await
@@ -75,11 +86,15 @@ async fn typed_snippets_run() {
             .unwrap()
             .is_none()
     );
-    snippets::write_todo_with_default_durability(&jazz)
-        .await
-        .unwrap();
-    // The created todos from the CRUD, transaction and durability snippets
-    // and the parent remain.
+    // The durability snippet needs a server: locally its plain write lands
+    // and its durable one is refused before it writes.
+    assert!(
+        snippets::write_todo_with_default_durability(&jazz)
+            .await
+            .is_err()
+    );
+    // The todos the CRUD, transaction and durability snippets created, and
+    // the parent, remain.
     assert_eq!(snippets::read_todos_oneshot(&jazz).await.unwrap().len(), 4);
 
     jazz.shutdown().await.unwrap();
