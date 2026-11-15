@@ -16,6 +16,8 @@ use crate::{CodegenError, ts};
 pub struct Recorded {
     /// `sha256:…` of the `jazz.app.json` they were generated from.
     pub source: String,
+    /// The bindings format ([`ts::FORMAT`]) they were written in.
+    pub format: u32,
     /// That file's current schema.
     pub current: SchemaHash,
     pub current_schema: Schema,
@@ -35,6 +37,13 @@ pub fn read(bindings: &str) -> Result<Recorded, CodegenError> {
             "not a module jazz-tools generated (its first line differs)",
         ));
     }
+    let format = bindings
+        .lines()
+        .nth(1)
+        .and_then(|line| line.strip_prefix("// Bindings format "))
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|n| n.parse::<u32>().ok())
+        .ok_or_else(|| refuse("no `// Bindings format <n>.` second line"))?;
     let call = bindings
         .find(ts::BIND_APP)
         .ok_or_else(|| refuse("no `export const app = bindApp<…>(…)`"))?;
@@ -75,6 +84,7 @@ pub fn read(bindings: &str) -> Result<Recorded, CodegenError> {
         return Err(refuse("the current schema doesn't match its hash"));
     }
     Ok(Recorded {
+        format,
         source,
         current,
         current_schema,
@@ -160,7 +170,9 @@ pub enum Staleness {
     /// `tables` changed since the bindings were generated and no migration
     /// leads from that version: `migrations create` is needed.
     SchemaChanged,
-    /// The file changed otherwise: regenerating is enough.
+    /// The file changed otherwise, or another Jazz version wrote them:
+    /// regenerating is enough. (Formatting doesn't make bindings stale:
+    /// only their `source` and format count.)
     OutOfDate,
 }
 
@@ -190,7 +202,7 @@ pub fn staleness(app: &App, bindings: Option<&str>) -> Result<Option<Staleness>,
     {
         return Ok(Some(Staleness::SchemaChanged));
     }
-    if recorded.source != app.source {
+    if recorded.source != app.source || recorded.format != ts::FORMAT {
         return Ok(Some(Staleness::OutOfDate));
     }
     Ok(None)
