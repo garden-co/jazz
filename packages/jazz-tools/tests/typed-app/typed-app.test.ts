@@ -246,11 +246,11 @@ describe("typed app prototype", () => {
     });
     // `$createdBy` is metadata, not an indexable timestamp.
     expect(() => testApp(withIndex(["roomId", "$createdBy"]))).toThrow(
-      /distinct declared columns or provenance timestamps/,
+      /indexes\.composite\[0\]: table messages has no column `\$createdBy`/,
     );
     // Not a column of this table.
     expect(() => testApp(withIndex(["roomId", "sentAt"]))).toThrow(
-      /distinct declared columns or provenance timestamps/,
+      /indexes\.composite\[0\]: table messages has no column `sentAt`/,
     );
     expect(() => testApp(withIndex(["$createdAt", "$createdAt"]))).toThrow(
       /distinct declared columns or provenance timestamps/,
