@@ -5,8 +5,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 set +e
 output=$(sh "$root/dev/scripts/clippy-staged.sh" \
-  "examples/todo-server-rs/src/file with spaces.rs" \
-  examples/todo-server-rs/src/main.rs 2>&1)
+  "examples/docs/todo-server-rs/src/file with spaces.rs" \
+  examples/docs/todo-server-rs/src/main.rs 2>&1)
 status=$?
 set -e
 if [ "$status" -ne 0 ]; then
