@@ -36,6 +36,14 @@ describe("holdAcrossPageCache", () => {
     expect(log).toEqual(["store leaves", "store returns"]);
   });
 
+  it("lets go of nothing for a page that unloads instead", async () => {
+    const log: string[] = [];
+    holder(log, "store");
+    fire("pagehide", false);
+    expect(log).toEqual([]);
+    expect(pageCacheForTest.isAway()).toBe(false);
+  });
+
   it("ignores the first pageshow of a page that never left", async () => {
     const log: string[] = [];
     holder(log, "store");

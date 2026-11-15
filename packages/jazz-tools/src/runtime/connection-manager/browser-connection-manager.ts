@@ -75,6 +75,7 @@ export class BrowserConnectionManager extends ConnectionManager {
    * What needs the connection meanwhile waits for that one.
    */
   private pageAway: {
+    left: BrowserWorkerConnection;
     reopened: Promise<BrowserWorkerConnection | null>;
     reopen: (connection: BrowserWorkerConnection | null) => void;
   } | null = null;
@@ -143,7 +144,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       return;
     let reopen!: (connection: BrowserWorkerConnection | null) => void;
     const reopened = new Promise<BrowserWorkerConnection | null>((resolve) => (reopen = resolve));
-    this.pageAway = { reopened, reopen };
+    this.pageAway = { left: connection, reopened, reopen };
     this.clearWorkerRecoveryTimer();
     this.unregisterInspectorControl?.();
     this.unregisterInspectorControl = null;
@@ -154,18 +155,24 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   /**
-   * Back from the back/forward cache (or the navigation never happened):
-   * open a new connection to the worker. The runtime kept its writes and
-   * transaction identities; the new connection replays what the worker
-   * hasn't seen, as after a worker failure.
+   * Back from the back/forward cache: open a new connection to the worker.
+   * The runtime kept its writes and transaction identities; the new
+   * connection replays what the worker hasn't seen, as after a worker
+   * failure. Unless the store was deleted, reset or invalidated meanwhile
+   * (the worker told only the tabs attached then): this page's runtime
+   * shows what is gone, so it reloads, as an attached tab does.
    */
-  private returnFromPageCache(): void {
+  private returnFromPageCache(): void | "stop" {
     const away = this.pageAway;
     if (!away) return;
     this.pageAway = null;
     if (this.shutdownStarted || this.host.isShuttingDown || !this.browserConnectionInput) {
       away.reopen(null);
       return;
+    }
+    if (away.left.storeChangedSinceLeaving?.() && reloadAfterStorageInvalidation()) {
+      away.reopen(null);
+      return "stop";
     }
     try {
       away.reopen(this.openBrowserWorkerConnection());

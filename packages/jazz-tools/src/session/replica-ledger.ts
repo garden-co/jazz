@@ -260,10 +260,20 @@ async function holdLock(
     },
     return: async () => {
       if (released || releaseHeld) return;
-      await take();
-      // Released meanwhile, or the page left again before it held the lock.
-      if (released || !releaseHeld) return;
-      return pageCache.returned();
+      const held = take().then(() => {
+        // Released meanwhile, or the page left again before it held the lock.
+        if (released || !releaseHeld) return;
+        return pageCache.returned();
+      });
+      // Another page's wipe or check holds the lock exclusively, for moments.
+      // One that doesn't let go must not keep this page from reconnecting:
+      // past the patience the next holder goes on, and this one still checks
+      // the store once it holds the lock.
+      let patience: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        held,
+        new Promise<void>((resolve) => (patience = setTimeout(resolve, RETAKE_PATIENCE_MS))),
+      ]).finally(() => clearTimeout(patience));
     },
   });
   // Resolves once the lock is gone, not merely asked to go: a wipe that
@@ -329,6 +339,8 @@ async function whileNoTabHolds<T>(
 /** As the backend watch confirms a signed-out answer before it signs anyone out. */
 export const CONFIRM_SIGNED_OUT_MS = 2_000;
 
+/** How long a page back from the back/forward cache waits for its store's lock before it reconnects anyway. */
+const RETAKE_PATIENCE_MS = 10_000;
 /** How long an open waits for an unfinished wipe it can't finish yet: at most ~10 s. */
 const FINISH_WIPE_RETRY_MS = 100;
 const FINISH_WIPE_RETRIES = 100;

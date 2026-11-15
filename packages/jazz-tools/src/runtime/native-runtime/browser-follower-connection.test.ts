@@ -814,6 +814,16 @@ describe("MessagePortBrowserFollowerConnection.leaveForPageCache", () => {
     expect(connection.leaveForPageCache()).toBe(true);
   });
 
+  it("declines while a write waits for the worker to settle it, and keeps it", async () => {
+    const { connection, port, setLocalSettlementsPending } = await createWatchdogFollower();
+    port.sent.length = 0;
+    setLocalSettlementsPending(true);
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.close).not.toHaveBeenCalled();
+    setLocalSettlementsPending(false);
+    expect(connection.leaveForPageCache()).toBe(true);
+  });
+
   it("declines before the worker admitted it", () => {
     const port = new TestPort();
     const connection = new MessagePortBrowserFollowerConnection(

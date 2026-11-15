@@ -86,6 +86,11 @@ export interface BrowserWorkerConnection {
    * worker): it stays as it was.
    */
   leaveForPageCache?(): boolean;
+  /**
+   * After `leaveForPageCache`: whether the store was deleted, reset or
+   * invalidated meanwhile, which the worker told only the tabs attached.
+   */
+  storeChangedSinceLeaving?(): boolean;
   /** Present only after an authenticated Inspector control-port attachment. */
   getAuthenticatedInspectorAttachmentPhysicalDbName?(): string | null;
 }

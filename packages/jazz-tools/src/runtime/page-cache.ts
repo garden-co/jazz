@@ -5,9 +5,9 @@
  * A Jazz page holds two locks for its whole life: its store's
  * (`jazz-replica-v1`, see `replica-ledger`) and its own liveness lock
  * (`jazz-tab-alive`, see the shared worker connection). So each holder lets
- * go when the page leaves (`pagehide`) and takes its lock again when the page
- * comes back from the cache (`pageshow`, `persisted`). A page that unloads
- * instead never comes back, and the browser drops whatever it still held.
+ * go when the page goes into the cache (`pagehide`, `persisted`) and takes
+ * its lock again when it comes back (`pageshow`, `persisted`). A page that
+ * unloads lets go of nothing itself: the browser drops what it held.
  *
  * (Firefox caches no page connected to a SharedWorker that holds a lock, as
  * a local-first tab's worker always does, so there "back" loads the page
@@ -56,7 +56,11 @@ export function holdAcrossPageCache(holder: PageCacheHolder): () => void {
 function listen(): void {
   if (listening) return;
   listening = true;
-  window.addEventListener("pagehide", leave);
+  // Only a page the browser keeps: one that unloads drops its locks with
+  // it, and letting go early would only cut short what it still sends.
+  window.addEventListener("pagehide", (event) => {
+    if (event.persisted) leave();
+  });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) comeBack();
   });

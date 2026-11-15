@@ -33,6 +33,11 @@ import { MessagePortBrowserFollowerConnection } from "./browser-follower-connect
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
 import { toError } from "../util.js";
+import {
+  browserStoreGeneration,
+  browserStoreGenerationChanged,
+  renewBrowserStoreGeneration,
+} from "../browser-store-generation.js";
 import { describeBrokerWorkerLoadFailure } from "./broker-worker-load-failure.js";
 
 /**
@@ -222,6 +227,8 @@ export function deleteBrowserStore(
       const answer = event.data;
       if (answer?.type === "delete-store-result") {
         finish();
+        // A tab in the back/forward cache meanwhile must not come back to it.
+        if (answer.outcome === "deleted") renewBrowserStoreGeneration(dbName);
         resolve(answer.outcome);
       } else if (answer?.type === "delete-store-error") {
         finish();
@@ -616,6 +623,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private cancelBootstrap: (() => void) | null = null;
   /** Lets go of this connection's liveness lock (see `holdLivenessLock`). */
   private releaseLivenessLock: (() => void) | null = null;
+  private readonly dbName: string;
+  /** The store's incarnation when the page left for the back/forward cache. */
+  private storeGenerationWhenLeft: string | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -639,6 +649,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     this.workerName = workerName;
+    this.dbName = options.dbName;
     const createWorker = (name: string) => createBrokerSharedWorker(runtimeSources, name);
     // Retain admission failures as state rather than leaving a process-wide
     // bootstrap promise rejected. The manager converts this state back into
@@ -888,8 +899,16 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             onExplicitOfflineChange: this.callbacks.onExplicitOfflineChange,
             onRemoteLinkChange: this.callbacks.onRemoteLinkChange,
             onFailure: this.callbacks.onFailure,
-            onStorageReset: this.callbacks.onStorageReset,
-            onStorageInvalidated: this.callbacks.onStorageInvalidated,
+            // Each tab that hears of a reset records it, for the tabs in the
+            // back/forward cache that don't (see `storeChangedSinceLeaving`).
+            onStorageReset: (resetId) => {
+              renewBrowserStoreGeneration(this.dbName);
+              this.callbacks.onStorageReset?.(resetId);
+            },
+            onStorageInvalidated: () => {
+              renewBrowserStoreGeneration(this.dbName);
+              this.callbacks.onStorageInvalidated?.();
+            },
           },
           options.logLevel === "trace",
         );
@@ -1006,11 +1025,21 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
    */
   leaveForPageCache(): boolean {
     if (this.closed || this.readyError || !this.connection?.leaveForPageCache()) return false;
+    this.storeGenerationWhenLeft = browserStoreGeneration(this.dbName);
     this.closed = true;
     this.connection = null;
     this.worker = null;
     this.releaseLivenessLock?.();
     return true;
+  }
+
+  /**
+   * Whether the store was deleted, reset or invalidated (by another tab, or
+   * by clearing site data) since this connection left for the back/forward
+   * cache: the worker told the tabs attached then, not this one.
+   */
+  storeChangedSinceLeaving(): boolean {
+    return browserStoreGenerationChanged(this.dbName, this.storeGenerationWhenLeft);
   }
 
   async shutdown(): Promise<void> {

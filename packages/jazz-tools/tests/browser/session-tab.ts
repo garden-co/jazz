@@ -20,6 +20,7 @@ declare module "vitest/internal/browser" {
     sessionTabLeave: (id: string) => Promise<{ heldWhileAway: string[] }>;
     sessionTabReturn: (id: string) => Promise<{ restored: boolean; notRestoredReasons: string[] }>;
     pageCacheKeepsSharedWorkerPages: () => Promise<boolean>;
+    sessionTabNavigationType: (id: string) => Promise<string | null>;
   }
 }
 
@@ -66,5 +67,7 @@ export async function openSessionTab(
     leave: () => commands.sessionTabLeave(id),
     /** Go back: whether the page came back from the cache, and why not. */
     goBack: () => commands.sessionTabReturn(id),
+    /** How its page last loaded: `"reload"` once it reloaded itself. */
+    navigationType: () => commands.sessionTabNavigationType(id),
   };
 }

@@ -7,7 +7,7 @@ import {
   type ReplicaEntry,
   type ReplicaLifecycle,
 } from "./replica-ledger.js";
-import { pageCacheForTest } from "../runtime/page-cache.js";
+import { holdAcrossPageCache, pageCacheForTest } from "../runtime/page-cache.js";
 
 // The #5250 model test: several tabs of one browser, one per-account store,
 // a backend and the device's account store, all simulated; random
@@ -634,6 +634,42 @@ describe("the back/forward cache", () => {
     fire("pageshow", true);
     await pageCacheForTest.returned();
     expect(b.locks.sharedHolders(aliceLock)).toBe(0);
+  });
+
+  it("a page whose store lock stays taken reconnects after its patience, and checks the store once it holds it", async () => {
+    vi.useFakeTimers();
+    try {
+      const b = browser();
+      const cached = b.tab("A");
+      await b.open(cached, alice);
+      fire("pagehide", true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(b.locks.sharedHolders(aliceLock)).toBe(0);
+      let endCheck!: () => void;
+      const checking = b.locks
+        .view("B")
+        .request(
+          aliceLock,
+          { mode: "exclusive", ifAvailable: true },
+          () => new Promise<void>((resolve) => (endCheck = resolve)),
+        );
+      const after: string[] = [];
+      // A holder after the store's: the client's worker connection.
+      holdAcrossPageCache({ leave: () => {}, return: () => void after.push("connection") });
+      fire("pageshow", true);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(after).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await pageCacheForTest.returned();
+      expect(after).toEqual(["connection"]);
+      expect(b.locks.sharedHolders(aliceLock)).toBe(0);
+      endCheck();
+      await checking;
+      await vi.waitFor(() => expect(b.locks.sharedHolders(aliceLock)).toBe(1));
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a page that left again before it held the store again lets go of it", async () => {

@@ -42,6 +42,7 @@ import {
   leaveSessionTab,
   returnToSessionTab,
   pageCacheKeepsSharedWorkerPages,
+  sessionTabNavigationType,
 } from "./tests/browser/session-tab-node.js";
 import {
   closeRemoteBrowserDb,
@@ -267,6 +268,7 @@ export default defineConfig({
         sessionTabCrash: async (_context, id) => crashSessionTab(id),
         sessionTabLeave: async (_context, id) => leaveSessionTab(id),
         sessionTabReturn: async (_context, id) => returnToSessionTab(id),
+        sessionTabNavigationType: async (_context, id) => sessionTabNavigationType(id),
         pageCacheKeepsSharedWorkerPages: async ({ context, page }) =>
           pageCacheKeepsSharedWorkerPages(context, page),
         jazzAppSignUp: async (_context, frontUrl, originUrl, userId) =>

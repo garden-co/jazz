@@ -318,12 +318,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
    * page for. The runtime keeps its writes; the connection that replaces
    * this one on return replays them, as after a worker failure.
    *
-   * Declines (`false`) while an operation waits on the worker: its outcome
-   * would be lost. That page keeps its connection, and with it its liveness
+   * Declines (`false`) while work waits on the worker (an operation, or a
+   * write the worker hasn't settled yet): its outcome would be lost. That page keeps its connection, and with it its liveness
    * lock, while it is cached.
    */
   leaveForPageCache(): boolean {
-    if (this.closed || this.failed || !this.established || this.pending.size > 0) return false;
+    if (this.closed || this.failed || !this.established || this.hasPendingWork()) return false;
     try {
       // As a tab that closes: the last tab out releases the worker's hold on
       // the store, so a tab under another sign-in may open it meanwhile.

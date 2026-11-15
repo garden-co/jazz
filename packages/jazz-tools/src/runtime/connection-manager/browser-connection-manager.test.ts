@@ -1844,6 +1844,22 @@ describe("BrowserConnectionManager in the back/forward cache", () => {
     }
   });
 
+  it("reloads instead of reconnecting when the store was reset or deleted while the page was away", async () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+    const fixture = await cachedManagerFixture();
+    try {
+      fixture.first.storeChangedSinceLeaving = vi.fn(() => true);
+      fire("pagehide", true);
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      expect(reload).toHaveBeenCalledOnce();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+    } finally {
+      await fixture.finish();
+    }
+  });
+
   it("keeps a connection that can't leave, and opens none when the page returns", async () => {
     const fixture = await cachedManagerFixture(false);
     try {

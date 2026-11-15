@@ -175,3 +175,15 @@ export async function returnToSessionTab(
     };
   }, left.marker);
 }
+
+/** How the tab's page last loaded ("navigate", "reload", "back_forward"); `null` mid-navigation. */
+export async function sessionTabNavigationType(id: string): Promise<string | null> {
+  return tab(id)
+    .evaluate(() => {
+      const entry = performance.getEntriesByType("navigation")[0] as
+        | PerformanceNavigationTiming
+        | undefined;
+      return entry?.type ?? null;
+    })
+    .catch(() => null);
+}
