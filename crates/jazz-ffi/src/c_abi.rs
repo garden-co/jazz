@@ -580,8 +580,18 @@ pub unsafe extern "C" fn jazz_generate_device_key(err: *mut *mut c_char) -> *mut
     })
 }
 
-/// A backend's `/jazz` endpoint (opaque to C).
-pub struct JazzEndpoint(crate::endpoint::EndpointCore);
+/// A backend's `/jazz` endpoint (opaque to C), with the gate on its host
+/// callback: cleared by `jazz_endpoint_free`, after which the callback is
+/// never called again (sockets still being served answer "no one").
+pub struct JazzEndpoint(crate::endpoint::EndpointCore, std::sync::Arc<AuthGate>);
+
+/// The host's `authenticate` and its `ctx`, while the endpoint lives.
+type AuthGate = std::sync::RwLock<
+    Option<(
+        unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+        TokenContext,
+    )>,
+>;
 
 /// A socket an endpoint serves (opaque to C).
 pub struct JazzSocket(crate::endpoint::SocketCore);
@@ -630,12 +640,18 @@ pub unsafe extern "C" fn jazz_endpoint_new(
                 "options_json",
             )?
         };
-        let ctx = std::sync::Arc::new(TokenContext(ctx));
+        let gate: std::sync::Arc<AuthGate> =
+            std::sync::Arc::new(std::sync::RwLock::new(Some((cb, TokenContext(ctx)))));
+        let calling = gate.clone();
         let auth: std::sync::Arc<crate::endpoint::HostAuthFn> =
             std::sync::Arc::new(move |request: &str| {
-                let ctx = &ctx;
+                // Held for the call: `jazz_endpoint_free` waits for it, and
+                // once it has cleared the gate no call starts.
+                let gate = calling.read().unwrap_or_else(|e| e.into_inner());
+                let (cb, ctx) = gate.as_ref()?;
                 let request = CString::new(request).unwrap_or_default();
-                // SAFETY: per `jazz_endpoint_new`'s contract.
+                // SAFETY: per `jazz_endpoint_new`'s contract, while the
+                // endpoint (this gate) lives.
                 let answer = unsafe { cb(ctx.0, request.as_ptr()) };
                 if answer.is_null() {
                     return None;
@@ -657,7 +673,7 @@ pub unsafe extern "C" fn jazz_endpoint_new(
                 .and_then(Json::as_u64)
                 .and_then(|max| usize::try_from(max).ok()),
         )?;
-        Ok(Box::into_raw(Box::new(JazzEndpoint(endpoint))))
+        Ok(Box::into_raw(Box::new(JazzEndpoint(endpoint, gate))))
     })
 }
 
@@ -813,8 +829,10 @@ pub unsafe extern "C" fn jazz_socket_free(socket: *mut JazzSocket) {
     }));
 }
 
-/// Frees an endpoint: stops the client it acts as users with (its sockets
-/// end on their own).
+/// Frees an endpoint: stops the client it acts as users with. When it
+/// returns, the authenticate callback is not running and is never called
+/// again, so `ctx` may be freed; sockets still being served answer their
+/// requests as no one (free them with `jazz_socket_free`).
 ///
 /// # Safety
 /// `endpoint` is NULL or from `jazz_endpoint_new`, not yet freed.
@@ -826,6 +844,9 @@ pub unsafe extern "C" fn jazz_endpoint_free(endpoint: *mut JazzEndpoint) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: per the function's contract.
         let endpoint = unsafe { Box::from_raw(endpoint) };
+        // Waits for a running callback, then no callback is ever called:
+        // the host may free `ctx` once this returns.
+        endpoint.1.write().unwrap_or_else(|e| e.into_inner()).take();
         let _ = endpoint.0.shutdown();
     }));
 }

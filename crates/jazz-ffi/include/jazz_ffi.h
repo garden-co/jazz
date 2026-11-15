@@ -202,6 +202,12 @@ JazzSocket *jazz_endpoint_socket(JazzEndpoint *endpoint, const char *upgrade_jso
 int jazz_socket_push(JazzSocket *socket, const unsigned char *data, size_t len, char **err);
 /* The client's socket closed: ends it, waits for on_close, frees it. */
 void jazz_socket_free(JazzSocket *socket);
+/*
+ * Frees an endpoint. When it returns, the authenticate callback is not
+ * running and is never called again, so its ctx may be freed; sockets still
+ * being served then answer as no one (free them with jazz_socket_free). An
+ * authenticate call taking over 30 s is answered as no one.
+ */
 void jazz_endpoint_free(JazzEndpoint *endpoint);
 
 /* Frees a string returned by, or stored in *err by, this API. */

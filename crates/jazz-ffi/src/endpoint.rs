@@ -29,6 +29,9 @@ const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::
 /// none) out. Called on a thread of its own: it may block.
 pub(crate) type HostAuthFn = dyn Fn(&str) -> Option<String> + Send + Sync;
 
+/// How long a host's `authenticate` may take before its request is no one.
+const AUTHENTICATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) fn request(json: &str) -> Result<Request> {
     let json: Json = serde_json::from_str(json)
         .map_err(|e| refused(format!("the request is not valid JSON: {e}")))?;
@@ -115,7 +118,11 @@ impl EndpointCore {
             async move {
                 spawned
                     .map_err(|e| jazz_app::Error::Config(format!("cannot authenticate: {e}")))?;
-                let answer = receiver.await.map_err(|_| jazz_app::Error::Stopped)?;
+                // A host callback that hangs is no one, not a held socket.
+                let answer = match tokio::time::timeout(AUTHENTICATE_TIMEOUT, receiver).await {
+                    Ok(answer) => answer.map_err(|_| jazz_app::Error::Stopped)?,
+                    Err(_) => None,
+                };
                 match answer {
                     None => Ok(None),
                     Some(text) => serde_json::from_str::<Answer>(&text)

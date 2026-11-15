@@ -334,11 +334,47 @@ impl SocketListener for Recorder {
     }
 }
 
-/// A socket whose opening message names credentials anywhere but its
-/// `auth` (here: an empty `auth` beside a top-level token) gets no session:
-/// the endpoint answers it as not signed in and closes it with 1008.
+/// The host's sign-in for device accounts: a request without a bearer may
+/// be a device account (TS `acceptDeviceAccounts`).
+struct Devices;
+impl Authenticator for Devices {
+    fn authenticate(&self, _request_json: String) -> Option<String> {
+        Some(json!({ "kind": "deviceAccount" }).to_string())
+    }
+}
+
+/// Opens a socket on `endpoint`, sends `prelude` as the client's first
+/// message, and returns how the endpoint closed it, if it did within the
+/// wait.
+fn close_of(endpoint: &Endpoint, app: &str, prelude: Value, wait: Duration) -> Option<u16> {
+    let (sender, events) = std::sync::mpsc::channel();
+    let upgrade = json!({ "method": "GET", "path": format!("/jazz/apps/{app}/ws"), "headers": [] })
+        .to_string();
+    let socket = endpoint
+        .socket(upgrade, Arc::new(Recorder(sender)))
+        .unwrap();
+    socket.push(serde_json::to_vec(&prelude).unwrap()).unwrap();
+    let deadline = std::time::Instant::now() + wait;
+    let mut closed = None;
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match events.recv_timeout(left) {
+            Ok((_, Some((code, _)))) => {
+                closed = Some(code);
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    socket.end();
+    closed
+}
+
+/// A device account's local-first token is admitted inside the prelude's
+/// `auth`; the same token beside an empty `auth` gets no session and the
+/// socket closes 1008.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_prelude_with_credentials_outside_auth_gets_no_session() {
+async fn a_credential_outside_auth_gets_no_session() {
     let app_id = jazz_app::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
@@ -350,29 +386,107 @@ async fn a_prelude_with_credentials_outside_auth_gets_no_session() {
     let result = blocking(move || {
         let backend = JazzHandle::open(config).unwrap();
         let endpoint = backend
-            .endpoint(Arc::new(Bearers), None, None, None)
+            .endpoint(Arc::new(Devices), None, None, None)
             .unwrap();
-        let path = format!("/jazz/apps/{app}/ws");
-        assert!(endpoint.is_socket(path.clone()));
-        let (sender, events) = std::sync::mpsc::channel();
-        let upgrade = json!({ "method": "GET", "path": path, "headers": [] }).to_string();
-        let socket = endpoint
-            .socket(upgrade, Arc::new(Recorder(sender)))
-            .unwrap();
-        let prelude = json!({ "peer_identity": "someone", "jwt_token": "a.b.c", "auth": {} });
-        socket.push(serde_json::to_vec(&prelude).unwrap()).unwrap();
-        let mut closed = None;
-        while let Ok((_, close)) = events.recv_timeout(Duration::from_secs(10)) {
-            if close.is_some() {
-                closed = close;
-                break;
-            }
-        }
-        let (code, _) = closed.expect("the socket is closed");
-        assert_eq!(code, 1008);
-        socket.end();
+        let token = jazz_app::jazz::tools::identity::mint_jazz_self_signed_token(
+            &[7; 32],
+            "urn:jazz:local-first",
+            &app,
+            3600,
+        )
+        .unwrap();
+        // Inside `auth`: admitted (the socket stays open).
+        let inside = json!({ "peer_identity": "client", "auth": { "jwt_token": token } });
+        assert_eq!(
+            close_of(&endpoint, &app, inside, Duration::from_secs(2)),
+            None
+        );
+        // Beside an empty `auth`: no session.
+        let outside = json!({ "peer_identity": "client", "jwt_token": token, "auth": {} });
+        assert_eq!(
+            close_of(&endpoint, &app, outside, Duration::from_secs(10)),
+            Some(1008)
+        );
         endpoint.shutdown().unwrap();
         backend.shutdown().unwrap();
+    })
+    .await;
+    server.shutdown().await;
+    result.unwrap();
+}
+
+static AUTH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe extern "C" fn counting_auth(
+    _ctx: *mut std::ffi::c_void,
+    _request: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    AUTH_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    std::ptr::null_mut()
+}
+
+unsafe extern "C" fn ignore_message(_: *mut std::ffi::c_void, _: *const u8, _: usize) {}
+unsafe extern "C" fn ignore_close(_: *mut std::ffi::c_void, _: u16, _: *const std::ffi::c_char) {}
+
+/// C hosts: once `jazz_endpoint_free` returns, the authenticate callback is
+/// never called again, even for a socket still being served (the host may
+/// free its `ctx`); that socket's client is no one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_authenticate_call_after_the_endpoint_is_freed() {
+    use jazz_ffi::c_abi::*;
+    use std::ffi::CString;
+    let app_id = jazz_app::AppId::random();
+    let server = jazz_server::JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let config = CString::new(backend_config(&server, &app_id.to_string(), "stage-plan")).unwrap();
+    let app = app_id.to_string();
+    let result = blocking(move || unsafe {
+        let mut err = std::ptr::null_mut();
+        let backend = jazz_open(config.as_ptr(), &mut err);
+        assert!(!backend.is_null());
+        let endpoint = jazz_endpoint_new(
+            backend,
+            Some(counting_auth),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut err,
+        );
+        assert!(!endpoint.is_null());
+        let upgrade = CString::new(
+            json!({ "method": "GET", "path": format!("/jazz/apps/{app}/ws"), "headers": [] })
+                .to_string(),
+        )
+        .unwrap();
+        let socket = jazz_endpoint_socket(
+            endpoint,
+            upgrade.as_ptr(),
+            Some(ignore_message),
+            Some(ignore_close),
+            std::ptr::null_mut(),
+            &mut err,
+        );
+        assert!(!socket.is_null());
+        jazz_endpoint_free(endpoint);
+        let before = AUTH_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        // A stated session: the endpoint asks the host who this is.
+        let prelude = serde_json::to_vec(&json!({
+            "peer_identity": "client",
+            "auth": { "backend_session": { "user_id": "alice" } },
+        }))
+        .unwrap();
+        jazz_socket_push(
+            socket,
+            prelude.as_ptr(),
+            prelude.len(),
+            std::ptr::null_mut(),
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(AUTH_CALLS.load(std::sync::atomic::Ordering::SeqCst), before);
+        jazz_socket_free(socket);
+        jazz_close(backend);
     })
     .await;
     server.shutdown().await;
