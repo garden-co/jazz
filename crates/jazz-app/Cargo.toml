@@ -2,6 +2,8 @@
 name = "jazz-app"
 version = "0.1.0"
 edition = "2024"
+# Not published: its test-relay bin serves tests/relay, a test stand-in.
+publish = false
 description = "Typed, Send + Clone Rust handle for a Jazz app opened from its jazz.app.json"
 
 [dependencies]
@@ -16,6 +18,30 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+# Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
+futures = { version = "0.3", optional = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"], optional = true }
+
+[features]
+# A stand-in for an app's Jazz endpoint, for testing bindings' end users:
+# see src/bin/jazz-app-test-relay.rs.
+test-relay = [
+  "dep:futures",
+  "dep:tokio-tungstenite",
+  "tokio/net",
+  "tokio/io-util",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+]
+
+[[bin]]
+name = "jazz-app-test-relay"
+path = "src/bin/jazz-app-test-relay.rs"
+required-features = ["test-relay"]
+
+[[test]]
+name = "test_relay_bin"
+required-features = ["test-relay"]
 
 [dev-dependencies]
 jazz-codegen = { path = "../jazz-codegen" }
