@@ -676,7 +676,7 @@ schema version.
   one.
 - The app's lenses make the names agree. An app ships its schema versions
   and the lenses between them (`DbConfig::with_migrations`; the JSON a
-  deployment publishes, which `jazz-tools validate` and `deploy` write to
+  deployment publishes, which `jazz-tools generate` and `deploy` write to
   `migrations/index.ts` beside `schema.ts`, and which TypeScript apps pass
   to `defineApp`). A store opening, or viewing, a version it has not
   admitted first admits the versions on a lens path to it, starting at one
@@ -795,7 +795,8 @@ An app is described by two readable JSON files beside its `schema.ts`:
   read it, so no client bundle carries the app's policies.
 
 The files are meant to be read by people and agents, and later written by
-them. In stage 1 (alpha.63) they are an IR: `jazz-tools validate` and
+them (see **Bindings** below for alpha.65, where they are the source). In
+stage 1 (alpha.63) they are an IR: `jazz-tools generate` and
 `jazz-tools migrations create` compile the TS DSL (`schema.ts`,
 `permissions.ts`, `migrations/*.ts`) to them through the Rust writer
 (`jazz::tools::deployment::artifact::write`), and `validate --check` fails
@@ -828,9 +829,9 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 | `tables`     | map name → Table      | The current schema: the version the app's code is written against.     |
 | `history`    | map version → Version | Optional. Earlier versions the app still ships, by name, oldest first. |
 | `migrations` | array of Migration    | Optional. Lenses between versions.                                     |
-| `slices`     | map export → [table]  | Optional. Slices `schema.ts` exports, by export name (codegen only).   |
+| `transforms` | map name → Transform  | Optional. Transforms columns name, implemented in every language.      |
 
-**Table** `{columns, relations?, indexes?, branchBy?, history?, tsOnly?}`:
+**Table** `{columns, relations?, indexes?, branchBy?, history?, computed?}`:
 
 - `columns`: map name → Column, in declared order.
 - `relations`: map name → Relation, separate from columns, as in the DSL:
@@ -845,9 +846,14 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 - `branchBy`: array of column names.
 - `history`: `"latest"` keeps only each row's newest version; absent keeps
   full history.
-- `tsOnly`: map field → `"computed"` or `"transform"`, for `s.computed` fields
-  (not stored, not in `columns`) and `.transform` columns (stored). Engines
-  ignore it; other languages' codegen warns about each.
+- `computed`: map name → `{"type": <Column type>, "from": [<column>, …]}`,
+  fields computed in code from the listed stored columns of the same table
+  (or `id`), in the order the implementation takes them; not stored, so the
+  engine schema and its hash don't include them. `type` is a column type
+  with an optional `?` and no options. A name may not be a column, a
+  relation, `id` or another computed field, and `from` names only stored
+  columns. Every language's bindings require an implementation of each
+  (in TS, `jazz.computed.ts`; a missing one is a compile error).
 
 **Column** is a type string, or an object when it needs options.
 
@@ -863,21 +869,34 @@ Neither file carries a schema hash or bundle id: loaders compute them.
     `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`, and
     `"references": "<table>"` for a column that references a table no
     forward relation names (a forward relation's column references its
-    table without it; history versions, which carry no relations, use it).
+    table without it; history versions, which carry no relations, use it),
+    and `"transform": "<name>"` for a column whose stored value goes
+    through a transform of the top-level `transforms` (whose `stored` type
+    must be the column's type).
 - Values are JSON in the column's type: strings for `string`, enums and
   `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
-  engine's integer for `timestamp` (an ISO 8601 form is not supported yet),
+  engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
+  8601 form is not supported yet),
   base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
   `{"<case>": {...}}` for payload enums, and `null`.
 
+**Transform** `{stored, view}`: two column types without `?` or options.
+The engine stores `stored`; code reads and writes `view`, converting with
+the transform every language implements (in TS, `jazz.computed.ts`). The
+column naming it says whether it is optional. A transform is a pure
+function of its one column: one that reads other columns (the .63 DSL's
+`dependsOn`) is not supported. Permissions can't reference computed or
+transformed values: they see the stored columns.
+
 **Version** `{tables, $comment?}`: an earlier schema in the same Table form
-(without relations). The writer names a version by its short schema hash,
+(without relations, computed fields or transforms). The writer names a version by its short schema hash,
 the first 12 hex characters (`3fa1c2d9e0b4`), as snapshot names end; a
 hand-written file may use any name.
 
-**Migration** `{from, to?, createTables?, dropTables?, renameTables?, migrate?}`,
+**Migration** `{name?, from, to?, createTables?, dropTables?, renameTables?, migrate?}`,
 the readable form of `defineMigration`:
 
+- `name`: what `migrations create --name` recorded; the engine ignores it.
 - `from`, `to`: version names; `to` absent means the current `tables`.
 - `createTables` / `dropTables`: arrays of table names.
 - `renameTables`: map new name → old name.
@@ -889,6 +908,45 @@ the readable form of `defineMigration`:
   - `{"renameFrom": "<old>"}` (`m.renameFrom`).
 
 Every migration must pass the lens checks a deployment runs (§10.6).
+
+**TODOs.** A string starting with `TODO:` where the tools write
+placeholders (any value in `migrations`, a computed field's `type`, a
+transform's `stored` or `view`, or the `json` of such a type) is a
+decision `jazz-tools migrations create` or `jazz-tools upgrade` left to the
+author. Every loader refuses a file that has one, listing each by JSON path
+and text, so a half-written migration never deploys. Elsewhere (a column
+default, an enum variant, a JSON Schema's text, a `$comment`) `TODO:` is
+plain text.
+
+**Every version leads to the current one.** Each `history` version must be
+connected to the current `tables` by a chain of migrations (lenses run both
+ways). A version that isn't, but whose rows pass unchanged to a later one
+(the same tables and columns, by name, of the same type and optionality;
+an enum may gain variants at the end), is joined to the next such version
+by the identity step that change implies, as files written before alpha.65
+hold them (their `migrations create` wrote no migration for an index,
+merge-strategy or column-order change). Any other loads with a warning
+(such files are what `jazz-tools validate` wrote before alpha.65 while a
+migration was still to be written), and `generate` refuses it, since
+bindings must not ship a version clients couldn't open; `migrations create`
+writes the migration that connects it.
+
+**Relation names.** A relation may not take the name of a column of its
+table, nor `id`, as the TS DSL refused.
+
+**Indexes** name stored columns of their table (a composite index also
+`$createdAt` and `$updatedAt`); a computed field isn't stored, so it can't
+be indexed.
+
+**References.** A migration may not move a kept column's reference to
+another table: its values name rows of the old one (add a new column and
+drop this one later). A reference to a table the same migration renames
+follows it.
+
+**Files from alpha.63.** A file's `slices` (schema slicing is gone in
+alpha.65) and a table's `tsOnly` load with a warning that they are ignored;
+`jazz-tools upgrade` turns `tsOnly` into `computed` and `transforms` and
+removes `slices`.
 
 #### `jazz.permissions.json`
 
@@ -1024,7 +1082,10 @@ Meaning:
   naming its JSON path, as it refuses an outer-row reference outside any
   `exists`. `session.__jazz_outer_row…` is not a session value: the reader
   refuses it.
-- **Session values.** `session.user`, `session.claims.<path>`,
+- **Session values.** `session.user` (the account: `$createdBy =
+session.user` matches rows written through any identity linked to it),
+  `session.identity` (the exact login: `$createdBy.identity =
+session.identity` matches only rows it wrote), `session.claims.<path>`,
   `session.identity.subject`, `session.identity.issuer` and
   `session.authMode`; any other path is refused as a typo.
 - **Comparisons.** A comparison compares a column with a value, a column
@@ -1039,7 +1100,7 @@ Meaning:
   with; one that can't (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is
   refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
   float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
-  `timestamp(1700000000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
+  `timestamp(1700000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
   `row(null, text('a'))`, `enumcase('closed', timestamp(5))`) is exactly that
   value, whatever it is compared with; the writer uses one only where a plain
   literal would read back as another value.
@@ -1069,7 +1130,12 @@ case(p)` an enum case whose payload satisfies `p` (`EnumMatch`), and
 - **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
   leads to allows `op`. `allowedTo.op(via col)` names the forward column
   itself and `allowedTo.op(via t.col)` the rows of `t` pointing here, for a
-  link no relation names. `maxDepth` bounds recursive chains.
+  link no relation names. `maxDepth` bounds recursive chains of forward
+  relations; a reverse relation (or `via t.col`) takes none, as the TS DSL
+  refused one: the engine checks every row pointing here and refuses
+  reverse inheritance cycles when it compiles the schema, so a bound would
+  be dropped rather than applied. A recursive relation's `maxDepth` is at
+  most 64.
 - `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
   number of items; the writer uses them only for fewer than two.
 - Nesting deeper than 64 levels is refused.
@@ -1114,7 +1180,39 @@ don't reproduce the engine input exactly (schema hashes, lenses,
 permissions), it refuses with "not supported … yet" rather than write files
 that would publish something else.
 
-Fixtures: `crates/jazz/fixtures/app-artifact/`.
+**Bindings.** From alpha.65 the files are the app's source in every
+language. `crates/jazz-codegen` generates typed bindings from
+`jazz.app.json` (`jazz.generated.ts` in TS), which apps commit. They embed
+the file's `source`, `sha256:` and the hex SHA-256 of its canonical text
+(the parsed file printed canonically, so reformatting the file leaves it
+alone; `artifact::source_hash`), and the compiled app a runtime opens
+along: `{current, schemas: [{hash, schema}], migrations}`, the bundle
+`load_client` lowers, so no runtime parses the readable file. Their second
+line names the bindings format. Bindings are stale when their `source` or
+format differs; reformatting them doesn't make them stale, and bindings
+that can't be read are regenerated (`--check` refuses them). A backend with
+only the bindings loads its permissions against their compiled app
+(`artifact::load_backend`), with every check `load` runs.
+
+The bindings also record the version the app last generated against, which
+is how `jazz-tools generate` (and the `jazz-tools` binary's `validate`)
+tells edits apart: when the file's versions don't include the bindings'
+current schema, `tables` changed without a migration, and validate refuses
+("the schema changed since the last version: run `jazz-tools migrations
+create --name <name>`") before it overwrites the only copy of that version.
+`migrations create` moves that version into `history` under its short hash
+and appends a migration (`name`, `from`, and the steps the diff decides:
+tables created, dropped or renamed when a removed table is identical to
+exactly one added one; columns added with their default or `null`, dropped
+with theirs; enums gaining variants at the end need no step). What only the
+author can decide is a `TODO:` string: a required column's value for
+existing rows, an added column shaped like a removed one (a rename, or an
+add and a drop), or a table change no step describes. A kept column's
+type or optionality can't change in place and is refused with the
+supported alternative.
+
+Fixtures: `crates/jazz/fixtures/app-artifact/`; generated bindings:
+`crates/jazz-codegen/tests/apps/`.
 
 ### Active schema and local schema
 

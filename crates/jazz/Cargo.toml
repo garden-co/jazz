@@ -67,6 +67,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 # Jazz's own tests (and the layer crates' test helpers they call) need the
 # `testing` feature, so a featureless `cargo test -p jazz` enables it here.
 jazz = { path = ".", default-features = false, features = ["testing"] }
+# The JSON Schemas of the app files, checked against the fixtures (jazz-model
+# already depends on this crate).
+jsonschema = { version = "0.42", default-features = false }
 divan.workspace = true
 jazz-benchmark-guard = { path = "../benchmark-guard" }
 hdrhistogram = "7.5.4"

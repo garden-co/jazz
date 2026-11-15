@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import { serverSigningKey } from "./signing-key.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
@@ -6,6 +6,7 @@ import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import * as jazzNapi from "jazz-napi";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -38,15 +39,11 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { shippedMigrations, shipsNoMigrations } from "../runtime/client-migrations.js";
-import { checkRunningApp } from "../dev/app-files.js";
-import { computeSchemaHash } from "../schema-hash.js";
-import {
-  mergePermissionsIntoWasmSchema,
-  type CompiledPermissionsMap,
-} from "../schema-permissions.js";
-import type { WasmSchema } from "../drivers/types.js";
-import { deployApp } from "../dev/catalogue.js";
+import { checkRunningBindings } from "../dev/app-files.js";
+import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
+import { boundApp } from "../typed-app.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { publishLoadedDeployment } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
@@ -442,9 +439,18 @@ export interface AuthenticatedUser extends JazzUser {
   expiresAt: number;
 }
 
+/**
+ * An app's `jazz.permissions.json`, as a backend imports it
+ * (`import permissions from "./jazz.permissions.json" with { type: "json" }`).
+ * Jazz's Rust loader reads and checks it against the app's bindings.
+ */
+export type AppPermissionsFile = { readonly format: number } & Readonly<Record<string, unknown>>;
+
 export interface CreateJazzOptions {
+  /** The app, as `jazz.generated.ts` exports it. */
   app: BackendSchemaInput;
-  permissions: CompiledPermissionsMap;
+  /** The app's `jazz.permissions.json`, imported as JSON. */
+  permissions: AppPermissionsFile;
   store: JazzStore;
   /**
    * Decide who sent `request`, with your app's own session (a cookie, a
@@ -551,6 +557,19 @@ export interface CreateJazzOptions {
    */
   sessionTtlSeconds?: number;
   /**
+   * How long an HTTP stream session may reuse `authenticate`'s answer for
+   * its client's later sends, in seconds. Defaults to 60. A send asks
+   * `authenticate` again sooner if its headers differ from the ones that
+   * answer came from, or the answer's `expiresAt` has passed; `revokeUser`
+   * ends the session at once either way. So a sign-out elsewhere that left
+   * the browser's cookie in place, a ban without `revokeUser`, or a revoked
+   * scoped backend credential reaches an open stream session within this
+   * long. Pass 0 for an `authenticate` that must run on every request
+   * (single-use tokens, per-request rate limits, sessions bound to a
+   * client IP). WebSocket sessions authenticate once, when they open.
+   */
+  streamAuthReuseSeconds?: number;
+  /**
    * Removed. Sessions no longer re-check `authenticate` from a timer: each
    * lasts until the `expiresAt` `authenticate` returns, then its client
    * connects again and `authenticate` decides on that new request. To end a
@@ -632,6 +651,37 @@ export interface CreateJazzOptions {
   inspect?: InspectHook;
   /** Redaction, auditing and agent token settings for {@link inspect}. */
   inspector?: InspectorOptions;
+}
+
+/** How long a stream session reuses `authenticate`'s answer by default (`streamAuthReuseSeconds`). */
+const DEFAULT_STREAM_AUTH_REUSE_SECONDS = 60;
+
+/**
+ * Request headers that differ from send to send without saying who sent it:
+ * set per request by proxies, hosts and tracing, or describing the body.
+ * Named one by one: every other header counts as a credential, since an
+ * app's `authenticate` may read any of them (an identity-aware proxy's
+ * `x-forwarded-user`, `cf-access-jwt-assertion`, a client certificate), and
+ * a changed one asks `authenticate` again.
+ */
+const PER_REQUEST_HEADER =
+  /^(content-length|content-type|content-encoding|transfer-encoding|date|via|forwarded|traceparent|tracestate|baggage|sentry-trace|x-request-id|x-correlation-id|x-amzn-trace-id|x-cloud-trace-context|x-b3-(traceid|spanid|parentspanid|sampled|flags)|b3|x-real-ip|true-client-ip|x-jazz-stream-key|x-forwarded-(for|host|proto|port|prefix|server)|cf-(ray|ipcountry|visitor|worker|ew-via|cache-status|connecting-ip)|x-vercel-(id|deployment-url|forwarded-for|ip-[a-z-]+|proxied-for|proxy-signature(-ts)?|sc-[a-z-]+|internal-[a-z-]+)|x-matched-path)$/;
+
+/** A digest of what an app's `authenticate` may read off a stream send. */
+function streamCredentials(request: Request): string {
+  const hash = createHash("sha256").update(request.url).update("\0");
+  const names: string[] = [];
+  request.headers.forEach((_, name) => {
+    if (!PER_REQUEST_HEADER.test(name)) names.push(name);
+  });
+  for (const name of names.sort()) {
+    hash
+      .update(name)
+      .update("\0")
+      .update(request.headers.get(name) ?? "")
+      .update("\0");
+  }
+  return hash.digest("base64url");
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -728,7 +778,11 @@ export interface Jazz {
    * their `expiresAt`. A session still signing in when you call it (its
    * `authenticate` may have read the cookie you just ended) is refused too
    * if it signs in as `userId`. Sessions served by other instances end at
-   * their `expiresAt`. Returns how many open sessions it ended.
+   * their `expiresAt`; an HTTP stream session there also asks
+   * `authenticate` again on a send at least every `streamAuthReuseSeconds`
+   * (a minute by default), so it ends within that long if `authenticate` no
+   * longer names the user. Returns how
+   * many open sessions it ended.
    */
   revokeUser(userId: string): Promise<number>;
   /**
@@ -1038,22 +1092,25 @@ async function applyBundle(
   options: {
     appId: string;
     adminSecret: string;
-    app: BackendSchemaInput;
-    permissions: CompiledPermissionsMap;
+    /** What the Rust loader built from the app's bindings and jazz.permissions.json. */
+    loaded: LoadedBackendApp;
     allowDroppingHistory?: boolean;
+    /** A test harness's backend: print no warnings. */
+    quiet?: boolean;
   },
 ): Promise<string> {
   // Published, never activated: this backend's sessions are pinned to its
   // bundle, so deployments of the app serve side by side and a rollback is
   // publishing the older bundle again.
-  const deployed = await deployApp({
-    appId: options.appId,
-    serverUrl: origin,
-    adminSecret: options.adminSecret,
-    app: options.app,
-    permissions: options.permissions,
-    allowDroppingHistory: options.allowDroppingHistory,
-  }).catch((error: unknown) => {
+  const deployed = await publishLoadedDeployment(
+    {
+      appId: options.appId,
+      serverUrl: origin,
+      adminSecret: options.adminSecret,
+      allowDroppingHistory: options.allowDroppingHistory,
+    },
+    options.loaded,
+  ).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
     if (error instanceof DeploymentError && (error.status === 404 || error.status === 405)) {
@@ -1067,6 +1124,13 @@ async function applyBundle(
   // An older core answers a publish without the bundle it made.
   if (!deployed.bundle) {
     throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
+  }
+  // The loader's own warnings were printed when the permissions loaded; the
+  // rest (tables without policies) are the publish's.
+  if (!options.quiet) {
+    for (const warning of deployed.warnings ?? []) {
+      if (!options.loaded.warnings.includes(warning)) console.warn(`jazz: ${warning}`);
+    }
   }
   return deployed.bundle;
 }
@@ -1450,6 +1514,11 @@ function jazzSettings(options: CreateJazzOptions): JazzSettings {
     throw new Error(
       "createJazz: recheckSeconds was removed. A sync session now lasts until the expiresAt your authenticate returns, and then authenticates again on its client's new connection; to end a user's sessions at once, call jazz.revokeUser(userId).",
     );
+  const reuse = options.streamAuthReuseSeconds;
+  if (reuse !== undefined && !(typeof reuse === "number" && reuse >= 0 && Number.isFinite(reuse)))
+    throw new Error(
+      `createJazz: streamAuthReuseSeconds must be a number of seconds, 0 or more; got ${JSON.stringify(reuse)}`,
+    );
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
   const publicUrls = [options.publicUrl ?? []].flat().map((value) => {
     try {
@@ -1542,8 +1611,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = async (next: CreateJazzOptions) => {
-    if (!testHarnessOptions.has(next)) await checkCommittedAppFiles(next);
-    return applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+    await compiledPermissions(next);
+    return applyBundle(core.serverUrl, {
+      ...next,
+      loaded: compiled.get(next)!,
+      appId,
+      adminSecret: core.adminSecret,
+      quiet: testHarnessOptions.has(next),
+    });
   };
 
   /** Publish `next`'s bundle and open the backend's own session on it. */
@@ -1555,7 +1630,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const session = await openJazzSession({
       appId,
       app: next.app,
-      permissions: next.permissions,
+      permissions: await compiledPermissions(next),
       serverUrl: core.serverUrl,
       driver: { type: "memory" },
       initial: { backendSecret: core.backendSecret },
@@ -2608,11 +2683,22 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
   }
 
+  /** `streamAuthReuseSeconds`, read live so a hot reload's options apply. */
+  const streamAuthReuseMs = () =>
+    (options.streamAuthReuseSeconds ?? DEFAULT_STREAM_AUTH_REUSE_SECONDS) * 1000;
   // HTTP stream sessions, by id, with the key that proves a request comes
   // from the client that opened them.
   const streams = new Map<
     string,
-    { session: ClientSession; key: Buffer; end(code: number, reason: string): void }
+    {
+      session: ClientSession;
+      key: Buffer;
+      end(code: number, reason: string): void;
+      /** The last `authenticate` answer for a send, while it may be reused (see `ownStream`). */
+      checked?: { credentials: string; userUntil: number; askedAt: number };
+      /** Counts asks of `authenticate` for sends, so only the latest one's answer is kept. */
+      authAsks: number;
+    }
   >();
   // Sockets accepted for clients, so close() can end them.
   const clientSockets = new Set<WsLikeSocket>();
@@ -2669,7 +2755,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 503 });
     }
-    streams.set(id, { session: socket, key, end });
+    streams.set(id, { session: socket, key, end, authAsks: 0 });
     controller.enqueue(
       encodeStreamRecord(
         STREAM_RECORD_SESSION,
@@ -2722,8 +2808,34 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         return new Response("not this backend client", { status: 403 });
       }
     } else if (socket.userId !== undefined) {
+      // A send carrying the same credentials as one `authenticate` admitted
+      // lately is the same user: an app save is several sends in a row, and
+      // asking the app's auth (a session lookup) on each was most of their
+      // server time. Any change to what `authenticate` may read asks it
+      // again; so does an answer past its `expiresAt`, or older than
+      // `streamAuthReuseSeconds`, so a sign-out elsewhere that kept this
+      // cookie (or a ban) reaches the stream within that long, where before
+      // it did on its next send. `revokeUser` ends the session at once.
+      const credentials = streamCredentials(request);
+      const checked = entry.checked;
+      if (
+        checked &&
+        checked.credentials === credentials &&
+        performance.now() - checked.askedAt < streamAuthReuseMs() &&
+        Date.now() < checked.userUntil
+      ) {
+        return socket;
+      }
+      entry.checked = undefined;
+      const ask = ++entry.authAsks;
+      const askedAt = performance.now();
       const user = await authenticate(request);
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
+      // Keep only the latest ask's answer (a slower earlier one must not
+      // undo a refusal since), and none once the session ended meanwhile.
+      if (streamAuthReuseMs() > 0 && entry.authAsks === ask && streams.get(id) === entry) {
+        entry.checked = { credentials, userUntil: user.expiresAt * 1000, askedAt };
+      }
     }
     return socket;
   }
@@ -3400,7 +3512,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       return schemaOf.schema;
     },
     get permissions() {
-      return options.permissions;
+      return compiledPermissionsOf(options);
     },
     db: () => backend.db,
     dbAs: async (user) => backendDbForSession(backend, await sessionFor(user, "inspect `as`")),
@@ -3542,7 +3654,6 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
-  refuseNoMigrationsOnPersistentStore(options);
   return openFacade(options);
 }
 
@@ -3559,80 +3670,80 @@ export function createTestJazz(options: CreateJazzOptions): Jazz {
   return openFacade(options);
 }
 
-/** The options of `createTestJazz` calls, which skip {@link checkCommittedAppFiles}. */
+/** The options of `createTestJazz` calls, which skip {@link checkRunningBindings}. */
 const testHarnessOptions = new WeakSet<CreateJazzOptions>();
 
+/** What the Rust loader made of each options' bindings and permissions file, once checked. */
+const compiled = new WeakMap<CreateJazzOptions, LoadedBackendApp>();
+
+/** The checked permissions of options {@link compiledPermissions} has loaded. */
+function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsMap {
+  const loaded = compiled.get(options);
+  if (!loaded) throw new Error("createJazz: the app's permissions are not loaded yet");
+  return loaded.permissions;
+}
+
 /**
- * Refuse to start when the project's committed jazz.app.json or
- * jazz.permissions.json no longer match the app's TS, naming which, as
- * `validate --check` would: an edited schema.ts or permissions.ts that
- * wasn't regenerated. Files absent (an app that never ran validate), an app
- * on `{ migrations: "none" }`, or an app the files can't express yet start
- * as before.
+ * Check the app's bindings and permissions and compile the permissions with
+ * Jazz's Rust loader, as `jazz-tools generate` checks them: refused when the
+ * bindings were generated from another jazz.app.json than the project's
+ * (stale bindings), or when jazz.permissions.json doesn't hold for the
+ * app's schema. A deployed backend without jazz.app.json in reach checks
+ * only the permissions.
  */
-async function checkCommittedAppFiles(options: CreateJazzOptions): Promise<void> {
-  let declared;
+async function compiledPermissions(options: CreateJazzOptions): Promise<CompiledPermissionsMap> {
+  const cached = compiled.get(options);
+  if (cached) return cached.permissions;
+  const bound = boundAppOf(options.app);
+  // Jazz's loader through a static jazz-napi import, so bundlers and file
+  // tracers (Next.js, Vercel) ship the addon with the backend.
+  provideCodegenNapi(jazzNapi);
+  if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
+  const permissions = options.permissions as unknown;
+  if (!isRecord(permissions) || typeof permissions.format !== "number") {
+    throw new Error(
+      'createJazz: `permissions` must be the app\'s jazz.permissions.json, imported as JSON: `import permissions from "./jazz.permissions.json" with { type: "json" }`.',
+    );
+  }
+  let loaded;
   try {
-    declared = resolveSchemaSource(options.app);
-  } catch {
-    // Not an app: publishing it says so.
-    return;
+    loaded = await loadBackendApp(bound, JSON.stringify(permissions));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`createJazz: ${message}`, { cause: error });
   }
-  if (shipsNoMigrations(declared)) return;
-  const schema = mergePermissionsIntoWasmSchema(declared, {});
-  const current = await computeSchemaHash(schema);
-  const shipped = shippedMigrations(declared);
-  const versions = new Map<string, WasmSchema>();
-  for (const version of shipped?.schemas ?? []) {
-    versions.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
-  }
-  versions.delete(current);
-  await checkRunningApp({
-    current,
-    schemas: [...versions.values(), schema],
-    migrations: (shipped?.migrations ?? []).map((edge) => ({
-      fromHash: edge.fromHash,
-      toHash: edge.toHash,
-      forward: edge.forward,
-    })),
-    permissions: options.permissions,
-    wasmSchema: declared,
-  });
+  for (const warning of loaded.warnings) console.warn(`jazz: ${warning}`);
+  compiled.set(options, loaded);
+  return loaded.permissions;
 }
 
-/**
- * The fix for an app on `{ migrations: "none" }` with a store that keeps its
- * data: what `createJazz` says when it refuses one.
- */
-export function noMigrationsOnPersistentStoreMessage(kind: string): string {
-  return (
-    `createJazz: defineApp(schema, { migrations: "none" }) ships no schema history, so this ${kind}() store ` +
-    "could not follow your first schema change. " +
-    'Add `import { migrations } from "./migrations"` to schema.ts, pass `{ migrations }` to defineApp, ' +
-    "then run `npx jazz-tools migrations create`: it records schema.ts as the app's first version in migrations/index.ts. " +
-    '"none" is only for memory() stores and tests. See https://jazz.tools/docs/schemas/migrations'
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * An app on `{ migrations: "none" }` ships no schema history: a store that
- * keeps its data (`sqlite()`, `vercel()`, `remote()`) would refuse the app at
- * its first schema change. Refused when `createJazz` is called, before
- * anything opens. `vercel()` is refused even outside a deployment, where it
- * runs its `local` store: it is the deployment's store that keeps the data.
- */
-function refuseNoMigrationsOnPersistentStore(options: CreateJazzOptions): void {
-  if (options.store.kind === "memory") return;
+/** What the generated bindings passed to `bindApp`, or a refusal naming where `app` comes from. */
+function boundAppOf(app: BackendSchemaInput) {
   let schema;
   try {
-    schema = resolveSchemaSource(options.app);
-  } catch {
-    // Not an app: opening the store says so.
-    return;
+    schema = resolveSchemaSource(app);
+  } catch (error) {
+    // A CommonJS-wrapped bindings module says so itself, with its fix.
+    const message = error instanceof Error ? error.message : "";
+    throw new Error(
+      message.includes("arrived as { default: … }")
+        ? `createJazz: ${message}`
+        : 'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`).',
+      { cause: error },
+    );
   }
-  if (shipsNoMigrations(schema)) {
-    throw new Error(noMigrationsOnPersistentStoreMessage(options.store.kind));
+  const bound = boundApp(schema);
+  if (!bound) {
+    throw new Error(
+      'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`); ' +
+        "run `npx jazz-tools generate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
+    );
   }
+  return bound;
 }
 
 function openFacade(options: CreateJazzOptions): Jazz {

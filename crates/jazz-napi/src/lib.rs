@@ -133,10 +133,151 @@ pub fn write_app_artifact(input: String) -> js::Result<WrittenAppFiles> {
 pub fn load_app_artifact(app: String, permissions: String) -> js::Result<JsonValue> {
     let loaded = jazz::tools::deployment::artifact::load(app.as_bytes(), permissions.as_bytes())
         .map_err(artifact_error)?;
-    Ok(serde_json::json!({
+    Ok(loaded_backend(&loaded))
+}
+
+/// What a backend needs of its loaded files: the current schema hash, the
+/// bundle id, the engine permissions (`{ [table]: TablePolicies }`), the
+/// body it publishes (`deployment`, the server's `DeployRequest` with
+/// `allowDroppingHistory: false`) and what loaded but is ignored.
+fn loaded_backend(loaded: &jazz::tools::deployment::artifact::LoadedApp) -> JsonValue {
+    serde_json::json!({
         "current": loaded.current_hash().to_string(),
         "bundle": loaded.bundle().to_hex(),
-    }))
+        "permissions": loaded.permissions(),
+        "deployment": loaded.deployment_body(false),
+        "warnings": loaded.warnings(),
+    })
+}
+
+/// Read and check a backend's `jazz.permissions.json` (`permissions`)
+/// against the compiled app its generated bindings embed (`schema`: JSON of
+/// `{ schema, relations }`, the options they pass to `bindApp`), for a
+/// deployed backend that has the bindings but not `jazz.app.json`. Same
+/// result and checks as `loadAppArtifact`.
+#[napi(js_name = "loadBackendApp")]
+pub fn load_backend_app(schema: String, permissions: String) -> js::Result<JsonValue> {
+    let loaded =
+        jazz::tools::deployment::artifact::load_backend(schema.as_bytes(), permissions.as_bytes())
+            .map_err(artifact_error)?;
+    Ok(loaded_backend(&loaded))
+}
+
+/// The bindings for `appJson` (a `jazz.app.json` text) in `lang` (`"ts"`):
+/// the whole `jazz.generated.ts`.
+#[napi(js_name = "generate")]
+pub fn generate_bindings(lang: String, app_json: String) -> js::Result<String> {
+    let lang = jazz_codegen::Lang::parse(&lang).map_err(codegen_error)?;
+    jazz_codegen::generate(lang, app_json.as_bytes()).map_err(codegen_error)
+}
+
+/// The options the generated TS bindings pass to `bindApp` (`{ source,
+/// schema, relations }`, without the computed and transform callbacks), as
+/// JSON text, for tests that define an app inline.
+#[napi(js_name = "compileApp")]
+pub fn compile_app(app_json: String) -> js::Result<String> {
+    jazz_codegen::compile_app(app_json.as_bytes()).map_err(codegen_error)
+}
+
+/// `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
+/// `source` generated bindings record.
+#[napi(js_name = "schemaSourceHash")]
+pub fn schema_source_hash(app_json: String) -> String {
+    jazz::tools::deployment::artifact::source_hash(app_json.as_bytes())
+}
+
+/// The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+/// policies dropped as a deployment drops them, as 64 hex characters. Not
+/// [`schema_source_hash`], which hashes the `jazz.app.json` file.
+#[napi(js_name = "schemaHash")]
+pub fn schema_hash(engine_schema_json: String) -> js::Result<String> {
+    jazz::tools::deployment::artifact::schema_hash(engine_schema_json.as_bytes())
+        .map(|hash| hash.to_string())
+        .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
+/// What `migrationsCreate` wrote.
+#[napi(object)]
+pub struct CreatedMigration {
+    /// The new `jazz.app.json` text.
+    pub app: String,
+    /// Whether a version and migration were added.
+    pub changed: bool,
+    /// JSON paths of the `"TODO: …"` strings left for the author.
+    pub todos: Vec<String>,
+    /// Why nothing was written, when it isn't simply that nothing changed
+    /// (an index-only edit).
+    pub note: Option<String>,
+}
+
+/// Write the migration from the version the committed bindings
+/// (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
+/// generated from to `appJson`'s edited `tables`, named `name`.
+#[napi(js_name = "migrationsCreate")]
+pub fn migrations_create(
+    app_json: String,
+    bindings: Option<String>,
+    name: String,
+) -> js::Result<CreatedMigration> {
+    let created = jazz_codegen::migrations::create(
+        jazz_codegen::Lang::TypeScript,
+        app_json.as_bytes(),
+        bindings.as_deref(),
+        &name,
+    )
+    .map_err(codegen_error)?;
+    Ok(CreatedMigration {
+        app: created.app,
+        changed: created.changed,
+        todos: created.todos,
+        note: created.note,
+    })
+}
+
+/// Check committed bindings (`bindings`, or null) against `appJson`. Throws
+/// with `error.code` `JAZZ_SCHEMA_CHANGED` when `tables` changed since the
+/// bindings were generated and no migration leads from that version (run
+/// `migrations create` before regenerating: the bindings hold the only
+/// copy of that version), or `JAZZ_BINDINGS_STALE` when regenerating is
+/// enough (including when there are none).
+#[napi(js_name = "validateBindings")]
+pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Result<()> {
+    use jazz_codegen::bindings::Staleness;
+    let app = jazz_codegen::App::load(app_json.as_bytes()).map_err(artifact_error)?;
+    match jazz_codegen::bindings::staleness(
+        &app,
+        jazz_codegen::Lang::TypeScript,
+        bindings.as_deref(),
+    )
+    .map_err(codegen_error)?
+    {
+        None => Ok(()),
+        Some(staleness) => {
+            let code = match staleness {
+                Staleness::SchemaChanged => "JAZZ_SCHEMA_CHANGED",
+                Staleness::Missing | Staleness::OutOfDate | Staleness::Unreadable(_) => {
+                    "JAZZ_BINDINGS_STALE"
+                }
+            };
+            Err(BindingError(napi::Error::new(
+                JsErrorCode(code.to_owned()),
+                staleness.message(jazz_codegen::Lang::TypeScript),
+            )))
+        }
+    }
+}
+
+/// A codegen refusal, coded as [`artifact_error`] codes the loaders'.
+fn codegen_error(error: jazz_codegen::CodegenError) -> BindingError {
+    use jazz::tools::deployment::artifact;
+    if error.is_unsupported() {
+        BindingError(napi::Error::new(
+            JsErrorCode(artifact::UNSUPPORTED_CODE.to_owned()),
+            error.message().to_owned(),
+        ))
+    } else {
+        napi::Error::from_reason(error.message().to_owned()).into()
+    }
 }
 
 /// An app-file refusal: what the files can't express (yet) throws with

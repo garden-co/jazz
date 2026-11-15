@@ -345,7 +345,8 @@ pub enum Ast {
     Allowed {
         op: Operation,
         target: AllowedTarget,
-        max_depth: Option<usize>,
+        /// The bound and where `maxDepth: n` is written.
+        max_depth: Option<(usize, Span)>,
     },
     Call {
         name: String,
@@ -439,8 +440,12 @@ const TYPED: &[&str] = &[
     "json",
 ];
 
+/// The deepest a recursive relation (`recursive(…, maxDepth: n)`, the
+/// DSL's `gather`) may go, as the TS DSL capped it.
+pub const RECURSIVE_MAX_DEPTH_CAP: usize = 64;
+
 /// Words a name must be quoted (`` `order` ``) to be read as a name.
-const KEYWORDS: &[&str] = &[
+pub(crate) const KEYWORDS: &[&str] = &[
     "and",
     "or",
     "not",
@@ -535,6 +540,15 @@ impl Parser<'_> {
 
     fn peek_at(&self, offset: usize) -> Option<&Tok> {
         self.tokens.get(self.at + offset).map(|t| &t.tok)
+    }
+
+    /// Whether a `,` continues a query's list (`select`, `order by`) rather
+    /// than ending the query: inside `recursive(…)` and `union(…)` a query
+    /// is followed by `, <field>: …`.
+    fn list_continues(&self) -> bool {
+        self.is_tok(&Tok::Comma)
+            && !(matches!(self.peek_at(1), Some(Tok::Ident(_)))
+                && self.peek_at(2) == Some(&Tok::Colon))
     }
 
     fn here(&self) -> Span {
@@ -836,10 +850,11 @@ impl Parser<'_> {
                         span,
                     }),
                 ) if key == "maxDepth" => {
-                    max_depth =
-                        Some(n.parse::<usize>().map_err(|_| {
-                            ExprError::new(span, "`maxDepth` takes a whole number")
-                        })?);
+                    max_depth = Some((
+                        n.parse::<usize>()
+                            .map_err(|_| ExprError::new(span, "`maxDepth` takes a whole number"))?,
+                        span,
+                    ));
                 }
                 _ => {
                     return Err(ExprError::new(self.here(), "expected `maxDepth: <number>`")
@@ -1006,6 +1021,7 @@ impl Parser<'_> {
         let known = matches!(
             parts.as_slice(),
             ["user"]
+                | ["identity"]
                 | ["identity", "subject"]
                 | ["identity", "issuer"]
                 | ["authMode"]
@@ -1021,7 +1037,7 @@ impl Parser<'_> {
         if !known {
             return Err(ExprError::new(
                 (start, end),
-                "a session value is `session.user` or `session.claims.<name>` (or `session.identity.subject`, `session.identity.issuer`, `session.authMode`)",
+                "a session value is `session.user` or `session.claims.<name>` (or `session.identity`, `session.identity.subject`, `session.identity.issuer`, `session.authMode`)",
             )
             .example("session.claims.role = 'admin'"));
         }
@@ -1359,7 +1375,7 @@ impl Parser<'_> {
                         self.expect_word("as")?;
                         let (alias, _) = self.name("a name after `as`")?;
                         columns.push(RelationProjectColumn { alias, expr });
-                        if self.is_tok(&Tok::Comma) {
+                        if self.list_continues() {
                             self.at += 1;
                         } else {
                             break;
@@ -1397,7 +1413,7 @@ impl Parser<'_> {
                             OrderDirection::Asc
                         };
                         terms.push(RelationOrderBy { column, direction });
-                        if self.is_tok(&Tok::Comma) {
+                        if self.list_continues() {
                             self.at += 1;
                         } else {
                             break;
@@ -1493,10 +1509,21 @@ impl Parser<'_> {
                     Some(Token {
                         tok: Tok::Num(n),
                         span,
-                    }) => RecursionBound::MaxDepth(
-                        n.parse()
-                            .map_err(|_| ExprError::new(span, "expected a whole number"))?,
-                    ),
+                    }) => {
+                        let depth: usize = n
+                            .parse()
+                            .map_err(|_| ExprError::new(span, "expected a whole number"))?;
+                        if depth > RECURSIVE_MAX_DEPTH_CAP {
+                            return Err(ExprError::new(
+                                span,
+                                format!(
+                                    "`maxDepth` {depth} exceeds the cap of {RECURSIVE_MAX_DEPTH_CAP} for a recursive relation"
+                                ),
+                            )
+                            .example("recursive(…, maxDepth: 8)"));
+                        }
+                        RecursionBound::MaxDepth(depth)
+                    }
                     _ => {
                         return Err(ExprError::new(
                             self.here(),
@@ -2194,14 +2221,25 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
     }
 }
 
+/// Why `allowedTo` along a reverse relation takes no `maxDepth`, as the TS
+/// DSL refused it: the engine checks every row pointing here, and refuses
+/// reverse inheritance cycles when it compiles the schema, so a bound
+/// would be dropped rather than applied.
+const REVERSE_MAX_DEPTH: &str = "`allowedTo` along a reverse relation takes no `maxDepth`; omit it (reverse inheritance cycles are refused when the schema compiles, so the rows pointing here are always all checked)";
+
 fn compile_allowed(
     op: Operation,
     target: &AllowedTarget,
-    max_depth: Option<usize>,
+    bound: Option<(usize, Span)>,
     context: &Context<'_>,
     scope: &Scope,
 ) -> Result<PolicyExpr, ExprError> {
     let table = scope.current().table.as_str();
+    let max_depth = bound.map(|(depth, _)| depth);
+    let no_depth = || match bound {
+        Some((_, span)) => Err(ExprError::new(span, REVERSE_MAX_DEPTH)),
+        None => Ok(()),
+    };
     match target {
         AllowedTarget::Via {
             table: None,
@@ -2222,11 +2260,12 @@ fn compile_allowed(
         } => {
             known_table(context, source, *span)?;
             column_type(context, source, column, *span)?;
+            no_depth()?;
             Ok(PolicyExpr::InheritsReferencing {
                 operation: op,
                 source_table: source.clone(),
                 via_column: column.clone(),
-                max_depth,
+                max_depth: None,
             })
         }
         AllowedTarget::Relation(relation, relation_span) => {
@@ -2247,11 +2286,12 @@ fn compile_allowed(
                             format!("relation `{relation}` leads back through `{source}.{forward}`, which is not a forward relation"),
                         )
                     })?;
+                    no_depth()?;
                     Ok(PolicyExpr::InheritsReferencing {
                         operation: op,
                         source_table: source.clone(),
                         via_column: via,
-                        max_depth,
+                        max_depth: None,
                     })
                 }
                 None => {

@@ -10,6 +10,7 @@
 
 mod accounts;
 pub(crate) mod http;
+mod metered_socket;
 mod utils;
 mod websocket;
 

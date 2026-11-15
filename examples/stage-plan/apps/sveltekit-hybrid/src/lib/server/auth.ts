@@ -2,7 +2,7 @@ import { betterAuth } from "better-auth";
 import { sveltekitCookies } from "better-auth/svelte-kit";
 import { getRequestEvent } from "$app/server";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { app } from "../../../schema";
+import { app } from "../../../jazz.generated";
 import { serverConfig } from "./config";
 import { jazz } from "./jazz";
 

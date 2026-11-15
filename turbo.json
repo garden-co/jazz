@@ -49,6 +49,7 @@
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
         "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
         "$TURBO_ROOT$/crates/jazz/**",
+        "$TURBO_ROOT$/crates/jazz-codegen/**",
         "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",
@@ -182,6 +183,7 @@
       "inputs": [
         "package.json",
         "$TURBO_ROOT$/crates/jazz/**",
+        "$TURBO_ROOT$/crates/jazz-codegen/**",
         "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-alpha59-alpha60-dump/**",
         "$TURBO_ROOT$/crates/jazz-cli/**",

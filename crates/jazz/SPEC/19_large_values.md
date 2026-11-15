@@ -326,8 +326,11 @@ each. Values up to the threshold, the common case, have none of these limits.
 These are limits, not a design commitment. A column flag that consolidates
 every write to a tail-free tree (making equality on that column exact, at the
 cost of cheap edits) is the planned escape hatch; content `contains` would
-need a write-time index (SQLite FTS5 with the trigram tokenizer runs on every
-target, Durable Objects included).
+need a write-time index. SQLite FTS5 with the trigram tokenizer is available
+on the native builds (server, NAPI, React Native) and on Durable Objects, but
+not in the browser: its WASM SQLite is built without FTS5 (#5516). An FTS5
+index therefore can't be the browser's answer; that target needs FTS5 back in
+its build or an index made of ordinary tables.
 
 The only Rust-side query work on chunked values is reading them: whole
 projections, partial selections (19.12), splices and deltas. Every query,
@@ -572,7 +575,17 @@ app.things.where({ id: thingId }).select({
 Ranges are half-open `[from, to)`. Byte ranges apply only to bytes; `{from,to}`
 on text is in UTF-16 code units; `{fromUtf8,toUtf8}` opts into UTF-8 bytes.
 `{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results are an
-ordinary `Uint8Array`, `string`, or decoded JSON subtree. Selecting a field by
+ordinary `Uint8Array`, `string`, or decoded JSON subtree.
+
+A range is clamped to the value it reads, in one-shot reads and
+subscriptions alike: `[min(from, end), end)` with `end = min(to, len)`, so a
+range that starts past the end reads as empty and one that runs past it
+reads what the value covers. A subscribed range thus outlives the value
+shrinking below it and follows it as it grows back. Clamping never rounds:
+an inverted range (`from > to`) fails, and so do clamped bounds that split a
+UTF-8 code point or a UTF-16 surrogate pair. The direct native range read
+(`Db::read_value_range`) names exact bytes and fails past the end, and so do
+`applyDiffs` pages (below). Selecting a field by
 name (or omitting `select`) materializes the complete value. Object-form
 partial selections apply to the root query only; in an include builder they
 fail explicitly rather than returning the complete value.
@@ -710,6 +723,7 @@ not expose epochs, cells, node hashes, tree nodes, leases or retry state.
 - Store-local leaf patches (a new leaf kept as its base leaf plus edits until
   it is offloaded), as a storage optimization outside the format.
 - Exact equality, ranges and `contains` on values over 64 KiB (19.5): a
-  consolidating column flag, and a write-time FTS5 trigram index.
+  consolidating column flag, and a write-time trigram index (FTS5 where
+  the target's SQLite has it; not the browser WASM, see 19.5).
 - Retention and history thinning: removal of old versions must be ordinary
   refcounted row deletions, never direct node deletion.

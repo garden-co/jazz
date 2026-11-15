@@ -11,7 +11,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { app, type Track } from "@/schema";
+import { app, type Track } from "@/jazz.generated";
 import { ROLE_LABELS, strongestRole } from "@/lib/roles";
 import { MAX_TRACKS } from "@/lib/instruments";
 import { addTrack, stepRow } from "@/lib/session-setup";

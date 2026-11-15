@@ -1,0 +1,61 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "projects": {
+      "columns": { "name": "string", "budget": "bigint?", "logo": "bytes?" },
+      "relations": { "tasksViaProject": { "reverse": "tasks", "relation": "project" } }
+    },
+    "tasks": {
+      "columns": {
+        "title": { "type": "string", "merge": "text" },
+        "projectId": "uuid",
+        "status": { "enum": ["todo", "doing", "done"], "default": "todo" },
+        "score": { "type": "int", "default": 0, "merge": "counter" },
+        "tags": { "array": "string" },
+        "dueAt": { "type": "timestamp", "optional": true, "transform": "isoDate" },
+        "meta": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "color": { "type": "string" },
+              "size": { "enum": ["s", "m", "l"] },
+              "links": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["color"],
+            "additionalProperties": false
+          },
+          "optional": true
+        },
+        "extra": { "json": true, "optional": true },
+        "review": {
+          "enum": {
+            "pending": {},
+            "approved": { "by": "uuid", "note": "string?" },
+            "rejected": { "reason": "string" }
+          },
+          "optional": true
+        },
+        "assigneeIds": { "array": "uuid" }
+      },
+      "relations": {
+        "project": { "rel": "projects", "column": "projectId" },
+        "assignees": { "rel": "people", "column": "assigneeIds" }
+      },
+      "indexes": ["projectId", ["projectId", "$createdAt"]],
+      "computed": {
+        "priority": { "type": { "enum": ["low", "high"] }, "from": ["score", "status"] },
+        "label": { "type": "string?", "from": ["title", "dueAt"] }
+      }
+    },
+    "people": {
+      "columns": { "name": "string", "email": { "type": "string", "transform": "lowercase" } },
+      "relations": { "tasksViaAssignees": { "reverse": "tasks", "relation": "assignees" } },
+      "history": "latest"
+    }
+  },
+  "transforms": {
+    "isoDate": { "stored": "timestamp", "view": "string" },
+    "lowercase": { "stored": "string", "view": "string" }
+  }
+}

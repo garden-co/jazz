@@ -396,6 +396,28 @@ export declare function captureTextRange(text: string, version: number | undefin
  */
 export declare function checkClientMigrations(migrations: string, target: string): void
 
+/**
+ * The options the generated TS bindings pass to `bindApp` (`{ source,
+ * schema, relations }`, without the computed and transform callbacks), as
+ * JSON text, for tests that define an app inline.
+ */
+export declare function compileApp(appJson: string): string
+
+/** What `migrationsCreate` wrote. */
+export interface CreatedMigration {
+  /** The new `jazz.app.json` text. */
+  app: string
+  /** Whether a version and migration were added. */
+  changed: boolean
+  /** JSON paths of the `"TODO: …"` strings left for the author. */
+  todos: Array<string>
+  /**
+   * Why nothing was written, when it isn't simply that nothing changed
+   * (an index-only edit).
+   */
+  note?: string
+}
+
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
@@ -452,6 +474,12 @@ export interface ExplainedReadRow {
   holds: Array<boolean>
 }
 
+/**
+ * The bindings for `appJson` (a `jazz.app.json` text) in `lang` (`"ts"`):
+ * the whole `jazz.generated.ts`.
+ */
+export declare function generate(lang: string, appJson: string): string
+
 export interface InsertOptions {
   rowId?: Uint8Array
   author?: Uint8Array
@@ -492,6 +520,22 @@ export type JsonValue =
  */
 export declare function loadAppArtifact(app: string, permissions: string): JsonValue
 
+/**
+ * Read and check a backend's `jazz.permissions.json` (`permissions`)
+ * against the compiled app its generated bindings embed (`schema`: JSON of
+ * `{ schema, relations }`, the options they pass to `bindApp`), for a
+ * deployed backend that has the bindings but not `jazz.app.json`. Same
+ * result and checks as `loadAppArtifact`.
+ */
+export declare function loadBackendApp(schema: string, permissions: string): JsonValue
+
+/**
+ * Write the migration from the version the committed bindings
+ * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
+ * generated from to `appJson`'s edited `tables`, named `name`.
+ */
+export declare function migrationsCreate(appJson: string, bindings: string | undefined | null, name: string): CreatedMigration
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
@@ -509,6 +553,19 @@ export interface RestoreOptions {
   branch?: JsonValue
   updatedAtMs?: number
 }
+
+/**
+ * The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+ * policies dropped as a deployment drops them, as 64 hex characters. Not
+ * [`schema_source_hash`], which hashes the `jazz.app.json` file.
+ */
+export declare function schemaHash(engineSchemaJson: string): string
+
+/**
+ * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
+ * `source` generated bindings record.
+ */
+export declare function schemaSourceHash(appJson: string): string
 
 /**
  * Serve a production core (the `jazz_server::run` shell: connection and
@@ -600,6 +657,16 @@ export interface UpstreamRefusal {
   /** What the core said, as an error's message. */
   message: string
 }
+
+/**
+ * Check committed bindings (`bindings`, or null) against `appJson`. Throws
+ * with `error.code` `JAZZ_SCHEMA_CHANGED` when `tables` changed since the
+ * bindings were generated and no migration leads from that version (run
+ * `migrations create` before regenerating: the bindings hold the only
+ * copy of that version), or `JAZZ_BINDINGS_STALE` when regenerating is
+ * enough (including when there are none).
+ */
+export declare function validateBindings(appJson: string, bindings?: string | undefined | null): void
 
 /** Validate a schema and its embedded permissions without opening a database. */
 export declare function validateSchema(schema: Uint8Array): void

@@ -12,7 +12,7 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
 <WhereOperatorsTable />
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
@@ -33,6 +33,28 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
     </include>
 
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-filters-rust
+    </include>
+
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-eq-ne-rust
+    </include>
+
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-numeric-rust
+    </include>
+
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-contains-rust
+    </include>
+
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-null-rust
+    </include>
+
+  </Tab>
 </Tabs>
 
 ## Sorting
@@ -44,7 +66,7 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   queries.
 </Callout>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
@@ -55,11 +77,17 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-sorting-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-sorting-rust
+    </include>
+
+  </Tab>
 </Tabs>
 
 ### Sorting by an enum
 
-An `s.enum(...)` column sorts its variants in the order your schema declares them, not
+An enum column (`{ "enum": [...] }`) sorts its variants in the order your schema declares them, not
 alphabetically. Reordering the variants, or adding one in the middle, changes the sort order
 from that schema version on. Clients still on an older schema version sort by their own
 declaration order. `min`, `max` and range filters such as `gt` follow the same order.
@@ -70,7 +98,7 @@ declaration order. `min`, `max` and range filters such as `gt` follow the same o
 deterministic order. If the first sort column is not unique, add `orderBy("id")` as the final
 tie-breaker so page boundaries are stable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
@@ -80,6 +108,12 @@ tie-breaker so page boundaries are stable.
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-pagination-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-pagination-rust
+    </include>
+
   </Tab>
 </Tabs>
 

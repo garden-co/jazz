@@ -90,12 +90,11 @@ pub struct AppContext {
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
-    /// The app's schema versions and the lenses between them, as
-    /// `jazz-tools validate` and `deploy` write them to `migrations/index.ts`
-    /// beside schema.ts (load it with
-    /// [`deployment::published::client_migrations_module`]): the store
-    /// reaches `schema` along them, so it stores each version as the server
-    /// does (SPEC 10.7).
+    /// The app's schema versions and the lenses between them: what
+    /// [`deployment::artifact::load_client`] reads from `jazz.app.json`, or
+    /// [`deployment::published::lowered_client_migrations`] lowers from the
+    /// compiled schema generated bindings embed. The store reaches `schema`
+    /// along them, so it stores each version as the server does (SPEC 10.7).
     pub migrations: crate::db::Migrations,
 }
 

@@ -813,6 +813,79 @@ describe("browser SharedWorker realm identity", () => {
     }
   });
 
+  it("lets go of its page lock and detaches at once when the page leaves for the back/forward cache", async () => {
+    // Firefox caches no page that holds a Web Lock, and the worker would
+    // count a cached page as a live tab.
+    const requests: Array<{ name: string; release?: Promise<unknown> }> = [];
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    vi.stubGlobal("navigator", {
+      locks: {
+        request: (name: string, callback: () => Promise<unknown>) => {
+          const request: { name: string; release?: Promise<unknown> } = { name };
+          requests.push(request);
+          request.release = callback();
+          return request.release;
+        },
+      },
+    });
+    try {
+      const { connection, port, sent } = runtimeBootstrapFixture();
+      port.emit({ type: "runtime-ready" });
+      await expect(connection.ready()).resolves.toBeUndefined();
+      await vi.waitFor(() =>
+        expect(sent.some((message) => message.type === "liveness-lock")).toBe(true),
+      );
+      sent.length = 0;
+      expect(connection.leaveForPageCache()).toBe(true);
+      // A close that wants no reply: nothing for the worker to post to a cached page.
+      expect(sent).toEqual([{ type: "close", releaseContext: true }]);
+      expect(port.closed).toBe(true);
+      await expect(requests[0]!.release).resolves.toBeUndefined();
+      expect(connection.leaveForPageCache()).toBe(false);
+      expect(connection.storeChangedSinceLeaving()).toBe(false);
+      // Another tab resets the store meanwhile.
+      storage.clear();
+      expect(connection.storeChangedSinceLeaving()).toBe(true);
+      // Closed already: shutdown waits for nothing.
+      await connection.shutdown();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps its connection and its lock without localStorage to tell a reset store on return", async () => {
+    vi.stubGlobal("localStorage", undefined);
+    try {
+      const { connection, port, sent } = runtimeBootstrapFixture();
+      port.emit({ type: "runtime-ready" });
+      await expect(connection.ready()).resolves.toBeUndefined();
+      expect(connection.leaveForPageCache()).toBe(false);
+      expect(port.closed).toBe(false);
+      const shutdown = connection.shutdown();
+      await Promise.resolve();
+      port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+      await shutdown;
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a connection still being admitted when the page leaves", async () => {
+    const { connection, port, sent } = runtimeBootstrapFixture();
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.closed).toBe(false);
+    port.emit({ type: "runtime-ready" });
+    await expect(connection.ready()).resolves.toBeUndefined();
+    const shutdown = connection.shutdown();
+    await Promise.resolve();
+    port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+    await shutdown;
+  });
+
   it("keeps runtime admission in the same realm when its alive reply is delayed", async () => {
     vi.useFakeTimers();
     const { connection, port, sent } = runtimeBootstrapFixture(1_100);

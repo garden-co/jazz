@@ -1,7 +1,7 @@
 import { useRef, useState, type PointerEvent } from "react";
 import { useAll } from "jazz-tools/react";
 import { Button, HStack, Text, ToggleButton, VStack } from "@astryxdesign/core";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 
 // Stroke colours are stored as names and drawn with design tokens, so a
 // sketch follows light and dark mode.

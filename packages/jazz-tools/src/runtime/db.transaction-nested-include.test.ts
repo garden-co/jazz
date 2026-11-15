@@ -1,26 +1,24 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { definePermissions } from "../permissions/index.js";
 import { startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
 
 it.each(["inline", "large"])(
   "reads a nested reference inside a transaction without encryption (%s)",
   async (size) => {
-    const app = s.defineApp(
-      {
-        projects: s.table(
-          { title: s.string() },
-          { notesViaProject: s.reverse("notes", "project") },
-        ),
-        notes: s.table(
-          { projectId: s.uuid(), title: s.string() },
-          { project: s.rel("projects", "projectId") },
-        ),
+    const app = testApp({
+      tables: {
+        projects: {
+          columns: { title: "string" },
+          relations: { notesViaProject: { reverse: "notes", relation: "project" } },
+        },
+        notes: {
+          columns: { projectId: "uuid", title: "string" },
+          relations: { project: { rel: "projects", column: "projectId" } },
+        },
       },
-      { migrations: "none" },
-    );
+    });
     const server = await startLocalJazzServer({ inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let front: TestJazz | undefined;
@@ -28,12 +26,13 @@ it.each(["inline", "large"])(
       front = await startTestJazz({
         core: server,
         app,
-        permissions: definePermissions(app, ({ policy }) => {
-          policy.projects.allowRead.always();
-          policy.projects.allowInsert.always();
-          policy.notes.allowRead.always();
-          policy.notes.allowInsert.always();
-        }),
+        permissions: {
+          format: 1,
+          tables: {
+            projects: { read: "true", insert: "true" },
+            notes: { read: "true", insert: "true" },
+          },
+        },
       });
       db = await createDb(await localAccountConfig(server.appId, front.url));
       const project = db.insert(app.projects, { title: "Project" });
@@ -69,16 +68,18 @@ it.each(["inline", "large"])(
 it.each(["local-first", "remote"] as const)(
   "reads a reverse include of a JSON child inside a serializable transaction (%s)",
   async (tier) => {
-    const app = s.defineApp(
-      {
-        parent: s.table({ name: s.string() }, { childViaParent: s.reverse("child", "parent") }),
-        child: s.table(
-          { parentId: s.uuid(), name: s.string(), metadata: s.json() },
-          { parent: s.rel("parent", "parentId") },
-        ),
+    const app = testApp({
+      tables: {
+        parent: {
+          columns: { name: "string" },
+          relations: { childViaParent: { reverse: "child", relation: "parent" } },
+        },
+        child: {
+          columns: { parentId: "uuid", name: "string", metadata: { json: true } },
+          relations: { parent: { rel: "parent", column: "parentId" } },
+        },
       },
-      { migrations: "none" },
-    );
+    });
     const server = await startLocalJazzServer({ inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let front: TestJazz | undefined;
@@ -86,12 +87,13 @@ it.each(["local-first", "remote"] as const)(
       front = await startTestJazz({
         core: server,
         app,
-        permissions: definePermissions(app, ({ policy }) => {
-          policy.parent.allowRead.always();
-          policy.parent.allowInsert.always();
-          policy.child.allowRead.always();
-          policy.child.allowInsert.always();
-        }),
+        permissions: {
+          format: 1,
+          tables: {
+            parent: { read: "true", insert: "true" },
+            child: { read: "true", insert: "true" },
+          },
+        },
       });
       db = await createDb(await localAccountConfig(server.appId, front.url));
       const parent = await db.insert(app.parent, { name: "Parent" }).wait({ tier: "global" });

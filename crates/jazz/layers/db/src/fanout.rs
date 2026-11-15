@@ -178,6 +178,18 @@ struct Member {
     /// settles it globally.
     settled: sync::SettledBy,
     told: std::cell::Cell<Option<DurabilityTier>>,
+    joined: std::cell::Cell<Joined>,
+}
+
+/// Where a member stands with its group's result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Joined {
+    /// Told nothing yet: it waits for an opening of a current result. A
+    /// group that awaits chunks holds rows that may be stale, so a member
+    /// that joins it then waits with it instead of opening on them.
+    AwaitingOpening,
+    /// Opened: follows the group's deltas.
+    Open,
 }
 
 /// One shared live result.
@@ -455,7 +467,8 @@ impl Fanout {
             }
             for member in &group.members {
                 let now = member.settled.tier();
-                if member.settled.get()
+                if member.joined.get() == Joined::Open
+                    && member.settled.get()
                     && member.told.get().is_none_or(|told| told < now)
                     && let Some(queue) = member.queue.upgrade()
                 {
@@ -501,12 +514,18 @@ impl Inner {
             position: format!("{:?}", read.position),
         };
         let now = settled.get();
-        let member = |queue: &Queue| Member {
+        // `opened`: the member's queue starts with an opening.
+        let member = |queue: &Queue, opened: bool| Member {
             queue: Rc::downgrade(queue),
             shape: prepared.shape,
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
-            told: std::cell::Cell::new(now.then(|| settled.tier())),
+            told: std::cell::Cell::new((opened && now).then(|| settled.tier())),
+            joined: std::cell::Cell::new(if opened {
+                Joined::Open
+            } else {
+                Joined::AwaitingOpening
+            }),
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -528,12 +547,15 @@ impl Inner {
             .cloned()
         {
             let mut group = handle.borrow_mut();
-            let queue: Queue = Rc::new(RefCell::new(if group.opened {
+            // While the group awaits chunks its rows may be stale: the
+            // joiner opens with the group's next successful run instead.
+            let opened = group.opened && !group.awaiting;
+            let queue: Queue = Rc::new(RefCell::new(if opened {
                 VecDeque::from([open(&group.rows)])
             } else {
                 VecDeque::new()
             }));
-            group.members.push(member(&queue));
+            group.members.push(member(&queue, opened));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
@@ -594,7 +616,7 @@ impl Inner {
             identity,
             read,
             rows,
-            members: vec![member(&queue)],
+            members: vec![member(&queue, !awaiting)],
             watches,
             evidence,
             recheck,
@@ -829,8 +851,10 @@ impl Inner {
                 .and_then(|author| self.read_sessions(prepared, Some(author)).0)
                 .filter(|s| !s.system)
                 .and_then(|session| {
+                    // The policy names columns as its governing schema does.
+                    let governing = policies.by_stored(&root.stored).unwrap_or(root);
                     root.policy(Operation::Select)
-                        .and_then(|p| row_pin(p, &session))
+                        .and_then(|p| row_pin(governing, p, &session))
                 })
                 .and_then(|(column, value)| {
                     let governing = policies.by_stored(&root.stored)?;
@@ -2013,6 +2037,9 @@ impl Inner {
             // Settlement withheld while waiting is published now.
             group.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
         }
+        // Members that joined while the group waited saw no rows: they
+        // open on the current ones (the deltas above went to the others).
+        group.open_waiting(&rows);
         // Order keys that are not shown may have moved even when no row
         // did: read them again with the rows.
         group.rows = rows;
@@ -2066,37 +2093,66 @@ fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
 }
 
 impl Group {
+    /// Publish `event` to every member. A delta reaches only opened
+    /// members; an opening opens the others too.
     fn push(&mut self, event: SubscriptionEvent) {
         self.members.retain(|m| m.queue.strong_count() > 0);
         for member in &self.members {
-            if let Some(queue) = member.queue.upgrade() {
-                let mut event = event.clone();
-                if let SubscriptionEvent::Delta {
-                    reset,
-                    added,
-                    settled,
-                    tier,
-                    ..
-                } = &mut event
-                {
-                    *settled = member.settled.get();
-                    *tier = member.settled.tier();
-                    let told = settled.then_some(*tier);
-                    if *reset || told != member.told.get() {
-                        tracing::debug!(
-                            target: "jazz::sync",
-                            table = %self.query().table,
-                            opening = *reset,
-                            rows = added.len(),
-                            settled = *settled,
-                            tier = ?*tier,
-                            "subscription delivered",
-                        );
-                    }
-                    member.told.set(told);
-                }
-                queue.borrow_mut().push_back(event);
+            Self::deliver(self.query(), member, event.clone());
+        }
+    }
+
+    /// Open the members still waiting for an opening on `rows`.
+    fn open_waiting(&mut self, rows: &[CurrentRow]) {
+        if self
+            .members
+            .iter()
+            .all(|member| member.joined.get() == Joined::Open)
+        {
+            return;
+        }
+        let event = opening(rows);
+        for member in &self.members {
+            if member.joined.get() == Joined::AwaitingOpening {
+                Self::deliver(self.query(), member, event.clone());
             }
+        }
+    }
+
+    fn deliver(query: &Query, member: &Member, event: SubscriptionEvent) {
+        match &event {
+            SubscriptionEvent::Delta { reset: true, .. } => member.joined.set(Joined::Open),
+            // A delta is relative to an opening this member has not had.
+            SubscriptionEvent::Delta { .. } if member.joined.get() != Joined::Open => return,
+            _ => {}
+        }
+        if let Some(queue) = member.queue.upgrade() {
+            let mut event = event;
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                settled,
+                tier,
+                ..
+            } = &mut event
+            {
+                *settled = member.settled.get();
+                *tier = member.settled.tier();
+                let told = settled.then_some(*tier);
+                if *reset || told != member.told.get() {
+                    tracing::debug!(
+                        target: "jazz::sync",
+                        table = %query.table,
+                        opening = *reset,
+                        rows = added.len(),
+                        settled = *settled,
+                        tier = ?*tier,
+                        "subscription delivered",
+                    );
+                }
+                member.told.set(told);
+            }
+            queue.borrow_mut().push_back(event);
         }
     }
 }
@@ -2480,6 +2536,7 @@ fn root_key(query: &Query, binding: &BTreeMap<String, Value>) -> Option<(String,
 /// understand (then no table is pinned). A table seen twice with different
 /// pins, or nested inside another EXISTS, is not pinned.
 pub(super) fn policy_pins(
+    schema: &Schema,
     policy: &PolicyExpr,
     session: &Session,
     pins: &mut HashMap<String, Option<(String, String)>>,
@@ -2487,11 +2544,11 @@ pub(super) fn policy_pins(
     use crate::tools::PolicyValue;
     match policy {
         PolicyExpr::And(list) | PolicyExpr::Or(list) => {
-            list.iter().all(|p| policy_pins(p, session, pins))
+            list.iter().all(|p| policy_pins(schema, p, session, pins))
         }
         // A pin bounds which rows can change an EXISTS's value, whatever
         // surrounds it, so negation keeps it sound.
-        PolicyExpr::Not(inner) => policy_pins(inner, session, pins),
+        PolicyExpr::Not(inner) => policy_pins(schema, inner, session, pins),
         PolicyExpr::Exists { table, condition } => {
             let conjuncts: Vec<&PolicyExpr> = match condition.as_ref() {
                 PolicyExpr::And(list) => list.iter().collect(),
@@ -2506,8 +2563,13 @@ pub(super) fn policy_pins(
                         value: PolicyValue::SessionRef(path),
                     } if path.first().map(String::as_str) != Some("__jazz_outer_row") => {
                         if pin.is_none() {
-                            pin = session
-                                .resolve(path)
+                            // The value the compiled comparison holds the
+                            // column to (a claim as the column's type).
+                            let ty = schema
+                                .table(table)
+                                .ok()
+                                .and_then(|table| table.column_type(column).cloned());
+                            pin = session_value_for(path, ty.as_ref(), session)
                                 .as_ref()
                                 .and_then(canon_value)
                                 .map(|v| (column.clone(), v));
@@ -2784,8 +2846,11 @@ fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<
         ValueType::Nullable(inner) => inner.as_ref(),
         ty => ty,
     };
-    let value = match (ty, session.resolve(path)?) {
-        (ValueType::Uuid, Value::String(text)) => Value::Uuid(text.parse().ok()?),
+    let mut value = session.resolve(path)?;
+    if crate::compile::is_claim(path) {
+        value = crate::values::claim_as(ty, value)?;
+    }
+    let value = match (ty, value) {
         (ValueType::Uuid, value @ Value::Uuid(_)) => value,
         (ValueType::String, value @ Value::String(_)) => value,
         (_, value @ Value::String(_)) if stored.tags.is_some() => value,
@@ -2838,20 +2903,32 @@ pub(super) fn stored_pins(
 
 /// `column = session value` required of the protected row itself: the
 /// policy is that comparison, or a conjunction containing it.
-fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
+fn row_pin(table: &Table, policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
     use crate::tools::PolicyValue;
     match policy {
         PolicyExpr::Cmp {
             column,
             op: CmpOp::Eq,
             value: PolicyValue::SessionRef(path),
-        } if path.first().map(String::as_str) != Some("__jazz_outer_row") => session
-            .resolve(path)
-            .as_ref()
-            .and_then(canon_value)
-            .map(|value| (column.clone(), value)),
-        PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
+        } if path.first().map(String::as_str) != Some("__jazz_outer_row") => {
+            session_value_for(path, table.column_type(column), session)
+                .as_ref()
+                .and_then(canon_value)
+                .map(|value| (column.clone(), value))
+        }
+        PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(table, p, session)),
         _ => None,
+    }
+}
+
+/// `session.<path>` as a policy compares it with a column of type `ty`: a
+/// provider claim converted by [`crate::values::claim_as`], as the
+/// compiled policy converts it, so a pin holds the value the policy does.
+fn session_value_for(path: &[String], ty: Option<&ValueType>, session: &Session) -> Option<Value> {
+    let value = session.resolve(path)?;
+    match ty {
+        Some(ty) if crate::compile::is_claim(path) => crate::values::claim_as(ty, value),
+        _ => Some(value),
     }
 }
 

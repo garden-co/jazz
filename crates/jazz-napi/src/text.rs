@@ -3,6 +3,9 @@
 //! side, before, after }` and `{ version?, start?, end?, before, matched,
 //! after }`. Versions are optional: a resolve takes the position as is only
 //! when the anchor's version is the value's.
+// napi-derive registers `#[napi]` exports only outside `cfg(test)`, so the lib
+// test build sees this module's exports as unused.
+#![cfg_attr(test, allow(dead_code))]
 
 use jazz_text::{Anchor, Range, Side};
 use napi_derive::napi;

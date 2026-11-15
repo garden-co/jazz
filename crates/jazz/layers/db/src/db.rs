@@ -109,6 +109,19 @@ impl PreparedQuery {
             .and_then(|(requested, claims)| (*requested == author).then_some(claims))
     }
 
+    /// The same query with a different query text, under a shape of its
+    /// own (`tag` names the change), so no plan cached for the original
+    /// answers it.
+    fn with_query(&self, query: Query, tag: &str) -> PreparedQuery {
+        let shape =
+            jazz_types::sha256::hash(format!("{:?}{tag}{query:?}", self.shape.0).as_bytes());
+        PreparedQuery {
+            query,
+            shape: Shape(short(shape)),
+            ..self.clone()
+        }
+    }
+
     /// The same query without its window (limit and offset).
     pub(crate) fn unwindowed(&self) -> PreparedQuery {
         let mut query = self.query.clone();
@@ -169,6 +182,73 @@ impl PreparedQuery {
 
 fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
+}
+
+/// Whether `query` or one of its relations, nested ones too, reads a
+/// window (a `limit` or an `offset`).
+fn has_window(query: &Query) -> bool {
+    fn arrays(list: &[crate::query::ArraySubquery]) -> bool {
+        list.iter()
+            .any(|array| array.limit.is_some() || array.offset > 0 || arrays(&array.nested_arrays))
+    }
+    query.limit.is_some() || query.offset > 0 || arrays(&query.array_subqueries)
+}
+
+/// Whether and where a root row falls in `query`'s ordered result
+/// depends on that row's own version alone, policies aside: its filters
+/// and order name root columns, and nothing reads other rows to admit it.
+fn row_local(query: &Query) -> bool {
+    use crate::query::{ArraySubqueryRequirement, JoinMode};
+    query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.policy_branches.is_empty()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.relation.is_none()
+        && query.aggregate.is_none()
+        && query
+            .includes
+            .iter()
+            .all(|include| !include.require && include.join_mode == JoinMode::Holes)
+        && query
+            .array_subqueries
+            .iter()
+            .all(|array| array.requirement == ArraySubqueryRequirement::Optional)
+}
+
+/// Whether `policy` decides a row by that row and the session alone.
+fn row_local_policy(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::And(all) | PolicyExpr::Or(all) => all.iter().all(row_local_policy),
+        PolicyExpr::Not(inner) => row_local_policy(inner),
+        PolicyExpr::Cmp { .. }
+        | PolicyExpr::SessionCmp { .. }
+        | PolicyExpr::IsNull { .. }
+        | PolicyExpr::SessionIsNull { .. }
+        | PolicyExpr::IsNotNull { .. }
+        | PolicyExpr::SessionIsNotNull { .. }
+        | PolicyExpr::Contains { .. }
+        | PolicyExpr::SessionContains { .. }
+        | PolicyExpr::In { .. }
+        | PolicyExpr::InList { .. }
+        | PolicyExpr::SessionInList { .. }
+        | PolicyExpr::True
+        | PolicyExpr::False => true,
+        _ => false,
+    }
+}
+
+/// Widen the window `[offset, offset + limit)` of a row-local read to hold
+/// every row an overlay of `n` staged rows could bring into it (see
+/// [`Inner::recorded_window`]): each staged row shifts the rest by at most
+/// one place, so the window grows by `n` past its end and by up to `n`
+/// before its start.
+fn widen(limit: &mut Option<usize>, offset: &mut usize, n: usize) {
+    let before = (*offset).min(n);
+    *offset -= before;
+    if let Some(limit) = limit {
+        *limit = limit.saturating_add(n).saturating_add(before);
+    }
 }
 
 /// Result of a standalone write.
@@ -5293,6 +5373,169 @@ impl Inner {
         .collect()
     }
 
+    /// The rows the first `prefix` staged writes of `batch` write, counted
+    /// by stored table: how many rows its overlay can have moved in or
+    /// out of a read of each table.
+    fn staged_rows(batch: &Batch, prefix: usize) -> Result<BTreeMap<String, usize>, Error> {
+        let mut rows: BTreeMap<String, BTreeSet<RowUuid>> = BTreeMap::new();
+        let mut unnamed = BTreeMap::<String, usize>::new();
+        for (schema, op) in batch.ops.iter().take(prefix) {
+            let table = schema.stored_table(op.table())?.to_owned();
+            match op.row() {
+                Some(row) => {
+                    rows.entry(table).or_default().insert(row);
+                }
+                // Each insert without an id is a row of its own.
+                None => *unnamed.entry(table).or_default() += 1,
+            }
+        }
+        let mut out: BTreeMap<String, usize> = rows
+            .into_iter()
+            .map(|(table, rows)| (table, rows.len()))
+            .collect();
+        for (table, n) in unnamed {
+            *out.entry(table).or_default() += n;
+        }
+        Ok(out)
+    }
+
+    /// What a serializable transaction records for a windowed read it made
+    /// through its overlay of staged writes, `staged` (rows by stored table,
+    /// see [`Self::staged_rows`]); `None` when that is `prepared` itself.
+    ///
+    /// The recorded read is re-run without the overlay, here at commit and
+    /// by the authority. Under a `limit` or `offset`, a staged write can move
+    /// a row out of the window the app saw and promote one the recorded
+    /// window lacks, so a concurrent change to that row would go unnoticed
+    /// (issue 5521). The recorded window is widened to cover every row the
+    /// overlay could have promoted. It may hold rows the app did not see:
+    /// that can add conflicts, never miss one.
+    ///
+    /// - When a window's membership and order depend on each row's own
+    ///   columns only (row-local filters, root-column order, no joins,
+    ///   traversals, inheritance, required includes or relations, no read
+    ///   policy that reads other rows), each staged row of the window's
+    ///   table moves at most one other row across each edge of the window
+    ///   (a write to the same row twice counts once). With `n` such
+    ///   rows, the window `[offset, offset + limit)` grows to
+    ///   `[offset - min(offset, n), offset + limit + n)`: rows can be pushed
+    ///   in from before it (staged inserts or moves ahead of it) as well as
+    ///   from after it (staged deletes or moves out of it).
+    /// - Otherwise one staged write (to a joined row, a policy's input, a
+    ///   child a relation requires) can move any number of rows, and no
+    ///   count bounds them. Recording the whole filtered result instead
+    ///   would cost what the table holds, not what the read touches, so if
+    ///   the transaction wrote a table such a window depends on, the read
+    ///   is refused as not supported yet. Without such a write the overlay
+    ///   leaves the window as it is and the read records as before.
+    ///
+    /// Relation (array subquery) windows widen the same way, per parent:
+    /// a child row correlates with the parent its version names, so `n`
+    /// staged rows of the child table move at most `n` rows across each edge
+    /// of any one parent's window.
+    fn recorded_window(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        staged: &BTreeMap<String, usize>,
+    ) -> Result<Option<PreparedQuery>, Error> {
+        if staged.is_empty() || !has_window(&prepared.query) {
+            return Ok(None);
+        }
+        let schema = prepared.schema.as_deref().unwrap_or(&self.owner);
+        let policies = schema.policy_schema();
+        // A read policy that reads other rows (`EXISTS`, inheritance) admits
+        // rows by them, as a join does.
+        let policied = |stored: &str| {
+            identity.is_some()
+                && policies
+                    .by_stored(stored)
+                    .and_then(|table| table.policy(Operation::Select))
+                    .is_some_and(|policy| !row_local_policy(policy))
+        };
+        // The tables the transaction wrote that the read depends on,
+        // found once and only if a window needs them.
+        let mut touched: Option<Vec<String>> = None;
+        let mut refuse = |window: &str| -> Result<(), Error> {
+            if touched.is_none() {
+                let tables = self
+                    .with_relation_tables(prepared, &self.read_dependencies(prepared, identity)?)?;
+                touched = Some(
+                    staged
+                        .keys()
+                        .filter(|table| tables.contains(*table))
+                        .map(|table| {
+                            let name = schema.by_stored(table).map_or(table.as_str(), |t| &t.name);
+                            format!("`{name}`")
+                        })
+                        .collect(),
+                );
+            }
+            let written = touched.as_deref().unwrap_or_default();
+            if written.is_empty() {
+                return Ok(());
+            }
+            Err(Error::new(
+                ErrorCode::Query,
+                format!(
+                    "Reading a limited or offset window of `{window}` that depends on other \
+                     rows (a join, a required include or relation, or a policy that reads \
+                     other rows) after writing {} in the same transaction is not supported in \
+                     serializable transactions yet",
+                    written.join(", ")
+                ),
+            ))
+        };
+        let mut query = prepared.query.clone();
+        let root = schema.stored_table(&query.table)?;
+        if query.limit.is_some() || query.offset > 0 {
+            if row_local(&query) && !policied(root) {
+                widen(
+                    &mut query.limit,
+                    &mut query.offset,
+                    staged.get(root).copied().unwrap_or(0),
+                );
+            } else {
+                refuse(&query.table)?;
+            }
+        }
+        fn arrays(
+            schema: &Schema,
+            staged: &BTreeMap<String, usize>,
+            policied: &dyn Fn(&str) -> bool,
+            refuse: &mut dyn FnMut(&str) -> Result<(), Error>,
+            list: &mut [crate::query::ArraySubquery],
+        ) -> Result<(), Error> {
+            for array in list {
+                let table = schema.stored_table(&array.table)?;
+                if array.limit.is_some() || array.offset > 0 {
+                    let local = array.nested_arrays.iter().all(|nested| {
+                        nested.requirement == crate::query::ArraySubqueryRequirement::Optional
+                    }) && !policied(table);
+                    if local {
+                        let n = staged.get(table).copied().unwrap_or(0);
+                        widen(&mut array.limit, &mut array.offset, n);
+                    } else {
+                        refuse(&array.table)?;
+                    }
+                }
+                arrays(schema, staged, policied, refuse, &mut array.nested_arrays)?;
+            }
+            Ok(())
+        }
+        arrays(
+            schema,
+            staged,
+            &policied,
+            &mut refuse,
+            &mut query.array_subqueries,
+        )?;
+        if query == prepared.query {
+            return Ok(None);
+        }
+        Ok(Some(prepared.with_query(query, "widened")))
+    }
+
     /// The versions of the rows a read returns, its relations' rows
     /// included: what a serializable read set compares at commit.
     pub(crate) fn read_versions(
@@ -5303,6 +5546,14 @@ impl Inner {
     ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
+        // An aggregate's rows have no version of their own (each is a
+        // group, at position 0): named by their values too, a group whose
+        // value changed reads as another row, so the commit conflicts.
+        if prepared.query.aggregate.is_some() {
+            for (version, row) in out.iter_mut().zip(&roots) {
+                version.1 = aggregate_read_id(row);
+            }
+        }
         if !prepared.query.array_subqueries.is_empty() {
             let mut run = RelationRun::new(self, prepared, identity, read);
             let nodes = self.nest(
@@ -9322,6 +9573,20 @@ fn conflict(message: impl Into<String>) -> Error {
 /// read carried it.
 type ReadVersion = (Arc<str>, RowUuid, Pos, Option<Arc<[u8]>>);
 
+/// An aggregate row as a serializable read records it: its group (the row
+/// id the read gives it) and every value it computed, so the authority's
+/// re-run matches only while the aggregate's values are unchanged.
+pub(crate) fn aggregate_read_id(row: &CurrentRow) -> RowUuid {
+    let mut hasher = jazz_types::sha256::Hasher::new();
+    hasher.update(b"jazz serializable aggregate read v1\0");
+    hasher.update(row.id.0.as_bytes());
+    let cells = postcard::to_allocvec(&*row.cells).expect("encode aggregate values");
+    hasher.update(&(cells.len() as u64).to_be_bytes());
+    hasher.update(&cells);
+    let digest = hasher.finalize();
+    RowUuid::from_bytes(digest.as_bytes()[..16].try_into().expect("16 bytes"))
+}
+
 fn versions(rows: &[CurrentRow]) -> Vec<ReadVersion> {
     rows.iter()
         .map(|row| (row.table.clone(), row.id, row.seq, row.writer.clone()))
@@ -10378,11 +10643,44 @@ impl Db {
         Ok(())
     }
 
+    /// The read a serializable batch `id` records (and hydrates) for one
+    /// of `prepared` made through its first `prefix` staged writes, as
+    /// `identity`: its windows widened over what those writes could have
+    /// promoted into them (see [`Inner::recorded_window`]). `None` when
+    /// that is `prepared` itself, or the batch is not serializable.
+    fn widened_read(
+        &self,
+        id: OpenTransactionId,
+        prefix: usize,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+    ) -> Result<Option<PreparedQuery>, Error> {
+        if !has_window(&prepared.query) {
+            return Ok(None);
+        }
+        // Peek without the store gate: most reads stop here.
+        let staged = match self.inner.staging().batches.get(&id) {
+            Some(
+                batch @ Batch {
+                    kind: BatchKind::Serializable { .. },
+                    ..
+                },
+            ) => Inner::staged_rows(batch, prefix)?,
+            _ => return Ok(None),
+        };
+        if staged.is_empty() {
+            return Ok(None);
+        }
+        self.inner().recorded_window(prepared, identity, &staged)
+    }
+
     fn record_read(
         &self,
         id: OpenTransactionId,
         prepared: &PreparedQuery,
         include_deleted: bool,
+        prefix: usize,
+        identity: Option<AuthorSubject>,
     ) -> Result<(), Error> {
         // A mergeable read records nothing: peek without the store gate,
         // so the batch's cached overlay stays for its next stage or read.
@@ -10395,6 +10693,8 @@ impl Db {
         ) {
             return Ok(());
         }
+        let widened = self.widened_read(id, prefix, prepared, identity)?;
+        let prepared = widened.as_ref().unwrap_or(prepared);
         let mut inner = self.inner();
         let Some(Batch {
             kind: BatchKind::Serializable { snapshot, own, .. },
@@ -10676,11 +10976,17 @@ impl TxRef<'_> {
             && tier != ReadTier::LocalOnly
         {
             let at = pinned.then_some(snapshot);
-            self.db.remote_shape(&prepared.query)?;
+            // Hydrate what the read will record, not just what it returns:
+            // a widened window's extra rows are what the overlay promotes.
+            let widened = self
+                .db
+                .widened_read(self.id, prefix.ops, prepared, identity)?;
+            let hydrated = widened.as_ref().unwrap_or(prepared);
+            self.db.remote_shape(&hydrated.query)?;
             let through = self
                 .db
                 .fetch(
-                    prepared,
+                    hydrated,
                     at,
                     include_deleted,
                     if tier == ReadTier::Remote {
@@ -10734,7 +11040,8 @@ impl TxRef<'_> {
                 Ok((rows, prepared))
             })
             .await?;
-        self.db.record_read(self.id, &prepared, include_deleted)?;
+        self.db
+            .record_read(self.id, &prepared, include_deleted, prefix.ops, identity)?;
         Ok(rows)
     }
 

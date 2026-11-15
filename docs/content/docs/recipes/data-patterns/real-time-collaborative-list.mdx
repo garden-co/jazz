@@ -10,17 +10,76 @@ Every client subscribes to the same data and sees changes as they happen. This r
 
 A shared project with collaboratively-edited tasks.
 
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-client-localfirst-react/src/collab-list-snippets.tsx#collab-schema
-</include>
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": {
+        "tasks": { "reverse": "tasks", "relation": "project" },
+        "members": { "reverse": "projectMembers", "relation": "project" }
+      }
+    },
+    "tasks": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "assignee_id": "uuid?",
+        "projectId": "uuid"
+      },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+    },
+    "projectMembers": {
+      "columns": { "projectId": "uuid", "user_id": "uuid" },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+    }
+  }
+}
+```
 
 ## Permissions
 
 Project members can read and write tasks. The creator can manage membership. Tasks inherit access from their project via `allowedTo`.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-client-localfirst-react/src/collab-list-snippets.tsx#collab-permissions
-</include>
+```json title="jazz.permissions.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "projects": {
+      "$comment": "The creator and members.",
+      "read": {
+        "anyOf": [
+          "$createdBy.account = session.user",
+          "exists projectMembers(projectId = this.id, user_id = session.user)"
+        ]
+      },
+      "insert": "true",
+      "update": "$createdBy.account = session.user"
+    },
+    "tasks": {
+      "$comment": "Inherit from the project.",
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)",
+      "update": "allowedTo.read(project)"
+    },
+    "projectMembers": {
+      "$comment": "Only the creator can manage members.",
+      "insert": "exists projects(id = this.projectId, $createdBy.account = session.user)",
+      "read": {
+        "anyOf": [
+          "exists projects(id = this.projectId, $createdBy.account = session.user)",
+          "user_id = session.user"
+        ]
+      }
+    }
+  }
+}
+```
+
+See [Declarative Permissions](/docs/schemas/policies) for `exists`, `anyOf` and `allowedTo`.
 
 ## Subscribing to shared data
 

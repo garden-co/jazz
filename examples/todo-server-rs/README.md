@@ -1,61 +1,62 @@
 # todo-server-rs
 
-Axum REST + SSE service backed by the `jazz` Rust client, SQLite storage and the native WebSocket transport. The database path uses no NAPI or WASM. Application startup exports the TypeScript schema through the Jazz CLI, which requires the repository's JavaScript dependencies and built packages.
+An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app` crate. It runs as the app's backend: SQLite storage, the native WebSocket transport, no Node, NAPI or WASM.
 
 ## What it demonstrates
 
-- Using `JazzClient::connect_with_native_transport` with persistent storage and a remote sync server.
-- Running as the app's backend: the service holds the sync server's backend secret (`JAZZ_BACKEND_SECRET`) and acts as one user of the app (`TODO_USER_ID`), named `jazz:backend` as `createJazz` names its users. Before connecting it vouches for that user at `/admin/accounts/login-or-register`, and the returned account goes into its `backend_session`. That session is pinned to a published permissions bundle (`JAZZ_BUNDLE`), as `createJazz` pins the sessions it states: a core governs a stated session only by its bundle. It never holds the admin secret.
-- Loading a TypeScript schema from Rust by shelling out to the `jazz-tools` CLI (`schema compile`) at startup &mdash; the schema is authored once in `schema.ts` and consumed both by the JS tooling and the Rust client.
-- CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) backed by Jazz inserts / updates / deletes.
-- Server-Sent Events on `/todos/live` broadcasting the full todo list whenever it changes, via a `tokio::sync::broadcast` channel.
-- `mimalloc` as the native example's global allocator.
+- **The app is its files.** `jazz.app.json` declares the tables (and their history and migrations), and `jazz.permissions.json` declares who may do what. `src/jazz_app.rs` holds the typed bindings that `jazz-tools generate` generates from `jazz.app.json`. All three are committed, and there is no schema code to run.
+- **Typed bindings.** `jazz_app::Todo`, `NewTodo` and `TodoUpdate`, plus `todos::query()`, `todos::done().eq(false)` and `todos::todos_via_parent().of(id)`.
+- **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app::Jazz`. The handle lives directly in Axum's router state, while the client runs on a thread of its own.
+- **Running as the app's backend**, as `createJazz` does:
+  - On start it publishes the app's schema versions, migrations and permissions as a bundle, using the admin secret.
+  - It vouches for the one user it acts as (`TODO_USER_ID`, named `jazz:backend`), using the backend secret.
+  - Its session is pinned to that bundle.
+- **CRUD** over `/todos`, backed by typed inserts, updates and deletes.
+- **Server-Sent Events** on `/todos/live`: a subscription (a `futures::Stream` of typed deltas) is applied to a `Rows` list, and the whole list is sent on every change.
 
 ## Schema
 
-Defined in `schema.ts` (same DSL as every other example):
+From `jazz.app.json`:
 
-- **projects** &mdash; name
-- **todos** &mdash; title, done, description, parent (self-ref, optional), project (optional)
+- **projects**: name
+- **todos**: title, done, description (optional), parent (a todo, optional), project (optional)
 
-Permissions in `permissions.ts` allow todo reads and writes for everyone. Publish them alongside the schema on the sync server. Account enrolment does not replace table permissions.
+`jazz.permissions.json` lets everyone read and write todos. Account admission does not replace table permissions.
+
+## Changing the schema
+
+```bash
+# Edit the tables in jazz.app.json, then:
+npx jazz-tools migrations create --name <name>   # resolve any "TODO: …" it writes
+npx jazz-tools generate                          # checks the files, regenerates src/jazz_app.rs
+```
+
+Commit `jazz.app.json` and `src/jazz_app.rs`. In CI, `npx jazz-tools generate --check` refuses stale files, and so does this example's `bindings_are_current` test. To generate the bindings at build time instead of committing them, call `jazz_codegen::rust::build()` from a `build.rs` and `include!` its output (see that function's docs).
 
 ## Running locally
 
 ```bash
-# Run from the repository root, after preparing the JavaScript schema tooling:
-pnpm install
-pnpm build:core
-cargo build -p jazz-cli --bin jazz-tools
-export JAZZ_TOOLS_BIN="$PWD/target/debug/jazz-tools"
-
-# Use an existing Jazz server where the app's backend published this
-# schema's permissions as a bundle. Use the same app UUID, that server's
-# backend secret and the bundle's id.
+# A Jazz server for the app, with its admin and backend secrets:
 export JAZZ_APP_ID="<APP_UUID>"
 export JAZZ_SERVER_URL="http://localhost:1625"
+export JAZZ_ADMIN_SECRET="<ADMIN_SECRET>"
 export JAZZ_BACKEND_SECRET="<BACKEND_SECRET>"
-export JAZZ_BUNDLE="<BUNDLE_ID>"
-cargo run --manifest-path examples/todo-server-rs/Cargo.toml
-
-# The documentation copy has its own excluded manifest:
-cargo run --manifest-path examples/docs/todo-server-rs/Cargo.toml
+cargo run -p todo-server
 ```
 
-Both examples remain deliberately excluded from the root Cargo workspace. Build and test them with `--manifest-path`, not `-p` from the repository root. The todo service runs as one configured user; HTTP requests do not select separate Jazz identities. Its HTTP API has no sign-in of its own, so serve it only where your own infrastructure authenticates callers.
+On Ctrl-C or SIGTERM it stops accepting requests, ends the `/todos/live` streams and lets the requests in flight finish (for up to 10 seconds). Then it calls `jazz.shutdown()`. With a persistent store, call `shutdown` before the process exits, so that the calls already made finish and the store closes.
 
-Configurable via env vars (`JAZZ_BACKEND_SECRET` and `JAZZ_BUNDLE` are required):
+The service runs as one configured user. HTTP requests don't select separate Jazz identities, and its HTTP API has no sign-in of its own, so serve it only where your own infrastructure authenticates callers.
 
-| Variable              | Default                                                   |
-| --------------------- | --------------------------------------------------------- |
-| `JAZZ_APP_ID`         | hard-coded fallback id (see `main.rs`)                    |
-| `JAZZ_SERVER_URL`     | `http://localhost:1625`                                   |
-| `JAZZ_BACKEND_SECRET` | required: the sync server's backend secret                |
-| `JAZZ_BUNDLE`         | required: the permissions bundle its session is pinned to |
-| `TODO_USER_ID`        | `todo-service` (the user it acts as)                      |
-| `TODO_DATA_DIR`       | `./todo-data` (local data directory)                      |
-| `TODO_PORT`           | `3000`                                                    |
-| `JAZZ_TOOLS_BIN`      | `jazz-tools` (used for `schema compile`)                  |
+| Variable              | Default                                |
+| --------------------- | -------------------------------------- |
+| `JAZZ_APP_ID`         | hard-coded fallback id (see `main.rs`) |
+| `JAZZ_SERVER_URL`     | `http://localhost:1625`                |
+| `JAZZ_ADMIN_SECRET`   | required: publishes the bundle         |
+| `JAZZ_BACKEND_SECRET` | required: admits the user it acts as   |
+| `TODO_USER_ID`        | `todo-service`                         |
+| `TODO_DATA_DIR`       | `./todo-data`                          |
+| `TODO_PORT`           | `3000`                                 |
 
 ## API
 
@@ -72,19 +73,12 @@ Configurable via env vars (`JAZZ_BACKEND_SECRET` and `JAZZ_BUNDLE` are required)
 ## Tests
 
 ```bash
-# Focused native smoke: no external server, CLI or JavaScript build required.
-cargo test --manifest-path examples/todo-server-rs/Cargo.toml --test native_user
-cargo test --manifest-path examples/docs/todo-server-rs/Cargo.toml --test native_user
-
-# Compile every target in each independent example:
-cargo test --manifest-path examples/todo-server-rs/Cargo.toml --all-targets --no-run
-cargo test --manifest-path examples/docs/todo-server-rs/Cargo.toml --all-targets --no-run
-
-# Full example suites also need the CLI for the process-level resync test:
-cargo build -p jazz-cli --bin jazz-tools
-export JAZZ_TOOLS_BIN="$PWD/target/debug/jazz-tools"
-cargo test --manifest-path examples/todo-server-rs/Cargo.toml --all-targets
-cargo test --manifest-path examples/docs/todo-server-rs/Cargo.toml --all-targets
+cargo test -p todo-server
 ```
 
-The focused smoke starts an isolated Jazz server, publishes the example's open policies as fixture setup, and connects two independent todo workers that both act as Alice with the backend secret (no admin secret). Each resolves her one account; one writes and the other reads the row over native sync. This checks the worker path, not TypeScript schema export or application deployment. The full suites retain the CRUD, persistence, SSE and process-level resync assertions.
+The tests drive the real router:
+
+- CRUD, persistence across restarts and the SSE stream run on a local app.
+- Resync runs against an in-process Jazz server: one backend publishes the bundle and writes as Alice, and a second backend with an empty store reads the write as Bob.
+
+The documentation copy in `examples/docs/todo-server-rs` (`todo-server-docs`) is the same service, plus the Rust snippets the docs include.

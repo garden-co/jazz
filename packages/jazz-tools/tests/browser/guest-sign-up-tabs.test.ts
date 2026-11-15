@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { deploy } from "../../src/dev/catalogue.js";
+import { server } from "vitest/browser";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
@@ -12,6 +12,7 @@ import {
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
 import {
+  deploy,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppVisitor,
@@ -40,10 +41,16 @@ afterEach(async () => {
  */
 async function signUpWhileAnotherTabIsTheGuest(name: string, clearOnSignOut: boolean) {
   const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: permissions,
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const visitorUrl = await jazzAppVisitor(backend);
   // The backend answers no CORS: send the session's own requests to it from Node.
@@ -192,6 +199,32 @@ it("lets the tab that signed up in once the other guest tab crashes", async () =
     "The tab that signed up should connect",
   );
 }, 120_000);
+
+// Chrome kept a page in its back/forward cache with its locks held, so the
+// worker counted a guest tab the user navigated away from as open, and the
+// tab that signed up waited for it until it reported the store held. (Whether
+// "back" then shows the cached page is back-forward-cache.test.ts's.)
+it.runIf(server.browser === "chromium")(
+  "lets the tab that signed up in while the other guest tab is in the back/forward cache",
+  async () => {
+    const { other, db, titles } = await signUpWhileAnotherTabIsTheGuest(
+      "guest-sign-up-tab-bfcache",
+      false,
+    );
+    const { upload } = await writeWhileRefused(db);
+
+    expect((await other.leave()).heldWhileAway).toEqual([]);
+    await upload;
+    expect(await titles()).toEqual(["guest-1", "while-the-other-is-a-guest"]);
+    await waitForCondition(
+      async () => db.getSyncStatus().link.state === "connected",
+      10_000,
+      "The tab that signed up should connect",
+    );
+    await other.goBack();
+  },
+  120_000,
+);
 
 // #4992, #5139: on a shared device (clearOnSignOut), the user who signed up
 // in one tab signs out there before the other tab heard of the sign-up. The

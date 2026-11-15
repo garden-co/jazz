@@ -52,19 +52,22 @@ truth and will drift as the API evolves.
 
 ## Testing
 
-### Pre-commit hooks in restricted shells
+### Pre-commit lint hooks
 
-The staged Rust hook receives its file list directly from Lefthook and invokes
-Cargo through `dev/scripts/clippy-staged.sh`. It asks Cargo for authoritative
-workspace metadata once, then invokes Cargo directly; this avoids Node
-child-process invocations of `git` and `cargo`, which can be denied by
-sandboxed shells while ordinary Git commands still work. Run
-`pnpm test:tooling` to exercise workspace-member, standalone, excluded, and
-failure paths. Nonmember/auxiliary crates deliberately fall back to the root
-workspace guard; maintained standalone crates should have their
-own explicit gates. Run `pnpm test:tooling:real` for the slower real-Cargo
-probe of that fallback. Direct invocations of
-`node dev/scripts/clippy-staged.mjs` remain available for local debugging.
+The pre-commit hooks run the same lint as CI's lint partition (`pnpm lint`),
+so a commit they accept does not fail CI's lint:
+
+- `clippy` runs `cargo clippy --workspace -- -D warnings` (`pnpm lint:rust`)
+  whenever a `.rs` file or a `Cargo.toml` is staged. It lints the whole
+  workspace rather than only the staged crates on purpose: Cargo unifies
+  features over the selected packages, so `--package <crate>` compiles a crate
+  differently from `--workspace` and can pass what CI rejects. Incremental
+  compilation keeps a re-run down to the changed crates and their dependents.
+  Lefthook invokes Cargo directly, without a Node child process.
+- `oxlint` runs `oxlint --fix` on the staged files with CI's
+  `.oxlintignore`, so it never lints or rewrites a file that CI skips.
+
+Run `pnpm test:tooling` to check that the hooks still match CI.
 
 ### CLI integration tests
 

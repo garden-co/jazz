@@ -1,13 +1,8 @@
 import { afterEach, expect, it } from "vitest";
-import { schema as s, type Db, parseSnapshotRef, serializeSnapshotRef } from "../../src/index.js";
+import { type Db, parseSnapshotRef, serializeSnapshotRef } from "../../src/index.js";
 import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
+import { app } from "./apps/snapshot-capture/jazz.generated.js";
 
-const app = s.defineApp(
-  {
-    documents: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
-  },
-  { migrations: "none" },
-);
 let db: Db | undefined;
 afterEach(async () => {
   await db?.shutdown();

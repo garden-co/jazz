@@ -1,0 +1,28 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "items": {
+      "columns": {
+        "score": { "type": "int", "transform": "tenfold" },
+        "label": { "type": "string", "transform": "labelPrefix" }
+      },
+      "relations": { "parentsViaItems": { "reverse": "parents", "relation": "items" } }
+    },
+    "parents": {
+      "columns": {
+        "item": { "type": "uuid", "optional": true, "transform": "itemRef" },
+        "itemIds": { "array": "uuid" }
+      },
+      "relations": {
+        "itemRelation": { "rel": "items", "column": "item" },
+        "items": { "rel": "items", "column": "itemIds" }
+      }
+    }
+  },
+  "transforms": {
+    "itemRef": { "stored": "uuid", "view": "string" },
+    "labelPrefix": { "stored": "string", "view": "string" },
+    "tenfold": { "stored": "int", "view": "int" }
+  }
+}

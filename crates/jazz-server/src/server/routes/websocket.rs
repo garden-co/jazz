@@ -14,6 +14,7 @@ use crate::runtime::{
     CommitUnitTrust, ConnectionSessionContext, ServerRuntimeHandle, ServerSession,
 };
 use axum::{
+    extract::FromRequestParts as _,
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocketUpgrade, close_code},
     http::HeaderMap,
@@ -30,6 +31,7 @@ use jazz::wire::{
 };
 use tokio::sync::mpsc;
 
+use super::metered_socket::{MeteredWebSocket, PeerActivity};
 use crate::server::shutdown::ActiveWebSocketGuard;
 use crate::server::{ServerState, WebSocketEntryRefused};
 
@@ -106,10 +108,33 @@ impl WebSocketAdmissionState {
 /// gated on the server owning the state needed to open a real `jazz::Db`
 /// peer.
 pub(super) async fn ws_handler(
-    ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
+    request: axum::extract::Request,
 ) -> Response {
+    let (mut parts, _body) = request.into_parts();
+    // `WebSocketUpgrade` checks the request and answers malformed upgrades
+    // as axum does, but would wrap the upgraded IO itself. The upgrade handle
+    // is shared, so keep one to wrap it in a `MeteredWebSocket` instead: the
+    // idle timeout needs the raw socket's progress, not just whole messages.
+    let on_upgrade = parts.extensions.get::<hyper::upgrade::OnUpgrade>().cloned();
+    if let Err(rejection) = WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        return rejection.into_response();
+    }
+    let (Some(on_upgrade), Some(accept)) = (
+        on_upgrade,
+        parts
+            .headers
+            .get(axum::http::header::SEC_WEBSOCKET_KEY)
+            .map(|key| tungstenite::handshake::derive_accept_key(key.as_bytes())),
+    ) else {
+        // Only an HTTP/2 upgrade has no key, and the listener speaks HTTP/1.
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "websocket upgrade needs Sec-WebSocket-Key",
+        )
+            .into_response();
+    };
+    let headers = parts.headers;
     // Reserve the connection slot before upgrading, so a server at its
     // connection cap refuses with a plain HTTP status the client already
     // retries with backoff, instead of accepting a socket it cannot afford.
@@ -147,11 +172,52 @@ pub(super) async fn ws_handler(
         }
     };
 
-    ws.max_frame_size(WS_MAX_FRAME_BYTES)
-        .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| {
-            handle_ws_connection(socket, state, headers, websocket_guard, Handshake::Network)
-        })
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(upgraded) => {
+                serve_upgraded_ws(
+                    hyper_util::rt::TokioIo::new(upgraded),
+                    state,
+                    headers,
+                    websocket_guard,
+                )
+                .await;
+            }
+            Err(error) => tracing::debug!(%error, "websocket upgrade failed"),
+        }
+    });
+    Response::builder()
+        .status(axum::http::StatusCode::SWITCHING_PROTOCOLS)
+        .header(axum::http::header::CONNECTION, "upgrade")
+        .header(axum::http::header::UPGRADE, "websocket")
+        .header(axum::http::header::SEC_WEBSOCKET_ACCEPT, accept)
+        .body(axum::body::Body::empty())
+        .expect("static upgrade response headers are valid")
+}
+
+/// Serve a sync session over IO whose WebSocket upgrade is done, metering
+/// its raw reads so a slow message is not taken for an idle peer.
+async fn serve_upgraded_ws<IO>(
+    io: IO,
+    state: Arc<ServerState>,
+    headers: HeaderMap,
+    websocket_guard: ActiveWebSocketGuard,
+) where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let config = tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(Some(WS_MAX_FRAME_BYTES))
+        .max_message_size(Some(WS_MAX_MESSAGE_BYTES));
+    let (socket, activity) = MeteredWebSocket::accept(io, config).await;
+    handle_ws_connection(
+        socket,
+        state,
+        headers,
+        websocket_guard,
+        Handshake::Network,
+        Some(activity),
+    )
+    .await;
 }
 
 #[derive(Clone, Debug)]
@@ -223,8 +289,14 @@ impl WebSocketAdmissionRegistration {
     /// Record that the peer was heard from, so the cap never counts this
     /// link as a zombie.
     fn heard(&self) {
+        self.heard_ago(std::time::Duration::ZERO);
+    }
+
+    /// Record that the peer was heard from `ago` before now.
+    fn heard_ago(&self, ago: std::time::Duration) {
+        let ago = u64::try_from(ago.as_millis()).unwrap_or(u64::MAX);
         self.last_heard
-            .store(self.owner.now_ms(), Ordering::Relaxed);
+            .store(self.owner.now_ms().saturating_sub(ago), Ordering::Relaxed);
     }
 }
 
@@ -624,6 +696,60 @@ async fn account_still_admitted(
     }
 }
 
+/// What wakes a live socket to re-check its account admission.
+enum AccountWatch {
+    /// The link carries no account identity (Backend, Admin): nothing can
+    /// revoke it, so it never wakes.
+    Unaccounted,
+    /// Woken by every registry change. The registry owner thread holds the
+    /// only sender, so a closed watch means the registry is gone.
+    Registry(tokio::sync::watch::Receiver<u64>),
+    /// An account identity on a server without a registry: re-checked every
+    /// second (each check fails closed).
+    Poll,
+}
+
+/// Why [`AccountWatch::wake`] returned.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountWake {
+    /// Something may have changed: re-check.
+    Recheck,
+    /// The registry owner is gone: nothing can confirm the account any more.
+    RegistryGone,
+}
+
+impl AccountWatch {
+    /// Subscribe *before* the admission check (see
+    /// [`account_admission_current`]).
+    fn subscribe(
+        identity: Option<AuthorSubject>,
+        accounts: Option<&crate::server::accounts::AccountRegistryOwner>,
+    ) -> Self {
+        match (identity, accounts) {
+            (None, _) => Self::Unaccounted,
+            (Some(_), Some(registry)) => Self::Registry(registry.subscribe()),
+            (Some(_), None) => Self::Poll,
+        }
+    }
+
+    /// Wait until the account should be re-checked. Never resolves for an
+    /// unaccounted link, and resolves once (not in a loop) when the registry
+    /// is gone: the caller must stop on [`AccountWake::RegistryGone`].
+    async fn wake(&mut self) -> AccountWake {
+        match self {
+            Self::Unaccounted => std::future::pending().await,
+            Self::Registry(changes) => match changes.changed().await {
+                Ok(()) => AccountWake::Recheck,
+                Err(_) => AccountWake::RegistryGone,
+            },
+            Self::Poll => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                AccountWake::Recheck
+            }
+        }
+    }
+}
+
 /// Per-message admission check for a live account socket.
 ///
 /// Every registry mutation runs on the registry owner thread and bumps
@@ -639,12 +765,12 @@ async fn account_still_admitted(
 async fn account_admission_current(
     state: &ServerState,
     identity: Option<AuthorSubject>,
-    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+    watch: &mut AccountWatch,
 ) -> Result<(), super::accounts::AdmissionError> {
     if identity.is_none() {
         return Ok(());
     }
-    if let Some(changes) = changes {
+    if let AccountWatch::Registry(changes) = watch {
         match changes.has_changed() {
             Ok(false) => return Ok(()),
             Ok(true) => {
@@ -783,6 +909,8 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     request_headers: HeaderMap,
     _websocket_guard: ActiveWebSocketGuard,
     handshake: Handshake,
+    // Raw socket progress below message framing, where the socket has one.
+    peer_activity: Option<Arc<PeerActivity>>,
 ) {
     let mut shutdown_rx = state.shutdown.subscribe();
     if state.shutdown.is_shutting_down() {
@@ -1035,7 +1163,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
 
     let account_identity =
         matches!(admission.credential, WebSocketCredential::Session).then_some(admission.identity);
-    let mut account_changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+    let mut account_changes = AccountWatch::subscribe(account_identity, state.accounts.as_ref());
     let mut activity_rx = core_server_shell.subscribe_activity();
     // Subscribe before checking: a revocation concurrent with this check must
     // remain visible even if no application traffic arrives afterward.
@@ -1081,6 +1209,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // would otherwise hold its session and budgets until the OS gives up.
     // Ping on a fixed cadence and drop the link once nothing at all has
     // arrived for the idle timeout; every WebSocket client answers pings.
+    // "Nothing at all" is judged on raw bytes where the socket reports them
+    // (`peer_activity`): a large message on a slow uplink can take longer
+    // than the timeout to complete, and its bytes are the peer at work.
     let mut last_inbound = tokio::time::Instant::now();
     let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
     let mut keepalive = tokio::time::interval_at(
@@ -1104,6 +1235,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     last_inbound = tokio::time::Instant::now();
                     admission_registration.heard();
                 }
+                if let Some(heard_at) = peer_activity.as_ref().map(|activity| activity.last_heard())
+                    && heard_at > last_inbound
+                {
+                    last_inbound = heard_at;
+                    admission_registration.heard_ago(heard_at.elapsed());
+                }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
                     tracing::debug!("closing idle websocket: no inbound traffic within the idle timeout");
                     let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
@@ -1116,13 +1253,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 // browser) asked for a heartbeat frame it can see instead.
                 let _ = writer_tx.try_send(keepalive_beat(heartbeat));
             }
-            _ = async {
-                if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
-                else if account_identity.is_some() {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                } else { std::future::pending::<()>().await; }
-            } => {
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
+            wake = account_changes.wake() => {
+                let admitted = match wake {
+                    AccountWake::Recheck => account_still_admitted(&state, account_identity).await,
+                    AccountWake::RegistryGone => Err(super::accounts::AdmissionError::Unavailable),
+                };
+                if let Err(error) = admitted {
                     queue_ws_error(&writer_tx, error.into_wire());
                     break;
                 }
@@ -1662,6 +1798,32 @@ mod tests {
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
         TableSchema as PublicTableSchema,
     };
+
+    /// A Backend or Admin link carries no account identity: a dead registry
+    /// must not wake it (each wake used to resolve at once, a hot loop).
+    /// An account link wakes exactly once with `RegistryGone` and fails closed.
+    #[tokio::test]
+    async fn account_watch_does_not_spin_once_the_registry_is_gone() {
+        let registry = crate::server::accounts::AccountRegistryOwner::in_memory_for_test();
+        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, "alice")
+            .expect("author");
+        let mut unaccounted = AccountWatch::subscribe(None, Some(&registry));
+        let mut account = AccountWatch::subscribe(Some(identity), Some(&registry));
+        registry.close().expect("close registry");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), unaccounted.wake())
+                .await
+                .is_err(),
+            "a link without an account identity never wakes"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), account.wake())
+                .await
+                .expect("an account link wakes when the registry goes"),
+            AccountWake::RegistryGone
+        );
+    }
     use jazz::tools::{AppId, AuthMode};
 
     const WS_STORM_SIZE: usize = 24;
@@ -2601,9 +2763,7 @@ mod tests {
     }
 
     async fn expect_ws_server_hello(
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
         features: u64,
     ) {
         ws.send(WsMessage::Binary(
@@ -3347,9 +3507,22 @@ mod tests {
         features: u64,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+        let (ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
             .expect("connect websocket");
+        negotiate_ws(ws, prelude, features).await
+    }
+
+    /// Any IO a test client's WebSocket runs over: TCP, or an in-memory pipe.
+    trait TestWsIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {}
+    impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> TestWsIo for T {}
+
+    /// Send the prelude and the client Hello, and take the server's Hello.
+    async fn negotiate_ws<S: TestWsIo>(
+        mut ws: tokio_tungstenite::WebSocketStream<S>,
+        prelude: Vec<u8>,
+        features: u64,
+    ) -> tokio_tungstenite::WebSocketStream<S> {
         ws.send(WsMessage::Binary(prelude.into()))
             .await
             .expect("send websocket prelude");
@@ -3623,9 +3796,7 @@ mod tests {
     }
 
     async fn try_receive_ws_encoded_frames(
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
     ) -> Vec<Vec<u8>> {
         let Ok(message) = tokio::time::timeout(Duration::from_millis(25), ws.next()).await else {
             return Vec::new();
@@ -3639,9 +3810,7 @@ mod tests {
     /// Unlike the transport pump's optional poll, wait for a reply the server
     /// owes, using the route test's normal bounded-settlement deadline.
     async fn receive_required_ws_encoded_frames(
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
     ) -> Vec<Vec<u8>> {
         let message = tokio::time::timeout(WS_PUMP_DEADLINE, ws.next())
             .await
@@ -3658,18 +3827,14 @@ mod tests {
 
     async fn pump_core_websocket_transport_once(
         client: &TestClient,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
     ) -> (usize, usize) {
         pump_core_websocket_transport_once_with_first_receive(client, ws, true).await
     }
 
     async fn pump_core_websocket_transport_once_with_first_receive(
         client: &TestClient,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
         receive_after_client_send: bool,
     ) -> (usize, usize) {
         let mut outbound = client.tick_take();
@@ -3710,9 +3875,7 @@ mod tests {
 
     async fn settle_ws_write(
         client: &TestClient,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
         write: &WriteHandle,
     ) -> Option<Result<(), jazz::db::Error>> {
         let start = tokio::time::Instant::now();
@@ -3728,9 +3891,7 @@ mod tests {
 
     async fn receive_core_websocket_transport_push_once(
         client: &TestClient,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
     ) -> usize {
         let inbound = try_receive_ws_encoded_frames(ws).await;
         if inbound.is_empty() {
@@ -3766,9 +3927,7 @@ mod tests {
     /// handshake race rather than the stated route boundary.
     async fn settle_ws_todos_query(
         client: &TestClient,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut tokio_tungstenite::WebSocketStream<impl TestWsIo>,
     ) -> (PreparedQuery, QueryAttachment) {
         let (query, attachment) = client.attach_todos_query();
         let initial_outbound = client.tick_take();
@@ -4343,7 +4502,13 @@ mod tests {
         );
 
         let state = core.server_state();
-        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        let mut changes = AccountWatch::Registry(
+            state
+                .accounts
+                .as_ref()
+                .expect("account registry")
+                .subscribe(),
+        );
         let registry = state.accounts.as_ref().expect("account registry");
         registry.fail_next_write_for_test();
         let revoked = revoke(
@@ -4407,7 +4572,13 @@ mod tests {
                 .with_account(account),
         );
         let state = core.server_state();
-        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        let mut changes = AccountWatch::Registry(
+            state
+                .accounts
+                .as_ref()
+                .expect("account registry")
+                .subscribe(),
+        );
         account_admission_current(&state, identity, &mut changes)
             .await
             .expect("admitted");
@@ -4457,8 +4628,13 @@ mod tests {
                 for _ in 0..sockets {
                     let state = state.clone();
                     tasks.push(tokio::spawn(async move {
-                        let mut changes =
-                            state.accounts.as_ref().map(|registry| registry.subscribe());
+                        let mut changes = AccountWatch::Registry(
+                            state
+                                .accounts
+                                .as_ref()
+                                .expect("account registry")
+                                .subscribe(),
+                        );
                         for _ in 0..CHECKS_PER_SOCKET {
                             let result = if gated {
                                 account_admission_current(&state, identity, &mut changes).await
@@ -7326,5 +7502,206 @@ mod tests {
                 ..
             })]
         ));
+    }
+
+    /// A client WebSocket served exactly as `ws_handler` serves an upgraded
+    /// one, over an in-memory pipe instead of TCP, so a paused clock can run
+    /// minutes of a slow link in no time.
+    async fn open_negotiated_duplex_ws(
+        state: &Arc<ServerState>,
+        identity: AuthorSubject,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream> {
+        let (client_io, server_io) = tokio::io::duplex(8 * 1024 * 1024);
+        let guard = state
+            .shutdown
+            .try_enter_websocket_within(state.max_websocket_connections)
+            .expect("a websocket slot");
+        tokio::spawn(serve_upgraded_ws(
+            server_io,
+            Arc::clone(state),
+            HeaderMap::new(),
+            guard,
+        ));
+        let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client_io,
+            tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        negotiate_ws(ws, ws_prelude(identity), 0).await
+    }
+
+    /// One binary WebSocket message as the raw bytes a client puts on the
+    /// wire (a single masked frame), so a test can send it a slice at a time.
+    fn client_binary_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0x82];
+        match payload.len() {
+            len @ 0..126 => frame.push(0x80 | len as u8),
+            len @ 126..=0xffff => {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(len as u16).to_be_bytes());
+            }
+            len => {
+                frame.push(0x80 | 127);
+                frame.extend_from_slice(&(len as u64).to_be_bytes());
+            }
+        }
+        let mask = [0x37, 0xfa, 0x21, 0x3d];
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
+        frame
+    }
+
+    /// Steps a trickled message is sent in, one per [`TRICKLE_STEP`].
+    const TRICKLE_STEPS: usize = 100;
+    /// Far below the idle timeout: bytes arrive the whole time.
+    const TRICKLE_STEP: Duration = Duration::from_secs(1);
+
+    /// Write `bytes` onto the client's socket in [`TRICKLE_STEPS`] slices, one
+    /// per [`TRICKLE_STEP`], without reading (so without answering pings).
+    async fn trickle(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        bytes: &[u8],
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+        for slice in bytes.chunks(bytes.len().div_ceil(TRICKLE_STEPS)) {
+            ws.get_mut().write_all(slice).await.expect("trickle bytes");
+            tokio::time::sleep(TRICKLE_STEP).await;
+        }
+    }
+
+    /// The reason of the server's Close, read off the raw socket once the
+    /// server has ended it. (Read through tungstenite, the client would
+    /// answer the queued pings into a socket already gone.)
+    async fn server_close_reason(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+    ) -> String {
+        use tokio::io::AsyncReadExt as _;
+        let mut bytes = Vec::new();
+        tokio::time::timeout(WS_IDLE_TIMEOUT, ws.get_mut().read_to_end(&mut bytes))
+            .await
+            .expect("the server must end the socket")
+            .expect("read the server's frames");
+        let mut rest = bytes.as_slice();
+        while let [first, second, tail @ ..] = rest {
+            assert_eq!(second & 0x80, 0, "server frames are unmasked");
+            let (len, tail) = match second & 0x7f {
+                126 => (
+                    usize::from(u16::from_be_bytes([tail[0], tail[1]])),
+                    &tail[2..],
+                ),
+                127 => (
+                    usize::try_from(u64::from_be_bytes(tail[..8].try_into().unwrap())).unwrap(),
+                    &tail[8..],
+                ),
+                len => (usize::from(len), tail),
+            };
+            let (payload, tail) = tail.split_at(len);
+            if first & 0x0f == 0x8 {
+                return String::from_utf8(payload[2..].to_vec()).expect("a UTF-8 close reason");
+            }
+            rest = tail;
+        }
+        panic!("the server ended the socket without a Close");
+    }
+
+    // Internal route-boundary test: the idle timeout is only observable over
+    // minutes of a slow link, which a paused clock over an in-memory pipe
+    // runs in no time. The upgraded-socket assembly is the one `ws_handler`
+    // uses.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_a_slow_upload_keeps_its_link_while_bytes_arrive() {
+        let state = make_ws_convergence_test_state().await;
+        let client = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
+        let mut ws =
+            open_negotiated_duplex_ws(&state, AuthorSubject::for_test_bytes([0xa1; 16])).await;
+        let (_, setup_attachment) = settle_ws_todos_query(&client, &mut ws).await;
+        client.detach_query(setup_attachment);
+
+        // Several MB in rows, each message taking longer to arrive than the
+        // idle timeout and a keepalive tick allow for a whole message.
+        assert!(TRICKLE_STEP * TRICKLE_STEPS as u32 > WS_IDLE_TIMEOUT + WS_KEEPALIVE_PING_INTERVAL);
+        let title = "x".repeat(64 * 1024);
+        let writes = (0..48)
+            .map(|index| client.write_todo(&format!("{index} {title}")))
+            .collect::<Vec<_>>();
+
+        let mut largest = 0;
+        let mut trickled = 0;
+        let mut outbound = client.tick_take();
+        // Real time: the paused clock jumps minutes while trickling.
+        let deadline = std::time::Instant::now() + WS_SETTLE_DEADLINE;
+        while writes
+            .iter()
+            .any(|write| client.write_fate(write).is_none())
+        {
+            assert!(std::time::Instant::now() < deadline, "the upload must land");
+            // Only the upload runs on the paused clock: the server's answers
+            // are awaited in real time, as its runtime works on its own.
+            for message in encode_ws_frame_batches(&outbound).expect("encode client frames") {
+                largest = largest.max(message.len());
+                trickled += message.len();
+                tokio::time::pause();
+                trickle(&mut ws, &client_binary_frame(&message)).await;
+                tokio::time::resume();
+                assert_eq!(
+                    state.shutdown.active_websockets(),
+                    1,
+                    "a link whose message is still arriving must stay open"
+                );
+            }
+            let inbound = try_receive_ws_encoded_frames(&mut ws).await;
+            outbound = if inbound.is_empty() {
+                client.tick_take()
+            } else {
+                client.receive_tick_take(inbound)
+            };
+        }
+        assert!(
+            largest > 1024 * 1024,
+            "one message must be over 1 MiB, the largest was {largest} bytes"
+        );
+        assert!(trickled > 2 * 1024 * 1024, "only {trickled} bytes trickled");
+        for write in &writes {
+            assert!(
+                matches!(client.write_fate(write), Some(Ok(()))),
+                "every trickled row must land"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_a_silent_peer_is_still_closed_as_idle() {
+        let state = make_ws_test_state().await;
+        let mut ws =
+            open_negotiated_duplex_ws(&state, AuthorSubject::for_test_bytes([0xa2; 16])).await;
+
+        tokio::time::pause();
+        // Not read, so the server's pings go unanswered.
+        tokio::time::sleep(WS_IDLE_TIMEOUT + WS_KEEPALIVE_PING_INTERVAL * 2).await;
+        assert_eq!(server_close_reason(&mut ws).await, "websocket idle timeout");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_a_peer_that_stalls_mid_message_is_closed_as_idle() {
+        let state = make_ws_test_state().await;
+        let mut ws =
+            open_negotiated_duplex_ws(&state, AuthorSubject::for_test_bytes([0xa3; 16])).await;
+
+        tokio::time::pause();
+        let message = client_binary_frame(&vec![0; 1024 * 1024]);
+        trickle(&mut ws, &message[..message.len() / 2]).await;
+        assert_eq!(
+            state.shutdown.active_websockets(),
+            1,
+            "the first half arrived at a steady pace"
+        );
+        tokio::time::sleep(WS_IDLE_TIMEOUT + WS_KEEPALIVE_PING_INTERVAL * 2).await;
+        assert_eq!(server_close_reason(&mut ws).await, "websocket idle timeout");
     }
 }

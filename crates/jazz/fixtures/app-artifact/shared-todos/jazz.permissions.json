@@ -2,7 +2,7 @@
   "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
   "format": 1,
   "tables": {
-    "shares": { "read": "allowedTo.read(todo)" },
+    "shares": { "read": "allowedTo.read(todoRow)" },
     "todos": {
       "read": {
         "anyOf": ["owner = session.user", "exists shares(todo = this.id, user = session.user)"]

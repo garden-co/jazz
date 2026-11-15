@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "jazz-tools";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { demoPoster } from "@/src/lib/demo-poster";
 import { authorForSession } from "@/src/lib/identity";
 import { withBoundedConflictRetry } from "@/src/lib/retry";

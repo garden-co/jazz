@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../../schema-namespace.js";
-import { defineApp } from "../../typed-app.js";
+import { testApp } from "../../testing/test-app.js";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord } from "./native-codec.js";
 import { decodeNestedRowBytes, formatUuid, rowsFromBatches } from "./native-runtime-adapter.js";
@@ -492,12 +491,13 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 }
 
 it("preserves stored application columns named like internal metadata", () => {
-  const app = defineApp(
-    {
-      notes: { parents: s.string(), schema_version: s.string(), authored_columns: s.string() },
+  const app = testApp({
+    tables: {
+      notes: {
+        columns: { parents: "string", schema_version: "string", authored_columns: "string" },
+      },
     },
-    { migrations: "none" },
-  );
+  });
   const names = ["parents", "schema_version", "authored_columns"];
   const rows = rowsFromBatches(
     [

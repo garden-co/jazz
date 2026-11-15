@@ -13,7 +13,7 @@ import { useAll, useJazzSession, useSession } from "jazz-tools/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import type { District, Warehouse } from "@/schema";
+import type { District, Warehouse } from "@/jazz.generated";
 import { authClient } from "@/src/lib/auth-client";
 import { consoleQueries } from "@/src/warehouse";
 import { JoinWarehouse } from "./join-warehouse";

@@ -4356,7 +4356,7 @@ impl Inner {
         };
         let session = self.session(author);
         let mut pins = HashMap::new();
-        if !super::fanout::policy_pins(policy, &session, &mut pins) {
+        if !super::fanout::policy_pins(schema, policy, &session, &mut pins) {
             return Ok(true);
         }
         let pins = super::fanout::stored_pins(schema, pins);
