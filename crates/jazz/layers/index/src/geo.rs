@@ -208,7 +208,7 @@ pub fn cover_box(
             },
         ]
     };
-    Ok(cover::cover::<Morton>(&rects))
+    Ok(cover::cover::<Morton>(&rects, &cover::keep_all))
 }
 
 /// The grid rectangles of a radius's bounding box, padded so that every
@@ -286,12 +286,90 @@ fn radius_rects(lat: f64, lng: f64, meters: f64) -> Vec<Rect> {
 }
 
 /// Covers every point within `meters` (great-circle, on a sphere of radius
-/// [`EARTH_RADIUS_M`]) of `(lat, lng)`, through its bounding box: split at
-/// the antimeridian, and spanning all longitudes when the cap is near a
-/// pole.
+/// [`EARTH_RADIUS_M`]) of `(lat, lng)` with the blocks that meet the cap.
+/// The cap's bounding box (split at the antimeridian, spanning all
+/// longitudes when the cap is near a pole) is only the snapping frame.
 pub fn cover_radius(lat: f64, lng: f64, meters: f64) -> Result<Vec<(i64, i64)>, GeoError> {
     let (lat, lng, meters) = (check_lat(lat)?, check_lng(lng)?, check_meters(meters)?);
-    Ok(cover::cover::<Morton>(&radius_rects(lat, lng, meters)))
+    let cap = Cap::new(lat, lng, meters);
+    let keep = |x: u32, y: u32, k: u32| cap.meets(x, y, k);
+    Ok(cover::cover::<Morton>(
+        &radius_rects(lat, lng, meters),
+        &keep,
+    ))
+}
+
+/// Grid step `i` of an axis spanning `span` degrees from `origin`, in degrees.
+fn edge(origin: f64, span: f64, i: u64) -> f64 {
+    origin + i as f64 / STEPS * span
+}
+
+/// `sin²(d/2)` for `0 ≤ d ≤ 180` degrees: the haversine.
+fn hav(d: f64) -> f64 {
+    let (s, _) = trig::sin_cos_deg(d * 0.5);
+    s * s
+}
+
+/// A spherical cap, for testing which quadtree blocks it meets.
+struct Cap {
+    lat: f64,
+    lng: f64,
+    cos_lat: f64,
+    /// `hav` of the padded angular radius, with slack for rounding.
+    limit: f64,
+}
+
+impl Cap {
+    fn new(lat: f64, lng: f64, meters: f64) -> Cap {
+        let delta_deg = meters / EARTH_RADIUS_M * RAD_TO_DEG;
+        // The same padding as the bounding box, then slack for the rounding
+        // of the bound itself (a few ulps of values at most 1).
+        let padded = (delta_deg + 1e-9 + delta_deg * 1e-9).min(180.0);
+        Cap {
+            lat,
+            lng,
+            cos_lat: trig::sin_cos_deg(lat).1,
+            limit: hav(padded) * (1.0 + 1e-9) + 1e-30,
+        }
+    }
+
+    /// Whether the block of side `2^k` at grid corner `(x, y)` may hold a
+    /// point of the cap. With the haversine formula
+    /// `hav d = hav Δφ + cos φ₀ cos φ hav Δλ`, each term is bounded below
+    /// separately over the block: the latitude gap to the block, the
+    /// smallest `cos φ` in it, the longitude gap (around the globe) to it.
+    /// So a rejected block holds no point within the radius.
+    fn meets(&self, x: u32, y: u32, k: u32) -> bool {
+        let side = 1u64 << k;
+        let (w, e) = (
+            edge(-180.0, 360.0, x as u64),
+            edge(-180.0, 360.0, x as u64 + side),
+        );
+        let (s, n) = (
+            edge(-90.0, 180.0, y as u64),
+            edge(-90.0, 180.0, y as u64 + side),
+        );
+        let dlat = if self.lat < s {
+            s - self.lat
+        } else if self.lat > n {
+            self.lat - n
+        } else {
+            0.0
+        };
+        let dlng = if w <= self.lng && self.lng <= e {
+            0.0
+        } else {
+            let gap = |a: f64| {
+                let d = (a - self.lng).abs();
+                if d > 180.0 { 360.0 - d } else { d }
+            };
+            gap(w).min(gap(e))
+        };
+        // cos φ is smallest at the block's latitude farthest from the equator.
+        let cos_min = trig::sin_cos_deg(s.abs().max(n.abs()).min(90.0)).1.max(0.0);
+        let bound = hav(dlat.min(180.0)) + self.cos_lat * cos_min * hav(dlng.min(180.0));
+        bound <= self.limit
+    }
 }
 
 /// Everything SQL needs for a radius search (SPEC 20.5): read the `ranges`,

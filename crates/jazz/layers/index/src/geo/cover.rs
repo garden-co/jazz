@@ -9,6 +9,11 @@
 //!
 //! Finer snapping never reads more: its ranges are a subset of the coarser
 //! level's, so any merge of the coarser ranges also covers them.
+//!
+//! A cover may also prune with a [`Keep`] test: a block (or quadtree node)
+//! that the test rejects contains no point of the region and is skipped. A
+//! radius uses it to keep only blocks that meet the cap, with its bounding
+//! box only as the snapping frame.
 
 /// Most ranges in a cover (SPEC 20.10.3).
 pub const MAX_RANGES: usize = 16;
@@ -64,10 +69,19 @@ pub(crate) fn interleave(u: u32, v: u32) -> i64 {
     (spread(u) | (spread(v) << 1)) as i64
 }
 
-/// Covers the union of `rects` with at most [`MAX_RANGES`] inclusive ranges,
-/// sorted and disjoint.
-pub(crate) fn cover<C: Curve>(rects: &[Rect]) -> Vec<(i64, i64)> {
-    let mut ranges = exact_ranges::<C>(rects, snap_level(rects));
+/// Whether the quadtree node of side `2^k` at full-grid corner `(x, y)` may
+/// hold a point of the region. Must never reject a node that does.
+pub(crate) type Keep<'a> = &'a dyn Fn(u32, u32, u32) -> bool;
+
+/// Keeps every node: the region is the rectangles themselves.
+pub(crate) fn keep_all(_: u32, _: u32, _: u32) -> bool {
+    true
+}
+
+/// Covers the part of the union of `rects` that `keep` accepts with at most
+/// [`MAX_RANGES`] inclusive ranges, sorted and disjoint.
+pub(crate) fn cover<C: Curve>(rects: &[Rect], keep: Keep) -> Vec<(i64, i64)> {
+    let mut ranges = exact_ranges::<C>(rects, snap_level(rects), keep);
     ranges.sort_unstable();
     merge_touching(&mut ranges);
     limit(ranges, MAX_RANGES)
@@ -87,8 +101,9 @@ pub(crate) fn snap_level(rects: &[Rect]) -> u32 {
     s
 }
 
-/// The ranges of all blocks of side `2^s` that meet one of `rects`, unsorted.
-pub(crate) fn exact_ranges<C: Curve>(rects: &[Rect], s: u32) -> Vec<(i64, i64)> {
+/// The ranges of all blocks of side `2^s` that meet one of `rects` and that
+/// `keep` accepts, unsorted.
+pub(crate) fn exact_ranges<C: Curve>(rects: &[Rect], s: u32, keep: Keep) -> Vec<(i64, i64)> {
     let mut out = Vec::new();
     for r in rects {
         let snapped = Rect {
@@ -97,15 +112,18 @@ pub(crate) fn exact_ranges<C: Curve>(rects: &[Rect], s: u32) -> Vec<(i64, i64)> 
             v0: r.v0 >> s,
             v1: r.v1 >> s,
         };
-        walk::<C>(&snapped, s, 0, 0, BITS - s, &mut out);
+        walk::<C>(&snapped, s, keep, 0, 0, BITS - s, &mut out);
     }
     out
 }
 
 /// Visits the quadtree node at `(x, y)` (snapped coordinates) of side `2^k`.
-fn walk<C: Curve>(r: &Rect, s: u32, x: u32, y: u32, k: u32, out: &mut Vec<(i64, i64)>) {
+fn walk<C: Curve>(r: &Rect, s: u32, keep: Keep, x: u32, y: u32, k: u32, out: &mut Vec<(i64, i64)>) {
     let last = (1u32 << k) - 1;
     if x > r.u1 || x + last < r.u0 || y > r.v1 || y + last < r.v0 {
+        return;
+    }
+    if !keep(x << s, y << s, k + s) {
         return;
     }
     if x >= r.u0 && x + last <= r.u1 && y >= r.v0 && y + last <= r.v1 {
@@ -115,10 +133,10 @@ fn walk<C: Curve>(r: &Rect, s: u32, x: u32, y: u32, k: u32, out: &mut Vec<(i64, 
         return;
     }
     let h = 1u32 << (k - 1);
-    walk::<C>(r, s, x, y, k - 1, out);
-    walk::<C>(r, s, x + h, y, k - 1, out);
-    walk::<C>(r, s, x, y + h, k - 1, out);
-    walk::<C>(r, s, x + h, y + h, k - 1, out);
+    walk::<C>(r, s, keep, x, y, k - 1, out);
+    walk::<C>(r, s, keep, x + h, y, k - 1, out);
+    walk::<C>(r, s, keep, x, y + h, k - 1, out);
+    walk::<C>(r, s, keep, x + h, y + h, k - 1, out);
 }
 
 /// Merges sorted ranges that overlap or touch.

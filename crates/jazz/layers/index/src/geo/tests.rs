@@ -495,7 +495,7 @@ fn read_cells(ranges: &[(i64, i64)]) -> f64 {
 }
 
 fn cover_with<C: Curve>(rects: &[Rect], max: usize) -> Vec<(i64, i64)> {
-    let mut r = cover::exact_ranges::<C>(rects, cover::snap_level(rects));
+    let mut r = cover::exact_ranges::<C>(rects, cover::snap_level(rects), &cover::keep_all);
     r.sort_unstable();
     cover::merge_touching(&mut r);
     cover::limit(r, max)
@@ -519,47 +519,10 @@ fn hilbert_blocks_tile() {
     }
 }
 
-/// Z-order blocks of the bounding-box cover that meet the disc (planar
-/// approximation, fine at city scale): what a cap-shaped cover would read.
-fn disc_cover(rects: &[Rect], lat: f64, lng: f64, meters: f64) -> Vec<(i64, i64)> {
-    let lng_step = 360.0 / (1u64 << 31) as f64;
-    let lat_step = 180.0 / (1u64 << 31) as f64;
-    let m_per_deg = EARTH_RADIUS_M.to_radians_per_deg();
-    let coslat = lat.to_radians().cos();
-    let mut r: Vec<(i64, i64)> = cover::exact_ranges::<Morton>(rects, cover::snap_level(rects))
-        .into_iter()
-        .filter(|&(a, b)| {
-            let (mut u, mut v) = (0u32, 0u32);
-            for i in 0..31 {
-                u |= (((a >> (2 * i)) & 1) as u32) << i;
-                v |= (((a >> (2 * i + 1)) & 1) as u32) << i;
-            }
-            let side = (((b - a + 1) as f64).sqrt()) as u32;
-            let (w, e) = (
-                -180.0 + u as f64 * lng_step,
-                -180.0 + (u + side) as f64 * lng_step,
-            );
-            let (so, no) = (
-                -90.0 + v as f64 * lat_step,
-                -90.0 + (v + side) as f64 * lat_step,
-            );
-            let dx = (lng.clamp(w, e) - lng) * coslat * m_per_deg;
-            let dy = (lat.clamp(so, no) - lat) * m_per_deg;
-            dx * dx + dy * dy <= meters * meters * 1.0001
-        })
-        .collect();
-    r.sort_unstable();
-    cover::merge_touching(&mut r);
-    cover::limit(r, MAX_RANGES)
-}
-
-trait PerDeg {
-    fn to_radians_per_deg(self) -> f64;
-}
-impl PerDeg for f64 {
-    fn to_radians_per_deg(self) -> f64 {
-        self * core::f64::consts::PI / 180.0
-    }
+/// A cover of `rects` on curve `C`, keeping only blocks that meet the cap.
+fn cap_cover<C: Curve>(rects: &[Rect], lat: f64, lng: f64, meters: f64) -> Vec<(i64, i64)> {
+    let cap = Cap::new(lat, lng, meters);
+    cover::cover::<C>(rects, &|x, y, k| cap.meets(x, y, k))
 }
 
 fn quantile(xs: &mut [f64], q: f64) -> f64 {
@@ -573,13 +536,13 @@ fn amplification() {
     let cell_dlng = 2.0 * core::f64::consts::PI / (1u64 << 31) as f64;
     let cell_dlat = core::f64::consts::PI / (1u64 << 31) as f64;
     println!(
-        "{:>8} {:>5} | {:>10} {:>10} {:>10} | {:>10} {:>10} | {:>10} {:>10}",
-        "radius", "lat", "Z mean", "Z p90", "Z/bbox", "H mean", "H p90", "Z ∞ranges", "Z disc"
+        "{:>8} {:>5} | {:>8} {:>8} | {:>8} {:>8} | {:>8} {:>8}",
+        "radius", "lat", "Zcap", "Zcap p90", "Hcap", "Zbbox", "Hbbox", "Zbbox∞"
     );
     for &meters in &[100.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0, 50_000.0] {
         for &lat in &[0.0, 37.8, 51.5, 60.0, 70.0] {
             let mut rng = Rng(7);
-            let (mut z, mut h, mut zb, mut zu, mut zd) = (vec![], vec![], vec![], vec![], vec![]);
+            let mut cols: [Vec<f64>; 5] = Default::default();
             for _ in 0..300 {
                 let clat = lat + rng.range(-0.5, 0.5);
                 let clng = rng.range(-170.0, 170.0);
@@ -587,33 +550,26 @@ fn amplification() {
                 let delta = meters / EARTH_RADIUS_M;
                 let disc = 2.0 * core::f64::consts::PI * (1.0 - delta.cos())
                     / (cell_dlng * cell_dlat * clat.to_radians().cos());
-                let bbox: f64 = rects
-                    .iter()
-                    .map(|r| (r.u1 - r.u0 + 1) as f64 * (r.v1 - r.v0 + 1) as f64)
-                    .sum();
-                let zr = read_cells(&cover_with::<Morton>(&rects, MAX_RANGES));
-                assert_eq!(
-                    cover_radius(clat, clng, meters).unwrap(),
-                    cover_with::<Morton>(&rects, MAX_RANGES)
-                );
-                z.push(zr / disc);
-                zb.push(zr / bbox);
-                h.push(read_cells(&cover_with::<Hilbert>(&rects, MAX_RANGES)) / disc);
-                zu.push(read_cells(&cover_with::<Morton>(&rects, usize::MAX)) / disc);
-                zd.push(read_cells(&disc_cover(&rects, clat, clng, meters)) / disc);
+                let zcap = cover_radius(clat, clng, meters).unwrap();
+                assert_eq!(zcap, cap_cover::<Morton>(&rects, clat, clng, meters));
+                cols[0].push(read_cells(&zcap) / disc);
+                cols[1].push(read_cells(&cap_cover::<Hilbert>(&rects, clat, clng, meters)) / disc);
+                cols[2].push(read_cells(&cover_with::<Morton>(&rects, MAX_RANGES)) / disc);
+                cols[3].push(read_cells(&cover_with::<Hilbert>(&rects, MAX_RANGES)) / disc);
+                cols[4].push(read_cells(&cover_with::<Morton>(&rects, usize::MAX)) / disc);
             }
             let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+            let means: Vec<f64> = cols.iter().map(|c| mean(c)).collect();
             println!(
-                "{:>7}m {:>5} | {:>10.2} {:>10.2} {:>10.2} | {:>10.2} {:>10.2} | {:>10.2} {:>10.2}",
+                "{:>7}m {:>5} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2}",
                 meters,
                 lat,
-                mean(&z),
-                quantile(&mut z, 0.9),
-                mean(&zb),
-                mean(&h),
-                quantile(&mut h, 0.9),
-                mean(&zu),
-                mean(&zd),
+                means[0],
+                quantile(&mut cols[0], 0.9),
+                means[1],
+                means[2],
+                means[3],
+                means[4],
             );
         }
     }
