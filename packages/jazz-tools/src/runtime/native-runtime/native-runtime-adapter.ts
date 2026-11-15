@@ -5123,10 +5123,11 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
  * The explicit `$updatedAt` a write names (a backfill or import), or
  * `null` for an ordinary write. An ordinary write carries no time: the
  * replica's clock stamps it while it is pending, and the authority's clock
- * stamps it when it accepts it, so `$updatedAt` and `$acceptedAt` are the
- * acceptance time, not the device clock at authoring (an offline edit
- * synced later is stamped when it syncs), and a device with a fast clock
- * is not refused for writing in the future.
+ * stamps it when it accepts it, so its `$updatedAt` is the acceptance
+ * time, not the device clock at authoring (an offline edit synced later is
+ * stamped when it syncs), and a device with a fast clock is not refused
+ * for writing in the future. `$acceptedAt` is always the acceptance time,
+ * read from the version's accepted position, whatever `$updatedAt` says.
  */
 export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? null;
