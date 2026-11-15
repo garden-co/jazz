@@ -20,7 +20,16 @@ impl Settler {
         written: Option<TransactionId>,
     ) -> Result<()> {
         match (self.durability, written) {
-            (Some(tier), Some(written)) => Ok(client.wait_for_transaction(written, tier).await?),
+            (Some(tier), Some(written)) => {
+                // This wait handles the write's refusal: it isn't also a
+                // mutation error.
+                crate::lifecycle::claim(written);
+                let waited = client.wait_for_transaction(written, tier).await;
+                if waited.is_ok() {
+                    crate::lifecycle::unclaim(written);
+                }
+                Ok(waited?)
+            }
             _ => Ok(()),
         }
     }

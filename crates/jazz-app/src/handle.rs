@@ -61,6 +61,8 @@ pub(crate) struct Info {
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
+    /// Where the local store lives, for [`Jazz::delete_client_storage`].
+    pub(crate) storage_dir: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for Jazz {
@@ -110,6 +112,10 @@ impl Jazz {
             ));
         }
         let serverless = config.server_url.is_none();
+        let storage_dir = match &config.storage {
+            Storage::Dir(dir) => Some(dir.clone()),
+            Storage::Memory => None,
+        };
         let (commands, receiver) = mpsc::unbounded_channel();
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
@@ -124,6 +130,7 @@ impl Jazz {
                 account,
                 implementations,
                 serverless,
+                storage_dir,
             }),
             durability: None,
         })
@@ -327,6 +334,7 @@ fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
 ) {
+    let client_serverless = config.server_url.is_none();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -351,6 +359,11 @@ fn run(
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
             return;
+        }
+        // Refused writes no durable wait claimed go to `mutation_errors`.
+        if !client_serverless {
+            client.track_mutation_errors();
+            tokio::task::spawn_local(crate::lifecycle::report_mutation_errors(client.clone()));
         }
         // Jobs run as local tasks, so a slow one never holds up the rest.
         // Subscription forwarders are spawned by their jobs and are not in

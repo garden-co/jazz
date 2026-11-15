@@ -2114,6 +2114,7 @@ dependencies = [
  "jazz-codegen",
  "jazz-native-transport",
  "jazz-server",
+ "jazz-text",
  "reqwest",
  "serde",
  "serde_json",
