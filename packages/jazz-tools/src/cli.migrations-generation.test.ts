@@ -120,7 +120,10 @@ describe("cli migrations", () => {
     const { logs } = await captureConsoleLogs(() =>
       createMigration({ schemaDir: root, name: "add-points" }),
     );
-    expect(logs).toContain("Resolve 1 TODO in jazz.app.json, then run `jazz-tools validate`:");
+    // The file is named relative to the working directory.
+    expect(logs.join("\n")).toMatch(
+      /Resolve 1 TODO in \S*jazz\.app\.json, then run `jazz-tools validate`:/,
+    );
     expect(logs).toContain("  migrations[0].migrate.todos.points.default");
     // A stub with a TODO is refused until it is resolved.
     await expect(validate({ schemaDir: root })).rejects.toThrow(/TODO/);
@@ -188,32 +191,37 @@ describe("cli migrations", () => {
     // validate runs the checks a deploy runs on the migrations.
     await captureConsoleLogs(() => validate({ schemaDir: root }));
 
+    // Refusals come from the diff, so they start from a project whose
+    // bindings are the three-variant version and has no migration yet: a
+    // migration to the current tables (add-blocked above) would make the
+    // loader refuse the edited file before any diff runs.
+    const base = await project(tasks(["todo", "done", "blocked"], ["bug", "ui"]));
     for (const [status, labels, column, variant] of [
       [["todo", "blocked"], ["bug", "ui"], "status", "done"],
       [["open", "done", "blocked"], ["bug", "ui"], "status", "todo"],
       [["todo", "done", "blocked"], ["ui"], "labels", "bug"],
     ] as const) {
       const edited = tasks([...status], [...labels]);
-      await writeTables(root, edited);
-      await expect(createMigration({ schemaDir: root, name: "drop-variant" })).rejects.toThrow(
+      await writeTables(base, edited);
+      await expect(createMigration({ schemaDir: base, name: "drop-variant" })).rejects.toThrow(
         `Changing the enum variants of column \`tasks.${column}\` is not supported yet: ` +
           `it no longer declares "${variant}". A migration can add enum variants, but renaming ` +
           "or removing one is planned for a later release.",
       );
-      expect((await readApp(root)).tables).toEqual(edited);
-      expect((await readApp(root)).migrations).toHaveLength(1);
+      expect((await readApp(base)).tables).toEqual(edited);
+      expect((await readApp(base)).migrations).toBeUndefined();
     }
     for (const [status, labels, column] of [
       [["blocked", "todo", "done"], ["bug", "ui"], "status"],
       [["todo", "archived", "done", "blocked"], ["bug", "ui"], "status"],
       [["todo", "done", "blocked"], ["ui", "bug"], "labels"],
     ] as const) {
-      await writeTables(root, tasks([...status], [...labels]));
-      await expect(createMigration({ schemaDir: root, name: "drop-variant" })).rejects.toThrow(
+      await writeTables(base, tasks([...status], [...labels]));
+      await expect(createMigration({ schemaDir: base, name: "drop-variant" })).rejects.toThrow(
         `Changing the order of the enum variants of column \`tasks.${column}\` is not supported: ` +
           "add new variants at the end of the list.",
       );
-      expect((await readApp(root)).migrations).toHaveLength(1);
+      expect((await readApp(base)).migrations).toBeUndefined();
     }
   }, 60_000);
 

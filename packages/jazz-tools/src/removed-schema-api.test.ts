@@ -87,9 +87,9 @@ describe("the schema DSL alpha.65 removed", () => {
       expect(thrown, name).toBeInstanceOf(Error);
       expect(thrown, name).toMatchObject({ code: "JAZZ_API_REMOVED" });
       const { message } = thrown as Error;
-      expect(message.startsWith(`[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.65`)).toBe(
-        true,
-      );
+      expect(
+        message.startsWith(`[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.65`),
+      ).toBe(true);
       expect(message).toContain("`npx jazz-tools upgrade`");
       expect(message).toContain(UPGRADE_FROM_ALPHA_64_URL);
     }

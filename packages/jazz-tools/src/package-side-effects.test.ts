@@ -89,13 +89,18 @@ const PURE_CALLS = new Set([
  * Keyed `<file>: <callee>`. A new entry needs the same review.
  */
 const REVIEWED_CALLS = new Set([
+  // Generated bindings bind their app, a value the module exports.
+  "__typecheck__/chat.generated.ts: bindApp",
+  "__typecheck__/tasks/jazz.generated.ts: bindApp",
   "backend/vercel-store.ts: <value>.repeat",
   "classic-api.ts: classicFunction",
   "classic-api.ts: classicNamespace",
   "dev/app-files.ts: join",
+  "dev/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
   "inspect/mcp.ts: WHERE_OPERATORS.join",
   "local-first-auth/identity.ts: utf8",
+  "permissions/index.ts: removedSchemaApi",
   "prosemirror/overlays.ts: PluginKey",
   "prosemirror/sync.ts: PluginKey",
   "react-core/provider.tsx: createContext",

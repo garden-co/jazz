@@ -50,7 +50,7 @@ describe("an app module imported as CommonJS from ESM", () => {
     const wrapped = asCommonJsModule(app);
     expect(Object.keys(wrapped)).toEqual(["default"]);
     expect(() => resolveSchemaSource(wrapped as SchemaSourceInput)).toThrow(
-      wrapperError("schema.ts"),
+      wrapperError("jazz.generated.ts"),
     );
   });
 
