@@ -2,31 +2,31 @@
 name = "todo-server-docs"
 version = "0.1.0"
 edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "todo-server-docs"
 path = "src/main.rs"
 
 [dependencies]
-jazz = { path = "../../../crates/jazz", default-features = false, features = ["runtime"] }
-jazz-native-transport = { path = "../../../crates/jazz-native-transport" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
+jazz-app = { path = "../../../crates/jazz-app" }
 axum = "0.7"
+futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
-uuid = { version = "1", features = ["v4"] }
-futures-util = "0.3"
+uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 jazz-server = { path = "../../../crates/jazz-server", features = ["test"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest-eventsource = "0.6"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
-futures-util = "0.3"
-reqwest-eventsource = "0.6"
