@@ -128,7 +128,13 @@ type StreamingColumnName<TSchema extends SchemaLike, TTable extends string> = {
  * replaced by an asynchronous source; every other column retains its ordinary
  * insert type and required/defaulted status.
  */
-export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  // A test's loose app: any column may be the streamed one.
+  string extends StreamingColumnName<TSchema, TTable>
+    ? TableInit<TSchema, TTable>
+    : StrictTableStreamingInit<TSchema, TTable>;
+
+type StrictTableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
     Omit<TableInit<TSchema, TTable>, TColumn> & {
       [TStreamed in TColumn]-?: StreamingValueSource;
@@ -137,7 +143,12 @@ export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableN
 }[StreamingColumnName<TSchema, TTable>];
 
 /** Streaming update/upsert input with one required streamed scalar. */
-export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  string extends StreamingColumnName<TSchema, TTable>
+    ? Partial<TableInit<TSchema, TTable>>
+    : StrictTableStreamingUpdate<TSchema, TTable>;
+
+type StrictTableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
     Partial<Omit<TableInit<TSchema, TTable>, TColumn>> & {
       [TStreamed in TColumn]-?: StreamingValueSource;
@@ -1660,7 +1671,7 @@ function columnTransforms(
       tableTransforms(table)[field] = {
         computed: true,
         rowColumns: Object.freeze([...from]),
-        from: (_value, dependencies) => compute(dependencies),
+        from: (_value, row) => compute(row),
         to: () => {
           throw new TypeError(`Computed field "${field}" is read-only.`);
         },

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "entries": { "read": "exists entries().people()" },
+    "people": { "read": "exists people().entriesViaPeople()" }
+  }
+}

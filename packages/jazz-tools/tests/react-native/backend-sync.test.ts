@@ -1,5 +1,4 @@
 import { expect, it } from "vitest";
-import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import * as nativeCommands from "jazz-rn/relay";
 import {
@@ -7,25 +6,20 @@ import {
   type NativeForegroundModule,
 } from "../../src/react-native/native-foreground-db.js";
 import { encodeCellsForRow } from "../../src/runtime/native-runtime/native-runtime-adapter.js";
-import { startTestJazz } from "../../src/testing/index.js";
+import { startTestJazz, testApp, testPermissions } from "../../src/testing/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp(
-  { todos: schema.table({ title: schema.string() }, {}) },
-  { migrations: "none" },
-);
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-]);
+const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
+const permissionsFile = { format: 1, tables: { todos: { read: "true", insert: "true" } } };
+const permissions = testPermissions(app, permissionsFile);
 
 // A signed-in native user syncs through the app's backend with the app's own
 // bearer, as the backend's `authenticate` reads it; the core admits only the
 // backend.
 it("a signed-in user's write reaches the server through the app's backend and survives a relay restart", async () => {
-  const backend = await startTestJazz({ app, permissions });
+  const backend = await startTestJazz({ app, permissions: permissionsFile });
   try {
-    let written: { id: string; title: string } | undefined;
+    let written: { id: string; [column: string]: unknown } | undefined;
     await withNativeRelayFixture(
       app,
       permissions,
@@ -58,7 +52,7 @@ it("a signed-in user's write reaches the server through the app's backend and su
 }, 60_000);
 
 it("counts offline writes as pending until the app's backend accepts them", async () => {
-  const backend = await startTestJazz({ app, permissions });
+  const backend = await startTestJazz({ app, permissions: permissionsFile });
   try {
     await withNativeRelayFixture(
       app,

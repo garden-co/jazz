@@ -1,39 +1,51 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
-import { bindApp, type AppTypes, type ComputedImpl, type JsonValue, type TransformImpl } from "../../index.js";
+import {
+  bindApp,
+  type AppTypes,
+  type ComputedImpl,
+  type JsonValue,
+  type TransformImpl,
+} from "../../index.js";
 import { computed, transforms } from "./jazz.computed.js";
 
 export type TaskStatus = "todo" | "doing" | "done";
 export type TaskMeta = { color: string; links?: string[]; size?: "s" | "m" | "l" };
-export type TaskReview = { type: "pending" } | { type: "approved"; by: string; note: string | null } | { type: "rejected"; reason: string };
-export type TaskReviewInit = { type: "pending" } | { type: "approved"; by: string; note?: string | null } | { type: "rejected"; reason: string };
+export type TaskReview =
+  | { type: "pending" }
+  | { type: "approved"; by: string; note: string | null }
+  | { type: "rejected"; reason: string };
+export type TaskReviewInit =
+  | { type: "pending" }
+  | { type: "approved"; by: string; note?: string | null }
+  | { type: "rejected"; reason: string };
 export type TaskPriority = "low" | "high";
 
-export interface Person {
+export type Person = {
   readonly id: string;
   name: string;
   email: string;
-}
+};
 
-export interface PersonInsert {
+export type PersonInsert = {
   name: string;
   email: string;
-}
+};
 
-export interface Project {
+export type Project = {
   readonly id: string;
   name: string;
   budget: bigint | null;
   logo: Uint8Array | null;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   name: string;
   budget?: bigint | null;
   logo?: Uint8Array | null;
-}
+};
 
-export interface Task {
+export type Task = {
   readonly id: string;
   title: string;
   projectId: string;
@@ -47,9 +59,9 @@ export interface Task {
   assigneeIds: string[];
   readonly priority: TaskPriority;
   readonly label: string | null;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   title: string;
   projectId: string;
   status?: TaskStatus;
@@ -60,7 +72,7 @@ export interface TaskInsert {
   extra?: JsonValue | null;
   review?: TaskReviewInit | null;
   assigneeIds: string[];
-}
+};
 
 interface Types extends AppTypes {
   people: {

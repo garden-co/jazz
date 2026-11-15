@@ -452,7 +452,7 @@ async function publishSchema(server: LocalJazzServerHandle): Promise<{ hash: str
     appId: server.appId,
     serverUrl: server.url,
     adminSecret: server.adminSecret,
-    schema,
+    app: schema,
     permissions: allowAll(schema),
   });
 

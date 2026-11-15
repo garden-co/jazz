@@ -13,6 +13,7 @@ import {
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
 import {
+  compileTestPermissions,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -34,10 +35,16 @@ afterEach(async () => {
 
 async function appAt(name: string, user: string) {
   const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: await compileTestPermissions(app, permissions),
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const url = await jazzAppUserUrl(backend, user);
   const origin = new URL(url).origin;

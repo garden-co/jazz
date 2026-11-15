@@ -51,17 +51,24 @@
    - For existing apps migrating from another data store, the existing data should constrain this
      enough.
    - Write permission tests next to the policies: /docs/tooling/testing
-   - Before the first change to a schema the app has already run with data, run
-     `npx jazz-tools migrations create`, and keep `defineApp(schema, { migrations })` importing
-     `./migrations` (/docs/schemas/migrations). Never delete or move the store to get past a schema
-     error: it means a migration is missing, and the user's data is in that store.
-   - After changing `schema.ts`, `permissions.ts` or migrations, run `npx jazz-tools validate` and
-     commit the `jazz.app.json` and `jazz.permissions.json` it writes: readable JSON forms of the
-     schema and policies, which other languages load and which `createJazz` checks at startup
-     (/docs/reference/app-files). Their policy expressions read like SQL:
+   - Write the tables in `jazz.app.json` and the policies in `jazz.permissions.json`, at the app
+     root (/docs/reference/app-files). Put `"$schema": "https://jazz.tools/schemas/jazz.app.schema.json"`
+     in the first for editor checks. Policy expressions read like SQL:
      `exists chatMembers(chatId = this.id, userId = session.user)`, `allowedTo.read(chat)`,
-     `$createdBy.account = session.user`, `role in ['admin', 'owner']`. An error from `validate`
-     points at the spot in the expression and suggests a fix.
+     `$createdBy.account = session.user`, `role in ['admin', 'owner']`.
+   - After changing either file, run `npx jazz-tools generate`: it checks both and writes
+     `jazz.generated.ts`, the typed bindings app code imports (`import { app } from "./jazz.generated"`).
+     Commit all three; never edit `jazz.generated.ts` by hand. An error from `generate` points at the
+     spot in the file and suggests a fix. Backends pass the permissions to `createJazz`:
+     `import permissions from "./jazz.permissions.json" with { type: "json" }`.
+   - When `generate` says the tables changed since the last version, run
+     `npx jazz-tools migrations create --name <name>`: it records the old version and a migration in
+     `jazz.app.json`. Replace every `"TODO: …"` it leaves, then run `generate` again
+     (/docs/schemas/migrations). Never delete or move the store to get past a schema error: it means
+     a migration is missing, and the user's data is in that store.
+   - An alpha.64 app with `schema.ts` and `permissions.ts`: run
+     `npx jazz-tools@2.0.0-alpha.65 upgrade` first, before bumping the dependency, and review the
+     diff (/docs/operating/backups-and-upgrades#upgrading-from-alpha64).
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata

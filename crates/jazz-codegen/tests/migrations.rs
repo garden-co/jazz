@@ -316,19 +316,36 @@ fn tables_are_created_dropped_and_renamed() {
 }
 
 #[test]
-fn a_change_the_diff_cant_describe_is_a_todo() {
-    let created = migrate(
-        TODOS,
-        r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "history": "latest" } }"#,
-    );
-    assert_eq!(
-        created.todos,
-        vec!["migrations[0].migrate.todos".to_string()]
-    );
-    assert!(
-        migration(&created)
-            .contains("no migration step was inferred for the change to table `todos`")
-    );
+fn a_change_that_keeps_every_row_needs_an_empty_step() {
+    for (after, what) in [
+        (
+            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "history": "latest" } }"#,
+            "history retention",
+        ),
+        (
+            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title", ["done", "title"]] } }"#,
+            "indexes",
+        ),
+        (
+            r#"{ "todos": { "columns": { "title": { "type": "string", "merge": "text" }, "done": "boolean" } } }"#,
+            "merge strategies",
+        ),
+        (
+            r#"{ "todos": { "columns": { "done": "boolean", "title": "string" } } }"#,
+            "the column order",
+        ),
+    ] {
+        let created = migrate(TODOS, after);
+        assert!(created.todos.is_empty(), "{what}: {:?}", created.todos);
+        let text = migration(&created);
+        assert!(
+            text.contains(&format!(
+                "\"todos\": {{ \"$comment\": \"Rows pass unchanged: only {what} changed.\" }}"
+            )),
+            "{text}"
+        );
+        App::load(created.app.as_bytes()).unwrap_or_else(|e| panic!("{what}: {e}"));
+    }
 }
 
 #[test]

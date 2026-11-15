@@ -2,7 +2,8 @@ import { createAccountManager } from "../../src/accounts/create-account-manager.
 import type { AccountStore } from "../../src/accounts/persistence.js";
 import type { AccountHandle } from "../../src/accounts/state.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
-import { shippedMigrations } from "../../src/runtime/client-migrations.js";
+import { boundApp, type BoundApp } from "../../src/typed-app.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import {
   jazzServerBrowserCommands,
@@ -39,19 +40,35 @@ export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
  */
 export async function startJazzApp(
   core: JazzServerInfo,
-  app: { schema: SchemaSourceInput; permissions: CompiledPermissionsMap },
+  app: { schema: SchemaSourceInput; permissions: TestPermissionsFile },
 ): Promise<JazzServerInfo> {
   const coreUrl = jazzCore(core).serverUrl;
-  const schema = resolveSchemaSource(app.schema);
   const serverUrl = await jazzServerBrowserCommands().jazzAppFront(coreUrl, {
-    schema,
-    // The command serializes the schema without the migrations the app
-    // ships; the backend must publish them, as the app's createJazz does.
-    migrations: shippedMigrations(schema),
+    bound: boundOf(app.schema),
     permissions: app.permissions,
     pageOrigin: location.origin,
   });
   return { ...core, serverUrl, coreUrl };
+}
+
+/**
+ * The engine's policies for `permissions` (a `jazz.permissions.json`, as an
+ * object), compiled against `app` in Node as a backend compiles them: what
+ * `deploy` publishes. `app` comes from a committed `jazz.generated.ts`.
+ */
+export async function compileTestPermissions(
+  app: SchemaSourceInput,
+  permissions: TestPermissionsFile,
+): Promise<CompiledPermissionsMap> {
+  const compile = jazzServerBrowserCommands().jazzTestPermissions;
+  if (!compile) throw new Error("Browser test project is missing the jazzTestPermissions command.");
+  return compile(boundOf(app), permissions);
+}
+
+function boundOf(app: SchemaSourceInput): BoundApp {
+  const bound = boundApp(resolveSchemaSource(app));
+  if (!bound) throw new Error("expected an app from a committed jazz.generated.ts");
+  return bound;
 }
 
 /**

@@ -2,27 +2,27 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Folder {
+export type Folder = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface FolderInsert {
+export type FolderInsert = {
   name: string;
-}
+};
 
-export interface Note {
+export type Note = {
   readonly id: string;
   body: string;
   pinned: boolean;
   folderId: string | null;
-}
+};
 
-export interface NoteInsert {
+export type NoteInsert = {
   body: string;
   pinned?: boolean;
   folderId?: string | null;
-}
+};
 
 interface Types extends AppTypes {
   folders: {

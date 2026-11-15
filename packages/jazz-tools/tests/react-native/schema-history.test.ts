@@ -1,8 +1,6 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../../src/schema-namespace.js";
-import { migration as m } from "../../src/migration-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
-import { appMigrations, startTestJazz } from "../../src/testing/index.js";
+import { startTestJazz, testApp, testPermissions } from "../../src/testing/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 // A React Native client opens its native store along the migrations the app
@@ -10,28 +8,20 @@ import { withNativeRelayFixture } from "./fixture.js";
 // server does and reads the server's rows after the app gained a version
 // (#4777). Opened from the head schema alone it read nothing.
 it("reads rows written before the app renamed a column, from a server with schema history", async () => {
-  const before = { notes: s.table({ title: s.string() }, {}) };
-  const after = { notes: s.table({ body: s.string() }, {}) };
-  const rename = m.defineMigration({
-    from: before,
-    to: after,
-    migrate: { notes: { body: m.renameFrom("title") } },
+  const before = { notes: { columns: { title: "string" } } };
+  const after = { notes: { columns: { body: "string" } } };
+  const beforeApp = testApp({ tables: before });
+  const afterApp = testApp({
+    tables: after,
+    history: { v1: { tables: before } },
+    migrations: [{ from: "v1", migrate: { notes: { body: { renameFrom: "title" } } } }],
   });
-  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const afterApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration: rename }),
-  });
-  const allowBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
-  const allowAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
-  const backend = await startTestJazz({ app: beforeApp, permissions: allowBefore });
+  const allowNotes = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
+  const allowBefore = testPermissions(beforeApp, allowNotes);
+  const allowAfter = testPermissions(afterApp, allowNotes);
+  const backend = await startTestJazz({ app: beforeApp, permissions: allowNotes });
   try {
-    let written: { id: string; title: string } | undefined;
+    let written: { id: string; [column: string]: unknown } | undefined;
     await withNativeRelayFixture(
       beforeApp,
       allowBefore,
@@ -43,7 +33,7 @@ it("reads rows written before the app renamed a column, from a server with schem
       },
       { appId: backend.appId, upstream: { backend, userId: "native-alice" } },
     );
-    await backend.redeploy({ app: afterApp, permissions: allowAfter, migration: rename });
+    await backend.redeploy({ app: afterApp, permissions: allowNotes });
 
     await withNativeRelayFixture(
       afterApp,

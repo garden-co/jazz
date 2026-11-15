@@ -1,4 +1,4 @@
-import type { Db, QueryBuilder } from "../../src/runtime/db.js";
+import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import type { DbConfig } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
@@ -33,11 +33,14 @@ export interface RemoteBrowserDbWaitForTitleInput {
   tier?: "local-first" | "remote";
 }
 
+/** A row of whatever table the fixture was opened on. */
+type RemoteRow = { id: string } & Record<string, unknown>;
+
 interface RemoteBrowserDbState {
   db: Db;
   schema: WasmSchema;
-  query: QueryBuilder<Record<string, unknown>>;
-  table: QueryBuilder<Record<string, unknown>>;
+  query: QueryBuilder<RemoteRow>;
+  table: TableProxy<RemoteRow, Record<string, unknown>>;
 }
 
 declare global {
@@ -57,14 +60,11 @@ function getRemoteStateStore(): Map<string, RemoteBrowserDbState> {
   return window.__jazzRemoteBrowserDbs__;
 }
 
-function makeAllRowsQuery(
-  table: string,
-  schema: WasmSchema,
-): QueryBuilder<Record<string, unknown>> {
+function makeAllRowsQuery(table: string, schema: WasmSchema): QueryBuilder<RemoteRow> {
   return {
     _table: table,
     _schema: schema,
-    _rowType: {} as Record<string, unknown>,
+    _rowType: {} as RemoteRow,
     _build() {
       return JSON.stringify({
         table,
@@ -132,14 +132,14 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     ? {
         _table: input.table,
         _schema: schema,
-        _rowType: {} as Record<string, unknown>,
+        _rowType: {} as RemoteRow,
         _build: () => input.queryJson!,
       }
     : makeAllRowsQuery(input.table, schema);
   const table = {
     _table: input.table,
     _schema: schema,
-    _rowType: {} as Record<string, unknown>,
+    _rowType: {} as RemoteRow,
     _initType: {} as Record<string, unknown>,
   };
   if (input.initialize) await db.all(query, { tier: "local-first" });
@@ -167,7 +167,7 @@ export async function insertRemoteBrowserDbRow(input: {
     ? {
         _table: input.table,
         _schema: state.schema,
-        _rowType: {} as Record<string, unknown>,
+        _rowType: {} as RemoteRow,
         _initType: {} as Record<string, unknown>,
       }
     : state.table;
@@ -188,7 +188,7 @@ export async function updateRemoteBrowserDbRow(input: {
     ? {
         _table: input.table,
         _schema: state.schema,
-        _rowType: {} as Record<string, unknown>,
+        _rowType: {} as RemoteRow,
         _initType: {} as Record<string, unknown>,
       }
     : state.table;

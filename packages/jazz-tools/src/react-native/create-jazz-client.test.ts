@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
 import { accountRegistryUrl, type AccountDbConfig } from "../accounts/context.js";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
 import {
   PostcardWriter,
@@ -44,12 +44,7 @@ import {
 import { createDb } from "./create-db.js";
 import { openJazzClient, type OpenJazzClientConfig } from "./create-jazz-client.js";
 
-const app = s.defineApp(
-  {
-    notes: s.table({ title: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
 

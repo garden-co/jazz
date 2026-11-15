@@ -9,31 +9,31 @@ export type TaskReview = { type: "pending" } | { type: "approved"; by: string; n
 export type TaskReviewInit = { type: "pending" } | { type: "approved"; by: string; note?: string | null } | { type: "rejected"; reason: string };
 export type TaskPriority = "low" | "high";
 
-export interface Person {
+export type Person = {
   readonly id: string;
   name: string;
   email: string;
-}
+};
 
-export interface PersonInsert {
+export type PersonInsert = {
   name: string;
   email: string;
-}
+};
 
-export interface Project {
+export type Project = {
   readonly id: string;
   name: string;
   budget: bigint | null;
   logo: Uint8Array | null;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   name: string;
   budget?: bigint | null;
   logo?: Uint8Array | null;
-}
+};
 
-export interface Task {
+export type Task = {
   readonly id: string;
   title: string;
   projectId: string;
@@ -47,9 +47,9 @@ export interface Task {
   assigneeIds: string[];
   readonly priority: TaskPriority;
   readonly label: string | null;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   title: string;
   projectId: string;
   status?: TaskStatus;
@@ -60,7 +60,7 @@ export interface TaskInsert {
   extra?: JsonValue | null;
   review?: TaskReviewInit | null;
   assigneeIds: string[];
-}
+};
 
 interface Types extends AppTypes {
   people: {

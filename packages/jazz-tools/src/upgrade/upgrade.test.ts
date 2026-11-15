@@ -7,6 +7,7 @@
  * is jazz-codegen's output and has its own tests there, so only its
  * presence is checked. Regenerate the goldens with UPDATE_GOLDEN=1.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -196,6 +197,34 @@ describe("jazz-tools upgrade: refusals", () => {
       ),
     );
     await refused(dir, /`validate --check` refused the app files/);
+  });
+
+  it("refuses permissions that read the environment (alpha.64 baked an unset value in as `true`)", async () => {
+    await refused(
+      fixture("env-permissions"),
+      /read the environment[\s\S]*permissions\.ts:5: reads `process\.env\.UPGRADE_FIXTURE_ROOM`/,
+    );
+  });
+
+  it("refuses `true` inside anyOf/allOf, the trace of a condition that compiled to nothing", async () => {
+    const dir = fixture("env-permissions");
+    const permissions = join(dir, "permissions.ts");
+    writeFileSync(
+      permissions,
+      readFileSync(permissions, "utf8").replace(
+        "process.env.UPGRADE_FIXTURE_ROOM!",
+        "undefined as unknown as string",
+      ),
+    );
+    execFileSync(
+      process.execPath,
+      [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
+      {
+        cwd: dir,
+        stdio: "pipe",
+      },
+    );
+    await refused(dir, /`true` inside anyOf\/allOf at tables\.messages\.read\.anyOf\[0\]/);
   });
 
   it("refuses a project without jazz.app.json", async () => {

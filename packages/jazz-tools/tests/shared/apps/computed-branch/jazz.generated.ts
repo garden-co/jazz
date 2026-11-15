@@ -1,0 +1,63 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// Bindings format 1. Formatters may reformat this file, except `app` below.
+import { bindApp, type AppTypes, type ComputedImpl } from "jazz-tools";
+import { computed } from "./jazz.computed";
+
+export interface Row {
+  readonly id: string;
+  score: number | null;
+  branch: string;
+  readonly value: number;
+}
+
+export interface RowInsert {
+  score?: number | null;
+  branch: string;
+}
+
+interface Types extends AppTypes {
+  rows: {
+    row: Row;
+    insert: RowInsert;
+    columns: {
+      score: { kind: "int"; nullable: true; value: number };
+      branch: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {};
+    computed: {
+      value: { from: { score: number | null }; value: number };
+    };
+  };
+}
+
+export type AppComputed = ComputedImpl<Types>;
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types>({
+  "source": "sha256:eab16b453063c1b5a357451094b7c387c489f241c3036f700968190b7e625ec5",
+  "schema": {
+    "current": "80ca8b6d2c5546ac177603a5b45d0a753653297eff1eaa6ba2a7e3052637c029",
+    "schemas": [
+      {
+        "hash": "80ca8b6d2c5546ac177603a5b45d0a753653297eff1eaa6ba2a7e3052637c029",
+        "schema": {
+          "tables": {
+            "rows": {
+              "branchBy": ["branch"],
+              "columns": [
+                { "column_type": { "type": "Integer" }, "name": "score", "nullable": true },
+                { "column_type": { "type": "Text" }, "name": "branch", "nullable": false },
+              ],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+    "computed": { "rows": { "value": ["score"] } },
+  },
+  "relations": { "rows": {} },
+  computed,
+});
