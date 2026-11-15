@@ -61,12 +61,12 @@ pub fn create(
     }
     let from = &recorded.current_schema;
     let to = app.compiled.current_schema();
-    // An index changes the hash, not the version or the rows (#5494): there
-    // is nothing to migrate, as `bindings::staleness` says.
+    // Single-column indexes change the hash, not the version or the rows
+    // (#5494): there is nothing to migrate, as `bindings::staleness` says.
     if bindings::differs_only_in_indexes(from, to) {
         return Ok(Created {
             note: Some(
-                "only indexes changed: no migration needed; run `jazz-tools generate`".into(),
+                "only single-column indexes changed: no migration needed; run `jazz-tools generate`".into(),
             ),
             ..unchanged()
         });

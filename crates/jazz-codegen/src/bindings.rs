@@ -279,8 +279,8 @@ pub fn staleness(
         .iter()
         .any(|(h, _)| *h == recorded.current)
     {
-        // An index changes the schema's hash, not its version or its rows
-        // (#5494): regenerating is enough, no migration.
+        // A change of single-column indexes changes the schema's hash, not
+        // its version or its rows (#5494): regenerating is enough.
         if differs_only_in_indexes(&recorded.current_schema, app.compiled.current_schema()) {
             return Ok(Some(Staleness::OutOfDate));
         }
@@ -292,11 +292,22 @@ pub fn staleness(
     Ok(None)
 }
 
-/// Whether `from` and `to` differ only in their tables' `indexed_columns`
-/// and `composite_indexes`, which change the schema's hash but not its
-/// runtime version or its rows.
+/// Whether going from `from` to `to` needs no migration because only
+/// indexes changed: their tables differ in nothing but `indexed_columns` /
+/// `composite_indexes`, and they are the same runtime version. That second
+/// condition is the invariant deploys rely on (they check admitted versions,
+/// not hashes). Single-column indexes keep the version; a composite index is
+/// part of it (`tests/composite_indexes.rs`), so a composite change still
+/// needs its (empty) migration.
 pub(crate) fn differs_only_in_indexes(from: &Schema, to: &Schema) -> bool {
+    let version = |schema: &Schema| {
+        jazz::schema::JazzSchema::new(schema)
+            .ok()
+            .map(|schema| schema.version_id())
+    };
     without_indexes(from) == without_indexes(to)
+        && version(from).is_some()
+        && version(from) == version(to)
 }
 
 /// `schema` with every table's indexes removed.

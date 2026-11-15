@@ -122,12 +122,14 @@ fn an_edit_without_a_migration_is_caught_against_the_bindings() {
     );
 }
 
-/// #5494: an edit that only adds or changes indexes needs no migration:
-/// the bindings are only out of date. Any other edit still needs one.
+/// #5494: an edit that only adds or changes single-column indexes needs no
+/// migration (the runtime version stays the same): the bindings are only out
+/// of date. A composite index is part of the version, and any other edit
+/// needs a migration too.
 #[test]
 fn an_index_only_edit_needs_no_migration() {
     let bindings = generate(Lang::TypeScript, file(TODOS).as_bytes()).unwrap();
-    for indexes in [r#"["title"]"#, r#"[["done", "title"]]"#] {
+    for indexes in [r#"["title"]"#, r#"["title", "done"]"#] {
         let indexed = App::load(
             file(&format!(
                 r#"{{ "todos": {{ "columns": {{ "title": "string", "done": "boolean" }}, "indexes": {indexes} }} }}"#
@@ -149,13 +151,23 @@ fn an_index_only_edit_needs_no_migration() {
     // `migrations create` agrees: it writes nothing and says why.
     let created = migrate(
         TODOS,
-        r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title", ["done", "title"]] } }"#,
+        r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title"] } }"#,
     );
     assert!(!created.changed);
     assert!(created.todos.is_empty());
     assert_eq!(
         created.note.as_deref(),
-        Some("only indexes changed: no migration needed; run `jazz-tools generate`")
+        Some("only single-column indexes changed: no migration needed; run `jazz-tools generate`")
+    );
+    // A composite index changes the version: still a migration.
+    let composite = App::load(
+        file(r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": [["done", "title"]] } }"#)
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        bindings::staleness(&composite, Lang::TypeScript, Some(&bindings)).unwrap(),
+        Some(Staleness::SchemaChanged)
     );
     let indexed_and_more = App::load(
         file(r#"{ "todos": { "columns": { "title": "string", "done": "boolean", "n": "int?" }, "indexes": ["title"] } }"#)
@@ -368,8 +380,13 @@ fn a_change_that_keeps_every_row_needs_an_empty_step() {
             r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "history": "latest" } }"#,
             "history retention",
         ),
-        // Indexes alone need no migration at all (#5494): see
-        // `an_index_only_edit_needs_no_migration`.
+        // A composite index is part of the runtime version, so it keeps its
+        // empty step; single-column indexes need no migration at all (#5494,
+        // see `an_index_only_edit_needs_no_migration`).
+        (
+            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": [["done", "title"]] } }"#,
+            "indexes",
+        ),
         (
             r#"{ "todos": { "columns": { "title": { "type": "string", "merge": "text" }, "done": "boolean" } } }"#,
             "merge strategies",
