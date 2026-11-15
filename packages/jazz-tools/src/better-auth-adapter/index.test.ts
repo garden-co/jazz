@@ -1087,7 +1087,7 @@ describe("jazzAdapter", () => {
       expect(changed).toBe(1);
     });
 
-    it("accepts app-like schema sources from root schema.ts modules", async () => {
+    it("accepts app-like schema sources", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
         db: () => context.asBackend(authSchema),
@@ -1131,19 +1131,22 @@ describe("jazzAdapter", () => {
           },
         },
       });
+      const notes = String(log.mock.calls[0]?.[0]);
       log.mockRestore();
 
       expect(generated).toMatchObject({
         path: "./jazz.app.json",
         overwrite: true,
       });
-      expect(JSON.parse(generated.code)).toEqual({
+      const file = JSON.parse(generated.code);
+      expect(file).toMatchObject({
         $schema: "https://jazz.tools/schemas/jazz.app.schema.json",
         format: 1,
         tables: { better_auth_user: { columns: { name: "string" } } },
       });
+      expect(Object.keys(file.tables).every((name) => name.startsWith("better_auth_"))).toBe(true);
       // No policies: every client read and write of the table is denied.
-      expect(log.mock.calls[0]?.[0]).toContain(
+      expect(notes).toContain(
         '"better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" }',
       );
     });
