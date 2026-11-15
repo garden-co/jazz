@@ -43,7 +43,7 @@ export function attachInspectorCacheRuntime(
   const receive = ({ data }: MessageEvent<BrowserFollowerPortEvent>) => {
     if (
       data.type === "error" ||
-      data.type === "auth-failure" ||
+      (data.type === "link-fate" && data.fate.authFailure !== null) ||
       data.type === "storage-invalidated" ||
       data.type === "storage-reset"
     ) {

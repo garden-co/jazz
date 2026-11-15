@@ -15,7 +15,12 @@ import type {
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
+  BrowserWorkerLinkFate,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
+import {
+  AuthorityChangedError,
+  isAuthorityChangedError,
+} from "../runtime/authority-changed-error.js";
 import {
   deserializeBrowserRelayError,
   type BrowserRelayError,
@@ -136,6 +141,7 @@ const mocks = vi.hoisted(() => {
           remoteLinkState: vi.fn(() => "connected"),
           onUpstreamLinkStatusChange: vi.fn(),
           upstreamLinkStatus: vi.fn(() => ({ state: "connected" })),
+          upstreamFailure: vi.fn((): { error: Error; retrying: boolean } | null => null),
           setRemoteLinkHint: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
@@ -384,6 +390,16 @@ class TestPort {
   hasEvent(predicate: (event: TestPortEvent) => boolean): boolean {
     return this.events.some(predicate);
   }
+
+  takeEvent(predicate: (event: TestPortEvent) => boolean): TestPortEvent | undefined {
+    const index = this.events.findIndex(predicate);
+    return index >= 0 ? this.events.splice(index, 1)[0] : undefined;
+  }
+
+  discardEvents(predicate: (event: TestPortEvent) => boolean): void {
+    const kept = this.events.filter((event) => !predicate(event));
+    this.events.splice(0, this.events.length, ...kept);
+  }
 }
 
 class InspectorControlTestPort {
@@ -591,6 +607,10 @@ function connectRuntimeChannel(initOptions: BrowserWorkerInitOptions, tabId: str
       channel.port2.close();
     },
   };
+}
+
+function authFailureFate(reason: string | null) {
+  return (event: TestPortEvent) => event.type === "link-fate" && event.fate.authFailure === reason;
 }
 
 async function initializeFollower(port: TestPort, id: number): Promise<void> {
@@ -928,11 +948,11 @@ describe("broker worker context initialization", () => {
       // Exhaust this task's microtasks while admission remains held. An auth
       // transition that overtakes init would now have published restoration.
       await bounded(nextTask());
-      expect(owner.port.hasEvent((event) => event.type === "auth-restored")).toBe(false);
-      const restored = owner.port.waitForEvent((event) => event.type === "auth-restored");
+      expect(runtime.updateAuth).not.toHaveBeenCalled();
+      const rebound = vi.spyOn(subscriber, "updateAuthenticatedClaims");
       admission.resolve(subscriber);
       expect(await initialised).not.toHaveProperty("error");
-      await bounded(restored);
+      await vi.waitFor(() => expect(rebound).toHaveBeenCalledWith({ role: "writer" }));
       joining.port.emitMessage({ type: "frames", frames: [Uint8Array.of(7)] });
       expect(await subscriberResponses(joining.port)).toEqual([
         { claims: { role: "writer" }, frame: [7] },
@@ -2758,17 +2778,20 @@ describe("broker worker context initialization", () => {
       publishAuthFailure("invalid");
       throw new Error("authentication rejected");
     });
-    const firstFailure = first.port.waitForEvent((event) => event.type === "auth-failure");
-    const secondFailure = second.port.waitForEvent((event) => event.type === "auth-failure");
+    const firstFailure = first.port.waitForEvent(authFailureFate("invalid"));
+    const secondFailure = second.port.waitForEvent(authFailureFate("invalid"));
     first.port.emitMessage({ type: "update-auth", authJson: "invalid", sessionClaims: {} });
     await Promise.all([firstFailure, secondFailure]);
+    // Drop the fates the tabs were admitted with.
+    first.port.discardEvents((event) => event.type === "link-fate");
+    second.port.discardEvents((event) => event.type === "link-fate");
 
     expect(first.port.close).not.toHaveBeenCalled();
     expect(second.port.close).not.toHaveBeenCalled();
 
     runtime.updateAuth.mockResolvedValueOnce(undefined);
-    const firstRestored = first.port.waitForEvent((event) => event.type === "auth-restored");
-    const secondRestored = second.port.waitForEvent((event) => event.type === "auth-restored");
+    const firstRestored = first.port.waitForEvent(authFailureFate(null));
+    const secondRestored = second.port.waitForEvent(authFailureFate(null));
     second.port.emitMessage({ type: "update-auth", authJson: "valid", sessionClaims: {} });
     await Promise.all([firstRestored, secondRestored]);
 
@@ -2924,14 +2947,12 @@ describe("broker worker context initialization", () => {
     expect(runtime.connect).not.toHaveBeenCalled();
 
     // Revalidation binds the provider JWT: that update dials, with it.
-    const restored = retained.port.waitForEvent((event) => event.type === "auth-restored");
     retained.port.emitMessage({
       type: "update-auth",
       authJson: '{"jwt_token":"revalidated"}',
       sessionClaims: { role: "editor" },
     });
-    await restored;
-    expect(runtime.connect).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(runtime.connect).toHaveBeenCalledOnce());
     expect(runtime.connect).toHaveBeenCalledWith("ws://server.test", '{"jwt_token":"revalidated"}');
     expect(runtime.updateAuth).not.toHaveBeenCalled();
   });
@@ -3025,49 +3046,130 @@ describe("broker worker context initialization", () => {
     await initialized;
   });
 
-  it("relays a terminal server error only to active followers and never replays it", async () => {
-    const initOptions = { ...options("terminal-error-continuity"), serverUrl: "ws://server.test" };
-    const owner = await connect(initOptions, "owner-tab");
-    const successor = await connect(initOptions, "successor-tab");
-    await initializeFollower(owner.port, 1);
-    await initializeFollower(successor.port, 1);
+  // A runtime's link callbacks, and its link state as the worker reads it.
+  function linkControls(runtime: (typeof mocks.runtimes)[number]) {
+    const linkChanged = runtime.onRemoteLinkStateChange.mock.calls[0]?.[0] as () => void;
+    const transportError = runtime.onServerTransportError.mock.calls[0]?.[0] as (
+      error: Error,
+      state: { retrying: boolean },
+    ) => void;
+    const authFailure = runtime.onAuthFailure.mock.calls[0]?.[0] as (reason: string) => void;
+    return {
+      refuse(error: Error) {
+        runtime.remoteLinkState.mockReturnValue("unavailable");
+        runtime.upstreamLinkStatus.mockReturnValue({
+          state: "offline",
+          reason: "authority-changed",
+          willRetry: false,
+        } as never);
+        runtime.upstreamFailure.mockReturnValue({ error, retrying: false });
+        transportError(error, { retrying: false });
+        linkChanged();
+      },
+      drop() {
+        runtime.remoteLinkState.mockReturnValue("unavailable");
+        runtime.upstreamLinkStatus.mockReturnValue({
+          state: "offline",
+          reason: "auth",
+          willRetry: false,
+        } as never);
+        linkChanged();
+      },
+      recover() {
+        runtime.remoteLinkState.mockReturnValue("connected");
+        runtime.upstreamLinkStatus.mockReturnValue({ state: "connected" });
+        runtime.upstreamFailure.mockReturnValue(null);
+        linkChanged();
+      },
+      authFailure,
+    };
+  }
 
-    const late = await connect(initOptions, "late-tab");
-    const runtime = mocks.runtimes[0]!;
-    const callback = runtime.onServerTransportError.mock.calls[0]?.[0] as
-      | ((error: Error, state: { retrying: boolean }) => void)
-      | undefined;
-    expect(callback).toBeTypeOf("function");
-    const terminalError = new Error("Protocol: terminal maintained view failure");
-    callback?.(terminalError, { retrying: false });
-
-    for (const port of [owner.port, successor.port]) {
-      await expect(
-        port.waitForEvent((event) => event.type === "transport-error"),
-      ).resolves.toMatchObject({
-        type: "transport-error",
-        error: {
-          name: "Error",
-          message: terminalError.message,
-          stack: terminalError.stack,
-        },
-        retrying: false,
-      });
+  function linkFates(port: TestPort) {
+    const fates: BrowserWorkerLinkFate[] = [];
+    while (port.hasEvent((candidate) => candidate.type === "link-fate")) {
+      const event = port.takeEvent((candidate) => candidate.type === "link-fate");
+      if (event?.type === "link-fate") fates.push(event.fate);
     }
-    expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);
+    return fates;
+  }
 
-    owner.port.emitMessage({
-      type: "reconnect",
-      id: 2,
-      authJson: "{}",
-      sessionClaims: {},
+  it("keeps an upstream refusal as link state for tabs admitted before and after it (#4808)", async () => {
+    const initOptions = { ...options("latched-refusal"), serverUrl: "ws://server.test" };
+    const early = await connect(initOptions, "early-tab");
+    await initializeFollower(early.port, 1);
+    const late = await connect(initOptions, "late-tab");
+    const link = linkControls(mocks.runtimes[0]!);
+    expect(linkFates(early.port)).toEqual([
+      { state: "connected", link: { state: "connected" }, failure: null, authFailure: null },
+    ]);
+
+    const refusal = new AuthorityChangedError("the server's store was recreated");
+    link.refuse(refusal);
+    // The tab attached now hears it live, once for one refusal.
+    const [live, ...rest] = linkFates(early.port);
+    expect(rest).toEqual([]);
+    expect(live).toMatchObject({
+      state: "unavailable",
+      link: { state: "offline", reason: "authority-changed" },
+      failure: {
+        error: { name: "AuthorityChangedError", code: "authority_changed" },
+        retrying: false,
+      },
+      authFailure: null,
     });
-    await owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    // A tab still being admitted holds no remote waits to fail yet.
+    expect(linkFates(late.port)).toEqual([]);
+
+    // A tab admitted later gets the same fate before its init reply.
+    const reply = late.port.waitForEvent((event) => event.type === "result" && event.id === 1);
+    late.port.emitMessage({ type: "init", id: 1, sessionClaims: {} });
+    await reply;
+    const [attached] = linkFates(late.port);
+    expect(attached).toEqual(live);
+    // The late tab's Global waits fail with the typed error.
+    expect(isAuthorityChangedError(deserializeBrowserRelayError(attached!.failure!.error))).toBe(
+      true,
+    );
+
+    // Recovery (say deleteClientStorage and a fresh upstream) clears it for
+    // every tab, and a tab admitted afterwards sees no stale failure.
+    link.recover();
+    for (const port of [early.port, late.port]) {
+      expect(linkFates(port)).toEqual([
+        { state: "connected", link: { state: "connected" }, failure: null, authFailure: null },
+      ]);
+    }
+    const fresh = await connect(initOptions, "fresh-tab");
+    await initializeFollower(fresh.port, 1);
+    expect(linkFates(fresh.port)).toEqual([
+      { state: "connected", link: { state: "connected" }, failure: null, authFailure: null },
+    ]);
+  });
+
+  it("keeps an auth refusal for later tabs until the upstream connects again", async () => {
+    const initOptions = { ...options("latched-auth-refusal"), serverUrl: "ws://server.test" };
+    const early = await connect(initOptions, "early-tab");
+    await initializeFollower(early.port, 1);
+    const link = linkControls(mocks.runtimes[0]!);
+    linkFates(early.port);
+
+    link.authFailure("expired");
+    link.drop();
+    expect(linkFates(early.port).map((fate) => fate.authFailure)).toEqual(["expired", "expired"]);
+    const late = await connect(initOptions, "late-tab");
     await initializeFollower(late.port, 1);
-    // A reconnect/admission completed after the terminal observation starts a
-    // successor runtime, not a recipient for an old foreground error.
-    await Promise.resolve();
-    expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);
+    expect(linkFates(late.port)).toMatchObject([{ state: "unavailable", authFailure: "expired" }]);
+
+    // The worker reconnected (a renewed credential reached it): no tab keeps
+    // a stale auth error, so an offline sign-out reads as an outage again.
+    link.recover();
+    for (const port of [early.port, late.port]) {
+      expect(linkFates(port)).toMatchObject([{ state: "connected", authFailure: null }]);
+    }
+    const fresh = await connect(initOptions, "fresh-tab");
+    await initializeFollower(fresh.port, 1);
+    expect(linkFates(fresh.port)).toMatchObject([{ authFailure: null }]);
   });
 
   it("cancels a closed peer's offline server wait", async () => {
