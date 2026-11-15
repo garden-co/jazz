@@ -35,6 +35,27 @@ static void on_event(void *ctx, const char *kind, const char *json) {
   pthread_mutex_unlock(&seen->lock);
 }
 
+/* A callback that is still running when jazz_unsubscribe is called. */
+struct slow {
+  pthread_mutex_t lock;
+  int entered;
+  int finished;
+};
+
+static void on_slow(void *ctx, const char *kind, const char *json) {
+  (void)kind;
+  (void)json;
+  struct slow *slow = ctx;
+  pthread_mutex_lock(&slow->lock);
+  slow->entered++;
+  pthread_mutex_unlock(&slow->lock);
+  struct timespec pause = {0, 200 * 1000 * 1000};
+  nanosleep(&pause, NULL);
+  pthread_mutex_lock(&slow->lock);
+  slow->finished++;
+  pthread_mutex_unlock(&slow->lock);
+}
+
 static char *call(JazzHandle *h, const char *method, const char *args) {
   char *err = NULL;
   char *out = jazz_call(h, method, args, &err);
@@ -104,6 +125,26 @@ int main(void) {
   pthread_mutex_unlock(&seen.lock);
 
   jazz_unsubscribe(sub);
+
+  /* jazz_unsubscribe waits for a running callback: ctx may be freed after. */
+  struct slow *slow = calloc(1, sizeof *slow);
+  pthread_mutex_init(&slow->lock, NULL);
+  JazzSubscription *slow_sub = jazz_subscribe(h, "{\"table\": \"todos\"}", on_slow, slow, &err);
+  CHECK(slow_sub != NULL);
+  for (int i = 0; i < 500; i++) {
+    pthread_mutex_lock(&slow->lock);
+    int entered = slow->entered;
+    pthread_mutex_unlock(&slow->lock);
+    if (entered) break;
+    struct timespec ten_ms = {0, 10 * 1000 * 1000};
+    nanosleep(&ten_ms, NULL);
+  }
+  jazz_unsubscribe(slow_sub);
+  CHECK(slow->entered == 1);
+  CHECK(slow->finished == slow->entered);
+  pthread_mutex_destroy(&slow->lock);
+  free(slow);
+
   jazz_close(h);
   jazz_string_free(NULL);
   printf("jazz_ffi C ABI: ok\n");

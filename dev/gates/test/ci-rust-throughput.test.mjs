@@ -752,9 +752,13 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn maintained_one_shot_differential_oracle\(/,
   );
   assert.match(aggregate, /if: always\(\)/);
-  assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat\]/);
+  assert.match(
+    aggregate,
+    /needs: \[test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings\]/,
+  );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
@@ -2053,7 +2057,14 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     default: "full",
   });
   assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
-  for (const name of ["test-rust-workspace", "test-storage-compat", "test-ts", "test-react-native"])
+  for (const name of [
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-react-native",
+    "test-jazz-ffi-bindings",
+    "test-go",
+  ])
     assert.equal(
       suite.jobs[name].if,
       "inputs.scope == 'full'",
@@ -2064,6 +2075,8 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     Object.keys(suite.jobs).sort(),
     [
       "lint",
+      "test-go",
+      "test-jazz-ffi-bindings",
       "test-react-native",
       "test-rust",
       "test-rust-workspace",

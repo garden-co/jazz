@@ -465,3 +465,21 @@ pub(crate) fn delta_json(
     })
     .to_string())
 }
+
+/// White-box: no JSON input can produce a non-finite double (JSON has no
+/// NaN or infinity), so the read side's mapping is checked directly.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_finite_doubles_read_as_null() {
+        for double in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                to_json(Value::Double(double), Some(&ColumnType::Double)),
+                Json::Null
+            );
+        }
+        assert_eq!(to_json(Value::Double(0.5), None), json!(0.5));
+    }
+}
