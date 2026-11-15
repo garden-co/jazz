@@ -299,7 +299,7 @@ enum Commands {
 
         /// Seconds a client session may read slower than the minimum read
         /// rate while its output waits before it is closed. Defaults to
-        /// 300.
+        /// 120.
         #[arg(long, env = "JAZZ_SLOW_READER_TIMEOUT_SECS", value_parser = clap::value_parser!(u64).range(1..))]
         slow_reader_timeout_secs: Option<u64>,
 

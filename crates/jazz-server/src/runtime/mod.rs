@@ -2305,7 +2305,7 @@ pub(crate) const EGRESS_BUDGET_DEFAULT: usize = 2 * 1024 * 1024 * 1024;
 /// output waits at the budget, before it is closed: the default of
 /// [`EgressLimits::slow_reader_timeout`] (`JAZZ_SLOW_READER_TIMEOUT_SECS`).
 /// Generous, so a slow mobile link that pauses is not cut off ([`ReadClock`]).
-pub(crate) const SLOW_READER_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const SLOW_READER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Bounds on the output the server holds for its clients. Every bound
 /// closes the session it picks with a retryable `Backpressure` error: the

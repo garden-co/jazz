@@ -41,7 +41,7 @@ pub struct ServerResourceLimits {
     /// the memory limit, else 2 GiB).
     pub egress_budget_bytes: Option<u64>,
     /// Seconds a session may fall behind the minimum read rate, while its
-    /// output waits, before it is closed (`None`: 300).
+    /// output waits, before it is closed (`None`: 120).
     pub slow_reader_timeout_secs: Option<u64>,
     /// Seconds a session must be behind the minimum read rate before the
     /// egress budget may close it (`None`: 10).
