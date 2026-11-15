@@ -143,6 +143,19 @@ fn same_table(a: &TableSchema, b: &TableSchema) -> bool {
     serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
 }
 
+/// Whether `b` is `a` under another name: the same table, whatever the
+/// order of its columns (as TS's `tableSchemasEqual` compares them).
+fn same_table_renamed(a: &TableSchema, b: &TableSchema) -> bool {
+    let sorted = |t: &TableSchema| {
+        let mut t = t.clone();
+        t.columns
+            .columns
+            .sort_by(|x, y| x.name_str().cmp(y.name_str()));
+        t
+    };
+    same_table(&sorted(a), &sorted(b))
+}
+
 fn type_spec(ty: &ColumnType) -> Result<Json, CodegenError> {
     artifact::column_type_spec(ty).map_err(CodegenError::from_artifact)
 }
@@ -500,7 +513,7 @@ pub fn diff(from: &Schema, to: &Schema) -> Result<Vec<(String, Json)>, CodegenEr
             let old_table = get(from, old)?;
             let candidates: Vec<&String> = added
                 .iter()
-                .filter(|new| get(to, new).is_some_and(|t| same_table(&old_table, &t)))
+                .filter(|new| get(to, new).is_some_and(|t| same_table_renamed(&old_table, &t)))
                 .collect();
             (candidates.len() == 1).then(|| (old.clone(), candidates[0].clone()))
         })
