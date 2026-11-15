@@ -1,14 +1,5 @@
 package jazz
 
-/*
-#include <stdint.h>
-#include <stdlib.h>
-#include "jazz_ffi.h"
-extern JazzHandle* jazz_go_open_user(const char* config, uintptr_t ctx, char** err);
-extern JazzWatch* jazz_go_watch(JazzHandle* h, const char* what, uintptr_t ctx, char** err);
-*/
-import "C"
-
 import (
 	"context"
 	"encoding/json"
@@ -118,13 +109,16 @@ func (f fileStore) Save(key string) error {
 // GenerateDeviceKey is a new device account's key: keep it like a
 // password.
 func GenerateDeviceKey() (string, error) {
-	var cerr *C.char
-	key := C.jazz_generate_device_key(&cerr)
+	if err := loadFFI(); err != nil {
+		return "", err
+	}
+	var cerr uintptr
+	key := ffi.generateKey(&cerr)
 	if err := takeError(cerr); err != nil {
 		return "", err
 	}
-	defer C.jazz_string_free(key)
-	return C.GoString(key), nil
+	text, _ := takeString(key)
+	return text, nil
 }
 
 // token providers, by the id jazz-ffi's token callback gets.
@@ -133,40 +127,40 @@ var (
 	nextProvider atomic.Uint64
 )
 
-//export jazzGoTokenCallback
-func jazzGoTokenCallback(ctx C.uintptr_t, reason *C.char, token **C.char) C.int {
-	*token = nil
+// onToken is jazz-ffi's token callback: 0 with *token set (NULL: signed
+// out), or non-zero for a failed fetch, *token its message.
+func onToken(ctx, reason, token uintptr) int32 {
+	out := (*uintptr)(unsafe.Add(unsafe.Pointer(nil), token))
+	*out = 0
 	value, ok := providers.Load(uint64(ctx))
 	if !ok {
 		return 0 // the app closed: signed out
 	}
 	c, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	t, err := value.(TokenProvider)(c, TokenReason(C.GoString(reason)))
+	t, err := value.(TokenProvider)(c, TokenReason(goString(reason)))
 	if err != nil {
 		// A failed fetch: the session stays, and Jazz asks again.
-		*token = C.CString(err.Error()) // jazz-ffi frees it
+		*out = mallocString(err.Error()) // jazz-ffi frees it
 		return 1
 	}
 	if t != "" {
-		*token = C.CString(t) // jazz-ffi frees it
+		*out = mallocString(t) // jazz-ffi frees it
 	}
 	return 0 // "" signs the user out
 }
 
-func openUser(config string, provider TokenProvider) (*C.JazzHandle, uint64, error) {
+func openUser(config string, provider TokenProvider) (uintptr, uint64, error) {
 	id := nextProvider.Add(1)
 	providers.Store(id, provider)
-	text := C.CString(config)
-	defer C.free(unsafe.Pointer(text))
-	var cerr *C.char
-	h := C.jazz_go_open_user(text, C.uintptr_t(id), &cerr)
-	if err := takeError(cerr); err != nil || h == nil {
+	var cerr uintptr
+	h := ffi.openUser(cstr(config), ffi.tokenCallback, uintptr(id), &cerr)
+	if err := takeError(cerr); err != nil || h == 0 {
 		providers.Delete(id)
 		if err == nil {
 			err = &Error{Kind: KindRefused, Message: "open failed"}
 		}
-		return nil, 0, err
+		return 0, 0, err
 	}
 	return h, id, nil
 }
@@ -287,16 +281,14 @@ func (db *DB) OnSyncStatus(ctx context.Context) (<-chan SyncStatus, error) {
 
 func watch[T any](ctx context.Context, db *DB, what string, decode func(event) (T, bool)) (<-chan T, error) {
 	return stream(ctx, db, decode, func(id uint64) (func(), error) {
-		cwhat := C.CString(what)
-		defer C.free(unsafe.Pointer(cwhat))
-		var cerr *C.char
-		w := C.jazz_go_watch(db.handle, cwhat, C.uintptr_t(id), &cerr)
-		if err := takeError(cerr); err != nil || w == nil {
+		var cerr uintptr
+		w := ffi.watch(db.handle, cstr(what), ffi.subscriptionCallback, uintptr(id), &cerr)
+		if err := takeError(cerr); err != nil || w == 0 {
 			if err == nil {
 				err = &Error{Kind: KindRefused, Message: "watch failed"}
 			}
 			return nil, err
 		}
-		return func() { C.jazz_unwatch(w) }, nil
+		return func() { ffi.unwatch(w) }, nil
 	})
 }

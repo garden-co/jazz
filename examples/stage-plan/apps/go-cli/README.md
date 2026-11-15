@@ -11,7 +11,7 @@ It syncs with a Jazz server, which the variables `JAZZ_SERVER_URL`,
 
 ```sh
 # from the repository root
-cargo build -p jazz-ffi -p jazz-cli
+cargo build -p jazz-ffi -p jazz-cli   # jazz-go loads target/debug/libjazz_ffi.so
 export JAZZ_APP_ID=$(uuidgen) JAZZ_BACKEND_SECRET=dev-backend JAZZ_ADMIN_SECRET=dev-admin
 export JAZZ_SERVER_URL=http://127.0.0.1:1625
 target/debug/jazz-tools server "$JAZZ_APP_ID" --in-memory \

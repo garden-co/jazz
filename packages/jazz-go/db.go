@@ -3,28 +3,14 @@
 // bindings `jazz-tools generate` writes into a `jazzapp` package beside an
 // app's jazz.app.json and go.mod.
 //
-// Building needs cgo and the jazz-ffi static library, libjazz_ffi.a, for
-// your platform: from the GitHub release (see the Go setup page) or built
-// with `cargo build --release -p jazz-ffi`. Point CGO_LDFLAGS at its
-// directory (`-L<dir>`). Inside the Jazz repository, cgo also finds it in
-// target/debug and target/release. The C header ships in include/.
+// It needs no cgo and no C compiler: it loads jazz-ffi's shared library
+// at run time (see ffi.go for where it finds it).
 package jazz
-
-/*
-#cgo CFLAGS: -I${SRCDIR}/include
-#cgo LDFLAGS: -L${SRCDIR}/../../target/debug -L${SRCDIR}/../../target/release
-#cgo linux LDFLAGS: -l:libjazz_ffi.a -lm -ldl -lpthread
-#cgo darwin LDFLAGS: -ljazz_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration
-#include <stdlib.h>
-#include "jazz_ffi.h"
-*/
-import "C"
 
 import (
 	"context"
 	"encoding/json"
 	"sync"
-	"unsafe"
 )
 
 // Config is how an app is opened. Generated bindings' Open sets App.
@@ -72,19 +58,10 @@ type Session struct {
 	Subject string `json:"subject"`
 }
 
-func takeError(err *C.char) error {
-	if err == nil {
-		return nil
-	}
-	text := C.GoString(err)
-	C.jazz_string_free(err)
-	return parseError(text)
-}
-
 // DB is an open app. It is safe for concurrent use.
 type DB struct {
 	mu       sync.RWMutex
-	handle   *C.JazzHandle
+	handle   uintptr
 	app      any
 	provider uint64 // the TokenProvider's id, if any
 }
@@ -94,6 +71,9 @@ func (db *DB) computed() any { return db.app }
 // Open opens the app cfg describes. Prefer the generated jazzapp.Open,
 // which embeds the app's jazz.app.json.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
+	if err := loadFFI(); err != nil {
+		return nil, err
+	}
 	if cfg.Session != nil && cfg.Session.Issuer == "" {
 		session := *cfg.Session
 		session.Issuer = BackendIssuer
@@ -115,7 +95,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		return nil, err
 	}
 	type opened struct {
-		h        *C.JazzHandle
+		h        uintptr
 		err      error
 		provider uint64
 	}
@@ -126,10 +106,8 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 			done <- opened{h, err, provider}
 			return
 		}
-		text := C.CString(string(config))
-		defer C.free(unsafe.Pointer(text))
-		var cerr *C.char
-		h := C.jazz_open(text, &cerr)
+		var cerr uintptr
+		h := ffi.open(cstr(string(config)), &cerr)
 		done <- opened{h: h, err: takeError(cerr)}
 	}()
 	select {
@@ -140,8 +118,8 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider}, nil
 	case <-ctx.Done():
 		go func() {
-			if o := <-done; o.h != nil {
-				C.jazz_close(o.h)
+			if o := <-done; o.h != 0 {
+				ffi.close(o.h)
 			}
 		}()
 		return nil, ctx.Err()
@@ -152,9 +130,9 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if db.handle != nil {
-		C.jazz_close(db.handle)
-		db.handle = nil
+	if db.handle != 0 {
+		ffi.close(db.handle)
+		db.handle = 0
 		// The token callback is valid until jazz_close returns.
 		providers.Delete(db.provider)
 	}
@@ -181,21 +159,14 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 	go func() {
 		db.mu.RLock()
 		defer db.mu.RUnlock()
-		if db.handle == nil {
+		if db.handle == 0 {
 			done <- result{err: &Error{Kind: KindClosed, Message: "closed"}}
 			return
 		}
-		cmethod := C.CString(method)
-		cargs := C.CString(string(argsJSON))
-		defer C.free(unsafe.Pointer(cmethod))
-		defer C.free(unsafe.Pointer(cargs))
-		var cerr *C.char
-		res := C.jazz_call(db.handle, cmethod, cargs, &cerr)
+		var cerr uintptr
+		res := ffi.call(db.handle, cstr(method), cstr(string(argsJSON)), &cerr)
 		var r result
-		if res != nil {
-			r.text = C.GoString(res)
-			C.jazz_string_free(res)
-		}
+		r.text, _ = takeString(res)
 		r.err = takeError(cerr)
 		done <- r
 	}()
