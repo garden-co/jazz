@@ -2785,6 +2785,10 @@ struct Watches {
     /// Each told subscription's row watches held (true) or released
     /// (false) since it was last told, as they happen.
     changes: HashMap<u64, HashMap<u64, (bool, RowName)>>,
+    /// The version of each watched row this session last shipped: while
+    /// a read holds the row, the replica holds that version (see
+    /// `held_by_session`). Forgotten when nobody watches the row.
+    versions: HashMap<u64, Pos>,
 }
 
 /// A row by stored table and id.
@@ -2881,6 +2885,20 @@ impl Watches {
     /// `key` is held no more: its row name goes too.
     fn unwatched(&mut self, key: u64) {
         self.names.remove(&key);
+        self.versions.remove(&key);
+    }
+
+    /// The session ships `at` of row `id` of stored table `table`.
+    fn shipped(&mut self, table: &str, id: [u8; 16], at: Pos) {
+        let key = id_watch(table, id);
+        if self.holders.contains_key(&key) {
+            self.versions.insert(key, at);
+        }
+    }
+
+    /// Whether the version of row `key` this session last shipped is `at`.
+    fn shipped_at(&self, key: u64, at: Pos) -> bool {
+        self.versions.get(&key) == Some(&at)
     }
 
     fn contains(&self, key: &u64) -> bool {
@@ -11796,30 +11814,29 @@ impl Db {
                 };
                 // Held through another of the session's reads: a row
                 // another live subscription watches is kept current on the
-                // replica, so a version at or below the connection's settled
-                // position is one the replica holds. An opening leaves it
-                // out as it would a resumed client's held row (and this
+                // replica, so the version this session last shipped of it is
+                // one the replica holds. An opening leaves that version out
+                // as it would a resumed client's held row (and this
                 // subscription watches it too, so it stays current when the
                 // other one ends). An offset page's subscription covers
                 // every row before its window (`remote_query`), so the next
                 // page ships only its own rows while the previous one is
-                // live. Not on a relay, whose connection position follows
-                // its upstream's rather than what it shipped. Not for a
+                // live, on an authority and on a relay (a worker serving its
+                // tabs) alike. Not for a
                 // table with branch views either: a row watch covers every
                 // branch of an id, but the replica holds versions per
                 // branch, so another view's read holding the id says
                 // nothing about this view's version.
-                let session_settled = (!relaying)
-                    .then_some(inner.sessions[index].connection_settled)
-                    .flatten();
                 let held_by_session =
                     |watch: &Watches, stored: &str, row: &SubscriptionOutputRow, reset: bool| {
                         reset
-                            && session_settled.is_some_and(|settled| row.seq <= Pos::at(settled))
                             && names
                                 .table(&row.table)
                                 .is_ok_and(|table| table.branch_by.is_empty())
-                            && watch.held_by_other(id, id_watch(stored, *row.id.0.as_bytes()))
+                            && {
+                                let key = id_watch(stored, *row.id.0.as_bytes());
+                                watch.held_by_other(id, key) && watch.shipped_at(key, row.seq)
+                            }
                     };
                 // Every image this subscription's events ship or touch, read
                 // a chunk of rows per statement: an opening snapshot ships
@@ -12413,6 +12430,7 @@ impl Db {
             images.retain(|image| {
                 seen.insert((image.table.clone(), image.id, image.key.clone(), image.at))
             });
+
             // The writer's own rows, still at the version its commit
             // produced and exactly as it holds them, settle by its Fate.
             let mut as_written: BTreeMap<TxId, Vec<AsWritten>> = BTreeMap::new();
@@ -12486,6 +12504,11 @@ impl Db {
                         *h = rows;
                     }
                 }
+            }
+            // Rows held are watched by now: what ships is what the replica
+            // will hold of them (see `held_by_session`).
+            for image in &images {
+                session.watch.shipped(&image.table, image.id, image.at);
             }
             out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
             out.extend(evictions);

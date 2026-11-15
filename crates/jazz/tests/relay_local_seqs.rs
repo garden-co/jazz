@@ -1529,3 +1529,117 @@ fn an_upstreams_later_version_on_one_branch_leaves_a_tabs_write_on_another() {
     }
     drop(watches);
 }
+
+/// Notes by body, `offset` rows in, `limit` long.
+fn notes_window(offset: usize, limit: usize) -> Query {
+    Query::from("notes")
+        .order_by("body", jazz::query::OrderDirection::Asc)
+        .offset(offset)
+        .limit(limit)
+}
+
+/// Row images the worker sent tab 0 since `from` messages ago.
+fn images_to_tab(net: &Net, from: usize) -> usize {
+    net.to_tabs[0]
+        .borrow()
+        .iter()
+        .skip(from)
+        .map(|message| match message {
+            SyncMessage::Rows { images, .. } => images.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn window_bodies(db: &Db, query: &Query) -> Vec<String> {
+    let prepared = db.prepare_query(query).unwrap();
+    block_on(db.all(
+        &prepared,
+        ReadOpts {
+            tier: jazz::db::ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap()
+    .iter()
+    .filter_map(|row| match row.cells().find(|(name, _)| *name == "body") {
+        Some((_, Some(Value::String(text)))) => Some(text.clone()),
+        _ => None,
+    })
+    .collect()
+}
+
+/// A tab pages through offset windows. Each page's read covers the
+/// previous page's rows (`remote_query` reads the prefix through the
+/// window), and the worker keeps them current for the tab while the
+/// previous page is live: the worker ships the tab only each page's own
+/// rows, not the prefix again, as the authority does for the worker.
+#[test]
+fn a_worker_ships_a_tab_only_each_next_offset_pages_own_rows() {
+    let net = Net::new(1);
+    for n in 0..20 {
+        net.insert(&net.core, &format!("n{n:02}"));
+    }
+    net.pump();
+    let mut pages = Vec::new();
+    for page in 0..4 {
+        let from = net.to_tabs[0].borrow().len();
+        let query = notes_window(page * 5, 5);
+        let prepared = net.tab(0).prepare_query(&query).unwrap();
+        pages.push(block_on(net.tab(0).subscribe(&prepared, ReadOpts::default())).unwrap());
+        net.pump();
+        let expected: Vec<String> = (page * 5..page * 5 + 5)
+            .map(|n| format!("n{n:02}"))
+            .collect();
+        assert_eq!(window_bodies(net.tab(0), &query), expected, "page {page}");
+        let sent = images_to_tab(&net, from);
+        if page == 0 {
+            assert!(sent >= 5, "the first page ships its rows");
+        } else {
+            assert_eq!(
+                sent, 5,
+                "page {page} ships its own five rows, not the prefix"
+            );
+        }
+    }
+}
+
+/// Edits above a deduplicated page reach it through the worker: a prefix
+/// row moved past the window and one deleted, while the previous page is
+/// live and after it ended.
+#[test]
+fn edits_above_a_tabs_deduplicated_offset_page_reach_it() {
+    let net = Net::new(1);
+    let mut rows = Vec::new();
+    for n in 0..20 {
+        rows.push(net.insert(&net.core, &format!("n{n:02}")));
+    }
+    net.pump();
+    let first = net.tab(0).prepare_query(&notes_window(0, 5)).unwrap();
+    let first_page = block_on(net.tab(0).subscribe(&first, ReadOpts::default())).unwrap();
+    net.pump();
+    let query = notes_window(5, 5);
+    let prepared = net.tab(0).prepare_query(&query).unwrap();
+    let _page = block_on(net.tab(0).subscribe(&prepared, ReadOpts::default())).unwrap();
+    net.pump();
+    let check = |what: &str| {
+        assert_eq!(
+            window_bodies(net.tab(0), &query),
+            window_bodies(&net.core, &query),
+            "{what}"
+        );
+    };
+    check("opening");
+    net.update(&net.core, rows[0], "zz");
+    net.pump();
+    check("a prefix row moved past the window");
+    drop(first_page);
+    net.pump();
+    check("the previous page ended");
+    block_on(net.core.delete("notes", rows[1], Default::default())).unwrap();
+    net.pump();
+    check("a prefix row deleted");
+    net.update(&net.core, rows[3], "n03 edited");
+    net.pump();
+    check("a prefix row edited");
+}
