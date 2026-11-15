@@ -238,7 +238,7 @@ describe("jazz-tools upgrade: refusals", () => {
 
   it("refuses when the app's jazz-tools has no DSL", async () => {
     const dir = fixture("backend-history");
-    rmSync(join(dir, "node_modules"));
+    rmSync(join(dir, "node_modules"), { recursive: true, force: true });
     mkdirSync(join(dir, "node_modules", "jazz-tools"), { recursive: true });
     symlinkSync(
       join(legacyModules(), "typescript"),
