@@ -29,6 +29,7 @@ mod error;
 mod handle;
 mod include;
 mod query;
+mod read;
 mod subscription;
 mod table;
 mod value;
@@ -41,7 +42,8 @@ pub use include::{Include, IntoInclude, Nullability, OneInclude, Partial, Row, S
 pub use query::{
     Column, Condition, Many, NotNull, Nullable, One, Order, Query, created_at, id, updated_at,
 };
-pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
+pub use read::ReadOptions;
+pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated, ValueSplice};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use value::{ColumnValue, Json, Timestamp};
 

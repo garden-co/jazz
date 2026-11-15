@@ -49,13 +49,13 @@ const BACKEND_ISSUER: &str = "jazz:backend";
 #[derive(Clone)]
 pub struct Jazz {
     commands: mpsc::UnboundedSender<Command>,
-    info: Arc<Info>,
+    pub(crate) info: Arc<Info>,
 }
 
-struct Info {
+pub(crate) struct Info {
     bundle: Option<String>,
     account: Option<AccountId>,
-    implementations: Implementations,
+    pub(crate) implementations: Implementations,
 }
 
 impl std::fmt::Debug for Jazz {
@@ -338,7 +338,10 @@ fn insert<N: Insert>(
     table::decode(id, fields, implementations)
 }
 
-fn decode_result<T: Row>(row: QueryResult, implementations: &Implementations) -> Result<T> {
+pub(crate) fn decode_result<T: Row>(
+    row: QueryResult,
+    implementations: &Implementations,
+) -> Result<T> {
     let id = row.key.row_id().ok_or_else(|| Error::Decode {
         table: <T::Table as Table>::NAME,
         message: "a joined result is not a row".into(),

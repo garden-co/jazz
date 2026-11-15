@@ -120,3 +120,64 @@ async fn a_column_named_query() {
         .unwrap();
     assert_eq!(found, vec![labelled]);
 }
+
+/// Read options: waiting for the server's first answer (offline it answers
+/// at once), and splices of a column's changes on subscription updates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_options() {
+    use futures::StreamExt;
+    use jazz_app::ReadOptions;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask::new("abc", 0, Vec::new()))
+        .await
+        .unwrap();
+
+    let rows = jazz
+        .all_with_options(
+            tasks::query(),
+            ReadOptions::default().wait_for_remote(std::time::Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![task.clone()]);
+
+    let mut changes = jazz
+        .subscribe_with_options(
+            tasks::query(),
+            ReadOptions::default().splices(tasks::title()),
+        )
+        .await
+        .unwrap();
+    let first = changes.next().await.unwrap().unwrap();
+    assert_eq!(first.added.len(), 1);
+    jazz.update(
+        task.id,
+        bindings::TaskUpdate {
+            title: Some("abXc".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let update = loop {
+        let delta = changes.next().await.unwrap().unwrap();
+        if let Some(updated) = delta.updated.into_iter().next() {
+            break updated;
+        }
+    };
+    assert_eq!(update.row.unwrap().title, "abXc");
+    let (column, splices) = &update.splices[0];
+    assert_eq!(column, "title");
+    assert_eq!(splices.len(), 1);
+    assert_eq!(
+        (
+            splices[0].at,
+            splices[0].delete,
+            splices[0].insert.as_slice()
+        ),
+        (2, 0, b"X".as_slice())
+    );
+}
