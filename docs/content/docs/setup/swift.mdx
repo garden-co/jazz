@@ -117,7 +117,7 @@ On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live resu
 ```
 
 Every call `throws(JazzError)`. The cases are `refused` (validation, permissions or not supported
-yet), `io`, `closed` and `decoding`.
+yet), `io`, `closed`, `decoding` and `cancelled` (the calling task was cancelled).
 
 ## Relations, transactions and tiers
 
