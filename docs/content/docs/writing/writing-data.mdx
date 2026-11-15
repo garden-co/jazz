@@ -116,6 +116,15 @@ Trying to insert, update or delete an already deleted row will fail. Use `restor
 Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
 row before restoring it.
 
+`restore` is only for a deleted row: on a live one it fails with `row not deleted`. When you don't
+know which it is, check `$deletedAt`, which a query with `includeDeleted()` can select:
+
+```ts
+const existing = await db.one(app.todos.where({ id }).includeDeleted().select("$deletedAt"));
+if (existing?.$deletedAt) db.restore(app.todos, id, values);
+else db.update(app.todos, id, values);
+```
+
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">

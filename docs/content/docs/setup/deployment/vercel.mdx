@@ -84,11 +84,10 @@ On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/funct
 `next dev`, which can't upgrade sockets, the browser
 switches to an HTTP stream on its own.
 
-Install `ws`: for now, Next.js 16's default bundler (Turbopack) can't build Jazz's route without it,
-so `next dev` answers every `/jazz` request with a 500 and `next build` fails. With webpack, a backend
-without `ws` logs once at startup "jazz: next() on Vercel needs the ws package: npm install ws.
-Without it, sync sockets can't open: clients sync over the HTTP stream instead." Clients still sync
-then, but the HTTP stream needs a single instance or sticky routing.
+Install `ws`. Without it, the backend still builds and starts, and logs once at startup "jazz: next()
+on Vercel needs the ws package: npm install ws. Without it, sync sockets can't open: clients sync
+over the HTTP stream instead." Clients still sync then, but the HTTP stream needs a single instance
+or sticky routing.
 
 Set `publicUrl` to the URLs browsers reach `/jazz` at. Without it, the backend takes its URL from
 each request's headers, and logs "createJazz: vouched for a local-first guest of …, taken from the
