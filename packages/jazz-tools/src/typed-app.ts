@@ -101,9 +101,11 @@ type ColumnOf<
 > = Extract<ColumnsOf<TSchema, TTable>[TColumn], ColumnTypes>;
 
 // Simplified, so the generated interfaces read as plain object types.
-export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
-  TableTypesOf<TSchema, TTable>["row"] & { id: string }
->;
+export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  string extends keyof TableTypesOf<TSchema, TTable>["row"]
+    ? // An index-signature row (a test's loose app): simplifying would drop `id`.
+      TableTypesOf<TSchema, TTable>["row"] & { id: string }
+    : Simplify<TableTypesOf<TSchema, TTable>["row"] & { id: string }>;
 
 export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   TableTypesOf<TSchema, TTable>["insert"]
@@ -341,13 +343,21 @@ type DeletedWhere<TDeleted extends boolean> = TDeleted extends true
   : {};
 
 /** Shared projection typing for ordinary and history rows. */
-type SelectedRow<TRow, TSelection> = Simplify<
-  ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
-    Pick<
-      ProvenanceMagicColumns & DeletionMagicColumns,
-      Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns>
-    >
->;
+type SelectedRow<TRow, TSelection> = string extends keyof TRow
+  ? // An index-signature row (a test's loose app): every column, `id` kept.
+    TRow
+  : Simplify<
+      ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
+        Pick<
+          ProvenanceMagicColumns & DeletionMagicColumns,
+          Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns>
+        >
+    >;
+
+/** A selected row with its included relations in place of same-named columns. */
+type WithIncluded<TSelected, TIncluded> = string extends keyof TSelected
+  ? TSelected & TIncluded
+  : Simplify<Omit<TSelected, Extract<keyof TIncluded, keyof TSelected>> & TIncluded>;
 
 type ApplyRelationCardinality<
   TValue,
@@ -431,12 +441,9 @@ export type TableSelectedWithIncludes<
   TInclude extends TableInclude<TSchema, TTable> = {},
   TSelection extends TableSelectableColumn<TSchema, TTable> = DefaultSelection<TSchema, TTable>,
   TRequired extends boolean = false,
-> = Simplify<
-  Omit<
-    TableSelected<TSchema, TTable, TSelection>,
-    Extract<keyof TInclude, keyof TableSelected<TSchema, TTable, TSelection>>
-  > &
-    IncludedRelations<TSchema, TTable, TRequired, TInclude>
+> = WithIncluded<
+  TableSelected<TSchema, TTable, TSelection>,
+  IncludedRelations<TSchema, TTable, TRequired, TInclude>
 >;
 
 export interface TableRelation<
@@ -783,12 +790,9 @@ type SelectedWithIncludesFromMeta<
   TInclude extends BuilderInclude<TMeta> = {},
   TSelection = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
-> = Simplify<
-  Omit<
-    SelectedFromMeta<TMeta, TSelection>,
-    Extract<keyof TInclude, keyof SelectedFromMeta<TMeta, TSelection>>
-  > &
-    IncludedRelationsFromMeta<TMeta, TRequired, TInclude>
+> = WithIncluded<
+  SelectedFromMeta<TMeta, TSelection>,
+  IncludedRelationsFromMeta<TMeta, TRequired, TInclude>
 >;
 
 type BuiltCondition = { column: string; op: string; value: unknown };
@@ -1525,12 +1529,25 @@ export type BindAppOptions<TTypes extends SchemaLike, TTransforms extends Transf
 } & ComputedOption<TTypes> &
   TransformsOption<TTransforms>;
 
-/** Where `bindApp` records the source hash on the app's schema, read across copies of jazz-tools. */
-const SOURCE = Symbol.for("jazz-tools.appSource");
+/**
+ * Where `bindApp` records what the bindings passed it on the app's schema,
+ * read across copies of jazz-tools (a bundler may load the generated module
+ * and the backend's as separate copies). Not enumerable: the schema's JSON,
+ * and so its hash, stay as they are.
+ */
+const BOUND = Symbol.for("jazz-tools.boundApp");
 
-/** The `source` of the bindings that made `wasmSchema`, if `bindApp` made it. */
-export function boundAppSource(wasmSchema: WasmSchema): string | undefined {
-  return (wasmSchema as { [SOURCE]?: string })[SOURCE];
+/** What the bindings that made an app's schema passed to `bindApp`. */
+export interface BoundApp {
+  /** `"sha256:<hex>"` of the `jazz.app.json` they were generated from. */
+  readonly source: string;
+  readonly schema: CompiledAppSchema;
+  readonly relations?: CompiledRelations;
+}
+
+/** What the bindings that made `wasmSchema` passed to `bindApp`, if `bindApp` made it. */
+export function boundApp(wasmSchema: WasmSchema): BoundApp | undefined {
+  return (wasmSchema as { [BOUND]?: BoundApp })[BOUND];
 }
 
 const REGENERATE = "run `npx jazz-tools validate` to regenerate jazz.generated.ts";
@@ -1553,7 +1570,8 @@ export function bindApp<TTypes extends SchemaLike, TTransforms extends Transform
   }
   const wasmSchema = currentTables(schema, options.relations);
   shipMigrations(wasmSchema, { schemas: schema.schemas, migrations: schema.migrations });
-  Object.defineProperty(wasmSchema, SOURCE, { value: source, enumerable: false });
+  const bound: BoundApp = Object.freeze({ source, schema, relations: options.relations });
+  Object.defineProperty(wasmSchema, BOUND, { value: bound, enumerable: false });
   const transforms = columnTransforms(
     wasmSchema,
     schema,
