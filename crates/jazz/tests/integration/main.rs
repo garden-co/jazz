@@ -117,6 +117,8 @@ mod pending_rebase_scope;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../policy_claim_coercion.rs"]
+mod policy_claim_coercion;
 #[path = "../policy_support_rows.rs"]
 mod policy_support_rows;
 #[path = "../pre_sync_writes.rs"]

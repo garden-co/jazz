@@ -129,6 +129,11 @@ A claim can also be the value a row is compared with, for example rows of the us
 policy.projects.allowRead.where({ orgId: session.claims["org"] });
 ```
 
+Claims are JSON, so a claim is compared as the type of the column it meets, the same way in every
+policy form: a `s.uuid()` column (or `id`) reads a string claim as the UUID it spells, a text column
+compares the claim's text exactly, and an integer column accepts a JSON number or a string such as
+`"42"`. A claim the column can't hold matches no rows.
+
 ### Inherited access (`allowedTo.*`)
 
 A row can inherit its access from a related row. Use
