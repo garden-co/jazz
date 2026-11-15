@@ -248,22 +248,32 @@ fn kotlin_bindings_read_back_with_columns_named_as_their_constants() {
 }
 
 #[test]
-fn kotlin_refuses_tables_that_would_shadow_types_it_uses() {
+fn kotlin_tables_may_be_named_as_stdlib_and_runtime_types() {
+    // The file names everything outside `jazzapp` fully qualified.
     for (table, ty) in [
         ("results", "Result"),
         ("lists", "List"),
-        ("pairs", "Pair"),
         ("units", "Unit"),
+        ("columns", "Column"),
+        ("strings", "String"),
     ] {
         let app = format!(
             r#"{{ "format": 1, "tables": {{ "{table}": {{ "columns": {{ "a": "string" }} }} }} }}"#
         );
-        let error = generate(Lang::Kotlin, app.as_bytes()).unwrap_err();
+        let generated = generate(Lang::Kotlin, app.as_bytes()).unwrap();
         assert!(
-            error.to_string().contains(&format!("Kotlin type `{ty}`")),
-            "{error}"
+            generated.contains(&format!("public data class {ty}(")),
+            "{generated}"
         );
+        assert!(!generated.contains("\nimport "), "the file imports nothing");
     }
+    // Names that clash inside the package are still refused.
+    let app = br#"{ "format": 1, "tables": { "tasks": { "columns": { "a": "string" } }, "newTasks": { "columns": { "a": "string" } } } }"#;
+    let error = generate(Lang::Kotlin, app).unwrap_err();
+    assert!(
+        error.to_string().contains("Kotlin type `NewTask`"),
+        "{error}"
+    );
 }
 
 #[test]
