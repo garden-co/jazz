@@ -25,9 +25,22 @@ use crate::names::{pascal, singular};
 /// Where the bindings go, relative to `jazz.app.json`.
 pub const FILE: &str = "src/jazz_app.rs";
 
+/// The version of the bindings' shape this generator writes: the second
+/// line records it.
+pub const FORMAT: u32 = 1;
+
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
     "// jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.";
+
+/// How the second line starts.
+const FORMAT_PREFIX: &str = "// Bindings format ";
+
+/// How the embedded `jazz.app.json` starts: a raw string follows.
+const APP_PREFIX: &str = "pub const APP: &str = r";
+
+/// How the recorded source starts.
+const SOURCE_PREFIX: &str = "pub const SOURCE: &str = ";
 
 /// The runtime crate, as an absolute path: the bindings' own module is
 /// usually named `jazz_app` too.
@@ -166,14 +179,14 @@ impl<'a> Writer<'a> {
 
         let mut out = String::new();
         let _ = writeln!(out, "{HEADER}");
-        out.push_str("// Regenerate it after changing jazz.app.json.\n");
+        let _ = writeln!(out, "{FORMAT_PREFIX}{FORMAT}. Regenerate it after changing jazz.app.json.");
         // Committed as generated: `cargo fmt` leaves it be, so
         // `generate --check` doesn't find it stale. (Stable Rust takes
         // rustfmt's skip only in this form.)
         out.push_str("#![cfg_attr(rustfmt, rustfmt_skip)]\n");
         out.push_str("#![allow(dead_code, clippy::all)]\n\n");
         out.push_str("/// The `jazz.app.json` these bindings were generated from.\n");
-        let _ = writeln!(out, "pub const SOURCE: &str = {:?};\n", self.app.source);
+        let _ = writeln!(out, "{SOURCE_PREFIX}{:?};\n", self.app.source);
         for (name, (variants, what)) in &self.enums {
             let _ = writeln!(out, "/// The values of {what}.");
             out.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n");
@@ -637,7 +650,7 @@ impl<'a> Writer<'a> {
         let hashes = "#".repeat(longest_hash_run(&self.app.file) + 1);
         let _ = writeln!(
             out,
-            "/// The app's `jazz.app.json`: its schema, every earlier version and the\n/// migrations between them.\npub const APP: &str = r{hashes}\"{}\"{hashes};\n",
+            "/// The app's `jazz.app.json`: its schema, every earlier version and the\n/// migrations between them.\n{APP_PREFIX}{hashes}\"{}\"{hashes};\n",
             self.app.file
         );
         out.push_str(
@@ -787,6 +800,58 @@ fn type_label(ty: &ColumnType) -> &'static str {
 
 fn longest_hash_run(text: &str) -> usize {
     text.split(|c| c != '#').map(str::len).max().unwrap_or(0)
+}
+
+// ---- reading back ------------------------------------------------------------
+
+/// What committed bindings embed: their format, their source, and the
+/// `jazz.app.json` they were generated from, checked again (its source
+/// must still be what they record).
+pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenError> {
+    let refuse = |what: &str| {
+        CodegenError::new(format!(
+            "{FILE}: {what}; regenerate it with `jazz-tools generate`"
+        ))
+    };
+    let mut lines = bindings.lines();
+    if lines.next() != Some(HEADER) {
+        return Err(refuse("not a file jazz-tools generated (its first line differs)"));
+    }
+    let format = lines
+        .next()
+        .and_then(|line| line.strip_prefix(FORMAT_PREFIX))
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|n| n.parse::<u32>().ok())
+        .ok_or_else(|| refuse("no `// Bindings format <n>.` second line"))?;
+    let source = bindings
+        .lines()
+        .find_map(|line| line.strip_prefix(SOURCE_PREFIX))
+        .and_then(|rest| rest.strip_suffix(';'))
+        .and_then(|literal| serde_json::from_str::<String>(literal).ok())
+        .ok_or_else(|| refuse("no `pub const SOURCE`"))?;
+    let at = bindings
+        .find(APP_PREFIX)
+        .ok_or_else(|| refuse("no `pub const APP`"))?
+        + APP_PREFIX.len();
+    let rest = &bindings[at..];
+    let hashes = rest.chars().take_while(|c| *c == '#').count();
+    let open = format!("{}\"", "#".repeat(hashes));
+    let close = format!("\"{}", "#".repeat(hashes));
+    let file = rest
+        .strip_prefix(&open)
+        .and_then(|body| body.find(&close).map(|end| &body[..end]))
+        .ok_or_else(|| refuse("`APP` is cut short"))?;
+    if jazz::tools::deployment::artifact::source_hash(file.as_bytes()) != source {
+        return Err(refuse("`APP` was edited (it no longer matches `SOURCE`)"));
+    }
+    let app = App::load(file.as_bytes())
+        .map_err(|error| refuse(&format!("its `APP` no longer loads ({error})")))?;
+    Ok(crate::bindings::Recorded {
+        source,
+        format,
+        current: app.compiled.current,
+        current_schema: app.compiled.current_schema().clone(),
+    })
 }
 
 // ---- names ------------------------------------------------------------------

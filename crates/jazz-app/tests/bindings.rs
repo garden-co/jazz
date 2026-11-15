@@ -36,3 +36,27 @@ fn payload_enums_are_not_supported_yet() {
     assert!(error.is_unsupported(), "{error}");
     assert!(error.message().contains("enum-with-payload"), "{error}");
 }
+
+/// `jazz-tools generate` reads committed Rust bindings back: what they
+/// were generated from, for `--check` and `migrations create`.
+#[test]
+fn committed_bindings_read_back() {
+    for app in ["todos", "tasks"] {
+        let file = std::fs::read(format!("{FIXTURES}/{app}/jazz.app.json")).unwrap();
+        let committed = std::fs::read_to_string(format!("{BINDINGS}/{app}.rs")).unwrap();
+        let loaded = jazz_codegen::App::load(&file).unwrap();
+        let recorded = jazz_codegen::bindings::read(Lang::Rust, &committed).unwrap();
+        assert_eq!(recorded.source, loaded.source);
+        assert_eq!(recorded.format, Lang::Rust.format());
+        assert_eq!(recorded.current, loaded.compiled.current);
+        assert_eq!(
+            jazz_codegen::bindings::staleness(&loaded, Lang::Rust, Some(&committed)).unwrap(),
+            None
+        );
+
+        let edited = committed.replacen("\"format\": 1", "\"format\":  1", 1);
+        assert!(jazz_codegen::bindings::read(Lang::Rust, &edited).is_err(), "an edited APP");
+    }
+    let foreign = "// some other file\n";
+    assert!(jazz_codegen::bindings::read(Lang::Rust, foreign).is_err());
+}
