@@ -1627,10 +1627,21 @@ impl Binding {
     /// `local`, on the server's acceptance for `global` (rejecting if it
     /// refused).
     pub fn wait_for(&self, seq: u64, tier: &str) -> HostResult<HostFuture<()>> {
+        self.wait_for_seq(seq, tier, true)
+    }
+
+    /// `reports`: whether a rejection this wait sees counts as reported, so
+    /// a later [`Self::wait_for_sync_global`] doesn't report it
+    /// again (an observing wait leaves it to that).
+    fn wait_for_seq(&self, seq: u64, tier: &str, reports: bool) -> HostResult<HostFuture<()>> {
         let tier = binding_args::durability_tier(tier)?;
         let db = self.db.clone();
         Ok(Box::pin(self.hooks.progress.parked(async move {
-            db.wait_for_transaction(seq, tier).await?;
+            if reports {
+                db.wait_for_transaction(seq, tier).await?;
+            } else {
+                db.observe_transaction(seq, tier).await?;
+            }
             Ok(())
         })))
     }
@@ -1654,7 +1665,7 @@ impl Binding {
             let error = error.clone();
             Box::pin(async move { Err(HostError::Engine(error)) })
         } else {
-            self.wait_for(write.seq, tier)?
+            self.wait_for_seq(write.seq, tier, claim.is_some())?
         };
         let Some(claim) = claim else {
             return Ok(fate);
@@ -1673,6 +1684,19 @@ impl Binding {
             db.wait_for_pending_writes(DurabilityTier::Global).await?;
             Ok(())
         }))
+    }
+
+    /// TS `waitForSync`: like [`Self::wait_for_pending_writes_global`] for
+    /// the writes of `writer` (a trusted session's author bytes; `None` for
+    /// this database's own), also failing with a rejection of theirs that
+    /// settled before and no wait reported (see [`Db::wait_for_sync`]).
+    pub fn wait_for_sync_global(&self, writer: Option<&[u8]>) -> HostResult<HostFuture<()>> {
+        let writer = writer.map(|bytes| self.author_of(bytes)).transpose()?;
+        let db = self.db.clone();
+        Ok(Box::pin(self.hooks.progress.parked(async move {
+            db.wait_for_sync(DurabilityTier::Global, writer).await?;
+            Ok(())
+        })))
     }
 
     /// How many local commits still wait for the server's verdict.
