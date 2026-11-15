@@ -941,7 +941,12 @@ impl Core {
             .cloned()
             .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
         let bearer = bearer.to_owned();
-        let user = block_on(async move { session.link(&bearer).await })?;
+        // On the client's runtime: linking talks to the app's endpoint
+        // (tokio I/O), and the caller's thread may have no runtime at all.
+        let user = block_on(
+            self.open_jazz()?
+                .with_client(move |_| async move { session.link(&bearer).await }),
+        )?;
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
@@ -1341,6 +1346,7 @@ fn config(
     let mut admin_secret = None;
     let mut session = None;
     let mut auth = None;
+    let mut insecure = false;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -1362,6 +1368,13 @@ fn config(
             "adminSecret" => admin_secret = Some(text()?),
             "session" => session = Some(value.clone()),
             "auth" => auth = Some(value.clone()),
+            // An end user over plain http:// to a host other than
+            // localhost, for development only.
+            "allowInsecureHttp" => {
+                insecure = value
+                    .as_bool()
+                    .ok_or_else(|| refused("config.allowInsecureHttp must be true or false"))?;
+            }
             // Read by `Core::open`; checked here.
             "contract" => match value.as_u64() {
                 Some(1 | 2) => {}
@@ -1472,6 +1485,9 @@ fn config(
             }
         };
         result = result.user(auth);
+        if insecure {
+            result = result.allow_insecure_http();
+        }
     } else if result.server_url.is_some() {
         return Err(refused(
             "a \"serverUrl\" needs \"permissions\" (a backend) or \"auth\" (an end user)",
