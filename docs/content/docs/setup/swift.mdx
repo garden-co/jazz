@@ -15,34 +15,47 @@ should work on macOS, but isn't tested there yet. iOS and macOS UI apps aren't b
 
 ## Install
 
-The package isn't published yet. Build it from the Jazz repository, which needs Rust and Swift 6.0
-or newer:
+The Swift package is the Jazz repository itself: its root `Package.swift` has the `Jazz` product.
+The package doesn't ship the Jazz core, `libjazz_ffi`, a static library built from Rust, so build
+it once from a checkout at the same release tag (this needs Rust and Swift 6.0 or newer) and point
+pkg-config at it:
 
 ```bash
-git clone https://github.com/garden-co/jazz
-jazz/packages/jazz-swift/scripts/build-ffi.sh   # builds libjazz_ffi and its Swift sources
+git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
+jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only   # builds libjazz_ffi.a and jazz_ffi.pc
+export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
 ```
 
-Then depend on it by path:
+Then depend on the package by URL at that tag (or by path, `.package(path: "../jazz")`, on the
+checkout), and build with `PKG_CONFIG_PATH` set:
 
 ```swift title="Package.swift"
 dependencies: [
-    .package(name: "jazz-swift", path: "../jazz/packages/jazz-swift")
+    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65")
 ],
 targets: [
     .target(
         name: "MyApp",
-        dependencies: [.product(name: "Jazz", package: "jazz-swift")],
+        dependencies: [.product(name: "Jazz", package: "jazz")],
         path: ".",
         sources: ["JazzApp.swift", "Sources/MyApp"]
     ),
 ]
 ```
 
+```bash
+swift build
+```
+
+If `swift build` warns "couldn't find pc file for jazz_ffi" and then fails to link, `PKG_CONFIG_PATH`
+isn't set. The library and the package must come from the same tag. Linux is built and tested in CI. macOS
+follows the same steps but isn't tested yet, and there are no prebuilt binaries or XCFrameworks yet
+(see [Not supported yet](#not-supported-yet)).
+
 ## Generate the bindings
 
-With a `Package.swift` that names `jazz-swift` beside `jazz.app.json`, `jazz-tools generate` writes
-`JazzApp.swift` next to them:
+With a `Package.swift` that uses the `Jazz` product beside `jazz.app.json`, `jazz-tools generate`
+writes `JazzApp.swift` next to them:
 
 ```bash
 npx jazz-tools generate            # checks the files, writes JazzApp.swift
@@ -179,10 +192,11 @@ Not supported yet:
 
 - iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
   or tested for them yet, and there are no prebuilt XCFrameworks.
-- Installing the package from a URL: depend on a local checkout by path.
+- Prebuilt `libjazz_ffi` and XCFrameworks: build the library from the release's source, as above.
 - A SwiftUI `Binding` for `JazzText`.
-- SwiftUI helpers beyond `JazzQuery`: an `@Observable` session, and Keychain storage for device
-  keys. Use `jazz.session` and your own Keychain code.
+- Keychain storage for device keys: keep the key from `Jazz.generateDeviceKey()` with your own
+  Keychain code. (`JazzQuery` and `JazzSession`, the `@Observable` models for SwiftUI, exist for
+  Apple platforms only, and CI, which runs on Linux, doesn't build or test them.)
 - Anonymous (guest) users, as in TypeScript.
 - Subscribing to history queries.
 - Parts of large values inside includes: parts are for root queries.
