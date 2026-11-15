@@ -122,7 +122,11 @@ columns (`merge: "text"`) take plain string writes.
   an `updated` row when its related rows change.
 - **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
   always) instead of all of them, at the root or in an include. `"*"` selects
-  every column.
+  every column. An entry may read part of a large value instead of all of
+  it: `{"column", "from", "to", "units": "utf8"|"utf16"|"bytes"}` (half-open;
+  UTF-8 on code point boundaries; bytes come back base64) or `{"column",
+"at": "<JSON pointer>"}` for a json column. Parts are for the root query,
+  not inside includes.
 - A forward relation through a `uuid[]` column reads as an array of the
   referenced rows; `required` on it keeps only rows whose every reference is
   readable. Stricter than TS: `required` on reverse relations or optional
@@ -167,13 +171,23 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   server would let this user `read` / `insert` / `update` / `delete`, without
   doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
   take `id`; `update` takes `id` and an optional `row` patch. `null` (no
-  server, or no decision) means unknown. Not inside a transaction.
+  server, or no decision) means unknown. It is advice: `true` doesn't promise
+  the write will succeed, as the data or permissions may change first. Not
+  inside a transaction.
 - **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
   `upsert {table, id, row}` write the row with this id: an insert if there is
   none, else its columns replaced; `row` is a whole row, as for an insert.
   `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
   deleted row as it was, or with `patch` (a whole row) as its content. Both
   return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
+- **Streaming uploads:** UniFFI `begin_upload(table, column, kind, id?,
+row?) -> Upload` (`push(bytes)`, `finish() -> row`, `abort()`); C ABI
+  `uploadBegin {table, column, kind?: "insert"|"update"|"upsert", id?,
+row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
+{upload, tier?}` → the row, `uploadAbort {upload}`. An insert takes the
+  row's other columns as `row` and no `id`; update and upsert take the `id`.
+  Not inside a transaction. Read a large value back in pages with `select`
+  parts.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`

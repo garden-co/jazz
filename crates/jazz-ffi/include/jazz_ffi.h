@@ -68,8 +68,14 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              (edits: text / splice / jsonSet, see the README)
  *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
  *               "id"?, "row"?}                               -> true|false|null
+ *              (advisory: true does not promise the write succeeds; null =
+ *              unknown, e.g. no server; not available inside a transaction)
  *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
+ *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
+ *   "uploadPush"   {"upload", "bytes": base64}                -> null
+ *   "uploadFinish" {"upload", "tier"?}                        -> the row
+ *   "uploadAbort"  {"upload"}                                 -> null
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
  *                     | null (a local app or a backend)
  *   "syncStatus" {} -> {"link": ...}
