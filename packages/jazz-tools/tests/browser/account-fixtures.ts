@@ -1,6 +1,6 @@
 /** Browser-only account fixtures, safe to import from standalone remote pages. */
 import { AccountAuthError } from "../../src/accounts/registry-client.js";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import type { AccountHandle } from "../../src/accounts/state.js";
 import { createDb as createAccountDb } from "../../src/runtime/default-create-db.js";
 import type { Db, DbConfig } from "../../src/runtime/db.js";
@@ -60,7 +60,7 @@ export async function createBrowserTestDb(
   }
   if (!account) {
     let stored: string | null = null;
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId: config.appId,
       serverUrl,
       env: config.env,
@@ -84,7 +84,7 @@ async function issueImplicitAccount(
   env: string | undefined,
 ): Promise<AccountHandle> {
   let stored: string | null = null;
-  const accounts = await createAccountManager({
+  const accounts = await createTestAccountManager({
     appId,
     serverUrl,
     env,

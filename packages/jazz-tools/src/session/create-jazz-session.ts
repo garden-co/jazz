@@ -1,10 +1,10 @@
 import type { SignedOutDecision } from "./backend-watch.js";
-import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import type { AccountHandle } from "../accounts/state.js";
 import {
   clientRegistryUrl,
   createAccountManagerWithMinter,
   watchStoredSelection,
+  type AccountManagerConfig,
 } from "../accounts/account-manager-core.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { ShutdownOptions } from "../runtime/db.js";

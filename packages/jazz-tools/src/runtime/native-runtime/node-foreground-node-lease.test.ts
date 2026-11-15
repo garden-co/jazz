@@ -21,7 +21,7 @@ let restoreCwd: (() => void) | undefined;
 // The built modules a Node session opens its local-first Db with.
 const builtCreateDb = new URL("../../../dist/runtime/default-create-db.js", import.meta.url).href;
 const builtAccountManager = new URL(
-  "../../../dist/accounts/create-account-manager.js",
+  "../../../dist/runtime/testing/account-fixtures.js",
   import.meta.url,
 ).href;
 const memoryApp = s.defineApp(
@@ -66,9 +66,9 @@ function spawnPublicPersistentDb(
       "--eval",
       [
         `import { createDb } from ${JSON.stringify(builtCreateDb)};`,
-        `import { createAccountManager } from ${JSON.stringify(builtAccountManager)};`,
+        `import { createTestAccountManager } from ${JSON.stringify(builtAccountManager)};`,
         `let stored = null;`,
-        `const accounts = await createAccountManager({ appId: ${JSON.stringify(appId)}, serverUrl: "http://127.0.0.1:1", store: { async read() { return stored; }, async update(transform) { stored = transform(stored); } } });`,
+        `const accounts = await createTestAccountManager({ appId: ${JSON.stringify(appId)}, serverUrl: "http://127.0.0.1:1", store: { async read() { return stored; }, async update(transform) { stored = transform(stored); } } });`,
         `const account = accounts.restoreLocalFirst(${JSON.stringify(secret)});`,
         `const db = await createDb({ appId: ${JSON.stringify(appId)}, account });`,
         'process.stdout.write("ready\\n");',

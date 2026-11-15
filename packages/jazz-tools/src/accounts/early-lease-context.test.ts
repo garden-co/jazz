@@ -18,7 +18,7 @@ vi.mock("./enrollment.js", async (importOriginal) => {
 });
 
 import { createAccountDbWithRuntimeSource } from "./context.js";
-import { createAccountManager } from "./create-account-manager.js";
+import { createTestAccountManager } from "../runtime/testing/account-fixtures.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import type { BrowserForegroundNodeLease, RuntimeSource } from "../runtime/runtime-source.js";
 
@@ -59,7 +59,7 @@ function fakeRuntimeSource() {
 async function localAccount() {
   const appId = `early-lease-${crypto.randomUUID()}`;
   let saved: string | null = null;
-  const accounts = await createAccountManager({
+  const accounts = await createTestAccountManager({
     appId,
     serverUrl: "http://127.0.0.1:1",
     store: {

@@ -23,7 +23,6 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock("jazz-tools/react", async () => ({
   ...(await import("../react/index.js")),
-  useJazzSessionOwner: () => ({ session: fixture.session }),
   JazzProvider: ({
     children,
     signedOut,
