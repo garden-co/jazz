@@ -5,7 +5,7 @@
     "items": {
       "columns": { "score": "int", "storedPriority": { "type": "int", "transform": "priority" } },
       "computed": {
-        "priority": { "type": { "enum": ["low", "medium", "high"] }, "from": ["score", "storedPriority"] }
+        "priority": { "type": { "enum": ["low", "medium", "high"] }, "from": ["id", "score", "storedPriority"] }
       }
     }
   },

@@ -49,9 +49,8 @@ impl Jazz {
     /// permission refused, say).
     pub fn durable(&self, tier: DurabilityTier) -> Jazz {
         Jazz {
-            commands: self.commands.clone(),
-            info: self.info.clone(),
             durability: Some(tier),
+            ..self.clone()
         }
     }
 
@@ -83,15 +82,13 @@ impl Jazz {
         self.restore_cells::<T>(id, None).await
     }
 
-    /// Brings back the deleted row with this id, with `update`'s columns
-    /// replaced.
-    pub async fn restore_with<U: crate::table::Update>(
-        &self,
-        id: ObjectId,
-        update: U,
-    ) -> Result<U::Row> {
-        let cells = update.into_cells(&self.info.implementations)?;
-        self.restore_cells::<U::Row>(id, Some(cells)).await
+    /// Brings back the deleted row with this id, with `new`'s values. A
+    /// restore replaces the whole row, so it takes the full insert, as TS's
+    /// `restore(table, id, data)` does.
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        let cells = new.into_cells(&self.info.implementations)?;
+        self.restore_cells::<N::Row>(id, Some(cells.into_iter().collect()))
+            .await
     }
 
     async fn restore_cells<T: Table>(

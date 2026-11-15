@@ -35,11 +35,6 @@ pub enum Value {
         id: Option<ObjectId>,
         values: Vec<Value>,
     },
-    /// Selected case and positional payload values for a column-local enum.
-    Enum {
-        case: String,
-        values: Vec<Value>,
-    },
     Null,
 }
 
@@ -61,11 +56,6 @@ impl fmt::Debug for Value {
             Self::Row { id, values } => f
                 .debug_struct("Row")
                 .field("id", id)
-                .field("values_len", &values.len())
-                .finish(),
-            Self::Enum { case, values } => f
-                .debug_struct("Enum")
-                .field("case", case)
                 .field("values_len", &values.len())
                 .finish(),
             Self::Null => f.write_str("Null"),
@@ -100,25 +90,14 @@ enum ValueJson {
         id: Option<ObjectId>,
         values: Vec<Value>,
     },
-    #[serde(deserialize_with = "deserialize_enum")]
-    Enum {
-        case: String,
-        values: Vec<Value>,
-    },
     Null,
 }
 
-// Row and enum payloads also decode from a positional sequence.
+// Rows also decode from a positional sequence.
 #[derive(Deserialize)]
 struct RowHuman {
     #[serde(default)]
     id: Option<ObjectId>,
-    values: Vec<Value>,
-}
-
-#[derive(Deserialize)]
-struct EnumHuman {
-    case: String,
     values: Vec<Value>,
 }
 
@@ -127,13 +106,6 @@ fn deserialize_row<'de, D: Deserializer<'de>>(
 ) -> Result<(Option<ObjectId>, Vec<Value>), D::Error> {
     let RowHuman { id, values } = RowHuman::deserialize(deserializer)?;
     Ok((id, values))
-}
-
-fn deserialize_enum<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<(String, Vec<Value>), D::Error> {
-    let EnumHuman { case, values } = EnumHuman::deserialize(deserializer)?;
-    Ok((case, values))
 }
 
 /// Public `Value` is a host-facing shape, not a generic postcard payload.
@@ -282,16 +254,6 @@ impl PartialEq for Value {
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::TransactionId(a), Value::TransactionId(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
-            (
-                Value::Enum {
-                    case: a_case,
-                    values: a_values,
-                },
-                Value::Enum {
-                    case: b_case,
-                    values: b_values,
-                },
-            ) => a_case == b_case && a_values == b_values,
             (Value::Array(a), Value::Array(b)) => a == b,
             (
                 Value::Row {
@@ -336,7 +298,6 @@ impl Value {
             }
             // Row type requires external schema, can't be inferred
             Value::Row { .. } => None,
-            Value::Enum { .. } => None,
             Value::Null => None,
         }
     }
