@@ -84,25 +84,21 @@ it.each(["constant", "identity"] as const)(
   },
 );
 
-// TODO(files-as-source): this test needs transforms that depend on sibling
-// columns (the DSL's `amount: s.int().transform({ dependsOn: ["text"], from:
-// (value, { text }) => value + text.length })` and `text:
-// s.string().transform({ dependsOn: ["large"], from: (value, { large }) =>
-// `${value}:${large.length}` })`) and a computed field computed from another
-// computed field (`nested` from `derived`). jazz.app.json has neither: its
-// transforms take one value, and a computed field's `from` names stored columns
-// only. The app below is the expressible part only.
-it.skip("fetches only the stored inputs of callbacks evaluated by a computed read", async () => {
+it("fetches only the stored inputs of callbacks evaluated by a computed read", async () => {
   const app = testApp(
     {
       tables: {
         rows: {
           columns: { amount: "int", text: "string", large: "bytes" },
-          computed: { nested: { type: "string", from: ["amount"] } },
+          computed: { summary: { type: "string", from: ["amount", "text"] } },
         },
       },
     },
-    { computed: { rows: { nested: (row: { amount: number }) => `value:${row.amount}` } } },
+    {
+      computed: {
+        rows: { summary: (row: { amount: number; text: string }) => `${row.text}:${row.amount}` },
+      },
+    },
   );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
@@ -123,16 +119,18 @@ it.skip("fetches only the stored inputs of callbacks evaluated by a computed rea
       return request.select_columns.map((column) => column.column).sort();
     };
 
-    await expect(db.one(app.rows.where({ id: row.id }).select("nested"))).resolves.toEqual({
+    await expect(db.one(app.rows.where({ id: row.id }).select("summary"))).resolves.toEqual({
       id: row.id,
-      nested: "value:4",
+      summary: "raw:1",
     });
     expect(selectedColumns()).toEqual(["amount", "text"]);
 
-    await expect(db.one(app.rows.where({ id: row.id }).select("nested", "text"))).resolves.toEqual({
+    await expect(
+      db.one(app.rows.where({ id: row.id }).select("summary", "large")),
+    ).resolves.toEqual({
       id: row.id,
-      nested: "value:4",
-      text: "raw:3",
+      summary: "raw:1",
+      large: new Uint8Array([1, 2, 3]),
     });
     expect(selectedColumns()).toEqual(["amount", "large", "text"]);
   } finally {
