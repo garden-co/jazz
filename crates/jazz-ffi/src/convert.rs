@@ -851,6 +851,9 @@ pub(crate) fn delta_json(table: &Shape, delta: OrderedRowDelta, reset: bool) -> 
 /// "from", "to" }, "splices": [{ "at", "delete", "insert" }] }` (`insert` a
 /// string, or base64 for bytes) and `{ "kind": "jsonSet", "column",
 /// "edits": [{ "at": "<json pointer>", "value" }] }`.
+/// A splice page's `to` that stands for the current value's end.
+pub(crate) const WHOLE_VALUE: u64 = u64::MAX;
+
 pub(crate) fn edits(
     table: &TableSchema,
     table_name: &str,
@@ -898,19 +901,30 @@ pub(crate) fn edits(
                     }
                 }
                 "splice" => {
-                    let within = edit
-                        .get("within")
-                        .ok_or_else(|| refused(format!("{path} needs \"within\"")))?;
-                    let (from, to) = (
-                        number(within.get("from"), "within.from")?,
-                        number(within.get("to"), "within.to")?,
-                    );
+                    // Without `within`, the page is the whole current value
+                    // (resolved when the edit runs), in `units`.
+                    let whole =
+                        json!({ "units": edit.get("units").cloned().unwrap_or(json!("utf8")) });
+                    let within = edit.get("within").unwrap_or(&whole);
+                    let (from, to) = if edit.get("within").is_some() {
+                        (
+                            number(within.get("from"), "within.from")?,
+                            number(within.get("to"), "within.to")?,
+                        )
+                    } else {
+                        (0, WHOLE_VALUE)
+                    };
                     let bytes = match within.get("units").and_then(Json::as_str) {
                         Some("bytes") => true,
                         Some("utf8" | "utf16") => false,
                         _ => {
                             return Err(refused(format!(
-                                "{path}.within.units must be \"utf8\", \"utf16\" or \"bytes\""
+                                "{path}.{}units must be \"utf8\", \"utf16\" or \"bytes\"",
+                                if edit.get("within").is_some() {
+                                    "within."
+                                } else {
+                                    ""
+                                }
                             )));
                         }
                     };
@@ -944,7 +958,10 @@ pub(crate) fn edits(
                             };
                             Ok(LargeValueUpdateSplice {
                                 at: number(splice.get("at"), &format!("splices[{i}].at"))?,
-                                delete: splice.get("delete").and_then(Json::as_u64).unwrap_or(0),
+                                delete: match splice.get("delete") {
+                                    None | Some(Json::Null) => 0,
+                                    delete => number(delete, &format!("splices[{i}].delete"))?,
+                                },
                                 insert,
                             })
                         })

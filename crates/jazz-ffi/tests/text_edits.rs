@@ -101,6 +101,23 @@ fn a_text_edit_merges_over_changes_its_writer_did_not_see() {
     );
     assert!(refused(json!([{ "kind": "poke", "column": "notes" }])).contains("kind must be"));
     assert!(
+        refused(json!([{ "kind": "splice", "column": "title", "units": "words", "splices": [] }]))
+            .contains("edits[0].units must be")
+    );
+    assert!(refused(json!([{ "kind": "splice", "column": "title", "splices": [{ "at": 0, "delete": "2" }] }]))
+        .contains("delete"));
+    let missing = jazz.edit_text(
+        "tasks".into(),
+        "01a1e200-0000-7000-8000-00000000dead".into(),
+        "notes".into(),
+        "a".into(),
+        "b".into(),
+    );
+    assert!(
+        matches!(&missing, Err(JazzError::Refused { reason }) if reason.contains("no tasks row")),
+        "{missing:?}"
+    );
+    assert!(
         refused(json!([{ "kind": "text", "column": "nope", "text": "x", "editedFrom": "y" }]))
             .contains("no column nope")
     );
@@ -140,4 +157,59 @@ fn json_set_replaces_by_pointer() {
         row["meta"],
         json!({ "a": [1, { "deep": true }], "b": "keep" })
     );
+}
+
+/// Go's `textEdit`: splices at positions over the whole current value (in
+/// UTF-8 bytes, or UTF-16 units), with no page to give; and the same as an
+/// `edit` splice without `within`.
+#[test]
+fn splices_over_the_whole_value() {
+    use jazz_ffi::c_abi::*;
+    use std::ffi::{CStr, CString};
+    let mut err = std::ptr::null_mut();
+    let config = CString::new(client_config()).unwrap();
+    let h = unsafe { jazz_open(config.as_ptr(), &mut err) };
+    let call = |method: &str, args: Value| -> Value {
+        let (method, args) = (
+            CString::new(method).unwrap(),
+            CString::new(args.to_string()).unwrap(),
+        );
+        let mut err = std::ptr::null_mut();
+        let out = unsafe { jazz_call(h, method.as_ptr(), args.as_ptr(), &mut err) };
+        assert!(
+            !out.is_null(),
+            "{}",
+            unsafe { CStr::from_ptr(err) }.to_str().unwrap()
+        );
+        let text = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_owned();
+        unsafe { jazz_string_free(out) };
+        parse(&text)
+    };
+    let show_id = call(
+        "insert",
+        json!({ "table": "shows", "row": parse(&show(nil_uuid())) }),
+    )["id"]
+        .clone();
+    let id = call(
+        "insert",
+        json!({ "table": "tasks", "row": { "showId": show_id, "title": "Rig", "status": "todo", "rank": 1.0, "notes": "héllo world" } }),
+    )["id"]
+        .clone();
+    // "héllo world": é is 2 UTF-8 bytes, so " world" starts at byte 6.
+    call(
+        "textEdit",
+        json!({ "table": "tasks", "id": id, "column": "notes", "units": "utf8",
+                "edits": [{ "pos": 6, "delete": 6, "insert": " there" }] }),
+    );
+    let read = |h_call: &dyn Fn(&str, Value) -> Value| {
+        h_call("one", json!({ "query": { "table": "tasks" } }))["notes"].clone()
+    };
+    assert_eq!(read(&call), "héllo there");
+    call(
+        "edit",
+        json!({ "table": "tasks", "id": id, "edits": [{ "kind": "splice", "column": "notes", "units": "utf16",
+                "splices": [{ "at": 0, "delete": 5, "insert": "hi" }] }] }),
+    );
+    assert_eq!(read(&call), "hi there");
+    unsafe { jazz_close(h) };
 }
