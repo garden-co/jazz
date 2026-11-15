@@ -548,7 +548,7 @@ fn a_live_search_follows_its_rows() {
     let prepared = db.prepare_query(&search("garden")).unwrap();
     let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     block_on(db.tick()).unwrap();
-    let mut seen = |stream: &mut jazz::db::SubscriptionStream| {
+    let seen = |stream: &mut jazz::db::SubscriptionStream| {
         let mut added = Vec::new();
         let mut removed = Vec::new();
         while let Some(event) = stream.try_next_event() {
@@ -683,4 +683,52 @@ fn a_replica_indexes_a_large_value_once_its_chunks_arrive() {
     pump(&server, &[&bob]);
     assert_eq!(ids(&bob, &search("zebra")), ids(&server, &search("zebra")));
     assert_eq!(ids(&bob, &search("plans")), [1]);
+}
+
+/// A live text search applies a changed row by re-checking it alone and
+/// splicing it in by `(score, id)` (SPEC 20.8): unchanged rows keep their
+/// scores and places, the changed row moves to where its new score puts
+/// it, and the window is the one the query re-run reads (`INV-IX-6`).
+/// A live nearest search re-runs instead: its `k` caps the rows it reads.
+#[test]
+fn a_live_text_search_splices_a_changed_row_by_its_score() {
+    let db = seeded();
+    insert(
+        &db,
+        4,
+        note("Garden", Some("garden garden"), "home", &[0.0, 0.0]),
+    );
+    // Scores: row 4 = 2 + 2, row 1 = 2 + 1, row 3 = 2.
+    assert_eq!(ids(&db, &search("garden")), [4, 1, 3]);
+    let prepared = db.prepare_query(&search("garden").limit(2)).unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.tick()).unwrap();
+    while stream.try_next_event().is_some() {}
+    let before = db.fanout_stats();
+    // Row 3 gains "garden" in its body: 2 + 1 + 1 = 4, tied with row 4,
+    // which it follows by id.
+    update(
+        &db,
+        3,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("garden garden".into())))),
+    );
+    block_on(db.tick()).unwrap();
+    let after = db.fanout_stats();
+    assert!(after.rechecked > before.rechecked, "{before:?} → {after:?}");
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Delta {
+            added: a,
+            removed: r,
+            ..
+        } = event
+        {
+            added.extend(a.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+            removed.extend(r.iter().map(|row| row.row_uuid.0.as_bytes()[0]));
+        }
+    }
+    assert_eq!((added, removed), (vec![3], vec![1]));
+    assert_eq!(ids(&db, &search("garden").limit(2)), [3, 4]);
 }

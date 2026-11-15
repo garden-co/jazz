@@ -177,11 +177,12 @@ pub(crate) fn end_savepoint(
     // The outermost savepoint commits: the specialised indexes take in
     // every row it changed first (SPEC 20.3, `INV-IX-2`). If they cannot,
     // nothing commits.
-    if keep && is_outermost(conn) {
-        if let Err(error) = crate::ix::drain(conn) {
-            end_savepoint(conn, name, false)?;
-            return Err(error);
-        }
+    if keep
+        && is_outermost(conn)
+        && let Err(error) = crate::ix::drain(conn)
+    {
+        end_savepoint(conn, name, false)?;
+        return Err(error);
     }
     let sql = if keep {
         format!("RELEASE {name}")

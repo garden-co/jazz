@@ -484,7 +484,7 @@ fn unchanged_rows_changes(from: &TableSchema, to: &TableSchema) -> Vec<&'static 
         .iter()
         .filter_map(|c| column(from, &c.name).map(|s| (s, c.clone())))
         .collect();
-    let mut specialised = |t: &TableSchema| {
+    let specialised = |t: &TableSchema| {
         let mut indexes = t.specialised_indexes.clone();
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         indexes

@@ -786,7 +786,7 @@ pub(crate) fn is_ready(conn: &Connection, tbl: &str, index: &str) -> Result<bool
     conn.prepare_cached("SELECT state FROM _jazz_ix WHERE tbl = ?1 AND name = ?2")
         .and_then(|mut s| {
             let mut rows = s.query([tbl, index])?;
-            Ok(rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()?)
+            rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()
         })
         .map_err(storage)
         .map(|state| state == Some(STATE_READY))

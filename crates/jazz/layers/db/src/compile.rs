@@ -1020,10 +1020,46 @@ impl<'a> Ctx<'a> {
             .find(|table| table.name == query.table)
             .ok_or_else(|| query_error(format!("unknown table {}", query.table)))?;
         crate::query::validate_search(declared, search).map_err(query_error)?;
+        let cte = self.search_cte()?;
+        let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
+        let alias = "t";
+        self.searching = true;
+        let order = self.order_sql(table, alias, &query.order_by)?;
+        self.searching = false;
+        let columns = projection
+            .iter()
+            .map(|(name, ..)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
+        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(query.offset as i64));
+        let source = self.source(table)?;
+        let sql = format!(
+            "WITH ix(rid, score) AS ({cte}) SELECT {alias}.id, {alias}._clock, {alias}._state{columns}, \
+             {alias}._writer FROM {source} AS {alias} JOIN ix ON ix.rid = {alias}.rid WHERE {} \
+             ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+            and(&wheres),
+        );
+        Ok(Compiled {
+            sql,
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: 0,
+            versioned: false,
+            union: false,
+            writer: true,
+            partial: Vec::new(),
+        })
+    }
+
+    /// The body of `ix(rid, score)` for the planned search (see
+    /// [`crate::ix::Planned`]).
+    fn search_cte(&mut self) -> Result<String, Error> {
         // Without a plan this is a validation-only compile (as
         // `Db::prepare_query` runs): an empty candidate relation.
         let planned = self.search.take();
-        let cte = match planned {
+        Ok(match planned {
             None => "SELECT NULL AS rid, NULL AS score WHERE 0".to_owned(),
             Some(planned) => match planned {
                 crate::ix::Planned::Sql { index, op } => {
@@ -1056,37 +1092,40 @@ impl<'a> Ctx<'a> {
                     sql
                 }
             },
-        };
-        let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
-        let alias = "t";
-        self.searching = true;
-        let order = self.order_sql(table, alias, &query.order_by)?;
-        self.searching = false;
-        let columns = projection
-            .iter()
-            .map(|(name, ..)| Ok(format!(", {}", column_sql(table, alias, name)?)))
-            .collect::<Result<String, Error>>()?;
-        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
-        let offset = self.bind(Sql::Integer(query.offset as i64));
-        let source = self.source(table)?;
-        let sql = format!(
-            "WITH ix(rid, score) AS ({cte}) SELECT {alias}.id, {alias}._clock, {alias}._state{columns}, \
-             {alias}._writer FROM {source} AS {alias} JOIN ix ON ix.rid = {alias}.rid WHERE {} \
-             ORDER BY {order} LIMIT {limit} OFFSET {offset}",
-            and(&wheres),
-        );
-        Ok(Compiled {
-            sql,
-            params: self.params,
-            projection,
-            tables: self.tables,
-            aggregate: false,
-            joined: 0,
-            versioned: false,
-            union: false,
-            writer: true,
-            partial: Vec::new(),
         })
+    }
+
+    /// The sort keys of rows `ids` (a JSON array of hex ids) of a query
+    /// with a search, by `order`, which may name `$score`: for splicing a
+    /// live search's changed rows (SPEC 20.8).
+    pub(crate) fn compile_sort_keys(
+        mut self,
+        query: &Query,
+        order: &[crate::query::OrderBy],
+        ids: Sql,
+    ) -> Result<(String, Vec<Sql>), Error> {
+        let cte = self.search_cte()?;
+        let table = self.table(&query.table)?;
+        let mut columns = String::new();
+        for by in order {
+            if by.column == crate::query::SCORE_COLUMN {
+                columns.push_str(", ix.score");
+                continue;
+            }
+            let sql = column_sql(table, "t", &by.column)?;
+            let sql = table
+                .column(&by.column)
+                .and_then(|column| column.rank_sql(&sql))
+                .unwrap_or(sql);
+            columns.push_str(&format!(", {sql}"));
+        }
+        let ids = self.bind(ids);
+        let sql = format!(
+            "WITH ix(rid, score) AS ({cte}) SELECT t.id{columns} FROM {} AS t \
+             JOIN ix ON ix.rid = t.rid WHERE t.id IN (SELECT unhex(value) FROM json_each({ids}))",
+            quote(&table.stored)
+        );
+        Ok((sql, self.params))
     }
 
     /// Phase 1 of a Rust-scored search (SPEC 20.5): the rows `query`'s
