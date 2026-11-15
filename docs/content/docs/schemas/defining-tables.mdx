@@ -150,8 +150,10 @@ single-column index, an array of names a composite index, which may end in `$cre
 }
 ```
 
-Indexes are part of the schema version, so changing them is a schema change: `generate` asks for
-a migration, and `migrations create` writes an empty step for the table (rows pass unchanged).
+Adding, removing or changing single-column indexes needs no migration: run `generate`, and the new
+bindings use them. Composite indexes are part of the schema version, so changing one is a schema
+change: `generate` asks for a migration, and `migrations create` writes an empty step for the table
+(rows pass unchanged). See [Migrations](/docs/schemas/migrations#changes-that-keep-every-row).
 
 ## Latest-only tables
 
