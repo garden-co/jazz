@@ -74,7 +74,9 @@ public enum JazzApp {
         public static let table = "canvases"
         public let id: Jazz.ID
         public var chatId: Jazz.ID
+    }
 
+    extension Canvas {
         public init(id: Jazz.ID, chatId: Jazz.ID) {
             self.id = id
             self.chatId = chatId
@@ -90,7 +92,9 @@ public enum JazzApp {
     public struct NewCanvas: Jazz.Insert {
         public typealias Row = Canvas
         public var chatId: Jazz.ID
+    }
 
+    extension NewCanvas {
         public init(chatId: Jazz.ID) {
             self.chatId = chatId
         }
@@ -104,7 +108,9 @@ public enum JazzApp {
     public struct CanvasPatch: Jazz.Patch {
         public typealias Row = Canvas
         public var chatId: Jazz.Change<Jazz.ID>
+    }
 
+    extension CanvasPatch {
         public init(chatId: Jazz.Change<Jazz.ID> = .unchanged) {
             self.chatId = chatId
         }
@@ -138,7 +144,9 @@ public enum JazzApp {
         public var chatId: Jazz.ID
         public var userId: Jazz.ID
         public var joinCode: Swift.String?
+    }
 
+    extension ChatMember {
         public init(id: Jazz.ID, chatId: Jazz.ID, userId: Jazz.ID, joinCode: Swift.String?) {
             self.id = id
             self.chatId = chatId
@@ -160,7 +168,9 @@ public enum JazzApp {
         public var chatId: Jazz.ID
         public var userId: Jazz.ID
         public var joinCode: Swift.String?
+    }
 
+    extension NewChatMember {
         public init(chatId: Jazz.ID, userId: Jazz.ID, joinCode: Swift.String? = nil) {
             self.chatId = chatId
             self.userId = userId
@@ -180,7 +190,9 @@ public enum JazzApp {
         public var chatId: Jazz.Change<Jazz.ID>
         public var userId: Jazz.Change<Jazz.ID>
         public var joinCode: Jazz.Change<Swift.String?>
+    }
 
+    extension ChatMemberPatch {
         public init(chatId: Jazz.Change<Jazz.ID> = .unchanged, userId: Jazz.Change<Jazz.ID> = .unchanged, joinCode: Jazz.Change<Swift.String?> = .unchanged) {
             self.chatId = chatId
             self.userId = userId
@@ -224,7 +236,9 @@ public enum JazzApp {
         public var name: Swift.String?
         public var isPublic: Swift.Bool
         public var joinCode: Swift.String?
+    }
 
+    extension Chat {
         public init(id: Jazz.ID, name: Swift.String?, isPublic: Swift.Bool, joinCode: Swift.String?) {
             self.id = id
             self.name = name
@@ -246,7 +260,9 @@ public enum JazzApp {
         public var name: Swift.String?
         public var isPublic: Swift.Bool
         public var joinCode: Swift.String?
+    }
 
+    extension NewChat {
         public init(name: Swift.String? = nil, isPublic: Swift.Bool, joinCode: Swift.String? = nil) {
             self.name = name
             self.isPublic = isPublic
@@ -266,7 +282,9 @@ public enum JazzApp {
         public var name: Jazz.Change<Swift.String?>
         public var isPublic: Jazz.Change<Swift.Bool>
         public var joinCode: Jazz.Change<Swift.String?>
+    }
 
+    extension ChatPatch {
         public init(name: Jazz.Change<Swift.String?> = .unchanged, isPublic: Jazz.Change<Swift.Bool> = .unchanged, joinCode: Jazz.Change<Swift.String?> = .unchanged) {
             self.name = name
             self.isPublic = isPublic
@@ -310,7 +328,9 @@ public enum JazzApp {
         public var chatId: Jazz.ID
         public var text: Swift.String
         public var senderId: Jazz.ID
+    }
 
+    extension Message {
         public init(id: Jazz.ID, chatId: Jazz.ID, text: Swift.String, senderId: Jazz.ID) {
             self.id = id
             self.chatId = chatId
@@ -332,7 +352,9 @@ public enum JazzApp {
         public var chatId: Jazz.ID
         public var text: Swift.String
         public var senderId: Jazz.ID
+    }
 
+    extension NewMessage {
         public init(chatId: Jazz.ID, text: Swift.String, senderId: Jazz.ID) {
             self.chatId = chatId
             self.text = text
@@ -352,7 +374,9 @@ public enum JazzApp {
         public var chatId: Jazz.Change<Jazz.ID>
         public var text: Jazz.Change<Swift.String>
         public var senderId: Jazz.Change<Jazz.ID>
+    }
 
+    extension MessagePatch {
         public init(chatId: Jazz.Change<Jazz.ID> = .unchanged, text: Jazz.Change<Swift.String> = .unchanged, senderId: Jazz.Change<Jazz.ID> = .unchanged) {
             self.chatId = chatId
             self.text = text
@@ -396,7 +420,9 @@ public enum JazzApp {
         public var userId: Jazz.ID
         public var name: Swift.String
         public var avatar: Swift.String?
+    }
 
+    extension Profile {
         public init(id: Jazz.ID, userId: Jazz.ID, name: Swift.String, avatar: Swift.String?) {
             self.id = id
             self.userId = userId
@@ -418,7 +444,9 @@ public enum JazzApp {
         public var userId: Jazz.ID
         public var name: Swift.String
         public var avatar: Swift.String?
+    }
 
+    extension NewProfile {
         public init(userId: Jazz.ID, name: Swift.String, avatar: Swift.String? = nil) {
             self.userId = userId
             self.name = name
@@ -438,7 +466,9 @@ public enum JazzApp {
         public var userId: Jazz.Change<Jazz.ID>
         public var name: Jazz.Change<Swift.String>
         public var avatar: Jazz.Change<Swift.String?>
+    }
 
+    extension ProfilePatch {
         public init(userId: Jazz.Change<Jazz.ID> = .unchanged, name: Jazz.Change<Swift.String> = .unchanged, avatar: Jazz.Change<Swift.String?> = .unchanged) {
             self.userId = userId
             self.name = name
@@ -482,7 +512,9 @@ public enum JazzApp {
         public var messageId: Jazz.ID
         public var userId: Jazz.ID
         public var emoji: Swift.String
+    }
 
+    extension Reaction {
         public init(id: Jazz.ID, messageId: Jazz.ID, userId: Jazz.ID, emoji: Swift.String) {
             self.id = id
             self.messageId = messageId
@@ -504,7 +536,9 @@ public enum JazzApp {
         public var messageId: Jazz.ID
         public var userId: Jazz.ID
         public var emoji: Swift.String
+    }
 
+    extension NewReaction {
         public init(messageId: Jazz.ID, userId: Jazz.ID, emoji: Swift.String) {
             self.messageId = messageId
             self.userId = userId
@@ -524,7 +558,9 @@ public enum JazzApp {
         public var messageId: Jazz.Change<Jazz.ID>
         public var userId: Jazz.Change<Jazz.ID>
         public var emoji: Jazz.Change<Swift.String>
+    }
 
+    extension ReactionPatch {
         public init(messageId: Jazz.Change<Jazz.ID> = .unchanged, userId: Jazz.Change<Jazz.ID> = .unchanged, emoji: Jazz.Change<Swift.String> = .unchanged) {
             self.messageId = messageId
             self.userId = userId
@@ -569,7 +605,9 @@ public enum JazzApp {
         public var color: Swift.String
         public var width: Swift.Int
         public var pointsJson: Swift.String
+    }
 
+    extension Stroke {
         public init(id: Jazz.ID, canvasId: Jazz.ID, color: Swift.String, width: Swift.Int, pointsJson: Swift.String) {
             self.id = id
             self.canvasId = canvasId
@@ -594,7 +632,9 @@ public enum JazzApp {
         public var color: Swift.String
         public var width: Swift.Int
         public var pointsJson: Swift.String
+    }
 
+    extension NewStroke {
         public init(canvasId: Jazz.ID, color: Swift.String, width: Swift.Int, pointsJson: Swift.String) {
             self.canvasId = canvasId
             self.color = color
@@ -617,7 +657,9 @@ public enum JazzApp {
         public var color: Jazz.Change<Swift.String>
         public var width: Jazz.Change<Swift.Int>
         public var pointsJson: Jazz.Change<Swift.String>
+    }
 
+    extension StrokePatch {
         public init(canvasId: Jazz.Change<Jazz.ID> = .unchanged, color: Jazz.Change<Swift.String> = .unchanged, width: Jazz.Change<Swift.Int> = .unchanged, pointsJson: Jazz.Change<Swift.String> = .unchanged) {
             self.canvasId = canvasId
             self.color = color

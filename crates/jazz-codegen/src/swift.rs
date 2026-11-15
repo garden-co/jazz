@@ -311,7 +311,9 @@ impl<'a> Writer<'a> {
             f.doc(&mut out);
             let _ = writeln!(out, "    public var {}: {}", f.ident, f.ty);
         }
-        out.push('\n');
+        // `init` and the coding keys go in an extension, so the struct
+        // itself reads as its fields.
+        let _ = writeln!(out, "}}\n\nextension {row} {{");
         let _ = writeln!(
             out,
             "    public init(id: {RT}.ID{}) {{",
@@ -337,7 +339,7 @@ impl<'a> Writer<'a> {
             f.doc(&mut out);
             let _ = writeln!(out, "    public var {}: {}", f.ident, f.insert_type());
         }
-        out.push('\n');
+        let _ = writeln!(out, "}}\n\nextension {new} {{");
         let p = params(&fields, true);
         let _ = writeln!(out, "    public init({}) {{", p.trim_start_matches(", "));
         for f in &fields {
@@ -359,7 +361,7 @@ impl<'a> Writer<'a> {
             f.doc(&mut out);
             let _ = writeln!(out, "    public var {}: {RT}.Change<{}>", f.ident, f.ty);
         }
-        out.push('\n');
+        let _ = writeln!(out, "}}\n\nextension {patch} {{");
         let p = fields
             .iter()
             .map(|f| format!("{}: {RT}.Change<{}> = .unchanged", f.ident, f.ty))
