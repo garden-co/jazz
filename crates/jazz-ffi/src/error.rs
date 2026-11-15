@@ -87,7 +87,13 @@ pub(crate) fn refused(message: impl Into<String>) -> JazzErrorKind {
 
 /// `Refused` for what jazz-app (or this layer) cannot do yet.
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> JazzErrorKind {
-    JazzErrorKind::NotSupported(format!("not supported yet: {what}"))
+    let what = what.to_string();
+    // jazz-app's own messages may already say it.
+    if what.starts_with("not supported yet") {
+        JazzErrorKind::NotSupported(what)
+    } else {
+        JazzErrorKind::NotSupported(format!("not supported yet: {what}"))
+    }
 }
 
 /// Whether a rejection's reason is a permission denial, or a serializable
