@@ -271,6 +271,13 @@ pub unsafe extern "C" fn jazz_call(
                 )?
             }
             "uploadBegin" => {
+                // jazz-app streams outside transactions only: an upload
+                // that named one would escape it.
+                if args.get("tx").is_some_and(|tx| !tx.is_null()) {
+                    return Err(crate::error::unsupported(
+                        "streaming uploads inside a transaction",
+                    ));
+                }
                 let row = args
                     .get("row")
                     .filter(|r| !r.is_null())
@@ -293,7 +300,14 @@ pub unsafe extern "C" fn jazz_call(
                 core.upload_push(parse_tx(&string("upload")?)?, bytes)?;
                 "null".into()
             }
-            "uploadFinish" => core.upload_finish(parse_tx(&string("upload")?)?, &opts(false)?)?,
+            "uploadFinish" => {
+                if args.get("tx").is_some_and(|tx| !tx.is_null()) {
+                    return Err(crate::error::unsupported(
+                        "streaming uploads inside a transaction",
+                    ));
+                }
+                core.upload_finish(parse_tx(&string("upload")?)?, &opts(false)?)?
+            }
             "uploadAbort" => {
                 core.upload_abort(parse_tx(&string("upload")?)?)?;
                 "null".into()

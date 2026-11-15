@@ -714,7 +714,15 @@ impl Core {
             ));
         }
         let cells = match row_json {
-            Some(row) => convert::cells(&table, table_name, row, "the row")?.1,
+            Some(row) => {
+                let (named, cells) = convert::cells(&table, table_name, row, "the row")?;
+                if named.is_some() {
+                    return Err(refused(
+                        "an upload's row takes no \"id\": give it as the upload's id (update/upsert)",
+                    ));
+                }
+                cells
+            }
             None => Vec::new(),
         };
         let upload_id = self.next_tx.fetch_add(1, Ordering::Relaxed);
