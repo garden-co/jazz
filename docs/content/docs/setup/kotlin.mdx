@@ -9,36 +9,51 @@ it publishes the app's permissions bundle, as `createJazz` does. Then it acts as
 app, in a session pinned to that bundle.
 
 The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). Its calls are
-`suspend` functions, and subscriptions are `Flow`s. It isn't on Maven Central yet, so build it from
-the Jazz repository. With a checkout next to your project, include it as a composite build:
+`suspend` functions, and subscriptions are `Flow`s. It runs on JDK 17 or later, and on Android
+(minSdk 24).
 
-```kotlin title="settings.gradle.kts"
-includeBuild("../jazz/packages/jazz-kotlin")
-```
+## Install
+
+`jazz-kotlin` isn't on Maven Central yet. Each Jazz release has it as files on its
+[GitHub release](https://github.com/garden-co/jazz/releases), checked by the `SHA256SUMS` beside
+them:
+
+- `jazz-kotlin-<version>.jar`: the JVM library, with `libjazz_ffi` for Linux (x86-64, arm64) and
+  macOS (arm64) inside, which JNA loads from the jar;
+- `jazz-kotlin-android-<version>.aar`: the Android library, with `libjazz_ffi` for arm64-v8a,
+  armeabi-v7a and x86_64.
+
+Download the one you need into your project's `libs/`, and depend on it with the libraries it uses
+from Maven Central:
 
 ```kotlin title="build.gradle.kts"
 plugins {
     kotlin("jvm") version "2.2.21"
-    kotlin("plugin.serialization") version "2.2.21"
+    kotlin("plugin.serialization") version "2.2.21" // for the generated bindings
     application
 }
 
+repositories { mavenCentral() }
+
 dependencies {
-    implementation("tools.jazz:jazz-kotlin")
+    implementation(files("libs/jazz-kotlin-2.0.0-alpha.65.jar"))
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("net.java.dev.jna:jna:5.17.0")
 }
 ```
 
-Building `jazz-kotlin` runs `cargo build -p jazz-ffi`, so it needs a Rust toolchain. It loads
-`libjazz_ffi` through JNA: set `-Djna.library.path` to the directory that holds it
-(`target/debug` in the Jazz checkout). It runs on JDK 17 or later.
+On Android, depend on `files("libs/jazz-kotlin-android-2.0.0-alpha.65.aar")` and
+`net.java.dev.jna:jna:5.17.0@aar` instead of the jar and `jna`. Keep `tools.jazz.**`,
+`uniffi.jazz_ffi.**` and `com.sun.jna.**` if you minify.
 
-On Android, depend on `packages/jazz-kotlin-android` instead: the same API as an AAR, with
-`libjazz_ffi` for arm64-v8a, armeabi-v7a and x86_64 (minSdk 24). Building it needs the Android SDK
-and NDK, and `cargo-ndk`.
+On another platform (Windows, an Intel Mac), or to build from source: in a Jazz checkout,
+`cargo build -p jazz-ffi --release`, then either build the jar with Gradle in `packages/jazz-kotlin`
+(it bundles your platform's library) or set `-Djna.library.path` to `target/release`.
 
 ## Generate the bindings
 
-With a `build.gradle.kts` beside `jazz.app.json`, `jazz-tools generate` writes
+With a `build.gradle.kts` that depends on `jazz-kotlin` beside `jazz.app.json`, `jazz-tools generate` writes
 `src/main/kotlin/JazzApp.kt`, in the package `jazzapp`:
 
 ```bash
@@ -46,8 +61,8 @@ jazz-tools generate            # checks the files, writes src/main/kotlin/JazzAp
 jazz-tools generate --check    # in CI: fails if JazzApp.kt is stale
 ```
 
-This is the `jazz-tools` binary built from the Jazz repository (`cargo build -p jazz-cli --bin
-jazz-tools`); the npm `jazz-tools` CLI doesn't generate Kotlin yet.
+(`npx jazz-tools generate` works the same; a `build.gradle.kts` naming the jar file counts if it
+mentions `jazz-kotlin`, as `files("libs/jazz-kotlin-….jar")` does.)
 
 Commit `JazzApp.kt`. Per table it gives you:
 
@@ -182,11 +197,10 @@ In Kotlin, Jazz doesn't support these yet:
 - reading part of a large value inside an include (root queries only);
 - subscribing to history queries;
 - guest (anonymous) users;
-- writing enums with payloads (reading them works: a sealed interface per enum); nested rows and
-  catalogue enums in bindings;
+- nested rows and catalogue enums in bindings;
 - Kotlin Multiplatform targets other than the JVM and Android;
-- publishing `jazz-kotlin` and `jazz-kotlin-android` to Maven Central: build them from the
-  repository;
+- Maven Central: install the jar or AAR from the GitHub release;
+- prebuilt libraries for Windows and Intel Macs: build `jazz-ffi` there yourself;
 - non-finite doubles (`NaN`, infinities): writing or comparing one throws, as JSON has none;
 - `limit` and `offset` with `watch`: they apply to the server's result before `watch` re-sorts it
   locally, so a page can be off after changes. Use them with `all`.
