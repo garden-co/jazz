@@ -469,24 +469,18 @@ unsafe extern "C" {
     fn free(pointer: *mut c_void);
 }
 
-struct TokenContext(*mut c_void);
-
-thread_local! {
-    /// Set while this thread runs a host's token callback.
-    static IN_TOKEN_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// A C host's token callback and its `ctx`, while its handle is open.
-type TokenGate = std::sync::RwLock<
-    Option<(
-        unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32,
-        TokenContext,
-    )>,
->;
-// SAFETY: the caller of `jazz_open_user` promises `ctx` may be used from
-// any thread (the header says so).
-unsafe impl Send for TokenContext {}
-unsafe impl Sync for TokenContext {}
+type TokenGate = crate::gate::Gate<(
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32,
+    TokenRef,
+)>;
+
+/// A host's `ctx`, shared by the gated calls.
+#[derive(Clone, Copy)]
+struct TokenRef(*mut c_void);
+// SAFETY: the host promises `ctx` may be used from any thread (header).
+unsafe impl Send for TokenRef {}
+unsafe impl Sync for TokenRef {}
 
 /// Opens an app as an end user who signs in with the app's bearer
 /// (`"auth": {"bearer": true}`): `token_cb` gives it.
@@ -516,55 +510,38 @@ pub unsafe extern "C" fn jazz_open_user(
         // the host after close returns (a late one fails, without signing
         // anyone out).
         let gate: std::sync::Arc<TokenGate> =
-            std::sync::Arc::new(std::sync::RwLock::new(Some((cb, TokenContext(ctx)))));
+            std::sync::Arc::new(crate::gate::Gate::new((cb, TokenRef(ctx))));
         let calling = gate.clone();
         let host = crate::core::HostTokens(std::sync::Arc::new(move |reason: &str| {
-            let gate = calling.read().unwrap_or_else(|e| e.into_inner());
-            let Some((cb, ctx)) = gate.as_ref() else {
-                return Err("the app is closed".into());
-            };
-            // `jazz_close` from inside this callback must not wait for the
-            // read lock this thread holds.
-            IN_TOKEN_CALLBACK.with(|flag| flag.set(true));
-            struct Leave;
-            impl Drop for Leave {
-                fn drop(&mut self) {
-                    IN_TOKEN_CALLBACK.with(|flag| flag.set(false));
-                }
-            }
-            let _leave = Leave;
-            let reason = CString::new(reason).unwrap_or_default();
-            let mut token: *mut c_char = ptr::null_mut();
-            // SAFETY: per `jazz_open_user`'s contract, while the handle (this
-            // gate) is open.
-            let failed = unsafe { cb(ctx.0, reason.as_ptr(), &mut token) };
-            let text = if token.is_null() {
-                None
-            } else {
-                // SAFETY: the callback sets a NUL-terminated `malloc`ed string.
-                let text = unsafe { CStr::from_ptr(token) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { free(token.cast()) };
-                Some(text)
-            };
-            if failed != 0 {
-                return Err(text.unwrap_or_else(|| "the token callback failed".into()));
-            }
-            Ok(text)
+            calling
+                .call(|&(cb, ctx)| {
+                    let reason = CString::new(reason).unwrap_or_default();
+                    let mut token: *mut c_char = ptr::null_mut();
+                    // SAFETY: per `jazz_open_user`'s contract, while the
+                    // handle (this gate) is open.
+                    let failed = unsafe { cb(ctx.0, reason.as_ptr(), &mut token) };
+                    let text = if token.is_null() {
+                        None
+                    } else {
+                        // SAFETY: the callback sets a NUL-terminated
+                        // `malloc`ed string.
+                        let text = unsafe { CStr::from_ptr(token) }
+                            .to_string_lossy()
+                            .into_owned();
+                        unsafe { free(token.cast()) };
+                        Some(text)
+                    };
+                    if failed != 0 {
+                        return Err(text.unwrap_or_else(|| "the token callback failed".into()));
+                    }
+                    Ok(text)
+                })
+                .unwrap_or_else(|| Err("the app is closed".into()))
         }));
         let core = Core::open_with_tokens(config, Some(std::sync::Arc::new(host)))?;
-        core.on_close(Box::new(move || {
-            if IN_TOKEN_CALLBACK.with(std::cell::Cell::get) {
-                // Closed from the callback itself: the gate closes once that
-                // call returns.
-                std::thread::spawn(move || {
-                    gate.write().unwrap_or_else(|e| e.into_inner()).take();
-                });
-            } else {
-                gate.write().unwrap_or_else(|e| e.into_inner()).take();
-            }
-        }));
+        // Closing waits for fetches in progress (but its own, when closed
+        // from inside the callback); no fetch calls the host after.
+        core.on_close(Box::new(move || gate.close()));
         Ok(Box::into_raw(Box::new(JazzHandle(core))))
     })
 }
