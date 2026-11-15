@@ -197,7 +197,7 @@ func (peopleTable) Restore(ctx context.Context, db jazz.Querier, id string) (Per
 }
 
 // History starts a query of `people`'s history: every accepted version of its rows.
-func (peopleTable) History() *jazz.Query[jazz.Version[Person]] {
+func (peopleTable) History() *jazz.Query[jazz.HistoryRow[Person]] {
 	return jazz.History(jazz.NewQuery[Person]("people"))
 }
 
@@ -362,7 +362,7 @@ func (tasksTable) Restore(ctx context.Context, db jazz.Querier, id string) (Task
 }
 
 // History starts a query of `tasks`'s history: every accepted version of its rows.
-func (tasksTable) History() *jazz.Query[jazz.Version[Task]] {
+func (tasksTable) History() *jazz.Query[jazz.HistoryRow[Task]] {
 	return jazz.History(jazz.NewQuery[Task]("tasks"))
 }
 

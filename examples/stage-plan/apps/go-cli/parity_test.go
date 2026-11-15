@@ -361,7 +361,7 @@ func TestHopUnionAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	versions, err := jazzapp.Tasks.History().
-		Where(jazz.NewColumn[jazz.Version[jazzapp.Task], string]("id").Eq(first.ID)).
+		Where(jazz.NewColumn[jazz.HistoryRow[jazzapp.Task], string]("id").Eq(first.ID)).
 		OrderBy(jazz.AcceptedAt[jazzapp.Task]().Asc()).
 		Tier(jazz.ReadRemote).
 		All(ctx, db)

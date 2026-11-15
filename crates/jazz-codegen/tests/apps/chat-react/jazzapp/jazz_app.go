@@ -134,7 +134,7 @@ func (canvasesTable) Restore(ctx context.Context, db jazz.Querier, id string) (C
 }
 
 // History starts a query of `canvases`'s history: every accepted version of its rows.
-func (canvasesTable) History() *jazz.Query[jazz.Version[Canvas]] {
+func (canvasesTable) History() *jazz.Query[jazz.HistoryRow[Canvas]] {
 	return jazz.History(jazz.NewQuery[Canvas]("canvases"))
 }
 
@@ -239,7 +239,7 @@ func (chatMembersTable) Restore(ctx context.Context, db jazz.Querier, id string)
 }
 
 // History starts a query of `chatMembers`'s history: every accepted version of its rows.
-func (chatMembersTable) History() *jazz.Query[jazz.Version[ChatMember]] {
+func (chatMembersTable) History() *jazz.Query[jazz.HistoryRow[ChatMember]] {
 	return jazz.History(jazz.NewQuery[ChatMember]("chatMembers"))
 }
 
@@ -350,7 +350,7 @@ func (chatsTable) Restore(ctx context.Context, db jazz.Querier, id string) (Chat
 }
 
 // History starts a query of `chats`'s history: every accepted version of its rows.
-func (chatsTable) History() *jazz.Query[jazz.Version[Chat]] {
+func (chatsTable) History() *jazz.Query[jazz.HistoryRow[Chat]] {
 	return jazz.History(jazz.NewQuery[Chat]("chats"))
 }
 
@@ -461,7 +461,7 @@ func (messagesTable) Restore(ctx context.Context, db jazz.Querier, id string) (M
 }
 
 // History starts a query of `messages`'s history: every accepted version of its rows.
-func (messagesTable) History() *jazz.Query[jazz.Version[Message]] {
+func (messagesTable) History() *jazz.Query[jazz.HistoryRow[Message]] {
 	return jazz.History(jazz.NewQuery[Message]("messages"))
 }
 
@@ -566,7 +566,7 @@ func (profilesTable) Restore(ctx context.Context, db jazz.Querier, id string) (P
 }
 
 // History starts a query of `profiles`'s history: every accepted version of its rows.
-func (profilesTable) History() *jazz.Query[jazz.Version[Profile]] {
+func (profilesTable) History() *jazz.Query[jazz.HistoryRow[Profile]] {
 	return jazz.History(jazz.NewQuery[Profile]("profiles"))
 }
 
@@ -671,7 +671,7 @@ func (reactionsTable) Restore(ctx context.Context, db jazz.Querier, id string) (
 }
 
 // History starts a query of `reactions`'s history: every accepted version of its rows.
-func (reactionsTable) History() *jazz.Query[jazz.Version[Reaction]] {
+func (reactionsTable) History() *jazz.Query[jazz.HistoryRow[Reaction]] {
 	return jazz.History(jazz.NewQuery[Reaction]("reactions"))
 }
 
@@ -782,7 +782,7 @@ func (strokesTable) Restore(ctx context.Context, db jazz.Querier, id string) (St
 }
 
 // History starts a query of `strokes`'s history: every accepted version of its rows.
-func (strokesTable) History() *jazz.Query[jazz.Version[Stroke]] {
+func (strokesTable) History() *jazz.Query[jazz.HistoryRow[Stroke]] {
 	return jazz.History(jazz.NewQuery[Stroke]("strokes"))
 }
 

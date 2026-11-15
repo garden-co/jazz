@@ -47,8 +47,8 @@ func Union[R any](qs ...*Query[R]) *Query[R] {
 	return u
 }
 
-// Version is a version of a row of R, from its table's history.
-type Version[R any] struct {
+// HistoryRow is a version of a row of R, from its table's history.
+type HistoryRow[R any] struct {
 	Row R
 	// TransactionID is the transaction that wrote the version: with the
 	// row's id, it tells versions apart.
@@ -58,7 +58,7 @@ type Version[R any] struct {
 }
 
 // UnmarshalJSON reads the row and its $history metadata.
-func (v *Version[R]) UnmarshalJSON(data []byte) error {
+func (v *HistoryRow[R]) UnmarshalJSON(data []byte) error {
 	var meta struct {
 		History struct {
 			TransactionID string    `json:"transactionId"`
@@ -79,8 +79,8 @@ func (v *Version[R]) UnmarshalJSON(data []byte) error {
 // row q keeps (each keeps its row's id; id and TransactionID tell
 // versions apart). Order by AcceptedAt to list them as the server
 // applied them.
-func History[R any](q *Query[R]) *Query[Version[R]] {
-	h := &Query[Version[R]]{table: q.table, raw: q.toJSON().cloneParts()}
+func History[R any](q *Query[R]) *Query[HistoryRow[R]] {
+	h := &Query[HistoryRow[R]]{table: q.table, raw: q.toJSON().cloneParts()}
 	h.raw.History = true
 	return h
 }
@@ -146,8 +146,8 @@ func CanDelete(ctx context.Context, q Querier, table, id string) (Advice, error)
 }
 
 // AcceptedAt is a history version's $acceptedAt, to order versions by.
-func AcceptedAt[R any]() Column[Version[R], Timestamp] {
-	return Column[Version[R], Timestamp]{name: "$acceptedAt"}
+func AcceptedAt[R any]() Column[HistoryRow[R], Timestamp] {
+	return Column[HistoryRow[R], Timestamp]{name: "$acceptedAt"}
 }
 
 // IncludeDeleted is q reading deleted rows too (to show or Restore them).
