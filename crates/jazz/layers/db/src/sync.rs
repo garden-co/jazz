@@ -297,6 +297,13 @@ pub trait Transport {
     fn flush(&mut self) -> Result<(), TransportError> {
         Ok(())
     }
+    /// Whether the peer negotiated optional wire `feature` (one bit of
+    /// [`jazz_protocol::wire::WireFeatures`]). An in-process transport
+    /// links two stores of this build: every feature.
+    fn supports(&self, feature: jazz_protocol::wire::WireFeatures) -> bool {
+        let _ = feature;
+        true
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -549,6 +556,14 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
 
     fn take_failure(&mut self) -> Option<TransportError> {
         self.failed.as_mut().and_then(Option::take)
+    }
+
+    /// What the binding's wire negotiated; a wire that does not say
+    /// supports no optional feature.
+    fn supports(&self, feature: jazz_protocol::wire::WireFeatures) -> bool {
+        self.wire
+            .negotiated_features()
+            .is_some_and(|features| features & feature != 0)
     }
 }
 
@@ -5764,6 +5779,7 @@ impl Inner {
                 crate::large::install_fetched(&self.conn, &self.chunks, &request, node.bytes)?;
             }
         }
+        crate::ix::chunks_arrived(&self.conn)?;
         let parked = self
             .sessions
             .iter()
@@ -8408,6 +8424,17 @@ impl Db {
             .release_remote(query, binding, include_deleted, view, reach);
     }
 
+    /// Whether this replica's current upstream link offered optional
+    /// wire `feature`; `None` without a link.
+    pub(crate) fn upstream_supports(
+        &self,
+        feature: jazz_protocol::wire::WireFeatures,
+    ) -> Option<bool> {
+        let inner = self.inner.borrow();
+        let transport = inner.client.as_ref()?.transport.as_ref()?;
+        Some(transport.supports(feature))
+    }
+
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
         self.inner.borrow().client.as_ref().map(|c| c.hint.clone())
     }
@@ -9773,7 +9800,29 @@ impl Db {
             .iter()
             .position(|m| matches!(m, SyncMessage::Read { .. }))
             .unwrap_or(out.len());
-        let reads = out.split_off(first_read);
+        let mut reads = out.split_off(first_read);
+        // An upstream that did not offer index search cannot decode a
+        // query using it (SPEC 20.4): such a read stays local.
+        let searchable = client
+            .transport
+            .as_ref()
+            .is_some_and(|t| t.supports(jazz_protocol::wire::FEATURE_INDEX_SEARCH));
+        if !searchable {
+            reads.retain(|message| {
+                let SyncMessage::Read { id, query, .. } = message else {
+                    return true;
+                };
+                if crate::ix::search_of(query).is_none() {
+                    return true;
+                }
+                // Answered by this replica alone (a `Remote` subscription
+                // over such a link is refused where it opens).
+                if let Some(live) = client.reads.get_mut(id).and_then(ActiveRead::live_mut) {
+                    live.answered.set(true);
+                }
+                false
+            });
+        }
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))

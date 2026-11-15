@@ -577,3 +577,110 @@ fn a_live_search_follows_its_rows() {
     assert_eq!(seen(&mut stream), (vec![], vec![1]));
     assert_eq!(ids(&db, &search("garden")), [2, 3]);
 }
+
+/// A transport that says whether its upstream offered index search.
+struct Gated {
+    inner: Box<dyn Transport>,
+    search: bool,
+}
+
+impl Transport for Gated {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn supports(&self, feature: jazz::wire::WireFeatures) -> bool {
+        feature != jazz::wire::FEATURE_INDEX_SEARCH || self.search
+    }
+}
+
+/// A query with a search goes upstream only to an upstream that offered
+/// `FEATURE_INDEX_SEARCH` (an older server could not decode it): at
+/// `Remote` tier it is refused, typed; otherwise the replica answers it
+/// alone. Queries without a search sync as before.
+///
+/// ```
+/// bob ──Read(search)──✗ (no FEATURE_INDEX_SEARCH) server
+///  └── Remote: index_search_unsupported_upstream; LocalFirst: local rows
+/// ```
+#[test]
+fn a_search_goes_upstream_only_to_an_upstream_that_offered_it() {
+    let server = authority(schema());
+    insert(&server, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let bob = client(1, schema());
+    let (up, down) = jazz::db::duplex();
+    let _link = block_on(bob.connect_upstream(Box::new(Gated {
+        inner: up,
+        search: false,
+    })));
+    server.accept_subscriber(down, alice()).unwrap();
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _all = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(
+        ids(&bob, &search("garden")),
+        [1],
+        "the plain query synced the row"
+    );
+
+    let remote = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let prepared = bob.prepare_query(&search("garden")).unwrap();
+    let Err(error) = block_on(bob.subscribe(&prepared, remote)) else {
+        panic!("a Remote search over this link is refused");
+    };
+    assert_eq!(error.reason, Some(Reason::IndexSearchUnsupportedUpstream));
+    assert!(
+        error
+            .message
+            .contains("the server does not support index search"),
+        "{error}"
+    );
+
+    let mut local = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    let mut rows = Vec::new();
+    while let Some(event) = local.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { added, .. } => {
+                rows.extend(added.iter().map(|row| row.row_uuid().0.as_bytes()[0]))
+            }
+            SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
+            SubscriptionEvent::Closed => {}
+        }
+    }
+    assert_eq!(rows, [1], "answered by the replica");
+}
+
+/// A row whose large value reaches a replica before its chunks is indexed
+/// without that value at first and again once the chunks arrive, so the
+/// replica's search ends up equal to the authority's (`INV-IX-1`).
+///
+/// ```
+/// server ──row 1 (body chunked)──► bob   search "zebra": not yet
+/// server ──chunks──► bob                 search "zebra": [1], as server
+/// ```
+#[test]
+fn a_replica_indexes_a_large_value_once_its_chunks_arrive() {
+    let server = authority(schema());
+    let mut body = String::from("zebra crossing ");
+    while body.len() <= jazz::large_values::INLINE_VALUE_MAX_BYTES * 4 {
+        body.push_str("lorem ipsum dolor sit amet ");
+    }
+    insert(&server, 1, note("Plans", Some(&body), "home", &[0.0, 0.0]));
+    assert_eq!(ids(&server, &search("zebra")), [1]);
+    let bob = client(1, schema());
+    let _link = link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("zebra")), ids(&server, &search("zebra")));
+    assert_eq!(ids(&bob, &search("plans")), [1]);
+}

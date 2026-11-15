@@ -2076,6 +2076,64 @@ mod tests {
             );
         }
 
+        /// `Predicate::Search` (SPEC 20.4) is appended last: every other
+        /// predicate keeps its tag, and each op's JSON and postcard bytes
+        /// are pinned here.
+        #[test]
+        fn search_predicate_encodings_are_pinned() {
+            for (op, json, bytes) in [
+                (
+                    IndexOp::Match {
+                        text: "garden".into(),
+                    },
+                    r#"{"Search":{"index":"s","op":{"Match":{"text":"garden"}}}}"#,
+                    "0d0173000667617264656e",
+                ),
+                (
+                    IndexOp::Nearest {
+                        vector: vec![1.0, -0.5],
+                        k: 3,
+                    },
+                    r#"{"Search":{"index":"s","op":{"Nearest":{"vector":[1.0,-0.5],"k":3}}}}"#,
+                    "0d017301020000803f000000bf03",
+                ),
+                (
+                    IndexOp::WithinRadius {
+                        lat: 52.5,
+                        lng: 13.4,
+                        meters: 500.0,
+                    },
+                    r#"{"Search":{"index":"s","op":{"WithinRadius":{"lat":52.5,"lng":13.4,"meters":500.0}}}}"#,
+                    "0d0173020000000000404a40cdcccccccccc2a400000000000407f40",
+                ),
+                (
+                    IndexOp::WithinBox {
+                        south: -20.0,
+                        west: 170.0,
+                        north: -10.0,
+                        east: -170.0,
+                    },
+                    r#"{"Search":{"index":"s","op":{"WithinBox":{"south":-20.0,"west":170.0,"north":-10.0,"east":-170.0}}}}"#,
+                    "0d01730300000000000034c0000000000040654000000000000024c000000000004065c0",
+                ),
+            ] {
+                let predicate = Predicate::Search(IndexSearch {
+                    index: "s".into(),
+                    op,
+                });
+                assert_eq!(serde_json::to_string(&predicate).unwrap(), json);
+                assert_eq!(
+                    hex::encode(postcard::to_allocvec(&predicate).unwrap()),
+                    bytes
+                );
+                assert_eq!(serde_json::from_str::<Predicate>(json).unwrap(), predicate);
+                assert_eq!(
+                    postcard::from_bytes::<Predicate>(&hex::decode(bytes).unwrap()).unwrap(),
+                    predicate
+                );
+            }
+        }
+
         #[test]
         fn predicate_decode_errors_are_pinned() {
             for (json, error) in [

@@ -298,3 +298,48 @@ fn indexes_persist_across_reopens_and_rebuild_when_declared_anew() {
         .unwrap();
     assert_eq!(rows, 3, "every index is built");
 }
+
+/// Index maintenance is total (`INV-IX-7`): a value a kind cannot index
+/// (a zero vector under `cosine`) leaves its row unindexed, never fails
+/// the write that carries it, here a version synced from the authority.
+#[test]
+fn a_synced_value_the_index_cannot_take_applies_and_does_not_match() {
+    let server = block_on(Db::open(config(schema_with(4)))).unwrap();
+    server.set_authority();
+    seed(&server);
+    place(&server, 6, "Nowhere", None, 0.0, 0.0, [0.0, 0.0, 0.0]);
+    let bob = block_on(Db::open(DbConfig::new(
+        schema_with(4),
+        DbIdentity {
+            node: NodeUuid::from_bytes([2; 16]),
+            author: AuthorSubject::for_test_bytes([0xb0; 16]),
+        },
+    )))
+    .unwrap();
+    let (up, down) = jazz::db::duplex();
+    let _link = block_on(bob.connect_upstream(up));
+    server
+        .accept_subscriber(down, AuthorSubject::for_test_bytes([0xb0; 16]))
+        .unwrap();
+    let all = bob.prepare_query(&Query::from("places")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    for _ in 0..8 {
+        block_on(bob.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(ids(&bob, &Query::from("places")), [1, 2, 3, 4, 5, 6]);
+    let nearest = Query::from("places").search(
+        "similar",
+        IndexOp::Nearest {
+            vector: vec![0.0, 0.0, 1.0],
+            k: 10,
+        },
+    );
+    // Rows 1-3 are orthogonal to the query: equal scores, ordered by id.
+    assert_eq!(ids(&bob, &nearest), [4, 5, 1, 2, 3], "row 6 is not indexed");
+    assert_eq!(
+        ids(&bob, &text("nowhere")),
+        [6],
+        "its other indexes take it"
+    );
+}

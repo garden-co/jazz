@@ -2637,7 +2637,11 @@ impl Db {
             }
         }
         chunks.landed(wanted);
-        self.inner().retry_awaiting();
+        let inner = self.inner();
+        if let Err(error) = crate::ix::chunks_arrived(&inner.conn) {
+            first.get_or_insert(error);
+        }
+        inner.retry_awaiting();
     }
 
     /// Fetch `wanted` from the chunk store and install it.
@@ -3218,6 +3222,17 @@ impl Db {
             .flatten();
         if reach.is_some() {
             self.remote_shape(&prepared.query)?;
+        }
+        // A `Remote` search needs an upstream that offered index search
+        // (SPEC 20.4, 20.11).
+        if let Some(search) = crate::ix::search_of(&prepared.query)
+            && opts.tier == ReadTier::Remote
+            && self.upstream_supports(jazz_protocol::wire::FEATURE_INDEX_SEARCH) == Some(false)
+        {
+            return Err(crate::ix::unsupported_upstream(
+                &prepared.query.table,
+                &search.index,
+            ));
         }
         let view = opts.read_view.source.clone();
         let attached = reach

@@ -55,6 +55,12 @@ pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
 /// browser) can tell a link that went silently dead from a quiet one.
 pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
 
+/// The peer decodes and answers queries with an index search
+/// (`Predicate::Search`, SPEC 20.4). A node sends such a query upstream
+/// only to an upstream that offered this; queries without a search are
+/// byte-identical either way.
+pub const FEATURE_INDEX_SEARCH: WireFeatures = 1 << 12;
+
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
 
@@ -827,6 +833,7 @@ fn default_transport_compression_features() -> WireFeatures {
 pub fn current_wire_features() -> WireFeatures {
     FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+        | FEATURE_INDEX_SEARCH
         | runtime_transport_compression_features()
 }
 
@@ -862,6 +869,12 @@ pub trait WireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError>;
     /// Pull the next encoded [`WireFrame`] staged by the binding, if any.
     fn try_recv_frame(&mut self) -> Option<Vec<u8>>;
+    /// The features this link's `Hello` exchange negotiated, once known:
+    /// what the database may send over it (see [`FEATURE_INDEX_SEARCH`]).
+    /// `None` (unknown) offers none.
+    fn negotiated_features(&self) -> Option<WireFeatures> {
+        None
+    }
 }
 
 impl WireTransport for Box<dyn WireTransport + Send> {
@@ -871,6 +884,10 @@ impl WireTransport for Box<dyn WireTransport + Send> {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         (**self).try_recv_frame()
+    }
+
+    fn negotiated_features(&self) -> Option<WireFeatures> {
+        (**self).negotiated_features()
     }
 }
 

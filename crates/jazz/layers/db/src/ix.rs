@@ -44,7 +44,8 @@ pub(crate) const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS _jazz_ix (tbl TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, \
  encoding TEXT NOT NULL, decl BLOB NOT NULL, state INTEGER NOT NULL, built INTEGER NOT NULL DEFAULT 0, \
  PRIMARY KEY (tbl, name));
-CREATE TABLE IF NOT EXISTS _jazz_ix_dirty (tbl TEXT NOT NULL, rid INTEGER NOT NULL, PRIMARY KEY (tbl, rid));";
+CREATE TABLE IF NOT EXISTS _jazz_ix_dirty (tbl TEXT NOT NULL, rid INTEGER NOT NULL, PRIMARY KEY (tbl, rid));
+CREATE TABLE IF NOT EXISTS _jazz_ix_incomplete (tbl TEXT NOT NULL, rid INTEGER NOT NULL, PRIMARY KEY (tbl, rid));";
 
 /// `_jazz_ix.state` of an index still being built.
 pub(crate) const STATE_BUILDING: i64 = 0;
@@ -446,6 +447,10 @@ pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Re
     for ((tbl, _), index) in desired {
         by_table.entry(tbl).or_default().push(index);
     }
+    conn.execute_batch(
+        "DELETE FROM _jazz_ix_incomplete WHERE tbl NOT IN (SELECT tbl FROM _jazz_ix)",
+    )
+    .map_err(storage)?;
     // Triggers: every table that has (or had) an index gets the set its
     // indexes need now, or none.
     let existing: Vec<String> = conn
@@ -592,6 +597,7 @@ fn write_row(conn: &Connection, registry: &Indexes, index: &Index, rid: i64) -> 
     );
     let mut statement = conn.prepare_cached(&sql).map_err(storage)?;
     let mut rows = statement.query([rid]).map_err(storage)?;
+    let mut incomplete = false;
     let cells = match rows.next().map_err(storage)? {
         None => None,
         Some(row) => {
@@ -602,27 +608,72 @@ fn write_row(conn: &Connection, registry: &Indexes, index: &Index, rid: i64) -> 
                 let mut cells = Vec::with_capacity(index.columns.len());
                 for (i, column) in index.columns.iter().enumerate() {
                     let cell = row.get_ref(i + 1).map_err(storage)?;
-                    cells.push(read_cell(registry, column, cell)?);
+                    match read_cell(registry, column, cell)? {
+                        Some(cell) => cells.push(cell),
+                        None => {
+                            incomplete = true;
+                            cells.push(Cell::Null);
+                        }
+                    }
                 }
                 Some(cells)
             }
         }
     };
     drop(rows);
+    if incomplete {
+        conn.prepare_cached("INSERT OR IGNORE INTO _jazz_ix_incomplete (tbl, rid) VALUES (?1, ?2)")
+            .and_then(|mut s| s.execute(rusqlite::params![index.stored, rid]))
+            .map_err(storage)?;
+    }
     index.kind.write(conn, &index.prefix, rid, cells.as_deref())
 }
 
+/// Chunks arrived on this replica: every row indexed while one of its
+/// values was missing them is queued again, so it is indexed by its whole
+/// value (`INV-IX-1`). One still missing some is recorded again.
+pub(crate) fn chunks_arrived(conn: &Connection) -> Result<(), Error> {
+    if registered(conn).is_none_or(|r| r.borrow().by_table.is_empty()) {
+        return Ok(());
+    }
+    let any: bool = conn
+        .prepare_cached("SELECT EXISTS (SELECT 1 FROM _jazz_ix_incomplete)")
+        .and_then(|mut s| s.query_row([], |r| r.get(0)))
+        .map_err(storage)?;
+    if !any {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO _jazz_ix_dirty (tbl, rid) SELECT tbl, rid FROM _jazz_ix_incomplete; \
+         DELETE FROM _jazz_ix_incomplete;",
+    )
+    .map_err(storage)
+}
+
 /// A stored cell as its kind reads it: the logical value, a large value
-/// read whole (SPEC 19). A large value whose chunks this replica has not
-/// received yet reads as null, so the row is searchable by its other
-/// fields until the chunks arrive and the row is written again.
-fn read_cell(registry: &Indexes, column: &Column, cell: ValueRef<'_>) -> Result<Cell, Error> {
-    let value = match &registry.chunks {
-        Some(chunks) => match crate::values::column_from_sql(column, cell, chunks) {
-            Ok(value) => value,
-            Err(error) if crate::large::is_missing(&error) => return Ok(Cell::Null),
-            Err(error) => return Err(error),
+/// read whole (SPEC 19). `None` is a large value whose chunks this replica
+/// has not received yet: the row is indexed without it for now and again
+/// when they arrive ([`chunks_arrived`]).
+fn read_cell(
+    registry: &Indexes,
+    column: &Column,
+    cell: ValueRef<'_>,
+) -> Result<Option<Cell>, Error> {
+    read_whole(registry, column, cell).map_or_else(
+        |error| {
+            if crate::large::is_missing(&error) {
+                Ok(None)
+            } else {
+                Err(error)
+            }
         },
+        |cell| Ok(Some(cell)),
+    )
+}
+
+fn read_whole(registry: &Indexes, column: &Column, cell: ValueRef<'_>) -> Result<Cell, Error> {
+    let value = match &registry.chunks {
+        Some(chunks) => crate::values::column_from_sql(column, cell, chunks)?,
         None => None,
     };
     let mut value = match value {
