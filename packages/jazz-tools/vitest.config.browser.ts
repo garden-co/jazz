@@ -40,6 +40,7 @@ import {
   runInSessionTab,
   crashSessionTab,
 } from "./tests/browser/session-tab-node.js";
+import { sharedWorkerTimerCounts } from "./tests/browser/shared-worker-timer-probe-node.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
@@ -211,6 +212,9 @@ export default defineConfig({
         // `origin` through CDP, so a test can run IndexedDB out of space.
         overrideStorageQuota: async ({ page }, origin: string, quotaSize: number | null) =>
           overrideStorageQuota(page, origin, quotaSize),
+        // Chromium only: timers armed by the SharedWorker named for `key`.
+        sharedWorkerTimerCounts: async ({ page }, key: string) =>
+          sharedWorkerTimerCounts(page, key),
         recoverPendingIndexedDbWrites: async ({ context, page }, config) =>
           recoverPendingIndexedDbWrites(context, page, config),
         writeBrowserStorageCorpus: async (_context, records: Record<string, string>) => {

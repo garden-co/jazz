@@ -642,6 +642,18 @@ type MutationErrorCallback =
     ThreadsafeFunction<serde_json::Value, (), serde_json::Value, napi::Status, false, true>;
 
 impl Host {
+    /// A core deadline: tick after `ms`. Not coalesced with an immediate
+    /// request, which may already have run; the adapter keeps the earliest.
+    fn request_tick_after(&self, ms: u64) {
+        let scheduler = self.tick_scheduler.borrow();
+        if let Some(scheduler) = scheduler.as_ref() {
+            scheduler.call(
+                Ok(format!("after:{ms}")),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        }
+    }
+
     fn request_tick(&self) {
         let scheduler = self.tick_scheduler.borrow();
         let Some(scheduler) = scheduler.as_ref() else {
@@ -673,6 +685,9 @@ impl Inner {
         let scheduler = Rc::clone(&host);
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
+        let timer = Rc::clone(&host);
+        *binding.hooks.schedule_tick_after.borrow_mut() =
+            Some(Box::new(move |ms| timer.request_tick_after(ms)));
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, _| {

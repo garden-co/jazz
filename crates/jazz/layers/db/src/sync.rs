@@ -2461,6 +2461,9 @@ pub(crate) struct Gate {
     /// for its upstream it serves from its store once that upstream
     /// cannot answer (see [`Db::serve_due_first_loads`]).
     pub(crate) relay_view: bool,
+    /// Told when this opening is released by time alone, so the host
+    /// ticks then.
+    pub(crate) wakes: Rc<Wakes>,
 }
 
 impl Gate {
@@ -2486,11 +2489,71 @@ impl Gate {
         match self.deadline {
             None => false,
             Some(deadline) => {
-                Instant::now() >= deadline
+                let open = Instant::now() >= deadline
                     || !may_wait(link)
-                    || (self.live && link.hint != RemoteLinkHint::Live)
+                    || (self.live && link.hint != RemoteLinkHint::Live);
+                if !open {
+                    self.wakes.wake_at(deadline);
+                    self.wakes.note_link(link);
+                }
+                open
             }
         }
+    }
+}
+
+/// When the database next needs a tick for time alone to change an
+/// outcome: a read's first-load wait or deadline running out, a link
+/// attempt's window closing, an ingress window reopening. A check that
+/// compares such a deadline with the clock and keeps waiting reports it
+/// here, and the host is asked to tick at the earliest one, so no deadline
+/// depends on unrelated traffic happening to drive a tick.
+///
+/// Only the earliest deadline is armed with the host. A waiting check
+/// reports its deadline again on every tick or poll, so a later one that an
+/// earlier one displaced is armed again once that earlier one has passed.
+#[derive(Default)]
+pub(crate) struct Wakes {
+    /// The deadline the host was last asked to wake for.
+    armed: StdCell<Option<Instant>>,
+    /// The host's timer. It must not call back into the database.
+    hook: RefCell<Option<Box<dyn Fn(Instant)>>>,
+}
+
+impl Wakes {
+    /// Ask the host for a tick at `at`, unless an earlier wake it still
+    /// owes covers it. A deadline already passed needs none: the check that
+    /// reported it is being served now.
+    pub(crate) fn wake_at(&self, at: Instant) {
+        let now = Instant::now();
+        if at <= now {
+            return;
+        }
+        if self
+            .armed
+            .get()
+            .is_some_and(|armed| armed > now && armed <= at)
+        {
+            return;
+        }
+        self.armed.set(Some(at));
+        if let Some(hook) = self.hook.borrow().as_ref() {
+            hook(at);
+        }
+    }
+
+    /// A read waiting on `link` stops waiting once an attempt's window
+    /// closes ([`may_wait`]): wake then.
+    pub(crate) fn note_link(&self, link: Link) {
+        if link.hint == RemoteLinkHint::Attempting {
+            self.wake_at(link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW);
+        }
+    }
+
+    pub(crate) fn set_hook(&self, hook: Option<Box<dyn Fn(Instant)>>) {
+        *self.hook.borrow_mut() = hook;
+        // A new host has not armed anything yet.
+        self.armed.set(None);
     }
 }
 
@@ -8034,6 +8097,22 @@ impl Db {
             .expect("persist replica flag");
     }
 
+    /// Have the host told the instant it should next tick at for time
+    /// alone to change an outcome (a read's wait running out, a link
+    /// attempt's window closing; see [`Wakes`]). Without it, those
+    /// deadlines are only noticed when something else causes a tick. The
+    /// hook must not call back into the database.
+    pub fn set_wake_hook(&self, hook: Option<Box<dyn Fn(Instant)>>) {
+        let wakes = Rc::clone(&self.inner.borrow().wakes);
+        wakes.set_hook(hook);
+    }
+
+    /// Ask the host for a tick at `at` (see [`Db::set_wake_hook`]).
+    pub(crate) fn wake_at(&self, at: Instant) {
+        let wakes = Rc::clone(&self.inner.borrow().wakes);
+        wakes.wake_at(at);
+    }
+
     pub fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
         self.become_replica();
         let inner = self.inner.borrow();
@@ -8616,6 +8695,7 @@ impl Db {
             db: self,
             asked: None,
         };
+        let wakes = Rc::clone(&self.inner.borrow().wakes);
         let answer = poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
@@ -8672,6 +8752,13 @@ impl Db {
             let client = inner.client.as_mut().expect("client");
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                 return Poll::Ready(Ok(None));
+            }
+            // Still waiting: tick when time alone would end the wait.
+            if let Some(deadline) = deadline {
+                wakes.wake_at(deadline);
+            }
+            if !strict {
+                wakes.note_link(client.hint.get());
             }
             // A link this store refused answers nothing until a new one
             // does: a Remote read fails with why (SPEC 8 §8.10).
@@ -10283,7 +10370,22 @@ impl Inner {
                 None => ready.push((*id, fetch.message)),
             }
         }
+        // A kept fetch that is not strict is served from this store once its
+        // wait runs out or an attempt's window closes: tick then.
+        let next = kept
+            .iter()
+            .filter(|fetch| !fetch.strict)
+            .filter_map(|fetch| fetch.until)
+            .min();
+        let waiting = kept.iter().any(|fetch| !fetch.strict);
+        let link = client.hint.get();
         client.relayed_fetches = kept;
+        if let Some(next) = next {
+            self.wakes.wake_at(next);
+        }
+        if waiting {
+            self.wakes.note_link(link);
+        }
         let session = &mut self.sessions[index];
         session.outbox.extend(refused);
         let ready = ready
@@ -11295,6 +11397,10 @@ impl Db {
                 if session.ingress.1 > 0
                     && (session.ingress.1 + bytes) as u64 > policy.incoming_bytes_per_window
                 {
+                    // Served once the next window opens: tick then.
+                    let reopens =
+                        session.ingress.0 + std::time::Duration::from_millis(policy.window_ms);
+                    inner.wakes.wake_at(reopens);
                     held.push_back(message);
                     continue;
                 }
@@ -12743,9 +12849,20 @@ impl Db {
                 .filter(|(_, wait)| unanswerable || wait.until <= now)
                 .map(|(id, _)| *id)
                 .collect();
-            ids.into_iter()
+            let due = ids
+                .into_iter()
                 .filter_map(|id| session.first_load.remove(&id).map(|wait| (id, wait)))
-                .collect()
+                .collect();
+            // The waits left end at their own deadline, or when an attempt's
+            // window closes: tick then to serve them.
+            let next = session.first_load.values().map(|wait| wait.until).min();
+            if let Some(next) = next {
+                inner.wakes.wake_at(next);
+                if let Some(client) = inner.client.as_ref() {
+                    inner.wakes.note_link(client.hint.get());
+                }
+            }
+            due
         };
         for (id, wait) in due {
             let policy = {

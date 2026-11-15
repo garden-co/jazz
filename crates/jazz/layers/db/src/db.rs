@@ -535,6 +535,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// When time alone next changes an outcome; see [`sync::Wakes`].
+    wakes: Rc<sync::Wakes>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -1851,6 +1853,7 @@ impl Db {
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                wakes: Rc::default(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
@@ -3166,6 +3169,7 @@ impl Db {
                     live,
                     deadline,
                     relay_view: non_durable && opts.tier != ReadTier::Remote,
+                    wakes: Rc::clone(&self.inner().wakes),
                 })
             }
             _ => None,
