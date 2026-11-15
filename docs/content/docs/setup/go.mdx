@@ -63,7 +63,9 @@ synced, and other users never see it.
 Mergeable text columns (`merge: "text"`, `"markdown"`, `"html"`) get an edit method:
 `jazzapp.Tasks.EditNotes(ctx, db, id, jazz.Splice(pos, deleteLen, "insert"))`, with positions as
 UTF-8 byte offsets, which merge with concurrent edits. `jazz.InsertStreaming` streams an
-`io.Reader` into a `bytes` column, and `jazzapp.Tasks.CanInsert(ctx, db, row)` (and `CanRead`,
+`io.Reader` into a `bytes` column and `jazz.OpenBytes` reads one a page at a time (`jazz.Range` and
+`jazz.JSONAt` select part of a large value), `jazzapp.Tasks.Upsert` and `Restore` upsert and
+restore rows, and `jazzapp.Tasks.CanInsert(ctx, db, row)` (and `CanRead`,
 `CanUpdate`, `CanDelete`) advise what the app's permissions allow.
 
 Errors match their kind with `errors.Is`: `jazz.ErrPermission`, `jazz.ErrRefused`,
@@ -82,17 +84,39 @@ The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) p
 for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan
 command-line app.
 
+## Sign in as an end user
+
+A Go program can also be a client of your app, syncing as one of its users through your backend's
+Jazz endpoint (the `/jazz` route `createJazz` serves), as a browser does:
+
+```go
+db, err := jazzapp.Open(ctx, jazz.Config{
+	AppID:     appID,
+	ServerURL: "https://app.example/jazz",
+	Storage:   jazz.StoragePersistent,
+	DataDir:   "./jazz-data",
+	// A local-first device account, created on first open; or
+	// jazz.Token(func(ctx context.Context, reason jazz.TokenReason) (string, error) { … })
+	// to sign in with a JWT from your auth provider.
+	Auth: jazz.DeviceAccount(jazz.FileStore("./jazz-data/device-key")),
+})
+```
+
+`db.Session(ctx)` is who is signed in, `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of
+their changes, and `db.Refresh(ctx)` and `db.SignOut(ctx)` do what they say. Keep a device key like a
+password: `jazz.FileStore` keeps it in a file only its owner can read; implement `jazz.SecretStore`
+to keep it in the OS keychain.
+
 ## Not supported yet
 
-- syncing as an end user (with a JWT or a device account) and sessions: without a backend's
-  permissions and secrets, the app opens as a local client only;
+- serving end users from a Go backend: a Go program can sign in as an end user, but there is no Go
+  equivalent of `createJazz`'s `/jazz` endpoint yet (serve it from a TypeScript backend);
+- guest (anonymous) users;
 - `hopTo`, `gather` (recursive queries), `union` and history queries: the Go API
   (`jazz.HopTo`, `jazz.Gather`, `jazz.Union`, `jazz.History`) is there, but Jazz refuses them until
   the native core supports them;
 - writing and filtering by payload enums (enums with fields): they read as sealed interfaces, and a
   write or an `Eq` on one is refused;
-- upserts and restoring deleted rows;
-- reading a page of a large value (`bytes` reads whole; `jazz.InsertStreaming` writes in chunks);
 - nested rows and catalogue enums;
 - subscription deltas carry no positions: `q.Live(ctx, db)` keeps a query's rows in order for you;
 - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
