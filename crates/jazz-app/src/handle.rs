@@ -75,6 +75,10 @@ impl Jazz {
         config: Config,
         implementations: Implementations,
     ) -> Result<Self> {
+        let files = match config.backend.as_ref().and_then(|b| b.permissions.clone()) {
+            Some(permissions) => files.with_permissions(permissions),
+            None => files,
+        };
         if config.backend.is_some() && config.server_url.is_none() {
             return Err(Error::Config(
                 "a backend needs the sync server's URL (Config::server)".into(),
