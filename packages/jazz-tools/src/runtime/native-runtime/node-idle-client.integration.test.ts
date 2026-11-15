@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../../index.js";
@@ -52,4 +53,61 @@ describe("an idle Node client", () => {
       await server.stop();
     }
   }, 30_000);
+
+  // The link's outbound wake must not keep Node alive: a process whose
+  // client has closed exits, as it did before the wake existed.
+  it("lets a Node process exit once its connected client has closed", async () => {
+    const app = s.defineApp({ notes: s.table({ label: s.string() }, {}) }, { migrations: "none" });
+    const server = await startLocalJazzServer({ appId: randomUUID(), inMemory: true });
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schema: app,
+        permissions: {},
+      });
+      const built = (path: string) => new URL(`../../../dist/${path}`, import.meta.url).href;
+      const core = { url: server.url, appId: server.appId, adminSecret: server.adminSecret };
+      const child = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          [
+            `import { schema as s } from ${JSON.stringify(built("index.js"))};`,
+            `import { startTestJazz } from ${JSON.stringify(built("testing/index.js"))};`,
+            `const app = s.defineApp({ notes: s.table({ label: s.string() }, {}) }, { migrations: "none" });`,
+            `const core = { ...${JSON.stringify(core)}, stop: async () => {} };`,
+            `const session = await startTestJazz({ app, permissions: {}, core });`,
+            `await session.jazz.db.insert(app.notes, { label: "from the child" }).wait({ tier: "global" });`,
+            `await session.stop();`,
+            'process.stdout.write("closed\\n");',
+          ].join("\n"),
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let output = "";
+      let errors = "";
+      let closedAt: number | undefined;
+      child.stdout.on("data", (chunk: Buffer) => {
+        output += chunk.toString();
+        if (closedAt === undefined && output.includes("closed")) closedAt = Date.now();
+      });
+      child.stderr.on("data", (chunk: Buffer) => (errors += chunk.toString()));
+      const exit = await new Promise<{ code: number | null; at: number }>((resolve) => {
+        const watchdog = setTimeout(() => child.kill("SIGKILL"), 30_000);
+        child.once("exit", (code) => {
+          clearTimeout(watchdog);
+          resolve({ code, at: Date.now() });
+        });
+      });
+      expect(closedAt, `the child closed its client (stderr: ${errors})`).toBeDefined();
+      expect(exit.code, `the child exited by itself (stderr: ${errors})`).toBe(0);
+      // Before the fix it stayed alive until killed.
+      expect(exit.at - closedAt!).toBeLessThan(5_000);
+    } finally {
+      await server.stop();
+    }
+  }, 60_000);
 });

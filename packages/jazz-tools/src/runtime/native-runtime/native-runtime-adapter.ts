@@ -1343,6 +1343,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.auxiliaryReceiveDeadlines.get(transport)?.close();
     this.auxiliaryReceiveDeadlines.delete(transport);
     if (!this.coreOperation) {
+      // A retired link reports no more frames; its callback must not keep
+      // this runtime (or a Node process) alive.
+      transport.clearOutboundScheduler?.();
       transport.close();
       return Promise.resolve();
     }
@@ -4274,6 +4277,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTransportRetirements.clear();
     for (const [transport, waiters] of retirements) {
       try {
+        transport.clearOutboundScheduler?.();
         transport.close();
         for (const waiter of waiters) waiter.resolve();
       } catch (error) {
