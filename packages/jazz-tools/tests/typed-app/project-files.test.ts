@@ -118,6 +118,27 @@ describe("generate in a Rust crate", () => {
   });
 });
 
+describe("generate in a Kotlin app", () => {
+  const BUILD = 'dependencies {\n    implementation("tools.jazz:jazz-kotlin")\n}\n';
+  const KOTLIN = join("src", "main", "kotlin", "JazzApp.kt");
+
+  it("gives a Gradle app depending on jazz-kotlin its Kotlin bindings, and --check passes on them", async () => {
+    const dir = await project();
+    await writeFile(join(dir, "build.gradle.kts"), BUILD);
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/JazzApp\.kt/);
+    expect((await generateApp({ cwd: dir })).bindings).toEqual([KOTLIN]);
+    expect(await readFile(join(dir, KOTLIN), "utf8")).toContain("package jazzapp");
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
+    await expect(readFile(join(dir, "jazz.generated.ts"), "utf8")).rejects.toThrow();
+  });
+
+  it("ignores a build.gradle.kts that doesn't depend on jazz-kotlin", async () => {
+    const dir = await project();
+    await writeFile(join(dir, "build.gradle.kts"), '// implementation("tools.jazz:jazz-kotlin")\n');
+    expect((await generateApp({ cwd: dir })).bindings).toEqual(["jazz.generated.ts"]);
+  });
+});
+
 describe("finding the app's files", () => {
   it("refuses jazz.app.json in more than one place", async () => {
     const dir = await project();
