@@ -36,7 +36,7 @@ export const LANGUAGES: readonly Language[] = [
   {
     label: "Rust",
     setupPage: "setup/rust",
-    enabled: true,
+    enabled: false,
   },
   {
     label: "Swift",
