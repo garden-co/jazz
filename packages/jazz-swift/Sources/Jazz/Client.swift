@@ -438,11 +438,20 @@ final class Listener: SubscriptionListener, @unchecked Sendable {
         }
     }
 
-    func onError(message: String) {
-        // A subscription's last error after close is jazz-ffi's `Closed`,
-        // which reaches the listener as its message (crates/jazz-ffi/README.md).
-        continuation.finish(
-            throwing: message == "the app is closed" ? JazzError.closed : JazzError.io(message))
+    func onError(kind: String, message: String) {
+        continuation.finish(throwing: Self.error(kind: kind, message: message))
+    }
+
+    /// A subscription's last error, by jazz-ffi's kind.
+    static func error(kind: String, message: String) -> JazzError {
+        switch kind {
+        case "closed": return .closed
+        case "refused": return .refused(message)
+        case "permission": return .permissionDenied(message)
+        case "notSupported": return .notSupported(message)
+        case "conflict": return .conflict(message)
+        default: return .io(message)
+        }
     }
 }
 
