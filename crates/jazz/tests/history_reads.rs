@@ -153,8 +153,8 @@ fn history_lists_every_accepted_version_with_its_transaction() {
     assert!(
         times
             .iter()
-            .all(|at| at & ((1 << 18) - 1) == 0 && at >> 18 > 0),
-        "acceptance time is an HLC: milliseconds over a zero counter"
+            .all(|at| at & ((1 << 18) - 1) < 1 << 10 && at >> 18 > 0),
+        "acceptance time is an HLC: milliseconds over the accepted position's counter"
     );
 
     let newest_first = read(
@@ -1015,4 +1015,59 @@ fn an_offline_edit_synced_later_wins_and_is_accepted_last() {
         ReadOpts::default(),
     );
     assert_eq!(titles(&newest_first)[0], "alice offline");
+}
+
+/// `$acceptedAt` is when the authority accepted a version, not the
+/// `updatedAt` its writer named: a backfill with an explicit time years
+/// back is stamped as it arrives, so history ordered by `$acceptedAt` still
+/// ends with the current row, while `$updatedAt` keeps the writer's time.
+#[test]
+fn an_explicit_updated_at_does_not_move_accepted_at() {
+    let synced = Synced::new();
+    let note = row(1);
+    insert(&synced.server, note, "first");
+    let backfilled_at: u64 = 1_577_836_800_000; // 2020-01-01
+    block_on(synced.server.update(
+        "notes",
+        note,
+        title("backfilled"),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(backfilled_at),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    // A later ordinary write, in the same millisecond or not.
+    update(&synced.server, note, "after");
+    let versions = read(&synced.server, &history_of(note), ReadOpts::default());
+    assert_eq!(
+        titles(&versions),
+        ["first", "backfilled", "after"],
+        "in accept order"
+    );
+    let times: Vec<u64> = versions.iter().map(accepted_at).collect();
+    assert!(
+        times.windows(2).all(|pair| pair[0] < pair[1]),
+        "strictly increasing in accept order: {times:?}"
+    );
+    let ms = |accepted: u64| accepted >> 18;
+    assert!(
+        ms(times[1]) > backfilled_at,
+        "accepted now, not at the backfilled time: {}",
+        ms(times[1])
+    );
+    // The backfilled version keeps the writer's time.
+    let backfilled = read(
+        &synced.server,
+        &Query::from("history.notes")
+            .filter(eq(col("id"), lit(Value::Uuid(note.0))))
+            .select(["title", "$updatedAt"])
+            .order_by("$acceptedAt", OrderDirection::Asc),
+        ReadOpts::default(),
+    );
+    assert!(
+        format!("{:?}", cell(&backfilled[1], "$updatedAt")).contains(&backfilled_at.to_string()),
+        "$updatedAt keeps the writer's time: {:?}",
+        cell(&backfilled[1], "$updatedAt")
+    );
 }
