@@ -41,12 +41,7 @@ import { resolveSchemaSource } from "../schema-source.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp } from "../dev/codegen-napi.js";
 import { boundApp } from "../typed-app.js";
-import { computeSchemaHash } from "../schema-hash.js";
-import {
-  mergePermissionsIntoWasmSchema,
-  type CompiledPermissionsMap,
-} from "../schema-permissions.js";
-import type { WasmSchema } from "../drivers/types.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { deployApp } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
@@ -3718,20 +3713,19 @@ function boundAppOf(app: BackendSchemaInput) {
     schema = resolveSchemaSource(app);
   } catch (error) {
     throw new Error(
-      "createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from \"./jazz.generated\"`).",
+      'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`).',
       { cause: error },
     );
   }
   const bound = boundApp(schema);
   if (!bound) {
     throw new Error(
-      "createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from \"./jazz.generated\"`); " +
+      'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`); ' +
         "run `npx jazz-tools validate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
     );
   }
   return bound;
 }
-
 
 function openFacade(options: CreateJazzOptions): Jazz {
   // Checked at startup, so a missing `ws` is in the logs before the first socket.
