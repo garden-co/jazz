@@ -48,41 +48,45 @@ async fn serve(
         let Ok(upgrade) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await else {
             return endpoint.handle(head).await.into_axum();
         };
-        return upgrade.on_upgrade(move |socket| async move {
-            let (mut sink, stream) = socket.split();
-            // A close or an error ends the client's stream; text, ping and
-            // pong frames carry nothing for the core.
-            let incoming = Box::pin(
-                stream
-                    .take_while(|message| {
-                        std::future::ready(
-                            matches!(message, Ok(m) if !matches!(m, Message::Close(_))),
-                        )
-                    })
-                    .filter_map(|message| {
-                        std::future::ready(match message {
-                            Ok(Message::Binary(data)) => Some(data.to_vec()),
-                            _ => None,
+        return upgrade
+            .max_message_size(super::MAX_CLIENT_MESSAGE_BYTES + 1)
+            .on_upgrade(move |socket| async move {
+                let (mut sink, stream) = socket.split();
+                // A close or an error ends the client's stream; text, ping and
+                // pong frames carry nothing for the core.
+                let incoming = Box::pin(
+                    stream
+                        .take_while(|message| {
+                            std::future::ready(
+                                matches!(message, Ok(m) if !matches!(m, Message::Close(_))),
+                            )
                         })
-                    }),
-            );
-            let (to_client, mut from_relay) = futures_channel_pair();
-            let relay = endpoint.serve_socket(head, incoming, to_client);
-            let forward = async {
-                while let Some(data) = from_relay.recv().await {
-                    if sink.send(Message::Binary(data.into())).await.is_err() {
-                        break;
+                        .filter_map(|message| {
+                            std::future::ready(match message {
+                                Ok(Message::Binary(data)) => Some(data.to_vec()),
+                                // TS clients send their prelude as text.
+                                Ok(Message::Text(text)) => Some(text.as_bytes().to_vec()),
+                                _ => None,
+                            })
+                        }),
+                );
+                let (to_client, mut from_relay) = futures_channel_pair();
+                let relay = endpoint.serve_socket(head, incoming, to_client);
+                let forward = async {
+                    while let Some(data) = from_relay.recv().await {
+                        if sink.send(Message::Binary(data.into())).await.is_err() {
+                            break;
+                        }
                     }
-                }
-            };
-            let (closed, ()) = futures_util::future::join(relay, forward).await;
-            let _ = sink
-                .send(Message::Close(Some(CloseFrame {
-                    code: closed.code,
-                    reason: closed.reason.into(),
-                })))
-                .await;
-        });
+                };
+                let (closed, ()) = futures_util::future::join(relay, forward).await;
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: closed.code,
+                        reason: closed.reason.into(),
+                    })))
+                    .await;
+            });
     }
     let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();

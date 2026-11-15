@@ -609,6 +609,17 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     return this.client;
   }
 
+  /**
+   * The backend's connection manager holds no client, so wait on this
+   * `Db`'s: for the writes it makes as its session (or as the backend),
+   * reporting only their rejections. With no server this runtime is the
+   * authority, and writes settle when made.
+   */
+  protected override async waitForUpstreamSync(signal: AbortSignal): Promise<void> {
+    if (!this.getConfig().serverUrl) return;
+    await this.client.waitForSyncAs(this.accessContext?.writeSession ?? undefined, signal);
+  }
+
   private readonly backendMutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private mutationErrorSinkRef: WeakRef<BackendMutationErrorSink> | undefined;
 

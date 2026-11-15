@@ -54,6 +54,8 @@ export const docs = defineDocs({
   docs: {
     schema: pageSchema.extend({
       reviewedAt: z.string().optional(),
+      // "backend": only languages that can run a backend get tabs (docs/lib/languages).
+      languageTabs: z.enum(["backend"]).optional(),
     }),
     postprocess: {
       includeProcessedMarkdown: true,
