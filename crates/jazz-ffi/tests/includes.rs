@@ -165,3 +165,99 @@ fn subscriptions_carry_includes() {
     let row = seen.expect("the show updates when a task is added");
     assert_eq!(row["tasks"].as_array().unwrap().len(), 3);
 }
+
+/// Two nested includes named out of alphabetical order land under their own
+/// names (the engine returns nested relations in name order).
+#[test]
+fn nested_includes_in_any_order_decode_under_their_names() {
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    let (show_id, crew_id, name) = stage(&jazz);
+    let shows = parse(
+        &jazz
+            .all(
+                json!({ "table": "shows", "include": [{ "relation": "tasks", "query": {
+                    "where": [{ "column": "title", "op": "eq", "value": "Rig" }],
+                    "include": [{ "relation": "show" }, { "relation": "assignee" }],
+                } }] })
+                .to_string(),
+            )
+            .unwrap(),
+    );
+    let rig = &shows[0]["tasks"][0];
+    assert_eq!(rig["show"]["id"], show_id);
+    assert_eq!(rig["show"]["name"], name);
+    assert_eq!(rig["assignee"]["id"], crew_id);
+    assert_eq!(rig["assignee"]["name"], "Ada");
+}
+
+const RELATIONS_APP: &str = include_str!("fixtures/relations/jazz.app.json");
+
+/// A forward relation through a `uuid[]` column reads as an array of the
+/// referenced rows, as in TS; `required` keeps only rows whose every
+/// reference is readable. A reverse relation that reverses a forward one
+/// pointing at another table is refused, not lowered.
+#[test]
+fn forward_relations_through_uuid_arrays_read_as_arrays() {
+    let jazz = JazzHandle::open(json!({ "app": RELATIONS_APP }).to_string()).unwrap();
+    let person = |name: &str| {
+        parse(
+            &jazz
+                .insert("people".into(), json!({ "name": name }).to_string())
+                .unwrap(),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (ada, bo) = (person("Ada"), person("Bo"));
+    jazz.insert(
+        "teams".into(),
+        json!({ "name": "Crew", "members": [ada, bo], "lead": ada }).to_string(),
+    )
+    .unwrap();
+    let teams = parse(
+        &jazz
+            .all(
+                json!({ "table": "teams", "include": [
+                    { "relation": "memberRows", "required": true },
+                    { "relation": "leadRow" },
+                ] })
+                .to_string(),
+            )
+            .unwrap(),
+    );
+    let mut members: Vec<_> = teams[0]["memberRows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_owned())
+        .collect();
+    members.sort();
+    assert_eq!(members, ["Ada", "Bo"]);
+    assert_eq!(teams[0]["leadRow"]["name"], "Ada");
+
+    let misdirected = jazz
+        .all(json!({ "table": "notes", "include": [{ "relation": "misdirected" }] }).to_string());
+    assert!(
+        matches!(&misdirected, Err(JazzError::Refused { reason }) if reason.contains("no relation misdirected")),
+        "{misdirected:?}"
+    );
+}
+
+/// TS-compatible leniency: `offset: 0` in an include and `select: ["*"]`.
+#[test]
+fn offset_zero_and_select_star_are_accepted() {
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    stage(&jazz);
+    let shows = parse(
+        &jazz
+            .all(
+                json!({ "table": "shows", "select": ["*"],
+                        "include": [{ "relation": "tasks", "query": { "offset": 0, "select": ["*"] } }] })
+                .to_string(),
+            )
+            .unwrap(),
+    );
+    assert_eq!(shows[0]["venue"], "Main Hall");
+    assert_eq!(shows[0]["tasks"][0]["status"], "todo");
+}

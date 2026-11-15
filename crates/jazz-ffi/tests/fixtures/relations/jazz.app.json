@@ -1,0 +1,21 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "people": { "columns": { "name": "string" } },
+    "teams": {
+      "columns": { "name": "string", "members": { "array": "uuid" }, "lead": "uuid" },
+      "relations": {
+        "memberRows": { "rel": "people", "column": "members" },
+        "leadRow": { "rel": "people", "column": "lead" }
+      }
+    },
+    "notes": {
+      "columns": { "body": "string", "team": "uuid" },
+      "relations": {
+        "teamRow": { "rel": "teams", "column": "team" },
+        "misdirected": { "reverse": "teams", "relation": "leadRow" }
+      }
+    }
+  }
+}
