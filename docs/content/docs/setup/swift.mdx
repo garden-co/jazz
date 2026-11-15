@@ -182,8 +182,8 @@ Not supported yet:
 - Installing the package from a URL: depend on a local checkout by path.
 - A SwiftUI `Binding` for `JazzText`.
 - Keychain storage for device keys: keep the key from `Jazz.generateDeviceKey()` with your own
-  Keychain code. (`JazzQuery` and `JazzSession`, the `@Observable` models for SwiftUI, are built for
-  Apple platforms but only compiled on Linux in CI.)
+  Keychain code. (`JazzQuery` and `JazzSession`, the `@Observable` models for SwiftUI, exist for
+  Apple platforms only, and CI, which runs on Linux, doesn't build or test them.)
 - Anonymous (guest) users, as in TypeScript.
 - Subscribing to history queries.
 - Parts of large values inside includes: parts are for root queries.
