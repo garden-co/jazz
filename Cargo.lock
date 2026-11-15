@@ -2455,10 +2455,6 @@ dependencies = [
 [[package]]
 name = "jazz-ruzstd"
 version = "0.8.3"
-dependencies = [
- "fastrand",
- "twox-hash",
-]
 
 [[package]]
 name = "jazz-server"

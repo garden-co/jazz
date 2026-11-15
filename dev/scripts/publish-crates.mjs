@@ -16,7 +16,7 @@
 // failed run can be re-run.
 
 import { spawnSync } from "node:child_process";
-import { cargoMetadata, publishPlan } from "./rust-crates.mjs";
+import { cargoMetadata, publishPlan, withVendoredMembers } from "./rust-crates.mjs";
 
 const CRATES_IO = "https://crates.io/api/v1/crates";
 const USER_AGENT = "jazz-release (https://github.com/garden-co/jazz)";
@@ -41,11 +41,14 @@ export async function registryState(name, version, fetchImpl = fetch) {
 
 async function main() {
   const mode = process.argv[2];
-  const plan = publishPlan(cargoMetadata());
+  // With the vendored crates as members the lockfile gains their optional
+  // dependencies, so cargo runs without --locked here; Cargo.lock is restored
+  // afterwards, and CI checks it with --locked everywhere else.
+  const plan = publishPlan(cargoMetadata({ locked: false }));
   if (plan.problems.length > 0) {
-    console.error("The workspace can't be published as is:");
-    for (const problem of plan.problems) console.error(`  - ${problem}`);
-    process.exit(1);
+    throw new Error(
+      `The workspace can't be published as is:\n${plan.problems.map((p) => `  - ${p}`).join("\n")}`,
+    );
   }
   const packages = plan.order.flatMap((name) => ["-p", name]);
 
@@ -56,16 +59,15 @@ async function main() {
     // Cargo 1.90+ packages local path dependencies together, through a
     // temporary registry, so crates that aren't on crates.io yet verify.
     case "--verify":
-      cargo(["package", "--locked", ...packages]);
+      cargo(["package", "--allow-dirty", ...packages]);
       return;
     case "--dry-run":
-      cargo(["publish", "--dry-run", "--locked", ...packages]);
+      cargo(["publish", "--dry-run", "--allow-dirty", ...packages]);
       return;
     case "--publish":
       break;
     default:
-      console.error("Usage: publish-crates.mjs --list | --verify | --dry-run | --publish");
-      process.exit(2);
+      throw new Error("Usage: publish-crates.mjs --list | --verify | --dry-run | --publish");
   }
 
   const summary = [];
@@ -93,7 +95,9 @@ async function main() {
     // without it keeps the run inside the trusted-publishing token's lifetime.
     // Cargo waits until each crate is in the index before the next.
     console.log(`==> ${name}@${version} via ${auth}`);
-    cargo(["publish", "--locked", "--no-verify", "-p", name], { CARGO_REGISTRY_TOKEN: token });
+    cargo(["publish", "--allow-dirty", "--no-verify", "-p", name], {
+      CARGO_REGISTRY_TOKEN: token,
+    });
     summary.push(`${name}@${version}: published via ${auth}`);
   }
   console.log("\nCrates:");
@@ -101,7 +105,7 @@ async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  withVendoredMembers(main).catch((error) => {
     console.error(error.message);
     process.exit(1);
   });

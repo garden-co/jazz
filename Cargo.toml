@@ -9,10 +9,6 @@ members = [
   "crates/jazz/layers/types",
   "crates/jazz-alpha59-alpha60-dump",
   "crates/jazz-compression",
-  # The patched ruzstd fork, published as jazz-ruzstd for jazz-compression's
-  # optional `ruzstd` feature. A member so `cargo package --workspace` packages
-  # and verifies it with the crates that depend on it.
-  "vendor/ruzstd",
   "crates/jazz-text",
   "crates/wasm-tracing",
   "crates/jazz-wasm",
@@ -48,6 +44,10 @@ members = [
   "examples/wequencer/benchmarks",
 ]
 exclude = [
+  # The patched ruzstd fork, published as jazz-ruzstd. Not a member, since its
+  # upstream tests aren't vendored; dev/scripts/publish-crates.mjs adds it
+  # while packaging so it verifies with the crates that depend on it.
+  "vendor/ruzstd",
   "vendor/sqlite-wasm-rs",
   # The alpha59-alpha60 exporter and its test fixture, built inside an alpha.59
   # checkout by their prepare.sh.
