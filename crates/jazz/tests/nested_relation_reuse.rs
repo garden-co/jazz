@@ -972,6 +972,12 @@ mod batched {
 
     /// Children as wide as a statement may be read per parent: the batched
     /// statement's extra columns would pass Durable Object SQLite's limit.
+    /// The level below them still reads in one statement.
+    ///
+    /// ```
+    /// owners ──1 stmt──► wide (too wide: 1 stmt per owner)
+    ///                      └──1 stmt──► tags of every wide row
+    /// ```
     #[test]
     fn children_too_wide_to_batch_read_per_parent() {
         let mut wide = TableSchemaBuilder::new("wide")
@@ -988,6 +994,12 @@ mod batched {
                         .policies(read_and_allow_all_writes(PolicyExpr::True)),
                 )
                 .table(wide.policies(read_and_allow_all_writes(PolicyExpr::True)))
+                .table(
+                    TableSchemaBuilder::new("tags")
+                        .column("wide", ColumnType::Uuid)
+                        .column("label", ColumnType::Text)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
                 .build(),
         );
         let db = block_on(Db::open(DbConfig::new(
@@ -1026,25 +1038,52 @@ mod batched {
                 values.push((name.as_str(), Value::String(format!("{name} {w}"))));
             }
             insert("wide", id(10, w), cells(values));
+            for t in 0..2 {
+                insert(
+                    "tags",
+                    id(14, w * 2 + t),
+                    cells(vec![
+                        ("wide", Value::Uuid(id(10, w).0)),
+                        ("label", Value::String(format!("tag {t} of {w}"))),
+                    ]),
+                );
+            }
         }
         block_on(db.tick()).unwrap();
-        // Every text column twice, and the rank.
+        // Every text column twice, the rank and the owner.
         let mut select: Vec<String> = (0..2 * WIDE).map(|c| format!("c{}", c % WIDE)).collect();
         select.push("rank".to_owned());
+        select.push("owner".to_owned());
         let paged = ArraySubquery::new("wide", "wide", "owner", "id")
             .select(select)
             .order_by("rank", OrderDirection::Asc)
             .offset(1)
-            .limit(1);
-        let read = tree(&db, &Query::from("owners").array_subquery(paged));
+            .limit(1)
+            .nested(ArraySubquery::new("tags", "tags", "wide", "id"));
+        let query = Query::from("owners").array_subquery(paged);
+        let read = tree(&db, &query);
         assert!(read.roots.iter().all(|o| relation(o, "wide").len() == 1));
+        assert!(
+            read.roots
+                .iter()
+                .flat_map(|o| relation(o, "wide"))
+                .all(|w| relation(w, "tags").len() == 2)
+        );
+        let prepared = db.prepare_query(&query).unwrap();
+        jazz::db::take_query_statements_for_test();
+        let again = block_on(db.all_result_tree(&prepared, ReadOpts::default())).unwrap();
+        let statements = jazz::db::take_query_statements_for_test();
+        assert_eq!(again, read);
+        // The owners, their wide rows per owner, then every wide row's tags.
+        assert_eq!(statements, 1 + read.roots.len() as u64 + 1);
     }
 
     /// Text columns of [`children_too_wide_to_batch_read_per_parent`]'s
     /// child. A Durable Object table holds at most 100 columns, system
     /// ones included, so a projection this wide selects columns twice:
-    /// with id, `_clock`, `_state` and `_writer`, the per-parent statement
-    /// returns 99 columns, and the batched page would return 101.
+    /// with the rank, the owner, id, `_clock`, `_state` and `_writer`, the
+    /// per-parent statement returns 100 columns, and the batched one,
+    /// adding the parent's index, would return 101.
     const WIDE: usize = 47;
 
     /// Parents keyed by a real number have no exact JSON form, so they are
