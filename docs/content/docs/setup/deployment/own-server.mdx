@@ -35,9 +35,7 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
   </Tab>
   <Tab value="Rust">
-    A Rust backend can't run Jazz's core in its own process yet, so on your own server it keeps the
-    data in [Jazz Cloud](/docs/setup/deployment/jazz-cloud): get an app ID there, and set
-    `JAZZ_APP_ID`, `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` as that page says.
+    <include>../../../partials/backend-jazz-server.mdx</include>
 
     <include>../../../partials/backend-connect-rust.mdx</include>
 
@@ -45,9 +43,7 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
   </Tab>
   <Tab value="Go">
-    A Go backend can't run Jazz's core in its own process yet, so on your own server it keeps the
-    data in [Jazz Cloud](/docs/setup/deployment/jazz-cloud): get an app ID there, and set
-    `JAZZ_APP_ID`, `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` as that page says.
+    <include>../../../partials/backend-jazz-server.mdx</include>
 
     <include>../../../partials/backend-connect-go.mdx</include>
 
@@ -227,8 +223,8 @@ the core's address or secret. Your backend sends its schema, migrations and perm
 on start, and tells the core who each user is; the core does no auth of its own and trusts only the
 holder of the app's admin secret. Keep it server-side, like a database password.
 
-Jazz always runs inside a backend like this one. There is no separate Jazz server to install or
-run.
+A TypeScript backend always runs Jazz inside it, so it needs no separate Jazz server. A Rust or Go
+backend uses one for now (see the Rust and Go tabs above).
 
 ## Coming from the alpha.59 server
 
