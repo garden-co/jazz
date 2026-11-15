@@ -76,6 +76,10 @@ public interface Native : AutoCloseable {
     /** Brings back deleted row [id], as it was or with [patchJson] (a whole row) as its content; returns it. */
     public fun restore(table: String, id: String, patchJson: String?): String = throw JazzException.NotSupported("restore")
 
+    /** Starts a streaming write of [column]'s value: [kind] `insert`, `update` or `upsert`. */
+    public fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload =
+        throw JazzException.NotSupported("streaming uploads")
+
     /** Asks the token provider for a fresh token. */
     public fun refresh() {}
 
@@ -107,4 +111,11 @@ public interface NativeTransaction {
         throw JazzException.NotSupported("partial edits")
     public fun commit(tier: String?)
     public fun rollback()
+}
+
+/** A streaming write of a large value: [push] its bytes in order, then [finish] (returns the row) or [abort]. */
+public interface NativeUpload {
+    public fun push(bytes: ByteArray)
+    public fun finish(): String
+    public fun abort()
 }

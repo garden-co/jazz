@@ -134,6 +134,49 @@ public class Jazz internal constructor(
     public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(table: Table<Row, Insert, P>, id: String, row: Insert): Row =
         io { decodeStored(table, native.upsert(table.tableName, id, insertJson(table, row))) }
 
+    /**
+     * Inserts [row] with [column]'s value streamed from [data] (e.g. a file:
+     * `jazz.insertStreaming(Files, NewFile(name = "a.mov"), Files.content, file.inputStream().chunks())`).
+     * Nothing is written if [data] fails or the call is cancelled.
+     */
+    public suspend fun <Row : Any, Insert : Any, P : Patch> insertStreaming(
+        table: Table<Row, Insert, P>,
+        row: Insert,
+        column: Column<*>,
+        data: Flow<ByteArray>,
+    ): Row = stream(table, column, "insert", null, insertJson(table, row), data)
+
+    /** Replaces [column] of row [id] with a value streamed from [data]. */
+    public suspend fun <Row : Any> updateStreaming(table: Table<Row, *, *>, id: String, column: Column<*>, data: Flow<ByteArray>): Row =
+        stream(table, column, "update", id, null, data)
+
+    /** [upsert], with [column]'s value streamed from [data]. */
+    public suspend fun <Row : Any, Insert : Any, P : Patch> upsertStreaming(
+        table: Table<Row, Insert, P>,
+        id: String,
+        row: Insert,
+        column: Column<*>,
+        data: Flow<ByteArray>,
+    ): Row = stream(table, column, "upsert", id, insertJson(table, row), data)
+
+    private suspend fun <Row : Any> stream(
+        table: Table<Row, *, *>,
+        column: Column<*>,
+        kind: String,
+        id: String?,
+        row: String?,
+        data: Flow<ByteArray>,
+    ): Row {
+        val upload = io { native.beginUpload(table.tableName, column.name, kind, id, row) }
+        try {
+            data.collect { chunk -> io { upload.push(chunk) } }
+            return decodeStored(table, io { upload.finish() })
+        } catch (e: Throwable) {
+            withContext(NonCancellable) { io { runCatching { upload.abort() } } }
+            throw e
+        }
+    }
+
     /** Brings back deleted row [id] of [table], as it was or with [row] as its content; returns it. */
     public suspend fun <Row : Any, Insert : Any, P : Patch> restore(table: Table<Row, Insert, P>, id: String, row: Insert? = null): Row =
         io { decodeStored(table, native.restore(table.tableName, id, row?.let { insertJson(table, it) })) }

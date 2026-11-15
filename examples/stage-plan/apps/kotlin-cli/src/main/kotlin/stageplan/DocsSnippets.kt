@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
 import tools.jazz.JazzAuth
 import tools.jazz.JazzConfig
+import tools.jazz.chunks
 import tools.jazz.Link
 import tools.jazz.SessionState
 import tools.jazz.Storage
@@ -360,5 +361,20 @@ object DocsSnippets {
         val restored: Task = jazz.restore(Tasks, id)
         // #endregion writing-restore-kotlin
         return restored
+    }
+
+    suspend fun largeValues(jazz: Jazz, taskId: String, notes: java.io.InputStream): String? {
+        // #region writing-streaming-upload-kotlin
+        // Stream a large value in, chunk by chunk, without holding it in memory:
+        // nothing is written if the stream fails or the call is cancelled.
+        jazz.updateStreaming(Tasks, taskId, Tasks.notes, notes.chunks())
+        // #endregion writing-streaming-upload-kotlin
+        // #region reading-partial-value-kotlin
+        // Read only the part of a large value you show: here, the first 80 characters.
+        val preview: String? = jazz.one(
+            Tasks.where(Tasks.id eq taskId).select(Tasks.title, Tasks.notes.range(0, 80)),
+        )?.get(Tasks.notes)
+        // #endregion reading-partial-value-kotlin
+        return preview
     }
 }

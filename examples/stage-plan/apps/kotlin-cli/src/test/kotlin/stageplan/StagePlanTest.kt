@@ -219,6 +219,11 @@ class StagePlanTest {
             jazz.editText(Tasks, task.id, Tasks.notes, editedFrom = "Lights", text = "Stage lights")
             val merged = jazz.one(Tasks.where(Tasks.id eq task.id))!!.notes!!
             kotlin.test.assertTrue(merged.contains("Stage lights") && merged.contains("gaffer tape"), merged)
+            // Streaming a large value in, and reading part of it back.
+            val long = "0123456789".repeat(50_000)
+            val preview = DocsSnippets.largeValues(jazz, task.id, long.byteInputStream())
+            assertEquals(long.take(80), preview)
+            assertEquals(long.length, jazz.one(Tasks.where(Tasks.id eq task.id))!!.notes!!.length)
             // Partial edits: a splice of the title.
             jazz.edit(Tasks, task.id) { splice(Tasks.title, tools.jazz.SpliceUnits.Utf16, 0, 3, tools.jazz.Splice.text(3, 0, "ging")) }
             assertEquals("Rigging", jazz.one(Tasks.where(Tasks.id eq task.id))!!.title)

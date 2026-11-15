@@ -82,6 +82,15 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun sessionState(): String? = live { handle.sessionState() }
     override fun syncStatus(): String = live { handle.syncStatus() }
     override fun refresh(): Unit = live { handle.refresh() }
+
+    override fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload {
+        val upload = live { handle.beginUpload(table, column, kind, id, rowJson) }
+        return object : NativeUpload {
+            override fun push(bytes: ByteArray): Unit = call { upload.push(bytes) }
+            override fun finish(): String = try { call { upload.finish() } } finally { upload.destroy() }
+            override fun abort(): Unit = try { call { upload.abort() } } finally { upload.destroy() }
+        }
+    }
     override fun link(bearer: String): String = live { handle.link(bearer) }
     override fun upsert(table: String, id: String, rowJson: String): String = live { handle.upsert(table, id, rowJson) }
     override fun restore(table: String, id: String, patchJson: String?): String = live { handle.restore(table, id, patchJson) }

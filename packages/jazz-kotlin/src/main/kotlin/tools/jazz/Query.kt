@@ -48,8 +48,42 @@ public abstract class Table<Row : Any, Insert : Any, P : Patch>(
     public fun include(vararg relations: Relation<Row, *>): Query<JazzRow<Row>> = query().include(*relations)
 }
 
+/** What a query's `select` can read: a column ([Column]), or a part of a large one ([Column.range], [Column.at]). */
+public interface Selection {
+    /** The column it reads. */
+    public val name: String
+
+    /** Its `select` entry. */
+    public fun selectJson(): JsonElement
+}
+
 /** A column of type [T], to filter and sort by. */
-public class Column<T>(public val name: String, public val serializer: KSerializer<T>) {
+public class Column<T>(override val name: String, public val serializer: KSerializer<T>) : Selection {
+    override fun selectJson(): JsonElement = JsonPrimitive(name)
+
+    /**
+     * Only part of this text or `bytea` column's value: `[from, to)` in
+     * [units] (`row[column]` then reads that part). Root queries only.
+     */
+    public fun range(from: Long, to: Long, units: SpliceUnits = SpliceUnits.Utf16): Selection = PartSelection(
+        name,
+        buildJsonObject {
+            put("column", name)
+            put("from", from)
+            put("to", to)
+            put("units", units.wire)
+        },
+    )
+
+    /** Only the value at JSON pointer [pointer] (e.g. `"/color"`) inside this JSON column. Root queries only. */
+    public fun at(pointer: String): Selection = PartSelection(
+        name,
+        buildJsonObject {
+            put("column", name)
+            put("at", pointer)
+        },
+    )
+
     private fun value(value: T): JsonElement = jazzJson.encodeToJsonElement(serializer, value)
 
     public infix fun eq(value: T): Condition = Condition(name, "eq", value(value))
@@ -101,7 +135,7 @@ public data class Query<Row : Any>(
     val limit: Int? = null,
     val offset: Int? = null,
     val includes: List<Relation<*, *>> = emptyList(),
-    val columns: List<String>? = null,
+    val columns: List<JsonElement>? = null,
     /** The table object it reads, for its transforms and computed fields. */
     val source: Table<*, *, *>? = null,
 ) {
@@ -117,7 +151,7 @@ public data class Query<Row : Any>(
         if (orders.isNotEmpty()) put("orderBy", orderJson(orders))
         limit?.let { put("limit", it) }
         offset?.let { put("offset", it) }
-        columns?.let { c -> put("select", buildJsonArray { c.forEach { add(JsonPrimitive(it)) } }) }
+        columns?.let { c -> put("select", JsonArray(c)) }
         if (includes.isNotEmpty()) put("include", JsonArray(includes.map { it.spec() }))
     }.toString()
 
@@ -176,13 +210,17 @@ public fun <Row : Any> Query<JazzRow<Row>>.include(vararg relations: Relation<Ro
     copy(includes = includes + relations)
 
 /** Only these columns of each row (and its `id`): read them with [JazzRow.get]. */
-public fun <Row : Any> Query<Row>.select(vararg columns: Column<*>): Query<JazzRow<Row>> =
-    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes, columns.map { it.name }, source)
+public fun <Row : Any> Query<Row>.select(vararg columns: Selection): Query<JazzRow<Row>> =
+    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes, columns.map { it.selectJson() }, source)
 
 /** Only these columns, for a query that already includes relations. */
 @JvmName("selectMore")
-public fun <Row : Any> Query<JazzRow<Row>>.select(vararg columns: Column<*>): Query<JazzRow<Row>> =
-    copy(columns = columns.map { it.name })
+public fun <Row : Any> Query<JazzRow<Row>>.select(vararg columns: Selection): Query<JazzRow<Row>> =
+    copy(columns = columns.map { it.selectJson() })
+
+private class PartSelection(override val name: String, private val json: JsonObject) : Selection {
+    override fun selectJson(): JsonElement = json
+}
 
 internal fun whereJson(conditions: List<Condition>): JsonArray = buildJsonArray {
     for (c in conditions) {
