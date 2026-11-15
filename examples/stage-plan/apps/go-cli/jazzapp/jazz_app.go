@@ -234,7 +234,7 @@ func (activityTable) Restore(ctx context.Context, db jazz.Querier, id string) (A
 }
 
 // History starts a query of `activity`'s history: every accepted version of its rows.
-func (activityTable) History() *jazz.Query[jazz.Version[Activity]] {
+func (activityTable) History() *jazz.Query[jazz.HistoryRow[Activity]] {
 	return jazz.History(jazz.NewQuery[Activity]("activity"))
 }
 
@@ -336,7 +336,7 @@ func (checklistItemsTable) Restore(ctx context.Context, db jazz.Querier, id stri
 }
 
 // History starts a query of `checklistItems`'s history: every accepted version of its rows.
-func (checklistItemsTable) History() *jazz.Query[jazz.Version[ChecklistItem]] {
+func (checklistItemsTable) History() *jazz.Query[jazz.HistoryRow[ChecklistItem]] {
 	return jazz.History(jazz.NewQuery[ChecklistItem]("checklistItems"))
 }
 
@@ -444,7 +444,7 @@ func (commentsTable) Restore(ctx context.Context, db jazz.Querier, id string) (C
 }
 
 // History starts a query of `comments`'s history: every accepted version of its rows.
-func (commentsTable) History() *jazz.Query[jazz.Version[Comment]] {
+func (commentsTable) History() *jazz.Query[jazz.HistoryRow[Comment]] {
 	return jazz.History(jazz.NewQuery[Comment]("comments"))
 }
 
@@ -546,7 +546,7 @@ func (crewTable) Restore(ctx context.Context, db jazz.Querier, id string) (Crew,
 }
 
 // History starts a query of `crew`'s history: every accepted version of its rows.
-func (crewTable) History() *jazz.Query[jazz.Version[Crew]] {
+func (crewTable) History() *jazz.Query[jazz.HistoryRow[Crew]] {
 	return jazz.History(jazz.NewQuery[Crew]("crew"))
 }
 
@@ -666,7 +666,7 @@ func (showCrewTable) Restore(ctx context.Context, db jazz.Querier, id string) (S
 }
 
 // History starts a query of `showCrew`'s history: every accepted version of its rows.
-func (showCrewTable) History() *jazz.Query[jazz.Version[ShowCrew]] {
+func (showCrewTable) History() *jazz.Query[jazz.HistoryRow[ShowCrew]] {
 	return jazz.History(jazz.NewQuery[ShowCrew]("showCrew"))
 }
 
@@ -765,7 +765,7 @@ func (showInvitesTable) Restore(ctx context.Context, db jazz.Querier, id string)
 }
 
 // History starts a query of `showInvites`'s history: every accepted version of its rows.
-func (showInvitesTable) History() *jazz.Query[jazz.Version[ShowInvite]] {
+func (showInvitesTable) History() *jazz.Query[jazz.HistoryRow[ShowInvite]] {
 	return jazz.History(jazz.NewQuery[ShowInvite]("showInvites"))
 }
 
@@ -891,7 +891,7 @@ func (showsTable) Restore(ctx context.Context, db jazz.Querier, id string) (Show
 }
 
 // History starts a query of `shows`'s history: every accepted version of its rows.
-func (showsTable) History() *jazz.Query[jazz.Version[Show]] {
+func (showsTable) History() *jazz.Query[jazz.HistoryRow[Show]] {
 	return jazz.History(jazz.NewQuery[Show]("shows"))
 }
 
@@ -1029,7 +1029,7 @@ func (tasksTable) Restore(ctx context.Context, db jazz.Querier, id string) (Task
 }
 
 // History starts a query of `tasks`'s history: every accepted version of its rows.
-func (tasksTable) History() *jazz.Query[jazz.Version[Task]] {
+func (tasksTable) History() *jazz.Query[jazz.HistoryRow[Task]] {
 	return jazz.History(jazz.NewQuery[Task]("tasks"))
 }
 

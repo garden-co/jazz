@@ -898,7 +898,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "func ({ty}) History() *jazz.Query[jazz.Version[{row}]] {{\n\treturn jazz.History(jazz.NewQuery[{row}]({table_name}))\n}}\n"
+            "func ({ty}) History() *jazz.Query[jazz.HistoryRow[{row}]] {{\n\treturn jazz.History(jazz.NewQuery[{row}]({table_name}))\n}}\n"
         );
         for (method, doc, params, call) in [
             (

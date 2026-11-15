@@ -36,7 +36,7 @@ func TestGraphQueriesJSON(t *testing.T) {
 			t.Errorf("got  %s\nwant %s (%v)", got, c.want, err)
 		}
 	}
-	var v Version[incTask]
+	var v HistoryRow[incTask]
 	if err := json.Unmarshal([]byte(`{"id":"t","title":"T","rank":2,"$history":{"transactionId":"x","acceptedAt":5}}`), &v); err != nil || v.Row.Title != "T" || v.AcceptedAt != 5 || v.TransactionID != "x" {
 		t.Fatalf("%+v %v", v, err)
 	}

@@ -125,7 +125,7 @@ func (foldersTable) Restore(ctx context.Context, db jazz.Querier, id string) (Fo
 }
 
 // History starts a query of `folders`'s history: every accepted version of its rows.
-func (foldersTable) History() *jazz.Query[jazz.Version[Folder]] {
+func (foldersTable) History() *jazz.Query[jazz.HistoryRow[Folder]] {
 	return jazz.History(jazz.NewQuery[Folder]("folders"))
 }
 
@@ -230,7 +230,7 @@ func (notesTable) Restore(ctx context.Context, db jazz.Querier, id string) (Note
 }
 
 // History starts a query of `notes`'s history: every accepted version of its rows.
-func (notesTable) History() *jazz.Query[jazz.Version[Note]] {
+func (notesTable) History() *jazz.Query[jazz.HistoryRow[Note]] {
 	return jazz.History(jazz.NewQuery[Note]("notes"))
 }
 
