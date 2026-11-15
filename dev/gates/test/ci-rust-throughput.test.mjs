@@ -2058,6 +2058,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-storage-compat",
     "test-ts",
     "test-react-native",
+    "test-jazz-ffi-bindings",
     "test-kotlin",
   ])
     assert.equal(
@@ -2070,6 +2071,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     Object.keys(suite.jobs).sort(),
     [
       "lint",
+      "test-jazz-ffi-bindings",
       "test-kotlin",
       "test-react-native",
       "test-rust",

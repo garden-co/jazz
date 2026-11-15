@@ -46,6 +46,7 @@ export const ciPartitionJobs = Object.freeze({
   typescript: "test-ts",
   "react-native": "test-react-native",
   kotlin: "test-kotlin",
+  "jazz-ffi-bindings": "test-jazz-ffi-bindings",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -299,6 +300,13 @@ export const ciPartitions = Object.freeze({
       "--workspace",
       "--features",
       "jazz/durable-object-limits",
+    ]),
+  ]),
+  // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
+  // run against the library (needs a JDK and swiftc: the runner image).
+  "jazz-ffi-bindings": Object.freeze([
+    command("jazz-ffi Kotlin and Swift bindings", "bash", [
+      "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
   ]),
   // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI end to end

@@ -213,7 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings
-        run: bash dev/gates/jazz-ffi-compile-bindings.sh
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition jazz-ffi-bindings
 
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
