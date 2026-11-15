@@ -46,6 +46,10 @@ Invariant digest:
 - `INV-IX-5`: shadow tables store only built-in SQLite values in named,
   versioned encodings; a change to an encoding or analyzer is a new version
   and rebuilds the index, never a silent reinterpretation (20.2).
+- `INV-IX-7`: index maintenance is total: no value of an indexed column makes
+  draining fail. A value a kind cannot index (null, a zero vector under
+  `cosine`, a point out of range) leaves the row unindexed, so it never
+  matches; it never fails the write or a synced version (20.3).
 - `INV-IX-6`: a live query using an index updates exactly as the same query
   re-run would, rechecking only changed rows (20.8).
 
@@ -177,7 +181,10 @@ transaction commits, and before any statement that reads a shadow table.
 Draining a `rid` reads the row's current indexed values (a missing row means
 delete), computes its new shadow rows, and replaces the old ones. For text
 the old postings are diffed against the new so an edit touching one word
-writes one posting. Large values (19) are read as their logical value.
+writes one posting. Large values (19) are read as their logical value. Draining never fails
+because of a value (`INV-IX-7`): a write admitted under the table's own
+rules is always indexable, or else unindexed, so the same row can never be
+accepted by one node and wedge another's sync.
 
 Building an index (a new declaration, or a rebuilt one) enqueues every
 current row and drains in batches of bounded size, each its own transaction,
@@ -431,8 +438,8 @@ terms of both analyzers, byte for byte.
 ### 20.10.2 Vector
 
 `__vec.v` holds the column's `f32le/1` bytes; for `cosine`, each vector
-divided by its L2 norm in f64 and rounded to f32 (a zero vector is
-refused at admission for a `cosine` index). Scores:
+divided by its L2 norm in f64 and rounded to f32. A row whose vector is null,
+or zero under `cosine`, is not indexed and never matches. Scores:
 
 | metric   | score (smaller is better)          |
 | -------- | ---------------------------------- |
@@ -447,7 +454,7 @@ candidates but never change scores.
 ### 20.10.3 Geo
 
 A point is `(lat, lng)` from the declared columns, in degrees; a row with
-either null is not indexed. `x, y, z` is the point on the unit sphere.
+either null, non-finite or out of range is not indexed and never matches. `x, y, z` is the point on the unit sphere.
 Trigonometry is fdlibm's `sin`/`cos` kernels written out in basic IEEE-754
 binary64 operations, with exact argument reduction in degrees, never the
 platform's `sin`/`cos` (which may differ in the last bit between targets).
