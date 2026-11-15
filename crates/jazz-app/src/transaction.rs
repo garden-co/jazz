@@ -75,11 +75,15 @@ impl Transaction {
         self.read_back(id).await
     }
 
-    /// Brings back a deleted row with `update`'s columns replaced.
-    pub async fn restore_with<U: Update>(&self, id: ObjectId, update: U) -> Result<U::Row> {
-        let cells = update.into_cells(&self.implementations)?;
-        self.client
-            .restore(<U::Row as Table>::NAME, id, Some(cells))?;
+    /// Brings back a deleted row with `new`'s values, as
+    /// [`Jazz::restore_with`].
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        let cells = new.into_cells(&self.implementations)?;
+        self.client.restore(
+            <N::Row as Table>::NAME,
+            id,
+            Some(cells.into_iter().collect()),
+        )?;
         self.wrote.set(true);
         self.read_back(id).await
     }
