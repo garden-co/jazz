@@ -10,7 +10,7 @@ import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { JazzProvider, useAll, useJazzClient, type JazzClientConfig } from "jazz-tools/react";
 import { installInspectorHost, type AccountStore } from "jazz-tools";
-import { app } from "./schema.js";
+import { app } from "./app/jazz.generated.js";
 
 // Mirrors tests/browser/test-constants.ts (inlined: that module reads process.env).
 const APP_ID = "00000000-0000-0000-0000-000000000099";

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "messages": {
+      "columns": { "roomId": "uuid", "text": "string" },
+      "indexes": [["roomId", "$createdAt"], ["roomId", "$updatedAt"]]
+    }
+  }
+}

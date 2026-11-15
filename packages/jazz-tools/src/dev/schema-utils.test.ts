@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ColumnDescriptor, ColumnType, WasmSchema } from "../drivers/types.js";
 
-import { schema as s } from "../index.js";
-import { structuralSchemaHash, wasmSchemasEqual } from "./schema-utils.js";
+import { compileTestApp, testApp } from "../testing/index.js";
+import { wasmSchemasEqual } from "./schema-utils.js";
 
 function schemaWithColumnType(columnType: ColumnType, nullable = false): WasmSchema {
   return {
@@ -43,30 +43,7 @@ type StructuralHashFixture = {
   }>;
 };
 
-const portableColumnTypeTags = [
-  "Integer",
-  "BigInt",
-  "Double",
-  "Boolean",
-  "Text",
-  "Json",
-  "Enum",
-  "EnumPayload",
-  "Timestamp",
-  "Uuid",
-  "Bytea",
-  "Array",
-  "Row",
-] as const;
-
-type Assert<T extends true> = T;
-type IsEqual<Left, Right> =
-  (<T>() => T extends Left ? 1 : 2) extends <T>() => T extends Right ? 1 : 2 ? true : false;
-type PortableColumnTypeTagsAreExhaustive = Assert<
-  IsEqual<(typeof portableColumnTypeTags)[number], ColumnType["type"]>
->;
-
-describe("structuralSchemaHash", () => {
+describe("wasmSchemasEqual", () => {
   const structuralHashFixture = JSON.parse(
     readFileSync(
       new URL("../testing/fixtures/structural-schema-hashes.json", import.meta.url),
@@ -74,73 +51,31 @@ describe("structuralSchemaHash", () => {
     ),
   ) as StructuralHashFixture;
 
-  it("matches Rust for every portable column type and representative nested shape", () => {
-    expect(structuralHashFixture.schemaLayoutVersion).toBe(11);
-    expect(
-      new Set(structuralHashFixture.columnTypeCases.map((entry) => entry.columnType.type)),
-    ).toEqual(new Set(portableColumnTypeTags));
-
-    const hashes = structuralHashFixture.columnTypeCases.map(
-      ({ name, columnType, nullable, hash }) => {
-        const actual = structuralSchemaHash(schemaWithColumnType(columnType, nullable));
-        expect(actual, name).toBe(hash);
-        return actual;
-      },
-    );
-
-    expect(new Set(hashes).size).toBe(hashes.length);
-  });
-
-  it("matches Rust for composite indexes, including its UTF-8 index order", () => {
-    expect(structuralHashFixture.compositeIndexCases.length).toBeGreaterThanOrEqual(5);
-    for (const entry of structuralHashFixture.compositeIndexCases) {
-      const schema: WasmSchema = {
-        values: {
-          columns: entry.columns.map((name) => ({
-            name,
-            column_type: { type: "Text" },
-            nullable: false,
-          })),
-          composite_indexes: entry.compositeIndexes,
-        },
-      };
-      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
-    }
-  });
-
-  it("matches Rust for history retention, hashing full history as before", () => {
-    const hashes = new Map<string, string>();
-    for (const entry of structuralHashFixture.historyCases) {
-      const schema = schemaWithColumnType({ type: "Text" });
-      if (entry.history) schema.values!.history = entry.history;
-      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
-      hashes.set(entry.name, entry.hash);
-    }
-    expect(hashes.get("full")).toBe(structuralSchemaHash(schemaWithColumnType({ type: "Text" })));
-    expect(hashes.get("latest")).not.toBe(hashes.get("full"));
-
+  it("tells latest-only history apart from full history", () => {
     const latest = schemaWithColumnType({ type: "Text" });
     latest.values!.history = "latest";
     expect(wasmSchemasEqual(latest, schemaWithColumnType({ type: "Text" }))).toBe(false);
   });
 
   it("carries a table's latest-only retention into the wasm schema through other modifiers", () => {
-    const presence = s
-      .table({ session: s.string(), cursor: s.json() }, {})
-      .history("latest")
-      .indexOnly(["session"]);
-    const app = s.defineApp(
-      { presence, notes: s.table({ body: s.string() }, {}) },
-      { migrations: "none" },
-    );
+    const app = testApp({
+      tables: {
+        presence: {
+          columns: { session: "string", cursor: { json: true } },
+          indexes: ["session"],
+          history: "latest",
+        },
+        notes: { columns: { body: "string" } },
+      },
+    });
     expect(app.wasmSchema.presence!.history).toBe("latest");
     expect(app.wasmSchema.notes!.history).toBeUndefined();
-    expect(() => s.table({ body: s.string() }, {}).history("30d" as unknown as "latest")).toThrow(
-      /supports only "latest"/,
-    );
+    expect(() =>
+      compileTestApp({ tables: { notes: { columns: { body: "string" }, history: "30d" } } }),
+    ).toThrow(/the only history option is "latest"/);
   });
 
-  it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
+  it("compares Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
     expect(structuralHashFixture.defaultCases.length).toBeGreaterThanOrEqual(22);
     for (const entry of structuralHashFixture.defaultCases) {
       // This corpus intentionally consumes Rust's human-JSON carriers, including
@@ -159,7 +94,6 @@ describe("structuralSchemaHash", () => {
           ...(entry.branchBy === undefined ? {} : { branchBy: entry.branchBy }),
         },
       };
-      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
       expect(wasmSchemasEqual(schema, structuredClone(schema)), entry.name).toBe(true);
       if (entry.default !== undefined) {
         const missing = structuredClone(schema);
@@ -175,21 +109,17 @@ describe("structuralSchemaHash", () => {
       }
     }
   });
-
-  it("keeps the portable type-tag list exhaustive at compile time", () => {
-    const _exhaustive: PortableColumnTypeTagsAreExhaustive = true;
-    expect(_exhaustive).toBe(true);
-  });
 });
+
+/** The wasm schema of an app with one table `records` holding one column `value` (JSON text). */
+function recordsSchema(column: string): WasmSchema {
+  return testApp(`{ "format": 1, "tables": { "records": { "columns": { "value": ${column} } } } }`)
+    .wasmSchema;
+}
 
 describe("canonical witness default equality", () => {
   it("normalizes exact human-JSON bigint defaults and rejects invalid carriers", () => {
-    const schema = s.defineApp(
-      {
-        records: s.table({ value: s.bigint().default(9223372036854775807n) }, {}),
-      },
-      { migrations: "none" },
-    ).wasmSchema;
+    const schema = recordsSchema('{ "type": "bigint", "default": "9223372036854775807" }');
     const serialized = JSON.parse(
       JSON.stringify(schema, (_, value) => (typeof value === "bigint" ? value.toString() : value)),
     );
@@ -210,41 +140,46 @@ describe("canonical witness default equality", () => {
   });
 
   it("distinguishes missing and altered defaults for every supported column value", () => {
+    // Columns as jazz.app.json text: `-0` must reach the loader as written.
     const pairs = [
-      [s.string().default("before"), s.string().default("after")],
-      [s.boolean().default(false), s.boolean().default(true)],
-      [s.int().default(0), s.int().default(1)],
-      [s.bigint().default(9007199254740992n), s.bigint().default(9007199254740993n)],
-      [s.float().default(-0), s.float().default(0)],
-      [s.timestamp().default(1), s.timestamp().default(2)],
+      ['{ "type": "string", "default": "before" }', '{ "type": "string", "default": "after" }'],
+      ['{ "type": "boolean", "default": false }', '{ "type": "boolean", "default": true }'],
+      ['{ "type": "int", "default": 0 }', '{ "type": "int", "default": 1 }'],
       [
-        s.uuid().default("11111111-1111-4111-8111-111111111111"),
-        s.uuid().default("22222222-2222-4222-8222-222222222222"),
+        '{ "type": "bigint", "default": "9007199254740992" }',
+        '{ "type": "bigint", "default": "9007199254740993" }',
       ],
-      [s.bytes().default(new Uint8Array([0, 255])), s.bytes().default(new Uint8Array([0, 254]))],
-      [s.json().default({ a: 1 }), s.json().default({ a: 2 })],
-      [s.enum("a", "b").default("a"), s.enum("a", "b").default("b")],
-      [s.array(s.array(s.bigint())).default([[1n]]), s.array(s.array(s.bigint())).default([[2n]])],
-      [s.string().optional().default(null), s.string().optional().default("value")],
+      ['{ "type": "float", "default": -0 }', '{ "type": "float", "default": 0 }'],
+      ['{ "type": "timestamp", "default": 1 }', '{ "type": "timestamp", "default": 2 }'],
       [
-        s.enum({ active: { count: s.int() } }).default({ type: "active", count: 1 }),
-        s.enum({ active: { count: s.int() } }).default({ type: "active", count: 2 }),
+        '{ "type": "uuid", "default": "11111111-1111-4111-8111-111111111111" }',
+        '{ "type": "uuid", "default": "22222222-2222-4222-8222-222222222222" }',
+      ],
+      // base64 of [0, 255] and [0, 254]
+      ['{ "type": "bytes", "default": "AP8=" }', '{ "type": "bytes", "default": "AP4=" }'],
+      ['{ "json": true, "default": { "a": 1 } }', '{ "json": true, "default": { "a": 2 } }'],
+      ['{ "enum": ["a", "b"], "default": "a" }', '{ "enum": ["a", "b"], "default": "b" }'],
+      [
+        '{ "array": { "array": "bigint" }, "default": [["1"]] }',
+        '{ "array": { "array": "bigint" }, "default": [["2"]] }',
+      ],
+      [
+        '{ "type": "string", "optional": true, "default": null }',
+        '{ "type": "string", "optional": true, "default": "value" }',
+      ],
+      [
+        '{ "enum": { "active": { "count": "int" } }, "default": { "active": { "count": 1 } } }',
+        '{ "enum": { "active": { "count": "int" } }, "default": { "active": { "count": 2 } } }',
       ],
     ] as const;
     for (const [before, after] of pairs) {
-      const left = s.defineApp(
-        { records: s.table({ value: before }, {}) },
-        { migrations: "none" },
-      ).wasmSchema;
-      const right = s.defineApp(
-        { records: s.table({ value: after }, {}) },
-        { migrations: "none" },
-      ).wasmSchema;
-      expect(wasmSchemasEqual(left, right)).toBe(false);
-      expect(wasmSchemasEqual(left, structuredClone(left))).toBe(true);
+      const left = recordsSchema(before);
+      const right = recordsSchema(after);
+      expect(wasmSchemasEqual(left, right), before).toBe(false);
+      expect(wasmSchemasEqual(left, structuredClone(left)), before).toBe(true);
       const missing = structuredClone(left);
-      delete missing.records.columns[0]!.default;
-      expect(wasmSchemasEqual(left, missing)).toBe(false);
+      delete missing.records!.columns[0]!.default;
+      expect(wasmSchemasEqual(left, missing), before).toBe(false);
     }
   });
 });

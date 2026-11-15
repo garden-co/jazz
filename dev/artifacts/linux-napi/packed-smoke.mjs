@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
-import { schema as s } from "jazz-tools";
+import { bindApp } from "jazz-tools";
 import * as backend from "jazz-tools/backend";
 import * as esm from "jazz-napi";
 const require = createRequire(import.meta.url);
@@ -21,11 +21,18 @@ assert.equal(direct.nativeArtifactFingerprint(), cjs.nativeArtifactFingerprint()
 const { createJazzContext } = await import(
   pathToFileURL(join(require.resolve("jazz-tools/backend"), "..", "create-jazz-context.js"))
 );
-const app = s.defineApp({ entries: s.table({ text: s.string() }, {}) }, { migrations: "none" });
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.entries.allowRead.always();
-  policy.entries.allowInsert.always();
-});
+// The app as its jazz.generated.ts would bind it, compiled by the packed
+// jazz-napi, and its permissions as the packed Rust loader compiles them.
+const bound = JSON.parse(
+  cjs.compileApp(
+    JSON.stringify({ format: 1, tables: { entries: { columns: { text: "string" } } } }),
+  ),
+);
+const app = bindApp(bound);
+const permissions = cjs.loadBackendApp(
+  JSON.stringify({ schema: bound.schema, relations: bound.relations }),
+  JSON.stringify({ format: 1, tables: { entries: { read: "true", insert: "true" } } }),
+).permissions;
 const directory = await mkdtemp(join(tmpdir(), "jazz-packed-native-"));
 const appId = randomUUID();
 let context;

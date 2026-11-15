@@ -1,4 +1,4 @@
-import type { ShippingMethod } from "@/schema";
+import type { CartShippingMethod as ShippingMethod } from "@/jazz.generated";
 
 /** Shared by the checkout UI (estimates) and the backend (the charged total). */
 export const SHIPPING: Record<

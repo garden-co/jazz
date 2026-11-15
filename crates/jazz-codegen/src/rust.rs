@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The version of the bindings' shape this generator writes: the second
 /// line records it.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
@@ -335,8 +335,14 @@ impl<'a> Writer<'a> {
         out.push_str("}\n\n");
 
         // New rows.
-        let defaultable = fields.iter().all(|field| field.insert_has_default());
-        let _ = writeln!(out, "/// A new row of `{}`.", table.name);
+        // `Default` only when every column may be left out: a required
+        // column is never filled in silently. `new` takes the required ones.
+        let defaultable = fields.iter().all(Field::optional_on_insert);
+        let _ = writeln!(
+            out,
+            "/// A new row of `{}`: [`{new}::new`] takes the columns it requires.",
+            table.name
+        );
         let _ = writeln!(
             out,
             "#[derive(Debug, Clone, PartialEq{})]",
@@ -351,6 +357,36 @@ impl<'a> Writer<'a> {
             let _ = writeln!(out, "    pub {}: {},", field.ident, field.insert_type());
         }
         out.push_str("}\n\n");
+        let required: Vec<&Field> = fields.iter().filter(|f| !f.optional_on_insert()).collect();
+        let _ = writeln!(out, "impl {new} {{");
+        // Positional, so the doc names them: several bools read poorly.
+        let names = if required.is_empty() {
+            "none".to_owned()
+        } else {
+            required
+                .iter()
+                .map(|f| format!("`{}`", f.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let _ = writeln!(
+            out,
+            "    /// A new row with the columns it requires, in this order: {names}. The others\n    /// are left out; set them with `{new} {{ column: …, ..{new}::new(…) }}`."
+        );
+        let params = required
+            .iter()
+            .map(|f| format!("{}: impl ::std::convert::Into<{}>", f.ident, f.view))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "    pub fn new({params}) -> Self {{\n        Self {{");
+        for field in &fields {
+            if field.optional_on_insert() {
+                let _ = writeln!(out, "            {}: {NONE},", field.ident);
+            } else {
+                let _ = writeln!(out, "            {0}: {0}.into(),", field.ident);
+            }
+        }
+        out.push_str("        }\n    }\n}\n\n");
 
         // Updates.
         let _ = writeln!(
@@ -488,15 +524,26 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(out, "pub mod {module} {{");
         out.push_str("    #[allow(unused_imports)]\n    use super::*;\n\n");
-        let mut fns = BTreeSet::from(["query".to_owned()]);
+        let mut fns = BTreeSet::from(["query".to_owned(), "id".to_owned()]);
         let _ = writeln!(
             out,
             "    /// Every row of `{}`; narrow it with `filter`.\n    pub fn query() -> {RT}::Query<{row}> {{\n        {RT}::Query::all()\n    }}",
             table.name
         );
+        let _ = writeln!(
+            out,
+            "\n    /// The row's id. (`{RT}::created_at()` and `updated_at()` are columns of every table too.)\n    pub fn id() -> {RT}::Column<{row}, {RT}::ObjectId> {{\n        {RT}::id()\n    }}"
+        );
         for field in &fields {
-            if !fns.insert(field.ident.clone()) {
-                return Err(clash(table, &field.name, &field.ident));
+            // A column named as the module's own `query` or `id` gets
+            // `_column` after it.
+            let ident = if fns.contains(&field.ident) {
+                format!("{}_column", field.ident.trim_start_matches("r#"))
+            } else {
+                field.ident.clone()
+            };
+            if !fns.insert(ident.clone()) {
+                return Err(clash(table, &field.name, &ident));
             }
             let note = if field.transform.is_some() {
                 " Compared as stored, before its transform."
@@ -505,8 +552,8 @@ impl<'a> Writer<'a> {
             };
             let _ = writeln!(
                 out,
-                "\n    /// Column `{}`.{note}\n    pub fn {}() -> {RT}::Column<{row}, {}> {{\n        {RT}::Column::new({:?})\n    }}",
-                field.name, field.ident, field.stored, field.name
+                "\n    /// Column `{}`.{note}\n    pub fn {ident}() -> {RT}::Column<{row}, {}> {{\n        {RT}::Column::new({:?})\n    }}",
+                field.name, field.stored, field.name
             );
         }
         for relation in &table.relations {
@@ -750,8 +797,9 @@ impl Field {
         }
     }
 
-    fn insert_has_default(&self) -> bool {
-        self.has_default() || self.nullable || type_has_default(&self.view)
+    /// An insert may leave it out: it is nullable or has a default.
+    fn optional_on_insert(&self) -> bool {
+        self.has_default() || self.nullable
     }
 
     fn doc(&self, out: &mut String) {
@@ -771,13 +819,6 @@ impl Field {
         };
         format!("{RT}::ColumnValue::into_value({converted})")
     }
-}
-
-fn type_has_default(ty: &str) -> bool {
-    ty.starts_with(OPTION)
-        || ty.starts_with(VEC)
-        || ty == STRING
-        || matches!(ty, "i32" | "i64" | "bool" | "f64")
 }
 
 fn computed_fn(table: &Table, computed: &Computed) -> Result<String, CodegenError> {
@@ -823,12 +864,14 @@ pub fn is_app_manifest(manifest: &str) -> bool {
         if let Some(header) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             section = header.trim().trim_matches(['[', ']']).trim().to_owned();
             package |= section == "package";
-            // `[dependencies.jazz-app]`, `[target.'…'.dev-dependencies.jazz-app]`
-            depends |= section.ends_with("dependencies.jazz-app")
-                || section.ends_with("dependencies.\"jazz-app\"");
+            // `[dependencies.jazz-app]`, `[target.'…'.dependencies.jazz-app]`
+            depends |= section
+                .strip_suffix(".jazz-app")
+                .or_else(|| section.strip_suffix(".\"jazz-app\""))
+                .is_some_and(is_runtime_dependencies);
             continue;
         }
-        if section.ends_with("dependencies") {
+        if is_runtime_dependencies(&section) {
             let key = line
                 .split(['=', '.'])
                 .next()
@@ -839,6 +882,15 @@ pub fn is_app_manifest(manifest: &str) -> bool {
         }
     }
     package && depends
+}
+
+/// `[dependencies]` or `[target.'…'.dependencies]`: what the crate's code
+/// links. A workspace's `[workspace.dependencies]` only declares versions
+/// for its members; dev- and build-dependencies don't make the crate use
+/// the app.
+fn is_runtime_dependencies(section: &str) -> bool {
+    section == "dependencies"
+        || (section.starts_with("target.") && section.ends_with(".dependencies"))
 }
 
 // ---- reading back ------------------------------------------------------------
@@ -1001,6 +1053,21 @@ mod tests {
         assert!(!is_app_manifest(
             "[package]\nname = \"x\"\n[dependencies]\njazz-application = \"1\"\n"
         ));
+        assert!(is_app_manifest(
+            "[package]\nname = \"x\"\n[target.'cfg(unix)'.dependencies]\njazz-app = \"1\"\n"
+        ));
+        // A root that is also a package only declares it for its members;
+        // dev- and build-dependencies don't count.
+        for section in [
+            "workspace.dependencies",
+            "dev-dependencies",
+            "build-dependencies",
+        ] {
+            let manifest = format!("[package]\nname = \"x\"\n[{section}]\njazz-app = \"1\"\n");
+            assert!(!is_app_manifest(&manifest), "{section}");
+            let table = format!("[package]\nname = \"x\"\n[{section}.jazz-app]\nversion = \"1\"\n");
+            assert!(!is_app_manifest(&table), "{section}.jazz-app");
+        }
     }
 
     #[test]

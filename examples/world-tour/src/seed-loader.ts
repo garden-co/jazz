@@ -1,5 +1,5 @@
 import type { Db, TransactionScope } from "jazz-tools";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { buildTourFixture, DEFAULT_SEED } from "./fixture.js";
 
 /**

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { useToast } from "@astryxdesign/core";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";

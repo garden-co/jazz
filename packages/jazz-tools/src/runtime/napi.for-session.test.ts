@@ -5,34 +5,37 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { schema as s } from "jazz-tools";
 import { deploy } from "../dev/catalogue.js";
-import { startLocalJazzServer } from "../testing/index.js";
+import { startLocalJazzServer, testApp, testPermissions } from "../testing/index.js";
 
 // ---------------------------------------------------------------------------
 // Inline schema + permissions
 // ---------------------------------------------------------------------------
-const todoApp = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-        description: s.string().optional(),
-        owner_id: s.uuid(),
+const todoApp = testApp({
+  tables: {
+    todos: {
+      columns: {
+        title: "string",
+        done: "boolean",
+        description: "string?",
+        owner_id: "uuid",
       },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
-
-const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.where({ owner_id: session.user });
-  policy.todos.allowUpdate.where({ owner_id: session.user });
-  policy.todos.allowDelete.where({ owner_id: session.user });
 });
+
+const todoAppPermissionsFile = {
+  format: 1,
+  tables: {
+    todos: {
+      read: "owner_id = session.user",
+      insert: "owner_id = session.user",
+      update: "owner_id = session.user",
+      delete: "owner_id = session.user",
+    },
+  },
+};
+const todoAppPermissions = testPermissions(todoApp, todoAppPermissionsFile);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,8 +108,8 @@ async function createTestContext(
     appId,
     serverUrl: server.url,
     adminSecret,
-    schema: todoApp,
-    permissions: todoAppPermissions,
+    app: todoApp,
+    permissions: todoAppPermissionsFile,
   });
 
   const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-concurrent-request-"));
@@ -166,80 +169,6 @@ async function createConcurrentTestEnv() {
 // ---------------------------------------------------------------------------
 
 describe("forSession auth and policy", () => {
-  it("uses request-visible transform dependencies and rejects uncertain upsert absence", async () => {
-    const appId = randomUUID();
-    const backendSecret = "dependent-transform-backend";
-    const adminSecret = "dependent-transform-admin";
-    const app = s.defineApp(
-      {
-        products: s.table(
-          {
-            owner_id: s.uuid(),
-            unit: s.string().default("cents"),
-            price: s.float().transform({
-              dependsOn: ["unit"],
-              from: (value, context: Readonly<{ unit: string }>) =>
-                context.unit === "cents" ? value / 100 : value,
-              to: (value: number, context: Readonly<{ unit: string }>) =>
-                context.unit === "cents" ? value * 100 : value,
-            }),
-          },
-          {},
-        ),
-      },
-      { migrations: "none" },
-    );
-    const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.products.allowRead.where({ owner_id: session.user });
-      policy.products.allowInsert.where({});
-      policy.products.allowUpdate.where({});
-    });
-    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
-    onTestFinished(() => server.stop());
-    const { bundle } = await deploy({
-      appId,
-      serverUrl: server.url,
-      adminSecret,
-      schema: app,
-      permissions,
-    });
-    const { createJazzContext } = await import("../backend/create-jazz-context.js");
-    const context = createJazzContext({
-      bundle,
-      appId,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      serverUrl: server.url,
-      backendSecret,
-      env: "test",
-    });
-    onTestFinished(() => context.shutdown());
-    const alice = await createAppUser("alice", server, appId);
-    const bob = await createAppUser("bob", server, appId);
-    const backend = context.asBackend();
-    const hidden = await backend
-      .insert(app.products, { owner_id: bob.user, unit: "dollars", price: 1 })
-      .wait({ tier: "global" });
-    const visible = await backend
-      .insert(app.products, { owner_id: alice.user, unit: "dollars", price: 1 })
-      .wait({ tier: "global" });
-    const scoped = context.forSession(sessionOf(alice));
-    await expect(scoped.one(app.products.where({ id: hidden.id }))).resolves.toBeNull();
-    await expect(
-      scoped.upsert(app.products, hidden.id, { price: 2 }).wait({ tier: "local" }),
-    ).rejects.toThrow(/cannot establish|unavailable/);
-    await scoped.update(app.products, visible.id, { price: 2 }).wait({ tier: "global" });
-    await expect(backend.one(app.products.where({ id: hidden.id }))).resolves.toMatchObject({
-      price: 1,
-      unit: "dollars",
-    });
-    await expect(backend.one(app.products.where({ id: visible.id }))).resolves.toMatchObject({
-      price: 2,
-      unit: "dollars",
-    });
-  });
-
   /**
    * Alice inserts her own row; then tries to insert with a foreign owner_id.
    * Backend Db sees the row regardless of ownership.
@@ -842,29 +771,32 @@ it.each(["table", "relation"] as const)(
     const appId = randomUUID();
     const backendSecret = "request-scope-backend";
     const adminSecret = "request-scope-admin";
-    const app = s.defineApp(
-      {
-        rooms: s.table(
-          { title: s.string(), code: s.string() },
-          { linksViaRoom: s.reverse("links", "roomRelation") },
-        ),
-        links: s.table({ room: s.uuid() }, { roomRelation: s.rel("rooms", "room") }),
+    const app = testApp({
+      tables: {
+        links: {
+          columns: { room: "uuid" },
+          relations: { roomRelation: { rel: "rooms", column: "room" } },
+        },
+        rooms: {
+          columns: { title: "string", code: "string" },
+          relations: { linksViaRoom: { reverse: "links", relation: "roomRelation" } },
+        },
       },
-      { migrations: "none" },
-    );
-    const query = kind === "relation" ? app.links.hopTo("roomRelation") : app.rooms;
-    const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.rooms.allowRead.where({ code: session.claims["join_code"] });
-      policy.links.allowRead.where({});
     });
+    const query = kind === "relation" ? app.links.hopTo("roomRelation") : app.rooms;
+    const permissionsFile = {
+      format: 1,
+      tables: { links: { read: "true" }, rooms: { read: "code = session.claims.join_code" } },
+    };
+    const permissions = testPermissions(app, permissionsFile);
     const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
     onTestFinished(() => server.stop());
     const { bundle } = await deploy({
       appId,
       serverUrl: server.url,
       adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
     const { createJazzContext } = await import("../backend/create-jazz-context.js");
     const writer = createJazzContext({
@@ -1036,18 +968,17 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   const appId = randomUUID();
   const backendSecret = "shared-transport-backend";
   const adminSecret = "shared-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-  const permissions = s.definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.where({});
-  });
+  const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+  const permissionsFile = { format: 1, tables: { notes: { read: "true" } } };
+  const permissions = testPermissions(app, permissionsFile);
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
   const { bundle } = await deploy({
     appId,
     serverUrl: server.url,
     adminSecret,
-    schema: app,
-    permissions,
+    app,
+    permissions: permissionsFile,
   });
 
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
@@ -1101,18 +1032,17 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   const appId = randomUUID();
   const backendSecret = "shutdown-transport-backend";
   const adminSecret = "shutdown-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-  const permissions = s.definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.where({});
-  });
+  const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+  const permissionsFile = { format: 1, tables: { notes: { read: "true" } } };
+  const permissions = testPermissions(app, permissionsFile);
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
   const { bundle } = await deploy({
     appId,
     serverUrl: server.url,
     adminSecret,
-    schema: app,
-    permissions,
+    app,
+    permissions: permissionsFile,
   });
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({

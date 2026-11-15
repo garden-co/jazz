@@ -1,0 +1,21 @@
+{
+  "notes": {
+    "columns": [
+      {
+        "name": "title",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "body",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {}
+  }
+}

@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { useAll } from "jazz-tools/solid";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function ConditionalQueryExample() {
   const [filter, setFilter] = createSignal<string | null>(null);

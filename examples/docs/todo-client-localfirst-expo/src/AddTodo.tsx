@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { useDb, useSession } from "jazz-tools/react-native";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 
 export function AddTodo() {
   const db = useDb();

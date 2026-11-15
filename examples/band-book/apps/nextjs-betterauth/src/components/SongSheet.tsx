@@ -31,7 +31,7 @@ import {
   Toolbar,
   VStack,
 } from "@astryxdesign/core";
-import { app, type SheetComment, type SongSheet as SongSheetRow } from "@/schema";
+import { app, type SheetComment, type SongSheet as SongSheetRow } from "@/jazz.generated";
 import { editingPlugins, parseSheet, SHEET_TOOLS, toggleLink } from "@/src/lib/song-editor";
 import { useSheetPresence } from "./use-sheet-presence";
 import { memberName, useWorkspace } from "./workspace-context";

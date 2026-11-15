@@ -97,7 +97,7 @@
   <Tab value="Bun">
     ```ts title="server.ts"
     import { jazz } from "./jazz.server";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     Bun.serve({
       port: 3000,
@@ -128,7 +128,7 @@
     import { HttpRouter, HttpServerResponse } from "effect/http";
     import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
     import { jazz } from "./jazz.server";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     const listTodos = HttpRouter.add(
       "GET",

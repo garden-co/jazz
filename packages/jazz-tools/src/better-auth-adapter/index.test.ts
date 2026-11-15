@@ -10,10 +10,11 @@ import {
 } from "../testing/index.js";
 import {
   app as fixtureApp,
+  appFile as fixtureAppFile,
   permissions as fixturePermissions,
-  schema as fixtureSchema,
+  permissionsFile as fixturePermissionsFile,
   wasmSchema as wasmSchemaExample,
-} from "./fixtures/schema.js";
+} from "./fixtures/app.js";
 import { jazzAdapter } from "./index.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
@@ -75,9 +76,11 @@ async function appUserSession(
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
     it("denies client CRUD for every generated Better Auth table", () => {
-      expect(Object.keys(fixturePermissions).sort()).toEqual(Object.keys(fixtureSchema).sort());
+      expect(Object.keys(fixturePermissions).sort()).toEqual(
+        Object.keys(fixtureAppFile.tables).sort(),
+      );
 
-      for (const tableName of Object.keys(fixtureSchema)) {
+      for (const tableName of Object.keys(fixtureAppFile.tables)) {
         const tablePermissions = fixturePermissions[tableName]!;
 
         expect(tablePermissions.select?.using).toEqual({ type: "False" });
@@ -96,8 +99,8 @@ describe("jazzAdapter", () => {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schema: fixtureApp,
-      permissions: fixturePermissions,
+      app: fixtureApp,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -154,8 +157,8 @@ describe("jazzAdapter", () => {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schema: fixtureApp,
-      permissions: fixturePermissions,
+      app: fixtureApp,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -295,8 +298,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1085,7 +1088,7 @@ describe("jazzAdapter", () => {
       expect(changed).toBe(1);
     });
 
-    it("accepts app-like schema sources from root schema.ts modules", async () => {
+    it("accepts app-like schema sources", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
         db: () => context.asBackend(authSchema),
@@ -1114,7 +1117,8 @@ describe("jazzAdapter", () => {
       });
     });
 
-    it("creates root schema.ts output for Better Auth CLI generation", async () => {
+    it("creates jazz.app.json output for Better Auth CLI generation", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
       const generated = await (adapter as any).createSchema({
         tables: {
           user: {
@@ -1128,22 +1132,24 @@ describe("jazzAdapter", () => {
           },
         },
       });
+      const notes = String(log.mock.calls[0]?.[0]);
+      log.mockRestore();
 
       expect(generated).toMatchObject({
-        path: "./schema-better-auth/schema.ts",
+        path: "./jazz.app.json",
         overwrite: true,
       });
-      expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
-      expect(generated.code).toContain(
-        'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
+      const file = JSON.parse(generated.code);
+      expect(file).toMatchObject({
+        $schema: "https://jazz.tools/schemas/jazz.app.schema.json",
+        format: 1,
+        tables: { better_auth_user: { columns: { name: "string" } } },
+      });
+      expect(Object.keys(file.tables).every((name) => name.startsWith("better_auth_"))).toBe(true);
+      // No policies: every client read and write of the table is denied.
+      expect(notes).toContain(
+        '"better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" }',
       );
-      expect(generated.code).toContain(
-        "export const permissions = s.definePermissions(app, ({ policy }) => {",
-      );
-      expect(generated.code).toContain("policy.better_auth_user.allowRead.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowInsert.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowUpdate.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowDelete.never();");
     });
   });
 
@@ -1164,8 +1170,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1534,8 +1540,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1670,8 +1676,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1737,8 +1743,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       const ctx1 = createJazzContext({
@@ -1814,8 +1820,8 @@ describe("jazzAdapter", () => {
           serverUrl: server.url,
           appId: server.appId,
           adminSecret: server.adminSecret,
-          schema: fixtureApp,
-          permissions: fixturePermissions,
+          app: fixtureApp,
+          permissions: fixturePermissionsFile,
         });
         const ctx1 = createJazzContext({
           appId: server.appId,

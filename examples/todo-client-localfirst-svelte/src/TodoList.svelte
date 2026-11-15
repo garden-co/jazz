@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getSession, QuerySubscription } from 'jazz-tools/svelte';
 	import { toast } from 'svelte-sonner';
-	import { app } from './lib/schema.js';
+	import { app } from './lib/jazz.generated.js';
 
 	// #region reading-reactive-svelte
 	const todos = new QuerySubscription(app.todos);

@@ -1,57 +1,27 @@
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
+import type { RowOf } from "../typed-app.js";
 import { type Db, type DbSubscriptionUpdate } from "./db.js";
 import { createDb } from "./default-create-db.js";
 
-const schema = {
-  notes: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
+const app = testApp({ tables: { notes: { columns: { title: "string", done: "boolean" } } } });
+type Note = RowOf<typeof app.notes>;
 
-type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
-type Note = s.RowOf<typeof app.notes>;
-
-const largeValueSchema = {
-  documents: s.table(
-    {
-      payload: s.bytes(),
-      body: s.string(),
-      metadata: s.json(),
-      done: s.boolean(),
+const largeValues = testApp({
+  tables: {
+    documents: {
+      columns: { payload: "bytes", body: "string", metadata: { json: true }, done: "boolean" },
     },
-    {},
-  ),
-};
-type LargeValueAppSchema = s.Schema<typeof largeValueSchema>;
-const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema, {
-  migrations: "none",
+  },
 });
 
-const textSchema = {
-  pages: s.table({ body: s.string().merge("markdown") }, {}),
-};
-type TextAppSchema = s.Schema<typeof textSchema>;
-const texts: s.App<TextAppSchema> = s.defineApp(textSchema, { migrations: "none" });
+const texts = testApp({
+  tables: { pages: { columns: { body: { type: "string", merge: "markdown" } } } },
+});
 
-const optionalJsonSchema = {
-  jobs: s.table(
-    {
-      title: s.string(),
-      meta: s.json().optional(),
-    },
-    {},
-  ),
-};
-type OptionalJsonAppSchema = s.Schema<typeof optionalJsonSchema>;
-const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema, {
-  migrations: "none",
+const optionalJson = testApp({
+  tables: { jobs: { columns: { title: "string", meta: { json: true, optional: true } } } },
 });
 
 describe("createDb in-memory driver", () => {
@@ -141,20 +111,21 @@ describe("createDb in-memory driver", () => {
   });
 
   it("refuses editedFrom it cannot honour", async () => {
-    const transformedSchema = {
-      pages: s.table(
-        {
-          body: s
-            .string()
-            .transform({ from: (value: string) => value, to: (value: string) => value })
-            .merge("markdown"),
+    const transformed = testApp(
+      {
+        tables: {
+          pages: {
+            columns: { body: { type: "string", merge: "markdown", transform: "identity" } },
+          },
         },
-        {},
-      ),
-    };
-    const transformed: s.App<s.Schema<typeof transformedSchema>> = s.defineApp(transformedSchema, {
-      migrations: "none",
-    });
+        transforms: { identity: { stored: "string", view: "string" } },
+      },
+      {
+        transforms: {
+          identity: { from: (value: string) => value, to: (value: string) => value },
+        },
+      },
+    );
     // A Db holds one schema: each app below gets its own.
     const open = async (name: string) => {
       await db?.shutdown();
@@ -692,14 +663,16 @@ describe("createDb in-memory driver", () => {
   });
 
   it("refuses splices on a range-selected column that a computed column makes it read whole", async () => {
-    const computedApp = s.defineApp(
+    const computedApp = testApp(
       {
-        documents: s.table(
-          { body: s.string() },
-          { preview: s.computed((row: { body: string }) => row.body.slice(0, 3)) },
-        ),
+        tables: {
+          documents: {
+            columns: { body: "string" },
+            computed: { preview: { type: "string", from: ["body"] } },
+          },
+        },
       },
-      { migrations: "none" },
+      { computed: { documents: { preview: (row: { body: string }) => row.body.slice(0, 3) } } },
     );
     db = await createDb({
       ...(await localAccountConfig("in-memory-splices-whole-read-test")),
@@ -726,13 +699,15 @@ describe("createDb in-memory driver", () => {
   });
 
   it("delivers splices for a hopped query's output rows", async () => {
-    const hopApp = s.defineApp(
-      {
-        documents: s.table({ body: s.string() }, {}),
-        links: s.table({ documentId: s.uuid() }, { document: s.rel("documents", "documentId") }),
+    const hopApp = testApp({
+      tables: {
+        documents: { columns: { body: "string" } },
+        links: {
+          columns: { documentId: "uuid" },
+          relations: { document: { rel: "documents", column: "documentId" } },
+        },
       },
-      { migrations: "none" },
-    );
+    });
     db = await createDb({
       ...(await localAccountConfig("in-memory-splices-hop-test")),
       driver: { type: "memory" },

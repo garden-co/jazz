@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WasmSchema } from "../../drivers/types.js";
-import { schema as s } from "../../index.js";
+import { testApp } from "../../testing/test-app.js";
 import { encodeSchema } from "./schema-codec.js";
 
 describe("branch-aware schema codec", () => {
@@ -17,22 +17,20 @@ describe("branch-aware schema codec", () => {
     expect(source).toEqual({ tables: schema });
   });
 
-  it("exposes branchBy through the typed schema DSL", () => {
-    const app = s.defineApp(
-      {
-        branches: s.table({ name: s.string() }, { todosViaBranch: s.reverse("todos", "branch") }),
-        todos: s
-          .table(
-            {
-              branch_id: s.uuid(),
-              title: s.string(),
-            },
-            { branch: s.rel("branches", "branch_id") },
-          )
-          .branchBy(["branch_id"]),
+  it("exposes branchBy through the app's bound schema", () => {
+    const app = testApp({
+      tables: {
+        branches: {
+          columns: { name: "string" },
+          relations: { todosViaBranch: { reverse: "todos", relation: "branch" } },
+        },
+        todos: {
+          columns: { branch_id: "uuid", title: "string" },
+          relations: { branch: { rel: "branches", column: "branch_id" } },
+          branchBy: ["branch_id"],
+        },
       },
-      { migrations: "none" },
-    );
+    });
 
     expect(app.wasmSchema.todos?.branchBy).toEqual(["branch_id"]);
   });

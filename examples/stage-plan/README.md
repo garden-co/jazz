@@ -47,7 +47,7 @@ to edit offline; the changes reach the other profile when you turn it back on.
 
 ## Who can do what
 
-Permissions live in [`permissions.ts`](apps/react-localfirst/permissions.ts)
+Permissions live in [`jazz.permissions.json`](apps/react-localfirst/jazz.permissions.json)
 and are enforced by the server.
 
 | Person                             | Show and board | Tasks                                 | Invite link and crew list                       |
