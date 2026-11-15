@@ -120,14 +120,7 @@ describe("migration references through table renames", () => {
     ]);
   });
 
-  // FILES-AS-SOURCE: the DSL's defineMigration refused this ("Column
-  // "notes.ownerId" must keep the same reference target in a migration unless
-  // adding a reference to an unchanged column.", src/migrations.ts), but
-  // Jazz's Rust loader doesn't compare reference targets across a migration:
-  // it compiles this file to a plain `people` rename lens. Skipped until the
-  // loader (or the deploy's lens checks) refuse a changed reference target.
-  // @jazz-ignore #5598: the loader does not refuse a changed reference target yet (jazz#5577)
-  it.skip("does not treat a different table as the renamed reference target", () => {
+  it("does not treat a different table as the renamed reference target", () => {
     expect(() =>
       forwardLens(
         {
@@ -145,6 +138,6 @@ describe("migration references through table renames", () => {
         },
         { renameTables: { people: "users" } },
       ),
-    ).toThrow(/same reference target/);
+    ).toThrow(/column notes\.ownerId moves its reference from users to teams, which is not supported/);
   });
 });

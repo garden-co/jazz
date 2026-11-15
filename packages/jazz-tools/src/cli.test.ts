@@ -204,7 +204,7 @@ describe("cli generate", () => {
     await writeAppFiles(root, migratedTodos("TODO: points needs the value existing rows get."));
 
     await expect(generate({ schemaDir: root })).rejects.toThrow(
-      "jazz.app.json: 1 unresolved TODO left by `jazz-tools migrations create`; replace each with the value it asks for, then run `jazz-tools generate` again:\n" +
+      "jazz.app.json: 1 unresolved TODO left by `jazz-tools migrations create` or `upgrade`; replace each with the value it asks for, then run `jazz-tools generate` again:\n" +
         "  migrations[0].migrate.todos.points.default: TODO: points needs the value existing rows get.",
     );
   });
