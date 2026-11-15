@@ -978,8 +978,22 @@ impl Binding {
         // An expired proof admits no one any more: drop those, so the map
         // holds only the accounts admitted within a proof's lifetime.
         admitted.retain(|_, admitted| admitted.expires_at > now);
-        admitted.insert(claimed_author.to_owned(), proof);
+        // A Db an earlier request opened may still write as this account:
+        // keep whichever proof admits it longer.
+        match admitted.get(claimed_author) {
+            Some(held) if held.expires_at >= proof.expires_at => {}
+            _ => {
+                admitted.insert(claimed_author.to_owned(), proof);
+            }
+        }
         Ok(())
+    }
+
+    /// How many local-first accounts this backend holds an unexpired-at-
+    /// admission proof for: only tests read it, to see the map stay bounded.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn admitted_local_first_accounts(&self) -> usize {
+        self.admitted.borrow().len()
     }
 
     /// The subject `bytes` (canonical author JSON) names: an ordinary

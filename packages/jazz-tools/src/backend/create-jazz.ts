@@ -777,9 +777,9 @@ export interface Jazz {
   forReqUser(request: Request): Promise<Db>;
   /**
    * The Jazz account of the request's signed-in user, or null when
-   * `authenticate` names no user or the user has no account yet. It never
-   * creates one (see {@link createAccountFor}). For API routes that act on
-   * the user's data with the backend's own `db`.
+   * `authenticate` names no user or the user has no account yet. For a
+   * user, it never creates one (see {@link createAccountFor}). For API
+   * routes that act on the user's data with the backend's own `db`.
    *
    * A device account's request (see {@link forReqUser}) answers null, as
    * anyone can make a device account, unless you pass

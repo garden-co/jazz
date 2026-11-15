@@ -1,11 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { defineShippedApp } from "../testing/client-migrations.js";
+import { startLocalJazzServer } from "../dev/dev-server.js";
 import { schema as s } from "../index.js";
-import { acceptDeviceAccounts, createJazz, createJazzClient, memory, type Jazz } from "./index.js";
+import {
+  acceptDeviceAccounts,
+  createJazz,
+  createJazzClient,
+  memory,
+  remote,
+  type Jazz,
+} from "./index.js";
 
 // `forReqUser`, `withAttribution` and `accountFor` on a plain HTTP request
 // from a device account (#5500): the request carries the account's
@@ -306,4 +315,72 @@ describe("forReqUser for a device account", () => {
       guestAccount,
     );
   });
+
+  it("reads only the core's identity_not_authorized refusal as a revoked key", async () => {
+    // A core whose account admission answers what the test says, as a
+    // misconfigured core (or a proxy in front of it) may.
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const answer: { status?: number; body?: string } = {};
+    const proxy = createServer((request, response) => {
+      if (request.url?.endsWith("/admin/accounts/found-local-first") && answer.status) {
+        response.statusCode = answer.status;
+        response.end(answer.body);
+        return;
+      }
+      const target = new URL(request.url ?? "/", core.url);
+      const upstream = httpRequest(
+        target,
+        { method: request.method, headers: { ...request.headers, host: target.host } },
+        (reply) => {
+          response.writeHead(reply.statusCode ?? 502, reply.headers);
+          reply.pipe(response);
+        },
+      );
+      request.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          proxy.closeAllConnections();
+          proxy.close(() => resolve());
+        }),
+    );
+    const url = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url, appId, secret: core.adminSecret }),
+      authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const token = signToken(generateSecret(), { audience: appId });
+    const request = () => route("http://app", bearer(token));
+    await expect(jazz.accountFor(request(), opt)).resolves.toEqual(expect.any(String));
+
+    // Another 403 is the server's problem, not the caller's key.
+    answer.status = 403;
+    answer.body = "Admin auth not configured";
+    for (const call of [
+      () => jazz.forReqUser(request()),
+      () => jazz.withAttribution(request(), opt),
+      () => jazz.accountFor(request(), opt),
+    ]) {
+      const error = await call().then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toMatchObject({ name: "RequestAuthenticationError" });
+      expect((error as Error).message).toMatch(/found-local-first failed \(403\)/);
+    }
+    // The core's own refusal of the identity is a revoked key.
+    answer.body = "identity_not_authorized";
+    await expect(jazz.forReqUser(request())).rejects.toMatchObject({
+      name: "RequestAuthenticationError",
+      code: "device_account_revoked",
+    });
+  }, 30_000);
 });
