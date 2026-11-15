@@ -8,7 +8,7 @@ use super::support::{
     has_any_change, has_removed, has_row, lacks_row, wait_for_global_txs, wait_for_query,
     wait_for_rows, wait_for_subscription_update,
 };
-use super::{assert_client_policy_denied, pe, permissions};
+use super::{pe, permissions};
 use jazz::tools::{ColumnDescriptor, RowDescriptor, Schema, TableName};
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
