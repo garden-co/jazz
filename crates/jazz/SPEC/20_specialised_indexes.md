@@ -169,10 +169,11 @@ error on the authority.
 
 ## 20.4 Queries and the wire
 
-The query AST gains one optional clause and one ordering key:
+A search is one new predicate, appended last to `Predicate` so every
+existing predicate keeps its encoding:
 
 ```rust
-pub struct Query { /* … */ pub search: Option<IndexSearch> }
+pub enum Predicate { /* … existing variants … */ Search(IndexSearch) }
 
 pub struct IndexSearch { pub index: String, pub op: IndexOp }
 
@@ -186,21 +187,27 @@ pub enum IndexOp {
     /// Rows inside a lat/lng rectangle (may cross the antimeridian).
     WithinBox { south: f64, west: f64, north: f64, east: f64 },
 }
-
-pub enum OrderBy { /* … */ Score }
 ```
 
-At most one `search` clause per query in this version; it combines by AND
-with `filters`, joins, includes and the read policy, and composes with
-`order_by`, `limit` and `offset` like any filter. `OrderBy::Score` orders by
-the clause's score (20.6), best first, and is valid only with a `search`
-clause; without an explicit `order_by`, a query with a `search` clause orders
-by `Score`. Ties are broken by `id`, as for every order.
+`Predicate::Search` is valid only as a top-level element of a query's
+`filters`, at most once per query, and never in a policy, a join, an include
+or under `Any`/`Not`. It combines by AND with the other filters, joins,
+includes and the read policy, and composes with `order_by`, `limit` and
+`offset` like any filter. The reserved order column `$score` (like
+`$createdAt`) orders by the search's score (20.6), best first, and is valid
+only with a search; without an explicit `order_by`, a query with a search
+orders by `$score`. Ties are broken by `id`, as for every order. `Query` and
+`OrderBy` keep their shapes.
 
-`Query` is carried in `SyncMessage`, so this is wire protocol version 7.
-`IndexSearch` and `IndexOp` are new Postcard types appended to the message
-descriptor table, with byte fixtures. A v6 peer cannot express them; a v7
-authority serves v6 peers unchanged.
+**Wire.** `Query` travels in `SyncMessage`, so a peer that does not know
+`Predicate::Search` cannot decode a query using it. Support is the wire
+feature `FEATURE_INDEX_SEARCH` (the next free `WireFeatures` bit), not a
+protocol version: the wire version stays 6 and queries without a search are
+byte-identical. A node sends a query with a search upstream only if the
+upstream offered the feature; otherwise that query is answered from the
+replica alone and, at `Remote` tier, refused with "the server does not
+support index search". The new types get byte fixtures in the message
+corpus.
 
 Validation refuses, with typed errors: an unknown index; an op not of the
 index's kind; an empty text after analysis; a vector of the wrong
@@ -408,6 +415,8 @@ All are typed, name the table and index, and carry no data about rows:
 - declaration errors (20.1);
 - query validation errors (20.4);
 - `IndexServerOnly` (20.9);
+- `IndexSearchUnsupportedUpstream`: a `Remote` search to an upstream without
+  `FEATURE_INDEX_SEARCH` (20.4);
 - `IndexBuilding` (retryable, authority only) (20.3);
 - `VectorSearchUnbounded`: unfiltered vector search on the authority (20.5);
 - `VectorCandidatesOverCap`: more than `VECTOR_EXACT_MAX` candidates (20.5).
@@ -436,4 +445,6 @@ All are typed, name the table and index, and carry no data about rows:
 - Hybrid search (several clauses fused by reciprocal rank), typo tolerance,
   trigram substring search (answering 19.5's large-value `contains`), and
   returning scores or highlights.
+- A typed `point` column (asked for in issue 3991) instead of two `f64`
+  columns for geo indexes.
 - Searching E2EE columns, which would need client-side encrypted indexes.
