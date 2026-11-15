@@ -16,6 +16,7 @@ members = [
   "crates/jazz-native-relay",
   "crates/jazz-app",
   "crates/jazz-cli",
+  "crates/jazz-codegen",
   "crates/jazz-server",
   "crates/jazz-testkit",
   "crates/jazz-otel",
@@ -64,6 +65,7 @@ jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false
 jazz-types = { path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-text = { path = "crates/jazz-text" }
+jazz-codegen = { path = "crates/jazz-codegen" }
 jazz-otel = { path = "crates/jazz-otel" }
 jazz-native-transport = { path = "crates/jazz-native-transport" }
 rustc-hash = "2.1.1"

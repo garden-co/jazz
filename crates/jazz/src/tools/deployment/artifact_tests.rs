@@ -93,6 +93,7 @@ fn todo_server() -> ArtifactInput {
                         reverse("todos", "projectRelation"),
                     )]),
                     ts_only: vec![],
+                    ..Default::default()
                 },
             ),
             (
@@ -104,10 +105,11 @@ fn todo_server() -> ArtifactInput {
                         ("projectRelation".into(), forward("projects", "project")),
                     ]),
                     ts_only: vec![],
+                    ..Default::default()
                 },
             ),
         ]),
-        slices: BTreeMap::new(),
+        ..Default::default()
     };
     ArtifactInput {
         current: SchemaHash::compute(&current).to_string(),
@@ -281,6 +283,7 @@ fn shared_todos() -> ArtifactInput {
                             column: "meta".into(),
                         },
                     ],
+                    ..Default::default()
                 },
             ),
             (
@@ -288,10 +291,11 @@ fn shared_todos() -> ArtifactInput {
                 CodegenTable {
                     relations: BTreeMap::from([("todo".into(), forward("todos", "todo"))]),
                     ts_only: vec![],
+                    ..Default::default()
                 },
             ),
         ]),
-        slices: BTreeMap::from([("sharing".into(), vec!["shares".into()])]),
+        ..Default::default()
     };
     ArtifactInput {
         current: h2.to_string(),

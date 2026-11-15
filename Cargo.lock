@@ -2003,6 +2003,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-codegen"
+version = "0.1.0"
+dependencies = [
+ "jazz",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jazz-compression"
 version = "0.1.0"
 dependencies = [
