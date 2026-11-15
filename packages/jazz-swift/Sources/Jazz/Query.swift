@@ -69,6 +69,8 @@ public struct Query<R: Row>: Sendable {
     }
 
     /// Only these columns (and `id`): decode them with `jazz.all(_:as:)`.
+    /// The values are as stored: a transformed column comes in its stored
+    /// form, and computed fields aren't there.
     public func select(_ columns: any AnyColumn<R>...) -> Selection<R> {
         Selection(query: self, columns: columns.map(\.name))
     }
