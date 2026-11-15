@@ -274,15 +274,22 @@ fn include_name(at: usize) -> String {
 #[derive(Debug, Clone)]
 pub struct Include<T, O> {
     subquery: ArraySubquery,
+    /// Why the include cannot run, when its query is not supported in one.
+    refused: Option<String>,
     types: PhantomData<fn() -> (T, O)>,
 }
 
 impl<T, O> Include<T, O> {
-    fn new(subquery: ArraySubquery) -> Self {
+    fn new((subquery, refused): (ArraySubquery, Option<String>)) -> Self {
         Self {
             subquery,
+            refused,
             types: PhantomData,
         }
+    }
+
+    pub(crate) fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
     }
 }
 
@@ -302,10 +309,28 @@ impl<T, O: Included> IntoInclude<T> for Include<T, O> {
     }
 }
 
-/// The child query of an include, as the core runs it. A typed query
-/// only filters, orders, limits, selects and includes, as a child can.
-fn subquery<S: Row>(query: Query<S>, inner_column: &str, outer_column: &str) -> ArraySubquery {
-    let query = query.into_untyped();
+/// The child query of an include, as the core runs it, and why it cannot
+/// run, if it cannot: a child filters, orders, limits, selects and
+/// includes, but does not hop, gather, union or read deleted rows, as in
+/// TypeScript.
+fn subquery<S: Row>(
+    query: Query<S>,
+    inner_column: &str,
+    outer_column: &str,
+) -> (ArraySubquery, Option<String>) {
+    let refused = query.refused.clone().or_else(|| {
+        if query.source.is_some() {
+            Some(
+                "include(...) of a hop_to(...), gather(...) or union(...) query is not supported"
+                    .into(),
+            )
+        } else if query.include_deleted {
+            Some("include_deleted() in an include(...) is not supported yet".into())
+        } else {
+            None
+        }
+    });
+    let query = query.query;
     let mut subquery = ArraySubquery::new(
         String::new(),
         <S::Table as Table>::NAME,
@@ -325,7 +350,7 @@ fn subquery<S: Row>(query: Query<S>, inner_column: &str, outer_column: &str) -> 
     subquery.limit = query.limit;
     subquery.offset = query.offset;
     subquery.nested_arrays = query.array_subqueries;
-    subquery
+    (subquery, refused)
 }
 
 impl<T: Table, U: Table, N: Nullability> One<T, U, N> {
@@ -379,7 +404,7 @@ impl Nullability for Nullable {
 /// A forward relation's include: an `Option<S>`, unless required.
 #[derive(Debug, Clone)]
 pub struct OneInclude<T, S, N = NotNull> {
-    subquery: ArraySubquery,
+    subquery: (ArraySubquery, Option<String>),
     types: PhantomData<fn() -> (T, S)>,
     nullability: PhantomData<N>,
 }
@@ -390,10 +415,14 @@ impl<T, S: Row, N: Nullability> OneInclude<T, S, N> {
     /// referenced row is there (and readable) are kept. On a [`Nullable`]
     /// one it stays an `Option<S>` and every row is kept.
     pub fn require(self) -> Include<T, N::Required<S>> {
-        Include::new(ArraySubquery {
-            requirement: N::REQUIREMENT,
-            ..self.subquery
-        })
+        let (subquery, refused) = self.subquery;
+        Include::new((
+            ArraySubquery {
+                requirement: N::REQUIREMENT,
+                ..subquery
+            },
+            refused,
+        ))
     }
 }
 

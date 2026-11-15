@@ -17,9 +17,13 @@
 //! row: `(Todo, Option<Project>)`), and `select` reads only some columns
 //! (a [`Partial`] row); see [`Query::include`] and [`Query::select`].
 //!
+//! [`Query::hop_to`] reads the rows a relation reaches, [`Query::gather`]
+//! rows recursively and [`Query::union`] several queries' rows; a table's
+//! `history()` reads its rows' accepted versions ([`Version`]) and
+//! [`Query::include_deleted`] reads deleted rows too.
+//!
 //! Not supported yet: connecting to a sync server as an end user (with a
-//! JWT), reads inside transactions, and these query forms the TypeScript
-//! client has: `hopTo`, `gather`, `union`, history (`$history`) and partial
+//! JWT), reads inside transactions, subscribing to history, and partial
 //! reads of large values.
 
 mod app;
@@ -27,8 +31,10 @@ mod backend;
 mod config;
 mod error;
 mod handle;
+mod history;
 mod include;
 mod query;
+mod relation;
 mod subscription;
 mod table;
 mod value;
@@ -37,16 +43,19 @@ pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
 pub use error::{Error, Result};
 pub use handle::{Jazz, Transaction};
+pub use history::Version;
 pub use include::{Include, IntoInclude, Nullability, OneInclude, Partial, Row, Selection, With};
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, created_at, id, updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, created_at, deleted_at, id,
+    updated_at,
 };
+pub use relation::{Hop, Step};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, ObjectId, ReadTier};
+pub use jazz::tools::{AppId, ObjectId, ReadTier, TransactionId};
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].
 #[doc(hidden)]

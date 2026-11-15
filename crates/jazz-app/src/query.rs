@@ -6,25 +6,84 @@ use jazz::query::{self as q, OrderDirection, Predicate};
 use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
 
+use crate::error::{Error, Result};
 use crate::include::{IntoInclude, Partial, Row, Selection, With};
+use crate::relation::{self, Source};
 use crate::table::Table;
 use crate::value::{ColumnValue, Timestamp};
 
 /// A query of rows of a table, yielding `T`s: the table's rows, or
 /// [`Partial`] rows of it, with the rows it includes after them.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Query<T> {
-    query: q::Query,
+    pub(crate) query: q::Query,
+    /// What the query reads in place of its table's rows: the rows a
+    /// [`Query::hop_to`], [`Query::gather`] or [`Query::union`] reaches.
+    pub(crate) source: Option<Source>,
+    pub(crate) include_deleted: bool,
+    /// Why the query cannot run, when it combines what is not supported:
+    /// reported when it is read.
+    pub(crate) refused: Option<String>,
     row: PhantomData<fn() -> T>,
+}
+
+// Not derived: a query of `T` clones whether or not `T` does.
+impl<T> Clone for Query<T> {
+    fn clone(&self) -> Self {
+        Self {
+            query: self.query.clone(),
+            source: self.source.clone(),
+            include_deleted: self.include_deleted,
+            refused: self.refused.clone(),
+            row: PhantomData,
+        }
+    }
+}
+
+impl<T> Query<T> {
+    pub(crate) fn from_parts(query: q::Query) -> Self {
+        Self {
+            query,
+            source: None,
+            include_deleted: false,
+            refused: None,
+            row: PhantomData,
+        }
+    }
+
+    /// The same query, yielding `U`s.
+    pub(crate) fn cast<U>(self) -> Query<U> {
+        Query {
+            query: self.query,
+            source: self.source,
+            include_deleted: self.include_deleted,
+            refused: self.refused,
+            row: PhantomData,
+        }
+    }
+
+    /// Refuses the query with `reason`, unless it already is.
+    pub(crate) fn refuse(mut self, reason: impl Into<String>) -> Self {
+        self.refused.get_or_insert_with(|| reason.into());
+        self
+    }
+
+    /// Whether this is a [`Query::union`]: it takes only `order_by`,
+    /// `limit` and `offset`, as in TypeScript.
+    fn refuse_on_union(self, modifier: &str) -> Self {
+        if matches!(self.source, Some(Source::Union(_))) {
+            return self.refuse(format!(
+                "union(...) supports only order_by, offset and limit; {modifier} is not supported"
+            ));
+        }
+        self
+    }
 }
 
 impl<T: Table> Query<T> {
     /// Every row of `T`.
     pub fn all() -> Self {
-        Self {
-            query: q::Query::from(T::NAME),
-            row: PhantomData,
-        }
+        Self::from_parts(q::Query::from(T::NAME))
     }
 
     /// Reads only the `columns` (a stored column, or a tuple of up to
@@ -36,12 +95,9 @@ impl<T: Table> Query<T> {
     /// todos::query().select((todos::title(), todos::done()))
     /// ```
     pub fn select<S: Selection<T>>(self, columns: S) -> Query<Partial<T, S::Values>> {
-        let mut query = self.query;
-        query.select = Some(columns.names().into_iter().map(str::to_owned).collect());
-        Query {
-            query,
-            row: PhantomData,
-        }
+        let mut query = self.refuse_on_union("select(...)");
+        query.query.select = Some(columns.names().into_iter().map(str::to_owned).collect());
+        query.cast()
     }
 }
 
@@ -55,22 +111,37 @@ impl<T: Row> Query<T> {
         I: IntoInclude<<T as Row>::Table>,
         T: With<<I as IntoInclude<<T as Row>::Table>>::Output>,
     {
-        let mut query = self.query;
-        let at = query.array_subqueries.len();
-        query
-            .array_subqueries
-            .push(relation.into_include().into_subquery(at));
-        Query {
-            query,
-            row: PhantomData,
+        let mut query = self.refuse_on_union("include(...)");
+        if matches!(
+            query.source,
+            Some(Source::Path { .. } | Source::Gathered { .. })
+        ) {
+            query = query.refuse("include(...) on hop_to(...) or gather(...) is not supported yet");
         }
+        let include = relation.into_include();
+        if let Some(reason) = include.refused() {
+            query = query.refuse(reason.to_owned());
+        }
+        let at = query.query.array_subqueries.len();
+        query.query.array_subqueries.push(include.into_subquery(at));
+        query.cast()
     }
 
     /// Only rows matching `condition`. Conditions add up: a row must match
-    /// each.
-    pub fn filter(mut self, condition: Condition<T::Table>) -> Self {
-        self.query.filters.push(condition.predicate);
-        self
+    /// each. After a [`Query::gather`], they narrow what it gathered.
+    pub fn filter(self, condition: Condition<T::Table>) -> Self {
+        let mut query = self.refuse_on_union("filter(...)");
+        query.query.filters.push(condition.predicate);
+        query
+    }
+
+    /// Reads deleted rows too, as TypeScript's `includeDeleted()` does.
+    /// [`deleted_at`] tells them apart: it is `None` for a row that is not
+    /// deleted.
+    pub fn include_deleted(self) -> Self {
+        let mut query = self.refuse_on_union("include_deleted()");
+        query.include_deleted = true;
+        query
     }
 
     /// The row with this id.
@@ -102,9 +173,26 @@ impl<T: Row> Query<T> {
         self
     }
 
-    /// The untyped query, for [`crate::Jazz::with_client`].
-    pub fn into_untyped(self) -> q::Query {
-        self.query
+    /// The untyped query, for [`crate::Jazz::with_client`]. Whether it
+    /// reads deleted rows is a read option: see [`Query::reads_deleted`].
+    ///
+    /// Fails when the query combines what is not supported yet.
+    pub fn into_untyped(self) -> Result<q::Query> {
+        if let Some(reason) = self.refused {
+            return Err(Error::Unsupported(reason));
+        }
+        let Some(source) = self.source else {
+            return Ok(self.query);
+        };
+        let mut query = self.query;
+        let rel = relation::lower(&mut query, source).map_err(Error::Unsupported)?;
+        query.relation = Some(q::RelationQuery { rel });
+        Ok(query)
+    }
+
+    /// Whether the query reads deleted rows too ([`Query::include_deleted`]).
+    pub fn reads_deleted(&self) -> bool {
+        self.include_deleted
     }
 }
 
@@ -117,12 +205,12 @@ pub enum Order {
 /// A condition on rows of `T`.
 #[derive(Debug, Clone)]
 pub struct Condition<T> {
-    predicate: Predicate,
+    pub(crate) predicate: Predicate,
     row: PhantomData<fn() -> T>,
 }
 
 impl<T> Condition<T> {
-    fn new(predicate: Predicate) -> Self {
+    pub(crate) fn new(predicate: Predicate) -> Self {
         Self {
             predicate,
             row: PhantomData,
@@ -229,6 +317,12 @@ pub fn created_at<T>() -> Column<T, Timestamp> {
 /// When the row was last updated: a column of every table.
 pub fn updated_at<T>() -> Column<T, Timestamp> {
     Column::new("$updatedAt")
+}
+
+/// When the row was deleted: `None` unless it is. Only a query that
+/// [`Query::include_deleted`] reads deleted rows.
+pub fn deleted_at<T>() -> Column<T, Option<Timestamp>> {
+    Column::new("$deletedAt")
 }
 
 impl<T> Column<T, String> {
@@ -353,7 +447,7 @@ impl<T: Table, U: Table> Many<T, U> {
 }
 
 /// A literal operand for a value a [`ColumnValue`] produced.
-fn literal(value: Value) -> q::Operand {
+pub(crate) fn literal(value: Value) -> q::Operand {
     q::lit(core(value))
 }
 

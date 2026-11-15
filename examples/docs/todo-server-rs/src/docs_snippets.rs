@@ -55,7 +55,7 @@ pub async fn list_todos_for_request(headers: &HeaderMap, jazz: &Jazz) -> Result<
     jazz.with_client(move |client| async move {
         let user_client = client.for_session(session);
         let rows = user_client
-            .query(todos::query().into_untyped(), ReadTier::LocalFirst)
+            .query(todos::query().into_untyped()?, ReadTier::LocalFirst)
             .await?;
         Ok(rows.len())
     })
