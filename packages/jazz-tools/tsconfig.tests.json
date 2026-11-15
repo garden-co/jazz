@@ -14,7 +14,7 @@
       "jazz-tools/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*", "tests/ts-dsl/**/*.ts", "tests/typed-app/**/*.ts"],
+  "include": ["src/**/*", "tests/typed-app/**/*.ts"],
   "exclude": [
     "node_modules",
     "dist",
