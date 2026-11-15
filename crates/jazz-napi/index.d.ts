@@ -24,8 +24,8 @@ export declare class JazzCore {
    */
   get appId(): string
   /**
-   * The secret a backend signs agent tokens with, kept in the store
-   * (`null` in memory).
+   * The secret a backend signs agent tokens with, kept in
+   * `<dataDir>/inspect-token-secret` (`null` in memory).
    */
   get tokenSecret(): string | null
   /**
@@ -410,8 +410,9 @@ export interface DeleteOptions {
 /**
  * Make the stopped store in `dataDir` a store of its own: it forgets its
  * store id and where its large values live, so its next start claims a
- * chunk directory or bucket prefix of its own instead of the original's.
- * For a copy of a store (a staging copy of a backup) opened next to the
+ * chunk directory or bucket prefix of its own instead of the original's,
+ * and its agent-token secret, so the original's tokens don't open it. For
+ * a copy of a store (a staging copy of a backup) opened next to the
  * original. It keeps the app id: the copy serves the same app.
  */
 export declare function detachStore(dataDir: string): void
@@ -529,6 +530,13 @@ export interface RestoreOptions {
  * budget, so a second call fails until the first core has stopped.
  */
 export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
+
+/**
+ * Make the stopped store in `dataDir` serve `appId` from its next start. A
+ * store refuses any app but the one it was first opened for; this is the
+ * way to change it (a wrong first `--app-id`, or a renamed app).
+ */
+export declare function setStoreAppId(dataDir: string, appId: string): void
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {

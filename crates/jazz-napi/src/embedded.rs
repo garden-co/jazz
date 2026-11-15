@@ -63,7 +63,7 @@ pub struct JazzCore {
     /// The kernel drops it when the process exits, however it exits.
     dir_lock: Mutex<Option<std::fs::File>>,
     app_id: String,
-    /// What the backend signs agent tokens with, kept in a persistent store.
+    /// What the backend signs agent tokens with, beside a persistent store.
     token_secret: Option<String>,
 }
 
@@ -162,8 +162,8 @@ impl JazzCore {
         self.app_id.clone()
     }
 
-    /// The secret a backend signs agent tokens with, kept in the store
-    /// (`null` in memory).
+    /// The secret a backend signs agent tokens with, kept in
+    /// `<dataDir>/inspect-token-secret` (`null` in memory).
     #[napi(getter)]
     pub fn token_secret(&self) -> Option<String> {
         self.token_secret.clone()
@@ -372,8 +372,9 @@ fn pairs(headers: &[Vec<String>]) -> Vec<(String, String)> {
 
 /// Make the stopped store in `dataDir` a store of its own: it forgets its
 /// store id and where its large values live, so its next start claims a
-/// chunk directory or bucket prefix of its own instead of the original's.
-/// For a copy of a store (a staging copy of a backup) opened next to the
+/// chunk directory or bucket prefix of its own instead of the original's,
+/// and its agent-token secret, so the original's tokens don't open it. For
+/// a copy of a store (a staging copy of a backup) opened next to the
 /// original. It keeps the app id: the copy serves the same app.
 #[napi(js_name = "detachStore")]
 pub fn detach_store(data_dir: String) -> napi::Result<()> {
@@ -385,4 +386,19 @@ pub fn detach_store(data_dir: String) -> napi::Result<()> {
     }
     let _lock = lock_data_dir(path)?;
     jazz_server::detach_store_identity(path).map_err(napi::Error::from_reason)
+}
+
+/// Make the stopped store in `dataDir` serve `appId` from its next start. A
+/// store refuses any app but the one it was first opened for; this is the
+/// way to change it (a wrong first `--app-id`, or a renamed app).
+#[napi(js_name = "setStoreAppId")]
+pub fn set_store_app_id(data_dir: String, app_id: String) -> napi::Result<()> {
+    let path = std::path::Path::new(&data_dir);
+    if !path.join("jazz.sqlite").exists() {
+        return Err(napi::Error::from_reason(format!(
+            "'{data_dir}' holds no store"
+        )));
+    }
+    let _lock = lock_data_dir(path)?;
+    jazz_server::set_store_app_id(path, &app_id).map_err(napi::Error::from_reason)
 }

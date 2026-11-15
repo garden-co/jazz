@@ -34,7 +34,7 @@ pub use embedded::{
 };
 pub use identity::{
     IdentityOpen, RecordedIdentity, StoreIdentity, detach_store_identity, open_store_identity,
-    read_store_identity,
+    read_store_identity, set_store_app_id,
 };
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]

@@ -7,7 +7,6 @@
 //!   alpha.59 app's spelling). A store refuses to open for any other app.
 //! - `blob_store`: where its large values live (see `plan_blob_store`);
 //!   absent means inside the file.
-//! - `token_secret`: what an in-process backend signs agent tokens with.
 //!
 //! The table is the authority: a copy of `jazz.sqlite` (a backup, or a
 //! restore from a replica) opens as the same store, with the same blobs.
@@ -18,7 +17,11 @@
 //! open rewrites from the table, so an earlier release opened on the store
 //! reads the same identity instead of minting a new one. Each kind of store
 //! mirrors only the files it kept before: a server `store-id` and
-//! `blob-store`, an in-process core also `app-id` and `inspect-token-secret`.
+//! `blob-store`, an in-process core also `app-id`.
+//!
+//! An in-process core's agent-token secret is not identity and never enters
+//! the file, which backups, copies and replicas carry: it lives in its own
+//! `inspect-token-secret` beside the store, readable by its owner only.
 
 use std::path::Path;
 
@@ -31,7 +34,8 @@ pub(crate) const IDENTITY: HostTable = HostTable::new("identity");
 pub(crate) const STORE_ID: &[u8] = b"store_id";
 pub(crate) const APP_ID: &[u8] = b"app_id";
 pub(crate) const BLOB_STORE: &[u8] = b"blob_store";
-pub(crate) const TOKEN_SECRET: &[u8] = b"token_secret";
+/// Where builds before the secret got a file of its own kept it; removed.
+const TOKEN_SECRET: &[u8] = b"token_secret";
 
 /// The SQLite file of a data directory's store.
 pub(crate) const STORE_FILE: &str = "jazz.sqlite";
@@ -42,11 +46,10 @@ const BLOB_STORE_FILE: &str = "blob-store";
 const TOKEN_SECRET_FILE: &str = "inspect-token-secret";
 
 /// The files stores kept their identity in before, by the key each holds.
-const LEGACY_FILES: [(&[u8], &str); 4] = [
+const LEGACY_FILES: [(&[u8], &str); 3] = [
     (STORE_ID, STORE_ID_FILE),
     (APP_ID, APP_ID_FILE),
     (BLOB_STORE, BLOB_STORE_FILE),
-    (TOKEN_SECRET, TOKEN_SECRET_FILE),
 ];
 
 /// Who opens a store, which decides what it may mint and mirror.
@@ -68,7 +71,8 @@ pub struct StoreIdentity {
     /// Where large values live, as recorded (`files`, `s3 …`); `None`
     /// keeps them in the file.
     pub blob_store: Option<String>,
-    /// Kept only by in-process cores.
+    /// What an in-process core signs agent tokens with: its
+    /// `inspect-token-secret` file (servers keep none).
     pub token_secret: Option<String>,
 }
 
@@ -94,7 +98,20 @@ pub fn open_store_identity(
     std::fs::create_dir_all(data_dir)
         .map_err(|e| format!("failed to create data dir '{}': {e}", data_dir.display()))?;
     let file = open_file(data_dir)?;
-    let identity = read_or_mint(&file, data_dir, how)?;
+    let mut identity = read_or_mint(&file, data_dir, how)?;
+    // Only an earlier build of this release kept the secret in the table:
+    // its file takes it over, then it leaves the table.
+    let in_table = file
+        .host_get(IDENTITY, TOKEN_SECRET)
+        .map_err(storage)?
+        .map(|kept| text(TOKEN_SECRET, kept))
+        .transpose()?;
+    if matches!(how, IdentityOpen::Embedded { .. }) {
+        identity.token_secret = Some(token_secret(data_dir, in_table.as_deref())?);
+    }
+    if in_table.is_some() {
+        file.host_delete(IDENTITY, TOKEN_SECRET).map_err(storage)?;
+    }
     drop(file);
     // Only once the store holds them, so a crash leaves mirrors equal to it
     // or missing, never ahead of it.
@@ -111,12 +128,6 @@ pub fn open_store_identity(
     )?;
     if matches!(how, IdentityOpen::Embedded { .. }) {
         write_mirror(data_dir, APP_ID_FILE, Some(&identity.app_id), false)?;
-        write_mirror(
-            data_dir,
-            TOKEN_SECRET_FILE,
-            identity.token_secret.as_deref(),
-            true,
-        )?;
     }
     Ok(identity)
 }
@@ -167,8 +178,9 @@ pub fn read_store_identity(data_dir: &Path) -> Result<RecordedIdentity, String> 
 /// a copy (a staging copy of a backup) that would otherwise claim the
 /// original's chunks. A chunk directory inside the data dir was copied with
 /// it, so its `owner` claim goes too; one outside is the original's, and
-/// the copy needs one of its own. The app id stays: the copy serves the
-/// same app. Nothing is minted.
+/// the copy needs one of its own. Its agent-token secret goes, so tokens
+/// the original issued don't open the copy. The app id stays: the copy
+/// serves the same app. Nothing is minted.
 ///
 /// Call it under the data dir's lock ([`crate::lock_data_dir`]).
 pub fn detach_store_identity(data_dir: &Path) -> Result<(), String> {
@@ -189,11 +201,39 @@ pub fn detach_store_identity(data_dir: &Path) -> Result<(), String> {
         file.host_delete(IDENTITY, key).map_err(storage)?;
     }
     drop(file);
-    for name in [STORE_ID_FILE, BLOB_STORE_FILE] {
+    // The secret goes too: the copy mints its own, so tokens the original
+    // issued don't open it.
+    for name in [STORE_ID_FILE, BLOB_STORE_FILE, TOKEN_SECRET_FILE] {
         remove_if_present(&data_dir.join(name))?;
     }
     if let Some(inside) = blob_store.as_deref().and_then(blob_dir_inside) {
         remove_if_present(&data_dir.join(inside).join(super::builder::BLOB_OWNER_FILE))?;
+    }
+    Ok(())
+}
+
+/// Make the stopped store in `data_dir` serve `app_id` from its next start:
+/// for a store started with the wrong app id, or one whose app was renamed.
+/// A store refuses any app but its own, and this is the one way to change
+/// it. The users' accounts and identities the store holds stay as they are.
+///
+/// Call it under the data dir's lock ([`crate::lock_data_dir`]).
+pub fn set_store_app_id(data_dir: &Path, app_id: &str) -> Result<(), String> {
+    let app_id = app_id.trim();
+    if app_id.is_empty() {
+        return Err("the app id is empty".to_owned());
+    }
+    if !data_dir.join(STORE_FILE).exists() {
+        return Err(format!("'{}' holds no store", data_dir.display()));
+    }
+    let file = open_file(data_dir)?;
+    import_legacy(&file, data_dir)?;
+    file.host_put_many(IDENTITY, &[(APP_ID.to_vec(), app_id.as_bytes().to_vec())])
+        .map_err(storage)?;
+    drop(file);
+    // An in-process store keeps the mirror; a server never had one.
+    if data_dir.join(APP_ID_FILE).exists() {
+        write_mirror(data_dir, APP_ID_FILE, Some(app_id), false)?;
     }
     Ok(())
 }
@@ -281,19 +321,9 @@ fn read_or_mint(
         )
     };
     let store_id = mint(STORE_ID, uuid::Uuid::new_v4().to_string())?;
-    let (given, token_secret) = match how {
-        IdentityOpen::Server { app_id } => (Some(app_id), None),
-        IdentityOpen::Embedded { app_id } => (
-            app_id,
-            Some(mint(
-                TOKEN_SECRET,
-                format!(
-                    "{}{}",
-                    uuid::Uuid::new_v4().simple(),
-                    uuid::Uuid::new_v4().simple()
-                ),
-            )?),
-        ),
+    let given = match how {
+        IdentityOpen::Server { app_id } => Some(app_id),
+        IdentityOpen::Embedded { app_id } => app_id,
     };
     let wanted = given
         .map(str::to_owned)
@@ -301,9 +331,10 @@ fn read_or_mint(
     let kept_app_id = mint(APP_ID, wanted.clone())?;
     if given.is_some() && parse_app_id(&kept_app_id) != parse_app_id(&wanted) {
         return Err(format!(
-            "the store in '{}' serves app {kept_app_id}, not {wanted}; \
-             a store keeps the app it was first opened for",
-            data_dir.display(),
+            "the store in '{dir}' serves app {kept_app_id}, not {wanted}: \
+             a store keeps the app it was first opened for. If it should serve {wanted}, \
+             stop it and run `npx jazz-tools store set-app-id {dir} {wanted}`",
+            dir = data_dir.display(),
         ));
     }
     let blob_store = file
@@ -315,8 +346,27 @@ fn read_or_mint(
         store_id,
         app_id: kept_app_id,
         blob_store,
-        token_secret,
+        token_secret: None,
     })
+}
+
+/// An in-process core's agent-token secret: its `inspect-token-secret`
+/// file, made (readable by its owner only) from `carried` or a new random
+/// one when absent.
+fn token_secret(data_dir: &Path, carried: Option<&str>) -> Result<String, String> {
+    let path = data_dir.join(TOKEN_SECRET_FILE);
+    if let Some(kept) = read_trimmed(&path)? {
+        return Ok(kept);
+    }
+    let secret = carried.map(str::to_owned).unwrap_or_else(|| {
+        format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        )
+    });
+    super::builder::write_durably(&path, format!("{secret}\n").as_bytes(), true)?;
+    Ok(secret)
 }
 
 /// The app an id names, read as hosts read it: a UUID in any spelling, or
@@ -472,6 +522,79 @@ mod tests {
     }
 
     #[test]
+    fn a_store_refused_for_another_app_can_be_set_to_serve_it() {
+        let dir = tempfile::tempdir().unwrap();
+        open_store_identity(dir.path(), server("app-a")).unwrap();
+        let error = open_store_identity(dir.path(), server("app-b")).unwrap_err();
+        assert!(error.contains("jazz-tools store set-app-id"), "{error}");
+        set_store_app_id(dir.path(), "app-b").unwrap();
+        assert_eq!(
+            open_store_identity(dir.path(), server("app-b"))
+                .unwrap()
+                .app_id,
+            "app-b"
+        );
+        assert!(open_store_identity(dir.path(), server("app-a")).is_err());
+        assert!(set_store_app_id(dir.path(), " ").is_err());
+        assert!(set_store_app_id(&dir.path().join("missing"), "x").is_err());
+
+        // An in-process store's mirror follows.
+        let dir = tempfile::tempdir().unwrap();
+        open_store_identity(dir.path(), EMBEDDED).unwrap();
+        set_store_app_id(dir.path(), "renamed").unwrap();
+        assert_eq!(file(dir.path(), APP_ID_FILE).as_deref(), Some("renamed\n"));
+        assert_eq!(
+            open_store_identity(dir.path(), EMBEDDED).unwrap().app_id,
+            "renamed"
+        );
+    }
+
+    /// The secret signs agent tokens: it stays out of the file backups,
+    /// copies and replicas carry.
+    #[test]
+    fn the_agent_token_secret_lives_in_its_own_private_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = open_store_identity(dir.path(), EMBEDDED).unwrap();
+        let secret = identity.token_secret.unwrap();
+        assert_eq!(
+            file(dir.path(), TOKEN_SECRET_FILE),
+            Some(format!("{secret}\n"))
+        );
+        let reader = HostReader::open(&dir.path().join(STORE_FILE), None).unwrap();
+        assert_eq!(reader.get(IDENTITY, TOKEN_SECRET).unwrap(), None);
+        reader.close();
+        // A copy of the store file alone mints its own.
+        let copy = tempfile::tempdir().unwrap();
+        std::fs::copy(dir.path().join(STORE_FILE), copy.path().join(STORE_FILE)).unwrap();
+        let copied = open_store_identity(copy.path(), EMBEDDED).unwrap();
+        assert_ne!(copied.token_secret.unwrap(), secret);
+    }
+
+    /// Earlier builds of this release kept the secret in the table: the
+    /// file takes it over, so tokens stay valid, and the table forgets it.
+    #[test]
+    fn a_secret_an_earlier_build_kept_in_the_table_moves_to_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        open_store_identity(dir.path(), server("app")).unwrap();
+        let store = open_file(dir.path()).unwrap();
+        store
+            .host_put_many(IDENTITY, &[(TOKEN_SECRET.to_vec(), b"old".to_vec())])
+            .unwrap();
+        drop(store);
+        let how = IdentityOpen::Embedded {
+            app_id: Some("app"),
+        };
+        let identity = open_store_identity(dir.path(), how).unwrap();
+        assert_eq!(identity.token_secret.as_deref(), Some("old"));
+        assert_eq!(
+            file(dir.path(), TOKEN_SECRET_FILE).as_deref(),
+            Some("old\n")
+        );
+        let reader = HostReader::open(&dir.path().join(STORE_FILE), None).unwrap();
+        assert_eq!(reader.get(IDENTITY, TOKEN_SECRET).unwrap(), None);
+    }
+
+    #[test]
     fn a_store_keeps_its_apps_spelling_and_accepts_the_same_app() {
         let dir = tempfile::tempdir().unwrap();
         let given = "0A590000-0000-4000-8000-000000000059";
@@ -487,9 +610,17 @@ mod tests {
         let original = open_store_identity(dir.path(), EMBEDDED).unwrap();
         let copy = tempfile::tempdir().unwrap();
         std::fs::copy(dir.path().join(STORE_FILE), copy.path().join(STORE_FILE)).unwrap();
+        let copied = open_store_identity(copy.path(), EMBEDDED).unwrap();
+        // All but the agent-token secret, which isn't in the file.
         assert_eq!(
-            open_store_identity(copy.path(), EMBEDDED).unwrap(),
-            original
+            StoreIdentity {
+                token_secret: None,
+                ..copied
+            },
+            StoreIdentity {
+                token_secret: None,
+                ..original
+            }
         );
     }
 
@@ -512,13 +643,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let original = open_store_identity(dir.path(), EMBEDDED).unwrap();
         let copy = tempfile::tempdir().unwrap();
-        std::fs::copy(dir.path().join(STORE_FILE), copy.path().join(STORE_FILE)).unwrap();
+        for name in [STORE_FILE, TOKEN_SECRET_FILE] {
+            std::fs::copy(dir.path().join(name), copy.path().join(name)).unwrap();
+        }
         detach_store_identity(copy.path()).unwrap();
         assert_eq!(file(copy.path(), STORE_ID_FILE), None);
+        assert_eq!(file(copy.path(), TOKEN_SECRET_FILE), None);
         let detached = open_store_identity(copy.path(), EMBEDDED).unwrap();
         assert_ne!(detached.store_id, original.store_id);
         assert_eq!(detached.blob_store, None);
         assert_eq!(detached.app_id, original.app_id);
+        assert_ne!(detached.token_secret, original.token_secret);
         assert!(detach_store_identity(&copy.path().join("missing")).is_err());
     }
 
@@ -575,11 +710,15 @@ mod tests {
                 token_secret: Some("secret".to_owned()),
             }
         );
-        // The table now holds them: the store alone carries them.
+        // The table now holds the identity: the store alone carries it.
         for (_, name) in LEGACY_FILES {
             std::fs::remove_file(dir.path().join(name)).unwrap();
         }
-        assert_eq!(open_store_identity(dir.path(), how).unwrap(), identity);
+        assert_eq!(
+            open_store_identity(dir.path(), how).unwrap(),
+            identity,
+            "the secret's own file stays"
+        );
     }
 
     #[test]

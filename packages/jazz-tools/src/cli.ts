@@ -489,20 +489,31 @@ if (isMainModule()) {
     exitOnError(validate(options));
   } else if (command === "store") {
     const [subcommand, path, ...rest] = args.slice(1);
-    if (subcommand !== "detach" || !path || rest.length > 0) {
-      console.error(
-        "Usage: jazz-tools store detach <path>\n\nMake a stopped copy of a sqlite({ path }) store a store of its own, so it claims its own chunk directory or s3() prefix instead of the original's.",
+    const usage =
+      "Usage: jazz-tools store detach <path>\n       jazz-tools store set-app-id <path> <app id>\n\n" +
+      "detach: make a stopped copy of a store a store of its own, so it claims its own chunk directory or s3() prefix instead of the original's.\n" +
+      "set-app-id: make a stopped store serve another app id from its next start.";
+    if (subcommand === "detach" && path && rest.length === 0) {
+      exitOnError(
+        import("jazz-napi").then(({ detachStore }) => {
+          detachStore(resolve(process.cwd(), path));
+          console.log(
+            `${path} is now a store of its own; it claims its large values' place on its next start.`,
+          );
+        }),
       );
+    } else if (subcommand === "set-app-id" && path && rest.length === 1) {
+      const appId = rest[0]!;
+      exitOnError(
+        import("jazz-napi").then(({ setStoreAppId }) => {
+          setStoreAppId(resolve(process.cwd(), path), appId);
+          console.log(`${path} serves app ${appId} from its next start.`);
+        }),
+      );
+    } else {
+      console.error(usage);
       process.exit(1);
     }
-    exitOnError(
-      import("jazz-napi").then(({ detachStore }) => {
-        detachStore(resolve(process.cwd(), path));
-        console.log(
-          `${path} is now a store of its own; it claims its large values' place on its next start.`,
-        );
-      }),
-    );
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
     if (subcommand === "compile") {
