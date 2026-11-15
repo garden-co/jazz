@@ -452,6 +452,41 @@ describe("browser SharedWorker realm identity", () => {
     await lease.retire();
   });
 
+  it("starts the bundler's worker when only the WASM URL is configured", async () => {
+    const port = new DelayedLeasePort(0);
+    const started: Array<{ url: string; name: string | undefined }> = [];
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = port;
+        constructor(url: URL | string, options?: WorkerOptions) {
+          started.push({ url: String(url), name: options?.name });
+        }
+      },
+    );
+    const runtimeSources = {
+      wasmUrl: "https://example.com/assets/jazz_wasm_bg.wasm",
+      wasmVersion: "build-1",
+    };
+
+    const lease = await SharedBrowserForegroundNodeLease.acquire({
+      dbName: "bundled-worker-root",
+      storageOwner: "owner",
+      runtimeSources,
+    });
+
+    // The worker the bundler built from `new SharedWorker(new URL(...))`: no
+    // bundler emits the published file at a URL Jazz could version.
+    expect(started).toHaveLength(1);
+    expect(started[0]!.url).toMatch(/\/worker\/jazz-broker-worker\.js$/);
+    // Another deployment still gets its own realm: the name carries the version.
+    expect(started[0]!.name).toContain(
+      createBrowserSharedWorkerBaseName(runtimeSources, "bundled-worker-root"),
+    );
+    expect(started[0]!.name).toContain("jazz-runtime-version=build-1");
+    await lease.retire();
+  });
+
   it("does not ask a probed worker to prefetch an in-memory WASM source", async () => {
     const port = new DelayedLeasePort(0);
     vi.stubGlobal(
@@ -776,6 +811,79 @@ describe("browser SharedWorker realm identity", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("lets go of its page lock and detaches at once when the page leaves for the back/forward cache", async () => {
+    // Firefox caches no page that holds a Web Lock, and the worker would
+    // count a cached page as a live tab.
+    const requests: Array<{ name: string; release?: Promise<unknown> }> = [];
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    vi.stubGlobal("navigator", {
+      locks: {
+        request: (name: string, callback: () => Promise<unknown>) => {
+          const request: { name: string; release?: Promise<unknown> } = { name };
+          requests.push(request);
+          request.release = callback();
+          return request.release;
+        },
+      },
+    });
+    try {
+      const { connection, port, sent } = runtimeBootstrapFixture();
+      port.emit({ type: "runtime-ready" });
+      await expect(connection.ready()).resolves.toBeUndefined();
+      await vi.waitFor(() =>
+        expect(sent.some((message) => message.type === "liveness-lock")).toBe(true),
+      );
+      sent.length = 0;
+      expect(connection.leaveForPageCache()).toBe(true);
+      // A close that wants no reply: nothing for the worker to post to a cached page.
+      expect(sent).toEqual([{ type: "close", releaseContext: true }]);
+      expect(port.closed).toBe(true);
+      await expect(requests[0]!.release).resolves.toBeUndefined();
+      expect(connection.leaveForPageCache()).toBe(false);
+      expect(connection.storeChangedSinceLeaving()).toBe(false);
+      // Another tab resets the store meanwhile.
+      storage.clear();
+      expect(connection.storeChangedSinceLeaving()).toBe(true);
+      // Closed already: shutdown waits for nothing.
+      await connection.shutdown();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps its connection and its lock without localStorage to tell a reset store on return", async () => {
+    vi.stubGlobal("localStorage", undefined);
+    try {
+      const { connection, port, sent } = runtimeBootstrapFixture();
+      port.emit({ type: "runtime-ready" });
+      await expect(connection.ready()).resolves.toBeUndefined();
+      expect(connection.leaveForPageCache()).toBe(false);
+      expect(port.closed).toBe(false);
+      const shutdown = connection.shutdown();
+      await Promise.resolve();
+      port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+      await shutdown;
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a connection still being admitted when the page leaves", async () => {
+    const { connection, port, sent } = runtimeBootstrapFixture();
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.closed).toBe(false);
+    port.emit({ type: "runtime-ready" });
+    await expect(connection.ready()).resolves.toBeUndefined();
+    const shutdown = connection.shutdown();
+    await Promise.resolve();
+    port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+    await shutdown;
   });
 
   it("keeps runtime admission in the same realm when its alive reply is delayed", async () => {

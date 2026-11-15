@@ -21,6 +21,7 @@ import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/bro
 import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js";
 import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
 import { toError } from "../util.js";
+import { holdAcrossPageCache } from "../page-cache.js";
 
 interface BrowserConnectionScope {
   readonly connection: BrowserWorkerConnection;
@@ -68,6 +69,17 @@ export class BrowserConnectionManager extends ConnectionManager {
   /** The other tab has held the store past that patience: report it. */
   private heldTooLong = false;
   declare protected foregroundNodeLease: BrowserForegroundNodeLease | undefined;
+  /**
+   * The page is in the back/forward cache: it let go of its connection (and
+   * its page lock) and opens a new one when it returns (see `page-cache`).
+   * What needs the connection meanwhile waits for that one.
+   */
+  private pageAway: {
+    left: BrowserWorkerConnection;
+    reopened: Promise<BrowserWorkerConnection | null>;
+    reopen: (connection: BrowserWorkerConnection | null) => void;
+  } | null = null;
+  private stopHoldingAcrossPageCache: (() => void) | null = null;
   private shutdownStarted = false;
   private shutdownFailure: {
     connection: BrowserWorkerConnection | null;
@@ -102,6 +114,78 @@ export class BrowserConnectionManager extends ConnectionManager {
   protected override onClientCreated(input: ConnectionManagerClientInput): void {
     this.browserConnectionInput = input;
     this.openBrowserWorkerConnection();
+    this.stopHoldingAcrossPageCache ??= holdAcrossPageCache({
+      leave: () => this.leaveForPageCache(),
+      return: () => this.returnFromPageCache(),
+    });
+  }
+
+  /**
+   * Let go of the worker connection, and with it this tab's liveness lock,
+   * while the page is in the back/forward cache: the worker would count a
+   * cached page as a live tab (see `page-cache`).
+   * Only a connected, idle connection leaves (see `leaveForPageCache` on the
+   * connection); any other stays, and the page stays as it was.
+   */
+  private leaveForPageCache(): void {
+    const connection = this.connection;
+    if (
+      !connection ||
+      this.pageAway ||
+      this.shutdownStarted ||
+      this.host.isShuttingDown ||
+      this.storageReset ||
+      this.recoverableConnectionFailure ||
+      this.configurationAdmissionRetry ||
+      // A tab the inspector attached reconnects only when asked.
+      this.connectionScope?.inspectorAttachment ||
+      !connection.leaveForPageCache?.()
+    )
+      return;
+    let reopen!: (connection: BrowserWorkerConnection | null) => void;
+    const reopened = new Promise<BrowserWorkerConnection | null>((resolve) => (reopen = resolve));
+    this.pageAway = { left: connection, reopened, reopen };
+    this.clearWorkerRecoveryTimer();
+    this.unregisterInspectorControl?.();
+    this.unregisterInspectorControl = null;
+    this.host.clearAuthenticatedInspectorLocalReads();
+    this.connection = null;
+    this.connectionReady = null;
+    this.initialExplicitOfflineStateKnown = false;
+  }
+
+  /**
+   * Back from the back/forward cache: open a new connection to the worker.
+   * The runtime kept its writes and transaction identities; the new
+   * connection replays what the worker hasn't seen, as after a worker
+   * failure. Unless the store was deleted, reset or invalidated meanwhile
+   * (the worker told only the tabs attached then): this page's runtime
+   * shows what is gone, so it reloads, as an attached tab does.
+   */
+  private returnFromPageCache(): void | "stop" {
+    const away = this.pageAway;
+    if (!away) return;
+    this.pageAway = null;
+    if (this.shutdownStarted || this.host.isShuttingDown || !this.browserConnectionInput) {
+      away.reopen(null);
+      return;
+    }
+    if (away.left.storeChangedSinceLeaving?.()) {
+      // Never reconnected, even when the reload guard refuses (a second
+      // invalidation within its window): what needs the worker fails instead.
+      this.connectionError = new Error(
+        "This page's store was reset while the page was in the back/forward cache: reload the page",
+      );
+      reloadAfterStorageInvalidation();
+      away.reopen(null);
+      return "stop";
+    }
+    try {
+      away.reopen(this.openBrowserWorkerConnection());
+    } catch (error) {
+      away.reopen(null);
+      throw error;
+    }
   }
 
   private openBrowserWorkerConnection(): BrowserWorkerConnection {
@@ -355,7 +439,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.host.isShuttingDown || signal?.aborted) return;
     // Between a retry's shutdown of the refused connection and its
     // replacement there is none: wait for the replacement.
-    connection ??= this.connection ?? (await this.configurationAdmissionRetry);
+    connection ??=
+      this.connection ??
+      (await this.pageAway?.reopened) ??
+      (await this.configurationAdmissionRetry);
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
     if (this.host.isShuttingDown || signal?.aborted) return;
     for (;;) {
@@ -475,6 +562,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     }
     await this.enqueueTransportTransition(async () => {
       if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
+      if (this.pageAway) await this.pageAway.reopened;
       if (this.recoverableConnectionFailure) this.reopenFailedFollower();
       await this.connectionReady;
       if (this.connectionError) throw this.connectionError;
@@ -633,13 +721,18 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   override async waitForPendingWrites(): Promise<void> {
-    await this.connection?.waitForPendingWrites();
+    const connection = this.connection ?? (await this.pageAway?.reopened);
+    await connection?.waitForPendingWrites();
   }
 
   override async shutdown(): Promise<void> {
     if (this.shutdownStarted) return;
     this.shutdownStarted = true;
     this.clearWorkerRecoveryTimer();
+    this.stopHoldingAcrossPageCache?.();
+    this.stopHoldingAcrossPageCache = null;
+    this.pageAway?.reopen(null);
+    this.pageAway = null;
     if (this.heldPatienceTimer !== null) clearTimeout(this.heldPatienceTimer);
     this.heldPatienceTimer = null;
     this.wakeReplacementWaiters();

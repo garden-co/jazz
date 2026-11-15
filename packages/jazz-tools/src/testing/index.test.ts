@@ -414,6 +414,36 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  // A suite whose policies make slow queries printed a report per slow
+  // query, tens of megabytes per line (jazz#5128): the harness takes the
+  // threshold, and 0 turns the log off.
+  it("takes the clients' slow-query threshold", async () => {
+    const reports = async (slowQueryThresholdMs: number) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect, {
+        slowQueryThresholdMs,
+      });
+      try {
+        const alice = policyTestApp.as({
+          issuer: "https://policy-test.example",
+          user_id: "alice",
+          account_id: "00000000-0000-4000-8000-000000000001",
+          claims: {},
+          authMode: "external",
+        });
+        for (let i = 0; i < 3; i++) await alice.all(testApp.todos.where({ done: false }));
+        return warn.mock.calls.filter(([line]) => String(line).startsWith("[jazz] slow query"))
+          .length;
+      } finally {
+        await policyTestApp.shutdown();
+        warn.mockRestore();
+      }
+    };
+    // Every query is slow at a threshold of a nanosecond.
+    expect(await reports(0.000001)).toBeGreaterThan(0);
+    expect(await reports(0)).toBe(0);
+  }, 20_000);
+
   // The /docs/tooling/testing pattern broke on an app's first migration: the
   // test server was handed only the current schema, so the app's client,
   // opening with the lenses the app ships, disagreed with it about the app's

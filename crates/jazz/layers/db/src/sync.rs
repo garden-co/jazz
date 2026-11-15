@@ -2172,6 +2172,12 @@ pub(crate) struct Client {
     reads: HashMap<u64, ActiveRead>,
     /// Deduplication index for live reads; owns no query or checkpoint state.
     live_reads: HashMap<String, u64>,
+    /// What closed live reads held, kept while a read opened before the
+    /// close (the ids beside it) has not been told what it holds yet: the
+    /// server may have answered that read while the closed one was still
+    /// live there, leaving out rows the closed one held. No listing drops
+    /// them until each such read's first `Holds` arrives or it closes.
+    closed_holds: Vec<(HashMap<String, HashSet<[u8; 16]>>, Vec<u64>)>,
     outbox: Vec<SyncMessage>,
     pending: PendingQueue,
     unsent: Vec<SyncMessage>,
@@ -4280,7 +4286,7 @@ impl Inner {
         };
         let session = self.session(author);
         let mut pins = HashMap::new();
-        if !super::fanout::policy_pins(policy, &session, &mut pins) {
+        if !super::fanout::policy_pins(schema, policy, &session, &mut pins) {
             return Ok(true);
         }
         let pins = super::fanout::stored_pins(schema, pins);
@@ -7479,6 +7485,33 @@ impl Inner {
 }
 
 impl Client {
+    /// Forget closed reads' holds once every read they wait for was told
+    /// what it holds, or closed (see `closed_holds`).
+    fn prune_closed_holds(&mut self) {
+        let reads = &self.reads;
+        self.closed_holds.retain_mut(|(_, waiting)| {
+            waiting.retain(|id| {
+                reads
+                    .get(id)
+                    .and_then(ActiveRead::live)
+                    .is_some_and(|live| !live.told)
+            });
+            !waiting.is_empty()
+        });
+    }
+
+    /// Whether a live read, or a closed one still kept, holds `row` of
+    /// stored table `table`.
+    fn holds_row(&self, table: &str, row: &[u8; 16]) -> bool {
+        self.reads
+            .values()
+            .filter_map(ActiveRead::live)
+            .map(|live| &live.holds)
+            .chain(self.closed_holds.iter().map(|(holds, _)| holds))
+            .filter_map(|holds| holds.get(table))
+            .any(|rows| rows.contains(row))
+    }
+
     fn forget_once(&mut self, id: u64) {
         self.answers.remove(&id);
         self.reads.remove(&id);
@@ -7562,6 +7595,7 @@ impl Client {
             next_advice: fresh_advice_base(),
             reads: HashMap::new(),
             live_reads: HashMap::new(),
+            closed_holds: Vec::new(),
             outbox: Vec::new(),
             pending: PendingQueue::default(),
             unsent: Vec::new(),
@@ -7896,14 +7930,7 @@ impl Db {
             // A row a live read holds stays: the server keeps it current
             // for that read and would not ship it again.
             if let Some(client) = inner.client.as_ref() {
-                stale.retain(|row| {
-                    !client
-                        .reads
-                        .values()
-                        .filter_map(ActiveRead::live)
-                        .filter_map(|live| live.holds.get(&table))
-                        .any(|rows| rows.contains(row.0.as_bytes()))
-                });
+                stale.retain(|row| !client.holds_row(&table, row.0.as_bytes()));
             }
             if stale.is_empty() || stale == previous {
                 return Ok(());
@@ -8483,8 +8510,21 @@ impl Inner {
         live.refs -= 1;
         if live.refs == 0 {
             client.live_reads.remove(key);
-            client.reads.remove(&id);
+            let closed = client.reads.remove(&id);
             client.outbox.push(SyncMessage::Unsubscribe { id });
+            let untold: Vec<u64> = client
+                .reads
+                .iter()
+                .filter(|(_, read)| read.live().is_some_and(|live| !live.told))
+                .map(|(id, _)| *id)
+                .collect();
+            if let Some(live) = closed.as_ref().and_then(ActiveRead::live)
+                && !untold.is_empty()
+                && !live.holds.is_empty()
+            {
+                client.closed_holds.push((live.holds.clone(), untold));
+            }
+            client.prune_closed_holds();
         }
     }
 
@@ -9665,6 +9705,7 @@ impl Db {
                                 live.holds.entry(table).or_default().insert(row);
                             }
                         }
+                        client.prune_closed_holds();
                     }
                     SyncMessage::ConnectionSettled { through } => {
                         inner.learn_known(through);
@@ -11732,6 +11773,10 @@ impl Db {
                 // resumes from: not shipped, but watched again, and their
                 // supporting rows followed (and shipped where they changed).
                 let mut held = Vec::new();
+                // Rows the session holds through another read, with support
+                // to follow: not shipped, but their support watched for
+                // this read too (see `held_by_session`).
+                let mut session_kept = Vec::new();
                 // Unchanged for a resumed client: a version it held as of
                 // `since` that was in the result then. A row whose
                 // membership inputs changed may have entered the result
@@ -11749,6 +11794,33 @@ impl Db {
                                 .is_none_or(|prior| prior.contains(&row.id))
                     })
                 };
+                // Held through another of the session's reads: a row
+                // another live subscription watches is kept current on the
+                // replica, so a version at or below the connection's settled
+                // position is one the replica holds. An opening leaves it
+                // out as it would a resumed client's held row (and this
+                // subscription watches it too, so it stays current when the
+                // other one ends). An offset page's subscription covers
+                // every row before its window (`remote_query`), so the next
+                // page ships only its own rows while the previous one is
+                // live. Not on a relay, whose connection position follows
+                // its upstream's rather than what it shipped. Not for a
+                // table with branch views either: a row watch covers every
+                // branch of an id, but the replica holds versions per
+                // branch, so another view's read holding the id says
+                // nothing about this view's version.
+                let session_settled = (!relaying)
+                    .then_some(inner.sessions[index].connection_settled)
+                    .flatten();
+                let held_by_session =
+                    |watch: &Watches, stored: &str, row: &SubscriptionOutputRow, reset: bool| {
+                        reset
+                            && session_settled.is_some_and(|settled| row.seq <= Pos::at(settled))
+                            && names
+                                .table(&row.table)
+                                .is_ok_and(|table| table.branch_by.is_empty())
+                            && watch.held_by_other(id, id_watch(stored, *row.id.0.as_bytes()))
+                    };
                 // Every image this subscription's events ship or touch, read
                 // a chunk of rows per statement: an opening snapshot ships
                 // every row of its result.
@@ -11775,7 +11847,16 @@ impl Db {
                                 .zip(row.joined_rows()),
                         );
                         let history = history_source_table(&row.table);
-                        if (history.is_none() && held_as_of(row, *reset) && support.is_none())
+                        let unchanged = history.is_none()
+                            && support.is_none()
+                            && (held_as_of(row, *reset)
+                                || held_by_session(
+                                    &watch,
+                                    names.stored_table(&row.table)?,
+                                    row,
+                                    *reset,
+                                ));
+                        if unchanged
                             || cache.contains_key(&(row.table.to_string(), row.id, row.seq))
                         {
                             continue;
@@ -11848,12 +11929,21 @@ impl Db {
                             .stored_table(history.unwrap_or(&row.table))?
                             .to_owned();
                         let unchanged = history.is_none() && held_as_of(row, reset);
+                        let session_held = history.is_none()
+                            && !unchanged
+                            && held_by_session(&watch, &table, row, reset);
                         let id_key = watch.row(&table, *row.id.0.as_bytes());
                         watch.hold(id, id_key);
-                        if unchanged && support.is_none() {
+                        if (unchanged || session_held) && support.is_none() {
                             continue;
                         }
                         let key = (row.table.to_string(), row.id, row.seq);
+                        if session_held {
+                            // Its support is followed for this read too,
+                            // shipping only what the session does not watch.
+                            session_kept.extend(cache[&key].iter().cloned());
+                            continue;
+                        }
                         if history.is_some() && !fresh.remove(&key) {
                             history_seqs.insert(row.seq.seq);
                         }
@@ -11959,6 +12049,9 @@ impl Db {
                     }
                     for image in &held {
                         inner.follow_support(&support, image, floor, &mut follow)?;
+                    }
+                    for image in &session_kept {
+                        inner.follow_support(&support, image, None, &mut follow)?;
                     }
                     images.extend(extra);
                     touched.extend(gone);

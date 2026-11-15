@@ -1087,12 +1087,63 @@ fn stored_provenance_columns() -> Vec<Column> {
         .collect()
 }
 
-fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
+pub(crate) fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
     match ty {
         ValueType::Nullable(inner) => inner,
         ty => ty,
     }
 }
+
+/// A session claim as a value of type `ty`, for comparing it with a column
+/// (or literal) of that type. One rule for every place a policy or query
+/// compares a claim (plain and `EXISTS` policies, relation policies, query
+/// predicates, fan-out pins), so they all grant the same rows.
+///
+/// A claim is JSON, so its type is only known from what it is compared
+/// with: a UUID column reads a string as the UUID it spells, a text column
+/// a UUID claim as its hyphenated text, and an Integer or BigInt column a
+/// string as the integer it spells in canonical decimal (`"42"`, not
+/// `"042"` or `"42.0"`; timestamps take numbers only). A claim the type cannot hold is `None`: it matches nothing.
+/// Each claim converts to at most one value, so no claim matches a row it
+/// does not name. Other types compare the claim as it is.
+pub(crate) fn claim_as(ty: &ValueType, claim: Value) -> Option<Value> {
+    let claim = match claim {
+        Value::Nullable(None) => return None,
+        Value::Nullable(Some(inner)) => *inner,
+        claim => claim,
+    };
+    Some(match (unwrap_nullable_type(ty), claim) {
+        (ValueType::Uuid, Value::String(text)) => Value::Uuid(text.parse().ok()?),
+        (ValueType::Uuid, claim @ Value::Uuid(_)) => claim,
+        (ValueType::Uuid, _) => return None,
+        (ValueType::String, Value::Uuid(uuid)) => Value::String(uuid.to_string()),
+        // Integer and BigInt columns; a timestamp (`U64`) never reads a
+        // string as its milliseconds.
+        (ValueType::I32 | ValueType::I64, Value::String(text)) => {
+            let number: i64 = text.parse().ok()?;
+            if number.to_string() != text {
+                return None;
+            }
+            Value::I64(number)
+        }
+        (_, claim) => claim,
+    })
+}
+
+/// [`claim_as`] for every element of an array claim, as an `IN` list
+/// compares them with a column of type `ty`.
+pub(crate) fn claims_as(ty: &ValueType, claim: Value) -> Vec<Value> {
+    match claim {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| claim_as(ty, item))
+            .collect(),
+        claim => claim_as(ty, claim).into_iter().collect(),
+    }
+}
+
+/// The type of a row id.
+static ROW_ID_TYPE: ValueType = ValueType::Uuid;
 
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
@@ -1120,6 +1171,15 @@ fn provenance_columns() -> Vec<Column> {
 }
 
 impl Table {
+    /// The type of `name` (a row id is a UUID), or `None` for a column this
+    /// table does not have.
+    pub(crate) fn column_type(&self, name: &str) -> Option<&ValueType> {
+        if name == "id" {
+            return Some(&ROW_ID_TYPE);
+        }
+        self.column(name).map(|column| &column.ty)
+    }
+
     /// A readable column: an application or provenance column.
     pub fn column(&self, name: &str) -> Option<&Column> {
         self.columns

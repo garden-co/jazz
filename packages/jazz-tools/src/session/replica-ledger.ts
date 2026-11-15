@@ -1,3 +1,6 @@
+import { reloadAfterStorageInvalidation } from "../runtime/browser-storage-invalidation.js";
+import { holdAcrossPageCache } from "../runtime/page-cache.js";
+
 /**
  * The lifecycle of this browser's per-account local-first stores under
  * `clearOnSignOut` (#5250): which accounts' data may be on the device, who
@@ -223,25 +226,81 @@ export function holdReplicaStore(
   }).hold({ account });
 }
 
+/**
+ * Hold `account`'s lock shared until the returned release is called. While
+ * the page is in the back/forward cache it lets go (see `page-cache`):
+ * `left` runs as it does, and `returned` once it holds the lock again
+ * (`"stop"`: the page reloads instead).
+ */
 async function holdLock(
   locks: Locks | undefined,
   registry: string,
   account: string,
+  pageCache: {
+    left(): void;
+    returned(): void | "stop";
+    /** Past the re-take patience, the lock not held yet: `"stop"` keeps the page from reconnecting. */
+    stillWaiting(): void | "stop";
+  },
 ): Promise<() => Promise<void>> {
   if (!locks) return async () => {};
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => (release = resolve));
-  let held!: Promise<unknown>;
-  await new Promise<void>((acquired) => {
-    held = locks.request(lockName(registry, account), { mode: "shared" }, async () => {
-      acquired();
-      await released;
+  // Set from the request on (a page that leaves meanwhile lets it go once granted).
+  let releaseHeld: (() => void) | null = null;
+  /** The lock is granted, not merely asked for. */
+  let granted = false;
+  let held: Promise<unknown> = Promise.resolve();
+  let released = false;
+  const take = () =>
+    new Promise<void>((acquired) => {
+      granted = false;
+      const done = new Promise<void>((resolve) => (releaseHeld = resolve));
+      held = locks.request(lockName(registry, account), { mode: "shared" }, async () => {
+        granted = true;
+        acquired();
+        await done;
+        granted = false;
+      });
     });
+  await take();
+  const stopHoldingAcrossPageCache = holdAcrossPageCache({
+    leave: () => {
+      if (released || !releaseHeld) return;
+      releaseHeld();
+      releaseHeld = null;
+      pageCache.left();
+    },
+    return: async () => {
+      if (released || releaseHeld) return;
+      const held = take().then(() => {
+        // Released meanwhile, or the page left again before it held the lock.
+        if (released || !releaseHeld) return;
+        return pageCache.returned();
+      });
+      // Another page's wipe or check holds the lock exclusively, for moments.
+      // One that doesn't let go must not keep this page from reconnecting:
+      // past the patience the next holder goes on, and this one still checks
+      // the store once it holds the lock.
+      // (Unless that page is wiping this store: then this one reloads.)
+      let patience: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        held,
+        new Promise<void | "stop">(
+          (resolve) =>
+            (patience = setTimeout(
+              () => resolve(released || granted ? undefined : pageCache.stillWaiting()),
+              RETAKE_PATIENCE_MS,
+            )),
+        ),
+      ]).finally(() => clearTimeout(patience));
+    },
   });
   // Resolves once the lock is gone, not merely asked to go: a wipe that
   // checks right after must not find this tab still holding it.
   return async () => {
-    release();
+    released = true;
+    stopHoldingAcrossPageCache();
+    releaseHeld?.();
+    releaseHeld = null;
     await held.catch(() => {});
   };
 }
@@ -298,6 +357,8 @@ async function whileNoTabHolds<T>(
 /** As the backend watch confirms a signed-out answer before it signs anyone out. */
 export const CONFIRM_SIGNED_OUT_MS = 2_000;
 
+/** How long a page back from the back/forward cache waits for its store's lock before it reconnects anyway. */
+const RETAKE_PATIENCE_MS = 10_000;
 /** How long an open waits for an unfinished wipe it can't finish yet: at most ~10 s. */
 const FINISH_WIPE_RETRY_MS = 100;
 const FINISH_WIPE_RETRIES = 100;
@@ -469,7 +530,39 @@ export function replicaLifecycle(options: {
           continue;
         }
         record();
-        const release = await holdLock(locks, registry, account);
+        let recordedWhenLeft = false;
+        const wipedSinceLeft = () => {
+          const now = ledger.get(account);
+          return !!now?.wiping || (recordedWhenLeft && now === undefined);
+        };
+        const release = await holdLock(locks, registry, account, {
+          left: () => {
+            recordedWhenLeft = ledger.get(account) !== undefined;
+          },
+          // Back from the back/forward cache, holding the store again. Another
+          // tab may have wiped it meanwhile (it signed out as the last tab
+          // out): this page's client still shows what was wiped, so reload,
+          // as after any other external storage invalidation.
+          returned: () => {
+            if (wipedSinceLeft()) {
+              // Never recorded again: that would keep what the wipe took. And
+              // never reconnected, even when the reload guard refuses (a second
+              // invalidation within its window): that would replay this
+              // page's writes into a store no ledger entry names.
+              reloadAfterStorageInvalidation();
+              return "stop";
+            }
+            record();
+          },
+          // A wipe that outlasts the patience (a blocked IndexedDB delete)
+          // still holds the lock: reconnecting would replay this page's
+          // writes into a store no ledger entry names, which nothing wipes.
+          stillWaiting: () => {
+            if (!wipedSinceLeft()) return;
+            reloadAfterStorageInvalidation();
+            return "stop";
+          },
+        });
         // Again once held: another tab's wipe may have forgotten it before.
         record();
         if (!ledger.get(account)?.wiping) return release;

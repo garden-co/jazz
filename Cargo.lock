@@ -2300,6 +2300,8 @@ dependencies = [
  "hex",
  "hmac",
  "http",
+ "hyper",
+ "hyper-util",
  "jazz",
  "jazz-otel",
  "jsonwebtoken",
@@ -4379,8 +4381,6 @@ dependencies = [
 [[package]]
 name = "sqlite-wasm-rs"
 version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
 dependencies = [
  "cc",
  "js-sys",
