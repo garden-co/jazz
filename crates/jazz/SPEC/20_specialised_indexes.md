@@ -139,7 +139,7 @@ Shadow rows reference indexed rows by the current table's `rid`. Per kind:
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | text   | `__terms(tid INTEGER PRIMARY KEY, term TEXT UNIQUE, n INTEGER)`; `__post(tid, rid, impact INTEGER)`, indexed `(tid, rid)` and `(rid)` |
 | vector | `__vec(rid INTEGER PRIMARY KEY, v BLOB)` (normalized for `cosine`)                                                                    |
-| geo    | `__geo(rid INTEGER PRIMARY KEY, cell INTEGER, x REAL, y REAL, z REAL)`, indexed `(cell)`                                              |
+| geo    | `__geo(rid INTEGER PRIMARY KEY, cell INTEGER, lat REAL, lng REAL, x REAL, y REAL, z REAL)`, indexed `(cell)`                          |
 
 `__terms.n` counts postings and exists to drop dead terms; it is never read by
 a query (20.7). Fixtures in `SPEC/fixtures/ix/` pin each encoding's bytes
@@ -434,18 +434,37 @@ candidates but never change scores.
 
 ### 20.10.3 Geo
 
-A point is `(lat, lng)` from the declared columns; a row with either null is
-not indexed. `x, y, z` is the point on the unit sphere. `cell` is a 62-bit
-Z-order (Morton) code of the point quantized to 31 bits per axis on the
-equirectangular grid (`lng` from −180, `lat` from −90), encoding
-`jazz-ix-geo-z62/1`.
+A point is `(lat, lng)` from the declared columns, in degrees; a row with
+either null is not indexed. `x, y, z` is the point on the unit sphere.
+Trigonometry is fdlibm's `sin`/`cos` kernels written out in basic IEEE-754
+binary64 operations, with exact argument reduction in degrees, never the
+platform's `sin`/`cos` (which may differ in the last bit between targets).
 
-A region is covered by the smallest set of aligned quadtree cells, at most 16
-merged ranges; a radius is covered through its bounding box (split at the
-antimeridian, and widened to all longitudes near a pole). The chord
-threshold for `meters` on a sphere of radius 6 371 008.8 m is
-`(2 sin(meters / (2R)))²`, computed in Rust. Results are exact: the cover
-only chooses which cells to read, the chord threshold decides.
+`cell` (encoding `jazz-ix-geo-z62/1`) interleaves
+`u = floor((lng + 180) / 360 · 2³¹)` and `v = floor((lat + 90) / 180 · 2³¹)`,
+each clamped to `2³¹ − 1`: `u` in the even bits, `v` in the odd bits.
+
+**Cover.** A region is covered by aligned quadtree blocks: snap to the finest
+level at which the region spans at most 64 blocks per side, keep the blocks
+that meet the region (for a radius, those that meet its spherical cap; a box
+is split at the antimeridian, and a radius whose cap reaches a pole widens to
+all longitudes), sort their cell ranges, and merge the smallest gaps until at
+most 16 ranges remain. The cover only chooses which cells are read; it is
+always a superset of the region.
+
+**Exact test and score.**
+
+- `WithinRadius`: rows with `chord2 ≤ (2 sin(meters / (2R)))²`, `R = 6 371 008.8 m`,
+  the threshold computed in Rust; score `chord2` (20.6).
+- `WithinBox`: rows with `lat BETWEEN south AND north` and
+  `lng BETWEEN west AND east` (`lng >= west OR lng <= east` when the box
+  crosses the antimeridian), on the stored degrees; score the constant 0, so
+  `$score` order is `id` order.
+
+Measured read amplification (cells read ÷ cells in a disc, 16 ranges) with
+the cap-shaped cover is about 1.25–1.33× from 100 m to 50 km and from
+latitude 0 to 70; a bounding-box cover reads 1.56–1.63×, and a Hilbert curve
+over the bounding box 1.42–1.45×.
 
 ## 20.11 Errors
 
