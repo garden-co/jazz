@@ -10,9 +10,47 @@ pub enum JazzError {
     /// Storage, the network or the sync server failed.
     #[error("{reason}")]
     Io { reason: String },
-    /// The app was closed.
+    /// The app was closed, or (for a subscription) the subscription ended.
     #[error("the app is closed")]
     Closed,
+    /// Contract 2: the app's permissions don't allow it.
+    #[error("{reason}")]
+    Permission { reason: String },
+    /// Contract 2: something this layer or jazz-app doesn't support yet.
+    #[error("{reason}")]
+    NotSupported { reason: String },
+    /// Contract 2: a serializable transaction conflicted with another write;
+    /// retrying it may succeed.
+    #[error("{reason}")]
+    Conflict { reason: String },
+}
+
+impl JazzError {
+    /// For a host speaking contract 1, the kinds it knows: the contract 2
+    /// kinds are refusals.
+    pub(crate) fn for_contract(self, contract: u64) -> Self {
+        if contract >= 2 {
+            return self;
+        }
+        match self {
+            Self::Permission { reason }
+            | Self::NotSupported { reason }
+            | Self::Conflict { reason } => Self::Refused { reason },
+            other => other,
+        }
+    }
+
+    /// The error JSON's `kind`.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Refused { .. } => "refused",
+            Self::Io { .. } => "io",
+            Self::Closed => "closed",
+            Self::Permission { .. } => "permission",
+            Self::NotSupported { .. } => "notSupported",
+            Self::Conflict { .. } => "conflict",
+        }
+    }
 }
 
 pub(crate) type FfiError = JazzErrorKind;
@@ -23,6 +61,9 @@ pub(crate) enum JazzErrorKind {
     Refused(String),
     Io(String),
     Closed,
+    Permission(String),
+    NotSupported(String),
+    Conflict(String),
 }
 
 impl From<JazzErrorKind> for JazzError {
@@ -31,6 +72,9 @@ impl From<JazzErrorKind> for JazzError {
             JazzErrorKind::Refused(reason) => Self::Refused { reason },
             JazzErrorKind::Io(reason) => Self::Io { reason },
             JazzErrorKind::Closed => Self::Closed,
+            JazzErrorKind::Permission(reason) => Self::Permission { reason },
+            JazzErrorKind::NotSupported(reason) => Self::NotSupported { reason },
+            JazzErrorKind::Conflict(reason) => Self::Conflict { reason },
         }
     }
 }
@@ -43,7 +87,7 @@ pub(crate) fn refused(message: impl Into<String>) -> JazzErrorKind {
 
 /// `Refused` for what jazz-app (or this layer) cannot do yet.
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> JazzErrorKind {
-    JazzErrorKind::Refused(format!("not supported yet: {what}"))
+    JazzErrorKind::NotSupported(format!("not supported yet: {what}"))
 }
 
 impl From<jazz_app::Error> for JazzErrorKind {
@@ -51,7 +95,20 @@ impl From<jazz_app::Error> for JazzErrorKind {
         use jazz_app::Error as E;
         use jazz_app::jazz::tools::JazzError as J;
         let message = error.to_string();
+        // The engine names a write's rejection reason in its message.
+        if message.contains("authorization_denied") || message.contains("AuthorizationDenied") {
+            return Self::Permission(message);
+        }
+        if message.contains("serialization_conflict")
+            || message.contains("transaction_conflict")
+            || message.contains("SerializationConflict")
+        {
+            return Self::Conflict(message);
+        }
         match error {
+            E::Rejected(reason) if reason.contains("Authoriz") || reason.contains("ermission") => {
+                Self::Permission(message)
+            }
             E::App(_) | E::Config(_) | E::Decode { .. } | E::Rejected(_) => Self::Refused(message),
             E::Unsupported(what) => unsupported(what),
             E::Server(_) | E::Panicked(_) => Self::Io(message),

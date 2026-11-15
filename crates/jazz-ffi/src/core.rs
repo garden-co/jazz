@@ -31,7 +31,6 @@ pub(crate) struct Core {
     next_tx: AtomicU64,
     /// The contract version the host speaks (`"contract"` in the config):
     /// 1 unless it says 2.
-    #[allow(dead_code)]
     pub(crate) contract: u64,
 }
 
@@ -181,6 +180,11 @@ impl Core {
             next_tx: AtomicU64::new(1),
             contract,
         })
+    }
+
+    /// An error as this host's contract version names it.
+    pub(crate) fn surface<T>(&self, result: Result<T>) -> std::result::Result<T, JazzError> {
+        result.map_err(|error| JazzError::from(error).for_contract(self.contract))
     }
 
     fn open_jazz(&self) -> Result<&Jazz> {
@@ -450,6 +454,18 @@ impl Core {
         Ok(())
     }
 
+    /// Waits until every write committed so far reaches `tier`: the client
+    /// settles its writes in order, so waiting for the last one is enough.
+    pub fn wait_for_sync(&self, tier: DurabilityTier) -> Result<()> {
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            match LAST_WRITE.with(|last| last.get()) {
+                Some(last) => Ok(client.wait_for_transaction(last, tier).await?),
+                None => Ok(()),
+            }
+        }))?;
+        Ok(())
+    }
+
     pub fn tx_rollback(&self, tx: u64) -> Result<()> {
         block_on(self.open_jazz()?.with_client(move |_| async move {
             take_tx(tx)?.0.rollback()?;
@@ -517,10 +533,19 @@ async fn settle(
     committed: Option<jazz_app::jazz::tools::TransactionId>,
     tier: Option<DurabilityTier>,
 ) -> jazz_app::Result<()> {
-    if let (Some(committed), Some(tier)) = (committed, tier) {
-        client.wait_for_transaction(committed, tier).await?;
+    if let Some(committed) = committed {
+        LAST_WRITE.with(|last| last.set(Some(committed)));
+        if let Some(tier) = tier {
+            client.wait_for_transaction(committed, tier).await?;
+        }
     }
     Ok(())
+}
+
+thread_local! {
+    /// The last write this app's client committed (on its own thread).
+    static LAST_WRITE: std::cell::Cell<Option<jazz_app::jazz::tools::TransactionId>> =
+        const { std::cell::Cell::new(None) };
 }
 
 pub(crate) struct SubscriptionCore {

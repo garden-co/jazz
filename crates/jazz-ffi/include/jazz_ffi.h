@@ -10,6 +10,9 @@
  * and every error it stores in *err, belongs to the caller: free it with
  * jazz_string_free. On failure a function returns NULL and, when err is not
  * NULL, stores {"kind":"refused"|"io"|"closed","message":"..."} in *err
+ * (with "contract": 2 in the open config, also "permission" (the app's
+ * permissions refuse it), "notSupported" (not supported yet) and "conflict"
+ * (a serializable transaction lost to another write; retry it))
  * (*err is set to NULL on success). Functions block until done. Calls on
  * one handle may come from any threads at once, except jazz_close: no call
  * on that handle may run concurrently with it or follow it. Likewise no
@@ -58,6 +61,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "txBegin"    {"serializable"?: true}      -> {"tx": "<id>"}
  *   "txCommit"   {"tx", "tier"?}              -> null
  *   "txRollback" {"tx"}                       -> null
+ *   "waitForSync" {"tier"}                    -> null, once every write so
+ *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
  * inside that open transaction (its reads see its own writes), and "tier":
  * for reads "local" | "localFirst" (default) | "remote"; for writes and
