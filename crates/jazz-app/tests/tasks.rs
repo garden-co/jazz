@@ -173,3 +173,61 @@ async fn text_edits_merge() {
         .unwrap();
     assert_eq!(notes().await, "bye now");
 }
+
+/// Large values: a bytes cell inserted from a stream, spliced in place, and a json cell edited by pointer.
+#[tokio::test]
+async fn large_values() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let task = jazz
+        .insert_streaming(
+            NewTask {
+                meta: Some(Json(serde_json::json!({ "owner": "ops", "tags": ["a"] }))),
+                ..NewTask::new("Upload", 0, Vec::new())
+            },
+            tasks::attachment(),
+            std::io::Cursor::new(data.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(task.attachment.as_deref(), Some(data.as_slice()));
+    jazz.splice(
+        task.id,
+        tasks::attachment(),
+        jazz_app::Page::Bytes { from: 0, to: 4 },
+        vec![jazz_app::Splice {
+            at: 1,
+            delete: 2,
+            insert: vec![7, 7, 7],
+        }],
+    )
+    .await
+    .unwrap();
+    let attachment = jazz
+        .get::<Task>(task.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .attachment
+        .unwrap();
+    assert_eq!(attachment[..6], [data[0], 7, 7, 7, data[3], data[4]]);
+    assert_eq!(attachment.len(), data.len() + 1);
+
+    jazz.json_set(
+        task.id,
+        tasks::meta(),
+        [("/owner".to_owned(), serde_json::json!("dev"))],
+    )
+    .await
+    .unwrap();
+    let meta = jazz
+        .get::<Task>(task.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .meta
+        .unwrap();
+    assert_eq!(meta.0, serde_json::json!({ "owner": "dev", "tags": ["a"] }));
+}
