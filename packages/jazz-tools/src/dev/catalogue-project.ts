@@ -140,7 +140,8 @@ export interface ValidateProjectResult {
    */
   schema: {
     hash: string;
-    status: "snapshotted" | "changed" | "unsnapshotted";
+    /** "indexes-changed": only `indexOnly`/`compositeIndex` differ from the latest snapshot. */
+    status: "snapshotted" | "changed" | "indexes-changed" | "unsnapshotted";
   };
 }
 
@@ -320,7 +321,22 @@ async function schemaSnapshotStatus(
     isCommittedSnapshotFileName(entry.fileName),
   );
   if (committed.some((entry) => entry.hash === hash)) return { hash, status: "snapshotted" };
-  return { hash, status: committed.length === 0 ? "unsnapshotted" : "changed" };
+  if (committed.length === 0) return { hash, status: "unsnapshotted" };
+  const latest = committed.reduce((a, b) => (a.fileName > b.fileName ? a : b));
+  const unindexed = (tables: WasmSchema) =>
+    computeSchemaHash(
+      Object.fromEntries(
+        Object.entries(tables).map(([name, table]) => {
+          const { indexed_columns: _i, composite_indexes: _c, ...rest } = table;
+          return [name, rest];
+        }),
+      ) as WasmSchema,
+    );
+  // An index changes the schema's hash, not its data: no migration (#5494).
+  if ((await unindexed(latest.schema)) === (await unindexed(schema))) {
+    return { hash, status: "indexes-changed" };
+  }
+  return { hash, status: "changed" };
 }
 
 export async function compileSchema(options: CompileSchemaOptions): Promise<CompileSchemaResult> {

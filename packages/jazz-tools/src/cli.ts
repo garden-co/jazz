@@ -93,6 +93,12 @@ export async function validate(options: BuildOptions): Promise<void> {
           "Run `jazz-tools migrations create --name <name>` before you deploy it.",
       );
       break;
+    case "indexes-changed":
+      console.log(
+        `schema.ts (${result.schema.hash.slice(0, 12)}) differs from the latest snapshot only in its indexes, ` +
+          "so no migration is needed. Commit the migrations/index.ts and jazz.app.json this run regenerated with the change.",
+      );
+      break;
     case "unsnapshotted":
       console.log(
         "This project has no schema snapshot yet. Run `jazz-tools migrations create` once now: it only records " +

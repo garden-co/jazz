@@ -20,6 +20,7 @@ const {
   rootPermissionsSchema,
   rootSchemaWithoutInlinePermissions,
   rootSchemaWithTodoNotes,
+  rootSchemaWithIndexedTodo,
   storedRootSchema,
   storedBooleanTodoSchemaWithDefaultFalse,
   storedRootSchemaWithReorderedColumns,
@@ -156,6 +157,40 @@ describe("cli migrations", () => {
     const module = await readFile(index, "utf8");
     expect(module).toContain("`jazz-tools validate` and `jazz-tools migrations create` rewrite it");
     expect(module).not.toContain("`deploy`");
+  });
+
+  // #5494: an index changes the schema's hash, not its data, so validate
+  // doesn't send the user to `migrations create` for it.
+  it("says an index-only change needs no migration, and still asks for one otherwise", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const indexed = rootSchemaWithIndexedTodo();
+    const plain = indexed.replace('.indexOnly(["ownerId"])', "");
+    await writeFile(join(root, "schema.ts"), plain);
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
+    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+
+    for (const changed of [
+      indexed,
+      plain.replace("}, {  }),", '}, {  }).compositeIndex(["ownerId", "title"]),'),
+    ]) {
+      expect(changed).not.toBe(plain);
+      await writeFile(join(root, "schema.ts"), changed);
+      const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+      const out = logs.join("\n");
+      expect(out).toContain("differs from the latest snapshot only in its indexes");
+      expect(out).not.toContain("migrations create --name");
+    }
+
+    await writeFile(
+      join(root, "schema.ts"),
+      indexed.replace(
+        "ownerId: s.string(),",
+        "ownerId: s.string(),\n    notes: s.string().optional(),",
+      ),
+    );
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(logs.join("\n")).toContain("changed since the latest snapshot");
   });
 
   it("counts the steps a stub leaves to fill in", async () => {
