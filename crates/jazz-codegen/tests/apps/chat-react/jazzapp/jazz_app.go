@@ -123,6 +123,16 @@ func (canvasesTable) Update(ctx context.Context, db jazz.Querier, id string, pat
 	return jazz.Update(ctx, db, "canvases", id, patch, opts...)
 }
 
+// Upsert writes row as the row of `canvases` with id: inserted, or updated if it exists.
+func (canvasesTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewCanvas, opts ...jazz.WriteOption) (Canvas, error) {
+	return jazz.Upsert[NewCanvas, Canvas](ctx, db, "canvases", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `canvases` with id.
+func (canvasesTable) Restore(ctx context.Context, db jazz.Querier, id string) (Canvas, error) {
+	return jazz.Restore[Canvas](ctx, db, "canvases", id, nil)
+}
+
 // History starts a query of `canvases`'s history: every accepted version of its rows.
 func (canvasesTable) History() *jazz.Query[jazz.Version[Canvas]] {
 	return jazz.History(jazz.NewQuery[Canvas]("canvases"))
@@ -216,6 +226,16 @@ func (chatMembersTable) Insert(ctx context.Context, db jazz.Querier, row NewChat
 // Update changes the fields patch sets of the row of `chatMembers` with id.
 func (chatMembersTable) Update(ctx context.Context, db jazz.Querier, id string, patch ChatMemberPatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "chatMembers", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `chatMembers` with id: inserted, or updated if it exists.
+func (chatMembersTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewChatMember, opts ...jazz.WriteOption) (ChatMember, error) {
+	return jazz.Upsert[NewChatMember, ChatMember](ctx, db, "chatMembers", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `chatMembers` with id.
+func (chatMembersTable) Restore(ctx context.Context, db jazz.Querier, id string) (ChatMember, error) {
+	return jazz.Restore[ChatMember](ctx, db, "chatMembers", id, nil)
 }
 
 // History starts a query of `chatMembers`'s history: every accepted version of its rows.
@@ -319,6 +339,16 @@ func (chatsTable) Update(ctx context.Context, db jazz.Querier, id string, patch 
 	return jazz.Update(ctx, db, "chats", id, patch, opts...)
 }
 
+// Upsert writes row as the row of `chats` with id: inserted, or updated if it exists.
+func (chatsTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewChat, opts ...jazz.WriteOption) (Chat, error) {
+	return jazz.Upsert[NewChat, Chat](ctx, db, "chats", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `chats` with id.
+func (chatsTable) Restore(ctx context.Context, db jazz.Querier, id string) (Chat, error) {
+	return jazz.Restore[Chat](ctx, db, "chats", id, nil)
+}
+
 // History starts a query of `chats`'s history: every accepted version of its rows.
 func (chatsTable) History() *jazz.Query[jazz.Version[Chat]] {
 	return jazz.History(jazz.NewQuery[Chat]("chats"))
@@ -420,6 +450,16 @@ func (messagesTable) Update(ctx context.Context, db jazz.Querier, id string, pat
 	return jazz.Update(ctx, db, "messages", id, patch, opts...)
 }
 
+// Upsert writes row as the row of `messages` with id: inserted, or updated if it exists.
+func (messagesTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewMessage, opts ...jazz.WriteOption) (Message, error) {
+	return jazz.Upsert[NewMessage, Message](ctx, db, "messages", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `messages` with id.
+func (messagesTable) Restore(ctx context.Context, db jazz.Querier, id string) (Message, error) {
+	return jazz.Restore[Message](ctx, db, "messages", id, nil)
+}
+
 // History starts a query of `messages`'s history: every accepted version of its rows.
 func (messagesTable) History() *jazz.Query[jazz.Version[Message]] {
 	return jazz.History(jazz.NewQuery[Message]("messages"))
@@ -515,6 +555,16 @@ func (profilesTable) Update(ctx context.Context, db jazz.Querier, id string, pat
 	return jazz.Update(ctx, db, "profiles", id, patch, opts...)
 }
 
+// Upsert writes row as the row of `profiles` with id: inserted, or updated if it exists.
+func (profilesTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewProfile, opts ...jazz.WriteOption) (Profile, error) {
+	return jazz.Upsert[NewProfile, Profile](ctx, db, "profiles", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `profiles` with id.
+func (profilesTable) Restore(ctx context.Context, db jazz.Querier, id string) (Profile, error) {
+	return jazz.Restore[Profile](ctx, db, "profiles", id, nil)
+}
+
 // History starts a query of `profiles`'s history: every accepted version of its rows.
 func (profilesTable) History() *jazz.Query[jazz.Version[Profile]] {
 	return jazz.History(jazz.NewQuery[Profile]("profiles"))
@@ -608,6 +658,16 @@ func (reactionsTable) Insert(ctx context.Context, db jazz.Querier, row NewReacti
 // Update changes the fields patch sets of the row of `reactions` with id.
 func (reactionsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ReactionPatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "reactions", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `reactions` with id: inserted, or updated if it exists.
+func (reactionsTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewReaction, opts ...jazz.WriteOption) (Reaction, error) {
+	return jazz.Upsert[NewReaction, Reaction](ctx, db, "reactions", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `reactions` with id.
+func (reactionsTable) Restore(ctx context.Context, db jazz.Querier, id string) (Reaction, error) {
+	return jazz.Restore[Reaction](ctx, db, "reactions", id, nil)
 }
 
 // History starts a query of `reactions`'s history: every accepted version of its rows.
@@ -709,6 +769,16 @@ func (strokesTable) Insert(ctx context.Context, db jazz.Querier, row NewStroke, 
 // Update changes the fields patch sets of the row of `strokes` with id.
 func (strokesTable) Update(ctx context.Context, db jazz.Querier, id string, patch StrokePatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "strokes", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `strokes` with id: inserted, or updated if it exists.
+func (strokesTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewStroke, opts ...jazz.WriteOption) (Stroke, error) {
+	return jazz.Upsert[NewStroke, Stroke](ctx, db, "strokes", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `strokes` with id.
+func (strokesTable) Restore(ctx context.Context, db jazz.Querier, id string) (Stroke, error) {
+	return jazz.Restore[Stroke](ctx, db, "strokes", id, nil)
 }
 
 // History starts a query of `strokes`'s history: every accepted version of its rows.

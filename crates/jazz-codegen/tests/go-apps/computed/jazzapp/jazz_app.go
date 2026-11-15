@@ -197,6 +197,16 @@ func (peopleTable) Update(ctx context.Context, db jazz.Querier, id string, patch
 	return jazz.Update(ctx, db, "people", id, patch, opts...)
 }
 
+// Upsert writes row as the row of `people` with id: inserted, or updated if it exists.
+func (peopleTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewPerson, opts ...jazz.WriteOption) (Person, error) {
+	return jazz.Upsert[NewPerson, Person](ctx, db, "people", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `people` with id.
+func (peopleTable) Restore(ctx context.Context, db jazz.Querier, id string) (Person, error) {
+	return jazz.Restore[Person](ctx, db, "people", id, nil)
+}
+
 // History starts a query of `people`'s history: every accepted version of its rows.
 func (peopleTable) History() *jazz.Query[jazz.Version[Person]] {
 	return jazz.History(jazz.NewQuery[Person]("people"))
@@ -357,6 +367,16 @@ func (tasksTable) Insert(ctx context.Context, db jazz.Querier, row NewTask, opts
 // Update changes the fields patch sets of the row of `tasks` with id.
 func (tasksTable) Update(ctx context.Context, db jazz.Querier, id string, patch TaskPatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "tasks", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `tasks` with id: inserted, or updated if it exists.
+func (tasksTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewTask, opts ...jazz.WriteOption) (Task, error) {
+	return jazz.Upsert[NewTask, Task](ctx, db, "tasks", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `tasks` with id.
+func (tasksTable) Restore(ctx context.Context, db jazz.Querier, id string) (Task, error) {
+	return jazz.Restore[Task](ctx, db, "tasks", id, nil)
 }
 
 // History starts a query of `tasks`'s history: every accepted version of its rows.

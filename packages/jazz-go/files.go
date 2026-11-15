@@ -99,3 +99,100 @@ func ReadBytes(ctx context.Context, q Querier, table, id, column string) (io.Rea
 	}
 	return io.NopCloser(bytes.NewReader(content)), nil
 }
+
+// Upsert writes row (an insert struct) as the row of table with id:
+// inserted if there is none, updated if there is. It returns the row.
+func Upsert[N, R any](ctx context.Context, q Querier, table, id string, row N, opts ...WriteOption) (R, error) {
+	var out R
+	encoded, err := encode(q, row)
+	if err != nil {
+		return out, err
+	}
+	var raw json.RawMessage
+	if err := q.call(ctx, "upsert", withOptions(map[string]any{"table": table, "id": id, "row": encoded}, opts), &raw); err != nil {
+		return out, err
+	}
+	err = decodeRow(q.computed(), table, raw, &out)
+	return out, err
+}
+
+// Restore brings back the deleted row of table with id (with patch's
+// fields set, if patch isn't nil), and returns it.
+func Restore[R any](ctx context.Context, q Querier, table, id string, patch any) (R, error) {
+	var out R
+	args := map[string]any{"table": table, "id": id}
+	if patch != nil {
+		encoded, err := encode(q, patch)
+		if err != nil {
+			return out, err
+		}
+		args["patch"] = encoded
+	}
+	var raw json.RawMessage
+	if err := q.call(ctx, "restore", args, &raw); err != nil {
+		return out, err
+	}
+	err := decodeRow(q.computed(), table, raw, &out)
+	return out, err
+}
+
+// ReadBytesRange is bytes [from, to) of the bytes column of the row of
+// table with id (clamped to its end): a page of a large file.
+func ReadBytesRange(ctx context.Context, q Querier, table, id, column string, from, to int64) ([]byte, error) {
+	var row map[string]json.RawMessage
+	query := map[string]any{
+		"table":  table,
+		"where":  []map[string]any{{"column": "id", "op": "eq", "value": id}},
+		"select": []any{map[string]any{"column": column, "from": from, "to": to, "units": "bytes"}},
+	}
+	if err := q.call(ctx, "one", map[string]any{"query": query}, &row); err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, &Error{Kind: KindRefused, Table: table, Message: table + " has no row " + id}
+	}
+	var content []byte
+	err := json.Unmarshal(row[column], &content)
+	return content, err
+}
+
+// OpenBytes reads the bytes column of the row of table with id a page at
+// a time (StreamChunk bytes per read from Jazz), for files too large to
+// hold in memory.
+func OpenBytes(ctx context.Context, q Querier, table, id, column string) io.ReadCloser {
+	return &pageReader{ctx: ctx, q: q, table: table, id: id, column: column}
+}
+
+type pageReader struct {
+	ctx               context.Context
+	q                 Querier
+	table, id, column string
+	at                int64
+	page              []byte
+	done              bool
+}
+
+func (r *pageReader) Read(p []byte) (int, error) {
+	if len(r.page) == 0 {
+		if r.done {
+			return 0, io.EOF
+		}
+		page, err := ReadBytesRange(r.ctx, r.q, r.table, r.id, r.column, r.at, r.at+StreamChunk)
+		if err != nil {
+			return 0, err
+		}
+		r.at += int64(len(page))
+		r.page = page
+		if len(page) < StreamChunk {
+			r.done = true
+		}
+		if len(page) == 0 {
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, r.page)
+	r.page = r.page[n:]
+	return n, nil
+}
+
+func (r *pageReader) Close() error { return nil }

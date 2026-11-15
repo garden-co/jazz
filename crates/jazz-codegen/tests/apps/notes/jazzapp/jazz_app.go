@@ -114,6 +114,16 @@ func (foldersTable) Update(ctx context.Context, db jazz.Querier, id string, patc
 	return jazz.Update(ctx, db, "folders", id, patch, opts...)
 }
 
+// Upsert writes row as the row of `folders` with id: inserted, or updated if it exists.
+func (foldersTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewFolder, opts ...jazz.WriteOption) (Folder, error) {
+	return jazz.Upsert[NewFolder, Folder](ctx, db, "folders", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `folders` with id.
+func (foldersTable) Restore(ctx context.Context, db jazz.Querier, id string) (Folder, error) {
+	return jazz.Restore[Folder](ctx, db, "folders", id, nil)
+}
+
 // History starts a query of `folders`'s history: every accepted version of its rows.
 func (foldersTable) History() *jazz.Query[jazz.Version[Folder]] {
 	return jazz.History(jazz.NewQuery[Folder]("folders"))
@@ -207,6 +217,16 @@ func (notesTable) Insert(ctx context.Context, db jazz.Querier, row NewNote, opts
 // Update changes the fields patch sets of the row of `notes` with id.
 func (notesTable) Update(ctx context.Context, db jazz.Querier, id string, patch NotePatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "notes", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `notes` with id: inserted, or updated if it exists.
+func (notesTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewNote, opts ...jazz.WriteOption) (Note, error) {
+	return jazz.Upsert[NewNote, Note](ctx, db, "notes", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `notes` with id.
+func (notesTable) Restore(ctx context.Context, db jazz.Querier, id string) (Note, error) {
+	return jazz.Restore[Note](ctx, db, "notes", id, nil)
 }
 
 // History starts a query of `notes`'s history: every accepted version of its rows.
