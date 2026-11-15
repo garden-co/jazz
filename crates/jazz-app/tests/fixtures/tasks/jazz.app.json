@@ -31,7 +31,10 @@
         "tags": { "array": "string" },
         "meta": { "json": true, "optional": true }
       },
-      "computed": { "urgent": { "type": "boolean", "from": ["score", "priority"] } }
+      "computed": {
+        "urgent": { "type": "boolean", "from": ["score", "priority"] },
+        "titleLen": { "type": "int", "from": ["title"] }
+      }
     }
   },
   "transforms": { "isoDate": { "stored": "timestamp", "view": "string" } }

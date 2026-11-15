@@ -16,6 +16,9 @@ pub trait Table: Sized + Send + 'static {
     const NAME: &'static str;
     /// The table's stored columns, as `jazz.app.json` names them.
     const COLUMNS: &'static [&'static str];
+    /// The columns its computed fields are computed from: read whole even
+    /// when a query asks for a part of them.
+    const COMPUTED_FROM: &'static [&'static str] = &[];
     /// Values for a new row.
     type New: Insert<Row = Self>;
     /// A partial update of a row.

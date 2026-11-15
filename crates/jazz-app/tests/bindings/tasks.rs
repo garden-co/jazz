@@ -1,10 +1,10 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 3. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
-#![allow(dead_code, clippy::all)]
+#![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:060bee725893b3a123934fd0781fbf6a5a9da7860b21a3fc852ddfbab8b05799";
+pub const SOURCE: &str = "sha256:3134cd956a0d10d0165de661de9cef97c8238c93cf9e55e12a0c98ddd65e413c";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -312,6 +312,8 @@ pub struct Task {
     pub meta: ::std::option::Option<::jazz_app::Json>,
     /// Computed from `score`, `priority`.
     pub urgent: bool,
+    /// Computed from `title`.
+    pub title_len: i32,
 }
 
 /// A new row of `tasks`: [`NewTask::new`] takes the columns it requires.
@@ -360,6 +362,7 @@ pub struct TaskUpdate {
 impl ::jazz_app::Table for Task {
     const NAME: &'static str = "tasks";
     const COLUMNS: &'static [&'static str] = &["title", "priority", "score", "type", "dueAt", "tags", "meta"];
+    const COMPUTED_FROM: &'static [&'static str] = &["priority", "score", "title"];
     type New = NewTask;
     type Update = TaskUpdate;
 
@@ -373,6 +376,7 @@ impl ::jazz_app::Table for Task {
         let tags = row.take::<::std::vec::Vec<::std::string::String>>("tags")?;
         let meta = row.take::<::std::option::Option<::jazz_app::Json>>("meta")?;
         let urgent = computed.tasks_urgent(score.clone(), priority.clone());
+        let title_len = computed.tasks_title_len(title.clone());
         ::std::result::Result::Ok(Self {
             id: row.id(),
             title,
@@ -383,6 +387,7 @@ impl ::jazz_app::Table for Task {
             tags,
             meta,
             urgent,
+            title_len,
         })
     }
 
@@ -510,6 +515,9 @@ pub trait Computed: ::std::marker::Send + ::std::marker::Sync + 'static {
     /// `tasks.urgent`.
     fn tasks_urgent(&self, score: i32, priority: TaskPriority) -> bool;
 
+    /// `tasks.titleLen`.
+    fn tasks_title_len(&self, title: ::std::string::String) -> i32;
+
     /// Transform `isoDate`: a stored value, as the app reads it.
     fn iso_date_view(&self, stored: ::jazz_app::Timestamp) -> ::std::string::String;
 
@@ -554,7 +562,10 @@ pub const APP: &str = r#"{
         "tags": { "array": "string" },
         "meta": { "json": true, "optional": true }
       },
-      "computed": { "urgent": { "type": "boolean", "from": ["score", "priority"] } }
+      "computed": {
+        "urgent": { "type": "boolean", "from": ["score", "priority"] },
+        "titleLen": { "type": "int", "from": ["title"] }
+      }
     }
   },
   "transforms": { "isoDate": { "stored": "timestamp", "view": "string" } }

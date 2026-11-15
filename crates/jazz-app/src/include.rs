@@ -325,6 +325,7 @@ fn subquery<S: Row>(query: Query<S>, inner_column: &str, outer_column: &str) -> 
     subquery.limit = query.limit;
     subquery.offset = query.offset;
     subquery.nested_arrays = query.array_subqueries;
+    subquery.partial = query.partial;
     subquery
 }
 

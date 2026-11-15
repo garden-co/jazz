@@ -17,6 +17,10 @@ impl Computed for App {
         score > 5 || priority == TaskPriority::High
     }
 
+    fn tasks_title_len(&self, title: String) -> i32 {
+        title.chars().count() as i32
+    }
+
     fn iso_date_view(&self, stored: Timestamp) -> String {
         // Days since 1970-01-01 is all this test needs.
         format!("day-{}", stored.0 / DAY_MS)
@@ -134,7 +138,8 @@ async fn partial_reads() {
             meta: Some(Json(
                 serde_json::json!({ "owner": { "name": "ops" }, "tags": ["a"] }),
             )),
-            ..NewTask::new("Partial reads", 0, Vec::new())
+            r#type: Some("Partial reads".into()),
+            ..NewTask::new("héllo wörld", 0, Vec::new())
         })
         .await
         .unwrap();
@@ -142,12 +147,49 @@ async fn partial_reads() {
         .one(
             tasks::query()
                 .id(task.id)
-                .part(tasks::title(), ValuePart::TextUtf8 { from: 0, to: 7 }),
+                .part(tasks::r#type(), ValuePart::TextUtf8 { from: 0, to: 7 }),
         )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(head.title, "Partial");
+    assert_eq!(head.r#type.as_deref(), Some("Partial"));
+
+    // A column a computed field is computed from is read whole, so the
+    // computed field is right (as TS re-reads it in full).
+    let computed = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .part(tasks::title(), ValuePart::TextUtf8 { from: 0, to: 3 }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (computed.title.as_str(), computed.title_len),
+        ("héllo wörld", 11)
+    );
+
+    // Inside an include, the included rows' column is read in part.
+    let boxed = jazz
+        .insert(bindings::NewBox {
+            task: Some(task.id),
+            ..bindings::NewBox::new("crate")
+        })
+        .await
+        .unwrap();
+    let (_, included) = jazz
+        .one(
+            bindings::boxes::query()
+                .id(boxed.id)
+                .include(bindings::boxes::task_relation().with(
+                    tasks::query().part(tasks::r#type(), ValuePart::TextUtf8 { from: 0, to: 4 }),
+                )),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(included.unwrap().r#type.as_deref(), Some("Part"));
     let owner = jazz
         .one(
             tasks::query()

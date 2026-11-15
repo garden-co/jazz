@@ -190,7 +190,7 @@ impl<'a> Writer<'a> {
         // `generate --check` doesn't find it stale. (Stable Rust takes
         // rustfmt's skip only in this form.)
         out.push_str("#![cfg_attr(rustfmt, rustfmt_skip)]\n");
-        out.push_str("#![allow(dead_code, clippy::all)]\n\n");
+        out.push_str("#![allow(dead_code, unused_variables, clippy::all)]\n\n");
         out.push_str("/// The `jazz.app.json` these bindings were generated from.\n");
         let _ = writeln!(out, "{SOURCE_PREFIX}{:?};\n", self.app.source);
         for (name, (variants, what)) in &self.enums {
@@ -416,6 +416,25 @@ impl<'a> Writer<'a> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        let mut computed_from: Vec<&str> = table
+            .computed
+            .iter()
+            .flat_map(|c| c.from.iter().map(String::as_str))
+            .filter(|from| *from != "id")
+            .collect();
+        computed_from.sort_unstable();
+        computed_from.dedup();
+        if !computed_from.is_empty() {
+            let _ = writeln!(
+                out,
+                "    const COMPUTED_FROM: &'static [&'static str] = &[{}];",
+                computed_from
+                    .iter()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         let _ = writeln!(out, "    type New = {new};");
         let _ = writeln!(out, "    type Update = {update};\n");
         let _ = writeln!(

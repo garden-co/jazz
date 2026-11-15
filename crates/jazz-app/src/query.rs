@@ -53,7 +53,10 @@ impl<T: Row> Query<T> {
     /// UTF-8 or UTF-16 range of a text one, or the subtree at a JSON
     /// pointer of a json one, as TS's partial select does. The row's value
     /// for `column` holds that part, and only the chunks it covers are
-    /// read.
+    /// read. On a transformed column, the view transform applies to the
+    /// part read. A column a computed field is computed from is read whole,
+    /// so the computed field is right (TS re-reads it in full). Inside an
+    /// include's query it reads the included rows' column in part.
     ///
     /// ```ignore
     /// let head = jazz.one(tasks::query().id(id).part(tasks::attachment(), ValuePart::Bytes { from: 0, to: 1024 })).await?;
@@ -63,6 +66,11 @@ impl<T: Row> Query<T> {
         column: Column<<T as Row>::Table, V>,
         part: ValuePart,
     ) -> Self {
+        // A computed field computes from the whole value: TS re-reads a
+        // partially read dependency in full, so it is read whole here.
+        if <<T as Row>::Table as Table>::COMPUTED_FROM.contains(&column.name()) {
+            return self;
+        }
         self.query = self.query.select_part(column.name(), part);
         self
     }
