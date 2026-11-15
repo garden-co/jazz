@@ -1,0 +1,39 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "notes": {
+      "columns": {
+        "body": "string",
+        "pinned": { "type": "boolean", "default": false },
+        "folderId": "uuid?"
+      },
+      "relations": { "folder": { "rel": "folders", "column": "folderId" } }
+    },
+    "folders": {
+      "columns": { "name": "string" },
+      "relations": { "notesViaFolder": { "reverse": "notes", "relation": "folder" } }
+    }
+  },
+  "history": {
+    "v1": {
+      "tables": {
+        "notes": { "columns": { "text": "string" } }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "name": "folders",
+      "from": "v1",
+      "createTables": ["folders"],
+      "migrate": {
+        "notes": {
+          "body": { "renameFrom": "text" },
+          "pinned": { "add": "boolean", "default": false },
+          "folderId": { "add": "uuid", "default": null }
+        }
+      }
+    }
+  ]
+}

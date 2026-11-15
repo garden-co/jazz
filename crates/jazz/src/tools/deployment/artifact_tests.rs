@@ -1835,62 +1835,103 @@ fn computed_fields_and_transforms_load_into_the_codegen_metadata() {
             .as_object_mut()
             .unwrap()
             .remove("transform");
-        v["tables"]["todos"].as_object_mut().unwrap().remove("computed");
+        v["tables"]["todos"]
+            .as_object_mut()
+            .unwrap()
+            .remove("computed");
     });
     assert_eq!(app.current_hash(), plain.current_hash());
 }
 
 #[test]
 fn computed_fields_and_transforms_must_name_what_exists() {
-    let error = edited_app(|v| v["tables"]["todos"]["computed"]["shareCount"]["from"] = serde_json::json!(["nmae"]));
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["shareCount"]["from"] = serde_json::json!(["nmae"])
+    });
     assert!(
         error.contains("tables.todos.computed.shareCount.from[0]: table todos has no column nmae; did you mean `name`?"),
         "{error}"
     );
-    let error = edited_app(|v| v["tables"]["todos"]["computed"]["name"] = serde_json::json!({"type": "string", "from": []}));
-    assert!(error.contains("tables.todos.computed.name: table todos already has a column name"), "{error}");
-    let error = edited_app(|v| v["tables"]["todos"]["computed"]["shares"] = serde_json::json!({"type": "int", "from": []}));
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["name"] = serde_json::json!({"type": "string", "from": []})
+    });
+    assert!(
+        error.contains("tables.todos.computed.name: table todos already has a column name"),
+        "{error}"
+    );
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["shares"] = serde_json::json!({"type": "int", "from": []})
+    });
     assert!(error.contains("already has a relation shares"), "{error}");
-    let error = edited_app(|v| v["tables"]["todos"]["computed"]["twice"] = serde_json::json!({"type": "int", "from": ["shareCount"]}));
-    assert!(error.contains("`shareCount` is a computed field"), "{error}");
-    let error = edited_app(|v| v["tables"]["todos"]["computed"]["x"] = serde_json::json!({"from": []}));
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["twice"] =
+            serde_json::json!({"type": "int", "from": ["shareCount"]})
+    });
+    assert!(
+        error.contains("`shareCount` is a computed field"),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["todos"]["computed"]["x"] = serde_json::json!({"from": []}));
     assert!(error.contains("a computed field needs `type`"), "{error}");
-    let error = edited_app(|v| v["tables"]["todos"]["computed"]["x"] = serde_json::json!({"type": {"type": "int", "default": 1}, "from": []}));
-    assert!(error.contains("computed.x.type.default: `default` is for stored columns"), "{error}");
-    let error = edited_app(|v| v["tables"]["todos"]["columns"]["meta"]["transform"] = "jsonTxt".into());
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["x"] =
+            serde_json::json!({"type": {"type": "int", "default": 1}, "from": []})
+    });
+    assert!(
+        error.contains("computed.x.type.default: `default` is for stored columns"),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["todos"]["columns"]["meta"]["transform"] = "jsonTxt".into());
     assert!(
         error.contains("tables.todos.columns.meta.transform: no transform `jsonTxt` in the top-level `transforms`; did you mean `jsonText`?"),
         "{error}"
     );
     let error = edited_app(|v| {
-        v["tables"]["todos"]["columns"]["name"] = serde_json::json!({"type": "string", "transform": "jsonText"})
+        v["tables"]["todos"]["columns"]["name"] =
+            serde_json::json!({"type": "string", "transform": "jsonText"})
     });
     assert!(
         error.contains("transform `jsonText` stores { \"json\": { \"type\": \"object\" } }, but column name is \"string\""),
         "{error}"
     );
-    let error = edited_app(|v| v["transforms"]["bad"] = serde_json::json!({"stored": "string?", "view": "string"}));
-    assert!(error.contains("transforms.bad.stored: a transform's types carry no `?`"), "{error}");
+    let error = edited_app(|v| {
+        v["transforms"]["bad"] = serde_json::json!({"stored": "string?", "view": "string"})
+    });
+    assert!(
+        error.contains("transforms.bad.stored: a transform's types carry no `?`"),
+        "{error}"
+    );
     let error = edited_app(|v| v["transforms"]["bad"] = serde_json::json!({"stored": "string"}));
     assert!(error.contains("a transform needs `view`"), "{error}");
     let error = edited_app(|v| {
         v["history"]["00304e9bce65"]["tables"]["todos"]["computed"] = serde_json::json!({})
     });
-    assert!(error.contains("only the current `tables` declare computed fields"), "{error}");
+    assert!(
+        error.contains("only the current `tables` declare computed fields"),
+        "{error}"
+    );
 }
 
 #[test]
 fn unresolved_todos_are_refused_with_every_path() {
     let error = edited_app(|v| {
-        v["migrations"][0]["migrate"]["todos"]["tags"]["default"] = "TODO: a value for existing rows".into();
+        v["migrations"][0]["migrate"]["todos"]["tags"]["default"] =
+            "TODO: a value for existing rows".into();
         v["migrations"][0]["migrate"]["todos"]["meta"] = "TODO: rename or add?".into();
     });
     assert!(error.contains("2 unresolved TODOs"), "{error}");
     assert!(
-        error.contains("  migrations[0].migrate.todos.tags.default: TODO: a value for existing rows"),
+        error.contains(
+            "  migrations[0].migrate.todos.tags.default: TODO: a value for existing rows"
+        ),
         "{error}"
     );
-    assert!(error.contains("  migrations[0].migrate.todos.meta: TODO: rename or add?"), "{error}");
+    assert!(
+        error.contains("  migrations[0].migrate.todos.meta: TODO: rename or add?"),
+        "{error}"
+    );
     // A comment may say TODO.
     edited_app_loads(|v| v["$comment"] = "TODO: tidy up".into());
     // The client loader refuses them too.
@@ -1907,8 +1948,16 @@ fn slices_and_ts_only_from_alpha63_load_with_a_warning() {
         v["tables"]["shares"]["tsOnly"] = serde_json::json!({ "user": "transform" });
     });
     assert_eq!(app.warnings().len(), 2, "{:?}", app.warnings());
-    assert!(app.warnings().iter().any(|w| w.contains("slices: schema slicing is gone in alpha.65")));
-    assert!(app.warnings().iter().any(|w| w.contains("tables.shares.tsOnly: `tsOnly` is from alpha.63")));
+    assert!(
+        app.warnings()
+            .iter()
+            .any(|w| w.contains("slices: schema slicing is gone in alpha.65"))
+    );
+    assert!(
+        app.warnings()
+            .iter()
+            .any(|w| w.contains("tables.shares.tsOnly: `tsOnly` is from alpha.63"))
+    );
     assert!(edited_app_loads(|_| {}).warnings().is_empty());
 }
 
@@ -1921,7 +1970,10 @@ fn migrations_take_a_name_and_comments() {
     });
     assert_eq!(app.migrations().len(), 1);
     let error = edited_app(|v| v["migrations"][0]["name"] = 3.into());
-    assert!(error.contains("migrations[0].name: must be a string"), "{error}");
+    assert!(
+        error.contains("migrations[0].name: must be a string"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1929,7 +1981,10 @@ fn the_source_hash_ignores_line_ends() {
     let unix = source_hash(b"{\n  \"format\": 1\n}\n");
     assert_eq!(unix, source_hash(b"{\r\n  \"format\": 1\r\n}\r\n"));
     assert_ne!(unix, source_hash(b"{\n  \"format\": 2\n}\n"));
-    assert!(unix.starts_with("sha256:") && unix.len() == 7 + 64, "{unix}");
+    assert!(
+        unix.starts_with("sha256:") && unix.len() == 7 + 64,
+        "{unix}"
+    );
 }
 
 #[test]

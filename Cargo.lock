@@ -2277,6 +2277,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "jazz",
+ "jazz-codegen",
  "jazz-native-relay",
  "jazz-otel",
  "jazz-server",
