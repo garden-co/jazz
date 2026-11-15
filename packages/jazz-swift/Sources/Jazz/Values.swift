@@ -51,7 +51,7 @@ public let implementationsKey = CodingUserInfoKey(rawValue: "jazz.implementation
 /// them while coding rows: what `JazzApp.open(_:computed:)` was given.
 public func implementations<T>(of type: T.Type, in userInfo: [CodingUserInfoKey: Any]) throws -> T {
     guard let implementations = userInfo[implementationsKey] as? T else {
-        throw JazzError.decoding(
+        throw JazzError.refused(
             "no \(T.self) to compute fields and transforms with: open the app with JazzApp.open(_:computed:)")
     }
     return implementations
