@@ -155,6 +155,27 @@ describe("jazz-tools upgrade: conversions", () => {
     expectGolden("slices-next", dir, report);
   });
 
+  it("runs the app's own validate on its own binaries, whatever this process's Jazz overrides say", async () => {
+    // As in the monorepo's sealed test runs, which point jazz-napi at this
+    // release's build: inherited, alpha.63's validate would load it (or, here,
+    // fail to load a binding that isn't there).
+    const saved = { ...process.env };
+    Object.assign(process.env, {
+      JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+      JAZZ_CORRECTNESS_NAPI_BINDING: "/nonexistent/jazz-napi.node",
+      JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "0",
+      NAPI_RS_NATIVE_LIBRARY_PATH: "/nonexistent/jazz-napi.node",
+    });
+    try {
+      const dir = fixture("slices-next");
+      const report = await upgrade(dir, { dryRun: true });
+      expect(report.deleted).toContain("schema.ts");
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
+
   it("writes nothing on a dry run", async () => {
     const dir = fixture("backend-history");
     const before = projectFiles(dir);

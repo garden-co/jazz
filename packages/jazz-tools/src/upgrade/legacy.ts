@@ -63,6 +63,27 @@ export function findLegacyJazzTools(project: Project): LegacyJazzTools {
   return { dir, version };
 }
 
+/**
+ * The environment for the app's own jazz-tools: everything but what points
+ * Jazz at other native or WASM builds. jazz-napi and jazz-tools honour
+ * `JAZZ_CORRECTNESS_*` (the monorepo's sealed test artifacts) and napi-rs
+ * `NAPI_RS_*` overrides; inherited, they would run alpha.64's validate on
+ * this release's engine, which writes different files (no `slices`).
+ */
+export function legacyEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (
+      key.startsWith('JAZZ_CORRECTNESS_') ||
+      key === "NAPI_RS_NATIVE_LIBRARY_PATH" ||
+      key === "NAPI_RS_FORCE_WASI"
+    )
+      continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 /** Run the old `validate --check`, refusing what it refuses. */
 export function checkLegacyFiles(project: Project, legacy: LegacyJazzTools): string[] {
   for (const file of [project.appFile, project.permissionsJsonFile]) {
@@ -82,7 +103,7 @@ export function checkLegacyFiles(project: Project, legacy: LegacyJazzTools): str
     {
       cwd: project.root,
       encoding: "utf8",
-      env: { ...process.env, NO_COLOR: "1" },
+      env: { ...legacyEnvironment(process.env), NO_COLOR: "1" },
     },
   );
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
