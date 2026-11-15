@@ -349,9 +349,21 @@ impl OpenTransaction {
             .await
     }
 
-    pub async fn restore_with<U: Update>(&self, id: ObjectId, update: U) -> Result<U::Row> {
-        self.on(move |tx| async move { tx.restore_with(id, update).await })
-            .await
+    /// Brings back a deleted row with `new`'s values. A restore replaces
+    /// the whole row, so it takes the full insert, as TS's
+    /// `restore(table, id, data)` does.
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        self.on(move |tx| async move {
+            let cells = new.into_cells(&tx.implementations)?;
+            tx.client.restore(
+                <N::Row as Table>::NAME,
+                id,
+                Some(cells.into_iter().collect()),
+            )?;
+            tx.wrote.set(true);
+            tx.read_back(id).await
+        })
+        .await
     }
 
     /// [`Jazz::edit_text`] staged in the transaction.

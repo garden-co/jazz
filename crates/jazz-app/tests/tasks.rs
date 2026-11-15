@@ -503,3 +503,36 @@ async fn shutdown_mid_upload() {
     // Let the client thread finish exiting (it aborted the process here).
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 }
+
+/// `OpenTransaction::restore_with` takes the full insert too: on a table
+/// with required columns, the row comes back with the values given once
+/// the transaction commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_transaction_restore_with_values() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask::new("Ship it", 3, vec!["release".to_owned()]))
+        .await
+        .unwrap();
+    jazz.delete::<Task>(task.id).await.unwrap();
+
+    let tx = jazz.begin_transaction().await.unwrap();
+    let restored = tx
+        .restore_with(
+            task.id,
+            NewTask::new("Ship it again", 7, vec!["retry".to_owned()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.id, task.id);
+    assert_eq!(restored.title, "Ship it again");
+    tx.commit().await.unwrap();
+
+    let row = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(row.title, "Ship it again");
+    assert_eq!(row.score, 7);
+    assert_eq!(row.tags, ["retry"]);
+    assert_eq!(row.priority, TaskPriority::Low, "the column's default");
+}
