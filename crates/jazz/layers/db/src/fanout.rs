@@ -328,17 +328,24 @@ fn canon_value(value: &Value) -> Option<String> {
     to_sql(value).ok().flatten().map(|sql| canon(&sql))
 }
 
-/// A value's canonical form ([`canon_value`]) as column `column` stores it:
-/// an enum variant's name as its tag where it has one, so it matches the
-/// cells of a changed row's image.
-fn stored_canon(column: Option<&crate::values::Column>, value: String) -> String {
+/// A value's canonical form ([`canon_value`]) as column `column` stores it,
+/// so it matches the cells of a changed row's image: an enum variant's name
+/// as its tag. `None` where the value has no stored form yet: a variant
+/// with no tag (one a store keeps for an import gets its tag only when a
+/// row first stores it, after this key would have been made) or anything
+/// else that is not a variant. A key on it could never match the rows it
+/// stands for, so the caller watches the table whole instead.
+fn stored_canon(column: Option<&crate::values::Column>, value: String) -> Option<String> {
     let Some(tags) = column.and_then(|column| column.tags.as_ref()) else {
-        return value;
+        return Some(value);
     };
+    if value == canon(&Sql::Null) {
+        return Some(value);
+    }
     let tags = tags.borrow();
     tags.iter()
         .find(|(_, name)| canon(&Sql::Text(name.as_bytes().to_vec())) == value)
-        .map_or(value, |(tag, _)| canon(&Sql::Integer(tag)))
+        .map(|(tag, _)| canon(&Sql::Integer(tag)))
 }
 
 impl Fanout {
@@ -860,19 +867,20 @@ impl Inner {
                     let governing = policies.by_stored(&root.stored)?;
                     // As for a query key: only an application column is in
                     // a changed row's image (`$createdBy.account` is not).
-                    governing.columns.iter().any(|c| c.name == column).then(|| {
-                        let value = stored_canon(governing.column(&column), value);
-                        (governing.stored_name(&column).to_owned(), value)
-                    })
+                    if !governing.columns.iter().any(|c| c.name == column) {
+                        return None;
+                    }
+                    let value = stored_canon(governing.column(&column), value)?;
+                    Some((governing.stored_name(&column).to_owned(), value))
                 });
             root_key(query, &prepared.binding)
                 // Only an application column is in a changed row's image;
                 // a key on anything else (`$createdBy.identity.subject`,
                 // `id`) would never be hit.
                 .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
-                .map(|(column, value)| {
-                    let value = stored_canon(root.column(&column), value);
-                    (root.stored_name(&column).to_owned(), value)
+                .and_then(|(column, value)| {
+                    let value = stored_canon(root.column(&column), value)?;
+                    Some((root.stored_name(&column).to_owned(), value))
                 })
                 .or(policy_root_key)
         }
@@ -2861,7 +2869,7 @@ fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<
         (ValueType::Bool, value @ Value::Bool(_)) => value,
         _ => return None,
     };
-    let value = stored_canon(Some(stored), canon_value(&value)?);
+    let value = stored_canon(Some(stored), canon_value(&value)?)?;
     Some((stored.stored.clone(), value))
 }
 
@@ -2893,7 +2901,11 @@ pub(super) fn stored_pins(
         .filter_map(|(table, pin)| {
             let table = schema.table(&table).ok()?;
             let pin = pin.map(|(column, value)| {
-                let value = stored_canon(table.column(&column), value);
+                // These pins are made anew for each tick's writes, after
+                // their cells are stored: a variant with no tag yet is in
+                // none of them, and its name, which no cell holds, rightly
+                // matches none.
+                let value = stored_canon(table.column(&column), value.clone()).unwrap_or(value);
                 (table.stored_name(&column).to_owned(), value)
             });
             Some((table.stored.clone(), pin))
