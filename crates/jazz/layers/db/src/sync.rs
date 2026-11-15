@@ -9322,7 +9322,7 @@ impl Db {
         let mut answered_remotes = Vec::new();
         // Rows a live read held on an earlier connection and its first
         // `Holds` on this one leaves out (see `Db::client_apply`).
-        let mut unheld: Vec<(String, [u8; 16])> = Vec::new();
+        let mut unheld: Vec<(u64, String, [u8; 16])> = Vec::new();
         {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
@@ -9945,7 +9945,7 @@ impl Db {
                                 let now = live.holds.get(&table);
                                 for row in rows {
                                     if now.is_none_or(|now| !now.contains(&row)) {
-                                        unheld.push((table.clone(), row));
+                                        unheld.push((id, table.clone(), row));
                                     }
                                 }
                             }
@@ -9999,9 +9999,25 @@ impl Db {
         // the support it rested on with it; nothing else would say so. A
         // row the listings above evicted is gone already, and not asked for.
         let mut inner = self.inner.borrow_mut();
+        // Only support: the read's own result rows are the server's resume
+        // to reconcile (what left the result ships as it is now, or its
+        // eviction, and its listing judges the rest), while a supporting row
+        // leaves the replica only through an `AccessLost` for a read that
+        // still holds it, which a read that no longer does never gets.
         let client = inner.client.as_ref().expect("client");
         let mut unheld: Vec<(String, [u8; 16])> = unheld
             .into_iter()
+            .filter(|(id, table, _)| {
+                let root = client.reads.get(id).and_then(|read| {
+                    inner
+                        .schema
+                        .table(&read.query.table)
+                        .ok()
+                        .map(|root| root.stored.clone())
+                });
+                root.is_some_and(|root| root != *table)
+            })
+            .map(|(_, table, row)| (table, row))
             .filter(|(table, row)| !client.holds_row(table, row))
             .collect();
         unheld.sort();
@@ -10011,8 +10027,10 @@ impl Db {
                 continue;
             }
             let id = row.to_vec();
+            // A deletion the replica holds is already the server's word on
+            // the row.
             for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
-                if image.at.accepted() {
+                if image.at.accepted() && !image.deleted {
                     inner.ask_whole((table.clone(), row, image.key), 0)?;
                 }
             }
