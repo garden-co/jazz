@@ -196,15 +196,24 @@ impl Core {
             // Forwards on the client's thread until cancelled, the stream
             // ends, or the delivery thread is gone.
             tokio::task::spawn_local(async move {
+                // If the client drops this task without it reaching an end
+                // (its thread winding down), the guard sends `Closed`.
+                let mut forward = EndGuard(Some(forward));
                 let mut cancelled = cancelled;
                 let mut first = true;
                 loop {
                     let item = tokio::select! {
                         item = stream.next() => item,
-                        _ = &mut cancelled => return,
+                        _ = &mut cancelled => {
+                            forward.0 = None;
+                            return;
+                        }
                     };
                     let event = match item {
-                        None => return,
+                        // The stream ended without a rejection (the client
+                        // stopped, or the server ended the query): say so,
+                        // so no host waits for a delta that never comes.
+                        None => Event::Error(JazzError::Closed),
                         Some(SubscriptionStreamItem::Delta(delta)) => {
                             match convert::delta_json(&table, delta, first) {
                                 Ok(json) => Event::Delta(json),
@@ -219,7 +228,8 @@ impl Core {
                     };
                     first = false;
                     let failed = matches!(event, Event::Error(_));
-                    if forward.send(Some(event)).is_err() || failed {
+                    if forward.send(event).is_err() || failed {
+                        forward.0 = None;
                         return;
                     }
                 }
@@ -282,6 +292,27 @@ impl Core {
         }
         result?;
         Ok(())
+    }
+}
+
+/// A forwarder's sender that, dropped before the forwarder ended on its
+/// own, tells the delivery thread the subscription is over.
+struct EndGuard(Option<mpsc::Sender<Option<Event>>>);
+
+impl EndGuard {
+    fn send(&self, event: Event) -> std::result::Result<(), ()> {
+        match &self.0 {
+            Some(sender) => sender.send(Some(event)).map_err(drop),
+            None => Err(()),
+        }
+    }
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(Some(Event::Error(JazzError::Closed)));
+        }
     }
 }
 
