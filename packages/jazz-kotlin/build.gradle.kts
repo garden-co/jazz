@@ -83,19 +83,25 @@ val edges = sourceSets.create("edges") {
     kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/kotlin-edges"))
     compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
 }
-// kotlin-computed (transforms and computed fields) runs a test of its own.
-val computedTest = sourceSets.create("computedTest") {
-    kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/kotlin-computed"))
-    compileClasspath += sourceSets.main.get().output + sourceSets.test.get().output + configurations.testCompileClasspath.get()
-    runtimeClasspath += output + compileClasspath + configurations.testRuntimeClasspath.get()
+// Goldens with tests of their own (each declares package jazzapp, so each
+// gets a source set): kotlin-computed (transforms, computed fields) and
+// tasks (payload enums, uuid[] relations, bigint/bytes, JSON).
+fun goldenTest(name: String, app: String): TaskProvider<Test> {
+    val set = sourceSets.create(name) {
+        kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/$app"))
+        compileClasspath += sourceSets.main.get().output + sourceSets.test.get().output +
+            configurations.testCompileClasspath.get()
+        runtimeClasspath += output + compileClasspath + configurations.testRuntimeClasspath.get()
+    }
+    return tasks.register<Test>(name) {
+        testClassesDirs = set.output.classesDirs
+        classpath = set.runtimeClasspath
+        useJUnitPlatform()
+    }
 }
-val testComputed by tasks.registering(Test::class) {
-    testClassesDirs = computedTest.output.classesDirs
-    classpath = computedTest.runtimeClasspath
-    useJUnitPlatform()
-}
-tasks.named("check") { dependsOn("compileEdgesKotlin", testComputed) }
-tasks.named("test") { dependsOn("compileEdgesKotlin"); finalizedBy(testComputed) }
+val goldenTests = listOf(goldenTest("computedTest", "kotlin-computed"), goldenTest("tasksTest", "tasks"))
+tasks.named("check") { dependsOn("compileEdgesKotlin", goldenTests) }
+tasks.named("test") { dependsOn("compileEdgesKotlin"); finalizedBy(goldenTests) }
 
 tasks.test {
     useJUnitPlatform()

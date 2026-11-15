@@ -65,3 +65,42 @@ public fun <R> computeField(
     }
     row[name] = jazzJson.encodeToJsonElement(result, compute(args))
 }
+
+/** A case of an enum with payloads: its name in `jazz.app.json`, its class and how its fields (de)serialize. */
+public class PayloadCase<T : Any>(
+    public val name: String,
+    public val type: kotlin.reflect.KClass<out T>,
+    public val serializer: KSerializer<out T>,
+)
+
+/**
+ * An enum with payloads, as generated bindings declare it (a sealed
+ * interface, a class per case): JSON `{ "case": "<name>", "fields": { … } }`.
+ */
+public open class PayloadEnumSerializer<T : Any>(serialName: String, private val cases: List<PayloadCase<out T>>) :
+    KSerializer<T> {
+    override val descriptor: kotlinx.serialization.descriptors.SerialDescriptor =
+        kotlinx.serialization.descriptors.buildClassSerialDescriptor(serialName)
+
+    override fun deserialize(decoder: Decoder): T {
+        val json = (decoder as kotlinx.serialization.json.JsonDecoder).decodeJsonElement() as kotlinx.serialization.json.JsonObject
+        val name = (json["case"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            ?: throw kotlinx.serialization.SerializationException("an enum with payloads needs a \"case\": $json")
+        val case = cases.firstOrNull { it.name == name }
+            ?: throw kotlinx.serialization.SerializationException("unknown case `$name` of ${descriptor.serialName}")
+        val fields = json["fields"] ?: kotlinx.serialization.json.JsonObject(emptyMap())
+        return jazzJson.decodeFromJsonElement(case.serializer, fields)
+    }
+
+    override fun serialize(encoder: Encoder, value: T) {
+        val case = cases.firstOrNull { it.type.isInstance(value) }
+            ?: throw kotlinx.serialization.SerializationException("$value is not a case of ${descriptor.serialName}")
+        @Suppress("UNCHECKED_CAST")
+        val fields = jazzJson.encodeToJsonElement(case.serializer as KSerializer<T>, value)
+        (encoder as kotlinx.serialization.json.JsonEncoder).encodeJsonElement(
+            kotlinx.serialization.json.JsonObject(
+                mapOf("case" to kotlinx.serialization.json.JsonPrimitive(case.name), "fields" to fields),
+            ),
+        )
+    }
+}
