@@ -1,12 +1,11 @@
 # jazz-kotlin
 
-The Kotlin/JVM runtime for Jazz apps: `suspend` calls and `Flow` subscriptions over
+The Kotlin runtime for Jazz apps (JVM and Android clients; backends run in TypeScript, Rust or Go): `suspend` calls and `Flow` subscriptions over
 [`jazz-ffi`](../../crates/jazz-ffi) (UniFFI, through JNA), for the typed bindings
 `jazz-tools generate` writes to `src/main/kotlin/JazzApp.kt` beside a `build.gradle.kts`.
 
 ```kotlin
-val jazz = jazzapp.open(JazzConfig(appId = …, serverUrl = …, permissions = …, backendSecret = …, adminSecret = …, sessionSubject = "user-1"))
-val tasks = jazz.all(Tasks.where(Tasks.showId eq show.id).orderBy(Tasks.rank.asc()))
+val jazz = jazzapp.open(JazzConfig(appId = …, serverUrl = "https://app.example/jazz", auth = JazzAuth.DeviceAccount(key)))
 jazz.update(Tasks, task.id) { status(TaskStatus.Done) }
 jazz.watch(Tasks.where(Tasks.showId eq show.id)).collect { println(it) }
 ```

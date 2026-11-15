@@ -87,6 +87,12 @@ public class Jazz internal constructor(
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
         public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz =
             withContext(config.dispatcher) {
+                if (config.serverUrl != null && config.auth == null) {
+                    throw JazzException.Refused(
+                        "connecting to ${config.serverUrl} needs JazzConfig.auth (a device account, or your backend's sign-in). " +
+                            "Kotlin is a client; run your backend in TypeScript, Rust or Go.",
+                    )
+                }
                 val json = config.toJson(app)
                 val native = when (val auth = config.auth) {
                     // The native core asks on a thread of its own: blocking there is fine.
@@ -180,12 +186,6 @@ public class Jazz internal constructor(
     /** Brings back deleted row [id] of [table], as it was or with [row] as its content; returns it. */
     public suspend fun <Row : Any, Insert : Any, P : Patch> restore(table: Table<Row, Insert, P>, id: String, row: Insert? = null): Row =
         io { decodeStored(table, native.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
-
-    /** The id of the permissions bundle this backend published, or `null` for a client. */
-    public suspend fun bundle(): String? = io { native.bundle() }
-
-    /** The account id of the user this backend acts as, or `null` for a client. */
-    public suspend fun account(): String? = io { native.account() }
 
     /** Every row [query] matches, read at [tier] (by default local-first). */
     public suspend fun <Row : Any> all(query: Query<Row>, tier: ReadTier? = null): List<Row> = io {

@@ -37,26 +37,6 @@ import jazzapp.Shows
 import jazzapp.Task
 
 object DocsSnippets {
-    suspend fun openBackend(serverUrl: String, appId: String, backendSecret: String, adminSecret: String, user: String): Jazz {
-        // #region context-setup-kotlin-backend
-        val jazz = jazzapp.open(
-            JazzConfig(
-                appId = appId,
-                serverUrl = serverUrl,
-                // The text of jazz.permissions.json: this makes it a backend.
-                permissions = permissions(),
-                backendSecret = backendSecret,
-                adminSecret = adminSecret,
-                // The user the backend acts as.
-                sessionSubject = user,
-            ),
-        )
-        val me: String? = jazz.account()
-        // #endregion context-setup-kotlin-backend
-        checkNotNull(me)
-        return jazz
-    }
-
     suspend fun oneShot(jazz: Jazz, showId: String): List<Task> {
         // #region reading-oneshot-kotlin
         val tasks: List<Task> = jazz.all(Tasks.where(Tasks.showId eq showId))

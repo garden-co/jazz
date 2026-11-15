@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The Kotlin partition: jazz-kotlin's tests and the StagePlan Kotlin CLI
-# end to end against `jazz-tools server`, on the JVM. Fetches a JDK and
+# The Kotlin partition: jazz-kotlin's tests and the StagePlan Kotlin CLI, an
+# end-user client, end to end against a StagePlan backend, on the JVM. Fetches a JDK and
 # Gradle into ~/.cache/jazz-kotlin when none is on PATH.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -16,8 +16,9 @@ done
 
 source dev/scripts/kotlin-toolchain.sh
 
-cargo build -p jazz-ffi -p jazz-cli --bin jazz-tools  # jazz-tools: the e2e tests' server
-cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay  # the end-user tests' app endpoint
+cargo build -p jazz-ffi
+# The e2e tests' StagePlan backend (a test harness: Kotlin is a client).
+cargo build -p jazz-app --example test_app_backend
 # Kotlin is switched off in the CLI until it ships: the codegen golden test
 # checks the example's committed bindings byte for byte instead.
 cargo test -p jazz-codegen --test golden the_stage_plan_kotlin_cli_commits_its_bindings_byte_for_byte

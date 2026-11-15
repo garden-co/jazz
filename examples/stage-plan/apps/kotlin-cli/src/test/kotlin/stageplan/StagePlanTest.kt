@@ -12,59 +12,50 @@ import jazzapp.Tasks
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import tools.jazz.Jazz
-import java.net.ServerSocket
-import java.net.Socket
-import java.util.UUID
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
-/** The StagePlan slice end to end, against a real in-memory Jazz server. */
+/** The StagePlan slice end to end: end users of a StagePlan backend (a Jazz server, its backend and its endpoint). */
 private operator fun <T> List<T>.component6(): T = this[5]
 private operator fun <T> List<T>.component7(): T = this[6]
 
 class StagePlanTest {
-    private val appId = UUID.randomUUID().toString()
-    private val backendSecret = "backend-" + UUID.randomUUID()
-    private val adminSecret = "admin-" + UUID.randomUUID()
-    private lateinit var server: Process
-    private lateinit var url: String
+    private lateinit var backend: Process
+    private lateinit var appId: String
+    private lateinit var endpoint: String
 
+    /** StagePlan's backend for the test: a Jazz server, the app's backend and its endpoint (a test harness). */
     @BeforeTest
-    fun startServer() {
-        val port = ServerSocket(0).use { it.localPort }
-        url = "http://127.0.0.1:$port"
-        server = ProcessBuilder(
-            System.getenv("JAZZ_TOOLS"), "server", appId, "--in-memory", "--port", "$port",
-            "--backend-secret", backendSecret, "--admin-secret", adminSecret,
-        ).inheritIO().start()
-        val deadline = System.currentTimeMillis() + 30_000
-        while (true) {
-            try {
-                Socket("127.0.0.1", port).close()
-                break
-            } catch (e: java.io.IOException) {
-                check(server.isAlive) { "jazz-tools server exited with ${server.exitValue()}" }
-                check(System.currentTimeMillis() < deadline) { "jazz-tools server didn't start" }
-                Thread.sleep(100)
-            }
-        }
+    fun startBackend() {
+        backend = ProcessBuilder(
+            System.getenv("JAZZ_TEST_APP_BACKEND"),
+            java.io.File("jazz.app.json").absolutePath,
+            java.io.File("jazz.permissions.json").absolutePath,
+        ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
+        val line = backend.inputStream.bufferedReader().readLine() ?: error("the test backend didn't start")
+        val info = kotlinx.serialization.json.Json.parseToJsonElement(line) as kotlinx.serialization.json.JsonObject
+        appId = (info["appId"] as kotlinx.serialization.json.JsonPrimitive).content
+        endpoint = (info["endpoint"] as kotlinx.serialization.json.JsonPrimitive).content
     }
 
     @AfterTest
-    fun stopServer() {
-        server.destroy()
+    fun stopBackend() {
+        backend.outputStream.close()
+        backend.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)
+        backend.destroy()
     }
 
-    private suspend fun open(user: String = "user-1"): Jazz = openAsUser(url, appId, backendSecret, adminSecret, user)
+    /** [user], signed in with the backend's sign-in (the harness takes `token-<user>`). */
+    private suspend fun open(user: String = "user-1"): Jazz = openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { "token-$user" })
 
     @Test
     fun create_a_show_add_tasks_and_move_them_between_stages() = runBlocking {
         open().use { jazz ->
             val show = showNamed(jazz, "Opening night")
-            assertEquals(jazz.account(), show.chiefAccount)
+            assertEquals(me(jazz), show.chiefAccount)
             // The same show the second time.
             assertEquals(show.id, showNamed(jazz, "Opening night").id)
 
@@ -80,7 +71,7 @@ class StagePlanTest {
 
     @Test
     fun docs_snippets_run() = runBlocking {
-        DocsSnippets.openBackend(url, appId, backendSecret, adminSecret, "user-2").close()
+        DocsSnippets.openClient(endpoint, appId, tools.jazz.JazzAuth.generateDeviceKey()).close()
         open("user-2").use { jazz ->
             val show = showNamed(jazz, "Matinee")
             val a = addTask(jazz, show, "A")
@@ -115,7 +106,7 @@ class StagePlanTest {
     @Test
     fun includes_and_select() = runBlocking {
         open("user-3").use { jazz ->
-            val me = jazz.account()!!
+            val me = me(jazz)
             val show = showNamed(jazz, "Encore")
             val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"))
             // Permissions let a task be assigned only to the show's crew.
@@ -170,7 +161,7 @@ class StagePlanTest {
     @Test
     fun transactions_tiers_and_permission_errors(): Unit = runBlocking {
         open("user-5").use { jazz ->
-            val me = jazz.account()!!
+            val me = me(jazz)
             val show = showNamed(jazz, "Gala")
             val a = addTask(jazz, show, "A")
             addTask(jazz, show, "B")
@@ -209,7 +200,7 @@ class StagePlanTest {
     @Test
     fun text_edits_and_permission_advice(): Unit = runBlocking {
         open("user-6").use { jazz ->
-            val me = jazz.account()!!
+            val me = me(jazz)
             val show = showNamed(jazz, "Premiere")
             val task = addTask(jazz, show, "Rig")
             jazz.update(Tasks, task.id, tier = tools.jazz.WriteTier.Global) { notes("Lights") }
@@ -239,20 +230,7 @@ class StagePlanTest {
 
     @Test
     fun end_users_sign_in_with_device_accounts_and_bearer_tokens(): Unit = runBlocking {
-        // The app's Jazz endpoint for end users: jazz-app's test stand-in for createJazz's
-        // handler, in front of this test's server, with the bundle the backend published.
-        val backend = open("endpoint-backend")
-        val bundle = checkNotNull(backend.bundle())
-        val endpointProcess = ProcessBuilder(
-            System.getenv("JAZZ_APP_TEST_RELAY"), "--core", url, "--app-id", appId, "--bundle", bundle,
-        ).redirectError(ProcessBuilder.Redirect.INHERIT).apply {
-            // Secrets through the environment, out of `ps`.
-            environment()["JAZZ_BACKEND_SECRET"] = backendSecret
-            environment()["JAZZ_ADMIN_SECRET"] = adminSecret
-        }.start()
-        try {
-            val endpoint = endpointProcess.inputStream.bufferedReader().readLine() ?: error("the endpoint didn't start")
-
+        run {
             // A device account signs up by opening with a new key.
             val carol = DocsSnippets.openClient(endpoint, appId, tools.jazz.JazzAuth.generateDeviceKey())
             carol.use {
@@ -282,16 +260,13 @@ class StagePlanTest {
             kotlinx.coroutines.withTimeout(30_000) { while (states.receive() != tools.jazz.SessionState.SignedOut) Unit }
             watching.cancel()
             kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { alice.all(jazzapp.Shows.query()) }
-        } finally {
-            endpointProcess.destroy()
-            backend.close()
         }
     }
 
     @Test
     fun hops_unions_history_and_deleted_rows(): Unit = runBlocking {
         open("user-7").use { jazz ->
-            val me = jazz.account()!!
+            val me = me(jazz)
             val show = showNamed(jazz, "Tour")
             val bo = jazz.insert(CrewTable, NewCrew(account = me, name = "Bo"), tier = tools.jazz.WriteTier.Global)
             jazz.insert(

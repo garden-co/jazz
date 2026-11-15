@@ -1,22 +1,25 @@
 # StagePlan: Kotlin CLI
 
-StagePlan as a Kotlin/JVM command-line backend over `jazz-kotlin`. `jazz.app.json` and
-`jazz.permissions.json` are byte-identical copies of `../react-localfirst`'s (CI checks it; never
-edit them here). `src/main/kotlin/JazzApp.kt` is what `jazz-tools generate` writes for them.
+StagePlan as a Kotlin/JVM command-line app: an **end user** of StagePlan's backend, through the
+backend's Jazz endpoint, over `jazz-kotlin`. (Kotlin is a client language: StagePlan's backend runs
+in TypeScript, Rust or Go.) `jazz.app.json` and `jazz.permissions.json` are byte-identical copies
+of `../react-localfirst`'s (CI checks it; never edit them here). `src/main/kotlin/JazzApp.kt` is what
+jazz-codegen's Kotlin back end writes for them; regenerate it with
+`JAZZ_UPDATE_FIXTURES=1 cargo test -p jazz-codegen --test golden the_stage_plan_kotlin_cli` (a golden
+test checks it in CI) until Kotlin is switched on in `jazz-tools generate`.
 
-As the user `JAZZ_USER`, it creates a show (with them as its chief) if there is none of that
-name, lists its tasks by `rank`, adds a task, and moves a task between stages:
+Signed in with a device account (its key in `~/.stage-plan/device-key`), or with your backend's
+bearer token, it creates a show (with the user as its chief) if there is none of that name, lists
+its tasks by `rank`, adds a task, and moves a task between stages:
 
 ```bash
-cargo build -p jazz-ffi -p jazz-cli --bin jazz-tools          # from the repository root
-../../../../target/debug/jazz-tools server my-app --in-memory --port 4200 \
-  --backend-secret b --admin-secret a &
-export JAZZ_SERVER_URL=http://127.0.0.1:4200 JAZZ_APP_ID=my-app \
-  JAZZ_BACKEND_SECRET=b JAZZ_ADMIN_SECRET=a JAZZ_USER=alice
+export JAZZ_ENDPOINT=https://stageplan.example/jazz JAZZ_APP_ID=<app id>
+# export JAZZ_TOKEN=<your backend's token>   # to sign in as a backend user instead
 gradle run --args='"Opening night" add Load in'
 gradle run --args='"Opening night" move <task id> doing'
 ```
 
-`gradle test` runs the same slice, and every docs snippet in `DocsSnippets.kt`, against an
-in-memory `jazz-tools server` (`dev/scripts/test-kotlin.sh` is the CI entry point). Android UI
-apps are out of scope for .65.
+`gradle test` runs the slice and every docs snippet in `DocsSnippets.kt` against a StagePlan
+backend started by the test: `crates/jazz-app/examples/test_app_backend.rs`, a **test harness** (a
+Jazz server, the app's backend and a stand-in for its endpoint), not a backend to copy.
+`dev/scripts/test-kotlin.sh` is the CI entry point.

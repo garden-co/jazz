@@ -85,10 +85,19 @@ class JazzTest {
     @Test
     fun config_json_names_the_contract_fields() {
         assertEquals(
-            """{"app":"A","contract":2,"permissions":"P","appId":"id","serverUrl":"http://s","storage":"memory","backendSecret":"b",""" +
-                """"adminSecret":"a","session":{"issuer":"jazz:backend","subject":"u1"}}""",
-            JazzConfig(appId = "id", serverUrl = "http://s", permissions = "P", backendSecret = "b", adminSecret = "a", sessionSubject = "u1").toJson("A"),
+            """{"app":"A","contract":2,"appId":"id","serverUrl":"https://app/jazz","dataDir":"d","storage":"persistent","auth":{"deviceKey":"jazz-auth-v1:k"}}""",
+            JazzConfig(appId = "id", serverUrl = "https://app/jazz", storage = Storage.Persistent, dataDir = "d", auth = JazzAuth.DeviceAccount("jazz-auth-v1:k")).toJson("A"),
         )
+        assertEquals(
+            """{"app":"A","contract":2,"serverUrl":"https://app/jazz","storage":"memory","auth":{"bearer":true}}""",
+            JazzConfig(serverUrl = "https://app/jazz", auth = JazzAuth.Bearer { "t" }).toJson("A"),
+        )
+    }
+
+    @Test
+    fun a_server_without_auth_is_refused_kotlin_is_a_client(): Unit = runBlocking {
+        val error = assertFailsWith<JazzException.Refused> { Jazz.open("{}", JazzConfig(serverUrl = "https://app/jazz")) }
+        assertTrue(error.message!!.contains("Kotlin is a client"), error.message)
     }
 
     @Test

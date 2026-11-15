@@ -195,7 +195,7 @@ impl<'a> Writer<'a> {
         }
         let _ = writeln!(out, "{APP_CLOSE}\n");
         out.push_str(
-            "/**\n * Opens the app. A backend (`JazzConfig.permissions` set to its\n * `jazz.permissions.json`) first publishes the app's permissions bundle\n * and pins the session it acts in to it.\n */\n",
+            "/**\n * Opens the app: locally, or as an end user of your backend's Jazz\n * endpoint (`JazzConfig.serverUrl` and `JazzConfig.auth`).\n */\n",
         );
         if self.has_computed() {
             out.push_str(

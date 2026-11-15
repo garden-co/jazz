@@ -36,21 +36,18 @@ public enum class Storage {
 }
 
 /**
- * How to open an app. Locally (no [serverUrl]) or as a backend of a Jazz
- * server: [permissions] (the text of `jazz.permissions.json`), [serverUrl],
- * [backendSecret], [adminSecret] and, to act as a user, [sessionSubject].
+ * How to open an app: locally (no [serverUrl]), or as an end user of your
+ * backend's Jazz endpoint ([serverUrl], e.g. `https://app.example/jazz`,
+ * signed in with [auth]). Kotlin is a client: run your backend in
+ * TypeScript, Rust or Go.
  */
 public data class JazzConfig(
     val appId: String? = null,
+    /** Your backend's Jazz endpoint (its `createJazz` handler), e.g. `https://app.example/jazz`. */
     val serverUrl: String? = null,
     val storage: Storage = Storage.Memory,
     val dataDir: String? = null,
-    val permissions: String? = null,
-    val backendSecret: String? = null,
-    val adminSecret: String? = null,
-    /** The user a backend acts as (issuer `jazz:backend`). */
-    val sessionSubject: String? = null,
-    /** How an end user's app signs in to [serverUrl] (the app's Jazz endpoint); not for a backend. */
+    /** How the user signs in to [serverUrl]: a device account, or your backend's sign-in. */
     val auth: JazzAuth? = null,
     /** Where the blocking native calls run; every call is main-safe either way. */
     val dispatcher: kotlinx.coroutines.CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
@@ -60,7 +57,6 @@ public data class JazzConfig(
             put("app", app)
             // jazz-ffi contract 2: typed error kinds (Permission, NotSupported, Conflict).
             put("contract", 2)
-            permissions?.let { put("permissions", it) }
             appId?.let { put("appId", it) }
             serverUrl?.let { put("serverUrl", it) }
             dataDir?.let { put("dataDir", it) }
@@ -71,21 +67,10 @@ public data class JazzConfig(
                     Storage.Persistent -> "persistent"
                 },
             )
-            backendSecret?.let { put("backendSecret", it) }
-            adminSecret?.let { put("adminSecret", it) }
             when (auth) {
                 is JazzAuth.DeviceAccount -> put("auth", buildJsonObject { put("deviceKey", auth.key) })
                 is JazzAuth.Bearer -> put("auth", buildJsonObject { put("bearer", true) })
                 null -> {}
-            }
-            sessionSubject?.let {
-                put(
-                    "session",
-                    buildJsonObject {
-                        put("issuer", "jazz:backend")
-                        put("subject", JsonPrimitive(it))
-                    },
-                )
             }
         }
         return json.toString()
