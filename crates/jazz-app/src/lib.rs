@@ -59,11 +59,13 @@ pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
 pub use history::Version;
-pub use include::{Include, IntoInclude, Nullability, OneInclude, Partial, Row, Selection, With};
+pub use include::{
+    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+};
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, created_at, deleted_at, id,
-    updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, deleted_at,
+    id, updated_at,
 };
 pub use relation::{Hop, Step};
 pub use session::{
