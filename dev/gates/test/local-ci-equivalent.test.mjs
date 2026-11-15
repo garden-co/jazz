@@ -106,6 +106,7 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
     [
       'test "${WORKSPACE_RESULT}" = success\n' +
         'test "${STORAGE_COMPAT_RESULT}" = success\n' +
+        'test "${JAZZ_FFI_BINDINGS_RESULT}" = success\n' +
         'test "${KOTLIN_RESULT}" = success',
     ],
     "the Rust aggregate may check partition statuses, but must not add a correctness command",

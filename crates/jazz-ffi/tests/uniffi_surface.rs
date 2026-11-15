@@ -342,7 +342,18 @@ fn refuses_what_it_cannot_do_by_name() {
         .starts_with("app files")
     );
 
+    let message = refused(JazzHandle::open(
+        json!({ "app": STAGE_PLAN_APP, "permissions": STAGE_PLAN_PERMISSIONS, "appId": nil_uuid(),
+                "backendSecret": "b", "adminSecret": "a", "session": { "subject": "alice" } })
+        .to_string(),
+    ));
+    assert!(message.contains("serverUrl"), "{message}");
+
     let jazz = JazzHandle::open(client_config()).unwrap();
+    // `one` validates the query as given before limiting it to one row.
+    assert!(
+        refused(jazz.one(json!({ "table": "shows", "limit": -1 }).to_string())).contains("limit")
+    );
     let message =
         refused(jazz.all(json!({ "table": "shows", "include": { "tasks": true } }).to_string()));
     assert!(
@@ -447,4 +458,26 @@ async fn a_backend_acts_as_its_session_user_under_permissions() {
     .await;
     server.shutdown().await;
     result.unwrap();
+}
+
+/// A subscription ends with a last `on_error` when the app shuts down, so a
+/// Swift `AsyncStream` or Kotlin `Flow` built on it finishes instead of
+/// waiting forever.
+#[test]
+fn shutdown_ends_live_subscriptions_with_on_error() {
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    let (sender, events) = mpsc::channel();
+    let _subscription = jazz
+        .subscribe(
+            json!({ "table": "shows" }).to_string(),
+            Arc::new(Collect(sender)),
+        )
+        .unwrap();
+    assert_eq!(next(&events)["reset"], true);
+    jazz.shutdown().unwrap();
+    let end = events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a last event");
+    assert_eq!(end, Err("the app is closed".to_owned()));
+    assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
 }
