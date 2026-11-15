@@ -361,14 +361,14 @@ describe("jazzAdapter", () => {
 
       try {
         const backend = context.asBackend(fixtureApp);
-        const user = await backend
+        const user = (await backend
           .insert(table("better_auth_user"), betterAuthRows("").better_auth_user)
-          .wait({ tier: "global" });
+          .wait({ tier: "global" })) as { id: string };
         const ids: Record<string, string> = { better_auth_user: user.id };
         for (const name of tableNames.filter((name) => name !== "better_auth_user")) {
-          const row = await backend
+          const row = (await backend
             .insert(table(name), betterAuthRows(user.id)[name])
-            .wait({ tier: "global" });
+            .wait({ tier: "global" })) as { id: string };
           ids[name] = row.id;
         }
 
@@ -399,14 +399,15 @@ describe("jazzAdapter", () => {
         }
         // The rows are there, unchanged: the client saw none because it was denied.
         for (const name of tableNames) {
-          const rows = await backend.all(table(name), { tier: "remote" });
+          const rows = (await backend.all(table(name), { tier: "remote" })) as {
+            id: string;
+            createdAt: Date;
+          }[];
           expect(
-            rows.map((row: { id: string }) => row.id),
+            rows.map((row) => row.id),
             `${name} rows`,
           ).toEqual([ids[name]]);
-          expect((rows[0] as { createdAt: Date }).createdAt.getTime(), `${name} updated`).not.toBe(
-            0,
-          );
+          expect(rows[0]!.createdAt.getTime(), `${name} updated`).not.toBe(0);
         }
       } finally {
         await context.shutdown();
