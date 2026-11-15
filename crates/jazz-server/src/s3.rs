@@ -167,6 +167,13 @@ const IMDS_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long an IMDSv2 session token is asked to last. A new one is
 /// fetched with each set of keys, so it never needs to outlive them.
 const IMDS_TOKEN_TTL: &str = "21600";
+/// How often a metadata request (container endpoint or IMDS) is tried
+/// when it fails transiently, as in the AWS SDKs.
+const METADATA_ATTEMPTS: u32 = 3;
+/// The pause between such tries.
+const METADATA_RETRY_PAUSE: Duration = Duration::from_millis(100);
+/// A credentials reply is a few hundred bytes; a longer one is refused.
+const METADATA_BODY_LIMIT: usize = 64 * 1024;
 /// How long a container credentials request may take.
 const CONTAINER_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -174,25 +181,33 @@ const CONTAINER_TIMEOUT: Duration = Duration::from_secs(5);
 /// over plain HTTP: only to this machine, or to the link-local addresses
 /// of ECS and EKS Pod Identity, as the AWS SDKs allow.
 fn container_uri_allowed(uri: &str) -> bool {
-    let Some(rest) = uri.strip_prefix("http://") else {
-        return uri.starts_with("https://");
+    let Ok(url) = reqwest::Url::parse(uri) else {
+        return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = match authority.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or_default(),
-        None => authority
-            .rsplit_once(':')
-            .map_or(authority, |(host, _)| host),
-    };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
+    // `http://127.0.0.1@elsewhere/` is a request to `elsewhere`.
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
     }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(ip) if ip.is_loopback() => true,
-        Ok(ip) => ["169.254.170.2", "169.254.170.23", "fd00:ec2::23"]
-            .iter()
-            .any(|allowed| allowed.parse::<std::net::IpAddr>().ok() == Some(ip)),
-        Err(_) => false,
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" if host.eq_ignore_ascii_case("localhost") => true,
+        // The parsed host is normalised: an IPv6 address is bracketed.
+        "http" => match host.trim_start_matches('[').trim_end_matches(']').parse() {
+            Ok(std::net::IpAddr::V4(ip)) => {
+                ip.is_loopback()
+                    || ip == std::net::Ipv4Addr::new(169, 254, 170, 2)
+                    || ip == std::net::Ipv4Addr::new(169, 254, 170, 23)
+            }
+            Ok(std::net::IpAddr::V6(ip)) => {
+                ip.is_loopback()
+                    || ip == std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23)
+            }
+            Err(_) => false,
+        },
+        _ => false,
     }
 }
 
@@ -367,7 +382,13 @@ impl S3Options {
 
 /// Assumed keys stay in use until this long before they expire.
 const REFRESH_EARLY: Duration = Duration::from_secs(5 * 60);
-/// Fetched keys handed out close to their expiry are still used this long.
+/// Fetched keys handed out close to their expiry, or even past it, are
+/// still used this long before they are fetched again. During an outage
+/// IMDS and the container endpoint keep handing out the last keys they
+/// have, which may already be expired; fetching again on every request
+/// would only hammer an endpoint that cannot help. If the bucket refuses
+/// them as expired, [`Inner::failure`] drops them and the next request
+/// fetches again anyway.
 const MIN_KEY_USE: Duration = Duration::from_secs(30);
 /// How long assumed keys are asked to last.
 const ASSUMED_FOR: Duration = Duration::from_secs(60 * 60);
@@ -744,96 +765,121 @@ impl Inner {
         authorization: Option<&ContainerToken>,
     ) -> Result<(Keys, Option<SystemTime>), String> {
         let at = endpoint_host(uri);
-        let mut request = self.local_http.get(uri).timeout(CONTAINER_TIMEOUT);
-        if let Some(token) = authorization {
-            request = request.header("authorization", token.read()?);
-        }
-        let response = request.send().await.map_err(|error| {
-            format!(
-                "s3 blobs: container credentials at {at}: {}",
-                error.without_url()
-            )
-        })?;
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let failed = |why: String| format!("s3 blobs: container credentials at {at}: {why}");
+        let token = authorization.map(ContainerToken::read).transpose()?;
+        let mut attempt = 0;
+        let (status, body) = loop {
+            attempt += 1;
+            let mut request = self.local_http.get(uri).timeout(CONTAINER_TIMEOUT);
+            if let Some(token) = &token {
+                request = request.header("authorization", token);
+            }
+            match request.send().await {
+                Ok(response) if retried(response.status()) && attempt < METADATA_ATTEMPTS => {}
+                Ok(response) => {
+                    break (
+                        response.status(),
+                        metadata_body(response).await.map_err(failed)?,
+                    );
+                }
+                Err(_) if attempt < METADATA_ATTEMPTS => {}
+                Err(error) => return Err(failed(error.without_url().to_string())),
+            }
+            tokio::time::sleep(METADATA_RETRY_PAUSE).await;
+        };
         if !status.is_success() {
-            return Err(format!(
-                "s3 blobs: container credentials at {at}: {status} {}",
-                json_message(&body)
-            ));
+            return Err(failed(format!("{status} {}", json_message(&body))));
         }
-        role_keys(&body).map_err(|why| format!("s3 blobs: container credentials at {at}: {why}"))
+        role_keys(&body).map_err(failed)
     }
 
     /// The instance profile role's keys through IMDSv2: a session token
     /// (PUT), the role's name, then its keys, each request carrying the
     /// token. Nothing answering the token request means this is no EC2
     /// instance, and since instance metadata is the chain's last source,
-    /// that no credentials were found anywhere.
+    /// that no credentials were found anywhere. That case is not retried,
+    /// so a host without instance metadata learns it within one
+    /// [`IMDS_TIMEOUT`]; a service that answers but fails (IMDS throttles
+    /// with 429 and 503) is asked again, as the AWS SDKs do.
     async fn instance_keys(&self, endpoint: &str) -> Result<(Keys, Option<SystemTime>), String> {
         let imds = |why: String| format!("s3 blobs: EC2 instance metadata at {endpoint}: {why}");
-        let token = self
-            .local_http
-            .put(format!("{endpoint}/latest/api/token"))
-            .header("x-aws-ec2-metadata-token-ttl-seconds", IMDS_TOKEN_TTL)
-            .timeout(IMDS_TIMEOUT)
-            .send()
-            .await;
-        let token = match token {
-            Ok(response) if response.status().is_success() => response
-                .text()
-                .await
-                .map_err(|error| imds(error.without_url().to_string()))?,
-            Ok(response) => return Err(imds(format!("token: {}", response.status()))),
-            Err(error) if error.is_connect() || error.is_timeout() => {
-                self.refuse(
-                    "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or AWS_ROLE_ARN, \
-                     or run where the host attaches a role (an ECS task role, an EC2 \
-                     instance profile; in a container on EC2, the instance's metadata \
-                     hop limit must be at least 2)",
-                );
-                return Err(format!(
-                    "s3 blobs: no AWS credentials found; tried {SOURCES_TRIED}; \
-                     and EC2 instance metadata at {endpoint}, which did not answer within {}s",
-                    IMDS_TIMEOUT.as_secs()
-                ));
-            }
-            Err(error) => return Err(imds(error.without_url().to_string())),
-        };
-        let get = |path: String| {
-            self.local_http
-                .get(format!(
-                    "{endpoint}/latest/meta-data/iam/security-credentials/{path}"
-                ))
-                .header("x-aws-ec2-metadata-token", token.trim())
+        let mut attempt = 0;
+        let token = loop {
+            attempt += 1;
+            let response = self
+                .local_http
+                .put(format!("{endpoint}/latest/api/token"))
+                .header("x-aws-ec2-metadata-token-ttl-seconds", IMDS_TOKEN_TTL)
                 .timeout(IMDS_TIMEOUT)
                 .send()
-        };
-        let read = |response: Result<reqwest::Response, reqwest::Error>, what: &'static str| async move {
-            let response =
-                response.map_err(|error| imds(format!("{what}: {}", error.without_url())))?;
-            let status = response.status();
-            if status == reqwest::StatusCode::NOT_FOUND && what == "role" {
-                return Err(imds(
-                    "the instance has no instance profile (IAM role) attached".to_owned(),
-                ));
+                .await;
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    break metadata_body(response).await.map_err(imds)?;
+                }
+                Ok(response) if retried(response.status()) && attempt < METADATA_ATTEMPTS => {}
+                Ok(response) => return Err(imds(format!("token: {}", response.status()))),
+                Err(error) if error.is_connect() || error.is_timeout() => {
+                    self.refuse(
+                        "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or AWS_ROLE_ARN, \
+                         or run where the host attaches a role (an ECS task role, an EC2 \
+                         instance profile; in a container on EC2, the instance's metadata \
+                         hop limit must be at least 2)",
+                    );
+                    return Err(format!(
+                        "s3 blobs: no AWS credentials found; tried {SOURCES_TRIED}; \
+                         and EC2 instance metadata at {endpoint}, which did not answer within {}s",
+                        IMDS_TIMEOUT.as_secs()
+                    ));
+                }
+                Err(_) if attempt < METADATA_ATTEMPTS => {}
+                Err(error) => return Err(imds(error.without_url().to_string())),
             }
-            let body = response.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(imds(format!("{what}: {status}")));
-            }
-            Ok(body)
+            tokio::time::sleep(METADATA_RETRY_PAUSE).await;
         };
-        let roles = read(get(String::new()).await, "role").await?;
+        let token = token.trim();
+        let get = async |path: &str, what: &str| -> Result<String, String> {
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                let response = self
+                    .local_http
+                    .get(format!(
+                        "{endpoint}/latest/meta-data/iam/security-credentials/{path}"
+                    ))
+                    .header("x-aws-ec2-metadata-token", token)
+                    .timeout(IMDS_TIMEOUT)
+                    .send()
+                    .await;
+                match response {
+                    Ok(response) if response.status().is_success() => {
+                        return metadata_body(response).await.map_err(imds);
+                    }
+                    Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                        return Err(imds(format!(
+                            "{what}: the instance has no instance profile (IAM role) attached"
+                        )));
+                    }
+                    Ok(response) if retried(response.status()) && attempt < METADATA_ATTEMPTS => {}
+                    Ok(response) => return Err(imds(format!("{what}: {}", response.status()))),
+                    Err(_) if attempt < METADATA_ATTEMPTS => {}
+                    Err(error) => {
+                        return Err(imds(format!("{what}: {}", error.without_url())));
+                    }
+                }
+                tokio::time::sleep(METADATA_RETRY_PAUSE).await;
+            }
+        };
+        let roles = get("", "role").await?;
         let role = roles
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
             .ok_or_else(|| {
-                imds("the instance has no instance profile (IAM role) attached".to_owned())
+                imds("role: the instance has no instance profile (IAM role) attached".to_owned())
             })?
             .to_owned();
-        let body = read(get(uri_encode(&role, true)).await, "keys").await?;
+        let body = get(&uri_encode(&role, true), "keys").await?;
         role_keys(&body).map_err(|why| imds(format!("keys for {role}: {why}")))
     }
 
@@ -1375,12 +1421,36 @@ fn refresh_at(now: SystemTime, until: SystemTime) -> SystemTime {
 
 /// `scheme://host[:port]` of `uri`: what errors name of an endpoint,
 /// whose path may identify a task's credentials.
-fn endpoint_host(uri: &str) -> &str {
-    let after_scheme = uri.find("://").map_or(0, |at| at + 3);
-    let end = uri[after_scheme..]
-        .find(['/', '?', '#'])
-        .map_or(uri.len(), |at| after_scheme + at);
-    &uri[..end]
+fn endpoint_host(uri: &str) -> String {
+    match reqwest::Url::parse(uri) {
+        Ok(url) => match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+            (Some(host), None) => format!("{}://{host}", url.scheme()),
+            (None, _) => "the endpoint".to_owned(),
+        },
+        Err(_) => "the endpoint".to_owned(),
+    }
+}
+
+/// Whether a metadata reply with `status` is worth asking again for.
+fn retried(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// A metadata reply's body, of at most [`METADATA_BODY_LIMIT`] bytes.
+async fn metadata_body(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("read reply: {}", error.without_url()))?
+    {
+        if body.len() + chunk.len() > METADATA_BODY_LIMIT {
+            return Err(format!("reply longer than {METADATA_BODY_LIMIT} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// The `Code` and `message` / `Message` of a JSON error reply, if any.
@@ -2178,6 +2248,29 @@ mod tests {
         assert_eq!(state.metadata_refused.load(Ordering::Relaxed), 0);
     }
 
+    /// A throttling instance metadata service is asked again.
+    #[test]
+    fn a_throttling_instance_metadata_service_is_asked_again() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        metadata.state.fail_next.store(2, Ordering::Relaxed);
+        let store = S3ChunkStore::new(
+            with(
+                S3Credentials::InstanceMetadata {
+                    endpoint: metadata.endpoint.clone(),
+                },
+                &bucket,
+            ),
+            "me".to_owned(),
+        )
+        .unwrap();
+        let (key, bytes) = node(1);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(metadata.state.token_puts.load(Ordering::Relaxed), 1);
+        assert_eq!(metadata.state.fail_next.load(Ordering::Relaxed), 0);
+    }
+
     /// An instance without a role says so.
     #[test]
     fn an_instance_without_a_role_says_so() {
@@ -2235,7 +2328,8 @@ mod tests {
         assert!(error.contains("hop limit"), "{error}");
     }
 
-    /// A role endpoint that fails answers a whole batch with one request,
+    /// A role endpoint that fails answers a whole batch with one fetch (of
+    /// [`METADATA_ATTEMPTS`] tries),
     /// and every operation for [`ASSUME_FAILURE_HOLD`] after it.
     #[test]
     fn a_failing_role_endpoint_is_held_off() {
@@ -2253,12 +2347,18 @@ mod tests {
             let error = result.unwrap_err().message;
             assert!(error.contains("500") && error.contains("Busy"), "{error}");
         }
-        assert_eq!(metadata.state.container_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metadata.state.container_calls.load(Ordering::Relaxed),
+            METADATA_ATTEMPTS as u64
+        );
         // Recovered, but still held off.
         metadata.state.failing.store(false, Ordering::Relaxed);
         let (key, bytes) = &nodes[0];
         block(store.put(key, bytes)).unwrap_err();
-        assert_eq!(metadata.state.container_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metadata.state.container_calls.load(Ordering::Relaxed),
+            METADATA_ATTEMPTS as u64
+        );
         // Once the hold is over, the endpoint is asked again.
         store
             .inner
@@ -2274,7 +2374,10 @@ mod tests {
             *at -= ASSUME_FAILURE_HOLD;
         }
         block(store.put(key, bytes)).unwrap();
-        assert_eq!(metadata.state.container_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            metadata.state.container_calls.load(Ordering::Relaxed),
+            METADATA_ATTEMPTS as u64 + 1
+        );
     }
 
     /// Keys the bucket calls expired are fetched again from the role
@@ -2446,9 +2549,22 @@ mod tests {
             "http://10.0.0.1/creds",
             "ftp://127.0.0.1/creds",
             "http://127.0.0.1.example.com/creds",
+            "http://127.0.0.1:80@evil.example/creds",
+            "http://user:pass@127.0.0.1/creds",
+            "https://user@creds.example.com/x",
+            "not a url",
         ] {
             assert!(!container_uri_allowed(refused), "{refused}");
         }
+        // Errors name the endpoint by scheme, host and port only.
+        assert_eq!(
+            endpoint_host("http://user:secret@127.0.0.1:9/v2/credentials/guid?x"),
+            "http://127.0.0.1:9"
+        );
+        assert_eq!(
+            endpoint_host("http://169.254.170.2/v2/credentials/guid"),
+            "http://169.254.170.2"
+        );
     }
 }
 
@@ -2866,6 +2982,8 @@ pub(crate) mod mock {
         pub container_calls: AtomicU64,
         /// The container endpoint and instance metadata answer 500 while set.
         pub failing: AtomicBool,
+        /// The next this many requests answer 503, as a throttling IMDS.
+        pub fail_next: AtomicU64,
         /// Keys expire this many seconds from when they are issued.
         pub expires_in: AtomicU64,
         /// The instance has no role attached.
@@ -2952,6 +3070,13 @@ pub(crate) mod mock {
                 .map(str::to_owned)
         };
         let path = request.uri().path().to_owned();
+        let throttled = state
+            .fail_next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok();
+        if throttled {
+            return (StatusCode::SERVICE_UNAVAILABLE, Vec::new());
+        }
         if state.failing.load(Ordering::Relaxed) {
             if path.starts_with("/v2/credentials/") {
                 state.container_calls.fetch_add(1, Ordering::Relaxed);
