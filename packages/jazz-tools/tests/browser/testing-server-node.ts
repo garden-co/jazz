@@ -136,7 +136,7 @@ export async function jazzAppFront(
   await started.front?.stop();
   started.front = await startTestJazz({
     app: schema,
-    permissions: app.permissions,
+    permissions: { format: 1, ...app.permissions },
     core: started.server,
     port,
     // The test page is served from the browser runner's own origin.

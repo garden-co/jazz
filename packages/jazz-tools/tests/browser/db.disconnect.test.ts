@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { schema as s } from "../../src/";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { ReadTier } from "../../src/runtime/client.js";
@@ -14,29 +13,17 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
+import {
+  compileTestPermissions,
+  getJazzServerInfo,
+  startJazzApp,
+  type JazzServerInfo,
+} from "./testing-server.js";
+import { app, type Todo } from "./apps/disconnect-todos/jazz.generated.js";
+import allowAllPermissions from "./apps/disconnect-todos/jazz.permissions.json";
 
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
+// The app (apps/disconnect-todos): todos everyone may read and write.
 const { todos } = app;
-type Todo = s.RowOf<typeof todos>;
-
-const allowAllPermissions = s.definePermissions(app, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
 
 const PENDING_ASSERTION_MS = 750;
 const LOCAL_OPERATION_TIMEOUT_MS = 2_000;
@@ -136,13 +123,18 @@ describe("Db disconnect/reconnect", () => {
   it("removes a remotely deleted owned row from the current default local worker snapshot", async () => {
     const label = uniqueDbName("local-worker-live-delete");
     const core = await getJazzServerInfo(label);
-    const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ "$createdBy.account": session.user });
-      policy.todos.allowInsert.always();
-      policy.todos.allowUpdate.where({ "$createdBy.account": session.user });
-      policy.todos.allowDelete.where({ "$createdBy.account": session.user });
-    });
-    await deploy({ ...core, schema: app, permissions });
+    const permissions = {
+      format: 1,
+      tables: {
+        todos: {
+          read: "$createdBy.account = session.user",
+          insert: "true",
+          update: "$createdBy.account = session.user",
+          delete: "$createdBy.account = session.user",
+        },
+      },
+    };
+    await deploy({ ...core, app, permissions: await compileTestPermissions(app, permissions) });
     const server = await startJazzApp(core, { schema: app, permissions });
     const secret = generateAuthSecret();
     const db = await createWorkerDb(ctx, `${label}-reader`, secret, server);
@@ -993,8 +985,8 @@ async function publishSyncServerSchemaAndPermissions(
     appId,
     serverUrl,
     adminSecret,
-    schema: app,
-    permissions: allowAllPermissions,
+    app,
+    permissions: await compileTestPermissions(app, allowAllPermissions),
   });
   return startJazzApp(testingServer, { schema: app, permissions: allowAllPermissions });
 }

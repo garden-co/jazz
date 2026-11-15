@@ -13,8 +13,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /** Validate's projects: a schema.ts beside a permissions.ts that ships migrations. */
 const FIXTURES = [
-  "packages/jazz-tools/tests/ts-dsl/fixtures/basic",
-  "packages/jazz-tools/tests/ts-dsl/fixtures/inferred-relations",
+  "packages/jazz-tools/tests/typed-app/apps/basic",
+  "packages/jazz-tools/tests/typed-app/apps/inferred-relations",
 ];
 
 function projects() {

@@ -12,6 +12,7 @@ import {
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
 import {
+  compileTestPermissions,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -36,10 +37,16 @@ afterEach(async () => {
 /** The app's backend, and `url`, the origin a browser of this test uses. */
 async function appAt(name: string, user?: string) {
   const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: await compileTestPermissions(app, permissions),
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const url = user ? await jazzAppUserUrl(backend, user) : await jazzAppVisitor(backend);
   // The backend answers no CORS: send the session's own requests to it from Node.

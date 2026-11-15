@@ -9,7 +9,13 @@ import {
   sessionTabApp as app,
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
-import { getJazzServerInfo, jazzAppFetch, jazzAppVisitor, startJazzApp } from "./testing-server.js";
+import {
+  compileTestPermissions,
+  getJazzServerInfo,
+  jazzAppFetch,
+  jazzAppVisitor,
+  startJazzApp,
+} from "./testing-server.js";
 
 // `localFirst: "now"` opens the local-first client on a first visit, while
 // another tab of the origin already holds the device account's store through
@@ -26,10 +32,16 @@ it('opens local-first at once with localFirst: "now" while another tab holds the
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("local-first-now-tabs"));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: await compileTestPermissions(app, permissions),
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const visitorUrl = await jazzAppVisitor(backend);
   // The backend answers no CORS: send the session's own requests to it from Node.

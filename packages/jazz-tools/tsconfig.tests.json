@@ -20,6 +20,7 @@
     "dist",
     "src/solid/**/*",
     "src/**/*.svelte.test.ts",
-    "src/svelte/test-helpers.svelte.ts"
+    "src/svelte/test-helpers.svelte.ts",
+    "tests/typed-app/frameworks/**/*"
   ]
 }

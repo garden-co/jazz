@@ -9,7 +9,13 @@ import {
   sessionTabApp as app,
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
-import { getJazzServerInfo, jazzAppFetch, jazzAppVisitor, startJazzApp } from "./testing-server.js";
+import {
+  compileTestPermissions,
+  getJazzServerInfo,
+  jazzAppFetch,
+  jazzAppVisitor,
+  startJazzApp,
+} from "./testing-server.js";
 
 // E7: signing out of a device account keeps its key (except with
 // clearOnSignOut), a reload stays signed out, and `reopenDeviceAccount()`
@@ -24,10 +30,16 @@ afterEach(async () => {
 
 async function visitorAt(name: string) {
   const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: await compileTestPermissions(app, permissions),
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const url = await jazzAppVisitor(backend);
   const pageFetch = globalThis.fetch;

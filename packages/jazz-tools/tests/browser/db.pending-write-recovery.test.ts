@@ -6,6 +6,7 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { recoveryApp, recoveryPermissions } from "./indexeddb-pending-recovery-fixture.js";
 import type { RecoveryConfig, RecoveryRows } from "./indexeddb-pending-recovery-fixture.js";
 import {
+  compileTestPermissions,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -58,7 +59,10 @@ it("recovers pending writes through self-signed admission after a cold browser r
 
 async function publishRecoveryApp(): Promise<JazzServerInfo> {
   const core = await getJazzServerInfo(crypto.randomUUID());
-  const app = { schema: recoveryApp.wasmSchema, permissions: recoveryPermissions };
-  await deploy({ ...core, ...app });
-  return startJazzApp(core, app);
+  await deploy({
+    ...core,
+    app: recoveryApp,
+    permissions: await compileTestPermissions(recoveryApp, recoveryPermissions),
+  });
+  return startJazzApp(core, { schema: recoveryApp, permissions: recoveryPermissions });
 }
