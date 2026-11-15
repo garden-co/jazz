@@ -142,3 +142,15 @@ func CanUpdate(ctx context.Context, q Querier, table, id string, patch any) (Adv
 func CanDelete(ctx context.Context, q Querier, table, id string) (Advice, error) {
 	return advise(ctx, q, map[string]any{"table": table, "op": "delete", "id": id})
 }
+
+// AcceptedAt is a history version's $acceptedAt, to order versions by.
+func AcceptedAt[R any]() Column[Version[R], Timestamp] {
+	return Column[Version[R], Timestamp]{name: "$acceptedAt"}
+}
+
+// IncludeDeleted is q reading deleted rows too (to show or Restore them).
+func IncludeDeleted[R any](q *Query[R]) *Query[R] {
+	c := &Query[R]{table: q.table, raw: q.toJSON().cloneParts()}
+	c.raw.IncludeDeleted = true
+	return c
+}

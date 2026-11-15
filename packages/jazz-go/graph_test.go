@@ -1,8 +1,10 @@
 package jazz
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 type gTodo struct {
@@ -37,5 +39,42 @@ func TestGraphQueriesJSON(t *testing.T) {
 	var v Version[incTask]
 	if err := json.Unmarshal([]byte(`{"id":"t","title":"T","rank":2,"$history":{"transactionId":"x","acceptedAt":5}}`), &v); err != nil || v.Row.Title != "T" || v.AcceptedAt != 5 || v.TransactionID != "x" {
 		t.Fatalf("%+v %v", v, err)
+	}
+}
+
+const todosApp = `{ "format": 1, "tables": { "todos": {
+  "columns": { "title": "string", "done": "boolean", "parent": "uuid?" },
+  "relations": { "parentRelation": { "rel": "todos", "column": "parent" } } } } }`
+
+func TestGatherFollowsASelfRelation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := Open(ctx, Config{App: todosApp, Storage: StorageMemory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	type newTodo struct {
+		Title  string  `json:"title"`
+		Done   bool    `json:"done"`
+		Parent *string `json:"parent,omitempty"`
+	}
+	root, err := Insert[newTodo, gTodo](ctx, db, "todos", newTodo{Title: "root", Done: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid, _ := Insert[newTodo, gTodo](ctx, db, "todos", newTodo{Title: "mid", Done: true, Parent: &root.ID})
+	if _, err := Insert[newTodo, gTodo](ctx, db, "todos", newTodo{Title: "leaf", Parent: &mid.ID}); err != nil {
+		t.Fatal(err)
+	}
+	done := NewColumn[gTodo, bool]("done")
+	parent := NewRelation[gTodo, gTodo]("parentRelation")
+	// From the open todo, its lineage: leaf, mid, root.
+	lineage, err := Gather(NewQuery[gTodo]("todos").Where(done.Eq(false)), parent, 10).All(ctx, db)
+	if err != nil || len(lineage) != 3 {
+		t.Fatalf("lineage: %+v %v", lineage, err)
+	}
+	if one, err := Gather(NewQuery[gTodo]("todos").Where(done.Eq(false)), parent, 1).All(ctx, db); err != nil || len(one) != 2 {
+		t.Fatalf("one hop: %+v %v", one, err)
 	}
 }
