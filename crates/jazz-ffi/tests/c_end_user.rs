@@ -358,3 +358,50 @@ async fn no_token_callback_runs_after_close() {
     app.stop().await;
     result.unwrap();
 }
+
+/// Concurrent fetches: `jazz_close` called from inside one token callback
+/// waits for the others still running (not for itself), so the host may
+/// free `ctx` when that callback returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_from_a_token_callback_waits_for_the_other_fetches() {
+    let app = app().await;
+    let bearer = (app.config)(json!({ "bearer": true }));
+    let result = tokio::task::spawn_blocking(move || unsafe {
+        let host = Host::new(None, Duration::from_millis(600));
+        let mut err = ptr::null_mut();
+        let alice = jazz_open_user(
+            c(&bearer).as_ptr(),
+            Some(token_cb),
+            &*host as *const Host as *mut c_void,
+            &mut err,
+        );
+        assert!(!alice.is_null());
+        // Several refreshes at once: their fetches overlap.
+        let handle = alice as usize;
+        let refreshes: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let _ = call(handle as *mut JazzHandle, "refresh", json!({}));
+                })
+            })
+            .collect();
+        while host.calls.load(Ordering::SeqCst) < 2 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        jazz_close(alice);
+        assert!(
+            !host.running.load(Ordering::SeqCst),
+            "close returned while fetches ran"
+        );
+        host.closed.store(true, Ordering::SeqCst);
+        for refresh in refreshes {
+            refresh.join().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!host.after_close.load(Ordering::SeqCst));
+        drop(host);
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
