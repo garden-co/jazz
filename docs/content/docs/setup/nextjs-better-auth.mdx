@@ -199,7 +199,9 @@ announcements, and people change only their own messages; the role comes from th
 `authenticate` returns. An `update` policy without `old` and `new` must hold for both the old
 and the new row, so a message can't be moved into the announcements room. See
 [Declarative Permissions](/docs/schemas/policies).
-{/* FILES-GAP: the example's permissions.ts read the room ids from NEXT_PUBLIC_CHAT_ID and NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID; jazz.permissions.json can't read environment variables, so the ids are literals here (the values from the example's .env.example). */}
+
+The chat ids are literals: policies are data, so a value that varies per deployment belongs in
+`session.claims` (set by your `authenticate`), not in the file.
 
 Then generate the typed bindings:
 
