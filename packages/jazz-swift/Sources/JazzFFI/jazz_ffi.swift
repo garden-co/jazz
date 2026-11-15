@@ -1888,18 +1888,22 @@ public func FfiConverterTypeSubscriptionListener_lower(_ value: SubscriptionList
  * Where an end user's bearer tokens come from (the host's own sign-in).
  * Called on a thread of its own, so it may block; `reason` is `connect`,
  * `renew`, `expired` or `refresh` (the last two want a fresh token, not a
- * cached one). `None` means no one is signed in.
+ * cached one). `None` means no one is signed in (the app stops); an error
+ * means the fetch failed (a network blip): the session stays signed in and
+ * asks again.
  */
 public protocol TokenProvider: AnyObject, Sendable {
     
-    func token(reason: String)  -> String?
+    func token(reason: String) throws  -> String?
     
 }
 /**
  * Where an end user's bearer tokens come from (the host's own sign-in).
  * Called on a thread of its own, so it may block; `reason` is `connect`,
  * `renew`, `expired` or `refresh` (the last two want a fresh token, not a
- * cached one). `None` means no one is signed in.
+ * cached one). `None` means no one is signed in (the app stops); an error
+ * means the fetch failed (a network blip): the session stays signed in and
+ * asks again.
  */
 open class TokenProviderImpl: TokenProvider, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -1954,8 +1958,8 @@ open class TokenProviderImpl: TokenProvider, @unchecked Sendable {
     
 
     
-open func token(reason: String) -> String?  {
-    return try!  FfiConverterOptionString.lift(try! rustCall() {
+open func token(reason: String)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
     uniffi_jazz_ffi_fn_method_tokenprovider_token(
             self.uniffiCloneHandle(),
@@ -2003,17 +2007,18 @@ fileprivate struct UniffiCallbackInterfaceTokenProvider {
                 guard let uniffiObj = try? FfiConverterTypeTokenProvider.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return uniffiObj.token(
+                return try uniffiObj.token(
                      reason: try FfiConverterString.lift(reason)
                 )
             }
 
             
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
-            uniffiTraitInterfaceCall(
+            uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
-                writeReturn: writeReturn
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeJazzError_lower
             )
         }
     )
@@ -2959,7 +2964,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_subscriptionlistener_on_error() != 60507) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_tokenprovider_token() != 52843) {
+    if (uniffi_jazz_ffi_checksum_method_tokenprovider_token() != 64706) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_transaction_all() != 25776) {
