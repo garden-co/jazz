@@ -640,7 +640,7 @@ describe("writing the Better Auth tables into jazz.app.json", () => {
         ...resolvers,
       });
       expect(JSON.parse(fresh.code).format).toBe(1);
-      expect(log.mock.calls.at(-1)?.[0]).toContain("npx jazz-tools validate");
+      expect(log.mock.calls.at(-1)?.[0]).toContain("npx jazz-tools generate");
     } finally {
       log.mockRestore();
       await rm(dir, { recursive: true, force: true });
