@@ -28,10 +28,7 @@ interface Types extends AppTypes {
     };
     relations: {};
     computed: {
-      priority: {
-        from: { score: number; storedPriority: ItemStoredPriority };
-        value: ItemPriority;
-      };
+      priority: { from: { id: string; score: number; storedPriority: ItemStoredPriority }; value: ItemPriority };
     };
     transforms: {
       storedPriority: "priority";
@@ -50,7 +47,7 @@ export type AppTransforms = TransformImpl<Transforms, Types>;
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types, Transforms>({
-  "source": "sha256:e41af79fadba03e8bc69ad395d84d224213d8e8fec98e67c1cb6c4cd560e2d45",
+  "source": "sha256:caf00125c90d1ff9fcb98ecaebcf1adab58c339bea1260186b971d1b70264941",
   "schema": {
     "current": "0d427cf9885428994013a262a7e0db7940d51ae8c2d3b2a8b5412a120947163c",
     "schemas": [
@@ -73,7 +70,7 @@ export const app = bindApp<Types, Transforms>({
       },
     ],
     "migrations": [],
-    "computed": { "items": { "priority": ["score", "storedPriority"] } },
+    "computed": { "items": { "priority": ["id", "score", "storedPriority"] } },
     "transforms": { "items": { "storedPriority": "priority" } },
   },
   "relations": { "items": {} },
