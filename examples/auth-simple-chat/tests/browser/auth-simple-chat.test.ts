@@ -41,7 +41,7 @@ type Role = "admin" | "member";
 // it. Its `authenticate` names each test user with their role claim.
 beforeAll(async () => {
   const core = await getJazzServerInfo(__APP_ID__);
-  await deploy({ ...core, schema: app, permissions });
+  await deploy({ ...core, app, permissions });
   server = await startJazzApp(core, { schema: app, permissions });
 });
 
