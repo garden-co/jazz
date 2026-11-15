@@ -41,7 +41,8 @@ pub struct NewBox {
 }
 
 impl NewBox {
-    /// A new row with the columns it requires; the others are left out.
+    /// A new row with the columns it requires, in this order: `label`. The others
+    /// are left out; set them with `NewBox { column: …, ..NewBox::new(…) }`.
     pub fn new(label: impl ::std::convert::Into<::std::string::String>) -> Self {
         Self {
             label: label.into(),
@@ -182,7 +183,8 @@ pub struct NewTask {
 }
 
 impl NewTask {
-    /// A new row with the columns it requires; the others are left out.
+    /// A new row with the columns it requires, in this order: `title`, `score`, `tags`. The others
+    /// are left out; set them with `NewTask { column: …, ..NewTask::new(…) }`.
     pub fn new(title: impl ::std::convert::Into<::std::string::String>, score: impl ::std::convert::Into<i32>, tags: impl ::std::convert::Into<::std::vec::Vec<::std::string::String>>) -> Self {
         Self {
             title: title.into(),

@@ -344,6 +344,14 @@ async fn a_panicking_call_reports_it_and_the_client_runs_on() {
         matches!(&panicked, Err(Error::Panicked(message)) if message == "boom"),
         "{panicked:?}"
     );
+    // A closure that panics before it returns its future.
+    let panicked = jazz
+        .with_client(|_| -> std::future::Ready<jazz_app::Result<()>> { panic!("sync boom") })
+        .await;
+    assert!(
+        matches!(&panicked, Err(Error::Panicked(message)) if message == "sync boom"),
+        "{panicked:?}"
+    );
     jazz.insert(new_todo("still here")).await.unwrap();
     assert_eq!(jazz.all(todos::query()).await.unwrap().len(), 1);
 }

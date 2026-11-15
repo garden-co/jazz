@@ -20,7 +20,8 @@ pub struct NewProject {
 }
 
 impl NewProject {
-    /// A new row with the columns it requires; the others are left out.
+    /// A new row with the columns it requires, in this order: `name`. The others
+    /// are left out; set them with `NewProject { column: …, ..NewProject::new(…) }`.
     pub fn new(name: impl ::std::convert::Into<::std::string::String>) -> Self {
         Self {
             name: name.into(),
@@ -131,7 +132,8 @@ pub struct NewTodo {
 }
 
 impl NewTodo {
-    /// A new row with the columns it requires; the others are left out.
+    /// A new row with the columns it requires, in this order: `title`, `done`. The others
+    /// are left out; set them with `NewTodo { column: …, ..NewTodo::new(…) }`.
     pub fn new(title: impl ::std::convert::Into<::std::string::String>, done: impl ::std::convert::Into<bool>) -> Self {
         Self {
             title: title.into(),

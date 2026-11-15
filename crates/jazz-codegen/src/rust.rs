@@ -359,9 +359,19 @@ impl<'a> Writer<'a> {
         out.push_str("}\n\n");
         let required: Vec<&Field> = fields.iter().filter(|f| !f.optional_on_insert()).collect();
         let _ = writeln!(out, "impl {new} {{");
+        // Positional, so the doc names them: several bools read poorly.
+        let names = if required.is_empty() {
+            "none".to_owned()
+        } else {
+            required
+                .iter()
+                .map(|f| format!("`{}`", f.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let _ = writeln!(
             out,
-            "    /// A new row with the columns it requires; the others are left out."
+            "    /// A new row with the columns it requires, in this order: {names}. The others\n    /// are left out; set them with `{new} {{ column: …, ..{new}::new(…) }}`."
         );
         let params = required
             .iter()

@@ -143,7 +143,9 @@ impl Jazz {
             Box::pin(async move {
                 // A panic in the job is its caller's error, not the end of
                 // the client: the other jobs and the client run on.
-                let result = std::panic::AssertUnwindSafe(job(client))
+                // Calling `job` happens inside the guard too: a closure
+                // that panics before returning its future is caught.
+                let result = std::panic::AssertUnwindSafe(async move { job(client).await })
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|panic| Err(Error::Panicked(panic_message(&*panic))));
