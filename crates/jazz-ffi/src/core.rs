@@ -341,10 +341,17 @@ impl Core {
         opts: &Opts,
         limit: Option<usize>,
     ) -> Result<Vec<Json>> {
-        let mut lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
-        if let Some(limit) = limit {
-            lowered.query.limit = Some(lowered.query.limit.map_or(limit, |l| l.min(limit)));
-        }
+        // A limit goes in before lowering: a relation query carries its
+        // window inside the relation, not as an ordinary clause.
+        let limited;
+        let query = match limit {
+            Some(limit) => {
+                limited = crate::relational::with_limit(query, limit);
+                &limited
+            }
+            None => query,
+        };
+        let lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
         let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
         let core_query = lowered.query.clone();
         let reads_deleted = lowered.reads_deleted;
