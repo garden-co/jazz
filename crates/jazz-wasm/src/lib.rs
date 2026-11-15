@@ -1814,6 +1814,16 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows (default 10000, at least 1) into one reset of its current
+    /// result.
+    #[wasm_bindgen(js_name = setSubscriptionBacklogRows)]
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> Result<(), JsValue> {
+        self.binding()?
+            .set_subscription_backlog_rows(rows)
+            .map_err(host_error)
+    }
+
     /// The newest transaction time this database handed out under its
     /// node (a `TxTime` is the commit seq). A leased node's next holder
     /// seeds it through `seedForegroundTxTimeHighWater`.
@@ -2122,6 +2132,7 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
         EventChunk::Delta {
             delta,
             reset,
+            coalesced,
             settled,
             tier,
         } => {
@@ -2133,6 +2144,7 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
             )?;
             set_prop(&object, "terminalOperations", js_sys::Array::new().into())?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
+            set_prop(&object, "coalesced", JsValue::from_bool(coalesced))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&tier))?;
         }

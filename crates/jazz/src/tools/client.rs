@@ -13,7 +13,7 @@
 //! locally and reconnects with backoff; the engine resubscribes and resends
 //! unsettled writes on the new link.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::pin::pin;
@@ -208,12 +208,21 @@ enum ClosedTransaction {
     RolledBack,
 }
 
+/// Items a public subscription stream holds before its forwarder stops
+/// taking events from the core (where a backlog coalesces instead).
+const SUBSCRIPTION_STREAM_ITEMS: usize = 16;
+
 /// Moves one engine subscription's events to its public stream.
 struct Forwarder {
     stream: CoreSubscriptionStream,
     /// The caller's query, which results are decoded against.
     query: Query,
-    sender: mpsc::UnboundedSender<SubscriptionStreamItem>,
+    /// Bounded ([`SUBSCRIPTION_STREAM_ITEMS`]): while it is full, events
+    /// wait in the core, which coalesces a backlog past its limit.
+    sender: mpsc::Sender<SubscriptionStreamItem>,
+    /// Set when the forwarder left events in the core because `sender` was
+    /// full; the public stream asks for a tick once it reads.
+    stalled: Rc<Cell<bool>>,
     cancellation: oneshot::Receiver<()>,
     /// The rows the public stream holds, in order.
     rows: Vec<SubscriptionOutputRow>,
@@ -356,7 +365,16 @@ impl Shared {
             if forwarder.cancelled() {
                 return false;
             }
-            while let Some(event) = forwarder.stream.try_next_event() {
+            loop {
+                // A full stream takes nothing more now: what the reader has
+                // not read waits in the core, bounded by its backlog limit.
+                if forwarder.sender.capacity() == 0 {
+                    forwarder.stalled.set(true);
+                    break;
+                }
+                let Some(event) = forwarder.stream.try_next_event() else {
+                    break;
+                };
                 let item = match event {
                     SubscriptionEvent::Delta {
                         reset,
@@ -364,6 +382,7 @@ impl Shared {
                         updated,
                         removed,
                         settled,
+                        coalesced,
                         ..
                     } => match forwarder.delta(
                         &self.schema,
@@ -376,6 +395,7 @@ impl Shared {
                         // Not yet settled at the tier the subscription asked for.
                         Ok(delta) => SubscriptionStreamItem::Delta(OrderedRowDelta {
                             pending: !settled || forwarder.unsettleable,
+                            coalesced,
                             ..delta
                         }),
                         Err(error) => SubscriptionStreamItem::Rejected {
@@ -393,7 +413,9 @@ impl Shared {
                     }
                     SubscriptionEvent::Closed => return false,
                 };
-                if forwarder.sender.send(item).is_err() {
+                // The capacity checked above is this forwarder's: only it
+                // sends, so the slot is still free.
+                if forwarder.sender.try_send(item).is_err() {
                     return false;
                 }
             }
@@ -1144,12 +1166,14 @@ impl JazzClient {
         }
         let unsettleable = self.shared.serverless && opts.tier != ReadTier::LocalOnly;
         let stream = self.open_core_subscription(&with_history_identity(&query), opts)?;
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(SUBSCRIPTION_STREAM_ITEMS);
         let (cancel, cancellation) = oneshot::channel();
+        let stalled = Rc::new(Cell::new(false));
         self.shared.state().forwarders.push(Forwarder {
             stream,
             query,
             sender,
+            stalled: stalled.clone(),
             cancellation,
             rows: Vec::new(),
             unsettleable,
@@ -1157,12 +1181,21 @@ impl JazzClient {
         self.shared.ensure_driven();
         self.shared.tick_soon();
         let shared = Rc::downgrade(&self.shared);
+        let refill = Rc::downgrade(&self.shared);
         Ok(SubscriptionStream::new(
             receiver,
             cancel,
             Box::new(move || {
                 if let Some(shared) = shared.upgrade() {
                     shared.drop_cancelled();
+                    shared.tick_soon();
+                }
+            }),
+            Box::new(move || {
+                // The forwarder stopped at a full stream: forward the rest.
+                if stalled.replace(false)
+                    && let Some(shared) = refill.upgrade()
+                {
                     shared.tick_soon();
                 }
             }),

@@ -70,7 +70,7 @@ pub(crate) struct Live {
     pub(crate) name: String,
     query: PreparedQuery,
     identity: Option<AuthorSubject>,
-    stream: SubscriptionStream,
+    pub(crate) stream: SubscriptionStream,
     pub(crate) rows: Snapshot,
 }
 
@@ -118,6 +118,13 @@ pub(crate) fn subscribe_with(
 /// Applies queued deltas to the maintained result.
 pub(crate) fn apply(live: &mut Live) {
     while let Some(event) = live.stream.try_next_event() {
+        apply_event(live, event);
+    }
+}
+
+/// Applies one delta to the maintained result.
+pub(crate) fn apply_event(live: &mut Live, event: SubscriptionEvent) {
+    {
         let SubscriptionEvent::Delta {
             reset,
             added,

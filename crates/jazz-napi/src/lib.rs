@@ -1138,6 +1138,9 @@ pub struct SubscriptionDeltaEvent {
     #[napi(js_name = "type", ts_type = "'delta'")]
     pub event_type: String,
     pub reset: bool,
+    /// A reset standing for deltas the reader fell too far behind to be
+    /// told one by one (its backlog passed its limit).
+    pub coalesced: bool,
     pub delta: Uint8Array,
     /// Always empty: SQLite subscriptions deliver whole-row deltas.
     #[napi(js_name = "terminalOperations", ts_type = "Array<never>")]
@@ -1198,11 +1201,13 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
             EventChunk::Delta {
                 delta,
                 reset,
+                coalesced,
                 settled,
                 tier,
             } => Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_owned(),
                 reset,
+                coalesced,
                 delta: delta.into(),
                 terminal_operations: Vec::new(),
                 settled,
@@ -2423,6 +2428,17 @@ impl NapiDb {
     pub fn set_slow_query_threshold_ms(&self, ms: f64) -> js::Result<()> {
         self.binding()?
             .set_slow_query_threshold_ms(ms)
+            .map_err(host_error)?;
+        Ok(())
+    }
+
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows (default 10000, at least 1) into one reset of its current
+    /// result.
+    #[napi(js_name = "setSubscriptionBacklogRows")]
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> js::Result<()> {
+        self.binding()?
+            .set_subscription_backlog_rows(rows)
             .map_err(host_error)?;
         Ok(())
     }

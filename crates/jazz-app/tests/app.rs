@@ -202,6 +202,38 @@ async fn subscriptions_stream_typed_deltas() {
     drop(changes);
 }
 
+/// A subscriber that stops reading while the app writes holds a bounded
+/// stream: its forwarder stops taking events once the stream is full, and
+/// they wait in the core, which coalesces them once they pass the default
+/// limit of 10000 changed rows. When the subscriber reads again it gets a
+/// delta marked `coalesced` (all rows held removed, the current ones
+/// added) and converges on every row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscriber_that_falls_behind_is_coalesced_and_catches_up() {
+    const TODOS: usize = 10_100;
+    let jazz = Jazz::open(client_files(), Config::new(AppId::random()))
+        .await
+        .unwrap();
+    let mut changes = jazz.subscribe(todos::query()).await.unwrap();
+    let mut rows = Rows::default();
+    rows.apply(next(&mut changes).await);
+    for n in 0..TODOS {
+        jazz.insert(new_todo(&format!("todo {n}"))).await.unwrap();
+    }
+    let mut coalesced = false;
+    while rows.as_slice().len() < TODOS {
+        let delta = next(&mut changes).await;
+        coalesced |= delta.coalesced;
+        rows.apply(delta);
+    }
+    assert!(coalesced, "the backlog past the limit was coalesced");
+    let mut titles: Vec<String> = rows.into_vec().into_iter().map(|todo| todo.title).collect();
+    titles.sort();
+    let mut expected: Vec<String> = (0..TODOS).map(|n| format!("todo {n}")).collect();
+    expected.sort();
+    assert_eq!(titles, expected);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
     let app_id = AppId::random();

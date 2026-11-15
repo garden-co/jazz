@@ -258,7 +258,7 @@ impl Jazz {
         tier: ReadTier,
     ) -> Result<Subscription<T>> {
         let query = query.into_untyped();
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(subscription::SUBSCRIPTION_ITEMS);
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
             let stream = client.subscribe_with_read_tier(query, tier).await?;

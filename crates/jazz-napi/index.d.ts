@@ -204,6 +204,12 @@ export declare class NapiDb {
    */
   setSlowQueryThresholdMs(ms: number): void
   /**
+   * Coalesce a subscription's undelivered deltas past `rows` changed
+   * rows (default 10000, at least 1) into one reset of its current
+   * result.
+   */
+  setSubscriptionBacklogRows(rows: number): void
+  /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
    */
@@ -600,6 +606,11 @@ export interface SubscriptionClosedEvent {
 export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
+  /**
+   * A reset standing for deltas the reader fell too far behind to be
+   * told one by one (its backlog passed its limit).
+   */
+  coalesced: boolean
   delta: Uint8Array
   /** Always empty: SQLite subscriptions deliver whole-row deltas. */
   terminalOperations: Array<never>

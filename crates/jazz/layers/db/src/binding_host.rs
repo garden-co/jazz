@@ -326,7 +326,8 @@ fn restore_options_as<O: HostObject>(
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices?,
+/// backlog_rows? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -362,7 +363,23 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         opts.splices = O::decode::<Vec<String>>(splices)
             .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
+    if let Some(rows) = options.get("backlog_rows")? {
+        opts.backlog_rows = Some(backlog_rows(O::number(&rows))?);
+    }
     Ok(opts)
+}
+
+/// A backlog limit as a host passes it: a whole number of rows, at least 1.
+fn backlog_rows(rows: Option<f64>) -> HostResult<std::num::NonZeroUsize> {
+    rows.filter(|rows| rows.is_finite() && rows.fract() == 0.0 && *rows >= 1.0)
+        .and_then(|rows| std::num::NonZeroUsize::new(rows.min(usize::MAX as f64) as usize))
+        .ok_or_else(|| {
+            HostError::Argument(
+                "backlog_rows must be a whole number of rows, at least 1: a subscription's \
+                 backlog cannot be unbounded"
+                    .into(),
+            )
+        })
 }
 
 /// A transaction kind: `"mergeable"`, or `"serializable"` (also spelled
@@ -1736,6 +1753,14 @@ impl Binding {
         Ok(())
     }
 
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows ([`crate::db::Db::set_subscription_backlog_limit`]); `rows` is at least 1.
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> HostResult<()> {
+        self.db
+            .set_subscription_backlog_limit(backlog_rows(Some(rows))?);
+        Ok(())
+    }
+
     /// Make this store the optimistic, non-durable foreground of a durable
     /// relay (a browser tab over its worker): its store starts empty, so
     /// every subscription's opening waits for the relay's answer.
@@ -1963,12 +1988,15 @@ impl Future for NextEvent<'_> {
 /// A subscription event as the host hands it to JavaScript.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EventChunk {
-    /// `{ type: "delta", delta, reset, settled, tier }`.
+    /// `{ type: "delta", delta, reset, coalesced, settled, tier }`.
     Delta {
         /// Binding-codec delta bytes.
         delta: Vec<u8>,
         /// Replaces everything delivered so far.
         reset: bool,
+        /// A reset that stands for deltas the reader fell too far behind
+        /// to be told one by one (a backlog past its limit).
+        coalesced: bool,
         /// The result is settled at `tier`.
         settled: bool,
         /// The durability tier, as `Debug`-spelled.
@@ -1998,10 +2026,12 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             removed,
             settled,
             tier,
+            coalesced,
             ..
         } => EventChunk::Delta {
             delta: crate::binding_codec::encode_subscription_delta(&added, &updated, &removed)?,
             reset,
+            coalesced,
             settled,
             tier: format!("{tier:?}"),
         },

@@ -3025,6 +3025,24 @@ describe("NativeRuntimeAdapter server transport", () => {
       }
     });
 
+    it("marks a reset the core coalesced from a backlog with reason backlog", async () => {
+      const { runtime, native, pump } = pooledRuntime();
+      try {
+        const callback = vi.fn();
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), callback);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        native[0]!.queue.push({ ...subscriptionReset([row(2)]), coalesced: true });
+        pump();
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(callback.mock.calls[0]![0]).not.toHaveProperty("reason");
+        expect(callback.mock.calls[1]![0]).toEqual(
+          expect.objectContaining({ reset: true, reason: "backlog" }),
+        );
+      } finally {
+        await runtime.close();
+      }
+    });
+
     it("fails only the subscription whose batch carries an error", async () => {
       const { runtime, native, failures, queues, pump } = pooledRuntime();
       try {

@@ -101,6 +101,11 @@ export interface RuntimeSubscriptionRemovedRow {
 /** Structured root changes published by a runtime adapter to the TS facade. */
 export interface RuntimeSubscriptionDelta {
   reset?: boolean;
+  /**
+   * On a reset: `"backlog"` when it replaces deltas the subscriber fell too
+   * far behind to be told one by one (its backlog passed `backlogRows`).
+   */
+  reason?: "backlog";
   added: RuntimeSubscriptionAddedRow[];
   removed: RuntimeSubscriptionRemovedRow[];
   updated: RuntimeSubscriptionUpdatedRow[];
