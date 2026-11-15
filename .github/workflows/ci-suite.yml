@@ -268,8 +268,7 @@ jobs:
           cargo build -p jazz-ffi
           cargo build -p jazz-cli --bin jazz-tools
       - name: StagePlan Go bindings are current
-        working-directory: examples/stage-plan/apps/go-cli
-        run: ../../../../target/debug/jazz-tools generate --check
+        run: cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings
       - name: gofmt and go vet
         run: |
           test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
