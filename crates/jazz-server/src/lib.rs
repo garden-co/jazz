@@ -14,7 +14,7 @@ pub mod vercel_blob;
 pub use middleware::AuthConfig;
 pub use server::{
     BlobStore, BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase,
-    StorageBackend,
+    StorageBackend, StoreIdentity, detach_store_identity, open_store_identity,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{

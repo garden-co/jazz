@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -1022,7 +1022,8 @@ describe("agent tokens", () => {
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const once = await start({ store: sqlite({ path: dir }) });
     const { token } = await mint(once.jazz);
-    expect(((await stat(join(dir, "inspect-token-secret"))).mode & 0o777).toString(8)).toBe("600");
+    // Kept in the store's own file, so a restored copy keeps its tokens.
+    expect(await readdir(dir)).not.toContain("inspect-token-secret");
     await once.jazz.close();
     const again = await start({ store: sqlite({ path: dir }) });
     expect(await ok(api(again.jazz, { op: "whoami" }, bearer(token)))).toMatchObject({

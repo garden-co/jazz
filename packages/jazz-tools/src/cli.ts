@@ -403,6 +403,7 @@ function printHelp(): void {
   console.log(
     "  inspect <command>     Read and change an app's data through its backend (see `inspect --help`)",
   );
+  console.log("  store detach <path>   Make a stopped copy of a sqlite() store a store of its own");
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
@@ -486,6 +487,22 @@ if (isMainModule()) {
   } else if (command === "validate") {
     const { options } = parseArgs(args);
     exitOnError(validate(options));
+  } else if (command === "store") {
+    const [subcommand, path, ...rest] = args.slice(1);
+    if (subcommand !== "detach" || !path || rest.length > 0) {
+      console.error(
+        "Usage: jazz-tools store detach <path>\n\nMake a stopped copy of a sqlite({ path }) store a store of its own, so it claims its own chunk directory or s3() prefix instead of the original's.",
+      );
+      process.exit(1);
+    }
+    exitOnError(
+      import("jazz-napi").then(({ detachStore }) => {
+        detachStore(resolve(process.cwd(), path));
+        console.log(
+          `${path} is now a store of its own; it claims its large values' place on its next start.`,
+        );
+      }),
+    );
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
     if (subcommand === "compile") {

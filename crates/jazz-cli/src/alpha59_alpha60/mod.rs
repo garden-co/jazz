@@ -267,6 +267,10 @@ async fn run(args: &Args) -> Result<Json, String> {
     }
 
     check_app_id(&head.admin, &args.app_id_text)?;
+    // The store keeps the app id in its own file, spelled as given: it runs
+    // as the alpha.59 app, so its guests' and users' accounts stay theirs,
+    // without the app naming the id.
+    jazz_server::open_store_identity(&args.data_dir, Some(&args.app_id_text))?;
 
     let built = ServerBuilder::new(args.app_id)
         .with_storage(StorageBackend::Persistent {
@@ -370,14 +374,6 @@ async fn run(args: &Args) -> Result<Json, String> {
     let footer = reader.footer().clone();
 
     let phase = built.shutdown().await;
-    // `sqlite({ path })` keeps its app id here: the store runs as the
-    // alpha.59 app, so its guests' and users' accounts stay theirs, without
-    // the app naming the id.
-    std::fs::write(
-        args.data_dir.join("app-id"),
-        format!("{}\n", args.app_id_text),
-    )
-    .map_err(err)?;
     Ok(json!({
         "data_dir": args.data_dir,
         "deployments": deployments,

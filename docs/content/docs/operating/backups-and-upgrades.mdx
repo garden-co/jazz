@@ -8,13 +8,15 @@ description: "Learn how to keep the data in your backend's Jazz directory safe a
 Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) stores lives in the directory you pass to
 `sqlite({ path })`:
 
-| File or folder                         | What it is                                                                                                   |
-| :------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
-| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions and the index of large-value chunks                                      |
-| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values) |
-| `app-id`                               | The app this directory belongs to                                                                            |
-| `store-id`, `blob-store`               | This directory's identity, and where its chunks live                                                         |
-| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                |
+| File or folder                         | What it is                                                                                                                                       |
+| :------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions, the index of large-value chunks, and the store's identity: its app id, its own id and where its chunks live |
+| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values)                                     |
+| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                                                    |
+
+Stores from before alpha.64 kept their identity in `app-id`, `store-id`, `blob-store` and
+`inspect-token-secret` files beside `jazz.sqlite`. The first start on a newer release moves them
+into `jazz.sqlite` and deletes them.
 
 If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
 data too.
@@ -34,9 +36,18 @@ Back up the whole directory together, and its chunk directory or bucket prefix w
 
 To restore in place, stop the backend, put the files back, and start it again.
 
-To restore into a new place while the original keeps running, such as a staging copy, give the copy
-its own chunk directory or `s3()` prefix and delete its `store-id` and `blob-store` files before it
-first starts. Otherwise it claims the original's chunks.
+`jazz.sqlite` is the whole store: a copy of it opens as the same store, for the same app, with the
+same chunks.
+
+To restore into a new place while the original keeps running, such as a staging copy, make the copy
+a store of its own before it first starts, and give it its own chunk directory or `s3()` prefix:
+
+```sh
+npx jazz-tools store detach ./staging-data
+```
+
+Otherwise it claims the original's chunks, and deletes the ones it no longer needs. The copy keeps
+the app id, so it still serves the same app.
 
 ## Upgrading between releases
 
@@ -363,7 +374,7 @@ Then:
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
-local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). It's written to `<data-dir>/app-id`, so your code never needs
+local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
 it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.

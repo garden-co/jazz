@@ -13,6 +13,7 @@ mod catalogue_storage;
 mod data_dir_corpus;
 #[cfg(feature = "embedded-server")]
 mod embedded;
+mod identity;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub mod alpha59_alpha60;
 pub(crate) mod deployment;
@@ -31,6 +32,7 @@ pub(crate) use catalogue_storage::CatalogueStorage;
 pub use embedded::{
     EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
 };
+pub use identity::{StoreIdentity, detach_store_identity, open_store_identity};
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_ISSUER};

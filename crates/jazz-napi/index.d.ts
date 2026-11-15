@@ -17,7 +17,17 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * The app this core serves: the one its store keeps, or the one it was
+   * opened with in memory.
+   */
+  get appId(): string
+  /**
+   * The secret a backend signs agent tokens with, kept in the store
+   * (`null` in memory).
+   */
+  get tokenSecret(): string | null
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -396,6 +406,15 @@ export interface DeleteOptions {
   base?: JsonValue
   updatedAtMs?: number
 }
+
+/**
+ * Make the stopped store in `dataDir` a store of its own: it forgets its
+ * store id and where its large values live, so its next start claims a
+ * chunk directory or bucket prefix of its own instead of the original's.
+ * For a copy of a store (a staging copy of a backup) opened next to the
+ * original. It keeps the app id: the copy serves the same app.
+ */
+export declare function detachStore(dataDir: string): void
 
 /** Authenticates before returning plaintext; rejects short or invalid ciphertext. */
 export declare function e2eeSodiumDecrypt(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, ciphertext: Uint8Array): Uint8Array
