@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useAll, useSession } from "jazz-tools/react";
 import { toast } from "sonner";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { PersistedWriteRejectedError, WriteHandle, WriteResult } from "jazz-tools";
 
 function notifyLocalWriteDurable(write: WriteResult<unknown>) {

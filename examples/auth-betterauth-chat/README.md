@@ -9,7 +9,7 @@ What it demonstrates:
 - `authenticate` reading the Better Auth session cookie, so the browser never holds a Jazz credential
 - The `admin` plugin to assign roles (`admin` / `member`) to users, passed to Jazz as the `role` claim
 - Starting as a guest on a device account and keeping the guest's data on sign-up with `linkDeviceAccount()`
-- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
+- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [jazz.permissions.json](./jazz.permissions.json), with generic-chat message ownership enforced via `$createdBy.account`.
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
 New sign-ups receive `role = "member"` by default (configured via the `admin` plugin).
@@ -43,7 +43,7 @@ under `/jazz/*`, each through a Next route handler. Open `NEXT_PUBLIC_APP_ORIGIN
 
 ## How the Better Auth integration works
 
-### Server: `src/lib/jazz.server.ts`, `src/lib/auth.ts` and `schema-better-auth/schema.ts`
+### Server: `src/lib/jazz.server.ts`, `src/lib/auth.ts` and the Better Auth tables
 
 `jazz.server.ts` creates Jazz once per process. Its `authenticate` asks Better Auth who the request's
 session cookie belongs to, and passes the `admin` plugin's role on as a claim:
@@ -66,9 +66,9 @@ betterAuth({
 });
 ```
 
-`schema-better-auth/schema.ts` is the generated Better Auth schema source file. Its deny-all
-`permissions` export is spread into the root `permissions.ts` alongside the message policies, so
-ordinary clients cannot read or mutate authentication rows; `jazz.db` acts with backend authority.
+Better Auth's tables (`better_auth_*`) are declared in `jazz.app.json` beside the chat's own, and
+`jazz.permissions.json` denies every operation on them, so ordinary clients cannot read or mutate
+authentication rows; `jazz.db` acts with backend authority.
 
 ### Client: `app/page.tsx`
 

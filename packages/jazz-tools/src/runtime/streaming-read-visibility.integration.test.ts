@@ -1,37 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { createPolicyTestApp } from "../testing/index.js";
+import { createPolicyTestApp, testApp } from "../testing/index.js";
 
 // Trimmed from examples/record-player: albums plus streamed track audio.
-const app = s.defineApp(
-  {
-    albums: s
-      .table(
-        { title: s.string(), artist: s.string() },
-        { tracksViaAlbum: s.reverse("tracks", "album") },
-      )
-      .indexOnly(["title"]),
-    tracks: s
-      .table(
-        {
-          album_id: s.uuid(),
-          title: s.string(),
-          ordinal: s.int(),
-          audio_bytes: s.bytes().optional(),
-        },
-        { album: s.rel("albums", "album_id") },
-      )
-      .indexOnly(["album_id", "ordinal"]),
+const app = testApp({
+  tables: {
+    albums: {
+      columns: { title: "string", artist: "string" },
+      relations: { tracksViaAlbum: { reverse: "tracks", relation: "album" } },
+      indexes: ["title"],
+    },
+    tracks: {
+      columns: { album_id: "uuid", title: "string", ordinal: "int", audio_bytes: "bytes?" },
+      relations: { album: { rel: "albums", column: "album_id" } },
+      indexes: ["album_id", "ordinal"],
+    },
   },
-  { migrations: "none" },
-);
-
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.albums.allowRead.where({});
-  policy.albums.allowInsert.where({ "$createdBy.account": session.user });
-  policy.tracks.allowRead.where({});
-  policy.tracks.allowInsert.where({ "$createdBy.account": session.user });
 });
+
+const permissions = {
+  tables: {
+    albums: { read: "true", insert: "$createdBy.account = session.user" },
+    tracks: { read: "true", insert: "$createdBy.account = session.user" },
+  },
+};
 
 const listener = {
   issuer: "https://auth.record-player.example",
@@ -52,9 +43,9 @@ async function* audio(): AsyncGenerator<Uint8Array> {
 // upload, so the query must wait behind them too.
 describe("read-your-writes after a streaming insert (#3839)", () => {
   it("sees a plain insert made right after insertStreaming", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
-      const db = testApp.as(listener);
+      const db = policyApp.as(listener);
       const first = db.insert(app.albums, { title: "First", artist: "A" }).value.id;
       await db.insertStreaming(app.tracks, {
         album_id: first,
@@ -69,14 +60,14 @@ describe("read-your-writes after a streaming insert (#3839)", () => {
         expect.objectContaining({ id, title: "Second" }),
       ]);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 20_000);
 
   it("sees the streamed row itself right after insertStreaming", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
-      const db = testApp.as(listener);
+      const db = policyApp.as(listener);
       const album = db.insert(app.albums, { title: "Album", artist: "A" }).value.id;
       const id = (
         await db.insertStreaming(app.tracks, {
@@ -91,14 +82,14 @@ describe("read-your-writes after a streaming insert (#3839)", () => {
         expect.objectContaining({ id, title: "Streamed" }),
       ]);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 20_000);
 
   it("sees every album and track of an import that interleaves streamed and plain writes", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
-      const db = testApp.as(listener);
+      const db = policyApp.as(listener);
       const albums: string[] = [];
       for (let album = 0; album < 3; album++) {
         const id = db.insert(app.albums, { title: `Album ${album}`, artist: "A" }).value.id;
@@ -118,7 +109,7 @@ describe("read-your-writes after a streaming insert (#3839)", () => {
       await expect(db.all(app.albums)).resolves.toHaveLength(albums.length);
       await expect(db.all(app.tracks)).resolves.toHaveLength(albums.length * 2);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 30_000);
 });

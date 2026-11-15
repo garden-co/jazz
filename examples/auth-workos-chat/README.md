@@ -7,7 +7,7 @@ What it demonstrates:
 - Server-side AuthKit: a small Express server (`server/server.ts`) runs the OAuth redirect and keeps the WorkOS session in a sealed, HttpOnly cookie
 - Jazz running inside that server with `createJazz`: its `authenticate` reads the AuthKit cookie, so the browser never holds a Jazz credential
 - Refreshing the short-lived WorkOS access token once per stale cookie, shared by HTTP requests and sync sockets
-- Role-based UI gating from the WorkOS organization role, passed to Jazz as the `role` claim (`admin` posts to Announcements; `member` posts to the general chat), with generic-chat message ownership enforced via `$createdBy` in `permissions.ts`
+- Role-based UI gating from the WorkOS organization role, passed to Jazz as the `role` claim (`admin` posts to Announcements; `member` posts to the general chat), with generic-chat message ownership enforced via `$createdBy` in `jazz.permissions.json`
 
 ## Prerequisites
 

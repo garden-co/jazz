@@ -1,0 +1,14 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "todoShares": {
+      "columns": { "todoId": "uuid", "user_id": "uuid", "can_edit": "boolean" },
+      "relations": { "todo": { "rel": "todos", "column": "todoId" } }
+    },
+    "todos": {
+      "columns": { "title": "string", "done": "boolean" },
+      "relations": { "shares": { "reverse": "todoShares", "relation": "todo" } }
+    }
+  }
+}

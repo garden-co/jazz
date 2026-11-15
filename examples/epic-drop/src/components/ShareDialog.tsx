@@ -13,7 +13,8 @@ import { Selector } from "@astryxdesign/core/Selector";
 import { HStack, StackItem, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { app, type FolderRole } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
+import { type FolderRole } from "../../app-extras.js";
 import { createInvite, inviteLink } from "../sharing.js";
 import { useNames } from "../profiles.js";
 

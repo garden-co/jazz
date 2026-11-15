@@ -35,7 +35,7 @@ async fn remote_whole_json_row_matches_explicit_projection() {
                 server.server_state(),
                 server.app_id(),
                 "dev",
-                &[schema.clone()],
+                std::slice::from_ref(&schema),
                 &[],
             )
             .await

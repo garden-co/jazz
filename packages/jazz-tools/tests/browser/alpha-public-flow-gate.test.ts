@@ -1,13 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  generateAuthSecret,
-  schema,
-  type CompiledPermissions,
-  type Db,
-  type Query,
-  type RowOf,
-} from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { generateAuthSecret, type Db } from "../../src/index.js";
+import { resolveSchemaSource } from "../../src/schema-source.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
+import { app, type Todo } from "./apps/alpha-public/jazz.generated.js";
+import permissions from "./apps/alpha-public/jazz.permissions.json";
+import { app as richApp, type Todo as RichTodo } from "./apps/alpha-public-rich/jazz.generated.js";
+import richPermissions from "./apps/alpha-public-rich/jazz.permissions.json";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -16,71 +14,16 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 
-const app = schema.defineApp(
-  {
-    todos: schema.table(
-      {
-        title: schema.string(),
-        done: schema.boolean(),
-        list: schema.string(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
-
-const richApp = schema.defineApp(
-  {
-    users: schema.table(
-      {
-        name: schema.string(),
-      },
-      { todosViaOwner: schema.reverse("todos", "owner") },
-    ),
-    todos: schema.table(
-      {
-        title: schema.string(),
-        done: schema.boolean(),
-        list: schema.string(),
-        priority: schema.int(),
-        tags: schema.array(schema.string()),
-        payload: schema.bytes().optional(),
-        ownerId: schema.uuid().optional(),
-      },
-      { owner: schema.rel("users", "ownerId") },
-    ),
-  },
-  { migrations: "none" },
-);
-
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-
-const richPermissions = schema.definePermissions(richApp, ({ policy }) => [
-  policy.users.allowRead.always(),
-  policy.users.allowInsert.always(),
-  policy.users.allowUpdate.always(),
-  policy.users.allowDelete.always(),
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-
-type Todo = RowOf<typeof app.todos>;
-type RichTodo = RowOf<typeof richApp.todos>;
+// The apps (apps/alpha-public, apps/alpha-public-rich) let everyone read and write everything.
+type TodoQuery = ReturnType<typeof app.todos.orderBy>;
+type RichTodoQuery = ReturnType<typeof richApp.todos.where>;
 
 const ctx = new TestCleanup();
 
@@ -139,7 +82,7 @@ describe("alpha public package flow", () => {
       }),
     );
 
-    await waitForCondition(() => snapshots.length > 0, 4000, "initial empty snapshot");
+    await waitForCondition(async () => snapshots.length > 0, 4000, "initial empty snapshot");
     expect(snapshots[0]).toEqual([]);
 
     const createdWrite = db.insert(app.todos, {
@@ -378,7 +321,7 @@ describe("alpha public package flow", () => {
       appId,
       dbName: uniqueDbName("alpha-public-remote-browser-indexeddb"),
       table: "todos",
-      schemaJson: JSON.stringify(app.wasmSchema),
+      schemaJson: JSON.stringify(resolveSchemaSource(app)),
       serverUrl,
       localFirstSecret: sharedSecret,
     });
@@ -928,13 +871,17 @@ async function publishSchemaAndPermissions(
   appId: string,
   serverUrl: string,
   adminSecret: string,
-  permissions: CompiledPermissions,
-  schemaApp: { wasmSchema: typeof app.wasmSchema } = app,
+  permissions: TestPermissionsFile,
+  schemaApp: typeof app | typeof richApp = app,
 ): Promise<string> {
   const core = { appId, serverUrl, adminSecret };
-  await deploy({ ...core, schema: schemaApp.wasmSchema, permissions });
+  await deploy({
+    ...core,
+    app: schemaApp,
+    permissions: permissions,
+  });
   // Clients sync through the app's backend; return its URL.
-  return (await startJazzApp(core, { schema: schemaApp.wasmSchema, permissions })).serverUrl;
+  return (await startJazzApp(core, { schema: schemaApp, permissions })).serverUrl;
 }
 
 async function expectTodoTitles(db: Db, snapshots: Todo[][], titles: string[]): Promise<void> {
@@ -963,7 +910,7 @@ async function expectTodoSummaries(
 
 async function expectTodoSummariesForQuery(
   db: Db,
-  query: Query<"todos">,
+  query: TodoQuery,
   summaries: string[],
   tier?: "local-first" | "remote",
 ): Promise<void> {
@@ -993,7 +940,7 @@ async function waitForSnapshotSummaries(
 async function waitForSubscribedTodoSummaries(
   db: Db,
   summaries: string[],
-  query: Query<"todos"> = app.todos.orderBy("title"),
+  query: TodoQuery = app.todos.orderBy("title"),
 ): Promise<Todo[]> {
   return await new Promise<Todo[]>((resolve, reject) => {
     let lastRows: Todo[] = [];
@@ -1022,7 +969,7 @@ async function waitForSubscribedTodoSummaries(
 
 async function waitForRichTodos(
   db: Db,
-  query: Query<"todos">,
+  query: RichTodoQuery,
   predicate: (todos: RichTodo[]) => boolean,
   label: string,
 ): Promise<RichTodo[]> {

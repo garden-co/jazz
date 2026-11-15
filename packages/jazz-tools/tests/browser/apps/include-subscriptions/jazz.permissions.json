@@ -1,0 +1,10 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "check_notes": { "read": "true", "insert": "true", "update": "true", "delete": "true" },
+    "orgs": { "read": "true", "insert": "true", "update": "true", "delete": "true" },
+    "todos": { "read": "true", "insert": "true", "update": "true", "delete": "true" },
+    "user_checks": { "read": "true", "insert": "true", "update": "true", "delete": "true" }
+  }
+}

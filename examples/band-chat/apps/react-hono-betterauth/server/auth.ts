@@ -1,6 +1,6 @@
 import { betterAuth } from "better-auth";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import { assertConfiguration } from "../src/lib/config.mjs";
 import { jazz } from "./jazz";
 

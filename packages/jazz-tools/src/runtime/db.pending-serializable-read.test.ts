@@ -1,19 +1,15 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startTestJazz } from "../testing/index.js";
 
 it("keeps local reads available while another transaction waits for remote coverage", async () => {
-  const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-  const permissions = definePermissions(app, ({ policy }) => {
-    policy.entries.allowRead.always();
-    policy.entries.allowInsert.always();
-  });
+  const app = testApp({ tables: { entries: { columns: { title: "string" } } } });
+  const permissions = { format: 1, tables: { entries: { read: "true", insert: "true" } } };
   const server = await startTestJazz({
-    app: app,
-    permissions: permissions,
+    app,
+    permissions,
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;

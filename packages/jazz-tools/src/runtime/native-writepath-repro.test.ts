@@ -3,28 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createJazzContext } from "../backend/create-jazz-context.js";
-import { schema as s } from "../index.js";
-import { startLocalJazzServer } from "../testing/index.js";
+import { startLocalJazzServer, testApp } from "../testing/index.js";
 
-const importSchema = {
-  parents: s.table(
-    {
-      label: s.string(),
-      ordinal: s.int(),
+const importApp = testApp({
+  tables: {
+    parents: {
+      columns: { label: "string", ordinal: "int" },
+      relations: { childrenViaParent: { reverse: "children", relation: "parentRelation" } },
     },
-    { childrenViaParent: s.reverse("children", "parentRelation") },
-  ),
-  children: s.table(
-    {
-      parent: s.uuid(),
-      label: s.string(),
-      ordinal: s.int(),
+    children: {
+      columns: { parent: "uuid", label: "string", ordinal: "int" },
+      relations: { parentRelation: { rel: "parents", column: "parent" } },
     },
-    { parentRelation: s.rel("parents", "parent") },
-  ),
-};
-
-const importApp = s.defineApp(importSchema, { migrations: "none" });
+  },
+});
 const txCount = Number(process.env.JAZZ_WRITEPATH_TXS ?? "100");
 
 function rowId(index: number): string {

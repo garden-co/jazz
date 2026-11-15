@@ -1,5 +1,5 @@
 import type { JazzClient, JazzSession } from "jazz-tools/client";
-import { app } from "../session-app.js";
+import { app } from "../session-app/jazz.generated.js";
 
 export async function authSessionExamples(session: JazzSession<JazzClient>) {
   const db = session.db;

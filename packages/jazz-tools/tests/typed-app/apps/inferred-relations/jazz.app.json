@@ -1,0 +1,62 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "analyses": {
+      "columns": { "summary": "string" },
+      "relations": { "entriesViaAnalyses": { "reverse": "entries", "relation": "analyses" } }
+    },
+    "categories": {
+      "columns": { "label": "string" },
+      "relations": {
+        "entriesViaCategories": { "reverse": "entries", "relation": "categories" },
+        "entriesViaCategory": { "reverse": "entries", "relation": "category" },
+        "teamsViaCategory": { "reverse": "teams", "relation": "category" }
+      }
+    },
+    "people": {
+      "columns": { "name": "string" },
+      "relations": {
+        "entriesViaAddress": { "reverse": "entries", "relation": "addressRelation" },
+        "entriesViaPeople": { "reverse": "entries", "relation": "people" },
+        "entriesViaPerson": { "reverse": "entries", "relation": "person" }
+      }
+    },
+    "entries": {
+      "columns": {
+        "category_id": "uuid",
+        "personId": "uuid",
+        "team_id": "uuid",
+        "teamIds": { "array": "uuid" },
+        "address": "uuid?",
+        "category_ids": { "array": "uuid" },
+        "person_ids": { "array": "uuid" },
+        "analysis_ids": { "array": "uuid" },
+        "status_ids": { "array": "uuid" }
+      },
+      "relations": {
+        "addressRelation": { "rel": "people", "column": "address" },
+        "analyses": { "rel": "analyses", "column": "analysis_ids" },
+        "categories": { "rel": "categories", "column": "category_ids" },
+        "category": { "rel": "categories", "column": "category_id" },
+        "people": { "rel": "people", "column": "person_ids" },
+        "person": { "rel": "people", "column": "personId" },
+        "statuses": { "rel": "statuses", "column": "status_ids" },
+        "team": { "rel": "teams", "column": "team_id" },
+        "teams": { "rel": "teams", "column": "teamIds" }
+      }
+    },
+    "statuses": {
+      "columns": { "label": "string" },
+      "relations": { "entriesViaStatuses": { "reverse": "entries", "relation": "statuses" } }
+    },
+    "teams": {
+      "columns": { "category_id": "uuid" },
+      "relations": {
+        "category": { "rel": "categories", "column": "category_id" },
+        "entriesViaTeam": { "reverse": "entries", "relation": "team" },
+        "entriesViaTeams": { "reverse": "entries", "relation": "teams" }
+      }
+    }
+  }
+}

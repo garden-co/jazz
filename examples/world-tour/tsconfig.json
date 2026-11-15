@@ -12,5 +12,5 @@
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["src", "schema.ts", "permissions.ts", "tests", "walkthrough", "*.config.ts"]
+  "include": ["src", "jazz.generated.ts", "tests", "walkthrough", "*.config.ts"]
 }

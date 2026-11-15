@@ -1,4 +1,5 @@
-import { schema as s } from "jazz-tools/react-native";
+// The fixture app, from src/app/jazz.app.json (`jazz-tools generate --schema-dir src/app`).
+import { app } from "./app/jazz.generated.ts";
 import { openJazzClient, type OpenJazzClientConfig } from "jazz-tools/_dev/native-account-session";
 import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
@@ -11,13 +12,6 @@ import {
   measureTypingComposer,
   type TypingComposerMetrics,
 } from "./typing-composer.ts";
-
-const app = s.defineApp(
-  {
-    todos: s.table({ title: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
 
 /** Public foregrounds borrow the fixture lease using the genuine account. */
 function clientConfig(admitted: {

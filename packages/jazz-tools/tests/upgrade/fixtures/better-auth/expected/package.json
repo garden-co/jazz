@@ -1,0 +1,9 @@
+{
+  "name": "upgrade-fixture-better-auth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "auth:generate": "npx @better-auth/cli generate --config ./auth-generate.ts --yes",
+    "build": "jazz-tools generate && next build"
+  }
+}

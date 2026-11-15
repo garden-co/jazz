@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { translateQuery } from "./query-adapter.js";
 import {
   createNapiNativeRuntimeAdapter,
@@ -7,15 +7,14 @@ import {
 } from "./testing/napi-runtime-test-utils.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp(
-  {
-    nodes: s.table(
-      { title: s.string(), parentId: s.uuid().optional() },
-      { parent: s.rel("nodes", "parentId") },
-    ),
+const app = testApp({
+  tables: {
+    nodes: {
+      columns: { title: "string", parentId: "uuid?" },
+      relations: { parent: { rel: "nodes", column: "parentId" } },
+    },
   },
-  { migrations: "none" },
-);
+});
 const ids = [
   "00000000-0000-4000-8000-000000000001",
   "00000000-0000-4000-8000-000000000002",

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "audit": { "columns": { "note": "string" } },
+    "seats": { "columns": { "show": "string", "holder": "string" } }
+  }
+}

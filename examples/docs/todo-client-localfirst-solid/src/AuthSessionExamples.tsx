@@ -1,6 +1,6 @@
 import { createMemo } from "solid-js";
 import { useAll, useSession } from "jazz-tools/solid";
-import { app } from "../session-app.js";
+import { app } from "../session-app/jazz.generated.js";
 
 export function AuthSessionExamples() {
   const session = useSession();

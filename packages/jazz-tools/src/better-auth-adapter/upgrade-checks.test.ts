@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../schema-namespace.js";
 import type { Db } from "../runtime/db.js";
+import { testApp } from "../testing/test-app.js";
 import { jazzAdapter } from "./index.js";
-import { legacyDefinition, currentDefinition } from "./fixtures/issuer-upgrade-schema.js";
+import { currentAppFile, legacyAppFile } from "./fixtures/issuer-upgrade.js";
 
-const legacyApp = s.defineApp(legacyDefinition, { migrations: "none" });
-const currentApp = s.defineApp(currentDefinition, { migrations: "none" });
+const legacyApp = testApp(legacyAppFile);
+const currentApp = testApp(currentAppFile);
 
 function fakeDb(accounts: Record<string, unknown>[]): Db {
   return { all: async () => accounts } as unknown as Db;
@@ -83,5 +83,20 @@ describe("Better Auth upgrade checks", () => {
     expect(warn.mock.calls.some(([message]) => String(message).includes("more than one row"))).toBe(
       false,
     );
+  });
+
+  it("generates with the docs' generation-only config: an empty schema and a db that throws", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const adapter = jazzAdapter({
+      db: async () => {
+        throw new Error("The generation config cannot query the database");
+      },
+      schema: {},
+    })({});
+    // As `npx @better-auth/cli generate --output <file>` calls it.
+    const generated = await adapter.createSchema!({}, "./does-not-exist/jazz.app.json");
+    expect(generated.path).toBe("./does-not-exist/jazz.app.json");
+    expect(JSON.parse(generated.code).tables.better_auth_user.columns.name).toBe("string");
+    expect(String(log.mock.calls[0]?.[0])).toContain("npx jazz-tools generate");
   });
 });

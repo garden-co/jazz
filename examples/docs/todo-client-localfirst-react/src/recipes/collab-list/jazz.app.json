@@ -1,0 +1,26 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "projectMembers": {
+      "columns": { "projectId": "uuid", "user_id": "uuid" },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+    },
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": {
+        "members": { "reverse": "projectMembers", "relation": "project" },
+        "tasks": { "reverse": "tasks", "relation": "project" }
+      }
+    },
+    "tasks": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "assignee_id": "uuid?",
+        "projectId": "uuid"
+      },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+    }
+  }
+}

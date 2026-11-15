@@ -20,7 +20,7 @@ import {
   TopNavHeading,
 } from "@astryxdesign/core";
 import { useAll, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import { OrganizationProvider, type CurrentOrganization } from "./lib/organization";
 import { href, useRoute, type Route } from "./lib/route";
 import { isRole, roleLabels } from "./roles";

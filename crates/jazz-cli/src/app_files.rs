@@ -197,7 +197,11 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
     let created = jazz_codegen::migrations::create(lang, &app_json, Some(&text), name)
         .map_err(|error| error.to_string())?;
     if !created.changed {
-        outcome.notes.push("no schema change to migrate".into());
+        outcome.notes.push(
+            created
+                .note
+                .unwrap_or_else(|| "no schema change to migrate".into()),
+        );
         return Ok(outcome);
     }
     std::fs::write(&app_path, &created.app)

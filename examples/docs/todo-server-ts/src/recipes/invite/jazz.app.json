@@ -1,0 +1,21 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "chatInvites": {
+      "columns": { "chatId": "uuid", "code": "string", "singleUse": "boolean" },
+      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+    },
+    "chatMembers": {
+      "columns": { "chatId": "uuid", "user_id": "uuid", "inviteId": "string?" },
+      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+    },
+    "chats": {
+      "columns": {},
+      "relations": {
+        "invites": { "reverse": "chatInvites", "relation": "chat" },
+        "members": { "reverse": "chatMembers", "relation": "chat" }
+      }
+    }
+  }
+}

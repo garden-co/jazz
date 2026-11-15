@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { schema as s } from "jazz-tools";
+import { testApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { TableSchemaDefinition } from "./TableSchemaDefinition";
@@ -10,17 +10,11 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
 }));
 
-const bigintDefaultApp = s.defineApp(
-  {
-    metrics: s.table(
-      {
-        largeCount: s.bigint().default(9007199254740993n),
-      },
-      {},
-    ),
+const bigintDefaultApp = testApp({
+  tables: {
+    metrics: { columns: { largeCount: { type: "bigint", default: "9007199254740993" } } },
   },
-  { migrations: "none" },
-);
+});
 
 describe("TableSchemaDefinition", () => {
   beforeEach(() => {
