@@ -1816,8 +1816,14 @@ impl JazzClient {
             return Ok(());
         }
         let db = self.db()?;
+        // This handle's writes only: its session's, or the database's own.
+        // A refusal that settled before the call counts (jazz#5728).
+        let writer = match self.write_identity()? {
+            WriteIdentity::Session(author) => Some(author),
+            _ => None,
+        };
         self.shared
-            .settle(db.wait_for_pending_writes(CoreDurabilityTier::Global))
+            .settle(db.wait_for_sync(CoreDurabilityTier::Global, writer))
             .await?
             .map_err(|error| {
                 if error.is_authorization_denied() {
