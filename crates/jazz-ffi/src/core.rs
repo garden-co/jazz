@@ -20,6 +20,7 @@ const BACKEND_ISSUER: &str = "jazz:backend";
 pub(crate) struct Core {
     jazz: Jazz,
     schema: Arc<Schema>,
+    relations: convert::Relations,
     closed: AtomicBool,
     /// The open subscriptions, told when the app closes.
     subscriptions: Mutex<Vec<Weak<Delivery>>>,
@@ -49,12 +50,13 @@ impl Delivery {
 
 impl Core {
     pub fn open(config_json: &str) -> Result<Self> {
-        let (files, config) = config(config_json)?;
+        let (files, config, app_text) = config(config_json)?;
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
         Ok(Self {
             jazz,
             schema: Arc::new(schema),
+            relations: convert::Relations::read(&app_text),
             closed: AtomicBool::new(false),
             subscriptions: Mutex::new(Vec::new()),
         })
@@ -87,31 +89,33 @@ impl Core {
 
     pub fn one(&self, query_json: &str) -> Result<Option<String>> {
         // Validated as given (a bad `limit` is refused), then limited to 1.
-        let (table_name, mut query) =
-            convert::query(&self.schema, &convert::parse(query_json, "the query")?)?;
+        let (_, mut query, shape) = convert::query(
+            &self.schema,
+            &self.relations,
+            &convert::parse(query_json, "the query")?,
+        )?;
         query.limit = Some(query.limit.map_or(1, |limit| limit.min(1)));
         Ok(self
-            .run_query(table_name, query)?
+            .run_query(shape, query)?
             .into_iter()
             .next()
             .map(|row| row.to_string()))
     }
 
     fn rows(&self, query: &Json) -> Result<Vec<Json>> {
-        let (table_name, query) = convert::query(&self.schema, query)?;
-        self.run_query(table_name, query)
+        let (_, query, shape) = convert::query(&self.schema, &self.relations, query)?;
+        self.run_query(shape, query)
     }
 
     fn run_query(
         &self,
-        table_name: String,
+        shape: convert::Shape,
         query: jazz_app::jazz::query::Query,
     ) -> Result<Vec<Json>> {
         let jazz = self.open_jazz()?;
         let results = block_on(jazz.with_client(move |client| async move {
             Ok(client.query(query, ReadTier::LocalFirst).await?)
         }))?;
-        let table = self.table(&table_name)?;
         results
             .into_iter()
             .map(|row| {
@@ -119,7 +123,7 @@ impl Core {
                     .key
                     .row_id()
                     .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))?;
-                Ok(convert::row_json(table, id, row.fields))
+                Ok(convert::row_json(&shape, id, row.fields))
             })
             .collect()
     }
@@ -142,7 +146,7 @@ impl Core {
                     value,
                 })
                 .collect();
-            Ok(convert::row_json(&table, id, fields))
+            Ok(convert::row_json(&convert::Shape::of(table), id, fields))
         }))?;
         Ok(row.to_string())
     }
@@ -183,9 +187,11 @@ impl Core {
         query_json: &str,
         listener: Box<dyn Fn(Event) + Send>,
     ) -> Result<SubscriptionCore> {
-        let (table_name, query) =
-            convert::query(&self.schema, &convert::parse(query_json, "the query")?)?;
-        let table = self.table(&table_name)?.clone();
+        let (_, query, table) = convert::query(
+            &self.schema,
+            &self.relations,
+            &convert::parse(query_json, "the query")?,
+        )?;
         let (events, received) = mpsc::channel::<Option<Event>>();
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         let forward = events.clone();
@@ -356,7 +362,7 @@ impl Drop for SubscriptionCore {
     }
 }
 
-fn config(config_json: &str) -> Result<(AppFiles, Config)> {
+fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));
     };
@@ -464,6 +470,9 @@ fn config(config_json: &str) -> Result<(AppFiles, Config)> {
             "backendSecret, adminSecret and session are for a backend, which needs \"permissions\"",
         ));
     }
-    let files = AppFiles::new(app.into_bytes(), permissions.map(String::into_bytes));
-    Ok((files, result))
+    let files = AppFiles::new(
+        app.clone().into_bytes(),
+        permissions.map(String::into_bytes),
+    );
+    Ok((files, result, app))
 }
