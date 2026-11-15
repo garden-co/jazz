@@ -120,3 +120,46 @@ async fn a_column_named_query() {
         .unwrap();
     assert_eq!(found, vec![labelled]);
 }
+
+/// A query can read a large value only in part: a text range, or a json
+/// subtree, of the full row or of a selection.
+#[tokio::test]
+async fn partial_reads() {
+    use jazz_app::ValuePart;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            meta: Some(Json(
+                serde_json::json!({ "owner": { "name": "ops" }, "tags": ["a"] }),
+            )),
+            ..NewTask::new("Partial reads", 0, Vec::new())
+        })
+        .await
+        .unwrap();
+    let head = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .part(tasks::title(), ValuePart::TextUtf8 { from: 0, to: 7 }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.title, "Partial");
+    let owner = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .select(tasks::meta())
+                .part(tasks::meta(), ValuePart::JsonPointer("/owner".into())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner.values.unwrap().0,
+        serde_json::json!({ "name": "ops" })
+    );
+}

@@ -39,7 +39,8 @@ pub use error::{Error, Result};
 pub use handle::{Jazz, Transaction};
 pub use include::{Include, IntoInclude, Nullability, OneInclude, Partial, Row, Selection, With};
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, created_at, id, updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, ValuePart, created_at, id,
+    updated_at,
 };
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};

@@ -3,6 +3,9 @@
 use std::marker::PhantomData;
 
 use jazz::query::{self as q, OrderDirection, Predicate};
+
+/// What part of a large value a query reads: see [`Query::part`].
+pub use jazz::query::Part as ValuePart;
 use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
 
@@ -46,6 +49,24 @@ impl<T: Table> Query<T> {
 }
 
 impl<T: Row> Query<T> {
+    /// Reads `column` only in `part`: a byte range of a bytes column, a
+    /// UTF-8 or UTF-16 range of a text one, or the subtree at a JSON
+    /// pointer of a json one, as TS's partial select does. The row's value
+    /// for `column` holds that part, and only the chunks it covers are
+    /// read.
+    ///
+    /// ```ignore
+    /// let head = jazz.one(tasks::query().id(id).part(tasks::attachment(), ValuePart::Bytes { from: 0, to: 1024 })).await?;
+    /// ```
+    pub fn part<V: ColumnValue>(
+        mut self,
+        column: Column<<T as Row>::Table, V>,
+        part: ValuePart,
+    ) -> Self {
+        self.query = self.query.select_part(column.name(), part);
+        self
+    }
+
     /// Includes the rows of a relation of the table with each row, after
     /// what the row already has: `Todo` becomes `(Todo, Option<Project>)`,
     /// `(Todo, Option<Project>)` becomes `(Todo, Option<Project>, Vec<Todo>)`.
