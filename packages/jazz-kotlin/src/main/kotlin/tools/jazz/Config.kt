@@ -50,6 +50,8 @@ public data class JazzConfig(
     val adminSecret: String? = null,
     /** The user a backend acts as (issuer `jazz:backend`). */
     val sessionSubject: String? = null,
+    /** How an end user's app signs in to [serverUrl] (the app's Jazz endpoint); not for a backend. */
+    val auth: JazzAuth? = null,
     /** Where the blocking native calls run; every call is main-safe either way. */
     val dispatcher: kotlinx.coroutines.CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
 ) {
@@ -71,6 +73,11 @@ public data class JazzConfig(
             )
             backendSecret?.let { put("backendSecret", it) }
             adminSecret?.let { put("adminSecret", it) }
+            when (auth) {
+                is JazzAuth.DeviceAccount -> put("auth", buildJsonObject { put("deviceKey", auth.key) })
+                is JazzAuth.Bearer -> put("auth", buildJsonObject { put("bearer", true) })
+                null -> {}
+            }
             sessionSubject?.let {
                 put(
                     "session",

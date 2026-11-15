@@ -10,7 +10,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
+import tools.jazz.JazzAuth
 import tools.jazz.JazzConfig
+import tools.jazz.SessionState
+import tools.jazz.Storage
+import tools.jazz.SyncStatus
 import tools.jazz.JazzException
 import tools.jazz.JazzRow
 import tools.jazz.ReadTier
@@ -286,5 +290,55 @@ object DocsSnippets {
         val canAdd = jazz.canInsert(Tasks, NewTask(showId = task.showId, title = "New", status = TaskStatus.Todo, rank = 1.0))
         // #endregion reading-permission-advice-kotlin
         return listOf(canRename, canAssign, canDelete, canAdd)
+    }
+
+    suspend fun openClient(endpoint: String, appId: String, deviceKey: String): Jazz {
+        // #region context-setup-kotlin-client
+        // An end user's app: it syncs through your backend's Jazz endpoint, signed in
+        // with a local-first device account (keep the key in the platform keychain).
+        val jazz = jazzapp.open(
+            JazzConfig(
+                appId = appId,
+                serverUrl = endpoint, // e.g. "https://app.example/jazz"
+                storage = Storage.Persistent,
+                dataDir = System.getProperty("java.io.tmpdir") + "/stage-plan-" + appId,
+                auth = JazzAuth.DeviceAccount(deviceKey), // JazzAuth.generateDeviceKey() once
+            ),
+        )
+        // #endregion context-setup-kotlin-client
+        return jazz
+    }
+
+    suspend fun signIn(endpoint: String, appId: String, fetchToken: suspend (fresh: Boolean) -> String?): Jazz {
+        // #region auth-bearer-kotlin
+        // A user your backend signs in: Jazz asks for their token when connecting,
+        // before it expires, and after the server refuses one.
+        val jazz = jazzapp.open(
+            JazzConfig(
+                appId = appId,
+                serverUrl = endpoint,
+                auth = JazzAuth.Bearer { reason -> fetchToken(reason.fresh) },
+            ),
+        )
+        val me: String? = (jazz.session.value as? SessionState.SignedIn)?.user?.account
+        // #endregion auth-bearer-kotlin
+        checkNotNull(me)
+        return jazz
+    }
+
+    suspend fun sessionState(jazz: Jazz): List<String> {
+        val seen = ArrayList<String>()
+        // #region auth-session-kotlin
+        // The session and sync status as StateFlows: collect them in your UI.
+        when (val session = jazz.session.value) {
+            is SessionState.SignedIn -> seen += "signed in as ${session.user.subject}"
+            is SessionState.Expired -> seen += "session expired (${session.reason}): sign in again"
+            SessionState.SignedOut, null -> seen += "signed out"
+        }
+        if (jazz.syncStatus.value is SyncStatus.Offline) seen += "offline"
+        jazz.refreshSession() // ask for a fresh token now
+        jazz.signOut() // also closes the app
+        // #endregion auth-session-kotlin
+        return seen
     }
 }

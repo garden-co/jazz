@@ -18,6 +18,17 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
         @JvmStatic
         public fun open(configJson: String): Native = UniffiNative(call { JazzHandle.open(configJson) })
 
+        @JvmStatic
+        public fun openWithTokens(configJson: String, tokens: (String) -> String?): Native {
+            val provider = object : uniffi.jazz_ffi.TokenProvider {
+                override fun token(reason: String): String? = tokens(reason)
+            }
+            return UniffiNative(call { JazzHandle.openWithTokens(configJson, provider) })
+        }
+
+        @JvmStatic
+        public fun generateDeviceKey(): String = call { uniffi.jazz_ffi.generateDeviceKey() }
+
         private inline fun <T> call(block: () -> T): T = try {
             block()
         } catch (e: FfiException) {
@@ -68,6 +79,32 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
         live { handle.updateAt(table, id, patchJson, tier) }
     override fun deleteAt(table: String, id: String, tier: String): Unit = live { handle.deleteAt(table, id, tier) }
     override fun waitForSync(tier: String): Unit = live { handle.waitForSync(tier) }
+    override fun sessionState(): String? = live { handle.sessionState() }
+    override fun syncStatus(): String = live { handle.syncStatus() }
+    override fun refresh(): Unit = live { handle.refresh() }
+
+    override fun signOut() {
+        if (!closed.compareAndSet(false, true)) return
+        try {
+            call { handle.signOut() }
+        } finally {
+            handle.destroy()
+        }
+    }
+
+    override fun watch(sync: Boolean, onChange: (String) -> Unit): () -> Unit {
+        val listener = object : uniffi.jazz_ffi.StateListener {
+            override fun onChange(stateJson: String) = onChange(stateJson)
+        }
+        val watch = live { if (sync) handle.watchSync(listener) else handle.watchSession(listener) }
+        return {
+            try {
+                watch.cancel()
+            } finally {
+                watch.destroy()
+            }
+        }
+    }
     override fun editText(table: String, id: String, column: String, editedFrom: String, text: String): Unit =
         live { handle.editText(table, id, column, editedFrom, text) }
     override fun edit(table: String, id: String, patchJson: String?, editsJson: String): Unit =

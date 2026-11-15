@@ -58,9 +58,28 @@ public interface Native : AutoCloseable {
     /** Starts a transaction. */
     public fun begin(): NativeTransaction = throw JazzException.NotSupported("transactions")
 
+    /** The end user's session as JSON, or `null` for a local app or a backend. */
+    public fun sessionState(): String? = null
+
+    /** The sync status as JSON: `{"link": {"state": …}}`. */
+    public fun syncStatus(): String = """{"link":{"state":"localOnly"}}"""
+
+    /** Calls [onChange] with each session (or, with [sync], sync status) state, the current one first; returns a cancel. */
+    public fun watch(sync: Boolean, onChange: (String) -> Unit): () -> Unit = {}
+
+    /** Asks the token provider for a fresh token. */
+    public fun refresh() {}
+
+    /** Signs the end user out, and closes the app. */
+    public fun signOut(): Unit = close()
+
     /** Opens native handles from a config JSON (the contract's open config). */
     public fun interface Opener {
         public fun open(configJson: String): Native
+
+        /** Opens as an end user signing in with a bearer [tokens] gives (reason → token or `null`). */
+        public fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
+            throw JazzException.NotSupported("bearer sign-in through this opener")
     }
 }
 

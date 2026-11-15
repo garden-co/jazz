@@ -5,6 +5,7 @@ import jazzapp.CrewTable
 import jazzapp.NewComment
 import jazzapp.NewCrew
 import jazzapp.TaskStatus
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import tools.jazz.include
 import jazzapp.Tasks
@@ -224,6 +225,54 @@ class StagePlanTest {
             assertEquals(false, assign)
             assertEquals(true, add)
             kotlin.test.assertNotNull(delete)
+        }
+    }
+
+    @Test
+    fun end_users_sign_in_with_device_accounts_and_bearer_tokens(): Unit = runBlocking {
+        val endpointProcess = ProcessBuilder(
+            System.getenv("JAZZ_END_USER_ENDPOINT"),
+            java.io.File("jazz.app.json").absolutePath,
+            java.io.File("jazz.permissions.json").absolutePath,
+        ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
+        try {
+            val line = endpointProcess.inputStream.bufferedReader().readLine() ?: error("the endpoint didn't start")
+            val info = kotlinx.serialization.json.Json.parseToJsonElement(line).let { it as kotlinx.serialization.json.JsonObject }
+            val appId = info["appId"].toString().trim('"')
+            val endpoint = info["endpoint"].toString().trim('"')
+
+            // A device account signs up by opening with a new key.
+            val carol = DocsSnippets.openClient(endpoint, appId, tools.jazz.JazzAuth.generateDeviceKey())
+            carol.use {
+                val state = carol.session.value
+                kotlin.test.assertTrue(state is tools.jazz.SessionState.SignedIn && state.user.kind == "device", "$state")
+                val account = (state as tools.jazz.SessionState.SignedIn).user.account
+                val show = carol.insert(
+                    jazzapp.Shows,
+                    jazzapp.NewShow(name = "Carol's", venue = "V", date = "D", doors = "19:00", chiefAccount = account),
+                    tier = tools.jazz.WriteTier.Global,
+                )
+                assertEquals("Carol's", carol.one(jazzapp.Shows.where(jazzapp.Shows.id eq show.id), tools.jazz.ReadTier.Remote)?.name)
+                kotlinx.coroutines.withTimeout(30_000) {
+                    carol.syncStatus.first { it == tools.jazz.SyncStatus.Connected }
+                }
+            }
+
+            // A user the backend signs in, with a bearer token.
+            val asked = java.util.Collections.synchronizedList(ArrayList<Boolean>())
+            val alice = DocsSnippets.signIn(endpoint, appId) { fresh -> asked += fresh; "token-alice" }
+            assertEquals("alice", (alice.session.value as tools.jazz.SessionState.SignedIn).user.subject)
+            assertEquals(false, asked.first())
+            val states = kotlinx.coroutines.channels.Channel<tools.jazz.SessionState?>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val watching = launch { alice.session.collect { states.send(it) } }
+            assertEquals(listOf("signed in as alice"), DocsSnippets.sessionState(alice).filter { it != "offline" })
+            kotlin.test.assertTrue(asked.contains(true), "refreshSession asks for a fresh token")
+            kotlinx.coroutines.withTimeout(30_000) { while (states.receive() != tools.jazz.SessionState.SignedOut) Unit }
+            watching.cancel()
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { alice.all(jazzapp.Shows.query()) }
+        } finally {
+            endpointProcess.outputStream.close()
+            endpointProcess.destroy()
         }
     }
 }

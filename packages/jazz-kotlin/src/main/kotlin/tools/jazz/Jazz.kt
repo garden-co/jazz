@@ -10,6 +10,10 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
@@ -30,10 +34,14 @@ import kotlinx.serialization.json.jsonPrimitive
  * the rest of the library builds without them. What `open` throws is
  * rethrown as it is, not wrapped.
  */
-internal fun openReflectively(className: String, config: String): Native {
+internal fun openReflectively(className: String, config: String, tokens: ((String) -> String?)? = null): Native {
     val native = Class.forName(className)
     return try {
-        native.getMethod("open", String::class.java).invoke(null, config) as Native
+        if (tokens == null) {
+            native.getMethod("open", String::class.java).invoke(null, config) as Native
+        } else {
+            native.getMethod("openWithTokens", String::class.java, Function1::class.java).invoke(null, config, tokens) as Native
+        }
     } catch (e: java.lang.reflect.InvocationTargetException) {
         throw e.targetException
     }
@@ -69,12 +77,50 @@ public class Jazz internal constructor(
     public companion object {
         /** How [open] reaches jazz-ffi; replace it to open through something else. */
         @Volatile
-        public var opener: Native.Opener = Native.Opener { config -> openReflectively("tools.jazz.UniffiNative", config) }
+        public var opener: Native.Opener = object : Native.Opener {
+            override fun open(configJson: String): Native = openReflectively("tools.jazz.UniffiNative", configJson)
+
+            override fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
+                openReflectively("tools.jazz.UniffiNative", configJson, tokens)
+        }
 
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
         public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz =
-            withContext(config.dispatcher) { Jazz(opener.open(config.toJson(app)), implementations, config.dispatcher) }
+            withContext(config.dispatcher) {
+                val json = config.toJson(app)
+                val native = when (val auth = config.auth) {
+                    // The native core asks on a thread of its own: blocking there is fine.
+                    is JazzAuth.Bearer -> opener.openWithTokens(json) { reason ->
+                        runBlocking { auth.token(TokenReason.of(reason)) }
+                    }
+                    else -> opener.open(json)
+                }
+                Jazz(native, implementations, config.dispatcher)
+            }
     }
+
+    /**
+     * The end user's session: [SessionState.SignedIn] with who, `Expired`
+     * or `SignedOut`, as it changes; `null` for a local app or a backend.
+     */
+    public val session: StateFlow<SessionState?> by lazy { stateFlow(sync = false, initial = native.sessionState()?.let(SessionState::parse)) { SessionState.parse(it) } }
+
+    /** How the app syncs ([SyncStatus.Connected], `Offline`, …), as it changes. */
+    public val syncStatus: StateFlow<SyncStatus> by lazy { stateFlow(sync = true, initial = SyncStatus.parse(native.syncStatus())) { SyncStatus.parse(it) } }
+
+    private val watches = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    private fun <T> stateFlow(sync: Boolean, initial: T, parse: (String) -> T): StateFlow<T> {
+        val flow = MutableStateFlow(initial)
+        watches += native.watch(sync) { json -> flow.value = parse(json) }
+        return flow.asStateFlow()
+    }
+
+    /** Asks the [JazzAuth.Bearer] provider for a fresh token ([TokenReason.Refresh]), e.g. after an `Expired` session. */
+    public suspend fun refreshSession(): Unit = io { native.refresh() }
+
+    /** Signs the end user out, and closes the app. */
+    public suspend fun signOut(): Unit = io { native.signOut() }
 
     /** The account id of the user this backend acts as, or `null` for a client. */
     public suspend fun account(): String? = io { native.account() }
@@ -347,7 +393,10 @@ public class Jazz internal constructor(
      * [JazzException.Closed], and so do later calls. Closing again does
      * nothing, so `use {}` and an explicit `close()` mix.
      */
-    override fun close(): Unit = native.close()
+    override fun close() {
+        watches.forEach { runCatching { it() } }
+        native.close()
+    }
 
     private suspend fun <T> io(block: () -> T): T = withContext(dispatcher) { block() }
 }
