@@ -95,7 +95,7 @@ Cloud; a Rust or Go backend connects to the same sync URL with the same admin se
 
     **Open the app.**
     <include cwd lang="rust" meta='title="src/main.rs"'>
-      ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
+      ../examples/docs/todo-server-rs/src/main.rs#backend-open-rust
     </include>
 
     `jazz_app::Jazz` is `Send + Clone`, so it can sit in shared state, such as an Axum router's. The
@@ -236,31 +236,9 @@ your own routes, like `jazz.forReqUser(request)`:
     axum = "0.8"
     ```
 
-    ```rust title="src/main.rs"
-    use ::jazz_app::endpoint::{Answer, AuthUser, Endpoint, Request};
-    use axum::Router;
-    use axum::routing::get;
-
-    // `jazz` is the backend's handle, opened with `Config::backend` as above.
-    let endpoint = Endpoint::new(&jazz, |request: Request| async move {
-        // Your app's own sign-in decides who the request's user is.
-        Ok(match session_from_cookie(request.cookie("sid")).await {
-            Some(s) => Some(Answer::User(AuthUser::new(s.user_id, s.expires_at))),
-            // Let device accounts (local-first guests) in; `None` refuses them.
-            None => Some(Answer::DeviceAccount),
-        })
-    })?;
-
-    let app = Router::new()
-        .route("/api/my-todos", get(my_todos))
-        .with_state(endpoint.clone())
-        .merge(endpoint.router()); // everything under /jazz
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, app).await?;
-    endpoint.shutdown().await?;
-    jazz.shutdown().await?;
-    ```
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/endpoint-server-rs/src/lib.rs#backend-serve-rust
+    </include>
 
     `AuthUser::new` takes the user's id and when the answer stops holding (Unix seconds); add claims
     with `.claims(…)`. A sync session asks its client to reconnect shortly before that, or after an hour
@@ -277,34 +255,9 @@ your own routes, like `jazz.forReqUser(request)`:
     user (TS `forReqUser`): its reads and writes run as them, under your permissions.
     `endpoint.for_auth_user(&user)` does the same for an `AuthUser` you already have (TS `forSession`).
 
-    ```rust title="src/main.rs"
-    use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode};
-    use axum::Json;
-    use jazz_app::todos; // the generated bindings
-
-    async fn my_todos(
-        State(endpoint): State<Endpoint>,
-        headers: HeaderMap,
-    ) -> Result<Json<Vec<String>>, StatusCode> {
-        let request = headers
-            .iter()
-            .fold(Request::new("GET", "/api/my-todos"), |request, (name, value)| {
-                request.header(name.as_str(), value.to_str().unwrap_or_default())
-            });
-        // The backend's handle acting as the request's user, under your permissions.
-        let as_user = endpoint.for_user(&request).await.map_err(|error| match error {
-            ::jazz_app::Error::SignedOut => StatusCode::UNAUTHORIZED,
-            ::jazz_app::Error::NoAccount(_) => StatusCode::FORBIDDEN,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
-        let todos = as_user
-            .all(todos::query())
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        Ok(Json(todos.into_iter().map(|todo| todo.title).collect()))
-    }
-    ```
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/endpoint-server-rs/src/lib.rs#backend-for-user-rust
+    </include>
 
     A user gets a Jazz account when they first sign in from a client. Until then `for_user` fails with
     `Error::NoAccount`. `endpoint.create_account_for(user_id)` creates one for a user who never opens a

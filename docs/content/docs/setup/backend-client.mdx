@@ -99,7 +99,17 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
     ```
   </Tab>
   <Tab value="Rust">
-    Not in Rust yet. See [Language support](/docs/reference/language-support#rust).
+    A Rust process connects as a scoped machine, one your main backend trusts as a user
+    (`trustWorkload({ …, as: (claims) => ({ userId }) })`): it signs in at your main backend's
+    `/jazz` with the workload's token as a bearer credential, which it asks for again before each
+    token expires (at 80% of its life, so give tokens at least five minutes).
+
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/endpoint-server-rs/src/lib.rs#backend-client-rust
+    </include>
+
+    A trusted machine (`as: "backend"`) isn't supported in Rust yet. See
+    [Language support](/docs/reference/language-support#rust).
   </Tab>
   <Tab value="Go">
     Not in Go yet. A Go process can sign in to your backend's `/jazz` as an end user (`jazz.Token`,

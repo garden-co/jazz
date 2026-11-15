@@ -18,7 +18,8 @@ Swift and Kotlin are for apps.
       the backend's handle acts as the user you name in `Backend::new`;
     - running the sync server in the backend's process (TS `sqlite()` and `memory()` stores): point
       `Config::server` at a Jazz server;
-    - `linkIdentity`.
+    - `linkIdentity`;
+    - connecting to a main backend as a trusted backend client (`as: "backend"`), and `forUser(userId)` on such a client: Rust connects as a scoped one only.
 
     The endpoint doesn't support these yet:
 
