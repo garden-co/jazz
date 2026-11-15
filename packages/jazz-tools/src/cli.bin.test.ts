@@ -188,16 +188,14 @@ describe("bin integration", () => {
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
   });
 
-  // bin/jazz-tools.js still names `validate` here and in its help (not yet
-  // renamed to `generate` there); these assertions follow the source.
-  it("rejects the removed build alias with a validate hint", async () => {
+  it("rejects the removed build alias with a generate hint", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
 
     const result = runBin(["build", "--schema-dir", root]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("renamed to `jazz-tools validate`");
+    expect(result.stderr).toContain("renamed to `jazz-tools generate`");
   });
 
   it.each(["hash", "export"])("rejects the removed schema %s command", (command) => {
@@ -241,7 +239,8 @@ describe("bin integration", () => {
     const result = runBin(["--help"]);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("validate");
+    expect(result.stdout).toContain("generate");
+    expect(result.stdout).not.toMatch(/^\s+validate\b/m);
     expect(result.stdout).toContain("schema compile");
     expect(result.stdout).not.toMatch(/^\s+deploy\b/m);
     expect(result.stdout).not.toContain("migrations push");
