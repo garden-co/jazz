@@ -9,6 +9,7 @@ import type { AccountHandle } from "../accounts/state.js";
 import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
 import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
+import { registerJazzSession } from "./session-tracking.js";
 
 const DEVICE_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -500,6 +501,7 @@ export function ownJazzSession<Config, Client>(
     close() {
       if (closing) return closing;
       closed = true;
+      untrack();
       ++actionGeneration;
       manualRetry = undefined;
       publish(true);
@@ -541,6 +543,7 @@ export function ownJazzSession<Config, Client>(
     },
   } as SessionInternals<unknown>);
 
+  const untrack = registerJazzSession(session);
   if (options.start !== false) void start().catch(() => {});
   return session;
 }
