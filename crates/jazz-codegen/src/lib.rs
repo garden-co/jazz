@@ -3,6 +3,8 @@
 //!
 //! - [`model`]: the language-neutral [`App`] every back end reads.
 //! - [`ts`]: the TypeScript back end (`jazz.generated.ts`).
+//! - [`rust`]: the Rust back end (`src/jazz_app.rs`).
+//! - [`swift`]: the Swift back end (`JazzApp.swift`).
 //! - [`migrations`]: `migrations create`, the schema diff and stub writer.
 //! - [`bindings`]: what committed bindings record, for staleness checks.
 //!
@@ -15,6 +17,7 @@ pub mod migrations;
 pub mod model;
 pub mod names;
 pub mod rust;
+pub mod swift;
 pub mod ts;
 
 use jazz::tools::deployment::artifact::{ArtifactError, json};
@@ -75,6 +78,7 @@ impl CodegenError {
 pub enum Lang {
     TypeScript,
     Rust,
+    Swift,
 }
 
 impl Lang {
@@ -83,14 +87,15 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
+            "swift" => Ok(Lang::Swift),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift"
             ))),
         }
     }
 
     /// Every language, in the order `jazz-tools generate` handles them.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Swift];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -98,6 +103,7 @@ impl Lang {
         match self {
             Lang::TypeScript => "package.json",
             Lang::Rust => "Cargo.toml",
+            Lang::Swift => "Package.swift",
         }
     }
 
@@ -112,6 +118,8 @@ impl Lang {
             Lang::TypeScript => marker.exists(),
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
+            Lang::Swift => std::fs::read_to_string(marker)
+                .is_ok_and(|manifest| swift::is_app_manifest(&manifest)),
         }
     }
 
@@ -120,6 +128,7 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FORMAT,
             Lang::Rust => rust::FORMAT,
+            Lang::Swift => swift::FORMAT,
         }
     }
 
@@ -128,6 +137,7 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FILE,
             Lang::Rust => rust::FILE,
+            Lang::Swift => swift::FILE,
         }
     }
 }
@@ -144,6 +154,7 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
     match lang {
         Lang::TypeScript => ts::generate(app),
         Lang::Rust => rust::generate(app),
+        Lang::Swift => swift::generate(app),
     }
 }
 
