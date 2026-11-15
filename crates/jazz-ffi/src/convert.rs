@@ -216,14 +216,12 @@ pub(crate) fn row_json(table: &TableSchema, id: ObjectId, fields: Vec<QueryResul
     Json::Object(row)
 }
 
+/// A row's given id, if any, and its cells by column name.
+pub(crate) type Cells = (Option<ObjectId>, Vec<(String, Value)>);
+
 /// The engine values of a row JSON object, for an insert (`required`) or a
 /// patch.
-pub(crate) fn cells(
-    table: &TableSchema,
-    table_name: &str,
-    row: &str,
-    what: &str,
-) -> Result<(Option<ObjectId>, Vec<(String, Value)>)> {
+pub(crate) fn cells(table: &TableSchema, table_name: &str, row: &str, what: &str) -> Result<Cells> {
     let Json::Object(object) = parse(row, what)? else {
         return Err(refused(format!("{what} must be a JSON object")));
     };

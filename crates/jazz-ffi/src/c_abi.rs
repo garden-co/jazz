@@ -59,7 +59,7 @@ fn guarded<T>(err: *mut *mut c_char, null: T, call: impl FnOnce() -> Result<T, F
         Ok(Ok(value)) => return value,
         Ok(Err(error)) => JazzError::from(error),
         Err(_) => JazzError::Io {
-            message: "the call panicked".into(),
+            reason: "the call panicked".into(),
         },
     };
     if !err.is_null() {
@@ -202,7 +202,9 @@ pub unsafe extern "C" fn jazz_subscribe(
                 let ctx = &ctx;
                 let (kind, json) = match event {
                     Event::Delta(json) => (c"delta", json),
-                    Event::Error(message) => (c"error", error_json(&JazzError::Io { message })),
+                    Event::Error(message) => {
+                        (c"error", error_json(&JazzError::Io { reason: message }))
+                    }
                 };
                 let json = CString::new(json).unwrap_or_default();
                 // SAFETY: per `jazz_subscribe`'s contract; the strings live
