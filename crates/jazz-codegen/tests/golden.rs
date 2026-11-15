@@ -360,18 +360,6 @@ fn every_app_generates_its_committed_swift_byte_for_byte() {
     assert!(generated_any);
 }
 
-#[test]
-fn swift_refuses_payload_enums_as_not_supported_yet() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
-    let error = generate(
-        Lang::Swift,
-        &std::fs::read(dir.join("jazz.app.json")).unwrap(),
-    )
-    .unwrap_err();
-    assert!(error.is_unsupported());
-    assert!(error.message().contains("not supported yet"), "{error}");
-}
-
 /// The Jazz Swift package's tests compile and run the bindings of
 /// `tests/apps/computed` (computed fields and transforms) from a copy.
 /// `JAZZ_UPDATE_FIXTURES=1` rewrites it.

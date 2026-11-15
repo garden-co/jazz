@@ -40,10 +40,7 @@
         "todos": {
           "name": { "renameFrom": "title" },
           "tags": { "add": { "array": "string" }, "default": [] },
-          "status": {
-            "add": { "enum": ["open", "done"] },
-            "default": null
-          },
+          "status": { "add": { "enum": ["open", "done"] }, "default": null },
           "meta": { "add": { "json": { "type": "object" } }, "default": null }
         }
       }

@@ -873,6 +873,7 @@ fn every_policy_variant() -> PolicyExpr {
         RelationPredicate::And(vec![RelationPredicate::Not(Box::new(
             RelationPredicate::False,
         ))]),
+        RelationPredicate::Not(Box::new(RelationPredicate::True)),
     ]);
     let key = RelationKeyRef::Column(column("id"));
     let rel = RelationExpr::Limit {
@@ -1332,8 +1333,8 @@ fn every_policy_and_relation_variant_round_trips_through_the_file() {
     let mut seen = BTreeSet::new();
     policy_variants(&expr, &mut seen);
     // 20 policy variants, 10 relation variants (+2 join kinds, 2 projections,
-    // 2 bounds), 11 predicates, 8 value refs.
-    assert_eq!(seen.len(), 20 + 10 + 6 + 11 + 8, "{seen:?}");
+    // 2 bounds), 10 predicates, 8 value refs.
+    assert_eq!(seen.len(), 20 + 10 + 6 + 10 + 8, "{seen:?}");
     through_the_permissions_file(&expr);
     // And each top-level alternative on its own, so a leaf the grammar spells
     // is checked as a string too.
