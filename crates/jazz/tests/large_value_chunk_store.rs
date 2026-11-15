@@ -9,6 +9,7 @@ use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -1636,38 +1637,142 @@ fn a_read_through_a_relay_of_a_value_whose_leaves_its_authority_lost_ends() {
     assert!(!tab.awaiting_chunks());
 }
 
+/// A directory store that fails its reads while `failing`, and counts
+/// the reads asked of it. It says it always answers at once only if
+/// `promises`.
+struct Faulty {
+    files: FileChunkStore,
+    failing: std::sync::atomic::AtomicBool,
+    reads: std::sync::atomic::AtomicUsize,
+    promises: bool,
+}
+
+impl Faulty {
+    fn new(dir: &Path, promises: bool) -> Self {
+        Self {
+            files: FileChunkStore::new(dir.to_path_buf()).unwrap(),
+            failing: false.into(),
+            reads: 0.into(),
+            promises,
+        }
+    }
+
+    fn fail(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ChunkStore for Faulty {
+    fn put<'a>(&'a self, node: &'a NodeKey, bytes: &'a [u8]) -> StoreFuture<'a, ()> {
+        self.files.put(node, bytes)
+    }
+
+    fn get<'a>(&'a self, node: &'a NodeKey) -> StoreFuture<'a, Option<Bytes>> {
+        self.files.get(node)
+    }
+
+    fn delete<'a>(&'a self, node: &'a NodeKey) -> StoreFuture<'a, ()> {
+        self.files.delete(node)
+    }
+
+    fn get_now(&self, node: &NodeKey) -> Option<Result<Option<Bytes>, jazz::db::Error>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(Err(jazz::db::Error::new(
+                ErrorCode::Storage,
+                "disk unreadable",
+            )));
+        }
+        self.files.get_now(node)
+    }
+
+    fn always_answers_now(&self) -> bool {
+        self.promises
+    }
+}
+
+/// Rows `1..=rows` on a store at `path`, each with a large body of its
+/// own (`text(80 + n, LARGE)`) moved to `store` and a small blob.
+fn offloaded_rows(path: &Path, store: &Arc<dyn ChunkStore>, rows: u8) {
+    let server = open(path, Some(store.clone())).unwrap();
+    for n in 1..=rows {
+        block_on(server.insert(
+            "docs",
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    Value::String(text(80 + u64::from(n), LARGE)),
+                ),
+                ("blob".to_owned(), Value::Bytes(vec![n])),
+            ]),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    block_on(server.tick()).unwrap();
+}
+
+/// Row `n`'s body, read from what the replica holds and its upstream's
+/// answers to the pulls for the rest.
+fn body_of(n: u8) -> Vec<u8> {
+    postcard::to_allocvec(
+        &Query::from("docs")
+            .filter(eq(col("id"), lit(Value::Uuid(row(n).0))))
+            .select(["body"]),
+    )
+    .unwrap()
+}
+
+fn local() -> ReadOpts {
+    ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+}
+
+/// Poll `read` and tick both sides for 20 rounds: whether it ended.
+fn rounds<F: Future>(read: &mut std::pin::Pin<&mut F>, sub: &Subscriber, server: &Db) -> bool {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..20 {
+        if read.as_mut().poll(&mut context).is_ready() {
+            return true;
+        }
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    false
+}
+
+/// Wall-clock Unix ms: where a test starts the clock it then sets.
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 /// A leaf the directory store fails to read (here: no permission to read
 /// its file) is not data loss: the pull is not answered missing, and the
-/// replica's read waits. Once the store reads again, a new link serves
-/// it. (The pull the failure parked is asked of the store again only when
-/// an asynchronous store's batch clears its failures, so on the same link
-/// a store that answers at once does not serve it: measured, unchanged
-/// from before.)
+/// replica's read waits. The store is asked again after a wait, so once
+/// it reads again the same pull is answered on the same link and the read
+/// ends with the value: no reconnect, no new version.
 #[cfg(unix)]
 #[test]
-fn a_leaf_the_directory_store_fails_to_read_is_not_answered_missing() {
+fn a_leaf_the_directory_store_fails_to_read_is_served_once_it_reads_again() {
     use std::os::unix::fs::PermissionsExt;
     let (_dir, path) = scratch();
     let directory = tempfile::tempdir().unwrap();
     let store: Arc<dyn ChunkStore> =
         Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
-    let value = text(82, LARGE);
-    {
-        let server = open(&path, Some(store.clone())).unwrap();
-        block_on(server.insert(
-            "docs",
-            BTreeMap::from([
-                ("body".to_owned(), Value::String(value.clone())),
-                ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
-            ]),
-            InsertOptions {
-                row_id: Some(row(1)),
-                ..Default::default()
-            },
-        ))
-        .unwrap();
-        block_on(server.tick()).unwrap();
-    }
+    offloaded_rows(&path, &store, 1);
     let leaves = walk(directory.path());
     let mode = |mode: u32| {
         for leaf in &leaves {
@@ -1681,6 +1786,8 @@ fn a_leaf_the_directory_store_fails_to_read_is_not_answered_missing() {
         return;
     }
     let server = open(&path, Some(store)).unwrap();
+    let started = wall_ms();
+    server.set_clock_for_test(Some(started));
     let sub = connect_to(&server);
     let listed = read_until_it_ends(
         &server,
@@ -1692,15 +1799,12 @@ fn a_leaf_the_directory_store_fails_to_read_is_not_answered_missing() {
         matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
         "{listed:?}"
     );
-    let bytes = postcard::to_allocvec(&Query::from("docs").select(["body"])).unwrap();
-    let opts = ReadOpts {
-        tier: ReadTier::LocalOnly,
-        ..ReadOpts::default()
-    };
-    let mut read = std::pin::pin!(
-        sub.alice
-            .all_serialized_query(&bytes, opts, None, None, None)
-    );
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     let from = sub.down.borrow().len();
     for _ in 0..40 {
@@ -1718,22 +1822,10 @@ fn a_leaf_the_directory_store_fails_to_read_is_not_answered_missing() {
         !missing_sent,
         "a store that failed to read is not data loss"
     );
+
+    // The store reads again, and the wait after its failure is over.
     mode(0o644);
-    let up = Rc::new(RefCell::new(VecDeque::new()));
-    let down = Rc::new(RefCell::new(VecDeque::new()));
-    let _ = block_on(sub.alice.connect_upstream(Box::new(Pipe {
-        out: up.clone(),
-        inbound: down.clone(),
-    })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            user(1),
-        )
-        .unwrap();
+    server.set_clock_for_test(Some(started + 1_000));
     let mut ended = None;
     for _ in 0..200 {
         if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
@@ -1746,10 +1838,211 @@ fn a_leaf_the_directory_store_fails_to_read_is_not_answered_missing() {
     match ended {
         Some(Ok(jazz::db::SerializedReadResult::Rows(rows))) => {
             assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cell("body"), Some(Value::String(text(81, LARGE))));
+        }
+        other => panic!(
+            "the read did not end with the value on the same link: {:?}",
+            other.map(|result| result.map(|_| ()))
+        ),
+    }
+}
+
+/// A store with no chunk store has no batch that fetches either: a pull
+/// that failed with a storage error there is answered again after the
+/// same wait, so the replica's read ends on the same link. The failure is
+/// injected: such a store has no failure a test can switch on and off.
+#[test]
+fn a_pull_that_failed_on_a_store_without_a_chunk_store_is_answered_after_the_wait() {
+    let (_dir, path) = scratch();
+    let value = text(91, LARGE);
+    let server = open(&path, None).unwrap();
+    insert(&server, 1, &value);
+    let started = wall_ms();
+    server.set_clock_for_test(Some(started));
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    server.fail_next_pulls_for_test(1);
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    let from = sub.down.borrow().len();
+    assert!(!rounds(&mut read, &sub, &server), "the read ended");
+    assert!(!rounds(&mut read, &sub, &server), "the read ended");
+    let missing_sent = sub.down.borrow().iter().skip(from).any(
+        |message| matches!(message, SyncMessage::Chunks { missing, .. } if !missing.is_empty()),
+    );
+    assert!(!missing_sent, "a storage error is not data loss");
+    server.set_clock_for_test(Some(started + 1_000));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut ended = None;
+    for _ in 0..20 {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            ended = Some(result);
+            break;
+        }
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    match ended {
+        Some(Ok(jazz::db::SerializedReadResult::Rows(rows))) => {
+            assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].cell("body"), Some(Value::String(value)));
         }
-        other => panic!("{:?}", other.map(|result| result.map(|_| ()))),
+        other => panic!(
+            "the read did not end with the value on the same link: {:?}",
+            other.map(|result| result.map(|_| ()))
+        ),
     }
+}
+
+/// A store that keeps failing its reads is not asked on every tick: the
+/// pull it failed is asked of it again after a second, then after waits
+/// that double up to a minute, one read a time. Once it has answered, a
+/// later failure waits a second again.
+#[test]
+fn a_failing_directory_store_is_asked_again_after_waits_that_double_to_a_minute() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let faulty = Arc::new(Faulty::new(directory.path(), true));
+    let store: Arc<dyn ChunkStore> = faulty.clone();
+    offloaded_rows(&path, &store, 2);
+    let server = open(&path, Some(store)).unwrap();
+    let mut now = wall_ms();
+    server.set_clock_for_test(Some(now));
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 2),
+        "{listed:?}"
+    );
+
+    faulty.fail(true);
+    let before = faulty.reads();
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    assert!(!rounds(&mut read, &sub, &server));
+    let mut asked = faulty.reads();
+    assert_eq!(
+        asked,
+        before + 1,
+        "the pull's first node is read, and fails"
+    );
+    assert!(!rounds(&mut read, &sub, &server));
+    assert_eq!(faulty.reads(), asked, "not asked again on every tick");
+    for wait in [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000] {
+        now += wait - 1;
+        server.set_clock_for_test(Some(now));
+        assert!(!rounds(&mut read, &sub, &server));
+        assert_eq!(
+            faulty.reads(),
+            asked,
+            "asked before its {wait} ms wait was over"
+        );
+        now += 1;
+        server.set_clock_for_test(Some(now));
+        assert!(!rounds(&mut read, &sub, &server));
+        assert_eq!(
+            faulty.reads(),
+            asked + 1,
+            "asked once after its {wait} ms wait"
+        );
+        asked += 1;
+    }
+
+    // It answers again: the pull is served when its wait is over.
+    faulty.fail(false);
+    now += 60_000;
+    server.set_clock_for_test(Some(now));
+    assert!(rounds(&mut read, &sub, &server), "served on the same link");
+
+    // A failure after that starts from the shortest wait.
+    faulty.fail(true);
+    let bytes = body_of(2);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    assert!(!rounds(&mut read, &sub, &server));
+    let asked = faulty.reads();
+    now += 999;
+    server.set_clock_for_test(Some(now));
+    assert!(!rounds(&mut read, &sub, &server));
+    assert_eq!(faulty.reads(), asked);
+    now += 1;
+    server.set_clock_for_test(Some(now));
+    assert!(!rounds(&mut read, &sub, &server));
+    assert_eq!(faulty.reads(), asked + 1, "the wait started over");
+}
+
+/// The wait and its retries are only for a store that says it always
+/// answers at once. A store that does not say so is asked again by its
+/// batches (a failed fetch), as before: a pull it failed to answer while
+/// answering at once is not asked of it again by the tick, however long
+/// the clock runs, so a store with batches sees no answers beyond theirs.
+#[test]
+fn a_store_that_does_not_always_answer_at_once_is_not_asked_again_by_the_tick() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let faulty = Arc::new(Faulty::new(directory.path(), false));
+    let store: Arc<dyn ChunkStore> = faulty.clone();
+    offloaded_rows(&path, &store, 1);
+    let server = open(&path, Some(store)).unwrap();
+    let mut now = wall_ms();
+    server.set_clock_for_test(Some(now));
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    faulty.fail(true);
+    let before = faulty.reads();
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    assert!(!rounds(&mut read, &sub, &server));
+    let asked = faulty.reads();
+    assert_eq!(
+        asked,
+        before + 1,
+        "the pull's first node is read, and fails"
+    );
+    for _ in 0..10 {
+        now += 120_000;
+        server.set_clock_for_test(Some(now));
+        assert!(!rounds(&mut read, &sub, &server));
+    }
+    assert_eq!(faulty.reads(), asked, "not asked again by the tick");
 }
 
 /// On the store itself a leaf its directory store lost, or holds

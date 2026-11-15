@@ -1289,6 +1289,60 @@ const PULL_BYTES: usize = 4 << 20;
 /// The most node bytes one `ChunkRequests` is answered with, across all
 /// its pulls: the rest is answered once that has been sent.
 const ANSWER_PULL_BYTES: usize = 4 * PULL_BYTES;
+/// How long pulls that failed with a storage error on a store no batch
+/// fetches for wait before they are answered again ([`StoreRetry`]), in
+/// ms: after the first failure, and at most. The waits jazz-server gives
+/// a network store whose batches fail.
+const STORE_RETRY_MS: (i64, i64) = (1_000, 60_000);
+
+/// When the pulls that failed with a storage error are answered again on
+/// a store no batch fetches for: one with no chunk store, or one whose
+/// chunk store always answers at once
+/// ([`crate::chunk_store::ChunkStore::always_answers_now`]). No batch
+/// records a failed fetch there that would ask again
+/// ([`Inner::retry_store_failed_pulls`]): the server's tick asks, after a
+/// wait that starts at a second and doubles up to a minute while the
+/// failures go on. Each waiting pull is answered again once a wait, never
+/// once a tick, until it is answered or its session ends. Any other store
+/// is asked again by its batches, as before, and never by this.
+#[derive(Default)]
+pub(crate) struct StoreRetry {
+    /// Failed rounds in a row: the next wait doubles with each.
+    failures: u32,
+    /// The wall-clock ms the wait that is on ends at.
+    not_before: Option<i64>,
+}
+
+impl StoreRetry {
+    /// The store failed pulls at `now`: unless a wait is already on (the
+    /// pulls then share it), the next one starts. Whether it did.
+    fn failed(&mut self, now: i64) -> bool {
+        if self.not_before.is_some() {
+            return false;
+        }
+        let (first, longest) = STORE_RETRY_MS;
+        let wait = first
+            .saturating_mul(1 << self.failures.min(20))
+            .min(longest);
+        self.failures = self.failures.saturating_add(1);
+        self.not_before = Some(now.saturating_add(wait));
+        true
+    }
+
+    /// Whether a wait that was on is over at `now`; it is then off. A
+    /// wait that ends further off than the longest one (the clock was set
+    /// back) is over too.
+    fn due(&mut self, now: i64) -> bool {
+        let Some(at) = self.not_before else {
+            return false;
+        };
+        if now < at && at.saturating_sub(now) <= STORE_RETRY_MS.1 {
+            return false;
+        }
+        self.not_before = None;
+        true
+    }
+}
 const _: () = assert!(
     CHUNK_BATCH_BYTES + jazz_types::large_values::MAX_ENCODED_NODE_BYTES + 64 * 1024
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
@@ -2623,7 +2677,9 @@ pub(crate) struct Session {
     parked_pulls: Vec<WirePull>,
     /// Pulls the chunk store failed to answer (a token, a permission, the
     /// network): asked again when the store is next asked
-    /// ([`Inner::retry_store_failed_pulls`]), so a short outage does not
+    /// ([`Inner::retry_store_failed_pulls`]: by the batch after one whose
+    /// fetches failed, or, on a store that always answers at once, after
+    /// a wait, [`StoreRetry`]), so a short outage does not
     /// leave the reader without them, and meanwhile they hold nothing up.
     store_failed_pulls: Vec<WirePull>,
     /// Pulls past an answer's byte budget: answered once the session's
@@ -11525,6 +11581,7 @@ impl Db {
             return Ok(());
         }
         crate::large::expire_receipts(&self.inner.borrow().conn, now_ms())?;
+        self.inner.borrow_mut().retry_store_failed_pulls_when_due();
         for index in 0..sessions {
             // What one session sent that the server cannot serve (or a
             // storage failure serving it) ends that session alone: the
@@ -13785,7 +13842,27 @@ impl Db {
                 session.outbox.extend(replies);
                 session.parked_pulls.extend(parked);
                 session.deferred_pulls.extend(deferred);
-                session.store_failed_pulls.extend(store_failed);
+                // No batch asks again on a store no batch fetches for:
+                // the tick does, after a wait ([`StoreRetry`]).
+                if let Some((pull, error)) = store_failed.first()
+                    && inner.chunks.never_fetches()
+                {
+                    let now = inner.now_ms();
+                    if inner.store_retry.failed(now) {
+                        tracing::warn!(
+                            target: "jazz::sync",
+                            table = %pull.table,
+                            row = ?RowUuid::from_bytes(pull.id),
+                            root = %crate::compile::hex(&pull.root),
+                            pulls = store_failed.len(),
+                            "the chunk store failed to answer a pull; asked again after a wait: {}",
+                            error.message
+                        );
+                    }
+                }
+                inner.sessions[index]
+                    .store_failed_pulls
+                    .extend(store_failed.into_iter().map(|(pull, _)| pull));
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
@@ -13950,7 +14027,8 @@ impl Db {
         pulls: Vec<WirePull>,
     ) -> Result<Answered, Error> {
         let policies = self.view_policies();
-        let inner = self.inner();
+        #[cfg_attr(not(any(test, feature = "testing")), allow(unused_mut))]
+        let mut inner = self.inner();
         let mut replies = Vec::new();
         let mut parked = Vec::new();
         let mut deferred = Vec::new();
@@ -13994,6 +14072,15 @@ impl Db {
                 continue;
             }
             let span = pull.span.map(|(start, end)| start..end);
+            #[cfg(any(test, feature = "testing"))]
+            if inner.failing_pulls > 0 {
+                inner.failing_pulls -= 1;
+                store_failed.push((
+                    pull,
+                    Error::new(ErrorCode::Storage, "a pull failure injected by a test"),
+                ));
+                continue;
+            }
             let found = crate::large::pulled(
                 &inner.conn,
                 &inner.chunks,
@@ -14011,7 +14098,7 @@ impl Db {
                 // The chunk store failed to answer for them (a token, a
                 // permission, the network): asked again with the store.
                 Err(error) if error.code == ErrorCode::Storage => {
-                    store_failed.push(pull);
+                    store_failed.push((pull, error));
                     continue;
                 }
                 found => found?,
@@ -15031,8 +15118,8 @@ struct Answered {
     parked: Vec<WirePull>,
     /// Pulls past the answer's byte budget.
     deferred: Vec<WirePull>,
-    /// Pulls the chunk store failed to answer.
-    store_failed: Vec<WirePull>,
+    /// Pulls the chunk store failed to answer, with why.
+    store_failed: Vec<(WirePull, Error)>,
 }
 
 impl Inner {
@@ -15052,6 +15139,28 @@ impl Inner {
             self.sessions[index].deferred_pulls.extend(pulls);
         }
         any
+    }
+
+    /// On a store no batch fetches for, answer the pulls that failed with
+    /// a storage error again when their wait is over ([`StoreRetry`]).
+    /// With no wait on and no pull waiting or being answered again, the
+    /// store has answered: its next failure waits the shortest wait again.
+    /// Any other store's pulls are left to its batches.
+    fn retry_store_failed_pulls_when_due(&mut self) {
+        if !self.chunks.never_fetches() {
+            return;
+        }
+        let now = self.now_ms();
+        if self.store_retry.due(now) {
+            self.retry_store_failed_pulls();
+        } else if self.store_retry.failures > 0
+            && self.store_retry.not_before.is_none()
+            && self.sessions.iter().all(|session| {
+                session.store_failed_pulls.is_empty() && session.deferred_pulls.is_empty()
+            })
+        {
+            self.store_retry = StoreRetry::default();
+        }
     }
 }
 
@@ -15074,6 +15183,51 @@ fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
 
 #[cfg(test)]
 mod tests {
+    /// Pulls a chunk store fails while a wait is on share that wait; each
+    /// failed round doubles the next wait, up to the longest, however many
+    /// rounds fail.
+    #[test]
+    fn a_store_retry_wait_is_shared_doubles_and_stops_at_the_longest() {
+        let mut retry = super::StoreRetry::default();
+        assert!(!retry.due(i64::MAX), "no wait is on");
+        retry.failed(0);
+        retry.failed(500);
+        assert!(!retry.due(999));
+        assert!(
+            retry.due(1_000),
+            "the second failure joined the first's wait"
+        );
+        assert!(!retry.due(i64::MAX), "a wait is over once");
+        let mut now = 1_000;
+        for wait in [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000] {
+            retry.failed(now);
+            assert!(!retry.due(now + wait - 1), "{wait}");
+            now += wait;
+            assert!(retry.due(now), "{wait}");
+        }
+        retry.failures = u32::MAX;
+        assert!(retry.failed(now));
+        assert!(!retry.failed(now), "a wait is on");
+        assert!(!retry.due(now + 59_999));
+        assert!(retry.due(now + 60_000));
+    }
+
+    /// A clock set back while a wait is on does not lengthen it past the
+    /// longest wait: the wait is over once it ends further off than that.
+    #[test]
+    fn a_store_retry_wait_is_not_lengthened_by_a_clock_set_back() {
+        let mut retry = super::StoreRetry::default();
+        let now = 10_000_000;
+        retry.failed(now);
+        assert!(!retry.due(now - 59_000), "within the longest wait");
+        assert!(
+            retry.due(now - 60_000),
+            "an hour back is not an hour's wait"
+        );
+        retry.failed(now);
+        assert!(retry.due(now - 3_600_000));
+    }
+
     /// A thin client's writer node carries its mark; a node minted as raw
     /// random bytes (alpha.59) that reads as version 8 does not.
     #[test]

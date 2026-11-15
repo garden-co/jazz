@@ -836,6 +836,15 @@ impl Chunks {
         any
     }
 
+    /// Whether no batch ever fetches for this store: it has no chunk
+    /// store, or one that always answers at once
+    /// ([`ChunkStore::always_answers_now`]).
+    pub(crate) fn never_fetches(&self) -> bool {
+        self.store
+            .as_ref()
+            .is_none_or(|store| store.always_answers_now())
+    }
+
     /// Refuse reads of `request` with `error` until the next batch starts:
     /// the host's batch failed to fetch it.
     pub(crate) fn fetch_failed(&self, request: &ChunkRequest, error: Error) {

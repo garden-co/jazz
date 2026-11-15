@@ -624,6 +624,10 @@ struct Inner {
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
+    /// Pulls a replica sends that fail with a storage error before they
+    /// read anything (see `Db::fail_next_pulls_for_test`).
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) failing_pulls: usize,
     /// Staged writes replayed into a transaction overlay so far: what tests
     /// of staging cost count.
     #[cfg(any(test, feature = "testing"))]
@@ -755,6 +759,9 @@ struct Inner {
     commit_origin: Option<([u8; 16], u64)>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
+    /// When pulls the chunk store failed to answer at once are asked of it
+    /// again.
+    pub(crate) store_retry: sync::StoreRetry,
     /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
     /// unless a test lowers it).
     merge_budget: u64,
@@ -1936,6 +1943,8 @@ impl Db {
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 #[cfg(any(test, feature = "testing"))]
+                failing_pulls: 0,
+                #[cfg(any(test, feature = "testing"))]
                 overlay_replays: 0,
                 #[cfg(any(test, feature = "testing"))]
                 evidence_copies: std::cell::Cell::new(0),
@@ -1981,6 +1990,7 @@ impl Db {
                 next_origin: None,
                 commit_origin: None,
                 clock_for_test: None,
+                store_retry: sync::StoreRetry::default(),
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
@@ -2792,6 +2802,15 @@ impl Db {
     #[doc(hidden)]
     pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = ErrorCode>) {
         self.inner().failing_ticks.extend(codes);
+    }
+
+    /// Fail the next `pulls` pulls replicas send this store with a storage
+    /// error before they read anything, as a store that cannot read its
+    /// file would.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fail_next_pulls_for_test(&self, pulls: usize) {
+        self.inner().failing_pulls = pulls;
     }
 
     /// Where the current schema stores `table`'s `column`: (stored table,

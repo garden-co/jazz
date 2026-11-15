@@ -90,6 +90,15 @@ pub trait ChunkStore: Send + Sync {
         let _ = node;
         None
     }
+
+    /// Whether [`ChunkStore::get_now`] always answers, so a read of this
+    /// store's leaves never waits for a fetch: `true` means it never
+    /// reports a fetch as pending (a node that is not there is an answer).
+    /// It is a property of the store, the same for its whole life. `false`
+    /// unless the store says so.
+    fn always_answers_now(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -210,6 +219,10 @@ impl ChunkStore for FileChunkStore {
 
     fn get_now(&self, node: &NodeKey) -> Option<Result<Option<Bytes>, Error>> {
         Some(self.read(node))
+    }
+
+    fn always_answers_now(&self) -> bool {
+        true
     }
 }
 

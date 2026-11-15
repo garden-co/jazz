@@ -520,12 +520,25 @@ chunk store does not hold is data loss and fails the read with a storage
 error. A replica's pull of a node this store holds damaged (a leaf a chunk
 store that answers at once does not hold, or bytes that do not match their
 hash) is answered with the node in `missing`, since asking again would not
-cure it, and the store logs the damage; a chunk store that failed to answer
-is asked again instead. The replica's read then fails as missing chunks
-that the upstream cannot supply, and the replica asks for them again only on
-a new link or once a version of the row that may hold them arrives, even
-after the store holds the leaf again; a read on the store itself is served
-as soon as it does. A read
+cure it, and the store logs the damage. The replica's read then fails as
+missing chunks that the upstream cannot supply, and the replica asks for
+them again only on a new link or once a version of the row that may hold
+them arrives, even after the store holds the leaf again; a read on the store
+itself is served as soon as it does. A pull that failed with a storage
+error (the chunk store failed to answer, rather than answering that it
+does not hold the leaf) is neither missing nor refused: it waits, on the
+same link, and is answered again once the store is asked again. A store
+whose batches fetch is asked by its next batch of chunk I/O. A store with
+no chunk store, or one that always answers at once
+(`ChunkStore::always_answers_now`), has no batch that fetches: the server
+answers the pull again on the first tick after a wait, and once the
+session's outbox has drained. The wait is a second, doubling up to a
+minute while the failures go on, so each waiting pull is answered again
+once a wait, not once a tick, until it is answered or its session ends.
+The wait rides the server's tick: a host that does not tick while idle
+asks again only on its next tick. A storage error
+that never heals is asked again once a minute, and the replica's read of
+it ends only when its link does. A read
 of a leaf only an asynchronous chunk store holds is demand: the
 read fails as missing chunks, the leaf is fetched, and the read runs again.
 One-shot reads and writes on `Db` await the fetch; subscriptions refresh after
