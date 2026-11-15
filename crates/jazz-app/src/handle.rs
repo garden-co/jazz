@@ -54,10 +54,9 @@ const BACKEND_ISSUER: &str = "jazz:backend";
 pub struct Jazz {
     pub(crate) commands: mpsc::UnboundedSender<Command>,
     pub(crate) info: Arc<Info>,
-    /// The session a backend's reads and writes run as, under its
-    /// permissions: the user it acts as ([`crate::Backend::user_id`]), or
-    /// one of its users ([`crate::Endpoint::for_user`]). Its link to the
-    /// core is the backend's own, trusted to act for them.
+    /// The user one of the endpoint's handles acts for
+    /// ([`crate::Endpoint::for_user`]): its reads and writes run as their
+    /// session, under their permissions, on the endpoint's trusted link.
     pub(crate) scope: Option<Arc<Session>>,
     /// Whether this handle acts for one of the backend's users.
     pub(crate) for_user: bool,
@@ -77,6 +76,9 @@ pub(crate) struct Info {
     pub(crate) sync: watch::Receiver<SyncStatus>,
     /// What a backend holds to vouch for its users ([`crate::Endpoint`]).
     pub(crate) backend: Option<BackendLink>,
+    /// How this backend was opened, for the trusted client its endpoint
+    /// acts for its users with.
+    pub(crate) opened_with: Option<(AppFiles, Config)>,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -112,6 +114,39 @@ impl Jazz {
         files: AppFiles,
         config: Config,
         implementations: Implementations,
+    ) -> Result<Self> {
+        Self::open_as(files, config, implementations, Link::Own).await
+    }
+
+    /// The client a backend's endpoint acts for its users with
+    /// ([`crate::Endpoint::for_user`]), as `createJazz`'s backend session:
+    /// its link states only the backend's secret and the bundle it is pinned
+    /// to, so the core trusts it to act for the sessions its calls name, and
+    /// its schema carries the permissions, so their reads evaluate here too.
+    pub(crate) async fn open_for_users(&self) -> Result<Self> {
+        let Some((files, config)) = self.info.opened_with.clone() else {
+            return Err(Error::Config(
+                "an endpoint is served by the app's backend: open it with Config::backend".into(),
+            ));
+        };
+        let config = Config {
+            storage: Storage::Memory,
+            ..config
+        };
+        Self::open_as(
+            files,
+            config,
+            self.info.implementations.clone(),
+            Link::TrustedForUsers,
+        )
+        .await
+    }
+
+    async fn open_as(
+        files: AppFiles,
+        config: Config,
+        implementations: Implementations,
+        link: Link,
     ) -> Result<Self> {
         let files = match config.backend.as_ref().and_then(|b| b.permissions.clone()) {
             Some(permissions) => files.with_permissions(permissions),
@@ -157,6 +192,10 @@ impl Jazz {
             ));
         }
         let serverless = config.server_url.is_none();
+        let opened_with = config
+            .backend
+            .is_some()
+            .then(|| (files.clone(), config.clone()));
         let (commands, receiver) = mpsc::unbounded_channel();
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
@@ -165,7 +204,7 @@ impl Jazz {
                 // The session stops the client through this, without keeping
                 // it alive: it stops with its last handle all the same.
                 let stopper = commands.downgrade();
-                move || run(files, config, receiver, ready, stopper)
+                move || run(files, config, link, receiver, ready, stopper)
             })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let Opened {
@@ -174,7 +213,6 @@ impl Jazz {
             session,
             sync,
             backend,
-            acts_as,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
@@ -186,8 +224,9 @@ impl Jazz {
                 session,
                 sync,
                 backend,
+                opened_with,
             }),
-            scope: acts_as.map(Arc::new),
+            scope: None,
             for_user: false,
             durability: None,
         })
@@ -367,7 +406,7 @@ impl Jazz {
     /// writes are flushed and the store closed.
     ///
     /// On a handle acting for a user ([`crate::Endpoint::for_user`]) it does
-    /// nothing: the backend's own handle stops the client.
+    /// nothing: [`crate::Endpoint::shutdown`] stops the client it shares.
     pub async fn shutdown(&self) -> Result<()> {
         if self.for_user {
             return Ok(());
@@ -417,9 +456,20 @@ pub(crate) fn decode_result<T: Table>(
     table::decode(id, row.fields, implementations)
 }
 
+/// Which link a backend opens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Link {
+    /// Its own: the session of the user it acts as, pinned to its bundle.
+    Own,
+    /// Its endpoint's, trusted to act for its users (see
+    /// [`Jazz::open_for_users`]).
+    TrustedForUsers,
+}
+
 fn run(
     files: AppFiles,
     config: Config,
+    link: Link,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
     stopper: mpsc::WeakUnboundedSender<Command>,
@@ -438,7 +488,7 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let (client, opened) = match connect(files, config, stopper).await {
+        let (client, opened) = match connect(files, config, link, stopper).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
@@ -527,20 +577,20 @@ struct Opened {
     session: Option<UserSession>,
     sync: watch::Receiver<SyncStatus>,
     backend: Option<BackendLink>,
-    /// The session the backend acts as.
-    acts_as: Option<Session>,
 }
 
 async fn connect(
     files: AppFiles,
     config: Config,
+    link_kind: Link,
     stopper: mpsc::WeakUnboundedSender<Command>,
 ) -> Result<(JazzClient, Opened)> {
     let mut loaded = files.load()?;
-    // A backend evaluates the sessions it acts for (its user's, and its
-    // users' through the endpoint) locally too: its schema carries the
-    // permissions it publishes. Policies are not part of the schema's hash.
-    if let Some(app) = &loaded.backend {
+    // The endpoint's client evaluates the sessions it acts for locally too:
+    // its schema carries the permissions the backend publishes, as
+    // `createJazz`'s backend session compiles them. Policies are not part
+    // of the schema's hash.
+    if let (Link::TrustedForUsers, Some(app)) = (link_kind, &loaded.backend) {
         for (table, policies) in app.permissions().iter() {
             if let Some(schema) = loaded.schema.get_mut(table) {
                 schema.policies = policies.clone();
@@ -569,22 +619,19 @@ async fn connect(
     let mut bundle = None;
     let mut admitted = None;
     let mut link = None;
-    let mut acts_as = None;
     if let (Some(backend), Some(server), Some(app)) =
         (&config.backend, &config.server_url, &loaded.backend)
     {
         let published = backend::publish(server, config.app_id, backend, app).await?;
-        let account = backend::enrol(server, config.app_id, backend, BACKEND_ISSUER).await?;
-        let mut session = Session::new(BACKEND_ISSUER, backend.user_id.clone());
-        session.account_id = Some(account);
-        context.account_id = Some(account);
-        admitted = Some(account);
         context.backend_secret = Some(backend.backend_secret.clone());
-        // The backend's own link states no session, so the core trusts it
-        // to act for the sessions its writes name (its user's, and those
-        // of the users it serves), each under that session's permissions
-        // and the bundle the link is pinned to, as `createJazz`'s is.
-        acts_as = Some(session);
+        if link_kind == Link::Own {
+            let account = backend::enrol(server, config.app_id, backend, BACKEND_ISSUER).await?;
+            let mut session = Session::new(BACKEND_ISSUER, backend.user_id.clone());
+            session.account_id = Some(account);
+            context.account_id = Some(account);
+            admitted = Some(account);
+            context.backend_session = Some(session);
+        }
         context.bundle = Some(published.clone());
         bundle = Some(published);
         link = Some(BackendLink {
@@ -626,7 +673,6 @@ async fn connect(
             session,
             sync,
             backend: link,
-            acts_as,
         },
     ))
 }
