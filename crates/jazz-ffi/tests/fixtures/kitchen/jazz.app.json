@@ -1,0 +1,21 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "things": {
+      "columns": {
+        "label": "string",
+        "count": "int",
+        "big": "bigint?",
+        "ratio": "float?",
+        "flag": "boolean",
+        "at": "timestamp?",
+        "ref": "uuid?",
+        "blob": "bytes?",
+        "meta": { "json": true, "optional": true },
+        "tags": { "array": "string" },
+        "level": { "enum": ["low", "high"], "default": "low" }
+      }
+    }
+  }
+}
