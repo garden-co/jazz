@@ -743,17 +743,38 @@ async fn only_the_vouched_credential_reaches_the_core() {
         json!({ "role": "member" })
     );
 
-    // Credentials anywhere but `auth`, or requests only a backend makes.
+    // A TS client's prelude repeats `auth` beside it, with `sub`: admitted,
+    // and nothing but the rebuilt fields reaches the core.
+    let ts_shaped = forwarded(
+        socket.clone(),
+        json!({
+            "peer_identity": "p",
+            "jwt_token": device_token,
+            "backend_secret": null,
+            "sub": "s",
+            "auth": { "jwt_token": device_token, "backend_secret": null, "sub": "s" },
+            "jazz_renewal": 1,
+        }),
+    )
+    .await
+    .expect("a TS client's prelude is admitted");
+    assert_eq!(keys(&ts_shaped), ["auth", "bundle", "peer_identity"]);
+    assert_eq!(keys(&ts_shaped["auth"]), ["backend_secret", "jwt_token"]);
+
+    // Credentials outside `auth` that differ from it, secrets, or requests
+    // only a backend makes.
     let refused = [
         json!({ "jwt_token": device_token, "auth": {} }),
         json!({ "jwt_token": device_token }),
+        json!({ "jwt_token": "another", "auth": { "jwt_token": device_token } }),
         json!({ "backend_secret": "x", "auth": { "jwt_token": device_token } }),
         json!({ "backend_session": { "user_id": "hal" }, "auth": { "jwt_token": device_token } }),
         json!({ "auth": { "jwt_token": device_token, "backend_session": { "user_id": "hal" } } }),
-        json!({ "auth": { "jwt_token": device_token, "extra": 1 } }),
+        json!({ "auth": { "jwt_token": device_token, "backend_secret": "x" } }),
         json!({ "auth": { "jwt_token": device_token }, "bootstrap_catalogue": true }),
         json!({ "auth": { "jwt_token": device_token }, "local_first_audience": "https://x" }),
         json!({ "auth": { "admin_secret": "x", "backend_session": { "user_id": "hal" } } }),
+        json!({ "peer_identity": 1, "auth": { "jwt_token": device_token } }),
     ];
     for prelude in refused {
         assert_eq!(
@@ -774,7 +795,9 @@ fn rand_seed() -> [u8; 32] {
 }
 
 /// An `authenticate` answer whose expiry has passed signs no one in,
-/// anywhere.
+/// anywhere: `backend-sign-in`, `backend-user`, sockets, `for_user` and
+/// `account_for` (S1). Without the check, sign-in answers 200 with the
+/// account.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_expired_answer_is_no_one() {
     let app = App::start().await;
@@ -794,6 +817,28 @@ async fn an_expired_answer_is_no_one() {
         app.endpoint.for_user(&request).await,
         Err(Error::SignedOut)
     ));
+    // Nor does sign-in answer with her account, nor a socket open.
+    let sign_in = Request {
+        path: app.path("accounts/backend-sign-in"),
+        ..request.clone()
+    };
+    let signed_in = app.endpoint.handle(sign_in).await;
+    assert_eq!(
+        (signed_in.status, signed_in.text_body().as_str()),
+        (401, "signed_out")
+    );
+    let socket = Request {
+        path: app.path("ws"),
+        method: "GET".into(),
+        ..request
+    };
+    let stating_ivy =
+        serde_json::to_vec(&json!({ "auth": { "backend_session": { "user_id": "ivy" } } }))
+            .unwrap();
+    assert_eq!(
+        app.endpoint.admits(&socket, &stating_ivy).await.unwrap(),
+        None
+    );
     app.stop().await;
 }
 

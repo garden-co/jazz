@@ -50,8 +50,6 @@ mod axum;
 const BACKEND_ISSUER: &str = "jazz:backend";
 /// The issuer of a device account's self-signed token.
 const LOCAL_FIRST_ISSUER: &str = "urn:jazz:local-first";
-/// Between a client and its backend only: the core never sees it.
-const SESSION_RENEWAL_PRELUDE_FIELD: &str = "jazz_renewal";
 /// The prefix of the error that asks a client to connect again.
 const REAUTHENTICATE_PREFIX: &str = "reauthenticate:";
 const DEFAULT_BASE_PATH: &str = "/jazz";
@@ -976,9 +974,10 @@ impl Endpoint {
     /// `peer_identity` and `requested_link` from the prelude, the pinned
     /// `bundle`, and an `auth` holding the backend secret and exactly one
     /// identity (the device's token, or the vouched session). Credentials
-    /// are read from `auth` only: one stated anywhere else, a field `auth`
-    /// does not define, or a request only a backend makes
-    /// (`bootstrap_catalogue`, `local_first_audience`) refuses the socket.
+    /// are read from `auth` only: one stated beside it that differs (TS
+    /// clients repeat theirs there), a secret, or a request only a backend
+    /// makes (`bootstrap_catalogue`, `local_first_audience`) refuses the
+    /// socket. Every other field is dropped.
     async fn admit(&self, request: &Request, prelude: &[u8]) -> Result<Admission> {
         if prelude.len() > MAX_PRELUDE_BYTES {
             return Ok(Admission::Unverified);
@@ -986,38 +985,36 @@ impl Endpoint {
         let Ok(Value::Object(parsed)) = serde_json::from_slice::<Value>(prelude) else {
             return Ok(Admission::Missing);
         };
-        let mut forwarded = Map::new();
-        for (key, value) in &parsed {
-            match key.as_str() {
-                "auth" | SESSION_RENEWAL_PRELUDE_FIELD => {}
-                // The core checks it against the session it admits.
-                "peer_identity" if value.is_string() => {
-                    forwarded.insert(key.clone(), value.clone());
-                }
-                "requested_link" if value.is_string() => {
-                    forwarded.insert(key.clone(), value.clone());
-                }
-                // Replaced by the backend's pin.
-                "bundle" => {}
-                "bootstrap_catalogue" if value == &json!(false) => {}
-                // Null credentials, as browser transports send them.
-                "jwt_token" | "backend_secret" | "admin_secret" | "backend_session"
-                    if value.is_null() => {}
-                _ => return Ok(Admission::Unverified),
-            }
-        }
         let Some(Value::Object(auth)) = parsed.get("auth") else {
             return Ok(Admission::Missing);
         };
-        let stated = |key: &str| auth.get(key).is_some_and(|value| !value.is_null());
-        if auth.keys().any(|key| {
-            !matches!(
-                key.as_str(),
+        let mut forwarded = Map::new();
+        for (key, value) in &parsed {
+            match key.as_str() {
+                // The core checks it against the session it admits.
+                "peer_identity" | "requested_link" if value.is_string() => {
+                    forwarded.insert(key.clone(), value.clone());
+                }
+                "peer_identity" | "requested_link" => return Ok(Admission::Unverified),
+                // A TS client repeats its credentials beside `auth`: they
+                // must be the same (or null), and only `auth`'s are read.
                 "jwt_token" | "backend_secret" | "admin_secret" | "backend_session"
-            )
-        }) || stated("backend_secret")
-            || stated("admin_secret")
-        {
+                    if !value.is_null() && auth.get(key) != Some(value) =>
+                {
+                    return Ok(Admission::Unverified);
+                }
+                // Requests only a backend makes.
+                "bootstrap_catalogue" if value != &json!(false) => {
+                    return Ok(Admission::Unverified);
+                }
+                "local_first_audience" if !value.is_null() => return Ok(Admission::Unverified),
+                // Anything else (the client's `bundle`, `sub`, the renewal
+                // field) never reaches the core.
+                _ => {}
+            }
+        }
+        let stated = |key: &str| auth.get(key).is_some_and(|value| !value.is_null());
+        if stated("backend_secret") || stated("admin_secret") {
             return Ok(Admission::Unverified);
         }
         let secret = Value::String(self.inner.core.backend_secret.clone());
