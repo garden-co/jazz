@@ -979,7 +979,12 @@ pub(crate) fn edits(
                         Some("utf8" | "utf16") => false,
                         _ => {
                             return Err(refused(format!(
-                                "{path}.within.units must be \"utf8\", \"utf16\" or \"bytes\""
+                                "{path}.{}units must be \"utf8\", \"utf16\" or \"bytes\"",
+                                if edit.get("within").is_some() {
+                                    "within."
+                                } else {
+                                    ""
+                                }
                             )));
                         }
                     };
@@ -1013,7 +1018,10 @@ pub(crate) fn edits(
                             };
                             Ok(LargeValueUpdateSplice {
                                 at: number(splice.get("at"), &format!("splices[{i}].at"))?,
-                                delete: splice.get("delete").and_then(Json::as_u64).unwrap_or(0),
+                                delete: match splice.get("delete") {
+                                    None | Some(Json::Null) => 0,
+                                    delete => number(delete, &format!("splices[{i}].delete"))?,
+                                },
                                 insert,
                             })
                         })
