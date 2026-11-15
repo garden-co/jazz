@@ -6,8 +6,9 @@ import { app as priorityApp, type ItemPriority } from "./apps/computed-priority/
 type Priority = "low" | "medium" | "high";
 
 // Permissions can't read computed fields: the loader checks every policy
-// against the stored columns, so a computed field is no column there.
-const COMPUTED_IN_POLICY = /unknown column `?(items\.)?priority`?/;
+// against the stored columns, and says so when a policy names a computed one.
+const COMPUTED_IN_POLICY =
+  /unknown column `?(items\.)?priority`?( in items)?: `priority` is a computed field, which isn't stored, so a permission can't read it; write the policy over the columns it's computed from/;
 
 const computedItems = testApp(
   {
@@ -145,7 +146,9 @@ describe("virtual computed columns", () => {
         },
         { computed: { items: { doubled: () => 1 } } },
       ),
-    ).toThrow(/doubled/);
+    ).toThrow(
+      "jazz.app.json: tables.items.indexes[0]: `doubled` is a computed field, which isn't stored, so it can't be indexed; index the columns it's computed from",
+    );
   });
 
   it("keeps transforms stored and writable while computed fields are virtual and read-only", () => {
