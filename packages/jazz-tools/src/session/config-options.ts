@@ -66,3 +66,16 @@ export function refuseInvalidSessionConfig(
     throw new TypeError(`${call} has no option "${key}"${replaced}. ${list}`);
   }
 }
+
+/**
+ * Refuse `initial: "signed-out"` with `serverUrl: null`: Jazz on this device
+ * only has no backend to sign in through, so the session always opens this
+ * device's device account. `initial` is the session's (`coreInitial`).
+ */
+export function refuseSignedOutWithoutBackend(initial: string | undefined): void {
+  if (initial === "signed-out") {
+    throw new Error(
+      'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
+    );
+  }
+}

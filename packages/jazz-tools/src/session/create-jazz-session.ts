@@ -51,7 +51,7 @@ import {
   replicaLifecycle,
   type ReplicaLifecycle,
 } from "./replica-ledger.js";
-import { refuseInvalidSessionConfig } from "./config-options.js";
+import { refuseInvalidSessionConfig, refuseSignedOutWithoutBackend } from "./config-options.js";
 import { warnWindowJazzConflict } from "../runtime/page-handle.js";
 import { accountForgotten, storedKeepsDeviceAccount } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
@@ -574,11 +574,7 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
       'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',
     );
   }
-  if (coreInitial(initial) === "signed-out") {
-    throw new Error(
-      'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
-    );
-  }
+  refuseSignedOutWithoutBackend(coreInitial(initial));
   const { serverUrl: _serverUrl, ...clientConfig } = rest;
   refuseUnkeptOptions(clientConfig);
   const accounts = await createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);

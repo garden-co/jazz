@@ -356,3 +356,22 @@ for (const [host, create, prepare, own] of [
     });
   });
 }
+
+it("refuses a signed-out device-only start with the same message on React Native and Expo", async () => {
+  const refusal = (
+    create: (config: typeof nativeStore & { serverUrl: null }) => Promise<unknown>,
+    own: typeof nativeStore,
+  ) =>
+    create({ serverUrl: null, ...own, initial: "signed-out" } as never).then(
+      () => undefined,
+      (error: Error) => error.message,
+    );
+  const native = await refusal(createNativeSession, nativeStore);
+  const expo = await refusal(createExpoSession, expoProfile);
+  expect(native).toBe(
+    'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
+  );
+  expect(expo).toBe(native);
+  expect(mocks.nativeAccounts).not.toHaveBeenCalled();
+  expect(mocks.expoAccounts).not.toHaveBeenCalled();
+});

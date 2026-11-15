@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { refuseInvalidSessionConfig } from "./config-options.js";
+import { refuseInvalidSessionConfig, refuseSignedOutWithoutBackend } from "./config-options.js";
 
 const options = { serverUrl: true, initial: true } as const;
 
@@ -42,5 +42,17 @@ describe("refuseInvalidSessionConfig", () => {
     expect(() => refuseInvalidSessionConfig({ linkGuestOnSignUp: false }, options)).toThrow(
       /linkGuestOnSignUp is now linkDeviceAccountOnSignUp/,
     );
+  });
+});
+
+describe("refuseSignedOutWithoutBackend", () => {
+  it("refuses only a signed-out start, with the message every host shows", () => {
+    expect(() => refuseSignedOutWithoutBackend("signed-out")).toThrow(
+      new Error(
+        'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
+      ),
+    );
+    expect(() => refuseSignedOutWithoutBackend(undefined)).not.toThrow();
+    expect(() => refuseSignedOutWithoutBackend("local-first")).not.toThrow();
   });
 });
