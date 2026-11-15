@@ -11,12 +11,6 @@ import { computed, transforms } from "./jazz.computed.js";
 
 export type ThingStatus = "todo" | "done";
 export type ThingMaybeStatus = "low" | "high";
-export type ThingEvent =
-  | { type: "created"; by: string }
-  | { type: "moved"; to: number; note: string | null; reason: string };
-export type ThingEventInit =
-  | { type: "created"; by: string }
-  | { type: "moved"; to: number; note?: string | null; reason?: string };
 export type ThingMaybeLabel = "x" | "y";
 
 export type Owner = {
@@ -49,8 +43,6 @@ export type Thing = {
   body: string;
   status: ThingStatus;
   maybeStatus: ThingMaybeStatus | null;
-  event: ThingEvent;
-  events: ({ type: "ping"; at: Date | null } | { type: "pong" })[];
   statuses: ("a" | "b")[];
   data: JsonValue;
   maybeData: JsonValue | null;
@@ -83,8 +75,6 @@ export type ThingInsert = {
   body: string;
   status?: ThingStatus;
   maybeStatus?: ThingMaybeStatus | null;
-  event: ThingEventInit;
-  events: ({ type: "ping"; at?: Date | null } | { type: "pong" })[];
   statuses: ("a" | "b")[];
   data: JsonValue;
   maybeData?: JsonValue | null;
@@ -129,12 +119,6 @@ interface Types extends AppTypes {
       body: { kind: "string"; nullable: false; value: string };
       status: { kind: "enum"; nullable: false; value: ThingStatus };
       maybeStatus: { kind: "enum"; nullable: true; value: ThingMaybeStatus };
-      event: { kind: "enum"; nullable: false; value: ThingEvent };
-      events: {
-        kind: "array";
-        nullable: false;
-        value: ({ type: "ping"; at: Date | null } | { type: "pong" })[];
-      };
       statuses: { kind: "array"; nullable: false; value: ("a" | "b")[] };
       data: { kind: "json"; nullable: false; value: JsonValue };
       maybeData: { kind: "json"; nullable: true; value: JsonValue };
@@ -256,57 +240,6 @@ export const app = bindApp<Types, Transforms>({
                   "column_type": { "type": "Enum", "variants": ["low", "high"] },
                   "name": "maybeStatus",
                   "nullable": true,
-                },
-                {
-                  "column_type": {
-                    "cases": [
-                      {
-                        "fields": [
-                          { "column_type": { "type": "Uuid" }, "name": "by", "nullable": false },
-                        ],
-                        "name": "created",
-                      },
-                      {
-                        "fields": [
-                          { "column_type": { "type": "Integer" }, "name": "to", "nullable": false },
-                          { "column_type": { "type": "Text" }, "name": "note", "nullable": true },
-                          {
-                            "column_type": { "type": "Text" },
-                            "default": { "type": "Text", "value": "none" },
-                            "name": "reason",
-                            "nullable": false,
-                          },
-                        ],
-                        "name": "moved",
-                      },
-                    ],
-                    "type": "EnumPayload",
-                  },
-                  "name": "event",
-                  "nullable": false,
-                },
-                {
-                  "column_type": {
-                    "element": {
-                      "cases": [
-                        {
-                          "fields": [
-                            {
-                              "column_type": { "type": "Timestamp" },
-                              "name": "at",
-                              "nullable": true,
-                            },
-                          ],
-                          "name": "ping",
-                        },
-                        { "fields": [], "name": "pong" },
-                      ],
-                      "type": "EnumPayload",
-                    },
-                    "type": "Array",
-                  },
-                  "name": "events",
-                  "nullable": false,
                 },
                 {
                   "column_type": {
