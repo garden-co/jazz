@@ -535,7 +535,13 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)
     };
     let sync = user_session::watch_sync(client.clone());
     let session = user.map(|(user, credential)| {
-        user_session::start(client.clone(), user, credential, sync.clone())
+        user_session::start(
+            client.clone(),
+            user,
+            credential,
+            config.server_url.as_deref().unwrap_or_default(),
+            sync.clone(),
+        )
     });
     Ok((
         client,
