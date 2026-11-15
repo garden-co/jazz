@@ -147,6 +147,9 @@ struct State {
     /// The last upstream connect attempt that failed, and its error.
     connect_failed: Option<(u64, String)>,
     /// The upstream link's last published status; `None` without a server.
+    /// How many times the server refused the credential: each refusal,
+    /// even one that leaves the status as it was.
+    auth_refusals: u64,
     link_status: Option<LinkStatus>,
     /// Consecutive recoverable tick failures.
     tick_failures: u32,
@@ -703,9 +706,16 @@ impl LinkKeeper {
         shared.db.set_remote_link_hint(self.link.remote_link_hint());
         let mut changed = false;
         for event in self.link.drain_events() {
-            if let LinkEvent::Status(status) = event {
-                shared.state().link_status = Some(status);
-                changed = true;
+            match event {
+                LinkEvent::Status(status) => {
+                    shared.state().link_status = Some(status);
+                    changed = true;
+                }
+                LinkEvent::AuthFailed { .. } => {
+                    shared.state().auth_refusals += 1;
+                    changed = true;
+                }
+                LinkEvent::AuthRestored => {}
             }
         }
         // Status readers (`JazzClient::status_changes`) re-read it.
@@ -1778,6 +1788,13 @@ impl JazzClient {
         self.shared.db.upload_status()
     }
 
+    /// How many times the server has refused this client's credential. A
+    /// refusal of a renewed credential leaves [`Self::upstream_status`] as
+    /// it was; this tells the two apart.
+    pub fn auth_refusals(&self) -> u64 {
+        self.shared.state.borrow().auth_refusals
+    }
+
     /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
         self.shared.state.borrow().upstream.is_some()
@@ -2055,9 +2072,9 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     })
 }
 
-/// The session a backend client states for its user, as the core reads it.
-/// The session the prelude states: on the backend secret, or (`bearer`) on
-/// the word of the app's bearer, which the app's backend checks it against.
+/// The session the prelude states for the client's user, as the core reads
+/// it: on the backend secret, or (`bearer`) on the word of the app's bearer,
+/// which the app's backend checks it against.
 fn stated_session(context: &AppContext, bearer: bool) -> Result<Option<serde_json::Value>> {
     let Some(session) = context.backend_session.as_ref() else {
         return Ok(None);
