@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3000);
 
-    // #region context-setup-rust-backend
+    // #region backend-open-rust
     // This service is the app's backend: it publishes the app's permissions
     // bundle on start (with the admin secret) and acts as one user of the
     // app (vouched for with the backend secret), in a session pinned to
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // `open` is generated from jazz.app.json: it embeds the app's schema.
     let jazz = jazz_app::open(config).await?;
-    // #endregion context-setup-rust-backend
+    // #endregion backend-open-rust
     info!(
         "Opened the todo app on {server_url}, bundle {}",
         jazz.bundle().unwrap_or("-")
