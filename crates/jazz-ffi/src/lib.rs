@@ -84,6 +84,13 @@ impl JazzHandle {
         self.core.surface(self.core.refresh())
     }
 
+    /// Links this device account to the user's account with the app's own
+    /// sign-in (`bearer`): the session becomes that user's. Returns the user
+    /// as JSON.
+    pub fn link(&self, bearer: String) -> Result<String> {
+        self.core.surface(self.core.link(&bearer))
+    }
+
     /// Signs the end user out and closes the app.
     pub fn sign_out(&self) -> Result<()> {
         self.core.surface(self.core.sign_out())
@@ -97,6 +104,12 @@ impl JazzHandle {
     /// Calls `listener` with each sync status, the current one first.
     pub fn watch_sync(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
         self.watch("sync", listener)
+    }
+
+    /// The permissions bundle a backend published and is pinned to;
+    /// `None` for a client.
+    pub fn bundle(&self) -> Result<Option<String>> {
+        self.core.surface(self.core.bundle())
     }
 
     /// The account id of the user a backend acts as (`session.user`);
@@ -245,6 +258,26 @@ impl JazzHandle {
             let id = args.get("id").and_then(serde_json::Value::as_str);
             self.core.can(&table, &op, id, row.as_deref())
         })())
+    }
+
+    /// Writes the row with this id: inserts it, or replaces its columns.
+    /// `row_json` is a whole row, as for an insert. Returns the row.
+    pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
+        self.core.surface(
+            self.core
+                .upsert(&table, &id, &row_json, &Default::default()),
+        )
+    }
+
+    /// Brings back a deleted row, as it was or with `patch_json` (a whole
+    /// row) as its new content. Returns the row.
+    pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
+        self.core.surface(self.core.restore(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &Default::default(),
+        ))
     }
 
     /// Begins a serializable transaction. Its reads see a snapshot and its
@@ -441,6 +474,23 @@ impl Transaction {
             &id,
             patch_json.as_deref(),
             &edits_json,
+            &self.opts(),
+        ))
+    }
+
+    pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
+        self.handle.core.surface(
+            self.handle
+                .core
+                .upsert(&table, &id, &row_json, &self.opts()),
+        )
+    }
+
+    pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
+        self.handle.core.surface(self.handle.core.restore(
+            &table,
+            &id,
+            patch_json.as_deref(),
             &self.opts(),
         ))
     }

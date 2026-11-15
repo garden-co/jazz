@@ -110,83 +110,201 @@ pub enum UserKind {
     Backend,
 }
 
-/// How the client syncs, as TypeScript's `SyncStatus`.
+/// How the client syncs, as TypeScript's `SyncStatus` (serialized the same
+/// way, camelCase).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct SyncStatus {
+    /// The upstream connection.
     pub link: Link,
+    /// Transactions this client committed that the server has neither
+    /// accepted nor rejected yet, including ones recovered from local
+    /// storage after a restart.
+    pub pending_uploads: usize,
+    /// When the oldest of them was committed, in Unix ms.
+    pub oldest_pending_at: Option<u64>,
+    /// This client's transactions the server rejected since it opened.
+    pub rejected: u64,
+    /// The latest thing that went wrong with sync since the client opened:
+    /// a rejected transaction, or the link failing. It stays after the link
+    /// recovers (`link` says how things are now).
+    pub last_error: Option<SyncError>,
+    /// Nothing waits for upload, and the link is connected (or there is no
+    /// server).
+    pub synced: bool,
 }
 
-/// The upstream link, as TypeScript's `SyncStatus.link`. Serializes as
-/// `{"state": "connected"}`, `{"state": "offline", "reason": "network",
-/// "retrying": true, "message": ".."}` and so on.
+/// The upstream link, as TypeScript's `SyncStatus.link`: `{"state":
+/// "connected"}`, `{"state": "offline", "reason": "network", "retrying":
+/// true}` and so on. A dropped link that is retrying reads as `Connecting`
+/// until the client publishes an outage, so a short blip never shows as
+/// offline.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum Link {
     /// No server: the app runs locally.
     LocalOnly,
-    /// A first attempt, or the first after a new credential.
     Connecting,
     Connected,
     /// Not syncing; `retrying` when the client reconnects on its own.
     Offline {
         reason: Offline,
         retrying: bool,
-        message: Option<String>,
+        /// Why the server refused the credential, with `reason: auth`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth: Option<AuthFailure>,
     },
 }
 
-/// Why the link is offline: `"network"`, `{"auth": "expired"}`, `"stopped"`.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+/// Why the link is offline, as TypeScript's `OfflineReason`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Offline {
     /// The network failed or the server is unreachable.
     Network,
     /// The server refused the credential.
-    Auth(AuthFailure),
-    /// A fatal failure, or the client stopped.
+    Auth,
+    /// A fatal failure; nothing happens until the client is reopened.
     Stopped,
+    /// The application took the client offline.
+    Disconnected,
 }
 
-impl SyncStatus {
-    fn of(status: Option<LinkStatus>) -> Self {
-        let Some(status) = status else {
-            return Self {
-                link: Link::LocalOnly,
-            };
-        };
-        let offline = |reason, retrying| Link::Offline {
-            reason,
-            retrying,
-            message: status.reason.clone(),
-        };
-        let link = match &status.phase {
-            LinkPhase::NoServer => Link::LocalOnly,
-            LinkPhase::Connecting => Link::Connecting,
-            LinkPhase::Live => Link::Connected,
-            LinkPhase::Backoff => offline(Offline::Network, true),
-            LinkPhase::Offline => offline(Offline::Network, false),
-            LinkPhase::AwaitingCredential(reason) => {
-                offline(Offline::Auth((*reason).into()), false)
-            }
-            LinkPhase::Stopped => offline(Offline::Stopped, false),
-        };
-        Self { link }
+/// What went wrong with sync, as TypeScript's `SyncError`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SyncError {
+    /// The server rejected a transaction this client committed.
+    Rejected {
+        /// The public error code, such as `permission_denied`.
+        code: String,
+        message: String,
+        /// When, in Unix ms.
+        at: u64,
+    },
+    /// The link failed this way.
+    Network {
+        message: String,
+        at: u64,
+    },
+    Auth {
+        message: String,
+        at: u64,
+    },
+    Stopped {
+        message: String,
+        at: u64,
+    },
+}
+
+impl SyncError {
+    fn at(&self) -> u64 {
+        match self {
+            Self::Rejected { at, .. }
+            | Self::Network { at, .. }
+            | Self::Auth { at, .. }
+            | Self::Stopped { at, .. } => *at,
+        }
     }
 }
 
-/// How often the link's status is read: the client publishes it as a value,
-/// not as changes.
+/// The app-facing link, as TypeScript's `linkStatusFromUpstream`.
+fn link_of(status: Option<&LinkStatus>) -> Link {
+    let offline = |reason, auth| Link::Offline {
+        reason,
+        retrying: reason == Offline::Network,
+        auth,
+    };
+    let Some(status) = status else {
+        return Link::LocalOnly;
+    };
+    match &status.phase {
+        LinkPhase::NoServer => Link::LocalOnly,
+        LinkPhase::Offline => offline(Offline::Disconnected, None),
+        LinkPhase::Live => Link::Connected,
+        LinkPhase::Connecting | LinkPhase::Backoff if status.outage_published => {
+            offline(Offline::Network, None)
+        }
+        LinkPhase::Connecting | LinkPhase::Backoff => Link::Connecting,
+        LinkPhase::AwaitingCredential(reason) => offline(Offline::Auth, Some((*reason).into())),
+        LinkPhase::Stopped => offline(Offline::Stopped, None),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
+/// Assembles the status from what the client reports, remembering the
+/// latest link failure (the client keeps only its rejections).
+#[derive(Default)]
+struct SyncTracker {
+    link_failure: Option<SyncError>,
+}
+
+impl SyncTracker {
+    fn status(&mut self, client: &JazzClient) -> SyncStatus {
+        let upstream = client.upstream_status();
+        let link = link_of(upstream.as_ref());
+        if let Link::Offline { reason, .. } = &link {
+            let message = upstream
+                .as_ref()
+                .and_then(|status| status.reason.clone())
+                .unwrap_or_default();
+            let same = |failure: &SyncError| match (failure, reason) {
+                (SyncError::Network { message: m, .. }, Offline::Network)
+                | (SyncError::Auth { message: m, .. }, Offline::Auth)
+                | (SyncError::Stopped { message: m, .. }, Offline::Stopped) => *m == message,
+                _ => false,
+            };
+            if !self.link_failure.as_ref().is_some_and(same) {
+                let at = now_ms();
+                self.link_failure = match reason {
+                    Offline::Network => Some(SyncError::Network { message, at }),
+                    Offline::Auth => Some(SyncError::Auth { message, at }),
+                    Offline::Stopped => Some(SyncError::Stopped { message, at }),
+                    Offline::Disconnected => self.link_failure.take(),
+                };
+            }
+        }
+        let uploads = client.upload_status();
+        let rejection = uploads.last_rejection.map(|refusal| SyncError::Rejected {
+            code: refusal.code,
+            message: refusal.message,
+            at: refusal.at,
+        });
+        let last_error = match (rejection, self.link_failure.clone()) {
+            (Some(rejection), Some(link)) if link.at() > rejection.at() => Some(link),
+            (Some(rejection), _) => Some(rejection),
+            (None, link) => link,
+        };
+        SyncStatus {
+            synced: uploads.pending == 0 && matches!(link, Link::Connected | Link::LocalOnly),
+            link,
+            pending_uploads: uploads.pending,
+            oldest_pending_at: uploads.oldest_pending_at.filter(|_| uploads.pending > 0),
+            rejected: uploads.rejected,
+            last_error,
+        }
+    }
+}
+
+/// How often the status is read: the client publishes it as a value, not
+/// as changes.
 const STATUS_POLL: Duration = Duration::from_millis(100);
 
-/// Publishes the client's link status as it changes, until the client's
+/// Publishes the client's sync status as it changes, until the client's
 /// thread ends.
 pub(crate) fn watch_sync(client: JazzClient) -> watch::Receiver<SyncStatus> {
-    let (sender, receiver) = watch::channel(SyncStatus::of(client.upstream_status()));
+    let mut tracker = SyncTracker::default();
+    let (sender, receiver) = watch::channel(tracker.status(&client));
     tokio::task::spawn_local(async move {
         loop {
             tokio::time::sleep(STATUS_POLL).await;
-            let status = SyncStatus::of(client.upstream_status());
+            let status = tracker.status(&client);
             sender.send_if_modified(|current| {
                 let changed = *current != status;
                 *current = status;
@@ -226,6 +344,16 @@ const MIN_RENEWAL_LIFETIME_SECS: u64 = 30;
 enum Command {
     Refresh(oneshot::Sender<Result<()>>),
     SignOut(oneshot::Sender<()>),
+    /// The device account was linked: the session is now this user's.
+    Linked(User, oneshot::Sender<()>),
+}
+
+/// What linking a device account needs: where the app's backend is, and
+/// the key that proves the account.
+struct Linking {
+    endpoint: String,
+    app: AppId,
+    key: DeviceKey,
 }
 
 /// An end user's session with the app: `Send + Clone`, from
@@ -234,6 +362,8 @@ enum Command {
 pub struct Session {
     state: watch::Receiver<SessionState>,
     commands: mpsc::UnboundedSender<Command>,
+    /// A device account's, which can be linked.
+    linking: Option<std::sync::Arc<Linking>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -263,6 +393,42 @@ impl Session {
             .send(Command::Refresh(reply))
             .map_err(|_| Error::Stopped)?;
         done.await.map_err(|_| Error::Stopped)?
+    }
+
+    /// Links this device account to the user the app's backend names from
+    /// `bearer` (TypeScript's `linkDeviceAccount`), so the account and its
+    /// data carry over to their provider sign-in: opening with
+    /// [`crate::Auth::bearer`] for that user reaches the same account. The
+    /// session is then that user's ([`UserKind::Backend`]); this client
+    /// keeps syncing on the device key, unless the backend revokes it on
+    /// linking (`guestKeyAfterLink: "revoke"`), when the session expires and
+    /// the app reopens with the bearer.
+    pub async fn link(&self, bearer: &str) -> Result<User> {
+        let linking = self.linking.as_ref().ok_or_else(|| {
+            Error::Config("only a device account's session links (Auth::Device)".into())
+        })?;
+        let device = linking.key.account(linking.app);
+        let linked =
+            crate::backend::link(&linking.endpoint, linking.app, bearer, &linking.key).await?;
+        if linked.account != device {
+            return Err(Error::Server(format!(
+                "the backend linked account {} instead of the device's {}",
+                linked.account.0, device.0
+            )));
+        }
+        let user = User {
+            account: linked.account,
+            issuer: linked.identity.issuer,
+            subject: linked.identity.subject,
+            claims: linked.claims,
+            kind: UserKind::Backend,
+        };
+        let (reply, done) = oneshot::channel();
+        self.commands
+            .send(Command::Linked(user.clone(), reply))
+            .map_err(|_| Error::Stopped)?;
+        done.await.map_err(|_| Error::Stopped)?;
+        Ok(user)
     }
 
     /// Stops renewing and reports `SignedOut`. [`crate::Jazz::sign_out`]
@@ -296,8 +462,17 @@ pub(crate) fn start(
     client: JazzClient,
     user: User,
     credential: Credential,
+    endpoint: &str,
     sync: watch::Receiver<SyncStatus>,
 ) -> Session {
+    let linking = match &credential {
+        Credential::Device { key, app } => Some(std::sync::Arc::new(Linking {
+            endpoint: endpoint.to_owned(),
+            app: *app,
+            key: key.clone(),
+        })),
+        Credential::Bearer { .. } => None,
+    };
     let (state, receiver) = watch::channel(SessionState::SignedIn { user: user.clone() });
     let (commands, inbox) = mpsc::unbounded_channel();
     let machine = Machine {
@@ -312,6 +487,7 @@ pub(crate) fn start(
     Session {
         state: receiver,
         commands,
+        linking,
     }
 }
 
@@ -374,6 +550,20 @@ impl Machine {
                             return;
                         }
                     }
+                    Some(Command::Linked(user, reply)) => {
+                        self.user = user;
+                        let linked = match self.state.borrow().clone() {
+                            SessionState::Expired { reason, .. } => SessionState::Expired {
+                                user: self.user.clone(),
+                                reason,
+                            },
+                            _ => SessionState::SignedIn {
+                                user: self.user.clone(),
+                            },
+                        };
+                        self.set(linked);
+                        let _ = reply.send(());
+                    }
                     Some(Command::SignOut(reply)) => {
                         self.signed_out();
                         let _ = reply.send(());
@@ -394,8 +584,7 @@ impl Machine {
                 });
             }
             Link::Offline {
-                reason: Offline::Auth(reason),
-                ..
+                auth: Some(reason), ..
             } => {
                 if reason.is_renewable() && !self.renewed_since_live {
                     self.renewed_since_live = true;
