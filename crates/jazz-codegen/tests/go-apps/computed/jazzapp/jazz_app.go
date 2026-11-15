@@ -95,8 +95,7 @@ type Person struct {
 	Email string `json:"-"`
 }
 
-// JazzDecode reads what plain JSON can't: payload enums, the transformed columns' views and
-// the computed fields.
+// JazzDecode reads the transformed columns' views and fills the computed fields.
 func (r *Person) JazzDecode(app any, fields map[string]json.RawMessage) error {
 	c, ok := app.(Computed)
 	if !ok {
@@ -248,8 +247,7 @@ type Task struct {
 	Label    *string      `json:"-"`
 }
 
-// JazzDecode reads what plain JSON can't: payload enums, the transformed columns' views and
-// the computed fields.
+// JazzDecode reads the transformed columns' views and fills the computed fields.
 func (r *Task) JazzDecode(app any, fields map[string]json.RawMessage) error {
 	c, ok := app.(Computed)
 	if !ok {

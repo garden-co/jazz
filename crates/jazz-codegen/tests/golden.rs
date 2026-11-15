@@ -217,22 +217,11 @@ fn every_go_app_generates_its_committed_go_byte_for_byte() {
 }
 
 #[test]
-fn go_payload_enums_are_sealed_interfaces_and_backquotes_read_back() {
-    // tasks has an enum with payloads: a sealed interface, a struct per case.
-    let generated = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks/jazzapp/jazz_app.go"),
-    )
-    .unwrap();
-    for expected in [
-        "type TaskReview interface{ isTaskReview() }",
-        "type TaskReviewApproved struct {",
-        "func (TaskReviewApproved) isTaskReview() {}",
-        "func decodeTaskReview(raw json.RawMessage) (TaskReview, error) {",
-        "\tReview      TaskReview       `json:\"-\"`",
-        "\tAssignees   []Person         `json:\"assignees,omitempty\"`",
-    ] {
-        assert!(generated.contains(expected), "{expected:?} in\n{generated}");
-    }
+fn go_bindings_refuse_payload_enums_and_read_back_backquotes() {
+    // tasks has an enum with payloads, which Go doesn't bind.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
+    let error = generate(Lang::Go, &std::fs::read(dir.join("jazz.app.json")).unwrap()).unwrap_err();
+    assert!(error.is_unsupported(), "{error}");
     // A backquote in the file survives the raw string it is embedded in.
     let app_json = "{ \"format\": 1, \"tables\": { \"notes\": { \"columns\": { \"body\": { \"enum\": [\"a`b\", \"c\"] } } } } }\n";
     let generated = generate(Lang::Go, app_json.as_bytes()).unwrap();
