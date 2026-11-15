@@ -22,8 +22,7 @@
   },
   "include": [
     "src",
-    "schema.ts",
-    "permissions.ts",
+    "jazz.generated.ts",
     "tests",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"

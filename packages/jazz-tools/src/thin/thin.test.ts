@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import {
@@ -24,26 +22,18 @@ import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
+// documents (branched by `branch`), files and notes; typed, for the streaming inputs.
+import { app } from "../../tests/typed-app/apps/thin/jazz.generated.js";
 
-const app = s.defineApp(
-  {
-    notes: s.table({ text: s.string(), done: s.boolean() }, {}),
-    documents: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
-    files: s.table({ name: s.string(), data: s.bytes() }, {}),
+const mine = "$createdBy = session.user";
+const permissions = {
+  format: 1,
+  tables: {
+    notes: { read: mine, insert: "true", update: mine, delete: mine },
+    documents: { read: mine, insert: "true", update: mine },
+    files: { read: mine, insert: "true" },
   },
-  { migrations: "none" },
-);
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ $createdBy: session.user });
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.where({ $createdBy: session.user });
-  policy.notes.allowDelete.where({ $createdBy: session.user });
-  policy.documents.allowRead.where({ $createdBy: session.user });
-  policy.documents.allowInsert.always();
-  policy.documents.allowUpdate.where({ $createdBy: session.user });
-  policy.files.allowRead.where({ $createdBy: session.user });
-  policy.files.allowInsert.always();
-});
+};
 
 const opened: Db[] = [];
 let server: TestJazz | undefined;
@@ -817,10 +807,9 @@ describe("thin client", () => {
     const server = await startServer();
     const db = await thinDb(server);
     // A bundle built against a schema this server doesn't have.
-    const stale = s.defineApp(
-      { notes: s.table({ text: s.string(), done: s.boolean(), extra: s.string() }, {}) },
-      { migrations: "none" },
-    );
+    const stale = testApp({
+      tables: { notes: { columns: { text: "string", done: "boolean", extra: "string" } } },
+    });
     const notDeployed = { name: "ThinRemoteError", code: "SchemaNotDeployed" };
     await expect(db.all(stale.notes)).rejects.toMatchObject(notDeployed);
     await expect(

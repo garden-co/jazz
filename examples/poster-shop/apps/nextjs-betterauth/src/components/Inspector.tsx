@@ -15,7 +15,7 @@ import {
 } from "@astryxdesign/core";
 import { useAll, useOne } from "jazz-tools/react";
 import { MousePointerClick } from "lucide-react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { MIN_SHAPE_SIZE, PALETTE, fillColor, nextZIndex } from "@/src/lib/poster";
 
 const KIND_LABELS = { rect: "Rectangle", ellipse: "Ellipse", text: "Text", image: "Image" };

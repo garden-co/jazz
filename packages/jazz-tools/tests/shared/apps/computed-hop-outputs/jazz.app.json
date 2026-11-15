@@ -1,0 +1,47 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "sources": {
+      "columns": {
+        "targetId": "uuid"
+      },
+      "relations": {
+        "target": {
+          "rel": "targets",
+          "column": "targetId"
+        }
+      },
+      "computed": {
+        "rank": {
+          "type": "int",
+          "from": []
+        },
+        "title": {
+          "type": "string",
+          "from": []
+        }
+      }
+    },
+    "targets": {
+      "columns": {
+        "rank": "int",
+        "title": "string"
+      },
+      "relations": {
+        "sources": {
+          "reverse": "sources",
+          "relation": "target"
+        }
+      },
+      "computed": {
+        "label": {
+          "type": "string",
+          "from": [
+            "title"
+          ]
+        }
+      }
+    }
+  }
+}

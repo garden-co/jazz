@@ -1,14 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
-import {
-  generateAuthSecret,
-  schema,
-  type CompiledPermissions,
-  type Db,
-  type QueryBuilder,
-  type RowOf,
-} from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { generateAuthSecret, type Db, type QueryBuilder } from "../../src/index.js";
+import type { SchemaSourceInput } from "../../src/schema-source.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 import { openJazzClient } from "../../src/web/create-jazz-client.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
@@ -21,261 +15,28 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
+import { app, type Chat, type Message } from "./apps/private-read-gate/jazz.generated.js";
+import permissions from "./apps/private-read-gate/jazz.permissions.json";
+import chatStyleMessagePermissions from "./apps/private-read-gate/chat-style.permissions.json";
+import { app as camelChatApp } from "./apps/private-read-gate-camel-chat/jazz.generated.js";
+import camelChatStyleMessagePermissions from "./apps/private-read-gate-camel-chat/jazz.permissions.json";
 import {
+  app as createdByApp,
+  type Todo as CreatedByTodo,
+} from "./apps/private-read-gate-created-by/jazz.generated.js";
+import createdByPermissions from "./apps/private-read-gate-created-by/jazz.permissions.json";
+import {
+  deploy,
   getJazzServerInfo,
   jazzAppUser,
   startJazzApp,
   type JazzServerInfo,
 } from "./testing-server.js";
 
-const app = schema.defineApp(
-  {
-    chats: schema.table(
-      {
-        title: schema.string(),
-        visibility: schema.string(),
-        owner_id: schema.uuid(),
-      },
-      {
-        chat_membersViaChat: schema.reverse("chat_members", "chat"),
-        messagesViaChat: schema.reverse("messages", "chat"),
-      },
-    ),
-    chat_members: schema.table(
-      {
-        chat_id: schema.uuid(),
-        user_id: schema.uuid(),
-      },
-      { chat: schema.rel("chats", "chat_id") },
-    ),
-    messages: schema.table(
-      {
-        chat_id: schema.uuid(),
-        body: schema.string(),
-        author_id: schema.uuid(),
-        owner_id: schema.uuid(),
-      },
-      { chat: schema.rel("chats", "chat_id") },
-    ),
-    announcements: schema.table(
-      {
-        title: schema.string(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
-
-const camelChatApp = schema.defineApp(
-  {
-    chats: schema.table(
-      {
-        name: schema.string().optional(),
-        isPublic: schema.boolean(),
-        createdBy: schema.string(),
-        joinCode: schema.string().optional(),
-      },
-      {
-        chatMembersViaChat: schema.reverse("chatMembers", "chat"),
-        messagesViaChat: schema.reverse("messages", "chat"),
-      },
-    ),
-    profiles: schema.table(
-      {
-        userId: schema.string(),
-        name: schema.string(),
-        avatar: schema.string().optional(),
-      },
-      { messagesViaSender: schema.reverse("messages", "sender") },
-    ),
-    chatMembers: schema.table(
-      {
-        chatId: schema.uuid(),
-        userId: schema.string(),
-        joinCode: schema.string().optional(),
-      },
-      { chat: schema.rel("chats", "chatId") },
-    ),
-    messages: schema.table(
-      {
-        chatId: schema.uuid(),
-        senderId: schema.uuid(),
-        text: schema.string(),
-        createdAt: schema.timestamp(),
-      },
-      {
-        chat: schema.rel("chats", "chatId"),
-        sender: schema.rel("profiles", "senderId"),
-        reactionsViaMessage: schema.reverse("reactions", "message"),
-      },
-    ),
-    reactions: schema.table(
-      {
-        messageId: schema.uuid(),
-        userId: schema.string(),
-        emoji: schema.string(),
-      },
-      { message: schema.rel("messages", "messageId") },
-    ),
-  },
-  { migrations: "none" },
-);
-
-const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
-  policy.chats.allowRead.where(anyOf([{ visibility: "public" }, { owner_id: session.user }])),
-  policy.chats.allowInsert.always(),
-  policy.chats.allowUpdate.always(),
-  policy.chats.allowDelete.always(),
-
-  policy.chat_members.allowRead.where({ user_id: session.user }),
-  policy.chat_members.allowInsert.always(),
-  policy.chat_members.allowUpdate.always(),
-  policy.chat_members.allowDelete.always(),
-
-  policy.messages.allowRead.where({ owner_id: session.user }),
-  policy.messages.allowInsert.always(),
-  policy.messages.allowUpdate.always(),
-  policy.messages.allowDelete.always(),
-
-  policy.announcements.allowRead.always(),
-  policy.announcements.allowInsert.always(),
-  policy.announcements.allowUpdate.always(),
-  policy.announcements.allowDelete.always(),
-]);
-
-const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
-  policy.chats.allowRead.where((chat) =>
-    anyOf([
-      { visibility: "public" },
-      policy.chat_members.exists.where({
-        chat_id: chat.id,
-        user_id: session.user,
-      }),
-    ]),
-  ),
-  policy.chats.allowInsert.always(),
-  policy.chats.allowUpdate.always(),
-  policy.chats.allowDelete.always(),
-
-  policy.chat_members.allowRead.where({ user_id: session.user }),
-  policy.chat_members.allowInsert.where({ user_id: session.user }),
-  policy.chat_members.allowUpdate.always(),
-  policy.chat_members.allowDelete.where({ user_id: session.user }),
-
-  policy.messages.allowRead.where((message) =>
-    anyOf([
-      policy.chats.exists.where({
-        id: message.chat_id,
-        visibility: "public",
-      }),
-      policy.chat_members.exists.where({
-        chat_id: message.chat_id,
-        user_id: session.user,
-      }),
-    ]),
-  ),
-  policy.messages.allowInsert.where((message) =>
-    policy.chat_members.exists.where({
-      chat_id: message.chat_id,
-      user_id: session.user,
-    }),
-  ),
-  policy.messages.allowUpdate.always(),
-  policy.messages.allowDelete.always(),
-
-  policy.announcements.allowRead.always(),
-  policy.announcements.allowInsert.always(),
-  policy.announcements.allowUpdate.always(),
-  policy.announcements.allowDelete.always(),
-]);
-
-const camelChatStyleMessagePermissions = schema.definePermissions(
-  camelChatApp,
-  ({ policy, anyOf, allowedTo, session }) => [
-    policy.profiles.allowRead.where({}),
-    policy.profiles.allowInsert.where({ userId: session.identity.subject }),
-    policy.profiles.allowUpdate.where({ userId: session.identity.subject }),
-
-    policy.chats.allowRead.where((chat) =>
-      anyOf([
-        { isPublic: true },
-        policy.chatMembers.exists.where({
-          chatId: chat.id,
-          userId: session.identity.subject,
-        }),
-        { joinCode: session.claims["join_code"] },
-      ]),
-    ),
-    policy.chats.allowInsert.where({ createdBy: session.identity.subject }),
-    policy.chats.allowUpdate.where({ createdBy: session.identity.subject }),
-    policy.chats.allowDelete.where({ createdBy: session.identity.subject }),
-
-    policy.chatMembers.allowRead.where((member) =>
-      anyOf([
-        { userId: session.identity.subject },
-        policy.chatMembers.exists.where({
-          chatId: member.chatId,
-          userId: session.identity.subject,
-        }),
-      ]),
-    ),
-    policy.chatMembers.allowInsert.where({ userId: session.identity.subject }),
-    policy.chatMembers.allowUpdate.always(),
-    policy.chatMembers.allowDelete.where({ userId: session.identity.subject }),
-
-    policy.messages.allowRead.where((message) =>
-      anyOf([
-        policy.chats.exists.where({ id: message.chatId, isPublic: true }),
-        policy.chatMembers.exists.where({
-          chatId: message.chatId,
-          userId: session.identity.subject,
-        }),
-      ]),
-    ),
-    policy.messages.allowInsert.where((message) =>
-      policy.chatMembers.exists.where({
-        chatId: message.chatId,
-        userId: session.identity.subject,
-      }),
-    ),
-    policy.messages.allowDelete.where((message) =>
-      policy.profiles.exists.where({
-        id: message.senderId,
-        userId: session.identity.subject,
-      }),
-    ),
-
-    policy.reactions.allowRead.where(allowedTo.read("message")),
-    policy.reactions.allowInsert.where({ userId: session.identity.subject }),
-    policy.reactions.allowDelete.where({ userId: session.identity.subject }),
-  ],
-);
-
-const createdByApp = schema.defineApp(
-  {
-    todos: schema.table(
-      {
-        title: schema.string(),
-        done: schema.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
-
-const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ "$createdBy.account": session.user });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ "$createdBy.account": session.user });
-  policy.todos.allowDelete.where({ "$createdBy.account": session.user });
-});
-
-type Chat = RowOf<typeof app.chats>;
-type Message = RowOf<typeof app.messages>;
-type CreatedByTodo = RowOf<typeof createdByApp.todos>;
-
+// The apps (apps/private-read-gate*): chats with members and messages, read
+// by owner (jazz.permissions.json) or by membership (chat-style.permissions.json);
+// a camelCase chat app with membership, join-code and relation-delegated reads;
+// and todos scoped to their creator.
 type BobExposureSnapshot = {
   phase: string;
   chatCount: number;
@@ -517,7 +278,7 @@ describe("raw websocket private read gate", () => {
         subscriptionQueries.map(({ label, query, predicate }) =>
           waitForSubscription(
             bob,
-            query,
+            query as QueryBuilder<{ id: string }>,
             predicate as (rows: unknown[]) => boolean,
             `Bob subscription should settle: ${label}`,
             15_000,
@@ -1080,11 +841,15 @@ async function openBackendUserDb(
 
 async function publishSchemaAndPermissions(
   core: JazzServerInfo,
-  permissions: CompiledPermissions,
-  appSchema: { wasmSchema: typeof app.wasmSchema } = app,
+  permissions: TestPermissionsFile,
+  appSchema: SchemaSourceInput = app,
 ): Promise<JazzServerInfo> {
-  await deploy({ ...core, schema: appSchema.wasmSchema, permissions });
-  return startJazzApp(core, { schema: appSchema.wasmSchema, permissions });
+  await deploy({
+    ...core,
+    app: appSchema,
+    permissions: permissions,
+  });
+  return startJazzApp(core, { schema: appSchema, permissions });
 }
 
 function requireUserAccountId(db: Db, label: string): string {

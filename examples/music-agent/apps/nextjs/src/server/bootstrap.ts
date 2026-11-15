@@ -1,5 +1,5 @@
 import "server-only";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { addDays } from "@/src/agent/tools";
 import { queueAssistantTurn } from "@/src/agent/runner";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";

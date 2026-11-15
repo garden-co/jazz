@@ -1,24 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJazz,
+  testApp,
+  type TestJazz,
+} from "../testing/index.js";
 
 describe("JSON parent includes through the native backend", () => {
   for (const inMemory of [true, false]) {
     it(`hydrates projected and full includes with ${inMemory ? "memory" : "persistent"} server storage`, async () => {
-      const app = s.defineApp(
-        {
-          parents: s.table(
-            { name: s.string(), metadata: s.json() },
-            { childrenViaParent: s.reverse("children", "parent") },
-          ),
-          children: s.table(
-            { parentId: s.uuid(), name: s.string() },
-            { parent: s.rel("parents", "parentId") },
-          ),
+      const app = testApp({
+        tables: {
+          parents: {
+            columns: { name: "string", metadata: { json: true } },
+            relations: { childrenViaParent: { reverse: "children", relation: "parent" } },
+          },
+          children: {
+            columns: { parentId: "uuid", name: "string" },
+            relations: { parent: { rel: "parents", column: "parentId" } },
+          },
         },
-        { migrations: "none" },
-      );
+      });
       const server = await startLocalJazzServer({ appId: randomUUID(), inMemory });
       let owner: TestJazz | undefined;
       try {
@@ -26,10 +30,10 @@ describe("JSON parent includes through the native backend", () => {
           serverUrl: server.url,
           appId: server.appId,
           adminSecret: server.adminSecret,
-          schema: app,
-          permissions: {},
+          app,
+          permissions: { format: 1, tables: {} },
         });
-        owner = await startTestJazz({ app, permissions: {}, core: server });
+        owner = await startTestJazz({ app, permissions: { format: 1, tables: {} }, core: server });
         const db = owner.jazz.db;
         const parent = await db
           .insert(app.parents, { name: "Alice", metadata: {} })

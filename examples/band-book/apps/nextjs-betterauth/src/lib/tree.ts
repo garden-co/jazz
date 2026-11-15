@@ -1,4 +1,4 @@
-import type { Page } from "@/schema";
+import type { Page } from "@/jazz.generated";
 
 export type PageNode = Pick<Page, "id" | "parentId" | "title" | "kind">;
 

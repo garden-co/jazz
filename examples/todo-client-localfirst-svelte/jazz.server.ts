@@ -5,8 +5,8 @@
 import type { Server } from "node:http";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
 import { acceptDeviceAccounts, createJazz, memory, sqlite } from "jazz-tools/backend";
-import { app } from "./src/lib/schema.js";
-import permissions from "./src/lib/permissions.js";
+import { app } from "./src/lib/jazz.generated.js";
+import permissions from "./src/lib/jazz.permissions.json" with { type: "json" };
 
 /**
  * Serve Jazz from the Vite server. Data stays in `dataDir`, or in memory.

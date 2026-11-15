@@ -1,5 +1,4 @@
 import { afterEach, expect, it } from "vitest";
-import { deploy } from "../../src/dev/catalogue.js";
 import { createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
@@ -9,7 +8,13 @@ import {
   sessionTabApp as app,
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
-import { getJazzServerInfo, jazzAppFetch, jazzAppVisitor, startJazzApp } from "./testing-server.js";
+import {
+  deploy,
+  getJazzServerInfo,
+  jazzAppFetch,
+  jazzAppVisitor,
+  startJazzApp,
+} from "./testing-server.js";
 
 // `localFirst: "now"` opens the local-first client on a first visit, while
 // another tab of the origin already holds the device account's store through
@@ -26,10 +31,16 @@ it('opens local-first at once with localFirst: "now" while another tab holds the
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("local-first-now-tabs"));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: permissions,
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const visitorUrl = await jazzAppVisitor(backend);
   // The backend answers no CORS: send the session's own requests to it from Node.

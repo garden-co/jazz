@@ -1,21 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../../index.js";
+import { testApp } from "../../testing/test-app.js";
 import { createOpenTransactionId } from "../client.js";
 import { testAuthorBytes } from "../testing/account-fixtures.js";
 import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig, queryFromTable, queryWithPredicates } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 
-const app = s.defineApp(
-  {
-    folders: s.table({ title: s.string() }, { notesViaFolder: s.reverse("notes", "folder") }),
-    notes: s.table(
-      { text: s.string(), folderId: s.uuid() },
-      { folder: s.rel("folders", "folderId") },
-    ),
+const app = testApp({
+  tables: {
+    folders: {
+      columns: { title: "string" },
+      relations: { notesViaFolder: { reverse: "notes", relation: "folder" } },
+    },
+    notes: {
+      columns: { text: "string", folderId: "uuid" },
+      relations: { folder: { rel: "folders", column: "folderId" } },
+    },
   },
-  { migrations: "none" },
-);
+});
 
 describe("WASM backend read capability parity", () => {
   for (const backend of [false, true]) {

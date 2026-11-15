@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import { useOne, useOneSuspense } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 // #region reading-one-react
 export function TodoDetail({ id }: { id: string }) {

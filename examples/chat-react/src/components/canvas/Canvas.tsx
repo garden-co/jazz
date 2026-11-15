@@ -3,7 +3,7 @@ import { useAll, useSession } from "jazz-tools/react";
 import { Eraser, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Toggle } from "@/components/ui/toggle";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { CollaboratorBadge } from "./CollaboratorBadge";
 import { useResponsiveCanvas } from "./useResponsiveCanvas";
 import {

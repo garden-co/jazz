@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Art, Hue } from "@/schema";
+import type { Art, Hue } from "@/app-extras";
 
 /**
  * Generated product imagery: a small line drawing per product kind, coloured

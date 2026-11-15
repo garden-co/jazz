@@ -1,4 +1,4 @@
-- `app` defines your schema, and `permissions` defines who can access the data. Your backend uses
+- `app` (from `jazz.generated.ts`) defines your schema, and `permissions` (your `jazz.permissions.json`, imported as JSON) defines who can access the data. Your backend uses
   the versions your code imports (so rolling back your application also returns to the schema and
   permissions of that version).
 - `authenticate(request)` reads your own session (a cookie, a header) and returns

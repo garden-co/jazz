@@ -1,27 +1,47 @@
-import { describe, expect, it } from "vitest";
-import { jwt } from "better-auth/plugins";
+import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { admin, jwt } from "better-auth/plugins";
 import { getAuthTables, type BetterAuthDBSchema } from "better-auth/db";
 import {
+  betterAuthAppFileNotes,
+  buildBetterAuthAppTables,
   buildJazzSchema,
   buildJazzSchemaFromTables,
-  buildJazzSchemaSourceText,
-  buildJazzSchemaSourceTextFromTables,
+  createJazzAppFile,
+  mergeBetterAuthTables,
+  mergeBetterAuthTablesFromTables,
 } from "./schema.js";
+import { testApp, testPermissions } from "../testing/test-app.js";
+
+/** The Better Auth tables as `generate` writes them into a new jazz.app.json. */
+function generatedAppFile(tables: BetterAuthDBSchema, usePlural?: boolean): string {
+  return mergeBetterAuthTablesFromTables({ appFile: null, tables, usePlural });
+}
+
+function generatedTables(tables: BetterAuthDBSchema, usePlural?: boolean) {
+  return JSON.parse(generatedAppFile(tables, usePlural)).tables;
+}
 
 describe("better-auth schema helpers", () => {
-  it("acknowledges adapter timestamps while preserving required and renamed fields", () => {
+  it("keeps Better Auth's own timestamps as plain columns while preserving required and renamed fields", () => {
     const tables = getAuthTables({});
-    const source = buildJazzSchemaSourceTextFromTables({ tables });
-    expect(source).toContain("createdAt: s.allowExternalProvenanceName(s.timestamp()),");
-    expect(source).toContain("updatedAt: s.allowExternalProvenanceName(s.timestamp()),");
-    expect(source).not.toContain("email: s.allowExternalProvenanceName");
-    const renamed = buildJazzSchemaSourceText({
+    // Better Auth owns these fields, including its required timestamps: they
+    // keep their domain meaning instead of becoming Jazz provenance columns.
+    expect(generatedTables(tables).user.columns).toMatchObject({
+      email: "string",
+      createdAt: "timestamp",
+      updatedAt: "timestamp",
+    });
+    const renamed = buildBetterAuthAppTables({
       tables,
       getModelName: (model) => model,
       getFieldName: ({ field }) => (field === "createdAt" ? "registeredAt" : field),
     });
-    expect(renamed).toContain("registeredAt: s.timestamp(),");
-    expect(renamed).not.toContain("registeredAt: s.allowExternalProvenanceName");
+    expect(renamed.user!.columns.registeredAt).toBe("timestamp");
+    expect(renamed.user!.columns).not.toHaveProperty("createdAt");
   });
   it.each(["__proto__", "union", "exists", "_schema", "wasmSchema"])(
     "rejects reserved table name %s in direct Better Auth schema generation",
@@ -48,7 +68,7 @@ describe("better-auth schema helpers", () => {
         }),
       ).toThrow(/reserved/i);
       expect(() =>
-        buildJazzSchemaSourceText({
+        buildBetterAuthAppTables({
           tables,
           getModelName,
           getFieldName,
@@ -57,7 +77,7 @@ describe("better-auth schema helpers", () => {
     },
   );
 
-  it("keeps ordinary, prototype, and hyphenated table names usable in direct generation", () => {
+  it("keeps ordinary, prototype, and hyphenated table names usable in direct generation, and refuses names the app file can't hold", () => {
     const tables = {
       normal: {
         modelName: "normal",
@@ -76,25 +96,36 @@ describe("better-auth schema helpers", () => {
     const getFieldName = ({ field }: { model: string; field: string }) => field;
 
     const schema = buildJazzSchema({ tables, getModelName, getFieldName });
-    const source = buildJazzSchemaSourceText({ tables, getModelName, getFieldName });
 
     expect(Object.keys(schema).sort()).toEqual(["hyphenated-name", "normal", "prototype"]);
-    expect(source).toContain("normal: s.table({");
-    expect(source).toContain("prototype: s.table({");
-    expect(source).toContain('"hyphenated-name": s.table({');
+    // jazz.app.json only allows identifier names (SPEC §10.10).
+    const { hyphenated: _, ...identifiers } = tables;
+    expect(
+      Object.keys(buildBetterAuthAppTables({ tables: identifiers, getModelName, getFieldName })),
+    ).toEqual(["normal", "prototype"]);
+    expect(() => buildBetterAuthAppTables({ tables, getModelName, getFieldName })).toThrow(
+      /Model "hyphenated": the table name "hyphenated-name" can't be written to jazz\.app\.json.*modelName/,
+    );
+    expect(() =>
+      buildBetterAuthAppTables({
+        tables: identifiers,
+        getModelName,
+        getFieldName: () => "value-name",
+      }),
+    ).toThrow(/Field "normal\.value": the column name "value-name".*fieldName/);
   });
 
   it("retains the installed JWT plugin signing-key metadata", () => {
     const tables = getAuthTables({ plugins: [jwt()] });
     const schema = buildJazzSchemaFromTables({ tables });
-    const source = buildJazzSchemaSourceTextFromTables({ tables });
+    const generated = generatedTables(tables);
     for (const name of ["alg", "crv"]) {
       expect(schema.jwks?.columns).toContainEqual({
         name,
         column_type: { type: "Text" },
         nullable: true,
       });
-      expect(source).toContain(`${name}: s.string().optional()`);
+      expect(generated.jwks.columns[name]).toBe("string?");
     }
   });
 
@@ -182,7 +213,7 @@ describe("better-auth schema helpers", () => {
     );
   });
 
-  it("builds schema.ts text from Better Auth tables using transformed names", () => {
+  it("builds jazz.app.json tables from Better Auth tables using transformed names", () => {
     const tables = {
       user: {
         modelName: "accountHolder",
@@ -194,7 +225,7 @@ describe("better-auth schema helpers", () => {
           email: {
             type: "string",
             required: true,
-            fieldName: "email-address",
+            fieldName: "email_address",
           },
           role: {
             type: ["user", "admin"],
@@ -254,63 +285,54 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(buildJazzSchemaSourceTextFromTables({ tables, usePlural: true })).toBe(
+    const file = generatedAppFile(tables, true);
+    expect(file).toBe(
       [
-        'import { schema as s } from "jazz-tools";',
-        "",
-        "export const schema = {",
-        "  accountHolders: s.table({",
-        '    "email-address": s.string(),',
-        '    role: s.enum("user", "admin"),',
-        "    metadata: s.json().optional(),",
-        "    deviceIds: s.array(s.uuid()).optional(),",
-        "  }, {",
-        '    deviceIdsRelation: s.rel("devices", "deviceIds"),',
-        "  }),",
-        "",
-        "  devices: s.table({",
-        "    name: s.string(),",
-        "    tags: s.array(s.string()),",
-        "    loginCount: s.int(),",
-        "  }, {",
-        "  }),",
-        "",
-        "  sessions: s.table({",
-        "    createdAt: s.allowExternalProvenanceName(s.timestamp()),",
-        "    retryCounts: s.array(s.int()).optional(),",
-        "    userId: s.uuid().optional(),",
-        "  }, {",
-        '    userIdRelation: s.rel("accountHolders", "userId"),',
-        "  }),",
-        "};",
-        "",
-        "type AppSchema = s.Schema<typeof schema>;",
-        "// Never deployed on its own: the app that spreads `schema` ships the migrations.",
-        'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
-        "export const wasmSchema = app.wasmSchema;",
-        "",
-        "export const permissions = s.definePermissions(app, ({ policy }) => {",
-        "  policy.accountHolders.allowRead.never();",
-        "  policy.accountHolders.allowInsert.never();",
-        "  policy.accountHolders.allowUpdate.never();",
-        "  policy.accountHolders.allowDelete.never();",
-        "",
-        "  policy.devices.allowRead.never();",
-        "  policy.devices.allowInsert.never();",
-        "  policy.devices.allowUpdate.never();",
-        "  policy.devices.allowDelete.never();",
-        "",
-        "  policy.sessions.allowRead.never();",
-        "  policy.sessions.allowInsert.never();",
-        "  policy.sessions.allowUpdate.never();",
-        "  policy.sessions.allowDelete.never();",
-        "});",
+        "{",
+        '  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",',
+        '  "format": 1,',
+        '  "tables": {',
+        '    "accountHolders": {',
+        '      "columns": {',
+        '        "email_address": "string",',
+        '        "role": { "enum": ["user", "admin"] },',
+        '        "metadata": { "json": true, "optional": true },',
+        '        "deviceIds": { "array": "uuid", "optional": true }',
+        "      },",
+        '      "relations": { "deviceIdsRelation": { "rel": "devices", "column": "deviceIds" } }',
+        "    },",
+        '    "devices": {',
+        '      "columns": { "name": "string", "tags": { "array": "string" }, "loginCount": "int" }',
+        "    },",
+        '    "sessions": {',
+        '      "columns": {',
+        '        "createdAt": "timestamp",',
+        '        "retryCounts": { "array": "int", "optional": true },',
+        '        "userId": "uuid?"',
+        "      },",
+        '      "relations": { "userIdRelation": { "rel": "accountHolders", "column": "userId" } }',
+        "    }",
+        "  }",
+        "}",
         "",
       ].join("\n"),
     );
+    // What it writes is a jazz.app.json the Rust loader takes.
+    const app = testApp(file);
+    expect(app.wasmSchema.sessions!.columns).toContainEqual({
+      name: "userId",
+      column_type: { type: "Uuid" },
+      nullable: true,
+      references: "accountHolders",
+    });
+    expect(app.wasmSchema.accountHolders!.relations?.deviceIdsRelation).toEqual({
+      kind: "forward",
+      table: "devices",
+      column: "deviceIds",
+    });
   });
 
-  it("generates deny-all policies for every Better Auth table", () => {
+  it("leaves every Better Auth table without policies, and prints the deny-all entries to paste", () => {
     const tables = {
       user: {
         modelName: "user",
@@ -333,32 +355,36 @@ describe("better-auth schema helpers", () => {
     } as BetterAuthDBSchema;
     const tableNamesByModel = {
       user: "better_auth_user",
-      session: "better-auth-session",
+      session: "better_auth_session",
     } as const;
-    const source = buildJazzSchemaSourceText({
+    const generated = buildBetterAuthAppTables({
       tables,
       getModelName: (model) => tableNamesByModel[model as keyof typeof tableNamesByModel],
       getFieldName: ({ field }) => field,
     });
+    // A table without policies denies every client read and write.
+    const app = testApp({ tables: generated });
+    expect(testPermissions(app, { tables: {} })).toEqual({});
 
+    const notes = betterAuthAppFileNotes(Object.keys(generated));
     for (const tableName of Object.values(tableNamesByModel)) {
-      const policyTarget =
-        tableName === "better_auth_user"
-          ? "policy.better_auth_user"
-          : 'policy["better-auth-session"]';
-
-      expect(source).toContain(`${policyTarget}.allowRead.never();`);
-      expect(source).toContain(`${policyTarget}.allowInsert.never();`);
-      expect(source).toContain(`${policyTarget}.allowUpdate.never();`);
-      expect(source).toContain(`${policyTarget}.allowDelete.never();`);
+      expect(notes).toContain(
+        `"${tableName}": { "read": "false", "insert": "false", "update": "false", "delete": "false" }`,
+      );
     }
-
-    expect(source.match(/\.allow(Read|Insert|Update|Delete)\.never\(\);/g)).toHaveLength(
-      Object.keys(tables).length * 4,
-    );
+    // The pasted entries are a valid `tables` object that denies every operation.
+    const pasted = JSON.parse(`{${notes.split("jazz.permissions.json:\n")[1]}}`);
+    const permissions = testPermissions(app, { tables: pasted });
+    for (const tableName of Object.values(tableNamesByModel)) {
+      expect(permissions[tableName]?.select?.using).toEqual({ type: "False" });
+      expect(permissions[tableName]?.insert?.with_check).toEqual({ type: "False" });
+      expect(permissions[tableName]?.update?.using).toEqual({ type: "False" });
+      expect(permissions[tableName]?.update?.with_check).toEqual({ type: "False" });
+      expect(permissions[tableName]?.delete?.using).toEqual({ type: "False" });
+    }
   });
 
-  it("throws when schema.ts generation encounters magic column names", () => {
+  it("throws when app-file generation encounters magic column names", () => {
     const tables = {
       user: {
         modelName: "user",
@@ -372,12 +398,10 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(() => buildJazzSchemaSourceTextFromTables({ tables })).toThrow(
-      /reserved for magic columns/i,
-    );
+    expect(() => generatedAppFile(tables)).toThrow(/reserved for magic columns/i);
   });
 
-  it("throws when schema.ts generation encounters fields renamed to id", () => {
+  it("throws when app-file generation encounters fields renamed to id", () => {
     const tables = {
       user: {
         modelName: "user",
@@ -391,12 +415,10 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(() => buildJazzSchemaSourceTextFromTables({ tables })).toThrow(
-      /conflicts with reserved Jazz row id/i,
-    );
+    expect(() => generatedAppFile(tables)).toThrow(/conflicts with reserved Jazz row id/i);
   });
 
-  it("throws when schema.ts generation encounters bigint numbers", () => {
+  it("throws when app-file generation encounters bigint numbers", () => {
     const tables = {
       user: {
         modelName: "user",
@@ -410,10 +432,10 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(() => buildJazzSchemaSourceTextFromTables({ tables })).toThrow(/cannot represent/i);
+    expect(() => generatedAppFile(tables)).toThrow(/cannot represent/i);
   });
 
-  it("throws when schema.ts generation encounters bigint number arrays", () => {
+  it("throws when app-file generation encounters bigint number arrays", () => {
     const tables = {
       user: {
         modelName: "user",
@@ -427,10 +449,10 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(() => buildJazzSchemaSourceTextFromTables({ tables })).toThrow(/cannot represent/i);
+    expect(() => generatedAppFile(tables)).toThrow(/cannot represent/i);
   });
 
-  it("throws when schema.ts generation encounters non-id references", () => {
+  it("throws when app-file generation encounters non-id references", () => {
     const tables = {
       user: { modelName: "user", fields: { email: { type: "string", required: true } } },
       session: {
@@ -448,9 +470,7 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(() => buildJazzSchemaSourceTextFromTables({ tables })).toThrow(
-      /only supports references to "id"/i,
-    );
+    expect(() => generatedAppFile(tables)).toThrow(/only support references to "id"/i);
   });
 
   it("declares a distinct relationship for an unsuffixed scalar UUID", () => {
@@ -471,9 +491,9 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(buildJazzSchemaSourceTextFromTables({ tables })).toContain(
-      'ownerRelation: s.rel("user", "owner")',
-    );
+    expect(generatedTables(tables).session.relations).toEqual({
+      ownerRelation: { rel: "user", column: "owner" },
+    });
   });
 
   it("declares a distinct relationship for an unsuffixed UUID array", () => {
@@ -494,8 +514,136 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(buildJazzSchemaSourceTextFromTables({ tables })).toContain(
-      'ownersRelation: s.rel("user", "owners")',
+    expect(generatedTables(tables).session.relations).toEqual({
+      ownersRelation: { rel: "user", column: "owners" },
+    });
+  });
+});
+
+describe("writing the Better Auth tables into jazz.app.json", () => {
+  const authTables = getAuthTables({ plugins: [jwt(), admin()] });
+  const resolvers = {
+    getModelName: (model: string) => `better_auth_${authTables[model]?.modelName ?? model}`,
+    getFieldName: ({ model, field }: { model: string; field: string }) =>
+      authTables[model]?.fields[field]?.fieldName ?? field,
+  };
+  const exampleFile = readFileSync(
+    new URL("../../../../examples/auth-betterauth-chat/jazz.app.json", import.meta.url),
+    "utf8",
+  );
+
+  it("gives back the shipped example's file unchanged when Better Auth's tables match it", () => {
+    expect(mergeBetterAuthTables({ appFile: exampleFile, tables: authTables, ...resolvers })).toBe(
+      exampleFile,
     );
+  });
+
+  it("replaces the auth tables' columns and keeps every other table, history and migration", () => {
+    const before = JSON.parse(exampleFile);
+    // An app on Better Auth 1.7.1, whose account still carries `issuer`, with a
+    // hand-written relation name and an index on the dropped column.
+    before.tables.better_auth_account.columns = {
+      issuer: "string",
+      ...before.tables.better_auth_account.columns,
+    };
+    before.tables.better_auth_account.indexes = ["issuer", "providerId"];
+    before.tables.messages = { columns: { text: "string" } };
+    const merged = JSON.parse(
+      mergeBetterAuthTables({
+        appFile: JSON.stringify(before, null, 2),
+        tables: authTables,
+        ...resolvers,
+      }),
+    );
+    expect(merged.tables.better_auth_account.columns).not.toHaveProperty("issuer");
+    expect(merged.tables.better_auth_account.indexes).toEqual(["providerId"]);
+    // The app's own relation names stay: no `userIdRelation` beside `user`.
+    expect(merged.tables.better_auth_account.relations).toEqual({
+      user: { rel: "better_auth_user", column: "userId" },
+    });
+    expect(merged.tables.better_auth_user.relations).toEqual(
+      before.tables.better_auth_user.relations,
+    );
+    expect(merged.tables.messages).toEqual({ columns: { text: "string" } });
+    expect(merged.history).toEqual(before.history);
+    expect(merged.migrations).toEqual(before.migrations);
+    expect(Object.keys(merged.tables)).toEqual(Object.keys(merged.tables).sort());
+  });
+
+  it("adds the auth tables to an app that has none, sorted among its tables, and keeps a table Better Auth no longer generates", () => {
+    const appFile = JSON.stringify(
+      {
+        format: 1,
+        tables: {
+          zebras: { columns: { name: "string" } },
+          apples: { columns: { name: "string" } },
+          better_auth_passkey: { columns: { name: "string" } },
+        },
+      },
+      null,
+      2,
+    );
+    const merged = mergeBetterAuthTables({ appFile, tables: authTables, ...resolvers });
+    expect(Object.keys(JSON.parse(merged).tables)).toEqual([
+      "apples",
+      "better_auth_account",
+      "better_auth_jwks",
+      "better_auth_passkey",
+      "better_auth_session",
+      "better_auth_user",
+      "better_auth_verification",
+      "zebras",
+    ]);
+    expect(merged.endsWith("}\n")).toBe(true);
+    expect(Object.keys(testApp(merged).wasmSchema)).toHaveLength(8);
+  });
+
+  it("keeps the rest of the file as written, in its own layout", () => {
+    const appFile = [
+      "{",
+      '  "format": 1,',
+      '  "tables": { "notes": { "columns": { "body": "string" } } },',
+      '  "history": {',
+      '    "a00000000000": {"tables": {"notes": {"columns": {"body": "string?"}}}},',
+      '    "b00000000000": {',
+      '        "tables": { "notes": { "columns": { "body": "string" } } } }',
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+    const merged = mergeBetterAuthTables({ appFile, tables: authTables, ...resolvers });
+    expect(merged.slice(merged.indexOf('  "history"'))).toBe(
+      appFile.slice(appFile.indexOf('  "history"')),
+    );
+  });
+
+  it("refuses a file that isn't an app file", () => {
+    expect(() =>
+      mergeBetterAuthTables({ appFile: "{ nope", tables: authTables, ...resolvers }),
+    ).toThrow(/jazz\.app\.json is not valid JSON/);
+    expect(() =>
+      mergeBetterAuthTables({ appFile: '{ "format": 1 }', tables: authTables, ...resolvers }),
+    ).toThrow(/no "tables" object/);
+  });
+
+  it("reads and returns the app file through createSchema", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-better-auth-generate-"));
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const path = join(dir, "jazz.app.json");
+      await writeFile(path, exampleFile);
+      const created = await createJazzAppFile({ file: path, tables: authTables, ...resolvers });
+      expect(created).toEqual({ path, overwrite: true, code: exampleFile });
+      const fresh = await createJazzAppFile({
+        file: join(dir, "missing.json"),
+        tables: authTables,
+        ...resolvers,
+      });
+      expect(JSON.parse(fresh.code).format).toBe(1);
+      expect(log.mock.calls.at(-1)?.[0]).toContain("npx jazz-tools generate");
+    } finally {
+      log.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

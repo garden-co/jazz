@@ -3,9 +3,10 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "resolveJsonModule": true,
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["schema.ts", "src", "tests"]
+  "include": ["jazz.generated.ts", "src", "tests"]
 }

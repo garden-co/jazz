@@ -15,6 +15,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: [
+      { find: /^jazz-tools$/, replacement: resolve(__dirname, "src/index.ts") },
       { find: /^react-native$/, replacement: resolve(__dirname, "tests/react-native/ui-host.ts") },
       ...(sealedWasmPackage
         ? [{ find: "jazz-wasm", replacement: resolve(sealedWasmPackage, "jazz_wasm.js") }]

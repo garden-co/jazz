@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app, type WorkspaceRole } from "@/schema";
+import { app, type MemberRole as WorkspaceRole } from "@/jazz.generated";
 import { retryOnConflict } from "./retry";
 
 const WORKSPACE_RANK: Record<WorkspaceRole, number> = { guest: 0, viewer: 1, member: 2, owner: 3 };

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
 import { getDbSubscriptionSource } from "../runtime/db.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { testApp } from "../testing/index.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 // The public surface under test. The vanilla binding below imports Jazz from
 // here and nowhere else — if any symbol it needs were missing, this file would
@@ -90,13 +90,8 @@ describe("jazz-tools/shared", () => {
     const db = await createDb(await localAccountConfig(appId));
     const manager = new SubscriptionsOrchestrator({ appId }, getDbSubscriptionSource(db));
 
-    // Schema + query via the real builder API (no JSON-shaped literals).
-    const app = s.defineApp(
-      {
-        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-      },
-      { migrations: "none" },
-    );
+    // App + query via the real query builder API (no JSON-shaped query literals).
+    const app = testApp({ tables: { todos: { columns: { title: "string", done: "boolean" } } } });
     const query = app.todos.where({ done: { eq: false } });
 
     const binding = useAllVanilla(manager, query);

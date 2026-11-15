@@ -15,7 +15,7 @@ import {
   VisuallyHidden,
 } from "@astryxdesign/core";
 import { useAll, useOne } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { TeamDialog } from "../components/forms";
 import { StatusBadge, formatCount, formatDate, sentence } from "../components/list";
 import { ConfirmButton } from "../components/confirm-button";

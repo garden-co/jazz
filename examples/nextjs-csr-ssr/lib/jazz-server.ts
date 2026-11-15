@@ -1,7 +1,7 @@
 import "server-only";
 
-import { app as schemaApp } from "../schema";
-import permissions from "../permissions";
+import { app as schemaApp } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 import type { Db, Jazz } from "jazz-tools/backend";
 
 // This is a workaround to resolve correctly NAPI modules in the monorepo

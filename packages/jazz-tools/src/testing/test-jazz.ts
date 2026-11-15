@@ -9,12 +9,11 @@ import {
   type Jazz,
 } from "../backend/create-jazz.js";
 import type { Session } from "../runtime/context.js";
-import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import type { AppPermissionsFile } from "../backend/create-jazz.js";
 import type { SchemaSourceInput } from "../schema-source.js";
 import {
   deploy,
   startLocalJazzServer,
-  type DeployOptions,
   type LocalJazzServerHandle,
   type StartLocalJazzServerOptions,
 } from "../dev/dev-server.js";
@@ -87,19 +86,21 @@ export interface TestJazz {
    * the core (with its migration), then restart the app's Jazz on it. Every
    * origin keeps its port, so clients reconnect where they were.
    */
-  redeploy(
-    next: Pick<DeployOptions, "migration" | "migrations" | "schemas"> & {
-      app: SchemaSourceInput;
-      permissions: CompiledPermissionsMap;
-    },
-  ): Promise<DeployResult>;
+  redeploy(next: {
+    /** The next version: its history and migrations ship with it. */
+    app: SchemaSourceInput;
+    /** Its `jazz.permissions.json`. */
+    permissions: AppPermissionsFile;
+  }): Promise<DeployResult>;
   /** Stop the app's Jazz, its origins and (if this started it) the core. */
   stop(): Promise<void>;
 }
 
 export interface StartTestJazzOptions {
+  /** The app, from `testApp` or a `jazz.generated.ts`. */
   app: SchemaSourceInput;
-  permissions: CompiledPermissionsMap;
+  /** Its `jazz.permissions.json`, as an object. */
+  permissions: AppPermissionsFile;
   /** A running core to front; by default one is started in memory. */
   core?: LocalJazzServerHandle;
   /** Options for the core started when `core` is not given. */
@@ -161,7 +162,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
   // Every connection, including upgraded sync sockets, which `server.close`
   // would otherwise wait on: a redeploy or stop drops them, as a real one does.
   const sockets = new Set<Socket>();
-  const boot = (app: SchemaSourceInput, permissions: CompiledPermissionsMap) =>
+  const boot = (app: SchemaSourceInput, permissions: AppPermissionsFile) =>
     createTestJazz({
       ...options.jazz,
       app: app as CreateJazzOptions["app"],
@@ -267,13 +268,12 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
           : { slowQueryThresholdMs: options.slowQueryThresholdMs }),
       };
     },
-    async redeploy({ app, permissions, ...history }) {
+    async redeploy({ app, permissions }) {
       const deployed = await deploy({
-        ...history,
         serverUrl: core.url,
         appId: core.appId,
         adminSecret: core.adminSecret,
-        schema: app,
+        app,
         permissions,
       });
       const ports = servers.map((server) => (server.address() as AddressInfo).port);

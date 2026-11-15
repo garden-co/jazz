@@ -1,0 +1,9 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "children": { "read": "true", "insert": "true" },
+    "parents": { "read": "true", "insert": "true" },
+    "summaries": { "read": "true", "insert": "true" }
+  }
+}

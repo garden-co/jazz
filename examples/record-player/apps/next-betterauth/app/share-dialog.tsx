@@ -12,7 +12,7 @@ import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/Segme
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import type { InvitationRole } from "../src/record-player";
 import { shortId } from "./format";
 import { useStore, type PlaylistSummary } from "./library-data";

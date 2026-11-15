@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NapiDb } from "jazz-napi";
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
+import { testApp } from "../testing/test-app.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import { encodeSchema } from "./native-runtime/schema-codec.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
@@ -11,14 +11,13 @@ import { testAuthorBytes } from "./testing/account-fixtures.js";
 // A connected carrier that never delivers a catalogue must preserve the native
 // read deadline, even though no application query can be attached yet (#2999).
 it("times out pending schema admission on a silent native upstream and closes", async () => {
-  const before = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
-  const after = s.defineApp(
-    {
-      notes: s.table({ text: s.string() }, {}),
-      controls: s.table({ value: s.string() }, {}),
+  const before = testApp({ tables: { notes: { columns: { text: "string" } } } });
+  const after = testApp({
+    tables: {
+      notes: { columns: { text: "string" } },
+      controls: { columns: { value: "string" } },
     },
-    { migrations: "none" },
-  );
+  });
   const path = await mkdtemp(join(tmpdir(), "jazz-schema-admission-timeout-"));
   const config = openConfig(
     new Uint8Array(16).fill(29),

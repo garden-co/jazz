@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  generateAuthSecret,
-  schema,
-  type CompiledPermissions,
-  type Db,
-  type RowOf,
-} from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { generateAuthSecret, type Db } from "../../src/index.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -14,76 +8,16 @@ import {
   waitForCondition,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { app, type Org } from "./apps/include-subscriptions/jazz.generated.js";
+import permissions from "./apps/include-subscriptions/jazz.permissions.json";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
-const app = schema.defineApp(
-  {
-    orgs: schema.table(
-      {
-        name: schema.string(),
-      },
-      {
-        todosViaOrg: schema.reverse("todos", "org"),
-        user_checksViaOrg: schema.reverse("user_checks", "org"),
-        check_notesViaOrg: schema.reverse("check_notes", "org"),
-      },
-    ),
-    todos: schema.table(
-      {
-        title: schema.string(),
-        org_id: schema.uuid(),
-      },
-      {
-        org: schema.rel("orgs", "org_id"),
-        user_checksViaTodo: schema.reverse("user_checks", "todo"),
-      },
-    ),
-    user_checks: schema.table(
-      {
-        org_id: schema.uuid(),
-        todo_id: schema.uuid(),
-      },
-      {
-        org: schema.rel("orgs", "org_id"),
-        todo: schema.rel("todos", "todo_id"),
-        check_notesViaUser_check: schema.reverse("check_notes", "user_check"),
-      },
-    ),
-    check_notes: schema.table(
-      {
-        body: schema.string(),
-        org_id: schema.uuid(),
-        user_check_id: schema.uuid(),
-      },
-      { org: schema.rel("orgs", "org_id"), user_check: schema.rel("user_checks", "user_check_id") },
-    ),
-  },
-  { migrations: "none" },
-);
-
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.orgs.allowRead.always(),
-  policy.orgs.allowInsert.always(),
-  policy.orgs.allowUpdate.always(),
-  policy.orgs.allowDelete.always(),
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-  policy.user_checks.allowRead.always(),
-  policy.user_checks.allowInsert.always(),
-  policy.user_checks.allowUpdate.always(),
-  policy.user_checks.allowDelete.always(),
-  policy.check_notes.allowRead.always(),
-  policy.check_notes.allowInsert.always(),
-  policy.check_notes.allowUpdate.always(),
-  policy.check_notes.allowDelete.always(),
-]);
-
-type Org = RowOf<typeof app.orgs>;
+// The app (apps/include-subscriptions): orgs, their todos, user checks and
+// check notes, every table open to every user.
 type OrgWithDeepIncludes = Org & {
   todosViaOrg?: Array<{
     id: string;
+    title?: string;
     user_checksViaTodo?: Array<{
       id: string;
       check_notesViaUser_check?: Array<{ id: string; body: string }>;
@@ -443,12 +377,12 @@ async function publishSchemaAndPermissions(
   appId: string,
   serverUrl: string,
   adminSecret: string,
-  permissions: CompiledPermissions,
+  permissions: TestPermissionsFile,
 ): Promise<string> {
   const core = { appId, serverUrl, adminSecret };
-  await deploy({ ...core, schema: app.wasmSchema, permissions });
+  await deploy({ ...core, app, permissions: permissions });
   // Clients sync through the app's backend; return its URL.
-  return (await startJazzApp(core, { schema: app.wasmSchema, permissions })).serverUrl;
+  return (await startJazzApp(core, { schema: app, permissions })).serverUrl;
 }
 
 function includesNote(

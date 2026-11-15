@@ -1,6 +1,6 @@
 import "server-only";
-import { app } from "@/schema";
-import permissions from "@/permissions";
+import { app } from "@/jazz.generated";
+import permissions from "@/jazz.permissions.json" with { type: "json" };
 import type { Jazz } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { jazzAppId } from "./jazz-env";

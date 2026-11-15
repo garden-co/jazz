@@ -12,5 +12,5 @@
     "jsx": "react-jsx",
     "types": ["vite/client"]
   },
-  "include": ["src", "tests", "schema.ts", "permissions.ts"]
+  "include": ["src", "tests", "jazz.generated.ts"]
 }
