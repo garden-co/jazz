@@ -168,6 +168,17 @@ impl Jazz {
         answer.await.map_err(|_| Error::Stopped)?
     }
 
+    /// Sends `job` to the client's thread without waiting for it: for
+    /// cleanups that must run even when nobody awaits them (from `Drop`).
+    pub(crate) fn fire<F, Fut>(&self, job: F)
+    where
+        F: FnOnce(JazzClient) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        let job: Job = Box::new(move |client| Box::pin(job(client)));
+        let _ = self.commands.send(Command::Run(job));
+    }
+
     /// Every row `query` matches, reading local data first.
     pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
         self.all_with(query, ReadTier::LocalFirst).await

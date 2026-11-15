@@ -132,7 +132,7 @@ impl SubscriptionListener for Collect {
     fn on_delta(&self, delta_json: String) {
         let _ = self.0.send(parse(&delta_json));
     }
-    fn on_error(&self, _: String) {}
+    fn on_error(&self, _: String, _: String) {}
 }
 
 /// A subscription with an include delivers rows with their related rows,

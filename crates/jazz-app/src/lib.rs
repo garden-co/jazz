@@ -25,9 +25,11 @@
 mod app;
 mod backend;
 mod config;
+mod edit;
 mod error;
 mod handle;
 mod include;
+mod large;
 mod query;
 mod subscription;
 mod table;
@@ -37,11 +39,13 @@ mod writes;
 
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
+pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
 pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
 };
+pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use query::{
     Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, id, updated_at,
 };
