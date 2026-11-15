@@ -132,6 +132,12 @@ pub enum ColumnType {
     /// Heterogeneous row/tuple of values with a known schema.
     /// Used for nested rows (e.g., array of rows from subquery).
     Row { columns: Box<RowDescriptor> },
+    /// `dimensions` IEEE-754 binary32 values (SPEC 20.1), `1..=4096`,
+    /// carried as [`Value::Bytea`](super::Value::Bytea) of exactly
+    /// `4 * dimensions` bytes in encoding `f32le/1`; NaN and infinities are
+    /// refused at admission. Written `{ "vector": n }` in `jazz.app.json`.
+    /// Appended last so existing serde variant indices are unchanged.
+    Vector { dimensions: u32 },
 }
 
 impl ColumnType {

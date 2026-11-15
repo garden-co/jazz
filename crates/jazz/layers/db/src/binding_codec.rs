@@ -506,6 +506,33 @@ mod tests {
         assert!(decode_named_cells(&overlong).is_err());
     }
 
+    // A `vector(n)` cell (SPEC 20.1) crosses the host boundary as type tag 19
+    // with its dimensions, and its payload is the `f32le/1` bytes, so the
+    // TypeScript codec writes it without consulting Rust's serde.
+    #[test]
+    fn named_cell_input_carries_vectors_as_f32le_and_refuses_bad_ones() {
+        let fixture = b"\x01\x01\x01v\x13\x02\x08\x00\x00\x80\x3f\x00\x00\x00\xc0";
+        let cells = decode_named_cells(fixture).unwrap();
+        let bytes = [1.0f32, -2.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        assert_eq!(cells.get("v"), Some(&Value::Bytes(bytes)));
+        let descriptor = RecordDescriptor::new([("v", ValueType::Vector(2))]);
+        assert_eq!(
+            encode_named_cell_descriptor(&descriptor).unwrap(),
+            &fixture[..6]
+        );
+        // Wrong length, NaN, and dimensions outside 1..=4096.
+        assert!(decode_named_cells(b"\x01\x01\x01v\x13\x02\x04\x00\x00\x80\x3f").is_err());
+        assert!(
+            decode_named_cells(b"\x01\x01\x01v\x13\x02\x08\x00\x00\xc0\x7f\x00\x00\x00\xc0")
+                .is_err()
+        );
+        assert!(decode_named_cells(b"\x01\x01\x01v\x13\x00\x00").is_err());
+        assert!(decode_named_cells(b"\x01\x01\x01v\x13\x81\x20\x00").is_err());
+    }
+
     #[test]
     fn named_cell_input_rejects_ambiguous_and_unbounded_descriptors_and_decodes_payload_enums() {
         for descriptor in [

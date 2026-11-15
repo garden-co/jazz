@@ -66,6 +66,7 @@ pub const COLUMN_KEYS: &[&str] = &[
     "enum",
     "json",
     "array",
+    "vector",
     "optional",
     "default",
     "merge",
@@ -639,7 +640,7 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                 refuse(
                     path,
                     format!(
-                        "unknown type `{base}`{}; a type is one of {} (add `?` for optional), or an object for enum, json and array",
+                        "unknown type `{base}`{}; a type is one of {} (add `?` for optional), or an object for enum, json, array and vector",
                         super::expr::did_you_mean(base, SCALARS.iter().copied()),
                         SCALARS.join(", ")
                     ),
@@ -648,14 +649,14 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
             Ok((ty, nullable))
         }
         Json::Object(_) => {
-            let keys: Vec<&str> = ["type", "enum", "json", "array"]
+            let keys: Vec<&str> = ["type", "enum", "json", "array", "vector"]
                 .into_iter()
                 .filter(|k| spec.get(k).is_some())
                 .collect();
             let [key] = keys.as_slice() else {
                 return Err(refuse(
                     path,
-                    "a column object takes exactly one of `type`, `enum`, `json`, `array`",
+                    "a column object takes exactly one of `type`, `enum`, `json`, `array`, `vector`",
                 ));
             };
             let value = spec.get(key).expect("filtered");
@@ -702,9 +703,25 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                             other => Some(to_serde(other)),
                         },
                     },
-                    _ => ColumnType::Array {
-                        element: Box::new(read_type(value, &sub)?.0),
+                    "vector" => ColumnType::Vector {
+                        dimensions: match value {
+                            Json::Number(n) => n.parse::<u32>().ok(),
+                            _ => None,
+                        }
+                        .filter(|n| (1..=jazz_types::records::VECTOR_MAX_DIMENSIONS).contains(n))
+                        .ok_or_else(|| {
+                            refuse(&sub, "a vector's dimensions are an integer from 1 to 4096")
+                        })?,
                     },
+                    _ => {
+                        let element = read_type(value, &sub)?.0;
+                        if matches!(element, ColumnType::Vector { .. }) {
+                            return Err(refuse(sub, "an array of vectors is not supported"));
+                        }
+                        ColumnType::Array {
+                            element: Box::new(element),
+                        }
+                    }
                 },
                 false,
             ))
@@ -740,6 +757,33 @@ fn read_value(value: &Json, ty: &ColumnType, path: &str) -> Result<Value, Refusa
         (ColumnType::Uuid, Json::String(s)) => Value::Uuid(ObjectId::from_uuid(
             uuid::Uuid::parse_str(s).map_err(|_| refuse(path, format!("`{s}` is not a UUID")))?,
         )),
+        (ColumnType::Vector { dimensions }, Json::Array(items)) => {
+            if items.len() != *dimensions as usize {
+                return Err(refuse(
+                    path,
+                    format!(
+                        "a vector default has {dimensions} numbers, not {}",
+                        items.len()
+                    ),
+                ));
+            }
+            let mut bytes = Vec::with_capacity(items.len() * 4);
+            for (i, item) in items.iter().enumerate() {
+                let x = match item {
+                    Json::Number(n) => n.parse::<f64>().ok().map(|x| x as f32),
+                    _ => None,
+                }
+                .filter(|x| x.is_finite())
+                .ok_or_else(|| {
+                    refuse(
+                        format!("{path}[{i}]"),
+                        "a vector holds finite numbers within float32 range",
+                    )
+                })?;
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+            Value::Bytea(bytes)
+        }
         (ColumnType::Bytea, Json::String(s)) => Value::Bytea(
             base64::engine::general_purpose::STANDARD
                 .decode(s)
@@ -1225,6 +1269,9 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
             return Err(super::expr::unsupported("a transaction-id column"));
         }
         ColumnType::Row { .. } => return Err(super::expr::unsupported("a row column")),
+        ColumnType::Vector { dimensions } => {
+            Json::object(vec![("vector", Json::Number(dimensions.to_string()))])
+        }
     })
 }
 
@@ -1307,6 +1354,14 @@ fn write_value(value: &Value, ty: &ColumnType) -> Result<Json, String> {
         (Value::Text(s), _) => Json::String(s.clone()),
         (Value::Timestamp(n), _) => Json::Number(n.to_string()),
         (Value::Uuid(id), _) => Json::String(id.to_string()),
+        // `f32le/1` bytes as numbers; Rust prints each `f32` in its shortest
+        // form that reads back to the same bits.
+        (Value::Bytea(bytes), ColumnType::Vector { .. }) if bytes.len() % 4 == 0 => Json::Array(
+            bytes
+                .chunks_exact(4)
+                .map(|c| Json::Number(f32::from_le_bytes([c[0], c[1], c[2], c[3]]).to_string()))
+                .collect(),
+        ),
         (Value::Bytea(bytes), _) => {
             Json::String(base64::engine::general_purpose::STANDARD.encode(bytes))
         }
