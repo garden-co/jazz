@@ -122,6 +122,20 @@ export function isPermissionsFile(permissions: unknown): permissions is Permissi
   );
 }
 
+/** Check `permissions` against `app`'s bindings with the Rust loader, as a deployed backend does. */
+export async function loadBackendAppFor(
+  app: SchemaSourceInput,
+  permissions: PermissionsFile,
+): Promise<LoadedBackendApp> {
+  const bound = boundApp(resolveSchemaSource(app));
+  if (!bound) {
+    throw new Error(
+      "the app must come from jazz.generated.ts (or testApp) to check jazz.permissions.json against it",
+    );
+  }
+  return loadBackendApp(bound, JSON.stringify(permissions));
+}
+
 /**
  * The engine's policies for `permissions`: a `jazz.permissions.json` is
  * checked and compiled against the app's bindings by the Rust loader; engine
@@ -132,11 +146,5 @@ export async function enginePermissions(
   permissions: PermissionsFile | CompiledPermissionsMap,
 ): Promise<CompiledPermissionsMap> {
   if (!isPermissionsFile(permissions)) return permissions;
-  const bound = boundApp(resolveSchemaSource(app));
-  if (!bound) {
-    throw new Error(
-      "the app must come from jazz.generated.ts (or testApp) to check jazz.permissions.json against it",
-    );
-  }
-  return (await loadBackendApp(bound, JSON.stringify(permissions))).permissions;
+  return (await loadBackendAppFor(app, permissions)).permissions;
 }

@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../../index.js";
+import { testApp } from "../../testing/test-app.js";
 import { createDb } from "../default-create-db.js";
 import {
   acquireNodeForegroundNodeLease,
@@ -24,10 +24,7 @@ const builtAccountManager = new URL(
   "../../../dist/accounts/create-account-manager.js",
   import.meta.url,
 ).href;
-const memoryApp = s.defineApp(
-  { notes: s.table({ title: s.string() }, {}) },
-  { migrations: "none" },
-);
+const memoryApp = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 afterEach(async () => {
   restoreCwd?.();

@@ -210,10 +210,10 @@ describe("migration graph", () => {
     const text = renderMigrationGraph(combined);
     expect(text).toContain("bbbbbbbbbbbb (latest bundle)");
     expect(text).toContain("cccccccccccc [server only]");
-    expect(text).toContain("dddddddddddd (schema.ts) [local only]");
+    expect(text).toContain("dddddddddddd (jazz.app.json) [local only]");
     expect(text).toContain("├─▶ [server only] ● cccccccccccc [server only]");
     expect(text).toContain(
-      "└─▶ [local only] ● dddddddddddd (schema.ts) [local only] (shown above)",
+      "└─▶ [local only] ● dddddddddddd (jazz.app.json) [local only] (shown above)",
     );
     expect(text).toContain("│ [local only]");
   });
@@ -272,7 +272,7 @@ it("labels inferred identity connections without suggesting a missing local migr
     { schemas: [a, b], currentSchemaHash: b, migrations: [] },
   );
   expect(renderMigrationGraph(merged)).toBe(
-    ["● aaaaaaaaaaaa", "│ [automatic]", "▼", "● bbbbbbbbbbbb (latest bundle) (schema.ts)"].join(
+    ["● aaaaaaaaaaaa", "│ [automatic]", "▼", "● bbbbbbbbbbbb (latest bundle) (jazz.app.json)"].join(
       "\n",
     ),
   );

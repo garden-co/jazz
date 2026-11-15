@@ -26,11 +26,16 @@ export const APP_ROOTS = [".", "src", join("src", "lib")];
 
 /** The directory holding `jazz.app.json` in the project at `cwd`, if any. */
 export function findAppDir(cwd: string): string | null {
-  for (const root of APP_ROOTS) {
-    const dir = join(cwd, root);
-    if (existsSync(join(dir, APP_FILE))) return dir;
+  const found = APP_ROOTS.map((root) => join(cwd, root)).filter((dir) =>
+    existsSync(join(dir, APP_FILE)),
+  );
+  if (found.length > 1) {
+    throw new Error(
+      `found ${APP_FILE} in both ${found.map((dir) => relative(cwd, join(dir, APP_FILE)) || APP_FILE).join(" and ")}: ` +
+        "keep one, or point the command at the app with --schema-dir.",
+    );
   }
-  return null;
+  return found[0] ?? null;
 }
 
 /** An app's files as they are on disk; the permissions and bindings may be missing. */

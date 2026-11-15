@@ -8,22 +8,22 @@ export type ToolCallStatus = "running" | "complete" | "error";
 export type TurnRole = "user" | "assistant";
 export type TurnStatus = "queued" | "streaming" | "complete" | "interrupted" | "failed";
 
-export interface Artist {
+export type Artist = {
   readonly id: string;
   ownerAccount: string;
   name: string;
   homeCity: string;
   genre: string;
-}
+};
 
-export interface ArtistInsert {
+export type ArtistInsert = {
   ownerAccount: string;
   name: string;
   homeCity: string;
   genre: string;
-}
+};
 
-export interface Attachment {
+export type Attachment = {
   readonly id: string;
   conversationId: string;
   turnId: string;
@@ -31,18 +31,18 @@ export interface Attachment {
   mediaType: string;
   byteLength: number;
   payload: Uint8Array;
-}
+};
 
-export interface AttachmentInsert {
+export type AttachmentInsert = {
   conversationId: string;
   turnId: string;
   filename: string;
   mediaType: string;
   byteLength: number;
   payload: Uint8Array;
-}
+};
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -50,18 +50,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -69,18 +69,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -89,9 +89,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -99,9 +99,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -109,35 +109,35 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface CalendarEvent {
+export type CalendarEvent = {
   readonly id: string;
   ownerAccount: string;
   artistId: string;
@@ -145,63 +145,63 @@ export interface CalendarEvent {
   kind: CalendarEventKind;
   title: string;
   city: string;
-}
+};
 
-export interface CalendarEventInsert {
+export type CalendarEventInsert = {
   ownerAccount: string;
   artistId: string;
   date: string;
   kind: CalendarEventKind;
   title: string;
   city: string;
-}
+};
 
-export interface Conversation {
+export type Conversation = {
   readonly id: string;
   ownerAccount: string;
   artistId: string;
   title: string;
   headTurnId: string | null;
-}
+};
 
-export interface ConversationInsert {
+export type ConversationInsert = {
   ownerAccount: string;
   artistId: string;
   title: string;
   headTurnId?: string | null;
-}
+};
 
-export interface Profile {
+export type Profile = {
   readonly id: string;
   accountId: string;
   authUserId: string;
   displayName: string;
-}
+};
 
-export interface ProfileInsert {
+export type ProfileInsert = {
   accountId: string;
   authUserId: string;
   displayName: string;
-}
+};
 
-export interface Song {
+export type Song = {
   readonly id: string;
   ownerAccount: string;
   artistId: string;
   title: string;
   durationSeconds: number;
   energy: SongEnergy;
-}
+};
 
-export interface SongInsert {
+export type SongInsert = {
   ownerAccount: string;
   artistId: string;
   title: string;
   durationSeconds: number;
   energy: SongEnergy;
-}
+};
 
-export interface ToolCall {
+export type ToolCall = {
   readonly id: string;
   conversationId: string;
   turnId: string;
@@ -211,9 +211,9 @@ export interface ToolCall {
   resultJson: string | null;
   status: ToolCallStatus;
   durationMs: number | null;
-}
+};
 
-export interface ToolCallInsert {
+export type ToolCallInsert = {
   conversationId: string;
   turnId: string;
   ordinal: number;
@@ -222,9 +222,9 @@ export interface ToolCallInsert {
   resultJson?: string | null;
   status: ToolCallStatus;
   durationMs?: number | null;
-}
+};
 
-export interface Turn {
+export type Turn = {
   readonly id: string;
   conversationId: string;
   parentId: string | null;
@@ -235,9 +235,9 @@ export interface Turn {
   error: string | null;
   runnerId: string | null;
   heartbeatAt: Date | null;
-}
+};
 
-export interface TurnInsert {
+export type TurnInsert = {
   conversationId: string;
   parentId?: string | null;
   role: TurnRole;
@@ -247,9 +247,9 @@ export interface TurnInsert {
   error?: string | null;
   runnerId?: string | null;
   heartbeatAt?: Date | null;
-}
+};
 
-export interface Venue {
+export type Venue = {
   readonly id: string;
   ownerAccount: string;
   name: string;
@@ -257,16 +257,16 @@ export interface Venue {
   capacity: number;
   style: string;
   bookingContact: string;
-}
+};
 
-export interface VenueInsert {
+export type VenueInsert = {
   ownerAccount: string;
   name: string;
   city: string;
   capacity: number;
   style: string;
   bookingContact: string;
-}
+};
 
 interface Types extends AppTypes {
   artists: {

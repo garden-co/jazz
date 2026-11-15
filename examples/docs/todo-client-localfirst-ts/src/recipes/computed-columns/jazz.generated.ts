@@ -5,17 +5,17 @@ import { computed } from "./jazz.computed.js";
 
 export type TaskPriority = "low" | "medium" | "high";
 
-export interface Task {
+export type Task = {
   readonly id: string;
   title: string;
   score: number;
   readonly priority: TaskPriority;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   title: string;
   score: number;
-}
+};
 
 interface Types extends AppTypes {
   tasks: {

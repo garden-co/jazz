@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.tests.json",
+  "include": [
+    "src/cli.migrations-generation.test.ts",
+    "src/cli.migrations-locks.test.ts",
+    "src/**/*.d.ts"
+  ]
+}

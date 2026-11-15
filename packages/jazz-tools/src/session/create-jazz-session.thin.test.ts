@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import { DbReplacedError } from "../runtime/db-replaced-error.js";
@@ -10,17 +8,17 @@ import { WriteWaitTimeoutError } from "../runtime/client.js";
 import { ThinConnectionLostError, ThinRemoteError, ThinRuntime } from "../thin/thin-runtime.js";
 import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import {
   openBrowserSessionCore as createJazzClient,
   type BrowserJazzSession,
 } from "./create-jazz-session.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ $createdBy: session.user });
-  policy.notes.allowInsert.always();
-});
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
+const permissions = {
+  format: 1,
+  tables: { notes: { read: "$createdBy = session.user", insert: "true" } },
+};
 
 let server: TestJazz | undefined;
 const sessions: BrowserJazzSession[] = [];

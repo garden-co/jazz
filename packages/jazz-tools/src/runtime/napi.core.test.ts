@@ -1,5 +1,4 @@
 import { allowAll } from "./testing/allow-all.js";
-import { schema as s } from "../index.js";
 import { translateQuery } from "./query-adapter.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -12,7 +11,7 @@ import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
 import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
+import { startLocalJazzServer, testApp, type LocalJazzServerHandle } from "../testing/index.js";
 import {
   FEATURE_PAYLOAD_ZSTD,
   WIRE_PROTOCOL_VERSION,
@@ -514,12 +513,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       account: testAccountId(authorSeed),
       identity: { issuer: "urn:jazz:test", subject: authorSeed },
     };
-    const provenanceApp = s.defineApp(
-      {
-        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-      },
-      { migrations: "none" },
-    );
+    const provenanceApp = testApp({
+      tables: { todos: { columns: { title: "string", done: "boolean" } } },
+    });
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,

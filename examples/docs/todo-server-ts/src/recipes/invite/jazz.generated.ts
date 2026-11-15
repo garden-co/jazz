@@ -2,37 +2,37 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface ChatInvite {
+export type ChatInvite = {
   readonly id: string;
   chatId: string;
   code: string;
   singleUse: boolean;
-}
+};
 
-export interface ChatInviteInsert {
+export type ChatInviteInsert = {
   chatId: string;
   code: string;
   singleUse: boolean;
-}
+};
 
-export interface ChatMember {
+export type ChatMember = {
   readonly id: string;
   chatId: string;
   user_id: string;
   inviteId: string | null;
-}
+};
 
-export interface ChatMemberInsert {
+export type ChatMemberInsert = {
   chatId: string;
   user_id: string;
   inviteId?: string | null;
-}
+};
 
-export interface Chat {
+export type Chat = {
   readonly id: string;
-}
+};
 
-export interface ChatInsert {}
+export type ChatInsert = {};
 
 interface Types extends AppTypes {
   chatInvites: {

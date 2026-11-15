@@ -4,40 +4,40 @@ import { bindApp, type AppTypes } from "jazz-tools";
 
 export type WorkspaceMemberRole = "reader" | "writer" | "contributor" | "admin";
 
-export interface Document {
+export type Document = {
   readonly id: string;
   title: string;
   content: string;
   workspaceId: string;
-}
+};
 
-export interface DocumentInsert {
+export type DocumentInsert = {
   title: string;
   content: string;
   workspaceId: string;
-}
+};
 
-export interface WorkspaceMember {
+export type WorkspaceMember = {
   readonly id: string;
   workspaceId: string;
   user_id: string;
   role: WorkspaceMemberRole;
-}
+};
 
-export interface WorkspaceMemberInsert {
+export type WorkspaceMemberInsert = {
   workspaceId: string;
   user_id: string;
   role: WorkspaceMemberRole;
-}
+};
 
-export interface Workspace {
+export type Workspace = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface WorkspaceInsert {
+export type WorkspaceInsert = {
   name: string;
-}
+};
 
 interface Types extends AppTypes {
   documents: {

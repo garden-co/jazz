@@ -34,7 +34,7 @@ export type ProductArt =
   | "strings"
   | "picks";
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -42,18 +42,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -61,18 +61,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -81,9 +81,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -91,9 +91,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -101,48 +101,48 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface CartLine {
+export type CartLine = {
   readonly id: string;
   cartId: string;
   productId: string;
   quantity: number;
-}
+};
 
-export interface CartLineInsert {
+export type CartLineInsert = {
   cartId: string;
   productId: string;
   quantity: number;
-}
+};
 
-export interface Cart {
+export type Cart = {
   readonly id: string;
   shopper: string;
   shippingMethod: CartShippingMethod;
@@ -153,9 +153,9 @@ export interface Cart {
   shipPostcode: string | null;
   shipCountry: string | null;
   checkoutKey: string | null;
-}
+};
 
-export interface CartInsert {
+export type CartInsert = {
   shopper: string;
   shippingMethod?: CartShippingMethod;
   shipName?: string | null;
@@ -165,56 +165,56 @@ export interface CartInsert {
   shipPostcode?: string | null;
   shipCountry?: string | null;
   checkoutKey?: string | null;
-}
+};
 
-export interface Category {
+export type Category = {
   readonly id: string;
   slug: string;
   name: string;
   blurb: string;
   position: number;
-}
+};
 
-export interface CategoryInsert {
+export type CategoryInsert = {
   slug: string;
   name: string;
   blurb: string;
   position: number;
-}
+};
 
-export interface OrderEvent {
+export type OrderEvent = {
   readonly id: string;
   orderId: string;
   status: OrderEventStatus;
   note: string;
   at: Date;
-}
+};
 
-export interface OrderEventInsert {
+export type OrderEventInsert = {
   orderId: string;
   status: OrderEventStatus;
   note: string;
   at: Date;
-}
+};
 
-export interface OrderLine {
+export type OrderLine = {
   readonly id: string;
   orderId: string;
   productId: string;
   productName: string;
   unitPriceCents: number;
   quantity: number;
-}
+};
 
-export interface OrderLineInsert {
+export type OrderLineInsert = {
   orderId: string;
   productId: string;
   productName: string;
   unitPriceCents: number;
   quantity: number;
-}
+};
 
-export interface Order {
+export type Order = {
   readonly id: string;
   shopper: string;
   code: string;
@@ -231,9 +231,9 @@ export interface Order {
   shipPostcode: string;
   shipCountry: string;
   placedAt: Date;
-}
+};
 
-export interface OrderInsert {
+export type OrderInsert = {
   shopper: string;
   code: string;
   status: OrderStatus;
@@ -249,9 +249,9 @@ export interface OrderInsert {
   shipPostcode: string;
   shipCountry: string;
   placedAt: Date;
-}
+};
 
-export interface Payment {
+export type Payment = {
   readonly id: string;
   orderId: string;
   provider: PaymentProvider;
@@ -260,9 +260,9 @@ export interface Payment {
   status: PaymentStatus;
   amountCents: number;
   failureReason: string | null;
-}
+};
 
-export interface PaymentInsert {
+export type PaymentInsert = {
   orderId: string;
   provider: PaymentProvider;
   providerRef: string;
@@ -270,9 +270,9 @@ export interface PaymentInsert {
   status: PaymentStatus;
   amountCents: number;
   failureReason?: string | null;
-}
+};
 
-export interface Product {
+export type Product = {
   readonly id: string;
   sku: string;
   slug: string;
@@ -287,9 +287,9 @@ export interface Product {
   art: ProductArt;
   searchText: string;
   position: number;
-}
+};
 
-export interface ProductInsert {
+export type ProductInsert = {
   sku: string;
   slug: string;
   name: string;
@@ -303,18 +303,18 @@ export interface ProductInsert {
   art: ProductArt;
   searchText: string;
   position: number;
-}
+};
 
-export interface Stock {
+export type Stock = {
   readonly id: string;
   productId: string;
   onHand: number;
-}
+};
 
-export interface StockInsert {
+export type StockInsert = {
   productId: string;
   onHand: number;
-}
+};
 
 interface Types extends AppTypes {
   better_auth_account: {
