@@ -98,6 +98,8 @@ final class StagePlanTests: XCTestCase {
         XCTAssertNil(plain.first?.show)
         let plainShow = try await app.jazz.one(JazzApp.shows.query().where(JazzApp.shows.id.eq(show.id)))
         XCTAssertNil(plainShow?.tasks)
+        // The same row compares equal with and without its include.
+        XCTAssertEqual(plain.first, withShow.first(where: { $0.id == plain.first?.id }))
         let titles = try await DocsSnippets.select(app.jazz, show: show)
         XCTAssertEqual(titles.map(\.title), ["Load in", "Sound check", "Doors", "Strike"])
         try await app.jazz.close()
