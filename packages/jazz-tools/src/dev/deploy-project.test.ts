@@ -37,7 +37,11 @@ it("ships the one schema version of an app without history", async () => {
   const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
   expect(shippedMigrations(app.wasmSchema)).toEqual({
     schemas: [
-      { hash: await computeSchemaHash(app.wasmSchema), schema: { tables: app.wasmSchema } },
+      {
+        hash: await computeSchemaHash(app.wasmSchema),
+        // A shipped version carries no relations.
+        schema: { tables: { notes: { columns: app.wasmSchema.notes!.columns } } },
+      },
     ],
     migrations: [],
   });
