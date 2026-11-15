@@ -1231,21 +1231,32 @@ impl StoreLoop {
     /// batches (retried with backoff), so this is a bug, and large values
     /// are a core feature: the server does not run degraded or restart the
     /// runtime in place. It logs one fatal error and exits non-zero, for
-    /// its orchestrator to restart the process. Test builds record the
-    /// error as the store's fault and stop the runtime instead of exiting.
+    /// its orchestrator to restart the process. That holds for an embedded
+    /// core too (a Node or Next app's `createJazz` backend with S3 or
+    /// Vercel Blob): the host process exits with it.
+    ///
+    /// The line also goes straight to stderr, as a host's subscriber may
+    /// not print it (the NAPI host's telemetry mode only exports spans).
+    /// Test builds, this crate's and its dependents' with the `test`
+    /// feature, record the error as the store's fault and stop the runtime
+    /// instead of exiting.
     fn lane_died(&mut self, app: &str, died: LaneDied) {
         tracing::error!(
             app,
             lane = died.lane,
             "large-value chunk lane died; the server exits"
         );
-        // The line above is only buffered for OTLP export: flush it.
+        eprintln!(
+            "large-value chunk lane died; the server exits (app={app}, lane={})",
+            died.lane
+        );
+        // An OTLP exporter only buffered the line above: flush it.
         if let Some(hook) = BEFORE_FATAL_EXIT.get() {
             hook();
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test")))]
         std::process::exit(FATAL_EXIT_CODE);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test"))]
         {
             self.stop();
             if let Ok(mut fault) = self.fault.lock() {
