@@ -2057,3 +2057,43 @@ fn every_history_version_must_lead_to_the_current_one() {
     value.as_object_mut().unwrap().remove("migrations");
     assert!(load_client(value.to_string().as_bytes()).is_err());
 }
+
+/// `policy.<t>.gather(…)` policies from the TS DSL: a query inside
+/// `recursive(…)` ends at the next `, <field>:`, so a `select` or `order by`
+/// list doesn't run on into it. The two below then reach the engine, which
+/// refuses them as a deployment would.
+#[test]
+fn recursive_relations_end_their_queries_at_the_next_field() {
+    let app = r#"{ "format": 1, "tables": {
+        "teams": { "columns": { "name": "string" } },
+        "user_team_edges": { "columns": { "team": "uuid", "user_id": "uuid" } },
+        "team_team_edges": { "columns": { "administrator": "boolean", "child_team": "uuid", "parent_team": "uuid" } },
+        "team_entry": { "columns": { "user_id": "uuid", "target_id": "uuid", "team_id": "uuid", "administrator": "boolean" } },
+        "dropdowns": { "columns": { "label": "string" } },
+        "dropdowns_access_edges": { "columns": { "team_id": "uuid", "resource_id": "uuid", "grant_role": "string", "administrator": "boolean" } }
+    } }"#;
+    let teams = "exists (from recursive(seed: from teams join user_team_edges as __join_0 on teams.id = __join_0.team where __join_0.user_id = session.user, step: from team_team_edges where team_team_edges.administrator = bool(false) and team_team_edges.child_team = id(frontier) select team_team_edges.parent_team as id, frontier: id(row), dedupe: (id(row)), maxDepth: 8) where teams.id = outer.id)";
+    let dropdowns = "exists (from recursive(seed: from team_entry join teams as __hop_0 on team_entry.target_id = __hop_0.id where team_entry.user_id = session.user select __hop_0.id as id, step: from team_entry where team_entry.administrator = bool(false) and team_entry.team_id = id(frontier) select team_entry.target_id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 8) join dropdowns_access_edges as __recursive_join_0 on teams.id = __recursive_join_0.team_id where __recursive_join_0.resource_id = outer.id and __recursive_join_0.grant_role in [text('viewer')] and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)";
+    let ordered = "exists (from recursive(seed: from teams select teams.id as id, teams.name as name, step: from teams where teams.id = id(frontier) order by teams.name, teams.id select teams.id as id, teams.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: fixpoint) where teams.id = outer.id)";
+    for text in [teams, dropdowns, ordered] {
+        expr::parse(text).unwrap_or_else(|e| panic!("{}", e.render(text)));
+    }
+    for (table, text, engine) in [
+        (
+            "teams",
+            teams,
+            "Gather seeds other than a filtered table scan are not supported in policies yet",
+        ),
+        (
+            "dropdowns",
+            dropdowns,
+            "ExistsRel column references unknown scope 'teams'",
+        ),
+    ] {
+        let permissions = serde_json::json!({ "format": 1, "tables": { table: { "read": text } } });
+        let error = load(app.as_bytes(), permissions.to_string().as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(engine), "{error}");
+    }
+}
