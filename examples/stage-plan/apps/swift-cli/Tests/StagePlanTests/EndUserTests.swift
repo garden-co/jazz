@@ -84,4 +84,28 @@ final class EndUserTests: XCTestCase {
         XCTAssertEqual(linked.subject, "bob")
         try await device.close()
     }
+
+    struct Flaky: Error {}
+
+    /// A thrown token error is a failed fetch, not a sign-out.
+    func testAThrownTokenErrorKeepsTheSessionSignedIn() async throws {
+        let server = try await TestServer()
+        let relay = try await TestRelay(server)
+        let alice = try await endUser(relay, server, auth: .bearer { reason in
+            if reason == .refresh { throw Flaky() }
+            return "token-alice"
+        })
+        let user = try await firstSignedIn(alice)
+        do {
+            try await alice.refresh()
+            XCTFail("refresh should surface the failed fetch")
+        } catch {
+            guard case .io = error else { return XCTFail("\(error)") }
+        }
+        let state = try await alice.sessionState()
+        XCTAssertEqual(state, .signedIn(user))
+        // Reads still work.
+        _ = try await alice.all(JazzApp.shows.query())
+        try await alice.close()
+    }
 }
