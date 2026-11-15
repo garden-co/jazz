@@ -1,5 +1,4 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { deploy } from "../../src/dev/catalogue.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
@@ -12,6 +11,7 @@ import {
   sessionTabPermissions as permissions,
 } from "./session-tab-schema.js";
 import {
+  deploy,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -36,10 +36,16 @@ afterEach(async () => {
 /** The app's backend, and `url`, the origin a browser of this test uses. */
 async function appAt(name: string, user?: string) {
   const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: permissions,
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const url = user ? await jazzAppUserUrl(backend, user) : await jazzAppVisitor(backend);
   // The backend answers no CORS: send the session's own requests to it from Node.

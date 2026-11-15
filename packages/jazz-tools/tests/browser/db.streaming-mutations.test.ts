@@ -1,20 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { schema as s } from "../../src/index.js";
 import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
 import type { Db } from "../../src/runtime/db.js";
-
-const app = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
+import { app } from "./apps/todos-title-done/jazz.generated.js";
 
 let db: Db | undefined;
 

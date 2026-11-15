@@ -7,7 +7,7 @@ import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { fireAndReport, waitForWrite } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { type DurabilityTier } from "jazz-tools";
 
 const INITIAL_MESSAGES_TO_SHOW = 20;

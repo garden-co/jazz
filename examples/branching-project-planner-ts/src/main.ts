@@ -1,5 +1,5 @@
 import { createJazzClient, parseSnapshotRef, serializeSnapshotRef } from "jazz-tools";
-import { app, type Task } from "../schema.js";
+import { app, type Task } from "../jazz.generated.js";
 
 // This database runs without a server, on this browser's device account.
 const session = await createJazzClient({

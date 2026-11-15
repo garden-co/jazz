@@ -1053,7 +1053,7 @@ surface. The test plan below records additional intended coverage.
   compare the maintained stream's reduced result to the one-shot result at each
   checkpoint.
 - Extend the TS query API coverage in
-  `packages/jazz-tools/tests/ts-dsl/query-api.test.ts` so result arrays that
+  `packages/jazz-tools/tests/typed-app/query-api.test.ts` so result arrays that
   currently sort ids before comparison become ordered-equality assertions. Add
   explicit cases for
   default root ordering, reverse relation include arrays ordered by

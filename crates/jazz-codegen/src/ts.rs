@@ -347,7 +347,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
         out.push_str("export type AppComputed = ComputedImpl<Types>;\n");
     }
     if has_transforms {
-        out.push_str("export type AppTransforms = TransformImpl<Transforms>;\n");
+        out.push_str("export type AppTransforms = TransformImpl<Transforms, Types>;\n");
     }
     if has_computed || has_transforms {
         out.push('\n');

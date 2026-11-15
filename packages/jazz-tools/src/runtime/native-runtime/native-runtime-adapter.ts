@@ -942,14 +942,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime;
   }
 
-  readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
-    if (this.closed || this.ownerRuntime.closed) return false;
-    const context = this.nativeReadContext(
-      readSession(sessionJson),
-      transaction ? this.pendingTxs.get(transaction) : undefined,
-    );
-    return context.kind !== "session-authority";
-  }
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
   /** Pooled native subscriptions, by pool id: one native call reads them all. */
@@ -2476,6 +2468,12 @@ export class NativeRuntimeAdapter implements Runtime {
       hasStagedMutations: false,
     });
     return id;
+  }
+
+  hasStagedTransactionWrites(openTransactionId: OpenTransactionId): boolean | undefined {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.hasStagedTransactionWrites(openTransactionId);
+    return this.pendingTxs.get(openTransactionId)?.hasStagedMutations;
   }
 
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
