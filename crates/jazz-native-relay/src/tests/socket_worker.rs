@@ -290,6 +290,52 @@ fn a_first_load_wait_on_a_silent_live_link_is_released_on_time() {
     );
 }
 
+/// A relay whose foreground waits on the server with no deadline (a
+/// subscription the silent server never answers) sleeps: its owner runs no
+/// drives until something happens. It used to re-tick every 25 ms while any
+/// subscription was unopened or any read pending.
+#[test]
+fn a_relay_waiting_on_a_silent_server_without_a_deadline_stays_idle() {
+    let root = tempfile::tempdir().unwrap();
+    let (connect, connected_now) = tokio::sync::oneshot::channel();
+    let connector = ScriptedConnector::new([Step::ConnectWhenReleased(connected_now)]);
+    let (mut host, _, alice) = scripted_foreground(root.path(), "idle-relay", connector);
+    let scope = host.foregrounds[&alice].scope.clone();
+    connect.send(()).unwrap();
+    wait_for(&host, "the link is live", |host| connected(host, &scope));
+
+    let ForegroundDbCommandResponse::Subscribed { .. } = host
+        .execute_foreground_command(
+            alice,
+            ForegroundDbCommandRequest::Subscribe {
+                query: postcard::to_allocvec(&jazz::query::Query::from("todos")).unwrap(),
+                options_json: r#"{"tier":"remote"}"#.into(),
+            },
+        )
+        .unwrap()
+    else {
+        panic!("subscription opens");
+    };
+    let relay = host
+        .relays
+        .values()
+        .find(|opened| opened.scope == scope)
+        .expect("alice's relay is open")
+        .relay
+        .clone();
+    let drives = || relay.run(|worker| Ok(worker.drives())).unwrap();
+    // Let the subscription's own traffic settle.
+    thread::sleep(Duration::from_millis(200));
+    let before = drives();
+    thread::sleep(Duration::from_millis(1_000));
+    // Each sample is itself a command, and runs one drive.
+    let idle = drives() - before - 1;
+    assert!(
+        idle <= 2,
+        "an idle relay ran {idle} drives in a second (polling ran ~40)"
+    );
+}
+
 /// Losing an established upstream link that the worker is retrying is
 /// connection state, not a foreground failure (#3630), even when the
 /// transport classifies the loss as non-retryable. Alice's foreground keeps

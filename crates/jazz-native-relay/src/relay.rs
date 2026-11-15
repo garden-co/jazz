@@ -71,8 +71,6 @@ const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
 /// Rounds of one drive before the owner yields to queued commands. A drive
 /// that hits it continues on the next owner turn.
 const NATIVE_RELAY_DRIVE_ROUNDS: usize = 64;
-/// How often the owner re-checks time-bound work (a subscription waiting for
-/// its first answer, a read waiting for the server) while some is pending.
 /// Bounds on the per-foreground handles a JavaScript runtime may hold open.
 const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
 const NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX: usize = 64;
@@ -853,7 +851,8 @@ impl Foreground {
         Ok(())
     }
 
-    /// Whether time-bound work is pending that a drive must re-check.
+    /// Tell the foreground's JavaScript runtime there is something to read,
+    /// if the last drive produced any (`notify`), so it reads once per drive.
     fn wake(&mut self) {
         if !std::mem::take(&mut self.notify) {
             return;
@@ -920,6 +919,9 @@ pub(crate) struct RelayWorker {
     /// to change an outcome (a read's wait running out): the owner sleeps
     /// until then, not on a polling interval.
     wake_at: Rc<Cell<Option<Instant>>>,
+    /// Drives the owner has run, for tests that check an idle relay sleeps.
+    #[cfg(test)]
+    drives: usize,
 }
 
 /// A binding's tick requests set `dirty`; the owner's drive ticks it. Its
@@ -1035,6 +1037,8 @@ impl RelayWorker {
             rebuilt: false,
             redrive: false,
             wake_at,
+            #[cfg(test)]
+            drives: 0,
         })
     }
 
@@ -1274,6 +1278,12 @@ impl RelayWorker {
         self.persistent.pending_upload_count()
     }
 
+    /// Drives the owner has run so far.
+    #[cfg(test)]
+    pub(crate) fn drives(&self) -> usize {
+        self.drives
+    }
+
     /// The current upstream connection's generation (tests carry the
     /// upstream themselves, and serve each new connection afresh).
     #[cfg(test)]
@@ -1383,6 +1393,10 @@ impl RelayWorker {
 
     /// Tick what asked for a tick and move frames until nothing moves.
     pub(crate) fn drive(&mut self) {
+        #[cfg(test)]
+        {
+            self.drives += 1;
+        }
         self.redrive = false;
         for round in 0.. {
             if round == NATIVE_RELAY_DRIVE_ROUNDS {
