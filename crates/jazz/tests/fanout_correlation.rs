@@ -1536,6 +1536,7 @@ fn refreshed(
         skipped: after.skipped - before.skipped,
         rechecked: after.rechecked - before.rechecked,
         renested: after.renested - before.renested,
+        renested_narrowly: after.renested_narrowly - before.renested_narrowly,
         reran: after.reran - before.reran,
         uncorrelated: after.uncorrelated - before.uncorrelated,
         unevidenced: after.unevidenced - before.unevidenced,
@@ -1650,6 +1651,113 @@ fn r2_a_child_write_renests_only_the_roots_holding_its_parent() {
         delete(&db, "messages", id(MESSAGES, 9))
     });
     assert_eq!((stats.reran, stats.renested), (0, 1), "{stats:?}");
+    assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
+}
+
+/// R3. A write under one of two relations nests only that one again; the
+/// other keeps its cells.
+///
+/// ```
+/// thread: messages WHERE chat = 0, writer (users), marks (read_marks)
+/// writer ──insert mark(m1)──► m1's marks nested again, writer kept
+/// ```
+#[test]
+fn r3_a_write_under_one_relation_reads_only_that_relation_again() {
+    let db = open(chat_schema(None), 1);
+    person(&db, 0, "u0");
+    chat(&db, 0, "c0");
+    for n in 0..3 {
+        message(&db, n, 0, n as i64, None);
+        by(&db, n, 0);
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(writer())
+            .array_subquery(ArraySubquery::new("marks", "read_marks", "message", "id")),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "a read mark on m1", || {
+        insert(
+            &db,
+            "read_marks",
+            id(MARKS, 1),
+            &[
+                ("message", uuid(id(MESSAGES, 1))),
+                ("reader", subject(0)),
+                ("at", Value::I64(1)),
+            ],
+        )
+    });
+    assert_eq!(
+        (stats.reran, stats.renested, stats.renested_narrowly),
+        (0, 1, 1),
+        "only `marks` is nested again: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(MESSAGES, 1)]));
+}
+
+/// R4. A write at a nested level nests again only the relations on its
+/// path: the relation above it keeps its rows' own cells and its other
+/// nested relations, and the merged cell is typed as a full run types it,
+/// an emptied nested relation included.
+///
+/// ```
+/// chat list: chats, last (messages, 1) { writer (users), marks }
+/// writer ──rename u1──► chat 1's last.writer nested again
+/// writer ──delete u1──► chat 1's last.writer empty
+/// ```
+#[test]
+fn r4_a_nested_write_reads_only_down_its_path() {
+    let db = open(chat_schema(None), 1);
+    for u in 0..3 {
+        person(&db, u, &format!("u{u}"));
+    }
+    for c in 0..3 {
+        chat(&db, c, &format!("c{c}"));
+        message(&db, c, c, c as i64, None);
+        by(&db, c, c);
+        insert(
+            &db,
+            "read_marks",
+            id(MARKS, c),
+            &[
+                ("message", uuid(id(MESSAGES, c))),
+                ("reader", subject(c)),
+                ("at", Value::I64(1)),
+            ],
+        );
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "chat list",
+        Query::from("chats").array_subquery(
+            ArraySubquery::new("last", "messages", "chat", "id")
+                .order_by("sent_at", OrderDirection::Desc)
+                .limit(1)
+                .nested(writer())
+                .nested(ArraySubquery::new("marks", "read_marks", "message", "id")),
+        ),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "u1 renamed", || {
+        update(&db, "users", id(USERS, 1), &[("name", text("renamed"))])
+    });
+    assert_eq!(
+        (stats.reran, stats.renested, stats.renested_narrowly),
+        (0, 1, 1),
+        "only last.writer is nested again: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
+    let (stats, reported) = refreshed(&db, &mut lives, "u1 deleted", || {
+        delete(&db, "users", id(USERS, 1))
+    });
+    assert_eq!((stats.reran, stats.renested_narrowly), (0, 1), "{stats:?}");
     assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
 }
 
@@ -2157,7 +2265,7 @@ fn seed_world(db: &Db) -> World {
 #[test]
 fn correlated_results_match_one_shot_reads_under_random_writes() {
     let mut totals = [(0u64, 0u64); 2];
-    let mut renested = 0;
+    let (mut renested, mut narrowly) = (0, 0);
     for seed in [3, 17, 29, 64, 101] {
         let on = differential_run(seed, true);
         let off = differential_run(seed, false);
@@ -2171,11 +2279,15 @@ fn correlated_results_match_one_shot_reads_under_random_writes() {
         }
         assert_eq!(off.1.renested, 0, "watches off: nothing is re-nested");
         renested += on.1.renested;
+        narrowly += on.1.renested_narrowly;
     }
     let [(filtered, skipped), (full, none)] = totals;
     // The random writes reach the in-place refreshes, each checked here
     // and by the engine's own oracle against a full run.
-    assert!(renested > 0, "re-nests {renested}");
+    assert!(
+        renested > narrowly && narrowly > 0,
+        "re-nests {renested}, narrow {narrowly}"
+    );
     assert_eq!(none, 0, "watches off: no correlation skips");
     assert!(skipped > 0, "the filter skipped changes: {skipped}");
     assert!(

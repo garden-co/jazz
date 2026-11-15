@@ -374,6 +374,9 @@ pub struct FanoutStats {
     pub rechecked: u64,
     /// Of those, refreshes that nested relations again (a re-nest).
     pub renested: u64,
+    /// Of those re-nests, the ones that read only the relations on the
+    /// matched levels' paths, every other relation keeping its cells.
+    pub renested_narrowly: u64,
     /// Woken groups that re-ran their query and diffed the whole result.
     pub reran: u64,
     /// Changed rows of a correlation-watched table that a watching group
@@ -1525,8 +1528,9 @@ impl Inner {
                 if let Some(hits) = selfhits.remove(&gid)
                     && matches!(refreshed, Refresh::Rechecked)
                 {
-                    if self.renest(&mut group, &hits).is_some() {
+                    if let Some(narrowly) = self.renest(&mut group, &hits) {
                         self.fan.stats.renested += 1;
+                        self.fan.stats.renested_narrowly += u64::from(narrowly);
                         #[cfg(any(test, feature = "testing"))]
                         oracle::compare(self, &group, "selfhit");
                     } else {
@@ -1554,9 +1558,10 @@ impl Inner {
                 continue;
             };
             let mut group = group.borrow_mut();
-            if self.renest(&mut group, &hits).is_some() {
+            if let Some(narrowly) = self.renest(&mut group, &hits) {
                 self.fan.stats.rechecked += 1;
                 self.fan.stats.renested += 1;
+                self.fan.stats.renested_narrowly += u64::from(narrowly);
                 #[cfg(any(test, feature = "testing"))]
                 oracle::compare(self, &group, "renest");
             } else {
@@ -2329,8 +2334,10 @@ impl Inner {
     /// nesting the relations again for the root rows whose subtree holds a
     /// matched parent or row. A `Related` table
     /// is read only through optional relations, so the roots, their cells
-    /// and their order are unchanged. `None`: undecided, re-run instead.
-    fn renest(&self, group: &mut Group, hits: &[(usize, Hit)]) -> Option<()> {
+    /// and their order are unchanged. `Some(narrowly)` when done (whether
+    /// only the relations on the hits' paths were read); `None`:
+    /// undecided, re-run instead.
+    fn renest(&self, group: &mut Group, hits: &[(usize, Hit)]) -> Option<bool> {
         if group.awaiting || group.prepared.query.array_subqueries.is_empty() {
             return None;
         }
@@ -2386,7 +2393,28 @@ impl Inner {
                 ..row.clone()
             });
         }
-        let nested = self.nest_relations(&group.prepared, group.identity, &read, bare);
+        // Only the relations on a hit's path can have changed: nested again
+        // down that path, every sibling relation of a level on it keeps its
+        // old cells. Nothing narrower than all of them: the plain re-nest.
+        let mut tree = BTreeMap::new();
+        for (level, _) in hits {
+            if let Some(level) = group.correlations.get(*level) {
+                scope_insert(&mut tree, &level.path);
+            }
+        }
+        let scope = scope_normalize(&group.prepared.query.array_subqueries, tree).filter(|tree| {
+            tree.len() < relations.len()
+                || tree.values().any(|node| matches!(node, ScopeNode::Part(_)))
+        });
+        let nested = match &scope {
+            None => self.nest_relations(&group.prepared, group.identity, &read, bare),
+            Some(scope) => {
+                let mut scoped = group.prepared.clone();
+                scoped.query.array_subqueries =
+                    scope_prune(&group.prepared.query.array_subqueries, scope);
+                self.nest_relations(&scoped, group.identity, &read, bare)
+            }
+        };
         let nested = nested.ok()?;
         // The same roots, in the same order: checked before anything is
         // merged or replaced, so a refusal leaves the result as it was.
@@ -2398,6 +2426,50 @@ impl Inner {
         {
             return None;
         }
+        // The old row with the scoped relations' cells replaced in place.
+        let nested: Vec<CurrentRow> = match &scope {
+            None => nested,
+            Some(scope) => {
+                let mut merged = Vec::with_capacity(nested.len());
+                for (index, fresh) in affected.iter().zip(nested) {
+                    let old = &group.rows[*index];
+                    let mut cells = (*old.cells).clone();
+                    let mut types = old.types.to_vec();
+                    for (name, node) in scope {
+                        let from = fresh.cells.iter().rposition(|(n, _)| n == name)?;
+                        let to = cells.iter().rposition(|(n, _)| n == name)?;
+                        match node {
+                            ScopeNode::Whole => {
+                                cells[to] = fresh.cells[from].clone();
+                                types[to] = fresh.types[from].clone();
+                            }
+                            ScopeNode::Part(sub) => {
+                                let (Some(old_value), Some(fresh_value)) =
+                                    (&cells[to].1, &fresh.cells[from].1)
+                                else {
+                                    return None;
+                                };
+                                let (value, ty) = merge_relation(
+                                    old_value,
+                                    &types[to],
+                                    fresh_value,
+                                    &fresh.types[from],
+                                    sub,
+                                )?;
+                                cells[to].1 = Some(value);
+                                types[to] = ty;
+                            }
+                        }
+                    }
+                    merged.push(CurrentRow {
+                        cells: Arc::new(cells),
+                        types: types.into(),
+                        ..fresh
+                    });
+                }
+                merged
+            }
+        };
         let prior: HashMap<RowUuid, CurrentRow> = if group.key.splices.is_empty() {
             HashMap::new()
         } else {
@@ -2424,7 +2496,7 @@ impl Inner {
             group.push(event);
         }
         Self::hold(group);
-        Some(())
+        Some(scope.is_some())
     }
 
     /// Reads the sort keys of a re-checkable group whose order is not
@@ -2559,6 +2631,184 @@ impl Group {
             queue.borrow_mut().push_back(event);
         }
     }
+}
+
+/// What a scoped re-nest reads again under one relation: all of it, or
+/// only the named nested relations (the others keep their old cells).
+#[derive(Clone, Debug)]
+enum ScopeNode {
+    Whole,
+    Part(BTreeMap<String, ScopeNode>),
+}
+
+/// Add the relation path `path` (root first) to `tree`: its last relation
+/// is read again whole; the ones above it only in part.
+fn scope_insert(tree: &mut BTreeMap<String, ScopeNode>, path: &[String]) {
+    let Some((first, rest)) = path.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        tree.insert(first.clone(), ScopeNode::Whole);
+        return;
+    }
+    match tree
+        .entry(first.clone())
+        .or_insert_with(|| ScopeNode::Part(BTreeMap::new()))
+    {
+        ScopeNode::Whole => {}
+        ScopeNode::Part(sub) => scope_insert(sub, rest),
+    }
+}
+
+/// `tree` checked against the query's relations: `None` when it names
+/// one the query has not; a level whose dropped siblings could filter its
+/// rows (a required relation) is read whole.
+fn scope_normalize(
+    arrays: &[crate::query::ArraySubquery],
+    tree: BTreeMap<String, ScopeNode>,
+) -> Option<BTreeMap<String, ScopeNode>> {
+    let mut out = BTreeMap::new();
+    for (name, node) in tree {
+        let array = arrays.iter().find(|array| array.column_name == name)?;
+        let node = match node {
+            ScopeNode::Whole => ScopeNode::Whole,
+            ScopeNode::Part(sub) => {
+                let filters = array.nested_arrays.iter().any(|nested| {
+                    !sub.contains_key(&nested.column_name)
+                        && nested.requirement != crate::query::ArraySubqueryRequirement::Optional
+                });
+                if filters {
+                    ScopeNode::Whole
+                } else {
+                    ScopeNode::Part(scope_normalize(&array.nested_arrays, sub)?)
+                }
+            }
+        };
+        out.insert(name, node);
+    }
+    Some(out)
+}
+
+/// The relations of `arrays` that `tree` reads again, nested ones pruned
+/// the same way.
+fn scope_prune(
+    arrays: &[crate::query::ArraySubquery],
+    tree: &BTreeMap<String, ScopeNode>,
+) -> Vec<crate::query::ArraySubquery> {
+    arrays
+        .iter()
+        .filter_map(|array| {
+            let node = tree.get(&array.column_name)?;
+            let mut array = array.clone();
+            if let ScopeNode::Part(sub) = node {
+                array.nested_arrays = scope_prune(&array.nested_arrays, sub);
+            }
+            Some(array)
+        })
+        .collect()
+}
+
+/// A relation cell (an array of records) with the relations `tree` names
+/// taken from `fresh` (read with only those) and every other field kept
+/// from `old`, re-encoded under the descriptor a full run would build;
+/// `None` when the two do not line up row for row.
+fn merge_relation(
+    old: &Value,
+    old_ty: &ValueType,
+    fresh: &Value,
+    fresh_ty: &ValueType,
+    tree: &BTreeMap<String, ScopeNode>,
+) -> Option<(Value, ValueType)> {
+    use crate::records::{DescriptorField, OwnedRecord, RecordDescriptor};
+    let (Value::Array(olds), Value::Array(freshs)) = (old, fresh) else {
+        return None;
+    };
+    if olds.len() != freshs.len() {
+        return None;
+    }
+    if olds.is_empty() {
+        return Some((old.clone(), old_ty.clone()));
+    }
+    let (ValueType::Array(old_element), ValueType::Array(fresh_element)) = (old_ty, fresh_ty)
+    else {
+        return None;
+    };
+    let (ValueType::Record(old_desc), ValueType::Record(fresh_desc)) =
+        (old_element.as_ref(), fresh_element.as_ref())
+    else {
+        return None;
+    };
+    let old_fields = old_desc.fields();
+    let fresh_fields = fresh_desc.fields();
+    // Relations are appended after the row's own cells: the last match.
+    let position = |fields: &[DescriptorField], name: &str| {
+        fields
+            .iter()
+            .rposition(|field| field.name.as_deref() == Some(name))
+    };
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(olds.len());
+    let mut replaced: BTreeMap<usize, Vec<(ValueType, bool)>> = BTreeMap::new();
+    for (old, fresh) in olds.iter().zip(freshs) {
+        let (Value::Record(old), Value::Record(fresh)) = (old, fresh) else {
+            return None;
+        };
+        let mut values = old.to_values().ok()?;
+        let fresh_values = fresh.to_values().ok()?;
+        if values.first() != fresh_values.first() {
+            return None;
+        }
+        for (name, node) in tree {
+            let at = position(old_fields, name)?;
+            let from = position(fresh_fields, name)?;
+            let (value, ty) = match node {
+                ScopeNode::Whole => (
+                    fresh_values.get(from)?.clone(),
+                    fresh_fields[from].value_type.clone(),
+                ),
+                ScopeNode::Part(sub) => merge_relation(
+                    values.get(at)?,
+                    &old_fields[at].value_type,
+                    fresh_values.get(from)?,
+                    &fresh_fields[from].value_type,
+                    sub,
+                )?,
+            };
+            let filled = matches!(&value, Value::Array(items) if !items.is_empty());
+            replaced.entry(at).or_default().push((ty, filled));
+            values[at] = value;
+        }
+        rows.push(values);
+    }
+    let mut fields: Vec<DescriptorField> = old_fields.to_vec();
+    for (at, types) in replaced {
+        // A nested relation's type is its non-empty siblings' widest.
+        let mut shared: Option<ValueType> = None;
+        for (ty, filled) in &types {
+            if *filled {
+                shared = Some(match shared {
+                    None => ty.clone(),
+                    Some(other) => crate::values::widen(&other, ty).ok()?,
+                });
+            }
+        }
+        fields[at].value_type = shared.unwrap_or_else(|| types[0].0.clone());
+    }
+    let descriptor = RecordDescriptor::new_with_fields(fields.clone());
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let record = row
+            .iter()
+            .zip(&fields)
+            .map(|(value, field)| crate::values::coerce(value, &field.value_type))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let raw = descriptor.create(&record).ok()?;
+        values.push(Value::Record(OwnedRecord::new(raw, descriptor)));
+    }
+    Some((
+        Value::Array(values),
+        ValueType::Array(Box::new(ValueType::Record(Box::new(descriptor)))),
+    ))
 }
 
 /// What matched at one correlation level: the held row, and the held
