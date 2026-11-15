@@ -15,6 +15,8 @@ members = [
   "crates/jazz-native-transport",
   "crates/jazz-native-relay",
   "crates/jazz-app",
+  # JSON-in/JSON-out bindings of jazz-app: UniFFI (Swift, Kotlin), C ABI (Go).
+  "crates/jazz-ffi",
   "crates/jazz-cli",
   "crates/jazz-codegen",
   "crates/jazz-server",
@@ -24,6 +26,7 @@ members = [
   "crates/jazz-napi",
   # Opens its app through jazz-app's Send + Clone handle.
   "examples/todo-server-rs",
+  "examples/stage-plan/apps/rust-cli",
   # The docs copy, whose snippets the docs include by region.
   "examples/docs/todo-server-rs",
   "examples/stage-plan/benchmarks",
