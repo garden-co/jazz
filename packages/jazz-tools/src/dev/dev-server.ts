@@ -12,6 +12,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { shippedMigrations } from "../runtime/client-migrations.js";
 import { deployApp } from "./catalogue.js";
+import { enginePermissions, type PermissionsFile } from "./codegen-napi.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -46,7 +47,11 @@ interface LocalJazzServerOptions {
 
 export type StartLocalJazzServerOptions = LocalJazzServerOptions &
   (
-    | { schema: SchemaSourceInput; permissions: CompiledPermissionsMap }
+    | {
+        schema: SchemaSourceInput;
+        /** The app's `jazz.permissions.json` (or the engine's policies a load returned). */
+        permissions: PermissionsFile | CompiledPermissionsMap;
+      }
     | { schema?: undefined; permissions?: undefined }
   );
 
@@ -93,7 +98,7 @@ export async function startLocalJazzServer(
   }
   if (options.schema !== undefined && options.permissions == null) {
     throw new Error(
-      "startLocalJazzServer requires permissions when schema is provided. Pass {} to deny all access.",
+      'startLocalJazzServer requires permissions when schema is provided: the app\'s jazz.permissions.json (`{ "format": 1, "tables": {} }` denies all access).',
     );
   }
   const host = validateServerHost(options.host);
@@ -103,7 +108,7 @@ export async function startLocalJazzServer(
       : {
           source: options.schema,
           schema: resolveSchemaSource(options.schema),
-          permissions: options.permissions,
+          permissions: await enginePermissions(options.schema, options.permissions!),
         };
   // An app that ships migrations is published as createJazz publishes it
   // (deployApp): every schema version and lens it ships. Started with only

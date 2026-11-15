@@ -65,7 +65,7 @@ export interface TableTypes {
 }
 
 /**
- * The type map `jazz-tools validate` generates from `jazz.app.json` into
+ * The type map `jazz-tools generate` generates from `jazz.app.json` into
  * `jazz.generated.ts` (`interface Types extends AppTypes { … }`): one
  * {@link TableTypes} per table. The typed query builder, the hooks and
  * `db.insert` read an app's types from it.
@@ -1445,7 +1445,7 @@ import { shipMigrations, type ClientMigrations } from "./runtime/client-migratio
 // ============================================================================
 
 /**
- * The compiled schema `jazz-tools validate` embeds in `jazz.generated.ts`:
+ * The compiled schema `jazz-tools generate` embeds in `jazz.generated.ts`:
  * what Jazz's Rust loader makes of `jazz.app.json`, so the runtime never
  * reads the file itself.
  */
@@ -1550,12 +1550,12 @@ export function boundApp(wasmSchema: WasmSchema): BoundApp | undefined {
   return (wasmSchema as { [BOUND]?: BoundApp })[BOUND];
 }
 
-const REGENERATE = "run `npx jazz-tools validate` to regenerate jazz.generated.ts";
+const REGENERATE = "run `npx jazz-tools generate` to regenerate jazz.generated.ts";
 
 /**
  * Bind an app's generated types to its compiled schema and the computed
  * fields and transforms it implements. Called by `jazz.generated.ts`, which
- * `jazz-tools validate` writes from `jazz.app.json`; apps import `app` from
+ * `jazz-tools generate` writes from `jazz.app.json`; apps import `app` from
  * there instead of calling this.
  */
 export function bindApp<TTypes extends SchemaLike, TTransforms extends TransformTypes = {}>(
@@ -1621,7 +1621,8 @@ function currentTables(
         throw new Error(`bindApp: relation ${table}.${name} is malformed; ${REGENERATE}.`);
       }
     }
-    tableSchema.relations = declared;
+    // Stored schemas carry no relations; only a table with some gets the key.
+    if (Object.keys(declared).length > 0) tableSchema.relations = declared;
   }
   for (const table of Object.keys(tables)) assertSchemaNameAllowed(table);
   return tables;

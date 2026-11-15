@@ -3673,7 +3673,7 @@ function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsM
 
 /**
  * Check the app's bindings and permissions and compile the permissions with
- * Jazz's Rust loader, as `jazz-tools validate` checks them: refused when the
+ * Jazz's Rust loader, as `jazz-tools generate` checks them: refused when the
  * bindings were generated from another jazz.app.json than the project's
  * (stale bindings), or when jazz.permissions.json doesn't hold for the
  * app's schema. A deployed backend without jazz.app.json in reach checks
@@ -3721,7 +3721,7 @@ function boundAppOf(app: BackendSchemaInput) {
   if (!bound) {
     throw new Error(
       "createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from \"./jazz.generated\"`); " +
-        "run `npx jazz-tools validate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
+        "run `npx jazz-tools generate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
     );
   }
   return bound;

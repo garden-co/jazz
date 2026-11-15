@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
-import { createAppMigration, localMigrationGraph, validateApp } from "./dev/project.js";
+import { createAppMigration, localMigrationGraph, generateApp } from "./dev/project.js";
 import {
   combineMigrationGraphs,
   fetchMigrationGraph,
@@ -19,7 +19,7 @@ import { runInspectCommand } from "./inspect/cli.js";
 export interface BuildOptions {
   /** The project directory: jazz.app.json in it, ./src or ./src/lib. */
   schemaDir: string;
-  /** Write nothing; fail if jazz.generated.ts isn't what validate would write. */
+  /** Write nothing; fail if jazz.generated.ts isn't what generate would write. */
   check?: boolean;
 }
 
@@ -42,6 +42,10 @@ const SERVER_REMOVED =
   "`createJazz({ store: sqlite({ path }) })` serves sync from your own server, and " +
   "`createJazz({ store: remote({ url, appId, secret }) })` uses Jazz Cloud.";
 
+export const VALIDATE_RENAMED =
+  "`jazz-tools validate` was renamed to `jazz-tools generate` in alpha.65: it checks jazz.app.json and " +
+  "jazz.permissions.json and writes jazz.generated.ts. Use `jazz-tools generate --check` in CI.";
+
 const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
 
 const MIGRATE_ALPHA59_MOVED =
@@ -61,9 +65,9 @@ function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   return { command, options: { schemaDir: resolve(process.cwd(), schemaDir), check: args.includes("--check") } };
 }
 
-/** `jazz-tools validate [--check]`: check jazz.app.json and jazz.permissions.json, regenerate jazz.generated.ts. */
-export async function validate(options: BuildOptions): Promise<void> {
-  const result = await validateApp({ cwd: options.schemaDir, check: options.check });
+/** `jazz-tools generate [--check]`: check jazz.app.json and jazz.permissions.json, write the bindings. */
+export async function generate(options: BuildOptions): Promise<void> {
+  const result = await generateApp({ cwd: options.schemaDir, check: options.check });
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
   }
@@ -74,8 +78,8 @@ export async function validate(options: BuildOptions): Promise<void> {
     options.check
       ? `jazz.app.json, jazz.permissions.json and ${shown} are up to date.`
       : result.wrote
-        ? `Validated jazz.app.json and jazz.permissions.json; wrote ${shown}. Commit it.`
-        : `Validated jazz.app.json and jazz.permissions.json; ${shown} is up to date.`,
+        ? `Checked jazz.app.json and jazz.permissions.json; wrote ${shown}. Commit it.`
+        : `Checked jazz.app.json and jazz.permissions.json; ${shown} is up to date.`,
   );
   console.log(DEPLOY_NOTE);
 }
@@ -315,7 +319,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   console.log(`Recorded the previous version in ${file}'s history and wrote the migration "${options.name}".`);
   if (result.todos.length > 0) {
     console.log("");
-    console.log(`Resolve ${result.todos.length} TODO${result.todos.length === 1 ? "" : "s"} in ${file}, then run \`jazz-tools validate\`:`);
+    console.log(`Resolve ${result.todos.length} TODO${result.todos.length === 1 ? "" : "s"} in ${file}, then run \`jazz-tools generate\`:`);
     for (const todo of result.todos) console.log(`  ${todo}`);
   } else {
     console.log("Review the migration, then commit jazz.app.json and jazz.generated.ts.");
@@ -345,8 +349,8 @@ function isMainModule(): boolean {
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
-  console.log("  validate              Check jazz.app.json and jazz.permissions.json and regenerate jazz.generated.ts");
-  console.log("                        (--check: write nothing, fail if jazz.generated.ts is out of date)");
+  console.log("  generate              Check jazz.app.json and jazz.permissions.json and write jazz.generated.ts");
+  console.log("                        (--check: write nothing, fail if the bindings are out of date; for CI)");
   console.log("  migrations create     Record a schema change in jazz.app.json (--name <name>)");
   console.log("  migrations graph      Visualize the full migration graph");
   console.log("  upgrade               Convert an alpha.64 app (schema.ts, permissions.ts, migrations/) to the files");
@@ -429,8 +433,11 @@ if (isMainModule()) {
       stderr: (text) => process.stderr.write(text),
       env: process.env,
     }).then((code) => process.exit(code));
+  } else if (command === "generate") {
+    exitOnError(Promise.resolve().then(() => generate(parseArgs(args).options)));
   } else if (command === "validate") {
-    exitOnError(Promise.resolve().then(() => validate(parseArgs(args).options)));
+    console.error(VALIDATE_RENAMED);
+    process.exit(1);
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
     if (subcommand === "compile") {

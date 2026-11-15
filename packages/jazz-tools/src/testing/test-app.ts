@@ -1,7 +1,7 @@
 /**
  * Apps defined inline, for tests: a `jazz.app.json` (and its
  * `jazz.permissions.json`) written as an object in the test, compiled by
- * Jazz's Rust loader exactly as `jazz-tools validate` compiles the files
+ * Jazz's Rust loader exactly as `jazz-tools generate` compiles the files
  * into `jazz.generated.ts`. Node only: it loads jazz-napi synchronously, so
  * a test can define its app at the top level.
  *
