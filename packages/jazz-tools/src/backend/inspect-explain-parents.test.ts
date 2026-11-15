@@ -29,14 +29,24 @@ const tasks = [
   { id: "a0000000-0000-4000-8000-000000000003", title: "public", projectId: null },
 ];
 
-function inspector() {
+function inspector(
+  options: {
+    redact?: Record<string, string[]>;
+    permissions?: unknown;
+    parents?: "fail" | { clauses: number };
+  } = {},
+) {
   const asked: Record<string, string[][]> = {};
   const db = {
     all: async () => tasks,
     explainReadClauses: (table: { _table: string }, ids: string[]) => {
       (asked[table._table] ??= []).push(ids);
       if (table._table === "projects") {
-        return { clauses: 1, rows: ids.map((id) => ({ id, holds: [id === MINE] })) };
+        if (options.parents === "fail") throw new Error("the store can't explain projects");
+        return {
+          clauses: options.parents?.clauses ?? 1,
+          rows: ids.map((id) => ({ id, holds: [id === MINE] })),
+        };
       }
       return {
         clauses: 2,
@@ -51,9 +61,9 @@ function inspector() {
     appId: "app",
     basePath: "/jazz",
     publicUrls: [],
-    options: {},
+    options: options.redact ? { redact: options.redact } : {},
     schema: () => app.wasmSchema,
-    permissions,
+    permissions: options.permissions ?? permissions,
     db: () => db,
     dbAs: async () => db,
     sessions: () => [],
@@ -105,6 +115,50 @@ describe("explain through an inherited clause", () => {
     ]);
     // The parents, once each, in one call.
     expect(asked.projects).toEqual([[MINE, THEIRS]]);
+  });
+
+  it("leaves parents out for a token with redacted columns in their table", async () => {
+    // Which parent clause held tells about what it reads: projects.owner.
+    const { call, asked } = inspector({ redact: { projects: ["owner"] } });
+    const minted = await call({ op: "mint_token" });
+    const answer = await call(
+      { op: "explain", query: { table: "tasks" }, as: "alice" },
+      minted.body.token,
+    );
+    expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+    expect(answer.body.rows.map((row: any) => [row.row.title, row.allowed, row.by])).toEqual([
+      ["mine", true, [0]],
+      ["theirs", false, []],
+      ["public", true, [1]],
+    ]);
+    expect(answer.body.inherited).toBeUndefined();
+    expect(answer.body.rows.every((row: any) => row.via === undefined)).toBe(true);
+    expect(asked.projects).toBeUndefined();
+  });
+
+  it("asks once for two clauses through the same column", async () => {
+    const twice = definePermissions(app, ({ policy, anyOf, session, allowedTo }) => {
+      policy.projects.allowRead.where({ owner: session.user });
+      policy.tasks.allowRead.where(anyOf([allowedTo.read("project"), allowedTo.read("project")]));
+    });
+    const { call, asked } = inspector({ permissions: twice });
+    const answer = await call({ op: "explain", query: { table: "tasks" }, as: "alice" });
+    expect(Object.keys(answer.body.inherited)).toEqual(["0", "1"]);
+    expect(asked.projects).toHaveLength(1);
+  });
+
+  it("answers the rows' own verdicts when a parent can't be explained", async () => {
+    for (const parents of ["fail", { clauses: 2 }] as const) {
+      const { call } = inspector({ parents });
+      const answer = await call({ op: "explain", query: { table: "tasks" }, as: "alice" });
+      expect(answer.status, JSON.stringify(parents)).toBe(200);
+      expect(answer.body.inherited).toBeUndefined();
+      expect(answer.body.rows.map((row: any) => [row.allowed, row.via])).toEqual([
+        [true, undefined],
+        [false, undefined],
+        [true, undefined],
+      ]);
+    }
   });
 
   it("leaves parents out for a token that may not see their table", async () => {

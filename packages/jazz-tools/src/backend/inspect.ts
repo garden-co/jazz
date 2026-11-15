@@ -934,11 +934,15 @@ export function createInspector(deps: InspectorDeps) {
   }
 
   /**
-   * For each of `clauses` that inherits read from a parent row (`Inherits`
-   * with `Select`, through a column that references a table): every parent
-   * the listed rows point to, with whether the user `db` reads as may read
-   * it, and by which of the parent table's clauses. Parents in a table the
-   * caller may not see, or one with branches, are left out.
+   * For each of `clauses` that inherits read from a parent row (a top-level
+   * `Inherits` with `Select`, through a column that references a table; one
+   * nested in an `and` isn't followed): every parent the listed rows point
+   * to, with whether the user `db` reads as may read it, and by which of the
+   * parent table's clauses. Left out, so the answer says nothing about them:
+   * a parent table with redacted columns for this caller (a clause's verdict
+   * tells about what it reads), one with branches, one whose clauses this
+   * backend's permissions and the store's don't number alike, and one the
+   * store can't explain.
    */
   function explainParents(
     admitted: Admitted,
@@ -949,14 +953,23 @@ export function createInspector(deps: InspectorDeps) {
   ) {
     const schema = deps.schema();
     const permissions = deps.permissions as Record<string, TablePolicies> | undefined;
+    // Two clauses through the same column read the same parents: once.
+    const byColumn = new Map<string, ReturnType<typeof explainParentTable>>();
     const explained = [];
     for (const [index, clause] of clauses.entries()) {
       const node = clause as { type?: string; operation?: string; via_column?: string };
       if (node.type !== "Inherits" || node.operation !== "Select" || !node.via_column) continue;
       const column = node.via_column;
+      if (!byColumn.has(column)) byColumn.set(column, explainParentTable(column));
+      const parent = byColumn.get(column);
+      if (parent) explained.push({ index, column, ...parent });
+    }
+    return explained;
+
+    function explainParentTable(column: string) {
       const parentTable = schema[table]?.columns.find((c) => c.name === column)?.references;
-      if (!parentTable || schema[parentTable]?.branchBy?.length) continue;
-      if (admitted.tables && !admitted.tables.includes(parentTable)) continue;
+      if (!parentTable || schema[parentTable]?.branchBy?.length) return undefined;
+      if (redactedFor(admitted, parentTable)) return undefined;
       const parentPolicy =
         permissions?.[parentTable]?.select?.using ?? permissions?.[parentTable]?.select?.with_check;
       const parentClauses = policyClauses(parentPolicy);
@@ -967,20 +980,26 @@ export function createInspector(deps: InspectorDeps) {
             .filter((id): id is string => typeof id === "string" && id !== REDACTED),
         ),
       ];
-      const engine = ids.length
-        ? db.explainReadClauses(tableProxy(parentTable), ids)
-        : { clauses: parentClauses.length, rows: [] };
-      // As for the table itself: the numbers are the engine's, the text ours.
-      if (engine.clauses !== parentClauses.length) continue;
+      let engine: { clauses: number; rows: { id: string; holds: boolean[] }[] };
+      try {
+        engine = ids.length
+          ? db.explainReadClauses(tableProxy(parentTable), ids)
+          : { clauses: parentClauses.length, rows: [] };
+      } catch {
+        // The row's own verdict stands; only the step to its parent is missing.
+        return undefined;
+      }
+      // As for the table itself, the numbers are the engine's and the text
+      // ours; unlike it, a parent that doesn't line up is only left out.
+      if (engine.clauses !== parentClauses.length) return undefined;
       const parents = new Map(
         engine.rows.map((row) => {
           const by = row.holds.flatMap((held, at) => (held ? [at] : []));
           return [row.id, { allowed: by.length > 0, by }] as const;
         }),
       );
-      explained.push({ index, table: parentTable, column, clauses: parentClauses, parents });
+      return { table: parentTable, clauses: parentClauses, parents };
     }
-    return explained;
   }
 
   function schemaAnswer(admitted: Admitted) {
