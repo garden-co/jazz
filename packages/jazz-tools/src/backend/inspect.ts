@@ -792,15 +792,21 @@ export function createInspector(deps: InspectorDeps) {
       }
       // A partial select clamps a range past the end of the value
       // (#5502); a part shorter than asked for ran past it. An empty part
-      // is past the end when the unit before it is too.
+      // is past the end when the unit before it is too: a probe the store
+      // refuses for splitting a character starts inside the value.
       const found = await read({ from, to: body.to });
       const length = partLength(found.value);
+      const unitBefore = async () => {
+        try {
+          return partLength((await read({ from: from - 1, to: from })).value);
+        } catch (error) {
+          if (splitsCharacter(error)) return 1;
+          throw error;
+        }
+      };
       const pastEnd =
         length !== undefined &&
-        (length < body.to - from ||
-          (from === body.to &&
-            from > 0 &&
-            partLength((await read({ from: from - 1, to: from })).value) === 0));
+        (length < body.to - from || (from === body.to && from > 0 && (await unitBefore()) === 0));
       if (pastEnd) {
         throw new InspectError(
           "bad_request",
@@ -1217,6 +1223,13 @@ export type Inspector = ReturnType<typeof createInspector>;
 const MAX_PART_BYTES = 512 * 1024;
 /** The most UTF-16 code units of a text value `get` answers at once. */
 const MAX_PART_TEXT = 256 * 1024;
+
+/** The store refused a range for splitting a code point or surrogate pair. */
+function splitsCharacter(error: unknown): boolean {
+  return /splits a (surrogate pair|code point)/.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
 
 /** The length of a part of a text (UTF-16 code units) or bytes value. */
 function partLength(value: unknown): number | undefined {
