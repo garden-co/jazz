@@ -138,6 +138,8 @@ describe("migration references through table renames", () => {
         },
         { renameTables: { people: "users" } },
       ),
-    ).toThrow(/column notes\.ownerId moves its reference from users to teams, which is not supported/);
+    ).toThrow(
+      /column notes\.ownerId moves its reference from users to teams, which is not supported/,
+    );
   });
 });

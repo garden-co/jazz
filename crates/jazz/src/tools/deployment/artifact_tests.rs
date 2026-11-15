@@ -2212,7 +2212,16 @@ fn every_committed_app_file_fits_its_json_schema() {
         (PERMISSIONS_FILE, "jazz.permissions.schema.json"),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
-        let files = committed(file);
+        // `jazz-tools upgrade`'s input fixtures are alpha.64 apps on purpose:
+        // their files carry alpha.63's `tsOnly`, which upgrade converts. What
+        // upgrade writes from them (`expected/`) is checked like any app.
+        let legacy = repo_root().join("packages/jazz-tools/tests/upgrade/fixtures");
+        let files: Vec<_> = committed(file)
+            .into_iter()
+            .filter(|path| {
+                !path.starts_with(&legacy) || path.components().any(|c| c.as_os_str() == "expected")
+            })
+            .collect();
         assert!(files.len() > 10, "{file}: {files:?}");
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
