@@ -13,7 +13,7 @@ import {
   Text,
   VStack,
 } from "@astryxdesign/core";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { useWorkspace } from "./workspace-context";
 
 /**

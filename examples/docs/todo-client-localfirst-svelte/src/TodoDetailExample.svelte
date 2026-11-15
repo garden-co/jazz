@@ -1,7 +1,7 @@
 <!-- #region reading-one-svelte -->
 <script lang="ts">
   import { QuerySubscriptionOne } from 'jazz-tools/svelte';
-  import { app } from '../schema.js';
+  import { app } from '../jazz.generated.js';
 
   let { id }: { id: string } = $props();
 

@@ -1,62 +1,56 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { translateQuery } from "./query-adapter.js";
 
-const app = s.defineApp(
-  {
-    users: s.table(
-      {
-        name: s.string(),
+const app = testApp({
+  tables: {
+    users: {
+      columns: { name: "string" },
+      relations: { todosViaOwner: { reverse: "todos", relation: "owner" } },
+    },
+    projects: {
+      columns: { name: "string" },
+      relations: { todosViaProject: { reverse: "todos", relation: "project" } },
+    },
+    todos: {
+      columns: {
+        title: "string",
+        body: "string",
+        rank: "bigint",
+        attachment: "bytes",
+        metadata: { json: true },
+        done: "boolean",
+        projectId: "uuid",
+        ownerId: "uuid?",
       },
-      { todosViaOwner: s.reverse("todos", "owner") },
-    ),
-    projects: s.table(
-      {
-        name: s.string(),
+      relations: {
+        project: { rel: "projects", column: "projectId" },
+        owner: { rel: "users", column: "ownerId" },
       },
-      { todosViaProject: s.reverse("todos", "project") },
-    ),
-    todos: s.table(
-      {
-        title: s.string(),
-        body: s.string(),
-        rank: s.bigint(),
-        attachment: s.bytes(),
-        metadata: s.json(),
-        done: s.boolean(),
-        projectId: s.uuid(),
-        ownerId: s.uuid().optional(),
+    },
+    events: {
+      columns: {
+        event: {
+          enum: { message: { text: "string", level: "int" }, closed: { code: "int" } },
+        },
       },
-      { project: s.rel("projects", "projectId"), owner: s.rel("users", "ownerId") },
-    ),
-    events: s.table(
-      {
-        event: s.enum({
-          message: { text: s.string(), level: s.int() },
-          closed: { code: s.int() },
-        }),
-      },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
-const scalarApp = s.defineApp(
-  {
-    filters: s.table(
-      {
-        timestamp: s.timestamp(),
-        bytes: s.bytes(),
-        nullableBytes: s.bytes().optional(),
-        metadata: s.json(),
-        tags: s.array(s.string()),
-        nullableTags: s.array(s.string()).optional(),
+});
+const scalarApp = testApp({
+  tables: {
+    filters: {
+      columns: {
+        timestamp: "timestamp",
+        bytes: "bytes",
+        nullableBytes: "bytes?",
+        metadata: { json: true },
+        tags: { array: "string" },
+        nullableTags: { array: "string", optional: true },
       },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
+});
 
 function translatedConditions(query: { _build(): string }) {
   return JSON.parse(translateQuery(query._build(), scalarApp.wasmSchema)).conditions;
@@ -221,80 +215,71 @@ describe("translateQuery", () => {
 
   it("rejects a forward relation that would shadow a stored output column", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table({ name: s.string() }, {
-            todosViaOwner: s.reverse("todos", "owner"),
-          } as never),
-          todos: s.table(
-            {
-              owner: s.string(),
-              ownerId: s.uuid(),
-            },
-            { owner: s.rel("users", "ownerId") } as never,
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { name: "string" },
+            relations: { todosViaOwner: { reverse: "todos", relation: "owner" } },
+          },
+          todos: {
+            columns: { owner: "string", ownerId: "uuid" },
+            relations: { owner: { rel: "users", column: "ownerId" } },
+          },
         },
-        { migrations: "none" },
-      ),
-    ).toThrow(/Relationship "owner" collides with a column/);
+      }),
+    ).toThrow("tables.todos.relations.owner: table todos already has a column owner");
   });
 
   it("rejects a generated relation that would shadow the implicit public id", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table({ name: s.string() }, { todosViaId: s.reverse("todos", "id") }),
-          todos: s.table(
-            {
-              idId: s.uuid(),
-            },
-            { id: s.rel("users", "idId") } as never,
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { name: "string" },
+            relations: { todosViaId: { reverse: "todos", relation: "id" } },
+          },
+          todos: {
+            columns: { idId: "uuid" },
+            relations: { id: { rel: "users", column: "idId" } },
+          },
         },
-        { migrations: "none" },
-      ),
-    ).toThrow(/Relationship "id" collides with a column/);
+      }),
+    ).toThrow("tables.todos.relations.id: table todos already has a column id");
   });
 
   it("rejects a nested reverse relation that would shadow a stored output column", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table(
-            {
-              todosViaOwner: s.string(),
-            },
-            { todosViaOwner: s.reverse("todos", "owner") } as never,
-          ),
-          todos: s.table(
-            {
-              ownerId: s.uuid(),
-            },
-            { owner: s.rel("users", "ownerId") } as never,
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { todosViaOwner: "string" },
+            relations: { todosViaOwner: { reverse: "todos", relation: "owner" } },
+          },
+          todos: {
+            columns: { ownerId: "uuid" },
+            relations: { owner: { rel: "users", column: "ownerId" } },
+          },
         },
-        { migrations: "none" },
-      ),
-    ).toThrow(/Relationship "todosViaOwner" collides with a column/);
+      }),
+    ).toThrow(
+      "tables.users.relations.todosViaOwner: table users already has a column todosViaOwner",
+    );
   });
 
   it("uses a distinct declared alias for an unsuffixed UUID column", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table(
-            { name: s.string() },
-            { todosViaOwner: s.reverse("todos", "ownerRelation") },
-          ),
-          todos: s.table(
-            {
-              owner: s.uuid(),
-            },
-            { ownerRelation: s.rel("users", "owner") },
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { name: "string" },
+            relations: { todosViaOwner: { reverse: "todos", relation: "ownerRelation" } },
+          },
+          todos: {
+            columns: { owner: "uuid" },
+            relations: { ownerRelation: { rel: "users", column: "owner" } },
+          },
         },
-        { migrations: "none" },
-      ),
+      }),
     ).not.toThrow();
   });
 

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "org": {
+      "columns": { "name": "string", "slug": "string" },
+      "relations": { "todoViaOrg": { "reverse": "todo", "relation": "orgRelation" } }
+    },
+    "todo": {
+      "columns": { "title": "string", "completed": "boolean", "org": "uuid" },
+      "relations": { "orgRelation": { "rel": "org", "column": "org" } }
+    }
+  }
+}

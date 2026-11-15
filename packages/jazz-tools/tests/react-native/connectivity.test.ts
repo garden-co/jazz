@@ -1,17 +1,13 @@
 import { expect, it } from "vitest";
-import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import * as nativeCommands from "jazz-rn/relay";
 import type { NativeForegroundModule } from "../../src/react-native/native-foreground-db.js";
 const { encodeNativeForegroundCommand, decodeNativeForegroundResponse } =
   nativeCommands as unknown as NativeForegroundModule;
 import { withNativeRelayFixture } from "./fixture.js";
-import type { TestJazz } from "../../src/testing/index.js";
+import { testApp, testPermissions, type TestJazz } from "../../src/testing/index.js";
 
-const app = schema.defineApp(
-  { notes: schema.table({ title: schema.string() }, {}) },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 it("rejects disconnect without a native upstream and leaves local reads usable", async () => {
   await withNativeRelayFixture(app, {}, async (fixture) => {
@@ -30,18 +26,16 @@ it("disconnects before any query and reconnects using only native credentials", 
   });
   let backend: TestJazz | undefined;
   try {
-    const permissions = schema.definePermissions(app, ({ policy }) => [
-      policy.notes.allowRead.always(),
-      policy.notes.allowInsert.always(),
-    ]);
+    const permissionsFile = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
+    const permissions = testPermissions(app, permissionsFile);
     await deploy({
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
-    backend = await startTestJazz({ core: server, app, permissions });
+    backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
       app,
       permissions,

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
+import { testApp } from "../testing/test-app.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import {
   NATIVE_CORE_ERROR_REASONS,
@@ -25,7 +25,7 @@ import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-
 // A core error crossing a native binding keeps its Rust display text as the
 // message and carries the stable core `ErrorCode` string as `code` (#3691).
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
 
 function config(label: string): Uint8Array {
   return openConfig(new Uint8Array(16).fill(31), testAuthorBytes(label), 1, true);

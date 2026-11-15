@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import { Skeleton, Thumbnail, Token, useLightbox } from "@astryxdesign/core";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { downloadBytes, formatBytes, isAudioType, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
 import type { MessageSummary } from "./RoomView";

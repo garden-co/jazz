@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useDb, useSession, useAll } from "jazz-tools/react";
 import { getRandomUsername } from "@/lib/utils";
-import { app, type Profile } from "../../schema.js";
+import { app, type Profile } from "../../jazz.generated.js";
 
 // Module-level guard: the in-memory WASM store settles synchronously with []
 // before IndexedDB data streams in from the worker. Without this guard, every page

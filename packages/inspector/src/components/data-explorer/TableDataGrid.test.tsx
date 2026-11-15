@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { PersistedWriteRejectedError, schema as s, type WasmSchema } from "jazz-tools";
+import { PersistedWriteRejectedError, type WasmSchema } from "jazz-tools";
+import { testApp } from "jazz-tools/testing";
 import { Link, MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
@@ -114,17 +115,9 @@ const mockWasmSchema: WasmSchema = {
   },
 };
 
-const bigintArrayApp = s.defineApp(
-  {
-    todos: s.table(
-      {
-        ranks: s.array(s.bigint()),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
+const bigintArrayApp = testApp({
+  tables: { todos: { columns: { ranks: { array: "bigint" } } } },
+});
 let currentWasmSchema: WasmSchema = mockWasmSchema;
 const initialMockTodoColumns = [...mockWasmSchema.todos.columns];
 

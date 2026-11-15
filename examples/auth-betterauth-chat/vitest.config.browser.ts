@@ -5,6 +5,7 @@ import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
 import {
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   jazzServerInfo,
@@ -44,6 +45,8 @@ export default defineConfig(async () => {
           jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
           jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
           jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+          jazzTestDeployment: async (_context, bound, permissions) =>
+            jazzTestDeployment(bound, permissions),
           jazzAppUser: async (_context, frontUrl, userId, claims) =>
             jazzAppUser(frontUrl, userId, claims),
           jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

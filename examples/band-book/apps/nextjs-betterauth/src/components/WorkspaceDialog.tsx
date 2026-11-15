@@ -16,7 +16,7 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { app, type WorkspaceRole } from "@/schema";
+import { app, type MemberRole as WorkspaceRole } from "@/jazz.generated";
 import { createInviteToken } from "@/src/lib/invites";
 import { InviteLink } from "./ShareDialog";
 import { ROLE_LABELS, useWorkspace } from "./workspace-context";

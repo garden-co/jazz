@@ -2,7 +2,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { useAll } from "jazz-tools/vue";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 const filter = ref<string | null>(null);
 const query = computed(() =>

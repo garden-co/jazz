@@ -1,12 +1,8 @@
-import { schema } from "../../src/index.js";
+import { app } from "./apps/session-tab/jazz.generated.js";
+import permissions from "./apps/session-tab/jazz.permissions.json";
 
-/** The app the session tab tests run: one table every user may read and write. */
-export const sessionTabApp = schema.defineApp(
-  { tasks: schema.table({ title: schema.string() }, {}) },
-  { migrations: "none" },
-);
+/** The app the session tab tests run (apps/session-tab): one table every user may read and write. */
+export const sessionTabApp = app;
 
-export const sessionTabPermissions = schema.definePermissions(sessionTabApp, ({ policy }) => [
-  policy.tasks.allowRead.always(),
-  policy.tasks.allowInsert.always(),
-]);
+/** Its jazz.permissions.json, as `startJazzApp` takes it. */
+export const sessionTabPermissions = permissions;

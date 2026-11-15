@@ -5,8 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import {
   createJazz,
   memory,
@@ -26,17 +25,20 @@ import { requestApproval, tokenStore } from "../inspect/client.js";
 import { runInspectCommand } from "../inspect/cli.js";
 import { runMcpServer } from "../inspect/mcp.js";
 
-const app = await defineShippedApp({
-  todos: s.table({ title: s.string(), owner: s.uuid(), secretNote: s.string().optional() }, {}),
-  notes: s.table({ body: s.string() }, {}),
+const app = testApp({
+  tables: {
+    todos: { columns: { title: "string", owner: "uuid", secretNote: "string?" } },
+    notes: { columns: { body: "string" } },
+  },
 });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-  policy.notes.allowRead.never();
-});
+// Todos can't be updated or deleted; nobody may read notes.
+const permissions = {
+  format: 1,
+  tables: {
+    todos: { read: "owner = session.user", insert: "owner = session.user" },
+    notes: { read: "false" },
+  },
+};
 
 const cleanups: Array<() => Promise<unknown>> = [];
 const savedNodeEnv = process.env.NODE_ENV;
@@ -1221,18 +1223,14 @@ describe("jazz-tools inspect and mcp", () => {
 
 describe("Viewing as a user whose permissions read claims", () => {
   // Managers (a claim) see every expense; others see their own.
-  const claimsApp = s.defineApp(
-    { expenses: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-    { migrations: "none" },
-  );
-  const claimsPermissions = s.definePermissions(claimsApp, ({ policy, anyOf, session }) => {
-    policy.expenses.allowRead.where(
-      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
-    );
-    policy.expenses.allowInsert.where(
-      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
-    );
+  const claimsApp = testApp({
+    tables: { expenses: { columns: { title: "string", owner: "uuid" } } },
   });
+  const ownOrManager = { anyOf: ["owner = session.user", "session.claims.role = 'manager'"] };
+  const claimsPermissions = {
+    format: 1,
+    tables: { expenses: { read: ownOrManager, insert: ownOrManager } },
+  };
 
   async function startWithClaims() {
     const jazz = await createJazz({
@@ -1331,13 +1329,8 @@ describe("Viewing as a user whose permissions read claims", () => {
 });
 
 describe("Large values through the Inspector (#5202)", () => {
-  const filesApp = s.defineApp(
-    { files: s.table({ name: s.string(), data: s.bytes() }, {}) },
-    { migrations: "none" },
-  );
-  const filesPermissions = s.definePermissions(filesApp, ({ policy }) => {
-    policy.files.allowRead.always();
-  });
+  const filesApp = testApp({ tables: { files: { columns: { name: "string", data: "bytes" } } } });
+  const filesPermissions = { format: 1, tables: { files: { read: "true" } } };
 
   it("lists a row with a large value, and reads parts of it from the store", async () => {
     const jazz = await createJazz({

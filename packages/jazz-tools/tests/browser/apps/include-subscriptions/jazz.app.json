@@ -1,0 +1,36 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "check_notes": {
+      "columns": { "body": "string", "org_id": "uuid", "user_check_id": "uuid" },
+      "relations": {
+        "org": { "rel": "orgs", "column": "org_id" },
+        "user_check": { "rel": "user_checks", "column": "user_check_id" }
+      }
+    },
+    "orgs": {
+      "columns": { "name": "string" },
+      "relations": {
+        "todosViaOrg": { "reverse": "todos", "relation": "org" },
+        "user_checksViaOrg": { "reverse": "user_checks", "relation": "org" },
+        "check_notesViaOrg": { "reverse": "check_notes", "relation": "org" }
+      }
+    },
+    "todos": {
+      "columns": { "title": "string", "org_id": "uuid" },
+      "relations": {
+        "org": { "rel": "orgs", "column": "org_id" },
+        "user_checksViaTodo": { "reverse": "user_checks", "relation": "todo" }
+      }
+    },
+    "user_checks": {
+      "columns": { "org_id": "uuid", "todo_id": "uuid" },
+      "relations": {
+        "org": { "rel": "orgs", "column": "org_id" },
+        "todo": { "rel": "todos", "column": "todo_id" },
+        "check_notesViaUser_check": { "reverse": "check_notes", "relation": "user_check" }
+      }
+    }
+  }
+}

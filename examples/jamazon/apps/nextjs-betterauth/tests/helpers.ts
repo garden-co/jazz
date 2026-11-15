@@ -1,8 +1,8 @@
 import type { Db } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
 import { expect } from "vitest";
-import permissions from "../permissions";
-import { app } from "../schema";
+import permissions from "../jazz.permissions.json" with { type: "json" };
+import { app } from "../jazz.generated";
 
 export const ISSUER = "https://jamazon.test";
 

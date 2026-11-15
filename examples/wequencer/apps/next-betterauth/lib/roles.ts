@@ -1,4 +1,4 @@
-import type { MemberRole } from "@/schema";
+import type { SessionMemberRole as MemberRole } from "@/jazz.generated";
 
 export const ROLE_RANK: Record<MemberRole, number> = { viewer: 0, editor: 1, owner: 2 };
 

@@ -7,8 +7,7 @@
  */
 
 import { afterEach, expect, it } from "vitest";
-import { ReadTier, generateAuthSecret, schema, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { ReadTier, generateAuthSecret, type Db } from "../../src/index.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -16,23 +15,12 @@ import {
   waitForCondition,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { app } from "./apps/serializable-worker-tab/jazz.generated.js";
+import permissions from "./apps/serializable-worker-tab/jazz.permissions.json";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
-const app = schema.defineApp(
-  {
-    seats: schema.table({ show: schema.string(), holder: schema.string() }, {}),
-    audit: schema.table({ note: schema.string() }, {}),
-  },
-  { migrations: "none" },
-);
-
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.seats.allowRead.always(),
-  policy.seats.allowInsert.always(),
-  policy.seats.allowUpdate.always(),
-  policy.audit.allowRead.always(),
-  policy.audit.allowInsert.always(),
-]);
+// The app (apps/serializable-worker-tab): seats everyone may read, insert and update; an
+// audit log everyone may read and append to.
 
 const ctx = new TestCleanup();
 afterEach(async () => {
@@ -41,8 +29,8 @@ afterEach(async () => {
 
 async function setup(label: string) {
   const core = await getJazzServerInfo(uniqueDbName(label));
-  await deploy({ ...core, schema: app.wasmSchema, permissions });
-  const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
+  await deploy({ ...core, app, permissions: permissions });
+  const server = await startJazzApp(core, { schema: app, permissions });
   const open = async (persistent: boolean): Promise<Db> =>
     ctx.track(
       await createBrowserTestDb({

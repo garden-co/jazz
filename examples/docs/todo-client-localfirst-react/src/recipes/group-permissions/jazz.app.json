@@ -1,0 +1,25 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "documents": {
+      "columns": { "title": "string", "content": "string", "workspaceId": "uuid" },
+      "relations": { "workspace": { "rel": "workspaces", "column": "workspaceId" } }
+    },
+    "workspaceMembers": {
+      "columns": {
+        "workspaceId": "uuid",
+        "user_id": "uuid",
+        "role": { "enum": ["reader", "writer", "contributor", "admin"] }
+      },
+      "relations": { "workspace": { "rel": "workspaces", "column": "workspaceId" } }
+    },
+    "workspaces": {
+      "columns": { "name": "string" },
+      "relations": {
+        "documents": { "reverse": "documents", "relation": "workspace" },
+        "members": { "reverse": "workspaceMembers", "relation": "workspace" }
+      }
+    }
+  }
+}

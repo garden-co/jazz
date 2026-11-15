@@ -225,6 +225,15 @@ export const ciPartitions = Object.freeze({
       "run",
       "typecheck",
     ]),
+    // A stale or missing jazz.generated.ts otherwise shows only when a backend
+    // starts: `jazz-tools generate --check` in every example app, with the
+    // CLI and the sealed jazz-napi this partition built.
+    command("example bindings", "node", [
+      "dev/gates/run-correctness-consumer.mjs",
+      "--",
+      "node",
+      "dev/gates/example-bindings.mjs",
+    ]),
   ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be

@@ -14,7 +14,7 @@ import {
   TopNavHeading,
   VStack,
 } from "@astryxdesign/core";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { authClient } from "@/src/lib/auth-client";
 import { buildPageTree } from "@/src/lib/tree";
 import { PageScreen } from "./PageScreen";

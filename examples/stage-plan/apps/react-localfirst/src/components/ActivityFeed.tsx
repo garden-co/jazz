@@ -4,7 +4,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
-import { app, type Activity, type Task } from "../../schema.js";
+import { app, type Activity, type Task } from "../../jazz.generated.js";
 
 type ActivityFeedProps = {
   /** Which activity to show: a show's or a single task's. */

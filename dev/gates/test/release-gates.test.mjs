@@ -5,34 +5,50 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 
-const unmarkedConventionalProvenance =
-  /^[ \t]*(createdAt|createdBy|updatedAt|updatedBy):(?![ \t]*s\.allowExternalProvenanceName\()/m;
+const CONVENTIONAL_PROVENANCE = new Set(["createdAt", "createdBy", "updatedAt", "updatedBy"]);
 
-test("provenance gate targets only unmarked Jazz provenance aliases", () => {
-  assert.equal(unmarkedConventionalProvenance.test("createdAt: s.timestamp(),"), true);
-  assert.equal(
-    unmarkedConventionalProvenance.test("createdAt: s.allowExternalProvenanceName(s.timestamp()),"),
-    false,
+/**
+ * Tables whose columns mirror an outside system's own model, which names its
+ * own timestamps: Better Auth's (`better_auth_*`, written by its adapter).
+ */
+const EXTERNAL_MODEL_TABLE = /^better_auth_/;
+
+/** The `table.column`s of `app` (a parsed jazz.app.json) that duplicate Jazz provenance. */
+function conventionalProvenanceColumns(app) {
+  return Object.entries(app.tables ?? {}).flatMap(([table, definition]) =>
+    EXTERNAL_MODEL_TABLE.test(table)
+      ? []
+      : Object.keys(definition.columns ?? {})
+          .filter((column) => CONVENTIONAL_PROVENANCE.has(column))
+          .map((column) => `${table}.${column}`),
   );
-  for (const domainEventTime of ["createdOn", "creationTime", "occurredAt"]) {
-    assert.equal(unmarkedConventionalProvenance.test(`${domainEventTime}: s.timestamp(),`), false);
-  }
+}
+
+test("provenance gate targets only app tables' Jazz provenance aliases", () => {
+  assert.deepEqual(
+    conventionalProvenanceColumns({
+      tables: {
+        posts: { columns: { createdAt: "timestamp", createdOn: "timestamp", title: "string" } },
+        better_auth_user: { columns: { createdAt: "timestamp", updatedAt: "timestamp" } },
+      },
+    }),
+    ["posts.createdAt"],
+  );
 });
 
-test("official examples do not duplicate Jazz provenance without an explicit external marker", () => {
+test("official examples do not duplicate Jazz provenance", () => {
   const offenders = [];
 
   function visit(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const file = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        visit(file);
-      } else if (
-        entry.isFile() &&
-        entry.name === "schema.ts" &&
-        unmarkedConventionalProvenance.test(fs.readFileSync(file, "utf8"))
-      ) {
-        offenders.push(path.relative(root, file));
+        if (entry.name !== "node_modules") visit(file);
+      } else if (entry.isFile() && entry.name === "jazz.app.json") {
+        for (const column of conventionalProvenanceColumns(
+          JSON.parse(fs.readFileSync(file, "utf8")),
+        ))
+          offenders.push(`${path.relative(root, file)}: ${column}`);
       }
     }
   }
@@ -41,6 +57,6 @@ test("official examples do not duplicate Jazz provenance without an explicit ext
   assert.deepEqual(
     offenders,
     [],
-    "Examples must use Jazz $ provenance or s.allowExternalProvenanceName(...)",
+    "Examples must use Jazz's $createdAt, $createdBy, $updatedAt and $updatedBy provenance columns",
   );
 });

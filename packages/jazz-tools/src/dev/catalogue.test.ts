@@ -1,58 +1,24 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
+import { boundApp } from "../typed-app.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
 
-const tempRoots: string[] = [];
 const APP_ID = "test-app";
 const SERVER_URL = "http://localhost:1625";
 const ADMIN_SECRET = "admin-secret";
 
-afterEach(async () => {
+afterEach(() => {
   vi.unstubAllGlobals();
-  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function createWorkspace(): Promise<{ root: string }> {
-  // The browser suite verifies artifact provenance while the Node suite runs.
-  // A checkout-local test workspace would be an untracked input midway through
-  // that verification, so keep this fixture out of the repository.
-  const root = await mkdtemp(join(tmpdir(), "jazz-tools-catalogue-test-"));
-  tempRoots.push(root);
-  await mkdir(root, { recursive: true });
-  await writeFile(join(root, "package.json"), '{ "type": "module" }\n');
-  return { root };
-}
-
-function schemaSource(indexImportPath: string = "../index.ts"): string {
-  return `
-import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.meta.url).pathname)};
-
-const schema = {
-  todos: s.table({
-    title: s.string(),
-    ownerId: s.string(),
-  }, {  }),
+const todosApp = testApp({
+  tables: { todos: { columns: { title: "string", ownerId: "string" } } },
+});
+const todosPermissions = {
+  format: 1,
+  tables: { todos: { read: "ownerId = session.identity.subject" } },
 };
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
-`;
-}
-
-function permissionsSource(indexImportPath: string = "../index.ts"): string {
-  return `
-import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.meta.url).pathname)};
-import { app } from "./schema.ts";
-
-export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
-]);
-`;
-}
 
 describe("dev catalogue API exports", () => {
   it("exports catalogue operations from jazz-tools/dev", async () => {
@@ -77,47 +43,46 @@ describe("dev catalogue API exports", () => {
 
 describe("dev catalogue runtime schema identity", () => {
   it("opens a NativeRuntimeAdapter for representative public schema shapes", async () => {
-    const schema = {
-      users: s.table(
-        {
-          name: s.string(),
-        },
-        {
-          filesViaOwner: s.reverse("files", "owner"),
-          commentsViaAuthor: s.reverse("comments", "author"),
-        },
-      ),
-      files: s.table(
-        {
-          ownerId: s.uuid(),
-          contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
-          mediaType: s.enum("image/png", "text/plain").default("text/plain"),
-          tags: s.array(s.string()).default(["draft", "review"]),
-        },
-        {
-          owner: s.rel("users", "ownerId"),
-          commentsViaFile: s.reverse("comments", "file"),
-          commentsViaAttachments: s.reverse("comments", "attachments"),
-        },
-      ),
-      comments: s
-        .table(
-          {
-            fileId: s.uuid(),
-            authorId: s.uuid().optional().default(null),
-            body: s.string(),
-            attachmentIds: s.array(s.uuid()).default([]),
-            status: s.enum("open", "resolved").default("open"),
+    const app = testApp({
+      tables: {
+        users: {
+          columns: { name: "string" },
+          relations: {
+            filesViaOwner: { reverse: "files", relation: "owner" },
+            commentsViaAuthor: { reverse: "comments", relation: "author" },
           },
-          {
-            file: s.rel("files", "fileId"),
-            author: s.rel("users", "authorId"),
-            attachments: s.rel("files", "attachmentIds"),
+        },
+        files: {
+          columns: {
+            ownerId: "uuid",
+            // base64 of [0, 1, 127, 255]
+            contents: { type: "bytes", default: "AAF//w==" },
+            mediaType: { enum: ["image/png", "text/plain"], default: "text/plain" },
+            tags: { array: "string", default: ["draft", "review"] },
           },
-        )
-        .indexOnly(["fileId", "status"]),
-    };
-    const app = s.defineApp(schema, { migrations: "none" });
+          relations: {
+            owner: { rel: "users", column: "ownerId" },
+            commentsViaFile: { reverse: "comments", relation: "file" },
+            commentsViaAttachments: { reverse: "comments", relation: "attachments" },
+          },
+        },
+        comments: {
+          columns: {
+            fileId: "uuid",
+            authorId: { type: "uuid", optional: true, default: null },
+            body: "string",
+            attachmentIds: { array: "uuid", default: [] },
+            status: { enum: ["open", "resolved"], default: "open" },
+          },
+          relations: {
+            file: { rel: "files", column: "fileId" },
+            author: { rel: "users", column: "authorId" },
+            attachments: { rel: "files", column: "attachmentIds" },
+          },
+          indexes: ["fileId", "status"],
+        },
+      },
+    });
     await createNapiNativeRuntimeAdapter(app.wasmSchema, {});
 
     expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
@@ -125,16 +90,14 @@ describe("dev catalogue runtime schema identity", () => {
 });
 
 describe("dev catalogue push behavior", () => {
+  // Was: deploy({ schemaDir }) from schema.ts/permissions.ts (catalogue-project.ts,
+  // removed). The app and its permissions now come from the files; the
+  // schemaFile and the permissions-loaded/-published events went with it.
   it.each(["initial", "permissions", "unchanged"])(
     "deploy reports %s publication without separate push requests",
     async (kind) => {
-      const { root } = await createWorkspace();
-      await writeFile(join(root, "schema.ts"), schemaSource());
-      await writeFile(join(root, "permissions.ts"), permissionsSource());
-      const { loadCompiledSchema } = await import("../schema-loader.js");
-      const { computeSchemaHash } = await import("./catalogue.js");
-      const hash = await computeSchemaHash((await loadCompiledSchema(root)).wasmSchema);
-      const events: any[] = [];
+      const { deploy } = await import("./catalogue.js");
+      const hash = boundApp(todosApp.wasmSchema)!.schema.current;
       let body: any;
       const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
         if (input.endsWith("/migrations/graph"))
@@ -155,13 +118,12 @@ describe("dev catalogue push behavior", () => {
         );
       });
       vi.stubGlobal("fetch", fetchMock);
-      const { deploy } = await import("./catalogue-project.js");
       const result = await deploy({
         appId: APP_ID,
         serverUrl: SERVER_URL,
         adminSecret: ADMIN_SECRET,
-        schemaDir: root,
-        onEvent: (event) => events.push(event),
+        app: todosApp,
+        permissions: todosPermissions,
       });
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(body.targetSchemaHash).toBe(hash);
@@ -170,32 +132,66 @@ describe("dev catalogue push behavior", () => {
       expect(result.changed).toBe(kind !== "unchanged");
       expect(result.schema).toEqual({
         hash,
-        schemaFile: join(root, "schema.ts"),
         status: kind === "initial" ? "published" : "already-stored",
       });
-      expect(result.warnings.some((warning) => warning.includes("has no insert policy"))).toBe(
-        true,
-      );
-      expect(events).toContainEqual({
-        type: "permissions-loaded",
-        permissionsFile: join(root, "permissions.ts"),
-      });
-      expect(events.some((event) => event.type === "permissions-published")).toBe(
-        kind !== "unchanged",
-      );
     },
   );
 
+  it("deploy warns for each table jazz.permissions.json gives no policy, not for explicit false", async () => {
+    const { deploy } = await import("./catalogue.js");
+    const app = testApp({
+      tables: {
+        notes: { columns: { body: "string" } },
+        drafts: { columns: { body: "string" } },
+        audit: { columns: { body: "string" } },
+        todos: { columns: { title: "string" } },
+      },
+    });
+    const hash = boundApp(app.wasmSchema)!.schema.current;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) =>
+        input.endsWith("/migrations/graph")
+          ? new Response(
+              JSON.stringify({ schemas: [], migrations: [], latestBundleSchemaHash: null }),
+            )
+          : new Response(
+              JSON.stringify({ changed: true, published: { schemas: [hash], migrations: [] } }),
+            ),
+      ),
+    );
+    const result = await deploy({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      app,
+      permissions: {
+        format: 1,
+        tables: {
+          // Listed with nothing allowed: still no policy.
+          drafts: {},
+          // Only the backend uses it, and the file says so.
+          audit: { read: "false", insert: "false", update: "false", delete: "false" },
+          todos: { read: "true", insert: "false", update: "false", delete: "false" },
+        },
+      },
+    });
+    const warning = (table: string) =>
+      `table "${table}" has no policies in jazz.permissions.json, so users can't read, insert, update or delete its rows. ` +
+      "Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: " +
+      `write \`"${table}": { "read": "false" }\` to say so and silence this warning. ` +
+      "Don't add allow rules just to silence it.";
+    expect(result.warnings).toEqual([warning("drafts"), warning("notes")]);
+  });
+
   it("deploy rejects policies compiled against an outdated schema before contacting the server", async () => {
     const { deploy } = await import("./catalogue.js");
-    const oldApp = s.defineApp(
-      { todos: s.table({ owner: s.string() }, {}) },
-      { migrations: "none" },
-    );
-    const permissions = s.definePermissions(oldApp, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.identity.subject });
-    });
-    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+    // Permissions written for a column the schema no longer has.
+    const permissions = {
+      format: 1,
+      tables: { todos: { read: "owner = session.identity.subject" } },
+    };
+    const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     await expect(
@@ -203,26 +199,14 @@ describe("dev catalogue push behavior", () => {
         appId: APP_ID,
         serverUrl: SERVER_URL,
         adminSecret: ADMIN_SECRET,
-        schema: app,
+        app,
         permissions,
       }),
     ).rejects.toThrow("owner");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("deploy rejects missing permissions before contacting the server", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), schemaSource());
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const { deploy } = await import("./catalogue-project.js");
-    await expect(
-      deploy({ appId: APP_ID, serverUrl: SERVER_URL, adminSecret: ADMIN_SECRET, schemaDir: root }),
-    ).rejects.toThrow("Create a permissions.ts file");
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("deploy rejects omitted in-code permissions before contacting the server", async () => {
+  it("deploy rejects omitted permissions before contacting the server", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const { deploy } = await import("./catalogue.js");
@@ -232,9 +216,9 @@ describe("dev catalogue push behavior", () => {
         appId: APP_ID,
         serverUrl: SERVER_URL,
         adminSecret: ADMIN_SECRET,
-        schema: s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" }),
+        app: testApp({ tables: { todos: { columns: { title: "string" } } } }),
       }),
-    ).rejects.toThrow("explicit permissions bundle");
+    ).rejects.toThrow(/deploy requires the app's jazz.permissions.json/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "score": {
+          "type": "int",
+          "default": 5
+        },
+        "text": {
+          "type": "string",
+          "default": "hello"
+        }
+      },
+      "computed": {
+        "json": {
+          "type": "string",
+          "from": [
+            "id",
+            "score",
+            "text"
+          ]
+        },
+        "copy": {
+          "type": {
+            "json": true
+          },
+          "from": [
+            "id",
+            "score",
+            "text"
+          ]
+        },
+        "keys": {
+          "type": {
+            "array": "string"
+          },
+          "from": [
+            "id",
+            "score",
+            "text"
+          ]
+        },
+        "tag": {
+          "type": "string",
+          "from": [
+            "id",
+            "score",
+            "text"
+          ]
+        }
+      }
+    }
+  }
+}

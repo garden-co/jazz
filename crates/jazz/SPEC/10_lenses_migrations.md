@@ -1130,7 +1130,12 @@ case(p)` an enum case whose payload satisfies `p` (`EnumMatch`), and
 - **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
   leads to allows `op`. `allowedTo.op(via col)` names the forward column
   itself and `allowedTo.op(via t.col)` the rows of `t` pointing here, for a
-  link no relation names. `maxDepth` bounds recursive chains.
+  link no relation names. `maxDepth` bounds recursive chains of forward
+  relations; a reverse relation (or `via t.col`) takes none, as the TS DSL
+  refused one: the engine checks every row pointing here and refuses
+  reverse inheritance cycles when it compiles the schema, so a bound would
+  be dropped rather than applied. A recursive relation's `maxDepth` is at
+  most 64.
 - `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
   number of items; the writer uses them only for fewer than two.
 - Nesting deeper than 64 levels is refused.

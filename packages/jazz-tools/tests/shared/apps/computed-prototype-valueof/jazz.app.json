@@ -1,0 +1,21 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "constructor": "string",
+        "toString": "string",
+        "valueOf": "string"
+      },
+      "computed": {
+        "computedValue": {
+          "type": "string",
+          "from": [
+            "valueOf"
+          ]
+        }
+      }
+    }
+  }
+}

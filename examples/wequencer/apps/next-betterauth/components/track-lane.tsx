@@ -7,7 +7,7 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Slider } from "@astryxdesign/core/Slider";
 import { Text } from "@astryxdesign/core/Text";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
-import { app, type Track } from "@/schema";
+import { app, type Track } from "@/jazz.generated";
 import { STEPS_PER_BEAT, TRACK_COLORS, trackColor } from "@/lib/instruments";
 
 export type TrackLaneProps = {

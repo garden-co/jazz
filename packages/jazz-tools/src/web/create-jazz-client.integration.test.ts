@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { schema } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { openJazzClient as createReactJazzClient } from "../react/create-jazz-client.js";
 import { openJazzClient as createSvelteJazzClient } from "../svelte/create-jazz-client.js";
@@ -8,12 +8,7 @@ import { openJazzClient as createVueJazzClient } from "../vue/create-jazz-client
 import { openJazzClient } from "./create-jazz-client.js";
 import { openJazzClient as createLazyJazzClient } from "./lazy-local-first.js";
 
-const app = schema.defineApp(
-  {
-    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { todos: { columns: { title: "string", done: "boolean" } } } });
 
 describe("web/create-jazz-client public API", () => {
   it.each([

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "data": {
+          "type": "string",
+          "transform": "jsonText"
+        }
+      },
+      "computed": {
+        "first": {
+          "type": {
+            "json": true
+          },
+          "from": [
+            "data"
+          ]
+        },
+        "second": {
+          "type": {
+            "json": true
+          },
+          "from": [
+            "data"
+          ]
+        },
+        "repeated": {
+          "type": {
+            "json": true
+          },
+          "from": [
+            "data"
+          ]
+        }
+      }
+    }
+  },
+  "transforms": {
+    "jsonText": {
+      "stored": "string",
+      "view": {
+        "json": true
+      }
+    }
+  }
+}

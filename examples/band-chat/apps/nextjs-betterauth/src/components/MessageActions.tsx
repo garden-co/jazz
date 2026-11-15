@@ -11,7 +11,7 @@ import {
   ToggleButton,
   VStack,
 } from "@astryxdesign/core";
-import { app, type Reaction } from "../../schema";
+import { app, type Reaction } from "../../jazz.generated";
 import { displayNameFor, useDirectory } from "../lib/profiles";
 import type { MessageSummary } from "./RoomView";
 

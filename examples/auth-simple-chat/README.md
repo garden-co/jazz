@@ -7,7 +7,7 @@ What it demonstrates:
 - A local Express server with its own email/password sign-in and an HttpOnly session cookie
 - Jazz running inside that server with `createJazz`: `authenticate` reads the same cookie, so the browser never holds a Jazz credential
 - Starting every visitor as a guest on a device account, and keeping the guest's data on sign-up with `linkDeviceAccount()`
-- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
+- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [jazz.permissions.json](./jazz.permissions.json), with generic-chat message ownership enforced via `$createdBy.account`.
 
 Passwords are stored in plain text in memory for example simplicity only.
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.

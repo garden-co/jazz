@@ -1,5 +1,5 @@
 import { useDb } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import type { FolderIndex } from "./folders.js";
 import { useAdvice, type Advice } from "./use-advice.js";
 

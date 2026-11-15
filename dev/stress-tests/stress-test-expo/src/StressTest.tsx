@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useAll, useSession } from "jazz-tools/react-native";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 
 const BATCH_SIZE = 500;
 const PROJECT_COUNT = 20;
