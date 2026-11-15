@@ -1,0 +1,31 @@
+# Language tabs
+
+Pages show per-language code in `<Tabs groupId="jazz-environment">`. The tab
+order is TypeScript, Effect, Rust, Swift, Kotlin, Go, set by `LANGUAGES` in
+`index.ts`. A test refuses tabs that are out of order, that use a language not
+in the list, or whose `items` don't match the tabs.
+
+## Adding a language
+
+1. Give your example `// #region <topic>-<lang>` snippets: `reading-oneshot-go`,
+   `writing-crud-go`, and so on. Use the same topics as Rust's in
+   `examples/docs/todo-server-rs/src/docs_snippets.rs`.
+2. Add a `<Tab value="Go">` with an `<include>` of your snippet to each
+   `jazz-environment` block that has one, and add `"Go"` to that block's `items`.
+   Where your language can't do what a block shows, add a tab with one line
+   instead: `Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).`
+3. Write `content/docs/setup/<lang>.mdx`, ending with a `## Not supported yet`
+   list. It's already in `content/docs/meta.json`.
+4. Set `bindings` in `LANGUAGES`: your committed generated file for StagePlan
+   and the declarations to show for its `tasks` table (row, insert and status
+   types). Then add a tab under "The generated bindings" in
+   `schemas/defining-tables.mdx` that holds only `<BindingsExcerpt language="Go" />`.
+   The build cuts each declaration out by name, from its first line to its
+   matching close, with the doc comments and attributes right above it.
+   Generated files carry no `#region` markers. A test fails if a symbol is missing.
+5. Set `enabled: true`.
+
+While a language is switched off, the build (`plugin.ts`, before includes run)
+drops its tabs, and `source.ts` drops its setup page and sidebar entry. So a
+language that misses a release appears nowhere in that release's docs, and its
+tabs can sit on main before its examples are ready.
