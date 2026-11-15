@@ -168,7 +168,7 @@ fn transactions_through_the_c_abi() {
 
     assert_eq!(
         call(h, "txBegin", json!({ "serializable": false })).unwrap_err()["kind"],
-        "refused"
+        "notSupported"
     );
     let tx = call(h, "txBegin", json!({})).unwrap()["tx"].clone();
     assert!(

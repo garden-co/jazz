@@ -33,7 +33,6 @@ pub(crate) struct Core {
     has_server: bool,
     /// The contract version the host speaks (`"contract"` in the config):
     /// 1 unless it says 2.
-    #[allow(dead_code)]
     pub(crate) contract: u64,
 }
 
@@ -199,6 +198,11 @@ impl Core {
             has_server,
             contract,
         })
+    }
+
+    /// An error as this host's contract version names it.
+    pub(crate) fn surface<T>(&self, result: Result<T>) -> std::result::Result<T, JazzError> {
+        result.map_err(|error| JazzError::from(error).for_contract(self.contract))
     }
 
     fn open_jazz(&self) -> Result<&Jazz> {
@@ -396,9 +400,11 @@ impl Core {
                             }
                         }
                         Some(SubscriptionStreamItem::Rejected { reason }) => {
-                            Event::Error(JazzError::Refused {
-                                reason: format!("subscription rejected: {reason:?}"),
-                            })
+                            let reason = format!("{reason:?}");
+                            Event::Error(JazzError::from(crate::error::rejection(
+                                &reason,
+                                format!("subscription rejected: {reason}"),
+                            )))
                         }
                     };
                     first = false;
@@ -499,6 +505,36 @@ impl Core {
         Ok(())
     }
 
+    /// Waits until every write committed so far reaches `tier`. Local
+    /// writes are durable locally once they return, so `Local` has nothing
+    /// to wait for; `GlobalServer` waits for the server to have them all
+    /// and fails if it rejected one (the core's `wait_for_sync`, as TS's
+    /// `waitForSync`). Without a server there is nothing to wait for. It
+    /// checks up to the last 4096 writes individually; older ones rely on
+    /// the core wait, which (until jazz#5728) can miss a refusal that is
+    /// not among the writes still pending.
+    pub fn wait_for_sync(&self, tier: DurabilityTier) -> Result<()> {
+        if tier == DurabilityTier::Local {
+            self.open_jazz()?;
+            return Ok(());
+        }
+        block_on(self.open_jazz()?.with_client(|client| async move {
+            // Taken first, so a refusal is reported by one call only.
+            let writes = UNSYNCED.with(|unsynced| std::mem::take(&mut *unsynced.borrow_mut()));
+            // Every pending write reaches the server (or is refused)...
+            client.wait_for_sync().await?;
+            // ...and each write since the last sync is checked on its own:
+            // a refusal followed by an accepted write still fails here.
+            for write in writes {
+                client
+                    .wait_for_transaction(write, DurabilityTier::GlobalServer)
+                    .await?;
+            }
+            Ok(())
+        }))?;
+        Ok(())
+    }
+
     pub fn tx_rollback(&self, tx: u64) -> Result<()> {
         block_on(self.open_jazz()?.with_client(move |_| async move {
             take_tx(tx)?.0.rollback()?;
@@ -566,10 +602,40 @@ async fn settle(
     committed: Option<jazz_app::jazz::tools::TransactionId>,
     tier: Option<DurabilityTier>,
 ) -> jazz_app::Result<()> {
-    if let (Some(committed), Some(tier)) = (committed, tier) {
-        client.wait_for_transaction(committed, tier).await?;
+    if let Some(committed) = committed {
+        match tier {
+            // Confirmed by the server: nothing for waitForSync to check.
+            Some(DurabilityTier::GlobalServer) => {
+                client
+                    .wait_for_transaction(committed, DurabilityTier::GlobalServer)
+                    .await?;
+            }
+            tier => {
+                UNSYNCED.with(|unsynced| {
+                    let mut unsynced = unsynced.borrow_mut();
+                    // Bounded for hosts that never call waitForSync: the
+                    // oldest unchecked writes are left to the core's wait.
+                    if unsynced.len() >= MAX_UNSYNCED {
+                        unsynced.pop_front();
+                    }
+                    unsynced.push_back(committed);
+                });
+                if let Some(tier) = tier {
+                    client.wait_for_transaction(committed, tier).await?;
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// How many unchecked writes waitForSync remembers.
+const MAX_UNSYNCED: usize = 4096;
+
+thread_local! {
+    /// The writes this app's client committed since its last waitForSync.
+    static UNSYNCED: RefCell<std::collections::VecDeque<jazz_app::jazz::tools::TransactionId>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
 }
 
 pub(crate) struct SubscriptionCore {
