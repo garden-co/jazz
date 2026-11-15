@@ -1,0 +1,1 @@
+{"name":"t8-native-backend","private":true,"type":"module","dependencies":{"jose":"^5","ws":"^8","tsx":"^4"}}
