@@ -561,3 +561,53 @@ async fn read_options_with_a_server() {
     }
     server.shutdown().await;
 }
+
+/// A write that lands between a transaction's read and its own write: a
+/// mergeable transaction merges with it, a serializable one is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mergeable_and_serializable_transactions() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    for serializable in [false, true] {
+        let todo = jazz.insert(new_todo("contended")).await.unwrap();
+        let id = todo.id;
+        let other = jazz.clone();
+        let body = move |tx: jazz_app::Transaction| async move {
+            let seen = tx.get::<Todo>(id).await?.expect("the row");
+            // Someone else renames it meanwhile.
+            other
+                .update(
+                    id,
+                    TodoUpdate {
+                        title: Some("renamed".into()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            tx.update(
+                id,
+                TodoUpdate {
+                    done: Some(!seen.done),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        };
+        let committed = if serializable {
+            jazz.serializable_transaction(body).await
+        } else {
+            jazz.transaction(body).await
+        };
+        let row = jazz.get::<Todo>(id).await.unwrap().unwrap();
+        if serializable {
+            assert!(committed.is_err(), "a serializable commit is refused");
+            assert_eq!((row.title.as_str(), row.done), ("renamed", false));
+        } else {
+            committed.unwrap();
+            assert_eq!(
+                (row.title.as_str(), row.done),
+                ("renamed", true),
+                "both writes merge"
+            );
+        }
+    }
+}

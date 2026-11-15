@@ -125,6 +125,22 @@ columns (`merge: "text"`) take plain string writes.
   at once), and fails if the server refused one. It checks up to the last
   4096 writes individually; older ones rely on the core wait, which can miss
   a refusal that is no longer pending until jazz#5728 is fixed.
+- **Partial edits:** UniFFI `edit_text(table, id, column, edited_from,
+text)` sets a text-merge column (`merge: "text"`) to `text`, an edit of
+  `edited_from`, the value its writer last saw: changes others made since are
+  kept, as the server merges them (TS's `editedFrom`). `edit(table, id,
+patch?, edits)` takes a list of `{"kind": "text", "column", "text",
+"editedFrom"}`, `{"kind": "splice", "column", "within": {"units":
+"utf8"|"utf16"|"bytes", "from", "to"}, "splices": [{"at", "delete",
+"insert"}]}` (`insert` a string, or base64 for bytes; `at` relative to
+  `from`) and `{"kind": "jsonSet", "column", "edits": [{"at": "<JSON
+pointer>", "value"}]}`, plus an optional whole-column patch, as one write.
+  Without `within`, a splice's page is the whole current value, in
+  `"units"` (default `"utf8"`). Both on `Transaction` too. C ABI: `jazz_call`
+  `textEdit {table, id, column, units?, edits: [{pos, delete, insert}]}`
+  (splices over the whole value), `editText {table, id, column,
+editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
+  `"tier"`.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`
