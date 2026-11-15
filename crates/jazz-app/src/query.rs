@@ -266,25 +266,36 @@ impl<T, V: ColumnValue> Column<T, Option<V>> {
     }
 }
 
-/// A forward relation: `T`'s `column` references one row of `U`.
+/// A forward relation: `T`'s `column` references one row of `U`. `N` is
+/// whether the column may be null: [`NotNull`] or [`Nullable`].
 #[derive(Debug)]
-pub struct One<T, U> {
+pub struct One<T, U, N = NotNull> {
     column: &'static str,
     types: PhantomData<fn() -> (T, U)>,
+    nullability: PhantomData<N>,
 }
 
-impl<T, U> Clone for One<T, U> {
+/// A forward relation's column always holds a reference.
+#[derive(Debug, Clone, Copy)]
+pub enum NotNull {}
+
+/// A forward relation's column may be null.
+#[derive(Debug, Clone, Copy)]
+pub enum Nullable {}
+
+impl<T, U, N> Clone for One<T, U, N> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T, U> Copy for One<T, U> {}
+impl<T, U, N> Copy for One<T, U, N> {}
 
-impl<T: Table, U: Table> One<T, U> {
+impl<T: Table, U: Table, N> One<T, U, N> {
     pub const fn new(column: &'static str) -> Self {
         Self {
             column,
             types: PhantomData,
+            nullability: PhantomData,
         }
     }
 

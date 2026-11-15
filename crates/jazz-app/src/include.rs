@@ -37,7 +37,7 @@ use jazz::query::{ArraySubquery, ArraySubqueryRequirement};
 use jazz::tools::{ObjectId, QueryResultField, Value};
 
 use crate::error::{Error, Result};
-use crate::query::{Column, Many, One, Query};
+use crate::query::{Column, Many, NotNull, Nullable, One, Query};
 use crate::table::{Fields, Implementations, Table};
 use crate::value::ColumnValue;
 
@@ -328,49 +328,76 @@ fn subquery<S: Row>(query: Query<S>, inner_column: &str, outer_column: &str) -> 
     subquery
 }
 
-impl<T: Table, U: Table> One<T, U> {
+impl<T: Table, U: Table, N: Nullability> One<T, U, N> {
     /// Includes the referenced row as `query` narrows and shapes it: an
-    /// `Option`, or with [`OneInclude::require`] the row itself.
-    pub fn with<S: Row<Table = U>>(self, query: Query<S>) -> OneInclude<T, S> {
+    /// `Option`, unless [`OneInclude::require`]d.
+    pub fn with<S: Row<Table = U>>(self, query: Query<S>) -> OneInclude<T, S, N> {
         OneInclude {
             subquery: subquery(query, "id", self.column()),
             types: PhantomData,
+            nullability: PhantomData,
         }
     }
 
-    /// Includes the referenced row as `U`, keeping only the rows that
-    /// reference a row they can read.
-    pub fn require(self) -> Include<T, U> {
+    /// Requires the referenced row, as TypeScript's `requireIncludes`
+    /// does: see [`OneInclude::require`].
+    pub fn require(self) -> Include<T, N::Required<U>> {
         self.with(Query::all()).require()
     }
 }
 
-impl<T: Table, U: Table> IntoInclude<T> for One<T, U> {
+impl<T: Table, U: Table, N: Nullability> IntoInclude<T> for One<T, U, N> {
     type Output = Option<U>;
     fn into_include(self) -> Include<T, Option<U>> {
         self.with(Query::all()).into_include()
     }
 }
 
-/// A forward relation's include: an `Option<S>`, unless required.
-#[derive(Debug, Clone)]
-pub struct OneInclude<T, S> {
-    subquery: ArraySubquery,
-    types: PhantomData<fn() -> (T, S)>,
+/// Whether a forward relation's column may be null, and so what requiring
+/// its row includes.
+pub trait Nullability: Copy + Send + 'static {
+    /// What a required include of `S` is.
+    type Required<S: Row>: Included;
+    #[doc(hidden)]
+    const REQUIREMENT: ArraySubqueryRequirement;
 }
 
-impl<T, S> OneInclude<T, S> {
-    /// Includes the row as `S`, keeping only the rows that reference one
-    /// they can read (an inner join).
-    pub fn require(self) -> Include<T, S> {
+/// The column always holds a reference: requiring its row includes the
+/// row itself and keeps only the rows whose referenced row is there.
+impl Nullability for NotNull {
+    type Required<S: Row> = S;
+    const REQUIREMENT: ArraySubqueryRequirement = ArraySubqueryRequirement::AtLeastOne;
+}
+
+/// The column may be null: requiring its row changes nothing, as in
+/// TypeScript. The include stays an `Option`, and every row is kept.
+impl Nullability for Nullable {
+    type Required<S: Row> = Option<S>;
+    const REQUIREMENT: ArraySubqueryRequirement = ArraySubqueryRequirement::Optional;
+}
+
+/// A forward relation's include: an `Option<S>`, unless required.
+#[derive(Debug, Clone)]
+pub struct OneInclude<T, S, N = NotNull> {
+    subquery: ArraySubquery,
+    types: PhantomData<fn() -> (T, S)>,
+    nullability: PhantomData<N>,
+}
+
+impl<T, S: Row, N: Nullability> OneInclude<T, S, N> {
+    /// Requires the row, as TypeScript's `requireIncludes` does. On a
+    /// [`NotNull`] relation the include is `S`, and only the rows whose
+    /// referenced row is there (and readable) are kept. On a [`Nullable`]
+    /// one it stays an `Option<S>` and every row is kept.
+    pub fn require(self) -> Include<T, N::Required<S>> {
         Include::new(ArraySubquery {
-            requirement: ArraySubqueryRequirement::AtLeastOne,
+            requirement: N::REQUIREMENT,
             ..self.subquery
         })
     }
 }
 
-impl<T, S: Row> IntoInclude<T> for OneInclude<T, S> {
+impl<T, S: Row, N> IntoInclude<T> for OneInclude<T, S, N> {
     type Output = Option<S>;
     fn into_include(self) -> Include<T, Option<S>> {
         Include::new(self.subquery)

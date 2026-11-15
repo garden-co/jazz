@@ -271,12 +271,12 @@ pub mod todos {
     }
 
     /// Relation `parentRelation`: the `todos` row `parent` references.
-    pub fn parent_relation() -> ::jazz_app::One<Todo, Todo> {
+    pub fn parent_relation() -> ::jazz_app::One<Todo, Todo, ::jazz_app::Nullable> {
         ::jazz_app::One::new("parent")
     }
 
     /// Relation `projectRelation`: the `projects` row `project` references.
-    pub fn project_relation() -> ::jazz_app::One<Todo, Project> {
+    pub fn project_relation() -> ::jazz_app::One<Todo, Project, ::jazz_app::Nullable> {
         ::jazz_app::One::new("project")
     }
 

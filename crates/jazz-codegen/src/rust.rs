@@ -599,9 +599,15 @@ impl<'a> Writer<'a> {
                 ))
             })?;
         Ok(match &relation.kind {
-            RelationKind::One { column, .. } => format!(
-                "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}> {{\n        {RT}::One::new({column:?})\n    }}\n",
-                relation.name, relation.target
+            RelationKind::One { column, nullable } => format!(
+                "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}{}> {{\n        {RT}::One::new({column:?})\n    }}\n",
+                relation.name,
+                relation.target,
+                if *nullable {
+                    format!(", {RT}::Nullable")
+                } else {
+                    String::new()
+                }
             ),
             RelationKind::Many { relation: forward } => {
                 let column = self

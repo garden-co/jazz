@@ -4,7 +4,7 @@
 #![allow(dead_code, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:83a2a5385e9c7409b3da7bc9e05d54a1a7cc80a8a57f797d1039e4154c4b3f91";
+pub const SOURCE: &str = "sha256:e48c31f6e9c4320d12c025a468e79a39ea858238a44e4a0d0a2b6033723278fa";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -153,7 +153,126 @@ pub mod boxes {
     }
 
     /// Relation `taskRelation`: the `tasks` row `task` references.
-    pub fn task_relation() -> ::jazz_app::One<Box, Task> {
+    pub fn task_relation() -> ::jazz_app::One<Box, Task, ::jazz_app::Nullable> {
+        ::jazz_app::One::new("task")
+    }
+}
+
+/// A row of `steps`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Step {
+    pub id: ::jazz_app::ObjectId,
+    pub label: ::std::string::String,
+    pub task: ::jazz_app::ObjectId,
+}
+
+/// A new row of `steps`: [`NewStep::new`] takes the columns it requires.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewStep {
+    pub label: ::std::string::String,
+    pub task: ::jazz_app::ObjectId,
+}
+
+impl NewStep {
+    /// A new row with the columns it requires, in this order: `label`, `task`. The others
+    /// are left out; set them with `NewStep { column: …, ..NewStep::new(…) }`.
+    pub fn new(label: impl ::std::convert::Into<::std::string::String>, task: impl ::std::convert::Into<::jazz_app::ObjectId>) -> Self {
+        Self {
+            label: label.into(),
+            task: task.into(),
+        }
+    }
+}
+
+/// Changes to a row of `steps`: a `None` field leaves its column as it is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StepUpdate {
+    pub label: ::std::option::Option<::std::string::String>,
+    pub task: ::std::option::Option<::jazz_app::ObjectId>,
+}
+
+impl ::jazz_app::Table for Step {
+    const NAME: &'static str = "steps";
+    const COLUMNS: &'static [&'static str] = &["label", "task"];
+    type New = NewStep;
+    type Update = StepUpdate;
+
+    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
+        let label = row.take::<::std::string::String>("label")?;
+        let task = row.take::<::jazz_app::ObjectId>("task")?;
+        ::std::result::Result::Ok(Self {
+            id: row.id(),
+            label,
+            task,
+        })
+    }
+
+    fn id(&self) -> ::jazz_app::ObjectId {
+        self.id
+    }
+}
+
+impl ::jazz_app::Insert for NewStep {
+    type Row = Step;
+
+    fn into_cells(
+        self,
+        _implementations: &::jazz_app::Implementations,
+    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        let mut cells = ::std::collections::HashMap::new();
+        let value = self.label;
+        cells.insert("label".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        let value = self.task;
+        cells.insert("task".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        ::std::result::Result::Ok(cells)
+    }
+}
+
+impl ::jazz_app::Update for StepUpdate {
+    type Row = Step;
+
+    fn into_cells(
+        self,
+        _implementations: &::jazz_app::Implementations,
+    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        let mut cells = ::std::vec::Vec::new();
+        if let ::std::option::Option::Some(value) = self.label {
+            cells.push(("label".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.task {
+            cells.push(("task".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
+        ::std::result::Result::Ok(cells)
+    }
+}
+
+/// Queries, columns and relations of `steps`.
+pub mod steps {
+    #[allow(unused_imports)]
+    use super::*;
+
+    /// Every row of `steps`; narrow it with `filter`.
+    pub fn query() -> ::jazz_app::Query<Step> {
+        ::jazz_app::Query::all()
+    }
+
+    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app::Column<Step, ::jazz_app::ObjectId> {
+        ::jazz_app::id()
+    }
+
+    /// Column `label`.
+    pub fn label() -> ::jazz_app::Column<Step, ::std::string::String> {
+        ::jazz_app::Column::new("label")
+    }
+
+    /// Column `task`.
+    pub fn task() -> ::jazz_app::Column<Step, ::jazz_app::ObjectId> {
+        ::jazz_app::Column::new("task")
+    }
+
+    /// Relation `taskRelation`: the `tasks` row `task` references.
+    pub fn task_relation() -> ::jazz_app::One<Step, Task> {
         ::jazz_app::One::new("task")
     }
 }
@@ -390,6 +509,13 @@ pub const APP: &str = r#"{
         "label": "string",
         "query": "string?",
         "task": { "type": "uuid", "optional": true, "references": "tasks" }
+      },
+      "relations": { "taskRelation": { "rel": "tasks", "column": "task" } }
+    },
+    "steps": {
+      "columns": {
+        "label": "string",
+        "task": { "type": "uuid", "references": "tasks" }
       },
       "relations": { "taskRelation": { "rel": "tasks", "column": "task" } }
     },

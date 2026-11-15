@@ -4,7 +4,7 @@
 
 **Rust: includes and select in `jazz-app`.** A typed query now includes related rows and reads partial rows, as `.include(...)`, `requireIncludes` and `.select(...)` do in TypeScript.
 
-- **Includes.** `todos::query().include(todos::project_relation())` yields `(Todo, Option<Project>)` per row. A reverse relation includes a `Vec<U>`. Each further `include` adds a tuple element, up to eight. `.require()` on a forward relation includes the row itself (`(Todo, Project)`) and keeps only the rows whose referenced row is there.
+- **Includes.** `todos::query().include(todos::project_relation())` yields `(Todo, Option<Project>)` per row. A reverse relation includes a `Vec<U>`. Each further `include` adds a tuple element, up to eight. `.require()` works as TypeScript's `requireIncludes` does. On a forward relation whose column is not null, it includes the row itself (`(Todo, Project)`) and keeps only the rows whose referenced row is there. On a nullable one, the include stays an `Option` and every row is kept. Generated bindings mark nullable relations as `One<T, U, Nullable>`.
 - **Shaping an include.** `relation.with(query)` filters, orders, limits, offsets, selects or nests the included rows, for example `projects::todos_via_project().with(todos::query().filter(...).include(todos::parent_relation()))`.
 - **Select.** `todos::query().select((todos::title(), todos::done()))` yields `jazz_app::Partial<Todo, (String, bool)>`, which holds the row's id and the selected values in order. A single column yields its value.
 - **Everywhere a query goes.** `all`, `one` and `subscribe` take these queries, and `Rows` keeps subscribed rows with includes in order.

@@ -85,15 +85,18 @@ async fn forward_includes_are_options_unless_required() {
         ]
     );
     assert_eq!(rows[0].1.as_ref(), Some(&f.home));
+    assert!(
+        rows.iter()
+            .any(|(todo, project)| *todo == f.loose && project.is_none())
+    );
 
-    // Required: the project itself, and only the todos that have one.
-    let rows: Vec<(Todo, Project)> = jazz
+    // Requiring a nullable relation changes nothing, as in TypeScript:
+    // still an `Option`, and every row kept.
+    let required: Vec<(Todo, Option<Project>)> = jazz
         .all(by_title().include(todos::project_relation().require()))
         .await
         .unwrap();
-    assert_eq!(rows.len(), 3);
-    assert!(rows.iter().all(|(_, project)| *project == f.home));
-    assert!(rows.iter().all(|(todo, _)| todo.id != f.loose.id));
+    assert_eq!(required, rows);
 
     // `one` and `id` work as for plain rows.
     let (todo, parent) = jazz
@@ -180,7 +183,7 @@ async fn includes_chain_and_nest() {
     assert_eq!(rows[3].3.as_ref(), Some(&f.milk));
 
     // Nested: each project's open todos, each with its parent and project.
-    type Nested = (Project, Vec<(Todo, Option<Todo>, Project)>);
+    type Nested = (Project, Vec<(Todo, Option<Todo>, Option<Project>)>);
     let rows: Vec<Nested> = jazz
         .all(
             projects::query()
@@ -190,7 +193,7 @@ async fn includes_chain_and_nest() {
                         by_title()
                             .filter(todos::done().eq(false))
                             .include(todos::parent_relation())
-                            .include(todos::project_relation().require()),
+                            .include(todos::project_relation()),
                     ),
                 ),
         )
@@ -202,8 +205,12 @@ async fn includes_chain_and_nest() {
             (
                 f.home.clone(),
                 vec![
-                    (f.milk.clone(), None, f.home.clone()),
-                    (f.skimmed.clone(), Some(f.milk.clone()), f.home.clone()),
+                    (f.milk.clone(), None, Some(f.home.clone())),
+                    (
+                        f.skimmed.clone(),
+                        Some(f.milk.clone()),
+                        Some(f.home.clone())
+                    ),
                 ]
             ),
             (f.work.clone(), vec![]),
@@ -212,18 +219,17 @@ async fn includes_chain_and_nest() {
 
     // Nested through a forward include.
     let rows = jazz
-        .all(
-            todos::query().id(f.skimmed.id).include(
-                todos::parent_relation()
-                    .with(todos::query().include(todos::project_relation().require()))
-                    .require(),
-            ),
-        )
+        .all(todos::query().id(f.skimmed.id).include(
+            todos::parent_relation().with(todos::query().include(todos::project_relation())),
+        ))
         .await
         .unwrap();
     assert_eq!(
         rows,
-        [(f.skimmed.clone(), (f.milk.clone(), f.home.clone()))]
+        [(
+            f.skimmed.clone(),
+            Some((f.milk.clone(), Some(f.home.clone())))
+        )]
     );
     let _ = f.bread;
 }
@@ -362,12 +368,64 @@ async fn included_rows_decode_every_column_type() {
     .unwrap();
 
     let rows = jazz
-        .all(boxes::query().include(boxes::task_relation().require()))
+        .all(boxes::query().include(boxes::task_relation()))
         .await
         .unwrap();
-    let included: &Task = &rows[0].1;
+    let included: &Task = rows[0].1.as_ref().unwrap();
     assert_eq!(included, &task);
     assert!(included.urgent);
+}
+
+/// Requiring a not-null relation includes the row itself, and keeps only
+/// the rows whose referenced row is there, as `requireIncludes` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requiring_a_not_null_relation_is_an_inner_join() {
+    use task_bindings::{NewStep, NewTask, Step, Task, steps};
+
+    let jazz = task_bindings::open(Config::new(AppId::random()), NoComputed)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask::new("Ship", 1, Vec::new()))
+        .await
+        .unwrap();
+    let held = jazz.insert(NewStep::new("held", task.id)).await.unwrap();
+    let dangling = jazz
+        .insert(NewStep::new("dangling", jazz_app::ObjectId::new()))
+        .await
+        .unwrap();
+
+    let optional: Vec<(Step, Option<Task>)> = jazz
+        .all(
+            steps::query()
+                .order_by(steps::label(), Order::Asc)
+                .include(steps::task_relation()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        optional,
+        [(dangling, None), (held.clone(), Some(task.clone()))]
+    );
+
+    let required: Vec<(Step, Task)> = jazz
+        .all(steps::query().include(steps::task_relation().require()))
+        .await
+        .unwrap();
+    assert_eq!(required, [(held, task)]);
+}
+
+struct NoComputed;
+impl task_bindings::Computed for NoComputed {
+    fn tasks_urgent(&self, _: i32, _: task_bindings::TaskPriority) -> bool {
+        false
+    }
+    fn iso_date_view(&self, stored: jazz_app::Timestamp) -> String {
+        stored.0.to_string()
+    }
+    fn iso_date_stored(&self, view: String) -> jazz_app::Timestamp {
+        jazz_app::Timestamp(view.parse().unwrap())
+    }
 }
 
 /// Through a sync server: a backend writes, another reads with includes.
