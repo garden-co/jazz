@@ -1601,9 +1601,9 @@ function currentTables(
       `bindApp: jazz.generated.ts ships no schema for its current version ${schema.current}; ${REGENERATE}.`,
     );
   }
-  const tables: WasmSchema = structuredClone(
-    (schema.tables ?? (current.schema as WasmSchema)) as WasmSchema,
-  );
+  // A version's schema is the engine's serde form, `{ tables }`.
+  const engine = current.schema as { tables?: WasmSchema };
+  const tables: WasmSchema = structuredClone(schema.tables ?? engine.tables ?? (engine as WasmSchema));
   for (const [table, entries] of Object.entries(relations ?? {})) {
     const tableSchema = tables[table];
     if (!tableSchema) {
