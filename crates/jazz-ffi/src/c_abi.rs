@@ -193,6 +193,28 @@ pub unsafe extern "C" fn jazz_call(
                 )?;
                 "null".into()
             }
+            // Go's shape: splices over the whole current value.
+            "textEdit" => {
+                let edits = json!([{
+                    "kind": "splice",
+                    "column": string("column")?,
+                    "units": args.get("units").cloned().unwrap_or(json!("utf8")),
+                    "splices": field("edits")?
+                        .as_array()
+                        .ok_or_else(|| refused("args_json.edits must be an array"))?
+                        .iter()
+                        .map(|e| json!({ "at": e.get("pos"), "delete": e.get("delete"), "insert": e.get("insert") }))
+                        .collect::<Vec<_>>(),
+                }]);
+                core.edit(
+                    &string("table")?,
+                    &string("id")?,
+                    None,
+                    &edits.to_string(),
+                    &opts(false)?,
+                )?;
+                "null".into()
+            }
             "editText" => {
                 let edits = json!([{
                     "kind": "text",
