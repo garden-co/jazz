@@ -97,9 +97,8 @@ fn validate_relation_policy_predicate(predicate: &RelationPredicate) -> Result<(
         RelationPredicate::In { values, .. } => {
             values.iter().try_for_each(validate_relation_policy_value)
         }
-        RelationPredicate::EnumMatch { payload, .. } | RelationPredicate::Not(payload) => {
-            validate_relation_policy_predicate(payload)
-        }
+        RelationPredicate::Not(payload) => validate_relation_policy_predicate(payload),
+        RelationPredicate::Removed(removed) => match *removed {},
         RelationPredicate::And(predicates) | RelationPredicate::Or(predicates) => predicates
             .iter()
             .try_for_each(validate_relation_policy_predicate),

@@ -861,8 +861,8 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   `uuid`, `bytes`; a trailing `?` makes the column optional (`"string?"`).
 - Objects carry one type key and options:
   - `{"type": "<scalar>"}`;
-  - `{"enum": ["todo", "done"]}`, or with payloads
-    `{"enum": {"open": {}, "closed": {"at": "timestamp"}}}`;
+  - `{"enum": ["todo", "done"]}` (an object of cases with fields is
+    refused: Jazz has no such columns, see jazz#5758);
   - `{"json": <JSON Schema>}` or `{"json": true}` for any JSON;
   - `{"array": <Column type>}`.
   - Options: `"optional": true`, `"default": <Value>`,
@@ -877,8 +877,7 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
   engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
   8601 form is not supported yet),
-  base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
-  `{"<case>": {...}}` for payload enums, and `null`.
+  base64 for `bytes`, any JSON for `json`, arrays for `array`, and `null`.
 
 **Transform** `{stored, view}`: two column types without `?` or options.
 The engine stores `stored`; code reads and writes `view`, converting with
@@ -1015,8 +1014,7 @@ typed       = "literal" , "(" , ( string | number | "true" | "false" | "null" ) 
             | ( "text" | "uuid" | "bytes" | "txid" ) , "(" , string , ")"
             | "bool" , "(" , ( "true" | "false" ) , ")"
             | "array" , "(" , [ typed_arg , { "," , typed_arg } ] , ")"
-            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")"
-            | "enumcase" , "(" , string , { "," , typed_arg } , ")" ;
+            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")" ;
 typed_arg   = typed | "null" ;
 
 exists      = "exists" , source , [ "as" , name ] , "(" , [ conditions ] , ")" ,
@@ -1101,7 +1099,7 @@ session.identity` matches only rows it wrote), `session.claims.<path>`,
   refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
   float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
   `timestamp(1700000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
-  `row(null, text('a'))`, `enumcase('closed', timestamp(5))`) is exactly that
+  `row(null, text('a'))`) is exactly that
   value, whatever it is compared with; the writer uses one only where a plain
   literal would read back as another value.
 - **`exists`.** `exists t(c₁, c₂, …)` holds when some row of `t` satisfies
@@ -1124,8 +1122,7 @@ session.identity` matches only rows it wrote), `session.claims.<path>`,
 n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
   `col`; `outer.col` and `frontier.col` are the outer and frontier rows'
   columns, `id(row)`, `id(outer)` and `id(frontier)` their row ids,
-  `param.name` a query parameter, `session.…` a session value, `col is
-case(p)` an enum case whose payload satisfies `p` (`EnumMatch`), and
+  `param.name` a query parameter, `session.…` a session value, and
   `json('…')` a literal JSON value the relation IR holds as is.
 - **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
   leads to allows `op`. `allowedTo.op(via col)` names the forward column

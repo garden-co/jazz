@@ -11,14 +11,6 @@ import { computed, transforms } from "./jazz.computed.js";
 
 export type TaskStatus = "todo" | "doing" | "done";
 export type TaskMeta = { color: string; links?: string[]; size?: "s" | "m" | "l" };
-export type TaskReview =
-  | { type: "pending" }
-  | { type: "approved"; by: string; note: string | null }
-  | { type: "rejected"; reason: string };
-export type TaskReviewInit =
-  | { type: "pending" }
-  | { type: "approved"; by: string; note?: string | null }
-  | { type: "rejected"; reason: string };
 export type TaskPriority = "low" | "high";
 
 export type Person = {
@@ -55,7 +47,6 @@ export type Task = {
   dueAt: string | null;
   meta: TaskMeta | null;
   extra: JsonValue | null;
-  review: TaskReview | null;
   assigneeIds: string[];
   readonly priority: TaskPriority;
   readonly label: string | null;
@@ -70,7 +61,6 @@ export type TaskInsert = {
   dueAt?: string | null;
   meta?: TaskMeta | null;
   extra?: JsonValue | null;
-  review?: TaskReviewInit | null;
   assigneeIds: string[];
 };
 
@@ -113,7 +103,6 @@ interface Types extends AppTypes {
       dueAt: { kind: "timestamp"; nullable: true; value: Date };
       meta: { kind: "json"; nullable: true; value: TaskMeta };
       extra: { kind: "json"; nullable: true; value: JsonValue };
-      review: { kind: "enum"; nullable: true; value: TaskReview };
       assigneeIds: { kind: "array"; nullable: false; value: string[] };
     };
     relations: {
@@ -215,29 +204,6 @@ export const app = bindApp<Types, Transforms>({
                   "nullable": true,
                 },
                 { "column_type": { "type": "Json" }, "name": "extra", "nullable": true },
-                {
-                  "column_type": {
-                    "cases": [
-                      { "fields": [], "name": "pending" },
-                      {
-                        "fields": [
-                          { "column_type": { "type": "Uuid" }, "name": "by", "nullable": false },
-                          { "column_type": { "type": "Text" }, "name": "note", "nullable": true },
-                        ],
-                        "name": "approved",
-                      },
-                      {
-                        "fields": [
-                          { "column_type": { "type": "Text" }, "name": "reason", "nullable": false },
-                        ],
-                        "name": "rejected",
-                      },
-                    ],
-                    "type": "EnumPayload",
-                  },
-                  "name": "review",
-                  "nullable": true,
-                },
                 {
                   "column_type": { "element": { "type": "Uuid" }, "type": "Array" },
                   "name": "assigneeIds",

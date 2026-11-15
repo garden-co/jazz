@@ -77,7 +77,7 @@ describe.each(["mergeable", "serializable"] as const)("%s transaction upserts", 
 it("requires arrays without defaults on insert instead of synthesizing an empty array", async () => {
   db = await createDb(await localAccountConfig("insert-required-array"));
   expect(() =>
-    // Deliberately omit a required field to test runtime validation.
+    // @ts-expect-error - deliberately omit a required field to test runtime validation
     db!.insert(requiredArrayApp.items, { title: "missing tags" }),
   ).toThrow("missing required column tags");
   await db
