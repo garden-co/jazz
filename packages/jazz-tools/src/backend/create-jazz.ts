@@ -3713,20 +3713,19 @@ function boundAppOf(app: BackendSchemaInput) {
     schema = resolveSchemaSource(app);
   } catch (error) {
     throw new Error(
-      "createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from \"./jazz.generated\"`).",
+      'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`).',
       { cause: error },
     );
   }
   const bound = boundApp(schema);
   if (!bound) {
     throw new Error(
-      "createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from \"./jazz.generated\"`); " +
+      'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`); ' +
         "run `npx jazz-tools generate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
     );
   }
   return bound;
 }
-
 
 function openFacade(options: CreateJazzOptions): Jazz {
   // Checked at startup, so a missing `ws` is in the logs before the first socket.

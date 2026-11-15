@@ -17,7 +17,7 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { app, type Profile } from "../../schema";
+import { app, type Profile } from "../../jazz.generated";
 import { avatarFromFile } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
 

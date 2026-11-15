@@ -1,7 +1,13 @@
 "use client";
 
 import { createContext, useContext } from "react";
-import type { GrantRole, Member, Page, Workspace, WorkspaceRole } from "@/schema";
+import type {
+  PageGrantRole as GrantRole,
+  Member,
+  Page,
+  Workspace,
+  MemberRole as WorkspaceRole,
+} from "@/jazz.generated";
 import type { PageTree } from "@/src/lib/tree";
 
 export type WorkspaceState = {

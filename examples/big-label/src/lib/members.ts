@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { normalizeEmail } from "./emails";
 import { isSerializationConflict, isPermissionDenied } from "./write-errors";
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
 
 export default function ClientTodo() {

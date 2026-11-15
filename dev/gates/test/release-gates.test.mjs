@@ -45,7 +45,9 @@ test("official examples do not duplicate Jazz provenance", () => {
       if (entry.isDirectory()) {
         if (entry.name !== "node_modules") visit(file);
       } else if (entry.isFile() && entry.name === "jazz.app.json") {
-        for (const column of conventionalProvenanceColumns(JSON.parse(fs.readFileSync(file, "utf8"))))
+        for (const column of conventionalProvenanceColumns(
+          JSON.parse(fs.readFileSync(file, "utf8")),
+        ))
           offenders.push(`${path.relative(root, file)}: ${column}`);
       }
     }

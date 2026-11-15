@@ -22,7 +22,7 @@ pub const FILE: &str = "jazz.generated.ts";
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
-    "// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.";
+    "// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.";
 
 /// The version of the module's shape, on its second line. A generator
 /// that writes another shape bumps it, so `validate --check` catches
@@ -187,7 +187,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
     if !local.is_empty() {
         let _ = writeln!(
             out,
-            "import {{ {} }} from \"./jazz.computed\";",
+            "import {{ {} }} from \"./jazz.computed.js\";",
             local.join(", ")
         );
     }
@@ -369,7 +369,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
     }
 
     let options = bind_options(app);
-    // Read back by `jazz-tools validate` and `migrations create`, so
+    // Read back by `jazz-tools generate` and `migrations create`, so
     // formatters must leave it as it is.
     out.push_str("// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.\n");
     out.push_str("// biome-ignore format: generated JSON\n");

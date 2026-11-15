@@ -1,5 +1,6 @@
 import type { Db } from "jazz-tools";
-import { app, type Conversation, type TimedTurn, type ToolCall } from "@/schema";
+import { app, type Conversation, type ToolCall } from "@/jazz.generated";
+import { type TimedTurn } from "@/app-extras";
 import { regenerateReply, requestReply, resumeReply } from "@/src/ui/agent-api";
 import { branchPath, latestLeaf, siblingsOf } from "@/src/ui/transcript";
 import { h } from "./dom";

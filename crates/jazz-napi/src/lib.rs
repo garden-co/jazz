@@ -206,8 +206,13 @@ pub fn migrations_create(
     bindings: Option<String>,
     name: String,
 ) -> js::Result<CreatedMigration> {
-    let created = jazz_codegen::migrations::create(app_json.as_bytes(), bindings.as_deref(), &name)
-        .map_err(codegen_error)?;
+    let created = jazz_codegen::migrations::create(
+        jazz_codegen::Lang::TypeScript,
+        app_json.as_bytes(),
+        bindings.as_deref(),
+        &name,
+    )
+    .map_err(codegen_error)?;
     Ok(CreatedMigration {
         app: created.app,
         changed: created.changed,
@@ -225,7 +230,13 @@ pub fn migrations_create(
 pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Result<()> {
     use jazz_codegen::bindings::Staleness;
     let app = jazz_codegen::App::load(app_json.as_bytes()).map_err(artifact_error)?;
-    match jazz_codegen::bindings::staleness(&app, bindings.as_deref()).map_err(codegen_error)? {
+    match jazz_codegen::bindings::staleness(
+        &app,
+        jazz_codegen::Lang::TypeScript,
+        bindings.as_deref(),
+    )
+    .map_err(codegen_error)?
+    {
         None => Ok(()),
         Some(staleness) => {
             let code = match staleness {
@@ -234,7 +245,7 @@ pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Resu
             };
             Err(BindingError(napi::Error::new(
                 JsErrorCode(code.to_owned()),
-                staleness.message(),
+                staleness.message(jazz_codegen::Lang::TypeScript),
             )))
         }
     }

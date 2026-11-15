@@ -6,7 +6,7 @@ interface JazzClassicApiRemoved {
 }
 
 const TABLES =
-  'tables, declared in `jazz.app.json`; import `app` from the `jazz.generated.ts` that `npx jazz-tools validate` writes';
+  "tables, declared in `jazz.app.json`; import `app` from the `jazz.generated.ts` that `npx jazz-tools validate` writes";
 const QUERY_HOOKS = "`useAll(query)` or `useOne(query)` (Svelte: `QuerySubscription`)";
 const SESSION =
   "the session: `useJazzSession()` (Svelte: `getJazzSession()`), whose `user` is who is signed in";

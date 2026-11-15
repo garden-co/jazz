@@ -59,7 +59,9 @@ test("no example's client code imports its permissions module", () => {
 test("the check recognises a client import and a server one", () => {
   assert.ok(PERMISSIONS_IMPORT.test('import permissions from "@/jazz.permissions.json";'));
   assert.ok(
-    PERMISSIONS_IMPORT.test('import permissions from "../jazz.permissions.json" with { type: "json" };'),
+    PERMISSIONS_IMPORT.test(
+      'import permissions from "../jazz.permissions.json" with { type: "json" };',
+    ),
   );
   assert.ok(PERMISSIONS_IMPORT.test('const p = await import("./jazz.permissions.json");'));
   assert.ok(!PERMISSIONS_IMPORT.test('import { app } from "./jazz.generated";'));

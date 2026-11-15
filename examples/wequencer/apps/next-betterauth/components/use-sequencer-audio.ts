@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DrumSynth, PlaybackScheduler, type PlaybackSnapshot } from "@/lib/audio";
 import { absoluteStepAt, wrapStep, type TransportState } from "@/lib/transport";
-import type { Instrument } from "@/schema";
+import type { TrackInstrument as Instrument } from "@/jazz.generated";
 
 /**
  * Local sound for this device. Browsers only start audio after a gesture, so

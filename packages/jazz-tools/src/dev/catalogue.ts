@@ -53,7 +53,10 @@ export interface DeployOptions extends CatalogueServerOptions {
 }
 
 /** A warning for each table without any policy: everything on it is denied. */
-function missingPolicyWarnings(tables: readonly string[], permissions: CompiledPermissionsMap): string[] {
+function missingPolicyWarnings(
+  tables: readonly string[],
+  permissions: CompiledPermissionsMap,
+): string[] {
   return tables
     .filter((table) => {
       const policies = permissions[table];
@@ -127,7 +130,6 @@ export async function deployApp(options: DeployOptions): Promise<DeployResult> {
     permissions,
   });
 }
-
 
 /** Publish an app and its permissions (what `createJazz` publishes when it starts). */
 export const deploy = deployApp;

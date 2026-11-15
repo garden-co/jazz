@@ -101,11 +101,13 @@ type ColumnOf<
 > = Extract<ColumnsOf<TSchema, TTable>[TColumn], ColumnTypes>;
 
 // Simplified, so the generated interfaces read as plain object types.
-export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
-  string extends keyof TableTypesOf<TSchema, TTable>["row"]
-    ? // An index-signature row (a test's loose app): simplifying would drop `id`.
-      TableTypesOf<TSchema, TTable>["row"] & { id: string }
-    : Simplify<TableTypesOf<TSchema, TTable>["row"] & { id: string }>;
+export type TableRow<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = string extends keyof TableTypesOf<TSchema, TTable>["row"]
+  ? // An index-signature row (a test's loose app): simplifying would drop `id`.
+    TableTypesOf<TSchema, TTable>["row"] & { id: string }
+  : Simplify<TableTypesOf<TSchema, TTable>["row"] & { id: string }>;
 
 export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   TableTypesOf<TSchema, TTable>["insert"]
@@ -1603,7 +1605,9 @@ function currentTables(
   }
   // A version's schema is the engine's serde form, `{ tables }`.
   const engine = current.schema as { tables?: WasmSchema };
-  const tables: WasmSchema = structuredClone(schema.tables ?? engine.tables ?? (engine as WasmSchema));
+  const tables: WasmSchema = structuredClone(
+    schema.tables ?? engine.tables ?? (engine as WasmSchema),
+  );
   for (const [table, entries] of Object.entries(relations ?? {})) {
     const tableSchema = tables[table];
     if (!tableSchema) {

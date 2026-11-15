@@ -17,13 +17,7 @@
  */
 import { createRequire } from "node:module";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
-import {
-  bindApp,
-  boundApp,
-  type App,
-  type AppTypes,
-  type BindAppOptions,
-} from "../typed-app.js";
+import { bindApp, boundApp, type App, type AppTypes, type BindAppOptions } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 
 /** A `jazz.app.json`, as an object; `format` defaults to 1. */

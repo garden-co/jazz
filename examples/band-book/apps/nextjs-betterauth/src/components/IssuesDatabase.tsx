@@ -22,7 +22,7 @@ import {
   VStack,
   type TableColumn,
 } from "@astryxdesign/core";
-import { app, type Issue, type IssueStatus } from "@/schema";
+import { app, type Issue, type IssueStatus } from "@/jazz.generated";
 import { createIssue } from "@/src/lib/page-actions";
 import {
   ISSUE_STATUSES,
