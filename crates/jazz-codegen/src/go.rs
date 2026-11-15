@@ -1,5 +1,5 @@
 //! The Go back end: `jazzapp/jazz_app.go`, typed bindings over the Go
-//! runtime module (`github.com/garden-co/jazz/packages/jazz-go`, package
+//! runtime module (`github.com/garden-co/jazz/packages/jazz-go/v2`, package
 //! `jazz`), which wraps the `jazz-ffi` C ABI through cgo.
 //!
 //! The bindings are their own package, `jazzapp`, in a directory beside
@@ -36,7 +36,7 @@ pub const HEADER: &str =
     "// Code generated from jazz.app.json by `jazz-tools generate`. DO NOT EDIT.";
 
 /// The Go runtime module's import path.
-pub const MODULE: &str = "github.com/garden-co/jazz/packages/jazz-go";
+pub const MODULE: &str = "github.com/garden-co/jazz/packages/jazz-go/v2";
 
 /// How the format line starts.
 const FORMAT_PREFIX: &str = "// Bindings format ";

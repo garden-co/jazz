@@ -5,7 +5,7 @@ import (
 	_ "embed"
 	"errors"
 
-	jazz "github.com/garden-co/jazz/packages/jazz-go"
+	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
 
 	"github.com/garden-co/jazz/examples/stage-plan/apps/go-cli/jazzapp"
 )

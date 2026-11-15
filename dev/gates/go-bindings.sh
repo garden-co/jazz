@@ -37,7 +37,7 @@ for dir in crates/jazz-codegen/tests/apps/*/jazzapp crates/jazz-codegen/tests/go
   module="$(mktemp -d)"
   mkdir "${module}/jazzapp"
   cp "${dir}/jazz_app.go" "${module}/jazzapp/"
-  printf 'module example.com/golden\n\ngo 1.22\n\nrequire github.com/garden-co/jazz/packages/jazz-go v0.0.0\n\nreplace github.com/garden-co/jazz/packages/jazz-go => %s/packages/jazz-go\n' "${root}" > "${module}/go.mod"
+  printf 'module example.com/golden\n\ngo 1.22\n\nrequire github.com/garden-co/jazz/packages/jazz-go/v2 v2.0.0\n\nreplace github.com/garden-co/jazz/packages/jazz-go/v2 => %s/packages/jazz-go\n' "${root}" > "${module}/go.mod"
   (cd "${module}" && go vet ./... && test -z "$(gofmt -l .)") || { echo "${dir} fails go vet or gofmt"; exit 1; }
 done
 
