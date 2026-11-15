@@ -142,8 +142,11 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
           Stream.tap((rows) =>
             // Write once the initial (empty) snapshot has arrived, so the stream
             // observes the change rather than a later initial result.
+            // Both branches are `Effect<void>`: with an inline app's loose
+            // rows, TS otherwise infers the callback's type from the insert
+            // branch alone, and a fresh build refuses `Effect.void` against it.
             rows.length === 0
-              ? jazz.insert(app.todos, { title: "milk", done: false })
+              ? jazz.insert(app.todos, { title: "milk", done: false }).pipe(Effect.asVoid)
               : Effect.void,
           ),
           Stream.map(titles),
