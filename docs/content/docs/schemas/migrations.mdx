@@ -97,9 +97,16 @@ Commit `jazz.app.json` and `jazz.generated.ts` together. Two branches that each 
 from the same version both change `history` and `migrations`: keep both versions' entries when you
 merge, then see [Handling concurrent migrations](#handling-concurrent-migrations).
 
-Index changes, `"history": "latest"`, a column's `merge` and the column order are part of the
-schema version too, so `generate` asks for a migration. Run `migrations create` as usual: for an
-index change it writes an empty step, with nothing to decide:
+### Changes that keep every row
+
+Single-column indexes aren't part of the schema version, so an edit that only adds, removes or
+changes them needs no migration: `generate` writes new bindings. If you run `migrations create`
+anyway, it writes nothing and says "only single-column indexes changed: no migration needed; run
+`jazz-tools generate`".
+
+Composite indexes, `"history": "latest"`, a column's `merge` and the column order are part of the
+schema version, so `generate` asks for a migration. Run `migrations create` as usual: it writes an
+empty step, with nothing to decide, for example for a composite index:
 
 ```json
 "tasks": { "$comment": "Rows pass unchanged: only indexes changed." }
