@@ -181,8 +181,9 @@ Not supported yet:
   or tested for them yet, and there are no prebuilt XCFrameworks.
 - Installing the package from a URL: depend on a local checkout by path.
 - A SwiftUI `Binding` for `JazzText`.
-- SwiftUI helpers beyond `JazzQuery`: an `@Observable` session, and Keychain storage for device
-  keys. Use `jazz.session` and your own Keychain code.
+- Keychain storage for device keys: keep the key from `Jazz.generateDeviceKey()` with your own
+  Keychain code. (`JazzQuery` and `JazzSession`, the `@Observable` models for SwiftUI, are built for
+  Apple platforms but only compiled on Linux in CI.)
 - Anonymous (guest) users, as in TypeScript.
 - Subscribing to history queries.
 - Parts of large values inside includes: parts are for root queries.
