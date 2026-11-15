@@ -102,4 +102,56 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(titles.map(\.title), ["Load in", "Sound check", "Doors", "Strike"])
         try await app.jazz.close()
     }
+
+    struct Oops: Error {}
+
+    func testTransactionsCommitAndRollBack() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Transactions")
+        let task = try await DocsSnippets.transaction(app.jazz, show: show)
+        let committed = try await app.tasks(of: show)
+        XCTAssertEqual(committed.map(\.id), [task.id])
+        XCTAssertEqual(committed.first?.rank, 1)
+        do {
+            _ = try await app.jazz.transaction { tx in
+                try await tx.insert(JazzApp.NewTask(showId: show.id, title: "Never", status: .todo, rank: 0))
+                throw Oops()
+            }
+            XCTFail("the transaction should rethrow")
+        } catch is Oops {}
+        let afterRollback = try await app.tasks(of: show)
+        XCTAssertEqual(afterRollback.map(\.title), ["Rig lights"])
+        try await app.jazz.close()
+    }
+
+    func testDurabilityTiers() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Tiers")
+        try await app.jazz.waitForSync(.global)
+        let task = try await DocsSnippets.writeTier(app.jazz, show: show)
+        let remote = try await DocsSnippets.readTier(app.jazz, show: show)
+        XCTAssertEqual(remote.map(\.id), [task.id])
+        XCTAssertEqual(remote.first?.status, .doing)
+        try await app.jazz.close()
+    }
+
+    func testAWriteThePermissionsRefuseFailsAtTheGlobalTier() async throws {
+        let server = try await TestServer()
+        let chief = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await chief.show(named: "Private")
+        try await chief.jazz.waitForSync(.global)
+        let stranger = try await StagePlanApp.open(
+            user: "00000000-0000-4000-8000-0000000000bb", server: server.server)
+        do {
+            _ = try await stranger.jazz.insert(
+                JazzApp.NewTask(showId: show.id, title: "Sneaky", status: .todo, rank: 1), tier: .global)
+            XCTFail("a stranger's task in someone else's show must be refused")
+        } catch {
+            guard case .permissionDenied = error else { return XCTFail("\(error)") }
+        }
+        try await stranger.jazz.close()
+        try await chief.jazz.close()
+    }
 }

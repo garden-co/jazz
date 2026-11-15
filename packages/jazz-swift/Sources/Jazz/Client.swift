@@ -11,6 +11,13 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     case closed
     /// A row or delta didn't decode into the bindings' types (stale bindings?).
     case decoding(String)
+    /// The app's permissions don't allow it (a write the server refuses
+    /// shows up here when waiting for the `global` tier).
+    case permissionDenied(String)
+    /// Something Jazz for Swift doesn't support yet.
+    case notSupported(String)
+    /// A serializable transaction lost to another write: retrying may succeed.
+    case conflict(String)
     /// The calling task was cancelled.
     case cancelled
 
@@ -20,6 +27,9 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .io(let message): return "io: \(message)"
         case .closed: return "closed"
         case .decoding(let message): return "decoding: \(message)"
+        case .permissionDenied(let message): return "permission denied: \(message)"
+        case .notSupported(let message): return "not supported yet: \(message)"
+        case .conflict(let message): return "conflict: \(message)"
         case .cancelled: return "cancelled"
         }
     }
@@ -42,6 +52,9 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .Refused(let message): return JazzError.refused(message)
         case .Io(let message): return JazzError.io(message)
         case .Closed: return JazzError.closed
+        case .Permission(let message): return JazzError.permissionDenied(message)
+        case .NotSupported(let message): return JazzError.notSupported(message)
+        case .Conflict(let message): return JazzError.conflict(message)
         }
     }
 }
@@ -107,6 +120,8 @@ public struct Config: Sendable {
     func json(app: String) throws -> String {
         var object: [String: JSONValue] = [
             "app": .string(app), "storage": .string(storage.rawValue),
+            // Contract 2: permission, not-supported and conflict errors apart.
+            "contract": .number(2),
         ]
         object["permissions"] = permissions.map(JSONValue.string)
         object["appId"] = appId.map(JSONValue.string)
@@ -182,10 +197,12 @@ public final class Client: Sendable {
     }
 
     /// Every row `query` matches.
-    public func all<R>(_ query: Query<R>) async throws(JazzError) -> [R] {
+    public func all<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws(JazzError) -> [R] {
         try await Self.typed {
             let json = try query.json()
-            let rows = try await Self.run { try self.handle.all(queryJson: json) }
+            let rows = try await Self.run {
+                if let tier { try self.handle.allAt(queryJson: json, tier: tier.rawValue) } else { try self.handle.all(queryJson: json) }
+            }
             return try Coding.decode([R].self, rows, userInfo)
         }
     }
@@ -203,10 +220,14 @@ public final class Client: Sendable {
     }
 
     /// The first row `query` matches, if any.
-    public func one<R>(_ query: Query<R>) async throws(JazzError) -> R? {
+    public func one<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws(JazzError) -> R? {
         try await Self.typed {
             let json = try query.json()
-            guard let row = try await Self.run({ try self.handle.one(queryJson: json) }) else {
+            guard
+                let row = try await Self.run({
+                    if let tier { try self.handle.oneAt(queryJson: json, tier: tier.rawValue) } else { try self.handle.one(queryJson: json) }
+                })
+            else {
                 return nil
             }
             return try Coding.decode(R.self, row, userInfo)
@@ -215,45 +236,97 @@ public final class Client: Sendable {
 
     /// Inserts `row`, returning it as stored (with its `id`).
     @discardableResult
-    public func insert<I: Insert>(_ row: I) async throws(JazzError) -> I.Row {
+    public func insert<I: Insert>(_ row: I, tier: WriteTier? = nil) async throws(JazzError) -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
             let inserted = try await Self.run {
-                try self.handle.insert(table: I.Row.table, rowJson: json)
+                if let tier {
+                    try self.handle.insertAt(table: I.Row.table, rowJson: json, tier: tier.rawValue)
+                } else {
+                    try self.handle.insert(table: I.Row.table, rowJson: json)
+                }
             }
             return try Coding.decode(I.Row.self, inserted, userInfo)
         }
     }
 
     /// Changes the columns `patch` sets on row `id`.
-    public func update<P: Patch>(_ id: Jazz.ID, _ patch: P) async throws(JazzError) {
+    public func update<P: Patch>(_ id: Jazz.ID, _ patch: P, tier: WriteTier? = nil)
+        async throws(JazzError)
+    {
         try await Self.typed {
             let json = try Coding.json(patch, userInfo)
-            try await Self.run { try self.handle.update(table: P.Row.table, id: id, patchJson: json) }
+            try await Self.run {
+                if let tier {
+                    try self.handle.updateAt(table: P.Row.table, id: id, patchJson: json, tier: tier.rawValue)
+                } else {
+                    try self.handle.update(table: P.Row.table, id: id, patchJson: json)
+                }
+            }
         }
     }
 
     /// Changes the columns `patch` sets on `row`.
-    public func update<P: Patch>(_ row: P.Row, _ patch: P) async throws(JazzError) {
-        try await update(row.id, patch)
+    public func update<P: Patch>(_ row: P.Row, _ patch: P, tier: WriteTier? = nil)
+        async throws(JazzError)
+    {
+        try await update(row.id, patch, tier: tier)
     }
 
-    public func delete<R: Row>(_ type: R.Type, id: Jazz.ID) async throws(JazzError) {
+    public func delete<R: Row>(_ type: R.Type, id: Jazz.ID, tier: WriteTier? = nil)
+        async throws(JazzError)
+    {
         try await Self.typed {
-            try await Self.run { try self.handle.delete(table: R.table, id: id) }
+            try await Self.run {
+                if let tier {
+                    try self.handle.deleteAt(table: R.table, id: id, tier: tier.rawValue)
+                } else {
+                    try self.handle.delete(table: R.table, id: id)
+                }
+            }
         }
     }
 
-    public func delete<R: Row>(_ row: R) async throws(JazzError) {
-        try await delete(R.self, id: row.id)
+    public func delete<R: Row>(_ row: R, tier: WriteTier? = nil) async throws(JazzError) {
+        try await delete(R.self, id: row.id, tier: tier)
+    }
+
+    /// Returns once every write made so far has reached `tier`.
+    public func waitForSync(_ tier: WriteTier = .global) async throws(JazzError) {
+        try await Self.typed {
+            try await Self.run { try self.handle.waitForSync(tier: tier.rawValue) }
+        }
+    }
+
+    /// Runs `body` in a serializable transaction: it commits when `body`
+    /// returns (waiting for `commit`'s tier, if given) and rolls back when it
+    /// throws, rethrowing that error. Inside, reads see the transaction's
+    /// own writes. Don't let `tx` escape `body`. A `JazzError.conflict`
+    /// means another write won: running the transaction again may succeed.
+    public func transaction<T: Sendable>(
+        commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
+    ) async throws -> T {
+        let ffi = try await Self.typed { try await Self.run { try self.handle.begin() } }
+        let tx = Transaction(ffi, implementations: implementations)
+        let result: T
+        do {
+            result = try await body(tx)
+        } catch {
+            try? await Self.run { try ffi.rollback() }
+            throw error
+        }
+        try await Self.typed { try await Self.run { try ffi.commit(tier: tier?.rawValue) } }
+        return result
     }
 
     /// The deltas of `query`'s result, the first a `reset` with all of it.
     /// Stop iterating (or cancel the task) to unsubscribe. It fails with a
     /// `JazzError`.
-    public func subscribe<R>(_ query: Query<R>) -> AsyncThrowingStream<Delta<R>, any Error> {
+    public func subscribe<R>(_ query: Query<R>, tier: ReadTier? = nil)
+        -> AsyncThrowingStream<Delta<R>, any Error>
+    {
         let implementations = implementations
-        return raw(query).map { raw in
+        return raw(query, tier: tier).map { raw in
             let userInfo = Self.userInfo(implementations)
             return Delta(
                 added: try raw.added.map { try Self.row($0, userInfo) },
@@ -265,9 +338,11 @@ public final class Client: Sendable {
     /// `query`'s whole result each time it changes, in its `orderBy` order.
     /// Stop iterating (or cancel the task) to unsubscribe. It fails with a
     /// `JazzError`.
-    public func watch<R>(_ query: Query<R>) -> AsyncThrowingStream<[R], any Error> {
+    public func watch<R>(_ query: Query<R>, tier: ReadTier? = nil)
+        -> AsyncThrowingStream<[R], any Error>
+    {
         let implementations = implementations
-        let upstream = raw(query)
+        let upstream = raw(query, tier: tier)
         return AsyncThrowingStream { continuation in
             let task = _Concurrency.Task {
                 var rows: [String: [String: JSONValue]] = [:]
@@ -307,12 +382,17 @@ public final class Client: Sendable {
         try Coding.decode(R.self, Coding.json(JSONValue.object(object)), userInfo)
     }
 
-    func raw<R>(_ query: Query<R>) -> AsyncThrowingStream<RawDelta, any Error> {
+    func raw<R>(_ query: Query<R>, tier: ReadTier? = nil) -> AsyncThrowingStream<RawDelta, any Error> {
         AsyncThrowingStream { continuation in
             let listener = Listener(continuation: continuation)
             do {
                 let json = try query.json()
-                let subscription = try handle.subscribe(queryJson: json, listener: listener)
+                let subscription =
+                    if let tier {
+                        try handle.subscribeAt(queryJson: json, tier: tier.rawValue, listener: listener)
+                    } else {
+                        try handle.subscribe(queryJson: json, listener: listener)
+                    }
                 continuation.onTermination = { _ in subscription.cancel() }
             } catch {
                 continuation.finish(throwing: JazzError.wrap(error))
@@ -358,11 +438,20 @@ final class Listener: SubscriptionListener, @unchecked Sendable {
         }
     }
 
-    func onError(message: String) {
-        // A subscription's last error after close is jazz-ffi's `Closed`,
-        // which reaches the listener as its message (crates/jazz-ffi/README.md).
-        continuation.finish(
-            throwing: message == "the app is closed" ? JazzError.closed : JazzError.io(message))
+    func onError(kind: String, message: String) {
+        continuation.finish(throwing: Self.error(kind: kind, message: message))
+    }
+
+    /// A subscription's last error, by jazz-ffi's kind.
+    static func error(kind: String, message: String) -> JazzError {
+        switch kind {
+        case "closed": return .closed
+        case "refused": return .refused(message)
+        case "permission": return .permissionDenied(message)
+        case "notSupported": return .notSupported(message)
+        case "conflict": return .conflict(message)
+        default: return .io(message)
+        }
     }
 }
 

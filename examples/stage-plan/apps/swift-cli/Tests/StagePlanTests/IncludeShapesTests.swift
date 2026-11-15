@@ -71,7 +71,8 @@ final class IncludeShapesTests: XCTestCase {
         try await app.jazz.insert(
             JazzApp.NewShowCrew(showId: show.id, crewId: crew.id, account: me, role: .chief))
         let task = try await app.addTask("Load in", to: show)
-        try await app.jazz.update(task.id, JazzApp.TaskPatch(assigneeId: .set(crew.id)))
+        // At the global tier, a refused write fails here instead of rolling back later.
+        try await app.jazz.update(task.id, JazzApp.TaskPatch(assigneeId: .set(crew.id)), tier: .global)
         try await app.addTask("Unassigned", to: show)
 
         let shows = JazzApp.shows.self
