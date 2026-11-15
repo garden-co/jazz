@@ -1,13 +1,18 @@
 ---
 title: Rust Backend
-description: "Open a Jazz app from Rust with the jazz-app crate and typed bindings generated from jazz.app.json."
+description: "Run your app's main backend in Rust with the jazz-app crate and typed bindings generated from jazz.app.json."
 languageTabs: backend
 ---
 
-A Rust service can be your app's backend. It opens the app from the same `jazz.app.json` and
-`jazz.permissions.json` as every other language, with typed bindings generated from them. On start
-it publishes the app's permissions bundle, as `createJazz` does. Then it acts as one user of the
-app, in a session pinned to that bundle.
+A Rust service can be your app's main backend, the Rust counterpart of `createJazz` in TypeScript.
+It opens the app from the same `jazz.app.json` and `jazz.permissions.json` as every other language,
+with typed bindings generated from them. On start it publishes the app's permissions bundle to the
+sync server. Its own handle then acts as one user of the app, the one you name in `Backend::new`,
+in a session pinned to that bundle.
+
+It also serves your users' clients at `/jazz`, as `createJazz` does: your app's own sign-in decides
+who each request's user is, and the backend relays their sync to the sync server under the
+permissions it published. See [Serve your users at /jazz](#serve-your-users-at-jazz).
 
 The `jazz-app` crate isn't on crates.io yet, so depend on it from the Jazz repository:
 
@@ -51,16 +56,127 @@ client runs on a thread of its own. Before the process exits, call `jazz.shutdow
 the calls already made finish and the local store closes.
 
 The backend needs the sync server's admin secret, to publish the bundle, and its backend secret, to
-vouch for the user it acts as. Like every backend, give it no HTTP surface that callers can reach
-without your own authentication.
+vouch for the user it acts as. Keep both on the server.
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Rust tab
 for each example. `examples/todo-server-rs` in the repository is a complete service.
+
+## Serve your users at /jazz
+
+`jazz_app::endpoint::Endpoint` is the app's Jazz endpoint: the routes your users' browser and
+native clients connect to, the same ones `createJazz` serves. Build it from the backend's handle and
+your app's sign-in, a closure that reads the request's cookies or bearer token and answers who is
+signed in (see [How Auth Works in Jazz](/docs/setup/auth/backend)). With the `axum` feature,
+`endpoint.router()` serves all of it:
+
+```toml title="Cargo.toml"
+[dependencies]
+jazz-app = { git = "https://github.com/garden-co/jazz", features = ["axum"] }
+axum = "0.8"
+```
+
+```rust title="src/main.rs"
+use ::jazz_app::endpoint::{Answer, AuthUser, Endpoint, Request};
+use axum::Router;
+use axum::routing::get;
+
+// `jazz` is the backend's handle, opened with `Config::backend` as above.
+let endpoint = Endpoint::new(&jazz, |request: Request| async move {
+    // Your app's own sign-in decides who the request's user is.
+    Ok(match session_from_cookie(request.cookie("sid")).await {
+        Some(s) => Some(Answer::User(AuthUser::new(s.user_id, s.expires_at))),
+        // Let device accounts (local-first guests) in; `None` refuses them.
+        None => Some(Answer::DeviceAccount),
+    })
+})?;
+
+let app = Router::new()
+    .route("/api/my-todos", get(my_todos))
+    .with_state(endpoint.clone())
+    .merge(endpoint.router()); // everything under /jazz
+
+let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+axum::serve(listener, app).await?;
+endpoint.shutdown().await?;
+jazz.shutdown().await?;
+```
+
+`AuthUser::new` takes the user's id and when the answer stops holding (Unix seconds); add claims
+with `.claims(…)`. A sync session asks its client to reconnect shortly before that, or after an hour
+at most (`.session_ttl(…)`), and the endpoint asks your sign-in again then. `.base_path(…)` serves it
+under another path than `/jazz`.
+
+Without Axum, your HTTP server passes requests under `/jazz` to `endpoint.handle(request)`. It
+upgrades the sync socket (`endpoint.is_socket(path)`) itself and passes the socket's binary
+messages to `endpoint.serve_socket(request, incoming, outgoing)`, then closes it with the code and
+reason that returns.
+
+### Act as the request's user
+
+In your own routes, `endpoint.for_user(&request)` is the backend's handle acting as the request's
+user (TS `forReqUser`): its reads and writes run as them, under your permissions.
+`endpoint.for_auth_user(&user)` does the same for an `AuthUser` you already have (TS `forSession`).
+
+```rust title="src/main.rs"
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::Json;
+use jazz_app::todos; // the generated bindings
+
+async fn my_todos(
+    State(endpoint): State<Endpoint>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    let request = headers
+        .iter()
+        .fold(Request::new("GET", "/api/my-todos"), |request, (name, value)| {
+            request.header(name.as_str(), value.to_str().unwrap_or_default())
+        });
+    // The backend's handle acting as the request's user, under your permissions.
+    let as_user = endpoint.for_user(&request).await.map_err(|error| match error {
+        ::jazz_app::Error::SignedOut => StatusCode::UNAUTHORIZED,
+        ::jazz_app::Error::NoAccount(_) => StatusCode::FORBIDDEN,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })?;
+    let todos = as_user
+        .all(todos::query())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(todos.into_iter().map(|todo| todo.title).collect()))
+}
+```
+
+A user gets a Jazz account when they first sign in from a client. Until then `for_user` fails with
+`Error::NoAccount`. `endpoint.create_account_for(user_id)` creates one for a user who never opens a
+client, and `endpoint.account_for(&request)` returns the request's user's account, if they have one.
+
+Users' handles share one client, which the endpoint opens on first use and keeps in memory. Their
+`shutdown` does nothing; `endpoint.shutdown()` stops that client, and the backend's own handle runs
+on.
 
 ## Not supported yet
 
 In Rust, Jazz doesn't support these yet:
 
-- connecting as an end user with a JWT;
 - includes, `select` and recursive queries (use `jazz.with_client(…)` for the low-level client);
-- payload enums.
+- payload enums;
+- a handle with the backend's own authority, where your permissions aren't checked (TS `jazz.db`):
+  the backend's handle acts as the user you name in `Backend::new`;
+- running the sync server in the backend's process (TS `sqlite()` and `memory()` stores): point
+  `Config::server` at a Jazz server;
+- `linkIdentity`.
+
+The endpoint doesn't support these yet:
+
+- linking a device account to a signed-in user (`backend-link`);
+- trusted backend clients (`backendClients`);
+- the HTTP-stream transport, for hosts without WebSockets: clients connect over the WebSocket;
+- renewing a cookie session in place: sessions reconnect at their expiry instead;
+- `revokeUser`;
+- `refresh`;
+- `allowedOrigins` and `publicUrl`;
+- device-account proofs signed for the endpoint's URL: only the app id is accepted;
+- `withAttribution`;
+- the Inspector (`inspect`);
+- on a user's handle (`for_user`): permission advice, byte-range reads and streaming inserts.
+
