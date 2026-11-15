@@ -57,6 +57,7 @@ const portableColumnTypeTags = [
   "Bytea",
   "Array",
   "Row",
+  "Vector",
 ] as const;
 
 type Assert<T extends true> = T;

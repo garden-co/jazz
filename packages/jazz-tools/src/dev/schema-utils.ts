@@ -325,6 +325,14 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       writer.byte(8);
       hashColumns(writer, columnType.columns);
       return;
+    case "Vector": {
+      // Mirrors Rust `hash_column_type`: tag 17, then the dimensions as u32 LE.
+      writer.byte(17);
+      const dimensions = new Uint8Array(4);
+      new DataView(dimensions.buffer).setUint32(0, columnType.dimensions, true);
+      writer.bytes(dimensions);
+      return;
+    }
   }
 
   const exhaustive: never = columnType;
