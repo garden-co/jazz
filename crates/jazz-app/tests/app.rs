@@ -121,6 +121,7 @@ async fn typed_reads_and_writes_locally() {
     });
     assert_eq!(slow.unwrap(), 42);
     stopped.unwrap();
+
     assert!(matches!(
         jazz.all(todos::query()).await,
         Err(Error::Stopped)
@@ -302,4 +303,37 @@ async fn next(changes: &mut jazz_app::Subscription<Todo>) -> jazz_app::Delta<Tod
         .expect("a delta")
         .expect("an open stream")
         .expect("a typed delta")
+}
+
+/// A call made by a call that is still finishing while the app shuts down
+/// fails with `Stopped`; it doesn't hold shutdown up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_refuses_calls_made_while_it_drains() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let nested = jazz.clone();
+    let outer = jazz.with_client(move |_| async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Shutdown began meanwhile.
+        Ok(nested.all(todos::query()).await)
+    });
+    let all = async {
+        tokio::join!(
+            outer,
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                jazz.shutdown().await
+            },
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                jazz.shutdown().await
+            }
+        )
+    };
+    let (outer, stopped, again) = tokio::time::timeout(Duration::from_secs(5), all)
+        .await
+        .expect("shutdown does not deadlock");
+    let inner = outer.unwrap();
+    assert!(matches!(inner, Err(Error::Stopped)), "{inner:?}");
+    stopped.unwrap();
+    again.unwrap();
 }

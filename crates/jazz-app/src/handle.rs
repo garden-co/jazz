@@ -32,6 +32,10 @@ enum Command {
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
+/// How long [`Jazz::shutdown`] lets the calls already made run before it
+/// cancels them.
+const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The issuer `createJazz` names the users a backend acts as by.
 const BACKEND_ISSUER: &str = "jazz:backend";
 
@@ -257,8 +261,10 @@ impl Jazz {
     }
 
     /// Stops the client for every clone: the calls already made finish
-    /// first, then open subscriptions end and later calls fail with
-    /// [`Error::Stopped`]. Call it before the process exits when the app
+    /// first (for up to 30 seconds, after which they fail with
+    /// [`Error::Stopped`]), then open subscriptions end. Calls made once
+    /// shutdown has begun, including from a call still finishing, fail
+    /// with [`Error::Stopped`]. Call it before the process exits when the app
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
     pub async fn shutdown(&self) -> Result<()> {
@@ -365,7 +371,7 @@ fn run(
         // Subscription forwarders are spawned by their jobs and are not in
         // here: they end with the client.
         let mut jobs = tokio::task::JoinSet::new();
-        let mut stopped = None;
+        let mut stopped = Vec::new();
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -373,7 +379,7 @@ fn run(
                         jobs.spawn_local(job(client.clone()));
                     }
                     Some(Command::Shutdown(reply)) => {
-                        stopped = Some(reply);
+                        stopped.push(reply);
                         break;
                     }
                     None => break,
@@ -381,11 +387,46 @@ fn run(
                 Some(_) = jobs.join_next(), if !jobs.is_empty() => {}
             }
         }
-        // The jobs already sent finish before the client stops.
-        while jobs.join_next().await.is_some() {}
-        let result = client.shutdown().await.map_err(Error::from);
-        if let Some(reply) = stopped {
-            let _ = reply.send(result);
+        // Nothing new starts: a call made from here on (even by a job that
+        // is draining) fails with `Stopped` instead of waiting on a job
+        // that never runs.
+        commands.close();
+        let drain = async {
+            let mut open = true;
+            loop {
+                tokio::select! {
+                    command = commands.recv(), if open => match command {
+                        // Dropping the job drops its reply: `Stopped`.
+                        Some(Command::Run(job)) => drop(job),
+                        Some(Command::Shutdown(reply)) => stopped.push(reply),
+                        None => open = false,
+                    },
+                    joined = jobs.join_next() => {
+                        if joined.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        // The jobs already started finish, within a limit: a remote read
+        // waiting on an unreachable server must not hold shutdown forever.
+        if tokio::time::timeout(SHUTDOWN_DRAIN, drain).await.is_err() {
+            jobs.abort_all();
+            while jobs.join_next().await.is_some() {}
+        }
+        let result = client.shutdown().await;
+        let failure = result.as_ref().err().map(ToString::to_string);
+        let mut replies = stopped.into_iter();
+        if let Some(first) = replies.next() {
+            let _ = first.send(result.map_err(Error::from));
+        }
+        // Every other caller learns the same outcome.
+        for reply in replies {
+            let _ = reply.send(match &failure {
+                None => Ok(()),
+                Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
+            });
         }
     });
 }
