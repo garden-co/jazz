@@ -812,6 +812,30 @@ fn longest_hash_run(text: &str) -> usize {
     text.split(|c| c != '#').map(str::len).max().unwrap_or(0)
 }
 
+/// Whether `manifest` (a `Cargo.toml`) is a crate that uses `jazz-app`: a
+/// `[package]` with `jazz-app` among its dependencies of any kind.
+pub fn is_app_manifest(manifest: &str) -> bool {
+    let mut package = false;
+    let mut depends = false;
+    let mut section = String::new();
+    for line in manifest.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some(header) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = header.trim().trim_matches(['[', ']']).trim().to_owned();
+            package |= section == "package";
+            // `[dependencies.jazz-app]`, `[target.'…'.dev-dependencies.jazz-app]`
+            depends |= section.ends_with("dependencies.jazz-app")
+                || section.ends_with("dependencies.\"jazz-app\"");
+            continue;
+        }
+        if section.ends_with("dependencies") {
+            let key = line.split(['=', '.']).next().unwrap_or("").trim().trim_matches('"');
+            depends |= key == "jazz-app";
+        }
+    }
+    package && depends
+}
+
 // ---- reading back ------------------------------------------------------------
 
 /// What committed bindings embed: their format, their source, and the
@@ -936,6 +960,19 @@ fn type_ident(ident: &str, name: &str) -> Result<String, CodegenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_manifests_depend_on_jazz_app() {
+        let app = "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app = { path = \"../jazz-app\" }\n";
+        assert!(is_app_manifest(app));
+        assert!(is_app_manifest("[package]\nname = \"x\"\n[dependencies]\njazz-app.workspace = true\n"));
+        assert!(is_app_manifest("[package]\nname = \"x\"\n[dependencies.jazz-app]\nversion = \"1\"\n"));
+        // A workspace root, a crate without jazz-app, a commented-out one.
+        assert!(!is_app_manifest("[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\njazz-app = \"1\"\n"));
+        assert!(!is_app_manifest("[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n"));
+        assert!(!is_app_manifest("[package]\nname = \"x\"\n[dependencies]\n# jazz-app = \"1\"\n"));
+        assert!(!is_app_manifest("[package]\nname = \"x\"\n[dependencies]\njazz-application = \"1\"\n"));
+    }
 
     #[test]
     fn names() {

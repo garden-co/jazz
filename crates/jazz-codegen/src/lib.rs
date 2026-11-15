@@ -101,6 +101,20 @@ impl Lang {
         }
     }
 
+    /// Whether the app in `dir` (the directory of its `jazz.app.json`) is
+    /// written in this language: a TS app has a `package.json`; a Rust app
+    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app` (a
+    /// workspace root or another crate beside a TS app's files is not
+    /// one). Committed bindings say so too; the caller checks those.
+    pub fn detected_in(self, dir: &std::path::Path) -> bool {
+        let marker = dir.join(self.marker());
+        match self {
+            Lang::TypeScript => marker.exists(),
+            Lang::Rust => std::fs::read_to_string(marker)
+                .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
+        }
+    }
+
     /// The version of the bindings' shape this generator writes.
     pub fn format(self) -> u32 {
         match self {
