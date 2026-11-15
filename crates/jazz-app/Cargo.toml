@@ -16,6 +16,15 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 tracing = "0.1"
 
+[features]
+# Runs tests/end_user.rs, which starts a createJazz backend with the
+# workspace's built jazz-tools (see tests/fixtures/notes/README.md).
+e2e-backend = []
+
+[[test]]
+name = "end_user"
+required-features = ["e2e-backend"]
+
 [dev-dependencies]
 jazz-codegen = { path = "../jazz-codegen" }
 jazz-server = { path = "../jazz-server", features = ["test"] }

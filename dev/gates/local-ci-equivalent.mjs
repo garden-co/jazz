@@ -213,6 +213,18 @@ export const ciPartitions = Object.freeze({
       "--",
       "tests/browser/indexeddb-jazz-compat.test.ts",
     ]),
+    // The Rust end-user client against a real createJazz backend: it needs
+    // the jazz-tools build the consumers just produced, so it runs here
+    // rather than in the workspace Rust partition (where its feature is off).
+    command("Rust end-user client against createJazz", "cargo", [
+      "test",
+      "-p",
+      "jazz-app",
+      "--features",
+      "e2e-backend",
+      "--test",
+      "end_user",
+    ]),
     // Vitest strips types without checking them, so without this step an
     // example can break against a jazz-tools API change while its tests pass.
     // It runs last, against the jazz-tools build the consumers produced.
