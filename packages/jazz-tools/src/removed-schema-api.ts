@@ -1,7 +1,7 @@
 /**
  * The TypeScript schema, permissions and migrations DSL that alpha.65
  * removed: `jazz.app.json` and `jazz.permissions.json` are now an app's only
- * source, and `jazz.generated.ts` (written by `jazz-tools validate`) its
+ * source, and `jazz.generated.ts` (written by `jazz-tools generate`) its
  * typed bindings. The names stay for one release as stubs that throw when
  * used, pointing at `jazz-tools upgrade`, which converts an alpha.64 app.
  * Without them a bundler's "not exported" error would guess a similarly

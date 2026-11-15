@@ -1,7 +1,7 @@
 /**
  * An app's files (SPEC 10.10): `jazz.app.json` (schema, history, migrations,
  * computed fields and transforms), `jazz.permissions.json` (backends only),
- * and the typed bindings `jazz-tools validate` generates from the first,
+ * and the typed bindings `jazz-tools generate` generates from the first,
  * `jazz.generated.ts`, whose `source` is the hash of the file it was
  * generated from. The files are the app's only source. Node only.
  */
@@ -77,6 +77,6 @@ export async function checkRunningBindings(
   if ((await schemaSourceHash(app)) === source) return;
   const shown = relative(cwd, join(dir, GENERATED_FILE)) || GENERATED_FILE;
   throw new Error(
-    `bindings out of date: ${shown} was generated from another ${APP_FILE}. Run \`npx jazz-tools validate\` and commit the ${GENERATED_FILE} it writes.`,
+    `bindings out of date: ${shown} was generated from another ${APP_FILE}. Run \`npx jazz-tools generate\` and commit the ${GENERATED_FILE} it writes.`,
   );
 }
