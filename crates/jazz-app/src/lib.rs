@@ -31,7 +31,7 @@ pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
 pub use error::{Error, Result};
 pub use handle::{Jazz, Transaction};
-pub use query::{Column, Condition, Many, One, Order, Query};
+pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use value::{ColumnValue, Json, Timestamp};

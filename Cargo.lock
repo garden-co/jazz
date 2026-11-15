@@ -2021,6 +2021,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "futures-core",
+ "futures-util",
  "jazz",
  "jazz-codegen",
  "jazz-native-transport",
@@ -4793,6 +4794,28 @@ dependencies = [
  "jazz-app",
  "jazz-server",
  "mimalloc",
+ "reqwest",
+ "reqwest-eventsource",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "todo-server-docs"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "futures-util",
+ "http-body-util",
+ "jazz-app",
+ "jazz-server",
  "reqwest",
  "reqwest-eventsource",
  "serde",
