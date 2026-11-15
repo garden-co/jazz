@@ -27,9 +27,11 @@ go test ./...                    # the board flow and the docs snippets (starts 
 The flags `-user` (whom the CLI acts as) and `-data` (where rows are kept,
 by default `.jazz`) go before the command.
 
-`jazzapp/jazz_app.go` is generated: after changing `jazz.app.json`, run
-`jazz-tools generate`. In CI, `jazz-tools generate --check` fails when it
-is stale.
+`jazzapp/jazz_app.go` is generated. Go is switched off in `jazz-tools
+generate` until the Go bindings reach parity with the TS clients, so
+regenerate it with
+`JAZZ_UPDATE_FIXTURES=1 cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings`.
+That test fails in CI when the file is stale.
 
 The example leaves out what the Go bindings don't support yet: `tasks.notes`
 is a text-merge column, which the CLI never writes, and there are no

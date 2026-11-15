@@ -97,9 +97,8 @@ public val APP: kotlin.String = kotlin.arrayOf(
 ).joinToString("")
 
 /**
- * Opens the app. A backend (`JazzConfig.permissions` set to its
- * `jazz.permissions.json`) first publishes the app's permissions bundle
- * and pins the session it acts in to it.
+ * Opens the app: locally, or as an end user of your backend's Jazz
+ * endpoint (`JazzConfig.serverUrl` and `JazzConfig.auth`).
  */
 public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =
     tools.jazz.Jazz.open(APP, config)

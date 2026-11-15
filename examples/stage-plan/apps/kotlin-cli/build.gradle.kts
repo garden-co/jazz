@@ -23,14 +23,6 @@ kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
-// The backend opens with the app's permissions: ship them as a resource.
-sourceSets.main { resources.srcDir(layout.buildDirectory.dir("app-resources")) }
-val appResources by tasks.registering(Copy::class) {
-    from("jazz.permissions.json")
-    into(layout.buildDirectory.dir("app-resources"))
-}
-tasks.processResources { dependsOn(appResources) }
-
 application { mainClass.set("stageplan.MainKt") }
 
 val repo = rootDir.resolve("../../../..").canonicalFile
@@ -39,9 +31,10 @@ val ffiLibDir = repo.resolve("target/debug")
 tasks.test {
     useJUnitPlatform()
     systemProperty("jna.library.path", ffiLibDir.path)
-    // The tests start `jazz-tools server` (cargo build -p jazz-cli --bin jazz-tools).
+    // The tests' StagePlan backend, a test harness: a Jazz server and the test
+    // stand-in for a backend's Jazz endpoint (cargo build -p jazz-cli --bin
+    // jazz-tools; cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay).
     environment("JAZZ_TOOLS", System.getenv("JAZZ_TOOLS") ?: repo.resolve("target/debug/jazz-tools").path)
-    // The app's endpoint for end users (cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay).
     environment(
         "JAZZ_APP_TEST_RELAY",
         System.getenv("JAZZ_APP_TEST_RELAY") ?: repo.resolve("target/debug/jazz-app-test-relay").path,

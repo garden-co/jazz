@@ -8,31 +8,33 @@ import jazzapp.NewTask
 import jazzapp.TaskStatus
 import jazzapp.Tasks
 import tools.jazz.Jazz
+import tools.jazz.JazzAuth
 import tools.jazz.JazzConfig
+import tools.jazz.SessionState
 import tools.jazz.Storage
 
-/** The app's `jazz.permissions.json`, bundled as a resource. */
-fun permissions(): String =
-    checkNotNull(object {}.javaClass.getResource("/jazz.permissions.json")) { "jazz.permissions.json is not bundled" }
-        .readText()
-
-/** Opens StagePlan as a backend of the server at [serverUrl], acting as [user]. */
-suspend fun openAsUser(serverUrl: String, appId: String, backendSecret: String, adminSecret: String, user: String): Jazz =
+/**
+ * Opens StagePlan as an end user of the backend's Jazz endpoint [endpoint]
+ * (e.g. `https://stageplan.example/jazz`), signed in with [auth]: a device
+ * account, or the backend's own sign-in.
+ */
+suspend fun openAsUser(endpoint: String, appId: String, auth: JazzAuth, dataDir: String? = null): Jazz =
     jazzapp.open(
         JazzConfig(
             appId = appId,
-            serverUrl = serverUrl,
-            storage = Storage.Memory,
-            permissions = permissions(),
-            backendSecret = backendSecret,
-            adminSecret = adminSecret,
-            sessionSubject = user,
+            serverUrl = endpoint,
+            storage = if (dataDir == null) Storage.Memory else Storage.Persistent,
+            dataDir = dataDir,
+            auth = auth,
         ),
     )
 
+/** The signed-in user's account id. */
+fun me(jazz: Jazz): String = (jazz.session.value as? SessionState.SignedIn)?.user?.account ?: error("not signed in")
+
 /** The signed-in user's show called [name], created (with them as its chief) if there is none. */
 suspend fun showNamed(jazz: Jazz, name: String): Show {
-    val me = checkNotNull(jazz.account()) { "not signed in" }
+    val me = me(jazz)
     jazz.one(Shows.where(Shows.name eq name, Shows.chiefAccount eq me))?.let { return it }
     return jazz.insert(
         Shows,

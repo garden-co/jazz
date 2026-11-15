@@ -422,7 +422,10 @@ try {
 
   </Tab>
   <Tab value="Go">
-    Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-durability-tier-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -519,7 +522,7 @@ A mutation can fail when you call it or while you wait:
   `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
   `WriteRejected`) on the thin client.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -533,6 +536,12 @@ A mutation can fail when you call it or while you wait:
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
       ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-mutation-errors-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-mutation-errors-go
     </include>
 
   </Tab>
