@@ -1,915 +1,340 @@
-//! Integration tests for the todo server.
-//!
-//! Tests the full HTTP API end-to-end.
+//! The todo API end to end: the real router over the app opened with its
+//! generated bindings, locally and as a backend of a real Jazz server.
 
-#[path = "../src/client_worker.rs"]
-mod client_worker;
-#[path = "../../../crates/jazz-testkit/src/permissions.rs"]
-mod permissions_support;
-
-use std::convert::Infallible;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::time::Duration;
 
+use ::jazz_app::{AppId, Backend, Config, Jazz, ReadTier, Storage};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::response::sse::{Event, Sse};
-use futures_util::StreamExt as _;
-use futures_util::stream::Stream;
 use http_body_util::BodyExt;
-use jazz::tools::{
-    AppContext, AppId, ClientStorage, ColumnType, ReadTier, SchemaBuilder, Session, TableSchema,
-};
-
-use serde::{Deserialize, Serialize};
+use jazz_server::JazzServer;
 use tempfile::TempDir;
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
+use todo_server::{CreateTodoRequest, Todo, UpdateTodoRequest, jazz_app, router, router_until};
 use tower::ServiceExt;
-use tower_http::cors::CorsLayer;
-use uuid::Uuid;
 
-use client_worker::{TodoClient, connect_native};
-
-/// Todo item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Todo {
-    pub id: Uuid,
-    pub title: String,
-    pub done: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateTodoRequest {
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateTodoRequest {
-    pub title: Option<String>,
-    pub done: Option<bool>,
-    pub description: Option<String>,
-}
-
-/// Application state.
-pub struct AppState {
-    pub client: TodoClient,
-    pub sse_tx: broadcast::Sender<Vec<Todo>>,
-}
-
-fn test_schema() -> jazz::tools::Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder("projects").column("name", ColumnType::Text))
-        .table(
-            TableSchema::builder("todos")
-                .column("title", ColumnType::Text)
-                .column("done", ColumnType::Boolean)
-                .nullable_column("description", ColumnType::Text)
-                .nullable_fk_column("parent", "todos")
-                .nullable_fk_column("project", "projects"),
-        )
-        .build()
-}
-
-fn with_offline_account(mut context: AppContext) -> AppContext {
-    let audience = context.app_id.to_string();
-    let token = jazz::identity::mint_jazz_self_signed_token(
-        &[1; 32],
-        jazz::identity::LOCAL_FIRST_ISSUER,
-        &audience,
-        3600,
+async fn local(data: &TempDir) -> Jazz {
+    jazz_app::open(
+        Config::new(AppId::from_name("test-todos"))
+            .storage(Storage::Dir(data.path().to_path_buf())),
     )
-    .expect("mint Alice's offline proof");
-    let proof = jazz::identity::verify_jazz_self_signed_proof(&token, &audience)
-        .expect("verify Alice's offline proof");
-    context.account_id = Some(jazz::account_registry::local_first_account_id(
-        *context.app_id.uuid(),
-        &proof.user_id,
-    ));
-    context.jwt_token = Some(token);
-    context
+    .await
+    .expect("open the app locally")
 }
 
-async fn setup_test_app(temp_dir: &TempDir) -> Router {
-    setup_test_app_with_path(temp_dir.path().to_path_buf()).await
-}
-
-async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
-    let context = AppContext {
-        app_id: AppId::from_name("test-todos"),
-        client_id: None,
-        schema: test_schema(),
-        server_url: String::new(),
-        data_dir,
-        storage: ClientStorage::Persistent,
-        account_id: None,
-        jwt_token: None,
-        backend_secret: None,
-        backend_session: None,
-        bundle: None,
-        admin_secret: None,
-        migrations: Default::default(),
-    };
-
-    let client = TodoClient::connect(with_offline_account(context))
-        .await
-        .unwrap();
-    let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
-    let state = Arc::new(AppState { client, sse_tx });
-
-    // Build router matching main.rs
-    Router::new()
-        .route("/todos", axum::routing::get(list_todos))
-        .route("/todos", axum::routing::post(create_todo))
-        .route("/todos/live", axum::routing::get(todos_live))
-        .route("/todos/:id", axum::routing::put(update_todo))
-        .route("/todos/:id", axum::routing::delete(delete_todo))
-        .route("/health", axum::routing::get(health))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
-}
-
-// Route handlers
-use axum::Json;
-use axum::extract::{Path, State};
-use axum::response::IntoResponse;
-use jazz::query::Query;
-use jazz::tools::{ObjectId, Value};
-
-fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
-    if values.len() < 2 {
-        return None;
+async fn call(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+) -> (StatusCode, Vec<u8>) {
+    let request = Request::builder().method(method).uri(uri);
+    let request = match body {
+        Some(body) => request
+            .header("content-type", "application/json")
+            .body(Body::from(body)),
+        None => request.body(Body::empty()),
     }
-    let title = match &values[0] {
-        Value::Text(s) => s.clone(),
-        _ => return None,
-    };
-    let done = match &values[1] {
-        Value::Boolean(b) => *b,
-        _ => return None,
-    };
-    let description = values.get(2).and_then(|v| match v {
-        Value::Text(s) if !s.is_empty() => Some(s.clone()),
-        _ => None,
-    });
-    Some(Todo {
-        id: *object_id.uuid(),
-        title,
-        done,
-        description,
-    })
-}
-
-fn todo_values(
-    title: impl Into<String>,
-    description: impl Into<String>,
-) -> std::collections::HashMap<String, Value> {
-    jazz::row_input!(
-        "title" => title.into(), "done" => false, "description" => description.into(),
-        "parent" => Value::Null, "project" => Value::Null,
-    )
-}
-
-/// Broadcast current todos to all SSE connections.
-async fn broadcast_todos(state: &AppState) {
-    let query = Query::from("todos");
-    if let Ok(rows) = state.client.query(query, None).await {
-        let todos: Vec<Todo> = rows
-            .iter()
-            .filter_map(|(id, values)| row_to_todo(*id, values))
-            .collect();
-        let _ = state.sse_tx.send(todos);
-    }
-}
-
-/// SSE endpoint streaming all todos on changes.
-async fn todos_live(
-    State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.sse_tx.subscribe();
-
-    let query = Query::from("todos");
-    let initial_todos: Vec<Todo> = state
-        .client
-        .query(query, None)
-        .await
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|(id, values)| row_to_todo(*id, values))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let initial_event = futures_util::stream::once(async move {
-        Ok::<_, Infallible>(
-            Event::default().data(serde_json::to_string(&initial_todos).unwrap_or_default()),
-        )
-    });
-
-    let update_stream = BroadcastStream::new(rx).filter_map(|result| async move {
-        match result {
-            Ok(todos) => Some(Ok::<_, Infallible>(
-                Event::default().data(serde_json::to_string(&todos).unwrap_or_default()),
-            )),
-            Err(_) => None,
-        }
-    });
-
-    Sse::new(initial_event.chain(update_stream))
-}
-
-async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let query = Query::from("todos");
-    match state.client.query(query, None).await {
-        Ok(rows) => {
-            let todos: Vec<Todo> = rows
-                .iter()
-                .filter_map(|(id, values)| row_to_todo(*id, values))
-                .collect();
-            Json(todos).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-async fn create_todo(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<CreateTodoRequest>,
-) -> impl IntoResponse {
-    let description = request.description.clone().unwrap_or_default();
-    let values = todo_values(request.title.clone(), description.clone());
-    match state.client.insert("todos", values).await {
-        Ok((row_id, row_values, _transaction_id)) => {
-            let todo = row_to_todo(row_id, &row_values);
-            broadcast_todos(&state).await;
-            (StatusCode::CREATED, Json(todo)).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-async fn update_todo(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-    Json(request): Json<UpdateTodoRequest>,
-) -> impl IntoResponse {
-    let object_id = ObjectId::from_uuid(id);
-    let mut updates = Vec::new();
-    if let Some(title) = request.title {
-        updates.push(("title".to_string(), Value::Text(title)));
-    }
-    if let Some(done) = request.done {
-        updates.push(("done".to_string(), Value::Boolean(done)));
-    }
-    if let Some(description) = request.description {
-        updates.push(("description".to_string(), Value::Text(description)));
-    }
-
-    match state.client.update(object_id, updates).await {
-        Ok(_transaction_id) => {
-            broadcast_todos(&state).await;
-            let query = Query::from("todos");
-            match state.client.query(query, None).await {
-                Ok(rows) => {
-                    for (oid, values) in &rows {
-                        if *oid.uuid() == id
-                            && let Some(todo) = row_to_todo(*oid, values)
-                        {
-                            return Json(todo).into_response();
-                        }
-                    }
-                    (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({ "error": "Not found after refetch" })),
-                    )
-                        .into_response()
-                }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response(),
-            }
-        }
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("Update failed: {}", e) })),
-        )
-            .into_response(),
-    }
-}
-
-async fn delete_todo(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let object_id = ObjectId::from_uuid(id);
-    match state.client.delete(object_id).await {
-        Ok(_transaction_id) => {
-            broadcast_todos(&state).await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({ "status": "healthy" }))
-}
-
-// Tests
-
-#[tokio::test]
-async fn test_health_check() {
-    let temp_dir = TempDir::new().unwrap();
-    let app = setup_test_app(&temp_dir).await;
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn test_crud_operations() {
-    let temp_dir = TempDir::new().unwrap();
-    let app = setup_test_app(&temp_dir).await;
-
-    // 1. List todos (should be empty)
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/todos")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let todos: Vec<Todo> = serde_json::from_slice(&body).unwrap();
-    assert!(todos.is_empty(), "Should start empty");
-
-    // 2. Create a todo
-    let create_req = CreateTodoRequest {
-        title: "Buy milk".to_string(),
-        description: None,
-    };
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/todos")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&create_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let created_todo: Todo = serde_json::from_slice(&body).unwrap();
-    assert_eq!(created_todo.title, "Buy milk");
-    assert!(!created_todo.done);
-
-    // 3. List todos (should have one)
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/todos")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let todos: Vec<Todo> = serde_json::from_slice(&body).unwrap();
-    assert_eq!(todos.len(), 1);
-    assert_eq!(todos[0].title, "Buy milk");
-
-    // 4. Update the todo
-    let update_req = UpdateTodoRequest {
-        title: None,
-        done: Some(true),
-        description: None,
-    };
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/todos/{}", created_todo.id))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&update_req).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let updated_todo: Todo = serde_json::from_slice(&body).unwrap();
-    assert!(updated_todo.done, "Should be done");
-
-    // 5. Delete the todo
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/todos/{}", created_todo.id))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    // 6. Verify it's gone
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/todos")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let todos: Vec<Todo> = serde_json::from_slice(&body).unwrap();
-    assert!(todos.is_empty(), "Should be empty after delete");
-}
-
-#[tokio::test]
-async fn test_local_persistence() {
-    tokio::task::LocalSet::new()
-        .run_until(local_persistence())
-        .await;
-}
-
-async fn local_persistence() {
-    let temp_dir = TempDir::new().unwrap();
-    let data_path = temp_dir.path().to_path_buf();
-
-    // Phase 1: Create a todo with first client
-    let created_id = {
-        let context = AppContext {
-            app_id: AppId::from_name("test-persist"),
-            client_id: None,
-            schema: test_schema(),
-            server_url: String::new(),
-            data_dir: data_path.clone(),
-            storage: ClientStorage::Persistent,
-            account_id: None,
-            jwt_token: None,
-            backend_secret: None,
-            backend_session: None,
-            bundle: None,
-            admin_secret: None,
-            migrations: Default::default(),
-        };
-        let client = connect_native(with_offline_account(context)).await.unwrap();
-
-        // Create a todo
-        let values = todo_values("Persist me", "");
-        let (row_id, _row_values, _transaction_id) = client.insert("todos", values).unwrap();
-
-        // Verify it exists
-        let query = Query::from("todos");
-        let results = client.query(query, ReadTier::LocalFirst).await.unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].get("title"),
-            Some(&Value::Text("Persist me".to_string()))
-        );
-
-        // Shutdown client to release SQLite file handles
-        client.shutdown().await.unwrap();
-        row_id
-    };
-
-    // Phase 2: Create new client with same data dir, verify todo persisted
-    {
-        let context = AppContext {
-            app_id: AppId::from_name("test-persist"),
-            client_id: None,
-            schema: test_schema(),
-            server_url: String::new(),
-            data_dir: data_path,
-            storage: ClientStorage::Persistent,
-            account_id: None,
-            jwt_token: None,
-            backend_secret: None,
-            backend_session: None,
-            bundle: None,
-            admin_secret: None,
-            migrations: Default::default(),
-        };
-        let client = connect_native(with_offline_account(context)).await.unwrap();
-
-        // Query todos - should have the one we created
-        let query = Query::from("todos");
-        let results = client.query(query, ReadTier::LocalFirst).await.unwrap();
-
-        assert_eq!(
-            results.len(),
-            1,
-            "Todo should persist across client restarts"
-        );
-        assert_eq!(
-            results[0].key.row_id(),
-            Some(created_id),
-            "Should be the same row"
-        );
-        assert_eq!(
-            results[0].get("title"),
-            Some(&Value::Text("Persist me".to_string()))
-        );
-
-        client.shutdown().await.unwrap();
-    }
-}
-
-// === Server resync test infrastructure ===
-
-/// Test server handle - kills process on drop.
-struct TestServer {
-    process: Child,
-    port: u16,
-    #[allow(dead_code)]
-    data_dir: TempDir,
-}
-
-/// Test admin secret for catalogue sync.
-const TEST_ADMIN_SECRET: &str = "test-admin-secret-12345";
-
-/// The backend secret this test service holds, as the app's backend does.
-const TEST_BACKEND_SECRET: &str = "test-backend-secret-12345";
-
-/// A context acting as `user_id`, as the app's backend opens one.
-fn backend_user_context(
-    app_id: AppId,
-    server_url: String,
-    data_dir: PathBuf,
-    user_id: &str,
-) -> AppContext {
-    AppContext {
-        app_id,
-        client_id: None,
-        schema: test_schema(),
-        server_url,
-        data_dir,
-        storage: ClientStorage::Persistent,
-        account_id: None,
-        jwt_token: None,
-        backend_secret: Some(TEST_BACKEND_SECRET.to_owned()),
-        backend_session: Some(Session::new("jazz:backend", user_id)),
-        bundle: None,
-        admin_secret: None,
-        migrations: Default::default(),
-    }
-}
-
-impl TestServer {
-    /// Start a test server on the given port.
-    async fn start(port: u16) -> Self {
-        let data_dir = TempDir::new().expect("create temp dir");
-
-        // Use a deterministic UUID app ID for testing
-        let app_id = "00000000-0000-0000-0000-000000000001";
-
-        // Find the jazz-tools binary. When running tests, look in target/debug or target/release.
-        let jazz_binary = Self::find_jazz_binary();
-
-        let process = Command::new(&jazz_binary)
-            .args([
-                "server",
-                app_id,
-                "--port",
-                &port.to_string(),
-                "--data-dir",
-                data_dir.path().to_str().unwrap(),
-                "--admin-secret",
-                TEST_ADMIN_SECRET,
-                "--backend-secret",
-                TEST_BACKEND_SECRET,
-            ])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap_or_else(|e| panic!("Failed to spawn jazz server at {:?}: {}", jazz_binary, e));
-
-        let server = Self {
-            process,
-            port,
-            data_dir,
-        };
-
-        // Wait for server to be ready
-        server.wait_ready().await;
-
-        server
-    }
-
-    /// Find the jazz-tools binary in cargo's target directory.
-    fn find_jazz_binary() -> PathBuf {
-        if let Some(path) = std::env::var_os("JAZZ_TOOLS_BIN") {
-            return PathBuf::from(path);
-        }
-        // Get the path to the test binary, which gives us the target directory
-        let exe = std::env::current_exe().expect("get current exe");
-        let target_dir = exe
-            .parent() // deps
-            .and_then(|p| p.parent()) // debug or release
-            .expect("find target dir");
-
-        let jazz_path = target_dir.join("jazz-tools");
-        if jazz_path.exists() {
-            return jazz_path;
-        }
-
-        // Try building if not found (useful for first run)
-        panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-cli --bin jazz-tools` first.",
-            jazz_path
-        );
-    }
-
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-
-    async fn wait_ready(&self) {
-        let client = reqwest::Client::new();
-        let url = format!("{}/health", self.base_url());
-
-        for i in 0..100 {
-            match client.get(&url).send().await {
-                Ok(_) => return,
-                Err(e) => {
-                    if i == 99 {
-                        eprintln!("Last error: {:?}", e);
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        panic!("Server failed to become ready within 10 seconds");
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
-}
-
-/// Find an available port by binding to port 0.
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to port 0");
-    listener.local_addr().unwrap().port()
-}
-
-/// Test that data syncs through server between clients via subscribe.
-///
-/// This test verifies the subscribe-driven sync model:
-/// 1. Fixture setup publishes the schema and permissions on the server
-/// 2. Client syncs row data to server
-/// 3. Server stores data
-/// 4. New client subscribes and receives data from server via sync
-///
-/// NOTE: This tests "subscribe triggers sync, data eventually arrives" behavior.
-/// We do NOT currently have upstream confirmation - "complete" means local graph
-/// settled, not that we've received all server data. See crates/jazz/SPEC/8_sync_protocol.md
-/// Future Work section.
-///
-/// NOTE: The core lazy schema activation is tested in jazz's
-/// `e2e_two_clients_server_schema_sync`. This integration test verifies
-/// end-to-end client-server sync with persistent client IDs.
-#[tokio::test]
-async fn test_server_resync() {
-    tokio::task::LocalSet::new()
-        .run_until(server_resync())
-        .await;
-}
-
-async fn server_resync() {
-    // 1. Start jazz-tools server
-    let port = get_free_port();
-    let server = TestServer::start(port).await;
-
-    let data_dir = TempDir::new().unwrap();
-    let data_path = data_dir.path().to_path_buf();
-
-    // IMPORTANT: Client app_id must match server's app_id for schema sync to work
-    let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
-    let mut bundle: Option<String> = None;
-
-    // 2. Act as one user (as the app's backend does), then add data.
-    // Publish schema and policies before that user's transport is admitted.
-    {
-        let mut context = backend_user_context(
-            test_app_id,
-            server.base_url(),
-            data_path.clone(),
-            "client1-user",
-        );
-        let permissions_schema = test_schema();
-        let published = permissions_support::publish_allow_all_permissions(
-            &server.base_url(),
-            test_app_id,
-            TEST_ADMIN_SECRET,
-            &permissions_schema,
-        )
-        .await;
-        // The backend pins the user's session to the bundle it published.
-        bundle = Some(published.bundle);
-        context.bundle = bundle.clone();
-        let client = connect_native(context).await.unwrap();
-
-        // Create a todo
-        let values = todo_values("Synced todo", "");
-        let (_row_id, _row_values, _transaction_id) = client.insert("todos", values).unwrap();
-
-        // Verify it exists locally
-        let query = Query::from("todos");
-        let results = client
-            .query(query.clone(), ReadTier::LocalFirst)
+    .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    (
+        status,
+        response
+            .into_body()
+            .collect()
             .await
-            .unwrap();
-        assert_eq!(results.len(), 1, "Todo should exist locally");
-
-        // Use a GlobalServer query as the causal barrier before shutdown.
-        // This waits until the server has settled the todo, instead of
-        // guessing with a fixed sleep that can flake under CI load.
-        let server_results = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.query(query, ReadTier::Remote),
-        )
-        .await
-        .expect("Writer query with GlobalServer tier should resolve within 10s")
-        .expect("Writer query should succeed");
-        assert_eq!(
-            server_results.len(),
-            1,
-            "Todo should reach the server before shutdown"
-        );
-
-        client.shutdown().await.unwrap();
-    }
-
-    // 3. Wipe local data completely
-    std::fs::remove_dir_all(&data_path).unwrap();
-    std::fs::create_dir_all(&data_path).unwrap();
-
-    // 4. A new client, acting as another user, should resync from the server
-    // via a one-shot query with GlobalServer tier. The server already has the
-    // schema from step 2; the backend session lets it read via QuerySubscription.
-    {
-        let mut context =
-            backend_user_context(test_app_id, server.base_url(), data_path, "client2-user");
-        context.bundle = bundle.clone();
-        let client = connect_native(context).await.unwrap();
-
-        // One-shot query with GlobalServer settled tier — waits for the server's
-        // QuerySettled response before resolving, ensuring synced data arrives.
-        let query = Query::from("todos");
-        let results = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.query(query, ReadTier::Remote),
-        )
-        .await
-        .expect("Query with GlobalServer tier should resolve within 10s")
-        .expect("Query should succeed");
-
-        assert_eq!(results.len(), 1, "Todo should resync from server");
-
-        client.shutdown().await.unwrap();
-    }
-
-    drop(server);
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
 }
 
-/// Test that the /todos/live SSE endpoint streams all todos and updates on changes.
+fn json<T: serde::de::DeserializeOwned>(body: &[u8]) -> T {
+    serde_json::from_slice(body).unwrap()
+}
+
 #[tokio::test]
-async fn test_todos_live_sse() {
+async fn health_check() {
+    let data = TempDir::new().unwrap();
+    let app = router(local(&data).await);
+    let (status, _) = call(&app, "GET", "/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn crud() {
+    let data = TempDir::new().unwrap();
+    let app = router(local(&data).await);
+
+    let (status, body) = call(&app, "GET", "/todos", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json::<Vec<Todo>>(&body).is_empty());
+
+    let create = CreateTodoRequest {
+        title: "Buy milk".into(),
+        description: None,
+    };
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/todos",
+        Some(serde_json::to_string(&create).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: Todo = json(&body);
+    assert_eq!(created.title, "Buy milk");
+    assert!(!created.done);
+    assert_eq!(created.description, None);
+
+    let (_, body) = call(&app, "GET", "/todos", None).await;
+    assert_eq!(json::<Vec<Todo>>(&body), vec![created.clone()]);
+
+    let update = UpdateTodoRequest {
+        done: Some(true),
+        description: Some("semi-skimmed".into()),
+        ..Default::default()
+    };
+    let uri = format!("/todos/{}", created.id);
+    let (status, body) = call(
+        &app,
+        "PUT",
+        &uri,
+        Some(serde_json::to_string(&update).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated: Todo = json(&body);
+    assert!(updated.done);
+    assert_eq!(updated.description.as_deref(), Some("semi-skimmed"));
+
+    let (status, body) = call(&app, "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json::<Todo>(&body), updated);
+
+    let (status, _) = call(&app, "DELETE", &uri, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, "DELETE", &uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, "PUT", &uri, Some("{}".into())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn todos_persist_across_restarts() {
+    let data = TempDir::new().unwrap();
+    let jazz = local(&data).await;
+    let app = router(jazz.clone());
+    let create = CreateTodoRequest {
+        title: "Persist me".into(),
+        description: None,
+    };
+    let (_, body) = call(
+        &app,
+        "POST",
+        "/todos",
+        Some(serde_json::to_string(&create).unwrap()),
+    )
+    .await;
+    let created: Todo = json(&body);
+    jazz.shutdown().await.unwrap();
+    drop(app);
+
+    let app = router(local(&data).await);
+    let (_, body) = call(&app, "GET", "/todos", None).await;
+    assert_eq!(json::<Vec<Todo>>(&body), vec![created]);
+}
+
+#[tokio::test]
+async fn live_todos_stream_every_change() {
     use futures_util::StreamExt;
     use reqwest_eventsource::{Event, EventSource};
 
-    let temp_dir = TempDir::new().unwrap();
-    let app = setup_test_app(&temp_dir).await;
-
-    // Start a real HTTP server for SSE (tower oneshot doesn't support streaming)
+    let data = TempDir::new().unwrap();
+    let app = router(local(&data).await);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base_url = format!("http://{}", addr);
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let server_handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Connect to SSE endpoint
-    let mut es = EventSource::get(format!("{}/todos/live", base_url));
-
-    // Helper to get next event data
-    async fn next_todos(es: &mut EventSource) -> Vec<Todo> {
+    let mut events = EventSource::get(format!("{base}/todos/live"));
+    async fn next(events: &mut EventSource) -> Vec<Todo> {
         loop {
-            match es.next().await {
-                Some(Ok(Event::Message(msg))) => {
-                    return serde_json::from_str(&msg.data).expect("parse todos");
+            match tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("an event")
+            {
+                Some(Ok(Event::Message(message))) => {
+                    return serde_json::from_str(&message.data).unwrap();
                 }
                 Some(Ok(Event::Open)) => continue,
-                Some(Err(e)) => panic!("SSE error: {:?}", e),
-                None => panic!("SSE stream ended unexpectedly"),
+                other => panic!("the stream ended: {other:?}"),
             }
         }
     }
+    assert!(next(&mut events).await.is_empty());
 
-    // 1. Initial event should be empty list
-    let initial = next_todos(&mut es).await;
-    assert!(initial.is_empty(), "Should start empty");
-
-    // 2. Create a todo - should see it in next event
-    let client = reqwest::Client::new();
-    let create_resp = client
-        .post(format!("{}/todos", base_url))
+    let http = reqwest::Client::new();
+    let created: Todo = http
+        .post(format!("{base}/todos"))
         .json(&CreateTodoRequest {
-            title: "SSE Test".to_string(),
+            title: "SSE".into(),
             description: None,
         })
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!(create_resp.status(), 201);
-    let created: Todo = create_resp.json().await.unwrap();
+    assert_eq!(next(&mut events).await, vec![created.clone()]);
 
-    let after_create = next_todos(&mut es).await;
-    assert_eq!(after_create.len(), 1);
-    assert_eq!(after_create[0].id, created.id);
-    assert_eq!(after_create[0].title, "SSE Test");
-
-    // 3. Update the todo - should see updated state
-    client
-        .put(format!("{}/todos/{}", base_url, created.id))
+    http.put(format!("{base}/todos/{}", created.id))
         .json(&UpdateTodoRequest {
-            title: None,
             done: Some(true),
-            description: None,
+            ..Default::default()
         })
         .send()
         .await
         .unwrap();
+    let list = next(&mut events).await;
+    assert_eq!(list.len(), 1);
+    assert!(list[0].done);
 
-    let after_update = next_todos(&mut es).await;
-    assert_eq!(after_update.len(), 1);
-    assert!(after_update[0].done, "Should be done");
-
-    // 4. Delete the todo - should see empty list again
-    client
-        .delete(format!("{}/todos/{}", base_url, created.id))
+    http.delete(format!("{base}/todos/{}", created.id))
         .send()
         .await
         .unwrap();
+    assert!(next(&mut events).await.is_empty());
 
-    let after_delete = next_todos(&mut es).await;
-    assert!(after_delete.is_empty(), "Should be empty after delete");
+    events.close();
+    server.abort();
+}
 
-    // Clean up
-    es.close();
-    server_handle.abort();
+/// As the app's backend: the service publishes the app's bundle, acts as
+/// one user, and what it writes reaches another user's backend (with a
+/// fresh store) through the server, under the app's permissions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writes_resync_through_the_server() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start a Jazz server");
+    let open = |user: &str, data: &TempDir| {
+        let backend = Backend::new(server.backend_secret(), server.admin_secret(), user)
+            .permissions(include_bytes!("../jazz.permissions.json").as_slice());
+        jazz_app::open(
+            Config::new(app_id)
+                .server(server.base_url())
+                .storage(Storage::Dir(data.path().to_path_buf()))
+                .backend(backend),
+        )
+    };
+
+    let first = TempDir::new().unwrap();
+    let writer = open("alice", &first)
+        .await
+        .expect("open as Alice's backend");
+    let app = router(writer.clone());
+    let create = CreateTodoRequest {
+        title: "Synced".into(),
+        description: Some("through the server".into()),
+    };
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/todos",
+        Some(serde_json::to_string(&create).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: Todo = json(&body);
+    // The server has the todo once a remote read sees it.
+    let remote = tokio::time::timeout(
+        Duration::from_secs(10),
+        writer.all_with(jazz_app::todos::query(), ReadTier::Remote),
+    )
+    .await
+    .expect("the server answers")
+    .unwrap();
+    assert_eq!(remote.len(), 1);
+    writer.shutdown().await.unwrap();
+
+    let second = TempDir::new().unwrap();
+    let reader = open("bob", &second).await.expect("open as Bob's backend");
+    assert_eq!(reader.bundle(), writer.bundle());
+    let seen = tokio::time::timeout(
+        Duration::from_secs(10),
+        reader.all_with(jazz_app::todos::query(), ReadTier::Remote),
+    )
+    .await
+    .expect("the server answers")
+    .unwrap();
+    assert_eq!(
+        seen.into_iter().map(Todo::from).collect::<Vec<_>>(),
+        vec![created]
+    );
+
+    reader.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// The committed bindings are what `jazz-tools generate` generates from
+/// the committed jazz.app.json.
+#[test]
+fn bindings_are_current() {
+    let app = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/jazz.app.json")).unwrap();
+    assert_eq!(
+        jazz_app::SOURCE,
+        jazz_app_source(&app),
+        "src/jazz_app.rs is stale: run `npx jazz-tools generate`"
+    );
+}
+
+fn jazz_app_source(file: &[u8]) -> String {
+    ::jazz_app::jazz::tools::deployment::artifact::source_hash(file)
+}
+
+/// Stopping ends the live streams, so a graceful shutdown isn't held open
+/// by a client still listening.
+#[tokio::test]
+async fn stopping_ends_live_streams() {
+    use futures_util::{FutureExt, StreamExt};
+    use reqwest_eventsource::{Event, EventSource};
+
+    let data = TempDir::new().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let stopping = async move {
+        let _ = stopped.await;
+    }
+    .boxed()
+    .shared();
+    let app = router_until(local(&data).await, stopping.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopping)
+            .await
+            .unwrap()
+    });
+
+    let mut events = EventSource::get(format!("{base}/todos/live"));
+    loop {
+        match events.next().await {
+            Some(Ok(Event::Open)) => continue,
+            Some(Ok(Event::Message(_))) => break,
+            other => panic!("no first list: {other:?}"),
+        }
+    }
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("the server stops with a live stream open")
+        .unwrap();
+    events.close();
 }

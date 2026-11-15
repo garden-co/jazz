@@ -1,0 +1,11 @@
+[package]
+name = "jazz-codegen"
+version = "0.1.0"
+edition = "2024"
+description = "Typed bindings and migration stubs generated from an app's jazz.app.json"
+publish = false
+
+[dependencies]
+jazz = { workspace = true, default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
