@@ -90,37 +90,55 @@ pub(crate) fn unsupported(what: impl std::fmt::Display) -> JazzErrorKind {
     JazzErrorKind::NotSupported(format!("not supported yet: {what}"))
 }
 
+/// Whether a rejection's reason is a permission denial, or a serializable
+/// transaction's conflict. The engine reports a write's rejection reason
+/// (`Reason::as_str`) inside its message; a typed reason is a follow-up.
+pub(crate) fn rejection(reason: &str, otherwise: String) -> JazzErrorKind {
+    if reason.contains("authorization_denied") || reason.contains("AuthorizationDenied") {
+        JazzErrorKind::Permission(otherwise)
+    } else if reason.contains("serialization_conflict")
+        || reason.contains("SerializationConflict")
+        || reason.contains("transaction_conflict")
+    {
+        JazzErrorKind::Conflict(otherwise)
+    } else {
+        JazzErrorKind::Refused(otherwise)
+    }
+}
+
 impl From<jazz_app::Error> for JazzErrorKind {
     fn from(error: jazz_app::Error) -> Self {
         use jazz_app::Error as E;
         use jazz_app::jazz::tools::JazzError as J;
         let message = error.to_string();
-        // The engine names a write's rejection reason in its message.
-        if message.contains("authorization_denied") || message.contains("AuthorizationDenied") {
-            return Self::Permission(message);
-        }
-        if message.contains("serialization_conflict")
-            || message.contains("transaction_conflict")
-            || message.contains("SerializationConflict")
-        {
-            return Self::Conflict(message);
-        }
+        // Only what contract 1 reports as `Refused` is told apart, so a
+        // contract 1 host sees exactly what it did before.
+        #[allow(unreachable_patterns)]
         match error {
-            E::Rejected(reason) if reason.contains("Authoriz") || reason.contains("ermission") => {
-                Self::Permission(message)
-            }
-            E::App(_) | E::Config(_) | E::Decode { .. } | E::Rejected(_) => Self::Refused(message),
+            E::Rejected(reason) => rejection(&reason, message),
             E::Unsupported(what) => unsupported(what),
+            E::App(_) | E::Config(_) | E::Decode { .. } => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
             E::Jazz(J::ChannelClosed) => Self::Closed,
             // The authority rejected a write that was waiting for a tier:
             // a refusal, not a transport failure.
-            E::Jazz(J::Sync(reason)) if reason.contains("was rejected") => Self::Refused(message),
-            E::Jazz(J::Query(_) | J::Write(_) | J::Schema(_) | J::Json(_) | J::Identity(_)) => {
+            E::Jazz(J::Sync(reason)) if reason.contains("was rejected") => {
+                rejection(&reason, message)
+            }
+            E::Jazz(J::Write(reason)) => rejection(&reason, message),
+            E::Jazz(J::Query(_) | J::Schema(_) | J::Json(_) | J::Identity(_)) => {
                 Self::Refused(message)
             }
             E::Jazz(_) => Self::Io(message),
+            // Variants jazz-app adds (it is becoming `#[non_exhaustive]`)
+            // until this layer names them: an edit of a missing row
+            // (`NotFound`) is a refusal; anything else, such as a host
+            // stream's failure (`Upload`), is I/O.
+            _ if message.contains("not found") || message.contains("no row") => {
+                Self::Refused(message)
+            }
+            _ => Self::Io(message),
         }
     }
 }

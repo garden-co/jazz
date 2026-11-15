@@ -120,6 +120,18 @@ async fn a_write_the_permissions_refuse_is_permission() {
             matches!(denied, Err(JazzError::Permission { .. })),
             "{denied:?}"
         );
+
+        // A refused plain write, then an accepted one: waitForSync still
+        // reports the refusal (it waits for every write, not the last).
+        bob.insert("tasks".into(), task(&show_id, "Sneaky again", 2.0))
+            .unwrap();
+        let bob_account = bob.account().unwrap().unwrap();
+        bob.insert("shows".into(), show(&bob_account)).unwrap();
+        let synced = bob.wait_for_sync("global".into());
+        assert!(
+            matches!(synced, Err(JazzError::Permission { .. })),
+            "{synced:?}"
+        );
         alice.shutdown().unwrap();
         bob.shutdown().unwrap();
     })

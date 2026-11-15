@@ -400,9 +400,11 @@ impl Core {
                             }
                         }
                         Some(SubscriptionStreamItem::Rejected { reason }) => {
-                            Event::Error(JazzError::Refused {
-                                reason: format!("subscription rejected: {reason:?}"),
-                            })
+                            let reason = format!("{reason:?}");
+                            Event::Error(JazzError::from(crate::error::rejection(
+                                &reason,
+                                format!("subscription rejected: {reason}"),
+                            )))
                         }
                     };
                     first = false;
@@ -503,15 +505,28 @@ impl Core {
         Ok(())
     }
 
-    /// Waits until every write committed so far reaches `tier`: the client
-    /// settles its writes in order, so waiting for the last one is enough.
+    /// Waits until every write committed so far reaches `tier`. Local
+    /// writes are durable locally once they return, so `Local` has nothing
+    /// to wait for; `GlobalServer` waits for the server to have them all
+    /// and fails if it rejected one (the core's `wait_for_sync`, as TS's
+    /// `waitForSync`). Without a server there is nothing to wait for.
     pub fn wait_for_sync(&self, tier: DurabilityTier) -> Result<()> {
-        self.reachable(Some(tier))?;
-        block_on(self.open_jazz()?.with_client(move |client| async move {
-            match LAST_WRITE.with(|last| last.get()) {
-                Some(last) => Ok(client.wait_for_transaction(last, tier).await?),
-                None => Ok(()),
+        if tier == DurabilityTier::Local {
+            self.open_jazz()?;
+            return Ok(());
+        }
+        block_on(self.open_jazz()?.with_client(|client| async move {
+            // Every pending write reaches the server (or is refused)...
+            client.wait_for_sync().await?;
+            // ...and each write since the last sync is checked on its own:
+            // a refusal followed by an accepted write still fails here.
+            let writes = UNSYNCED.with(|unsynced| std::mem::take(&mut *unsynced.borrow_mut()));
+            for write in writes {
+                client
+                    .wait_for_transaction(write, DurabilityTier::GlobalServer)
+                    .await?;
             }
+            Ok(())
         }))?;
         Ok(())
     }
@@ -584,7 +599,7 @@ async fn settle(
     tier: Option<DurabilityTier>,
 ) -> jazz_app::Result<()> {
     if let Some(committed) = committed {
-        LAST_WRITE.with(|last| last.set(Some(committed)));
+        UNSYNCED.with(|unsynced| unsynced.borrow_mut().push(committed));
         if let Some(tier) = tier {
             client.wait_for_transaction(committed, tier).await?;
         }
@@ -593,9 +608,9 @@ async fn settle(
 }
 
 thread_local! {
-    /// The last write this app's client committed (on its own thread).
-    static LAST_WRITE: std::cell::Cell<Option<jazz_app::jazz::tools::TransactionId>> =
-        const { std::cell::Cell::new(None) };
+    /// The writes this app's client committed since its last waitForSync.
+    static UNSYNCED: RefCell<Vec<jazz_app::jazz::tools::TransactionId>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) struct SubscriptionCore {
