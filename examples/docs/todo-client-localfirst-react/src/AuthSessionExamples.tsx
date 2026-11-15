@@ -1,5 +1,5 @@
 import { useAll, useSession } from "jazz-tools/react";
-import { app } from "../session-app.js";
+import { app } from "../session-app/jazz.generated.js";
 
 export function AuthSessionExamples() {
   // #region auth-session-react-hook

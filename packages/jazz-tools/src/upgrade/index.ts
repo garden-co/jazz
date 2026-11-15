@@ -54,6 +54,7 @@ import {
   runningPackageRoot,
   type Project,
 } from "./project.js";
+import { refuseDroppedConditions, refuseEnvironmentReads } from "./permissions-check.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
 
 export { UpgradeRefusal } from "./errors.js";
@@ -98,6 +99,10 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   // 1. The app files must be current.
   const legacy = findLegacyJazzTools(project);
   notes.push(...checkLegacyFiles(project, legacy));
+  const scan = scanImports(project);
+  // Fail closed on policies alpha.64 compiled from values the source doesn't hold.
+  refuseEnvironmentReads(project, schemaSources(project, scan));
+  refuseDroppedConditions(project);
 
   const appText = readFileSync(project.appFile, "utf8");
   const app = parseAppJson(appText);
@@ -153,7 +158,6 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     var names = generatedText ? readGeneratedNames(generatedText) : fallbackNames(edited.app);
 
     // 4. What schema.ts exported besides the schema.
-    const scan = scanImports(project);
     extras = convertExtras({
       ts,
       program: schemaProgram.program,
@@ -221,7 +225,18 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     newAppText === appText ? [] : [[project.appFile, newAppText]];
   if (computed.computedFile) writes.push([computedFile, computed.computedFile]);
   if (extras.extrasFile) writes.push([extrasFile, extras.extrasFile]);
-  if (generatedText) writes.push([generatedFile, generatedText]);
+  // A Rust app (a crate on `jazz-app`) gets Rust bindings instead, as `jazz-tools generate` writes them.
+  const rustApp = isRustApp(project.schemaDir);
+  if (generatedText && !rustApp) writes.push([generatedFile, generatedText]);
+  if (rustApp && computed.todos === 0) {
+    const rust = await rustBindings(newAppText);
+    if (typeof rust === "string") writes.push([join(project.schemaDir, RUST_BINDINGS_FILE), rust]);
+    else {
+      report.notes.push(
+        `${RUST_BINDINGS_FILE} was not written (${rust.reason}); run \`npx jazz-tools generate\` once this jazz-tools generates Rust bindings.`,
+      );
+    }
+  }
   for (const file of rewrites.files) writes.push([file.file, file.text]);
   if (config.file) writes.push([config.file, config.text]);
   if (manifest) writes.push([manifest.file, manifest.text]);
@@ -239,8 +254,9 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     );
     return report;
   }
-  // 6b. Typecheck against this jazz-tools.
-  if (!options.skipTypecheck) {
+  // 6b. Typecheck against this jazz-tools (a Rust app has no TS to check).
+  if (rustApp) report.notes.push("This is a Rust app: run `cargo check` to typecheck it against the new bindings.");
+  if (!options.skipTypecheck && !rustApp) {
     const roots = new Set(project.configFileNames.filter((f) => !deleted.has(f)));
     for (const [path] of writes) if (/\.(ts|tsx|mts|cts)$/.test(path)) roots.add(path);
     const runtime = runningPackageRoot();
@@ -278,6 +294,33 @@ async function napiGenerate(appJson: string): Promise<string> {
     );
   }
   return napi.generate("ts", appJson);
+}
+
+const RUST_BINDINGS_FILE = join("src", "jazz_app.rs");
+
+/**
+ * Whether `dir` is a Rust app, as `jazz-tools generate` tells: a crate (a
+ * `Cargo.toml` with `[package]`) that depends on `jazz-app`, or one with
+ * committed `src/jazz_app.rs`. A workspace root or an unrelated crate isn't.
+ */
+export function isRustApp(dir: string): boolean {
+  const manifest = join(dir, "Cargo.toml");
+  if (!existsSync(manifest)) return false;
+  const text = readFileSync(manifest, "utf8");
+  if (!/^\s*\[package\]/m.test(text)) return false;
+  if (existsSync(join(dir, RUST_BINDINGS_FILE))) return true;
+  return /^\s*jazz-app\s*=|^\s*\[(?:dev-|build-)?dependencies\.jazz-app\]/m.test(text);
+}
+
+/** The `jazz-app` crate's bindings, or why this jazz-napi can't generate them. */
+async function rustBindings(appJson: string): Promise<string | { reason: string }> {
+  try {
+    const napi = (await import("jazz-napi")) as unknown as { generate?: (lang: string, app: string) => string };
+    if (typeof napi.generate !== "function") return { reason: "this jazz-napi has no `generate`" };
+    return napi.generate("rust", appJson);
+  } catch (error) {
+    return { reason: (error instanceof Error ? error.message : String(error)).replace(/[.\s]*$/, "") };
+  }
 }
 
 /** The project's resolved jazz-tools package directory, if installed. */
@@ -365,6 +408,24 @@ function scanImports(project: Project): ImportScan {
     imports.set(file, targets);
   }
   return { imports, schemaNames, jsExtensions: js > plain };
+}
+
+/** schema.ts, permissions.ts and the project files they import, transitively. */
+function schemaSources(project: Project, scan: ImportScan): string[] {
+  const out = new Set<string>();
+  const queue = [project.schemaFile, ...(project.permissionsFile ? [project.permissionsFile] : [])];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (
+      out.has(file) ||
+      relative(project.root, file).startsWith("..") ||
+      file.includes("node_modules")
+    )
+      continue;
+    out.add(file);
+    queue.push(...(scan.imports.get(file) ?? []));
+  }
+  return [...out];
 }
 
 const DSL_IMPORT =

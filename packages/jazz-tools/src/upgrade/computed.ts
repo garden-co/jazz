@@ -212,11 +212,11 @@ export function convertComputed(input: ComputedInput): ComputedConversion {
     "// in TypeScript. Written by `jazz-tools upgrade` from schema.ts; edit freely.",
   ];
   const generatedImports = [
-    hasComputed ? "type AppComputed" : null,
-    hasTransforms ? "type AppTransforms" : null,
+    hasComputed ? "AppComputed" : null,
+    hasTransforms ? "AppTransforms" : null,
   ].filter(Boolean);
-  lines.push(`import { ${generatedImports.join(", ")} } from "./jazz.generated";`);
-  if (support) lines.push(support);
+  lines.push(`import type { ${generatedImports.join(", ")} } from "./jazz.generated.js";`);
+  if (support) lines.push(support.startsWith("import ") ? support : `\n${support}`);
   lines.push("");
   if (hasComputed) {
     lines.push("export const computed = {");
