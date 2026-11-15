@@ -249,7 +249,7 @@ export const jazz = createJazz({
 });
 
 export const auth = betterAuth({
-  database: jazzAdapter({ db: async () => jazz.db, schema: app.wasmSchema }),
+  database: jazzAdapter({ db: async () => jazz.db, schema: app }),
   emailAndPassword: { enabled: true },
   plugins: [admin({ adminRoles: ["admin"], defaultRole: "member" }), nextCookies()],
 });
