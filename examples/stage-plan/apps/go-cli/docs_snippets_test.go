@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -249,6 +250,89 @@ func addTaskDurably(ctx context.Context, db *jazz.DB, showID string) error {
 
 // #endregion writing-durability-tier-go
 
+// #region reading-includes-go
+func tasksWithTheirShow(ctx context.Context, db *jazz.DB, showID string) ([]jazzapp.Task, error) {
+	// Each task's Show field is filled; relations not included stay nil.
+	return jazzapp.Tasks.Query().
+		Where(jazzapp.Tasks.ShowID.Eq(showID)).
+		Include(jazzapp.Tasks.Show).
+		All(ctx, db)
+}
+
+// #endregion reading-includes-go
+
+// #region reading-require-includes-go
+func tasksOfVisibleShows(ctx context.Context, db *jazz.DB) ([]jazzapp.Task, error) {
+	// Only tasks whose show this user can read: Required() is
+	// requireIncludes, for a relation through a non-optional column.
+	return jazzapp.Tasks.Query().
+		Include(jazzapp.Tasks.Show.Required()).
+		All(ctx, db)
+}
+
+// #endregion reading-require-includes-go
+
+// #region reading-select-go
+type taskTitle struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+func taskTitles(ctx context.Context, db *jazz.DB, showID string) ([]taskTitle, error) {
+	// Select reads only the given columns (and id) into a struct of yours.
+	return jazz.Select[taskTitle](
+		jazzapp.Tasks.Query().Where(jazzapp.Tasks.ShowID.Eq(showID)),
+		jazzapp.Tasks.Title,
+	).All(ctx, db)
+}
+
+// #endregion reading-select-go
+
+// #region dry-run-permissions-go
+func canAddTask(ctx context.Context, db *jazz.DB, showID string) (bool, error) {
+	// Advice, not enforcement: Allowed, Denied, or Unknown (e.g. offline).
+	advice, err := jazzapp.Tasks.CanInsert(ctx, db, jazzapp.NewTask{
+		ShowID: showID, Title: "Encore", Status: jazzapp.TaskStatusTodo, Rank: 9,
+	})
+	return advice == jazz.Allowed, err
+}
+
+// #endregion dry-run-permissions-go
+
+// #region writing-mutation-errors-go
+func renameTask(ctx context.Context, db *jazz.DB, taskID, title string) error {
+	err := jazzapp.Tasks.Update(ctx, db, taskID, jazzapp.TaskPatch{Title: jazz.Set(title)},
+		jazz.WaitFor(jazz.WriteGlobal))
+	switch {
+	case errors.Is(err, jazz.ErrPermission):
+		return fmt.Errorf("you can't rename this task: %w", err)
+	case errors.Is(err, jazz.ErrRefused):
+		return fmt.Errorf("that title isn't valid: %w", err)
+	}
+	return err
+}
+
+// #endregion writing-mutation-errors-go
+
+// #region writing-serializable-transaction-go
+func moveIfStillTodo(ctx context.Context, db *jazz.DB, taskID string) error {
+	// Every Jazz transaction is serializable: if the task changed after it
+	// was read here, the commit fails with jazz.ErrConflict.
+	err := db.Tx(ctx, func(tx *jazz.Tx) error {
+		task, err := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(taskID)).One(ctx, tx)
+		if err != nil || task == nil || task.Status != jazzapp.TaskStatusTodo {
+			return err
+		}
+		return jazzapp.Tasks.Update(ctx, tx, taskID, jazzapp.TaskPatch{Status: jazz.Set(jazzapp.TaskStatusDoing)})
+	}, jazz.Serializable())
+	if errors.Is(err, jazz.ErrConflict) {
+		return moveIfStillTodo(ctx, db, taskID) // read again and retry
+	}
+	return err
+}
+
+// #endregion writing-serializable-transaction-go
+
 func TestDocsSnippets(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -316,6 +400,25 @@ func TestDocsSnippets(t *testing.T) {
 	}
 	if withTasks, err := showWithItsTasks(ctx, db, show.ID); err != nil || withTasks == nil || len(withTasks.Tasks) != 6 {
 		t.Fatalf("show with tasks: %+v, %v", withTasks, err)
+	}
+
+	if rows, err := tasksWithTheirShow(ctx, db, show.ID); err != nil || len(rows) == 0 || rows[0].Show == nil {
+		t.Fatalf("with show: %+v, %v", rows, err)
+	}
+	if rows, err := tasksOfVisibleShows(ctx, db); err != nil || len(rows) == 0 || rows[0].Show == nil {
+		t.Fatalf("required show: %+v, %v", rows, err)
+	}
+	if rows, err := taskTitles(ctx, db, show.ID); err != nil || len(rows) == 0 || rows[0].Title == "" {
+		t.Fatalf("titles: %+v, %v", rows, err)
+	}
+	if ok, err := canAddTask(ctx, db, show.ID); err != nil || !ok {
+		t.Fatalf("can add: %v, %v", ok, err)
+	}
+	if err := renameTask(ctx, db, byRank[0].ID, "Load-in early"); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveIfStillTodo(ctx, db, byRank[0].ID); err != nil {
+		t.Fatal(err)
 	}
 
 	// The subscription snippet returns once a task is done.
