@@ -219,10 +219,28 @@ impl Core {
         let has_server = config.server_url.is_some();
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
-        Ok(Self {
+        Ok(Self::from_parts(
             jazz,
-            schema: Arc::new(schema),
-            relations: convert::Relations::read(&app_text),
+            Arc::new(schema),
+            convert::Relations::read(&app_text),
+            has_server,
+            contract,
+        ))
+    }
+
+    /// A handle over an already open app, e.g. a backend acting as one of
+    /// its users ([`crate::endpoint`]).
+    pub(crate) fn from_parts(
+        jazz: Jazz,
+        schema: Arc<Schema>,
+        relations: convert::Relations,
+        has_server: bool,
+        contract: u64,
+    ) -> Self {
+        Self {
+            jazz,
+            schema,
+            relations,
             closed: AtomicBool::new(false),
             subscriptions: Mutex::new(Vec::new()),
             // Ids start at a random point, so a stale id from another
@@ -231,7 +249,20 @@ impl Core {
             next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
             has_server,
             contract,
-        })
+        }
+    }
+
+    pub(crate) fn parts(&self) -> (Jazz, Arc<Schema>, convert::Relations, bool) {
+        (
+            self.jazz.clone(),
+            self.schema.clone(),
+            self.relations.clone(),
+            self.has_server,
+        )
+    }
+
+    pub(crate) fn jazz(&self) -> Result<&Jazz> {
+        self.open_jazz()
     }
 
     /// An error as this host's contract version names it.
