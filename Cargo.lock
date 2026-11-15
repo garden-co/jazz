@@ -1176,6 +1176,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
+name = "endpoint-server-docs"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "jazz-app",
+ "todo-server-docs",
+ "tokio",
+]
+
+[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

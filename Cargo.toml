@@ -29,6 +29,8 @@ members = [
   "examples/stage-plan/apps/rust-cli",
   # The docs copy, whose snippets the docs include by region.
   "examples/docs/todo-server-rs",
+  # The docs' main-backend endpoint snippets.
+  "examples/docs/endpoint-server-rs",
   "examples/stage-plan/benchmarks",
   "examples/band-book/benchmarks",
   "examples/permissioned-resources/benchmarks",
