@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import type { AccountStore } from "../../src/accounts/persistence.js";
