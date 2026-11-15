@@ -22,11 +22,22 @@ it("compiles deny-all CRUD policies for every generated Better Auth table", () =
   }
 });
 
-it("checks the old and the new message of an update with one predicate", () => {
+it("checks the old and the new message of an update against the same room/role rule", () => {
   // An update is checked against the old row (`using`) and the new one
   // (`with_check`). Separate per-room rules for each would let a
-  // General-message creator move its message into Announcements.
+  // General-message creator move its message into Announcements. So each
+  // side, on its own, must be this one rule (an admin in Announcements, or
+  // the creator in General), compiled here as a read policy.
+  const rule = {
+    anyOf: [
+      { allOf: ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+      { allOf: ["chat_id = 'chat-01'", "$createdBy.account = session.user"] },
+    ],
+  };
+  const expected = testPermissions(app, { format: 1, tables: { messages: { read: rule } } })
+    .messages?.select?.using;
+  expect(expected).toBeDefined();
   const update = permissions.messages?.update;
-  expect(update?.using).toBeDefined();
-  expect(update?.using).toEqual(update?.with_check);
+  expect(update?.using, "update (old row)").toEqual(expected);
+  expect(update?.with_check, "update (new row)").toEqual(expected);
 });
