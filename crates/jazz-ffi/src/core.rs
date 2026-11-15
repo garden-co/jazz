@@ -335,6 +335,42 @@ impl Core {
         Ok(())
     }
 
+    /// Updates a row in place: `patch_json` sets whole columns (may be
+    /// `None`), `edits_json` edits text, bytes and JSON values partially
+    /// (see [`convert::edits`]); all in one write.
+    pub fn edit(
+        &self,
+        table_name: &str,
+        id: &str,
+        patch_json: Option<&str>,
+        edits_json: &str,
+        opts: &Opts,
+    ) -> Result<()> {
+        self.reachable(opts.write_tier)?;
+        let id = convert::parse_id(id, "the id")?;
+        let table = self.table(table_name)?;
+        let cells = match patch_json {
+            Some(patch) => {
+                let (patched_id, cells) = convert::cells(table, table_name, patch, "the patch")?;
+                if patched_id.is_some_and(|patched| patched != id) {
+                    return Err(refused("a patch cannot change a row's id"));
+                }
+                cells
+            }
+            None => Vec::new(),
+        };
+        let edits = convert::edits(table, table_name, &convert::parse(edits_json, "the edits")?)?;
+        let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let committed = client.update_with_edits(&name, id, cells, edits)?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await
+        }))?;
+        Ok(())
+    }
+
     pub fn delete(&self, table_name: &str, id: &str, opts: &Opts) -> Result<()> {
         self.reachable(opts.write_tier)?;
         let id = convert::parse_id(id, "the id")?;
