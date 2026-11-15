@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 3. Regenerate it after changing jazz.app.json.
+// Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, unused_variables, clippy::all)]
 
@@ -91,6 +91,11 @@ pub mod projects {
     /// Every row of `projects`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Project> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `projects`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Project>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -249,6 +254,11 @@ pub mod todos {
     /// Every row of `todos`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Todo> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `todos`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Todo>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)

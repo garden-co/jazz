@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 3. Regenerate it after changing jazz.app.json.
+// Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, unused_variables, clippy::all)]
 
@@ -206,6 +206,11 @@ pub mod activity {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `activity`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Activity>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<Activity, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -364,6 +369,11 @@ pub mod checklist_items {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `checklistItems`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ChecklistItem>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<ChecklistItem, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -500,6 +510,11 @@ pub mod comments {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `comments`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Comment>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<Comment, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -627,6 +642,11 @@ pub mod crew {
     /// Every row of `crew`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Crew> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `crew`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Crew>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -795,6 +815,11 @@ pub mod show_crew {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `showCrew`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ShowCrew>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<ShowCrew, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -935,6 +960,11 @@ pub mod show_invites {
     /// Every row of `showInvites`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<ShowInvite> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `showInvites`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ShowInvite>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -1090,6 +1120,11 @@ pub mod shows {
     /// Every row of `shows`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Show> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `shows`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Show>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -1289,6 +1324,11 @@ pub mod tasks {
     /// Every row of `tasks`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Task> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `tasks`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Task>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)

@@ -131,7 +131,7 @@ impl<'a> Fields<'a> {
         Ok(std::mem::replace(&mut field.value, Value::Null))
     }
 
-    fn error(&self, message: String) -> Error {
+    pub(crate) fn error(&self, message: String) -> Error {
         Error::Decode {
             table: self.table,
             message,

@@ -11,6 +11,7 @@ use futures_util::FutureExt as _;
 
 use crate::error::Result;
 use crate::handle::{Jazz, decode_result, insert};
+use crate::include::Row;
 use crate::query::Query;
 use crate::table::{Implementations, Insert, Table, Update};
 
@@ -30,6 +31,15 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    pub(crate) fn client(&self) -> &JazzClient {
+        &self.client
+    }
+
+    /// Marks the transaction as having written, so it commits.
+    pub(crate) fn wrote(&self) {
+        self.wrote.set(true);
+    }
+
     pub fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let (row, _) = insert(&self.client, new, &self.implementations)?;
         self.wrote.set(true);
@@ -85,17 +95,18 @@ impl Transaction {
     }
 
     /// Every row `query` matches, as the transaction sees them.
-    pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
+    pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
+        let opts = crate::handle::read_opts(&query, ReadTier::LocalFirst);
         let rows = self
             .client
-            .query(query.into_untyped(), ReadTier::LocalFirst)
+            .query_with_opts(query.into_untyped()?, opts)
             .await?;
         rows.into_iter()
             .map(|row| decode_result(row, &self.implementations))
             .collect()
     }
 
-    pub async fn one<T: Table>(&self, query: Query<T>) -> Result<Option<T>> {
+    pub async fn one<T: Row>(&self, query: Query<T>) -> Result<Option<T>> {
         Ok(self.all(query.limit(1)).await?.into_iter().next())
     }
 

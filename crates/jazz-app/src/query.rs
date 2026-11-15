@@ -9,25 +9,55 @@ pub use jazz::query::Part as ValuePart;
 use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
 
+use crate::error::Result;
 use crate::include::{IntoInclude, Partial, Row, Selection, With};
 use crate::table::Table;
+use crate::untyped;
 use crate::value::{ColumnValue, Timestamp};
 
 /// A query of rows of a table, yielding `T`s: the table's rows, or
-/// [`Partial`] rows of it, with the rows it includes after them.
-#[derive(Debug, Clone)]
+/// [`Partial`] rows of it, with the rows it includes after them. It is an
+/// [`untyped::Query`] with the type of what it yields.
+#[derive(Debug)]
 pub struct Query<T> {
-    query: q::Query,
+    pub(crate) inner: untyped::Query,
     row: PhantomData<fn() -> T>,
+}
+
+// Not derived: a query of `T` clones whether or not `T` does.
+impl<T> Clone for Query<T> {
+    fn clone(&self) -> Self {
+        Self::wrap(self.inner.clone())
+    }
+}
+
+impl<T> Query<T> {
+    pub(crate) fn wrap(inner: untyped::Query) -> Self {
+        Self {
+            inner,
+            row: PhantomData,
+        }
+    }
+
+    pub(crate) fn map(self, f: impl FnOnce(untyped::Query) -> untyped::Query) -> Self {
+        Self::wrap(f(self.inner))
+    }
+
+    /// The query by name, without its type.
+    pub fn into_inner(self) -> untyped::Query {
+        self.inner
+    }
+}
+
+/// `T`'s name and stored columns.
+pub(crate) fn table<T: Table>() -> untyped::Table {
+    untyped::Table::new(T::NAME, T::COLUMNS.iter().copied())
 }
 
 impl<T: Table> Query<T> {
     /// Every row of `T`.
     pub fn all() -> Self {
-        Self {
-            query: q::Query::from(T::NAME),
-            row: PhantomData,
-        }
+        Self::wrap(untyped::Query::table(table::<T>()))
     }
 
     /// Reads only the `columns` (a stored column, or a tuple of up to
@@ -39,12 +69,7 @@ impl<T: Table> Query<T> {
     /// todos::query().select((todos::title(), todos::done()))
     /// ```
     pub fn select<S: Selection<T>>(self, columns: S) -> Query<Partial<T, S::Values>> {
-        let mut query = self.query;
-        query.select = Some(columns.names().into_iter().map(str::to_owned).collect());
-        Query {
-            query,
-            row: PhantomData,
-        }
+        Query::wrap(self.inner.select(columns.names()))
     }
 }
 
@@ -84,22 +109,22 @@ impl<T: Row> Query<T> {
         I: IntoInclude<<T as Row>::Table>,
         T: With<<I as IntoInclude<<T as Row>::Table>>::Output>,
     {
-        let mut query = self.query;
-        let at = query.array_subqueries.len();
-        query
-            .array_subqueries
-            .push(relation.into_include().into_subquery(at));
-        Query {
-            query,
-            row: PhantomData,
-        }
+        let at = self.inner.query.array_subqueries.len();
+        let subquery = relation.into_include().into_subquery(at);
+        Query::wrap(self.inner.include(subquery))
     }
 
     /// Only rows matching `condition`. Conditions add up: a row must match
-    /// each.
-    pub fn filter(mut self, condition: Condition<T::Table>) -> Self {
-        self.query.filters.push(condition.predicate);
-        self
+    /// each. After a [`Query::gather`], they narrow what it gathered.
+    pub fn filter(self, condition: Condition<T::Table>) -> Self {
+        self.map(|inner| inner.filter(condition.predicate))
+    }
+
+    /// Reads deleted rows too, as TypeScript's `includeDeleted()` does.
+    /// [`deleted_at`] tells them apart: it is `None` for a row that is not
+    /// deleted.
+    pub fn include_deleted(self) -> Self {
+        self.map(untyped::Query::include_deleted)
     }
 
     /// The row with this id.
@@ -110,30 +135,29 @@ impl<T: Row> Query<T> {
         )))
     }
 
-    pub fn order_by<V>(mut self, column: Column<T::Table, V>, order: Order) -> Self {
-        self.query.order_by.push(q::OrderBy {
-            column: column.name.to_owned(),
-            direction: match order {
-                Order::Asc => OrderDirection::Asc,
-                Order::Desc => OrderDirection::Desc,
-            },
-        });
-        self
+    pub fn order_by<V>(self, column: Column<T::Table, V>, order: Order) -> Self {
+        self.map(|inner| inner.order_by(column.name, order.direction()))
     }
 
-    pub fn limit(mut self, limit: usize) -> Self {
-        self.query.limit = Some(limit);
-        self
+    pub fn limit(self, limit: usize) -> Self {
+        self.map(|inner| inner.limit(limit))
     }
 
-    pub fn offset(mut self, offset: usize) -> Self {
-        self.query.offset = offset;
-        self
+    pub fn offset(self, offset: usize) -> Self {
+        self.map(|inner| inner.offset(offset))
     }
 
-    /// The untyped query, for [`crate::Jazz::with_client`].
-    pub fn into_untyped(self) -> q::Query {
-        self.query
+    /// The untyped query, for [`crate::Jazz::with_client`]. Whether it
+    /// reads deleted rows is a read option: see [`Query::reads_deleted`].
+    ///
+    /// Fails when the query combines what is not supported yet.
+    pub fn into_untyped(self) -> Result<q::Query> {
+        self.inner.into_core()
+    }
+
+    /// Whether the query reads deleted rows too ([`Query::include_deleted`]).
+    pub fn reads_deleted(&self) -> bool {
+        self.inner.reads_deleted()
     }
 }
 
@@ -143,15 +167,24 @@ pub enum Order {
     Desc,
 }
 
+impl Order {
+    pub(crate) fn direction(self) -> OrderDirection {
+        match self {
+            Order::Asc => OrderDirection::Asc,
+            Order::Desc => OrderDirection::Desc,
+        }
+    }
+}
+
 /// A condition on rows of `T`.
 #[derive(Debug, Clone)]
 pub struct Condition<T> {
-    predicate: Predicate,
+    pub(crate) predicate: Predicate,
     row: PhantomData<fn() -> T>,
 }
 
 impl<T> Condition<T> {
-    fn new(predicate: Predicate) -> Self {
+    pub(crate) fn new(predicate: Predicate) -> Self {
         Self {
             predicate,
             row: PhantomData,
@@ -258,6 +291,12 @@ pub fn created_at<T>() -> Column<T, Timestamp> {
 /// When the row was last updated: a column of every table.
 pub fn updated_at<T>() -> Column<T, Timestamp> {
     Column::new("$updatedAt")
+}
+
+/// When the row was deleted: `None` unless it is. Only a query that
+/// [`Query::include_deleted`] reads deleted rows.
+pub fn deleted_at<T>() -> Column<T, Option<Timestamp>> {
+    Column::new("$deletedAt")
 }
 
 impl<T> Column<T, String> {
@@ -418,7 +457,7 @@ impl<T: Table, U: Table> Many<T, U> {
 }
 
 /// A literal operand for a value a [`ColumnValue`] produced.
-fn literal(value: Value) -> q::Operand {
+pub(crate) fn literal(value: Value) -> q::Operand {
     q::lit(core(value))
 }
 

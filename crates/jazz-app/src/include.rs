@@ -273,12 +273,15 @@ fn include_name(at: usize) -> String {
 /// Rows of `U` included with each row of `T`, as `O`.
 #[derive(Debug, Clone)]
 pub struct Include<T, O> {
-    subquery: ArraySubquery,
+    /// The child query, or why it cannot run in an include.
+    subquery: Child,
     types: PhantomData<fn() -> (T, O)>,
 }
 
+type Child = std::result::Result<ArraySubquery, String>;
+
 impl<T, O> Include<T, O> {
-    fn new(subquery: ArraySubquery) -> Self {
+    fn new(subquery: Child) -> Self {
         Self {
             subquery,
             types: PhantomData,
@@ -302,31 +305,16 @@ impl<T, O: Included> IntoInclude<T> for Include<T, O> {
     }
 }
 
-/// The child query of an include, as the core runs it. A typed query
-/// only filters, orders, limits, selects and includes, as a child can.
-fn subquery<S: Row>(query: Query<S>, inner_column: &str, outer_column: &str) -> ArraySubquery {
-    let query = query.into_untyped();
-    let mut subquery = ArraySubquery::new(
-        String::new(),
-        <S::Table as Table>::NAME,
-        inner_column,
-        outer_column,
-    );
-    subquery.filters = query.filters;
-    // Included rows come as values in order: select every column by name,
-    // so they decode by name.
-    subquery.select = Some(query.select.unwrap_or_else(|| {
-        <S::Table as Table>::COLUMNS
-            .iter()
-            .map(|&name| name.to_owned())
-            .collect()
-    }));
-    subquery.order_by = query.order_by;
-    subquery.limit = query.limit;
-    subquery.offset = query.offset;
-    subquery.nested_arrays = query.array_subqueries;
-    subquery.partial = query.partial;
-    subquery
+/// The child query of an include, as the core runs it, or why it cannot
+/// run in one: see [`crate::untyped::Query::into_include`].
+fn subquery<S: Row>(query: Query<S>, inner_column: &str, outer_column: &str) -> Child {
+    query
+        .inner
+        .into_include(String::new(), inner_column, outer_column)
+        .map_err(|error| match error {
+            Error::Unsupported(reason) => reason,
+            other => other.to_string(),
+        })
 }
 
 impl<T: Table, U: Table, N: Nullability> One<T, U, N> {
@@ -385,7 +373,7 @@ impl Nullability for Nullable {
 /// A forward relation's include: an `Option<S>`, unless required.
 #[derive(Debug, Clone)]
 pub struct OneInclude<T, S, N = NotNull> {
-    subquery: ArraySubquery,
+    subquery: Child,
     types: PhantomData<fn() -> (T, S)>,
     nullability: PhantomData<N>,
 }
@@ -396,10 +384,10 @@ impl<T, S: Row, N: Nullability> OneInclude<T, S, N> {
     /// referenced row is there (and readable) are kept. On a [`Nullable`]
     /// one it stays an `Option<S>` and every row is kept.
     pub fn require(self) -> Include<T, N::Required<S>> {
-        Include::new(ArraySubquery {
+        Include::new(self.subquery.map(|subquery| ArraySubquery {
             requirement: N::REQUIREMENT,
-            ..self.subquery
-        })
+            ..subquery
+        }))
     }
 }
 
@@ -437,7 +425,7 @@ impl<T: Table, U: Table, N: Nullability> IntoInclude<T> for Refs<T, U, N> {
 /// references that the query matches.
 #[derive(Debug, Clone)]
 pub struct RefsInclude<T, S, N = NotNull> {
-    subquery: ArraySubquery,
+    subquery: Child,
     types: PhantomData<fn() -> (T, S)>,
     nullability: PhantomData<N>,
 }
@@ -448,10 +436,10 @@ impl<T, S: Row, N: Nullability> RefsInclude<T, S, N> {
     /// there (and readable) are kept. On a [`Nullable`] one every row is
     /// kept. The include is a `Vec<S>` either way.
     pub fn require(self) -> Include<T, Vec<S>> {
-        Include::new(ArraySubquery {
+        Include::new(self.subquery.map(|subquery| ArraySubquery {
             requirement: N::ARRAY_REQUIREMENT,
-            ..self.subquery
-        })
+            ..subquery
+        }))
     }
 }
 
@@ -477,10 +465,11 @@ impl<T: Table, U: Table> IntoInclude<T> for Many<T, U> {
 }
 
 impl<T, O> Include<T, O> {
-    pub(crate) fn into_subquery(self, at: usize) -> ArraySubquery {
-        let mut subquery = self.subquery;
+    /// The child query as the `at`th include, or why it cannot run.
+    pub(crate) fn into_subquery(self, at: usize) -> Result<ArraySubquery> {
+        let mut subquery = self.subquery.map_err(Error::Unsupported)?;
         subquery.column_name = include_name(at);
-        subquery
+        Ok(subquery)
     }
 }
 

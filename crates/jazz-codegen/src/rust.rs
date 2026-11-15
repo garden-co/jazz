@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The version of the bindings' shape this generator writes: the second
 /// line records it.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
@@ -552,7 +552,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(out, "pub mod {module} {{");
         out.push_str("    #[allow(unused_imports)]\n    use super::*;\n\n");
-        let mut fns = BTreeSet::from(["query".to_owned(), "id".to_owned()]);
+        let mut fns = BTreeSet::from(["query".to_owned(), "id".to_owned(), "history".to_owned()]);
         let _ = writeln!(
             out,
             "    /// Every row of `{}`; narrow it with `filter`.\n    pub fn query() -> {RT}::Query<{row}> {{\n        {RT}::Query::all()\n    }}",
@@ -560,10 +560,15 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
+            "\n    /// Every accepted version of `{}`'s rows; bound it to rows with `id` or `id().is_in`.\n    pub fn history() -> {RT}::Query<{RT}::Version<{row}>> {{\n        {RT}::Query::history()\n    }}",
+            table.name
+        );
+        let _ = writeln!(
+            out,
             "\n    /// The row's id. (`{RT}::created_at()` and `updated_at()` are columns of every table too.)\n    pub fn id() -> {RT}::Column<{row}, {RT}::ObjectId> {{\n        {RT}::id()\n    }}"
         );
         for field in &fields {
-            // A column named as the module's own `query` or `id` gets
+            // A column named as the module's own `query`, `id` or `history` gets
             // `_column` after it.
             let ident = if fns.contains(&field.ident) {
                 format!("{}_column", field.ident.trim_start_matches("r#"))
