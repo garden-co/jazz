@@ -82,35 +82,6 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun sessionState(): String? = live { handle.sessionState() }
     override fun syncStatus(): String = live { handle.syncStatus() }
     override fun refresh(): Unit = live { handle.refresh() }
-
-    override fun endpoint(authenticate: (String) -> String?, basePath: String?, sessionTtlSecs: Long?): NativeEndpoint {
-        val authenticator = object : uniffi.jazz_ffi.Authenticator {
-            override fun authenticate(requestJson: String): String? = authenticate(requestJson)
-        }
-        val endpoint = live { handle.endpoint(authenticator, basePath, sessionTtlSecs?.toULong()) }
-        return object : NativeEndpoint {
-            override fun isSocket(path: String): Boolean = endpoint.isSocket(path)
-            override fun handle(requestJson: String): String = call { endpoint.handle(requestJson) }
-            override fun forUser(requestJson: String): Native = UniffiNative(call { endpoint.forUser(requestJson) })
-            override fun socket(upgradeJson: String, onMessage: (ByteArray) -> Unit, onClose: (Int, String) -> Unit): NativeSocket {
-                val listener = object : uniffi.jazz_ffi.SocketListener {
-                    override fun onMessage(message: ByteArray) = onMessage(message)
-                    override fun onClose(code: UShort, reason: String) = onClose(code.toInt(), reason)
-                }
-                val socket = call { endpoint.socket(upgradeJson, listener) }
-                return object : NativeSocket {
-                    override fun push(message: ByteArray): Unit = call { socket.push(message) }
-                    override fun close() {
-                        try {
-                            socket.end()
-                        } finally {
-                            socket.destroy()
-                        }
-                    }
-                }
-            }
-        }
-    }
     override fun bundle(): String? = live { handle.bundle() }
 
     override fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload {

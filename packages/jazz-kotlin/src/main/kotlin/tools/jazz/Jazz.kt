@@ -181,23 +181,6 @@ public class Jazz internal constructor(
     public suspend fun <Row : Any, Insert : Any, P : Patch> restore(table: Table<Row, Insert, P>, id: String, row: Insert? = null): Row =
         io { decodeStored(table, native.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
 
-    /**
-     * This backend's Jazz endpoint for end users (TS `createJazz`'s handler),
-     * served from your own HTTP server at [basePath] (see [JazzEndpoint]).
-     * [authenticate] says who a request's user is, from your own sign-in
-     * (e.g. its `Authorization` header), or `null` for no one.
-     */
-    public suspend fun endpoint(
-        basePath: String = "/jazz",
-        sessionTtlSecs: Long? = null,
-        authenticate: suspend (JazzRequest) -> EndpointUser?,
-    ): JazzEndpoint = io { JazzEndpoint(native.endpoint(authenticateJson(authenticate), basePath, sessionTtlSecs), this) }
-
-    internal suspend fun <T> ioCall(block: () -> T): T = io(block)
-
-    /** A handle over [native] with this one's computed fields, transforms and dispatcher. */
-    internal fun derive(native: Native): Jazz = Jazz(native, implementations, dispatcher)
-
     /** The id of the permissions bundle this backend published, or `null` for a client. */
     public suspend fun bundle(): String? = io { native.bundle() }
 

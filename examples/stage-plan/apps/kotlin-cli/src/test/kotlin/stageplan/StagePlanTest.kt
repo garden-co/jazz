@@ -315,29 +315,4 @@ class StagePlanTest {
             kotlin.test.assertTrue(DocsSnippets.includeDeleted(jazz, show.id).any { it.id == c.id })
         }
     }
-
-    @Test
-    fun end_users_through_a_kotlin_backends_own_endpoint(): Unit = runBlocking {
-        val backend = open("endpoint-host")
-        val port = ServerSocket(0).use { it.localPort }
-        val server = DocsSnippets.serveEndpoint(backend, port)
-        try {
-            val endpoint = "http://127.0.0.1:$port/jazz"
-            DocsSnippets.openClient(endpoint, appId, tools.jazz.JazzAuth.generateDeviceKey()).use { carol ->
-                val state = carol.session.value as tools.jazz.SessionState.SignedIn
-                val show = carol.insert(
-                    jazzapp.Shows,
-                    jazzapp.NewShow(name = "Via Ktor", venue = "V", date = "D", doors = "D", chiefAccount = state.user.account),
-                    tier = tools.jazz.WriteTier.Global,
-                )
-                assertEquals("Via Ktor", carol.one(jazzapp.Shows.where(jazzapp.Shows.id eq show.id), tools.jazz.ReadTier.Remote)?.name)
-            }
-            DocsSnippets.signIn(endpoint, appId) { "token-dana" }.use { dana ->
-                assertEquals("dana", (dana.session.value as tools.jazz.SessionState.SignedIn).user.subject)
-            }
-        } finally {
-            server.stop(100, 1000)
-            backend.close()
-        }
-    }
 }

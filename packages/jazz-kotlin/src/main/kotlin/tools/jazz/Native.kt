@@ -83,10 +83,6 @@ public interface Native : AutoCloseable {
     /** The permissions bundle a backend published, or `null` for a client. */
     public fun bundle(): String? = null
 
-    /** A backend's Jazz endpoint for end users, with the host's sign-in ([authenticate]: request JSON → answer JSON or `null`). */
-    public fun endpoint(authenticate: (String) -> String?, basePath: String?, sessionTtlSecs: Long?): NativeEndpoint =
-        throw JazzException.NotSupported("serving an endpoint")
-
     /** Asks the token provider for a fresh token. */
     public fun refresh() {}
 
