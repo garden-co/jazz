@@ -1919,6 +1919,12 @@ impl JazzClient {
         opts
     }
 
+    /// Whether this client reads and writes through a branch view
+    /// ([`JazzClient::on_branch`]).
+    pub fn is_on_branch(&self) -> bool {
+        self.branch.is_some()
+    }
+
     fn reject_branch(&self, operation: &str) -> Result<()> {
         if self.branch.is_some() {
             return Err(JazzError::Query(format!(

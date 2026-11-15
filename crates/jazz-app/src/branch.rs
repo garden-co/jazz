@@ -257,9 +257,16 @@ impl Jazz {
 /// An app handle that reads and writes through a branch view
 /// ([`Jazz::on_branch`]). `Send + Clone`, like [`Jazz`].
 ///
-/// Not supported yet through a branch: reads inside a transaction (so a
-/// branch transaction's `get`, `upsert` and `restore` fail), streaming
-/// inserts and byte-range reads.
+/// Not supported yet through a branch: reads inside a transaction (see
+/// [`Transaction::on_branch`]), streaming inserts and updates, and
+/// byte-range reads; they fail. It has no `transaction` of its own: use
+/// [`Jazz::transaction`] and [`Transaction::on_branch`]. [`Jazz::wait_for_sync`]
+/// covers its writes.
+///
+/// Where it differs from TS: a selector names every branch column of the
+/// schema (or is the value of its only one), for reads and writes alike;
+/// and a write to a table without `branchBy` goes to its shared rows, where
+/// TS refuses a `branch` option on such a table.
 #[derive(Debug, Clone)]
 pub struct OnBranch {
     jazz: Jazz,
@@ -430,8 +437,10 @@ impl Transaction {
     /// with the rest of the transaction. Writes to several branches (and
     /// to shared tables) in one transaction keep one fate.
     ///
-    /// Reads through a branch inside a transaction are not supported yet:
-    /// its `get`, `all`, `upsert` and `restore` fail.
+    /// Reads through a branch inside a transaction are not supported yet
+    /// (TS has them): its `get` and `all` fail, and its `upsert`, `restore`
+    /// and `restore_with`, which read the row back, fail before staging
+    /// anything.
     pub fn on_branch(&self, view: impl Into<BranchView>) -> Result<Transaction> {
         let client = view.into().resolve(self.client())?;
         Ok(self.with_client(client))

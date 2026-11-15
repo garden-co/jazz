@@ -30,6 +30,18 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    /// `write`, which returns the row read back, needs a read through the
+    /// branch, which a transaction can't do yet: refuse it before staging
+    /// anything, so a caller that ignores the error doesn't commit it.
+    fn refuse_read_back_on_branch(&self, write: &str) -> Result<()> {
+        if self.client.is_on_branch() {
+            return Err(crate::Error::Unsupported(format!(
+                "{write} through a branch inside a transaction (it reads the row back)"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn client(&self) -> &JazzClient {
         &self.client
     }
@@ -59,6 +71,7 @@ impl Transaction {
     /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
     /// transaction now sees it.
     pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        self.refuse_read_back_on_branch("upsert")?;
         let cells = new.into_cells(&self.implementations)?;
         self.client
             .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
@@ -74,6 +87,7 @@ impl Transaction {
 
     /// Brings back a deleted row, as [`Jazz::restore`].
     pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+        self.refuse_read_back_on_branch("restore")?;
         self.client.restore(T::NAME, id, None)?;
         self.wrote.set(true);
         self.read_back(id).await
@@ -81,6 +95,7 @@ impl Transaction {
 
     /// Brings back a deleted row with `update`'s columns replaced.
     pub async fn restore_with<U: Update>(&self, id: ObjectId, update: U) -> Result<U::Row> {
+        self.refuse_read_back_on_branch("restore_with")?;
         let cells = update.into_cells(&self.implementations)?;
         self.client
             .restore(<U::Row as Table>::NAME, id, Some(cells))?;

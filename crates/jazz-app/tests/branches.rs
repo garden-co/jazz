@@ -256,8 +256,21 @@ async fn transactions_and_selectors() {
         )?;
         draft.insert(NewDocument::new("draft", "Added"))?;
         tx.insert(NewDraft::new("draft"))?;
-        // Reads through a branch inside a transaction are not supported yet.
+        // Reads through a branch inside a transaction are not supported yet,
+        // and the writes that read back are refused before staging: this
+        // ignored upsert commits nothing.
         assert!(draft.get::<Document>(intro.id).await.is_err());
+        let refused = draft
+            .upsert(
+                jazz_app::ObjectId::new(),
+                NewDocument::new("draft", "Upserted"),
+            )
+            .await;
+        assert!(matches!(refused, Err(Error::Unsupported(_))), "{refused:?}");
+        assert!(matches!(
+            draft.restore::<Document>(intro.id).await,
+            Err(Error::Unsupported(_))
+        ));
         Ok(())
     })
     .await
@@ -365,6 +378,36 @@ async fn drafts_sync_through_the_server() {
     );
     let base = seen(reader.on_branch("main"), 1).await;
     assert_eq!(titles(&base), [("main", "Intro")]);
+
+    // Policies see the branch column: `locked` may be inserted into, but
+    // not updated or read.
+    let locked = writer
+        .on_branch(Branch::from("locked").over("main"))
+        .durable(jazz_app::DurabilityTier::GlobalServer);
+    let hidden = locked
+        .insert(NewDocument::new("locked", "Hidden"))
+        .await
+        .unwrap();
+    let denied = locked
+        .update(
+            intro.id,
+            DocumentUpdate {
+                title: Some("Intro, locked".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(denied.is_err(), "an update the policy denies: {denied:?}");
+    let unseen = reader
+        .on_branch("locked")
+        .all_with(by_title(), ReadTier::Remote)
+        .await
+        .unwrap();
+    assert!(
+        unseen.iter().all(|row| row.id != hidden.id),
+        "a read the policy denies: {unseen:?}"
+    );
+    assert!(seen(reader.on_branch("main"), 1).await[0].title == "Intro");
 
     writer.shutdown().await.unwrap();
     reader.shutdown().await.unwrap();
