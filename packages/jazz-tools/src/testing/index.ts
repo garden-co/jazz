@@ -13,6 +13,9 @@ export {
   type TestPermissionsFile,
   type LooseAppTypes,
   type LooseTableTypes,
+  type InferAppTypes,
+  type InferTransformTypes,
+  type TestAppImplementations,
 } from "./test-app.js";
 export { createPolicyTestApp, PolicyTestApp } from "./policy-test-app.js";
 export { startTestJwtIssuer, type TestJwtIssuerHandle } from "./test-jwt-issuer.js";

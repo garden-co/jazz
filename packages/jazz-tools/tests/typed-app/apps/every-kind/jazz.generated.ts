@@ -1,0 +1,361 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
+// Bindings format 1. Formatters may reformat this file, except `app` below.
+import {
+  bindApp,
+  type AppTypes,
+  type ComputedImpl,
+  type JsonValue,
+  type TransformImpl,
+} from "jazz-tools";
+import { computed, transforms } from "./jazz.computed.js";
+
+export type ThingStatus = "todo" | "done";
+export type ThingMaybeStatus = "low" | "high";
+export type ThingEvent =
+  | { type: "created"; by: string }
+  | { type: "moved"; to: number; note: string | null; reason: string };
+export type ThingEventInit =
+  | { type: "created"; by: string }
+  | { type: "moved"; to: number; note?: string | null; reason?: string };
+export type ThingMaybeLabel = "x" | "y";
+
+export type Owner = {
+  readonly id: string;
+  name: string;
+};
+
+export type OwnerInsert = {
+  name: string;
+};
+
+export type Thing = {
+  readonly id: string;
+  text: string;
+  maybeText: string | null;
+  int: number;
+  float: number;
+  big: bigint;
+  flag: boolean;
+  at: Date;
+  blob: Uint8Array;
+  ownerId: string;
+  reviewerId: string | null;
+  coOwnerIds: string[];
+  optionalInt: number | null;
+  defaultedFloat: number;
+  defaultedNull: bigint | null;
+  counter: number;
+  tags: string[];
+  body: string;
+  status: ThingStatus;
+  maybeStatus: ThingMaybeStatus | null;
+  event: ThingEvent;
+  events: ({ type: "ping"; at: Date | null } | { type: "pong" })[];
+  statuses: ("a" | "b")[];
+  data: JsonValue;
+  maybeData: JsonValue | null;
+  nested: number[][];
+  shouted: string;
+  maybeShouted: string | null;
+  stamp: string;
+  readonly summary: string;
+  readonly maybeLabel: ThingMaybeLabel;
+  readonly score: number | null;
+};
+
+export type ThingInsert = {
+  text: string;
+  maybeText?: string | null;
+  int: number;
+  float: number;
+  big: bigint;
+  flag: boolean;
+  at: Date;
+  blob: Uint8Array;
+  ownerId: string;
+  reviewerId?: string | null;
+  coOwnerIds: string[];
+  optionalInt?: number | null;
+  defaultedFloat?: number;
+  defaultedNull?: bigint | null;
+  counter: number;
+  tags: string[];
+  body: string;
+  status?: ThingStatus;
+  maybeStatus?: ThingMaybeStatus | null;
+  event: ThingEventInit;
+  events: ({ type: "ping"; at?: Date | null } | { type: "pong" })[];
+  statuses: ("a" | "b")[];
+  data: JsonValue;
+  maybeData?: JsonValue | null;
+  nested: number[][];
+  shouted: string;
+  maybeShouted?: string | null;
+  stamp: string;
+};
+
+interface Types extends AppTypes {
+  owners: {
+    row: Owner;
+    insert: OwnerInsert;
+    columns: {
+      name: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {
+      coOwned: { many: "things" };
+      things: { many: "things" };
+    };
+  };
+  things: {
+    row: Thing;
+    insert: ThingInsert;
+    columns: {
+      text: { kind: "string"; nullable: false; value: string };
+      maybeText: { kind: "string"; nullable: true; value: string };
+      int: { kind: "int"; nullable: false; value: number };
+      float: { kind: "float"; nullable: false; value: number };
+      big: { kind: "bigint"; nullable: false; value: bigint };
+      flag: { kind: "boolean"; nullable: false; value: boolean };
+      at: { kind: "timestamp"; nullable: false; value: Date };
+      blob: { kind: "bytes"; nullable: false; value: Uint8Array };
+      ownerId: { kind: "uuid"; nullable: false; value: string };
+      reviewerId: { kind: "uuid"; nullable: true; value: string };
+      coOwnerIds: { kind: "array"; nullable: false; value: string[] };
+      optionalInt: { kind: "int"; nullable: true; value: number };
+      defaultedFloat: { kind: "float"; nullable: false; value: number };
+      defaultedNull: { kind: "bigint"; nullable: true; value: bigint };
+      counter: { kind: "int"; nullable: false; value: number };
+      tags: { kind: "array"; nullable: false; value: string[] };
+      body: { kind: "string"; nullable: false; value: string };
+      status: { kind: "enum"; nullable: false; value: ThingStatus };
+      maybeStatus: { kind: "enum"; nullable: true; value: ThingMaybeStatus };
+      event: { kind: "enum"; nullable: false; value: ThingEvent };
+      events: {
+        kind: "array";
+        nullable: false;
+        value: ({ type: "ping"; at: Date | null } | { type: "pong" })[];
+      };
+      statuses: { kind: "array"; nullable: false; value: ("a" | "b")[] };
+      data: { kind: "json"; nullable: false; value: JsonValue };
+      maybeData: { kind: "json"; nullable: true; value: JsonValue };
+      nested: { kind: "array"; nullable: false; value: number[][] };
+      shouted: { kind: "string"; nullable: false; value: string };
+      maybeShouted: { kind: "string"; nullable: true; value: string };
+      stamp: { kind: "timestamp"; nullable: false; value: Date };
+    };
+    relations: {
+      coOwners: { many: "owners"; nullable: false };
+      owner: { one: "owners"; nullable: false };
+      reviewer: { one: "owners"; nullable: true };
+    };
+    computed: {
+      summary: { from: { text: string; int: number }; value: string };
+      maybeLabel: {
+        from: { id: string; maybeStatus: ThingMaybeStatus | null; shouted: string };
+        value: ThingMaybeLabel;
+      };
+      score: { from: { float: number }; value: number | null };
+    };
+    transforms: {
+      shouted: "upper";
+      maybeShouted: "upper";
+      stamp: "iso";
+    };
+  };
+}
+
+interface Transforms {
+  iso: { stored: Date; view: string };
+  upper: { stored: string; view: string };
+}
+
+export type AppComputed = ComputedImpl<Types>;
+export type AppTransforms = TransformImpl<Transforms, Types>;
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types, Transforms>({
+  "source": "sha256:0ecd2b0f4cae1c620f0a24ed577384f1f98921f3a5da3a4df627134ed95be920",
+  "schema": {
+    "current": "215b9375ac28f8bf0a5de0ddc9d6a708f011bdca8dcb7e7010d3fd7bd89fc133",
+    "schemas": [
+      {
+        "hash": "215b9375ac28f8bf0a5de0ddc9d6a708f011bdca8dcb7e7010d3fd7bd89fc133",
+        "schema": {
+          "tables": {
+            "owners": {
+              "columns": [{ "column_type": { "type": "Text" }, "name": "name", "nullable": false }],
+            },
+            "things": {
+              "columns": [
+                { "column_type": { "type": "Text" }, "name": "text", "nullable": false },
+                { "column_type": { "type": "Text" }, "name": "maybeText", "nullable": true },
+                { "column_type": { "type": "Integer" }, "name": "int", "nullable": false },
+                { "column_type": { "type": "Double" }, "name": "float", "nullable": false },
+                { "column_type": { "type": "BigInt" }, "name": "big", "nullable": false },
+                { "column_type": { "type": "Boolean" }, "name": "flag", "nullable": false },
+                { "column_type": { "type": "Timestamp" }, "name": "at", "nullable": false },
+                { "column_type": { "type": "Bytea" }, "name": "blob", "nullable": false },
+                {
+                  "column_type": { "type": "Uuid" },
+                  "name": "ownerId",
+                  "nullable": false,
+                  "references": "owners",
+                },
+                {
+                  "column_type": { "type": "Uuid" },
+                  "name": "reviewerId",
+                  "nullable": true,
+                  "references": "owners",
+                },
+                {
+                  "column_type": { "element": { "type": "Uuid" }, "type": "Array" },
+                  "name": "coOwnerIds",
+                  "nullable": false,
+                  "references": "owners",
+                },
+                { "column_type": { "type": "Integer" }, "name": "optionalInt", "nullable": true },
+                {
+                  "column_type": { "type": "Double" },
+                  "default": { "type": "Double", "value": 1.5 },
+                  "name": "defaultedFloat",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "type": "BigInt" },
+                  "default": { "type": "Null" },
+                  "name": "defaultedNull",
+                  "nullable": true,
+                },
+                {
+                  "column_type": { "type": "Integer" },
+                  "merge_strategy": "Counter",
+                  "name": "counter",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "element": { "type": "Text" }, "type": "Array" },
+                  "merge_strategy": "GSet",
+                  "name": "tags",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "type": "Text" },
+                  "merge_strategy": "Text",
+                  "name": "body",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "type": "Enum", "variants": ["todo", "done"] },
+                  "default": { "type": "Text", "value": "todo" },
+                  "name": "status",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "type": "Enum", "variants": ["low", "high"] },
+                  "name": "maybeStatus",
+                  "nullable": true,
+                },
+                {
+                  "column_type": {
+                    "cases": [
+                      {
+                        "fields": [
+                          { "column_type": { "type": "Uuid" }, "name": "by", "nullable": false },
+                        ],
+                        "name": "created",
+                      },
+                      {
+                        "fields": [
+                          { "column_type": { "type": "Integer" }, "name": "to", "nullable": false },
+                          { "column_type": { "type": "Text" }, "name": "note", "nullable": true },
+                          {
+                            "column_type": { "type": "Text" },
+                            "default": { "type": "Text", "value": "none" },
+                            "name": "reason",
+                            "nullable": false,
+                          },
+                        ],
+                        "name": "moved",
+                      },
+                    ],
+                    "type": "EnumPayload",
+                  },
+                  "name": "event",
+                  "nullable": false,
+                },
+                {
+                  "column_type": {
+                    "element": {
+                      "cases": [
+                        {
+                          "fields": [
+                            {
+                              "column_type": { "type": "Timestamp" },
+                              "name": "at",
+                              "nullable": true,
+                            },
+                          ],
+                          "name": "ping",
+                        },
+                        { "fields": [], "name": "pong" },
+                      ],
+                      "type": "EnumPayload",
+                    },
+                    "type": "Array",
+                  },
+                  "name": "events",
+                  "nullable": false,
+                },
+                {
+                  "column_type": {
+                    "element": { "type": "Enum", "variants": ["a", "b"] },
+                    "type": "Array",
+                  },
+                  "name": "statuses",
+                  "nullable": false,
+                },
+                { "column_type": { "type": "Json" }, "name": "data", "nullable": false },
+                { "column_type": { "type": "Json" }, "name": "maybeData", "nullable": true },
+                {
+                  "column_type": {
+                    "element": { "element": { "type": "Double" }, "type": "Array" },
+                    "type": "Array",
+                  },
+                  "name": "nested",
+                  "nullable": false,
+                },
+                { "column_type": { "type": "Text" }, "name": "shouted", "nullable": false },
+                { "column_type": { "type": "Text" }, "name": "maybeShouted", "nullable": true },
+                { "column_type": { "type": "Timestamp" }, "name": "stamp", "nullable": false },
+              ],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+    "computed": {
+      "things": {
+        "summary": ["text", "int"],
+        "maybeLabel": ["id", "maybeStatus", "shouted"],
+        "score": ["float"],
+      },
+    },
+    "transforms": { "things": { "shouted": "upper", "maybeShouted": "upper", "stamp": "iso" } },
+  },
+  "relations": {
+    "owners": {
+      "coOwned": { "many": "things", "relation": "coOwners" },
+      "things": { "many": "things", "relation": "owner" },
+    },
+    "things": {
+      "coOwners": { "one": "owners", "column": "coOwnerIds" },
+      "owner": { "one": "owners", "column": "ownerId" },
+      "reviewer": { "one": "owners", "column": "reviewerId" },
+    },
+  },
+  computed,
+  transforms,
+});

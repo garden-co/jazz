@@ -8,7 +8,7 @@ use crate::catalogue::Permissions;
 use crate::tools::public_schema::{OperationPolicy, PolicyExpr, Schema, TableName, TablePolicies};
 
 use super::CodegenRelation;
-use super::expr::{self, Context, Def, DefBody, Defs};
+use super::expr::{self, ComputedNames, Context, Def, DefBody, Defs};
 use super::json::Json;
 
 /// A refusal at a JSON path of the permissions file.
@@ -22,6 +22,7 @@ pub fn read(
     root: &Json,
     schema: &Schema,
     relations: &BTreeMap<String, BTreeMap<String, CodegenRelation>>,
+    computed: &ComputedNames,
 ) -> Result<Permissions, Refusal> {
     let top = root
         .as_object()
@@ -57,6 +58,7 @@ pub fn read(
         schema,
         relations,
         defs: &defs,
+        computed,
     };
     // A definition must compile on its own terms too: its body is checked
     // where it is called, and here for recursion through any table.
@@ -293,10 +295,12 @@ pub fn write(
     relations: &BTreeMap<String, BTreeMap<String, CodegenRelation>>,
 ) -> Result<Json, String> {
     let defs = Defs::new();
+    let computed = ComputedNames::new();
     let context = Context {
         schema,
         relations,
         defs: &defs,
+        computed: &computed,
     };
     let mut tables = Vec::new();
     for (table, policies) in permissions {

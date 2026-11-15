@@ -602,12 +602,10 @@ pub(crate) fn ts_type(ty: &ColumnType, init: bool) -> String {
             )
         }
         ColumnType::Array { element } => {
-            let inner = ts_type(element, init);
-            if inner.contains(' ') && !inner.starts_with('{') {
-                format!("({inner})[]")
-            } else {
-                format!("{inner}[]")
-            }
+            // `T[]` binds tighter than `|`: a union element (`"a" | "b"`, or
+            // a payload enum's `{ … } | { … }`) is parenthesised, as a JSON
+            // Schema's array items are.
+            format!("{}[]", crate::json_schema::group(ts_type(element, init)))
         }
         ColumnType::TransactionId | ColumnType::Row { .. } => "unknown".into(),
     }
@@ -723,5 +721,69 @@ fn write_literal(out: &mut String, value: &Json, indent: usize, prefix: usize) {
             out.push('}');
         }
         _ => out.push_str(&line),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jazz::tools::public_schema::EnumCaseDescriptor;
+
+    fn payload(cases: &[(&str, Vec<ColumnDescriptor>)]) -> ColumnType {
+        ColumnType::EnumPayload {
+            cases: cases
+                .iter()
+                .map(|(name, fields)| EnumCaseDescriptor {
+                    name: name.to_string(),
+                    fields: fields.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn array(element: ColumnType) -> ColumnType {
+        ColumnType::Array {
+            element: Box::new(element),
+        }
+    }
+
+    #[test]
+    fn array_elements_that_are_unions_are_parenthesized() {
+        let two_cases = payload(&[
+            (
+                "ping",
+                vec![ColumnDescriptor::new("at", ColumnType::Timestamp)],
+            ),
+            ("pong", vec![]),
+        ]);
+        assert_eq!(
+            ts_type(&array(two_cases), false),
+            r#"({ type: "ping"; at: Date } | { type: "pong" })[]"#
+        );
+        assert_eq!(
+            ts_type(
+                &array(ColumnType::Enum {
+                    variants: vec!["a".into(), "b".into()]
+                }),
+                false
+            ),
+            r#"("a" | "b")[]"#
+        );
+        // One object, or a plain type, needs none.
+        let one_case = payload(&[("ping", vec![ColumnDescriptor::new("at", ColumnType::Text)])]);
+        assert_eq!(
+            ts_type(&array(one_case), false),
+            r#"{ type: "ping"; at: string }[]"#
+        );
+        assert_eq!(
+            ts_type(&array(array(ColumnType::Double)), false),
+            "number[][]"
+        );
+        // Braces inside a variant's name don't end the object.
+        let braces = payload(&[("}", vec![]), ("{", vec![])]);
+        assert_eq!(
+            ts_type(&array(braces), false),
+            r#"({ type: "}" } | { type: "{" })[]"#
+        );
     }
 }

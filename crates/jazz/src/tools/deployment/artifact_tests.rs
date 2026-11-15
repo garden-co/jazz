@@ -493,6 +493,7 @@ fn printed(table: &str, expr: &PolicyExpr) -> String {
         schema: loaded.current_schema(),
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     expr::print(expr, &context, table).unwrap()
 }
@@ -1302,7 +1303,7 @@ fn through_the_permissions_file(expr: &PolicyExpr) -> TablePolicies {
     let text = json::print(&file);
     only_strings(&file, &text);
     let reread = json::parse(text.as_bytes()).unwrap();
-    let read = permissions_file::read(&reread, &current, &relations)
+    let read = permissions_file::read(&reread, &current, &relations, &Default::default())
         .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("todos")], policies, "{text}");
     policies
@@ -1635,6 +1636,7 @@ fn epic_drops_hop_prints_as_a_hop() {
         schema: &schema,
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     let text = expr::print(&hop, &context, "files").unwrap();
     assert_eq!(
@@ -1674,8 +1676,13 @@ fn epic_drops_hop_prints_as_a_hop() {
         "{text}"
     );
     assert!(!text.contains("__hop"), "{text}");
-    let read = permissions_file::read(&json::parse(text.as_bytes()).unwrap(), &schema, &relations)
-        .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
+    let read = permissions_file::read(
+        &json::parse(text.as_bytes()).unwrap(),
+        &schema,
+        &relations,
+        &Default::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("files")], policies, "{text}");
 }
 
@@ -2381,6 +2388,7 @@ fn recursive_relations_with_several_selected_columns_print_and_read_back() {
         schema: loaded.current_schema(),
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     let text = "exists (from recursive(seed: from todos where todos.owner = session.user select todos.id as id, todos.name as name, step: from todos where todos.id = id(frontier) order by todos.name, todos.id select todos.id as id, todos.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: 3) where todos.id = outer.id)";
     let ast = expr::parse(text).unwrap_or_else(|e| panic!("{}", e.render(text)));
@@ -2609,4 +2617,58 @@ fn relations_must_lead_where_they_say() {
     let error =
         edited_app(|v| v["tables"]["shares"]["relations"]["todoRow"]["rel"] = "todoz".into());
     assert!(error.contains("todoz"), "{error}");
+}
+
+#[test]
+fn a_relation_leads_where_its_column_references() {
+    // `shares.todo` references todos; a relation over it can't lead elsewhere.
+    let error = edited_app(|v| {
+        v["tables"]["shares"]["columns"]["todo"] =
+            serde_json::json!({ "type": "uuid?", "references": "todos" });
+        v["tables"]["shares"]["relations"]["todoRow"]["rel"] = "shares".into();
+    });
+    assert!(
+        error.contains(
+            "tables.shares.relations.todoRow: column todo references todos, so a relation over it leads to todos, not shares"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_policy_reading_a_computed_field_is_told_it_is_computed() {
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "shareCount = 1".into();
+    });
+    assert!(
+        error.contains(
+            "unknown column `shareCount` in todos: `shareCount` is a computed field, which isn't \
+             stored, so a permission can't read it; write the policy over the columns it's \
+             computed from"
+        ),
+        "{error}"
+    );
+    // A plain unknown column keeps the nearest-name hint.
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "nmae = 'x'".into();
+    });
+    assert!(
+        error.contains("unknown column `nmae` in todos; did you mean `name`?"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_relation_policy_reading_a_computed_outer_field_is_told_it_is_computed() {
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "exists (from shares where todo = outer.shareCount)".into();
+    });
+    assert!(
+        error.contains(
+            "unknown column todos.shareCount: `shareCount` is a computed field, which isn't \
+             stored, so a permission can't read it; write the policy over the columns it's \
+             computed from"
+        ),
+        "{error}"
+    );
 }
