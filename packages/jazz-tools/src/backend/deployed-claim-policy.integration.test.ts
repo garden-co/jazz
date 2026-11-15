@@ -92,6 +92,7 @@ describe("deployed permissions with claims in referenced read policies", () => {
 
       // waitForSync reports a refusal that settled before it was called,
       // even when a later write was accepted (jazz#5728), and only once.
+      // Graceful shutdown (server.stop below) doesn't fail on it.
       editor.db.insert(app.notes, {
         userId: viewer.userId,
         topicId: topic.value.id,
@@ -100,7 +101,11 @@ describe("deployed permissions with claims in referenced read policies", () => {
       expect(await outcome(editor.db.insert(app.topics, { title: "accepted after" }))).toBe(
         "accepted",
       );
-      await expect(editor.db.waitForSync()).rejects.toMatchObject({ code: "permission_denied" });
+      // It is the editor's: another user's wait, and the backend's own, are
+      // not told of it.
+      await viewer.db.waitForSync();
+      await server.jazz.db.waitForSync();
+      await expect(editor.db.waitForSync()).rejects.toThrow(/authorization_denied/);
       await editor.db.waitForSync();
     } finally {
       await server.stop();

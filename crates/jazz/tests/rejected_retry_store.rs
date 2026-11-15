@@ -377,17 +377,36 @@ fn a_sync_wait_reports_a_refusal_that_settled_before_it() {
     own_note(&client);
     pump(&client, &server);
 
-    let waited = block_on(client.wait_for_pending_writes(DurabilityTier::Global));
+    // A wait for pending writes (graceful shutdown's) isn't told of it:
+    // it settled before the call.
+    block_on(client.wait_for_pending_writes(DurabilityTier::Global)).unwrap();
+
+    let waited = block_on(client.wait_for_sync(DurabilityTier::Global, None));
     assert!(
         waited.is_err(),
         "the earlier refusal is reported: {waited:?}"
     );
     // Reported once: the next wait has nothing to report.
-    block_on(client.wait_for_pending_writes(DurabilityTier::Global)).unwrap();
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
+
+    // Two refusals: each is reported, one per wait, earliest first.
+    refused_note(&client, RowUuid::from_bytes([0x14; 16]));
+    refused_note(&client, RowUuid::from_bytes([0x15; 16]));
+    pump(&client, &server);
+    assert!(block_on(client.wait_for_sync(DurabilityTier::Global, None)).is_err());
+    assert!(block_on(client.wait_for_sync(DurabilityTier::Global, None)).is_err());
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
 
     // A refusal its own wait already reported isn't reported again.
     let seq = refused_note(&client, RowUuid::from_bytes([0x13; 16]));
     pump(&client, &server);
     assert!(block_on(client.wait_for_transaction(seq, DurabilityTier::Global)).is_err());
-    block_on(client.wait_for_pending_writes(DurabilityTier::Global)).unwrap();
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
+
+    // One a wait only observed (a host routing mutation errors) still is.
+    let seq = refused_note(&client, RowUuid::from_bytes([0x16; 16]));
+    pump(&client, &server);
+    assert!(block_on(client.observe_transaction(seq, DurabilityTier::Global)).is_err());
+    assert!(block_on(client.wait_for_sync(DurabilityTier::Global, None)).is_err());
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
 }

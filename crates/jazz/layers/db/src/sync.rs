@@ -1748,6 +1748,16 @@ struct Pending {
     expected: Option<Vec<Expected>>,
 }
 
+/// Whose a commit of these ops is, for [`Db::wait_for_sync`]: a trusted
+/// session's author, or `None` for this store's own (attributed ones too).
+fn writer(ops: &[StagedOp]) -> Option<AuthorSubject> {
+    if ops.iter().any(StagedOp::is_session) {
+        ops.iter().find_map(StagedOp::author)
+    } else {
+        None
+    }
+}
+
 impl Pending {
     /// Where it orders among unsettled versions.
     fn order(&self) -> Order {
@@ -2187,9 +2197,10 @@ pub(crate) struct Client {
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
     /// Commits of this store the upstream rejected that no wait has reported
-    /// yet: [`Db::wait_for_pending_writes`] reports them even when they
-    /// settled before it was called (TS `waitForSync`, jazz#5728).
-    unreported_rejections: BTreeSet<u64>,
+    /// yet, by writer ([`writer`]): [`Db::wait_for_sync`] reports them to
+    /// their writer's wait even when they settled before it was called (TS
+    /// `waitForSync`, jazz#5728).
+    unreported_rejections: BTreeMap<u64, Option<AuthorSubject>>,
     /// Fates the upstream gave this replica's commits, counted: each is
     /// progress a read queued behind them makes (see [`Db::settled_upstream`]).
     settled_upstream: u64,
@@ -7604,7 +7615,7 @@ impl Client {
             pending: PendingQueue::default(),
             unsent: Vec::new(),
             fates: HashMap::new(),
-            unreported_rejections: BTreeSet::new(),
+            unreported_rejections: BTreeMap::new(),
             settled_upstream: 0,
             local_fates: HashSet::new(),
             refused: Vec::new(),
@@ -8208,6 +8219,9 @@ impl Db {
                 ));
             }
         }
+        // A relayed commit is a session's, not this store's: its refusal is
+        // that session's to report.
+        let unreported = relayed.is_none().then(|| writer(&ops));
         // A session's commit goes up under its own id, at its own clock;
         // this store's at the stamp its writes took.
         let (bases, id, clock) = match relayed {
@@ -8304,6 +8318,9 @@ impl Db {
                 }
             }
             Err(error) => {
+                if let Some(writer) = unreported {
+                    client.unreported_rejections.insert(seq, writer);
+                }
                 client.fates.insert(seq, Err(error));
                 client.pending.push(Pending {
                     tx: seq,
@@ -8779,10 +8796,9 @@ impl Db {
     }
 
     /// Wait for a local transaction's fate at `tier`. A rejection it reports
-    /// is reported: a later [`Db::wait_for_pending_writes`] doesn't report
-    /// it again.
+    /// is reported: a later [`Db::wait_for_sync`] doesn't report it again.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
-        let fate = self.fate(tx, tier).await;
+        let fate = self.observe_transaction(tx, tier).await;
         if fate.is_err()
             && let Some(client) = self.inner.borrow_mut().client.as_mut()
         {
@@ -8791,7 +8807,10 @@ impl Db {
         fate
     }
 
-    async fn fate(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
+    /// Like [`Db::wait_for_transaction`], but a rejection it sees stays
+    /// unreported: a later [`Db::wait_for_sync`] reports it. For
+    /// waits that only watch a write (a host routing its mutation errors).
+    pub async fn observe_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         if !self.waits_upstream(tier) {
             return Ok(tx);
         }
@@ -8835,9 +8854,9 @@ impl Db {
 
     /// Wait until every transaction pending upload when called (recovered
     /// ones included) reaches `tier`, failing with the first the server
-    /// rejected: of those, and of the commits it rejected earlier that no
-    /// wait has reported yet (jazz#5728). Each rejection is reported once.
-    /// Writes made after the call are not waited for.
+    /// rejected. Writes made after the call are not waited for. Rejections
+    /// that settled before the call are not this wait's (graceful shutdown
+    /// waits so): see [`Db::wait_for_sync`].
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
         if !self.waits_upstream(tier) {
             return Ok(());
@@ -8847,11 +8866,43 @@ impl Db {
             let client = inner.client.as_ref().expect("client");
             client.pending.iter().map(|p| p.tx).collect()
         };
+        for tx in pending {
+            self.wait_for_transaction(tx, tier).await?;
+        }
+        Ok(())
+    }
+
+    /// TS `waitForSync` for one writer: `None` is this store's own writes
+    /// (and those attributed to someone), `Some(author)` a trusted session's
+    /// writes as `author`. Waits until each of the writer's transactions
+    /// pending upload when called reaches `tier`, then fails with the
+    /// earliest rejection among them and the writer's commits rejected
+    /// earlier that no wait has reported yet (jazz#5728). Each rejection is
+    /// reported once: the earliest per call, the others by later calls.
+    /// Another writer's rejections are never reported here.
+    pub async fn wait_for_sync(
+        &self,
+        tier: DurabilityTier,
+        writer: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        if !self.waits_upstream(tier) {
+            return Ok(());
+        }
+        let pending: Vec<u64> = {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            client
+                .pending
+                .iter()
+                .filter(|p| self::writer(&p.ops) == writer)
+                .map(|p| p.tx)
+                .collect()
+        };
         // Every verdict first, then the earliest failure among them and the
-        // rejections still unreported.
+        // writer's rejections still unreported.
         let mut failed: Option<(u64, Error)> = None;
         for tx in pending {
-            if let Err(error) = self.fate(tx, tier).await
+            if let Err(error) = self.observe_transaction(tx, tier).await
                 && failed.as_ref().is_none_or(|(first, _)| tx < *first)
             {
                 failed = Some((tx, error));
@@ -8859,12 +8910,19 @@ impl Db {
         }
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
-        let unreported = std::mem::take(&mut client.unreported_rejections);
-        if let Some(tx) = unreported.first()
-            && failed.as_ref().is_none_or(|(first, _)| tx < first)
-            && let Some(Err(error)) = client.fates.get(tx)
+        if let Some((&tx, _)) = client
+            .unreported_rejections
+            .iter()
+            .find(|(_, of)| **of == writer)
+            && failed.as_ref().is_none_or(|(first, _)| tx < *first)
+            && let Some(Err(error)) = client.fates.get(&tx)
         {
-            failed = Some((*tx, error.clone()));
+            failed = Some((tx, error.clone()));
+        }
+        // Only the rejection reported is reported; later ones wait for the
+        // next call.
+        if let Some((tx, _)) = &failed {
+            client.unreported_rejections.remove(tx);
         }
         match failed {
             Some((_, error)) => Err(error),
@@ -9604,6 +9662,7 @@ impl Db {
                         // commit refused before sending was never sent.
                         let settling = client.pending.get(tx);
                         let serializable = settling.is_some_and(|p| p.serializable);
+                        let settling_writer = settling.map(|p| writer(&p.ops));
                         if let (Some(changed), Some(settling)) = (changed.as_mut(), settling) {
                             changed.extend(settling.rows.iter().cloned());
                         }
@@ -9657,7 +9716,9 @@ impl Db {
                         }
                         // A relayed commit is a session's, not this store's.
                         if result.is_err() && !relayed {
-                            client.unreported_rejections.insert(tx);
+                            client
+                                .unreported_rejections
+                                .insert(tx, settling_writer.flatten());
                         }
                         client.fates.insert(tx, result);
                         if !relayed {
