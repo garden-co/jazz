@@ -26,7 +26,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalogue::{BundleId, Permissions, bundle_id, permissions_of};
 use crate::schema::JazzSchema;
-use crate::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies, TableSchema};
+use crate::tools::public_schema::{
+    ColumnType, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
+};
 
 use super::published::{
     ClientMigrations, PublishMigrationRequest, PublishedSchema, check_decoded_client_migrations,
@@ -125,15 +127,19 @@ const REGENERATE: &str = "regenerate it with `jazz-tools validate`";
 // ============================================================================
 
 /// What typed code in each language needs beyond the engine's schema: the
-/// relations, the columns only TypeScript computes, the exported slices.
+/// relations, the computed fields and the transforms the app declares.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Codegen {
     /// For tables of `current`.
     #[serde(default)]
     pub tables: BTreeMap<String, CodegenTable>,
-    /// Slices `schema.ts` exports, by export name.
+    /// The file's `transforms`, by name: what every language implements.
     #[serde(default)]
+    pub transforms: BTreeMap<String, TransformDecl>,
+    /// Slices a .63 `schema.ts` exported. Slicing is gone in alpha.65:
+    /// accepted from the .63 writer's input and ignored, never written.
+    #[serde(default, skip_serializing)]
     pub slices: BTreeMap<String, Vec<String>>,
 }
 
@@ -142,11 +148,49 @@ pub struct Codegen {
 pub struct CodegenTable {
     #[serde(default)]
     pub relations: BTreeMap<String, CodegenRelation>,
-    /// Columns whose values only TypeScript computes. Other languages see
-    /// the stored column of a `Transform` and nothing of a `Computed`, and
-    /// warn about both.
+    /// Computed fields, in declared order: not stored, implemented in every
+    /// language's code.
+    #[serde(default)]
+    pub computed: Vec<ComputedField>,
+    /// Column → the name of the transform (in [`Codegen::transforms`]) its
+    /// stored value goes through.
+    #[serde(default)]
+    pub transforms: BTreeMap<String, String>,
+    /// .63's `tsOnly` (the TS DSL's `s.computed` and `.transform` fields).
+    /// The .63 writer still emits it and loaders accept it with a warning,
+    /// so `jazz-tools upgrade` can turn it into `computed` and `transforms`.
     #[serde(default)]
     pub ts_only: Vec<TsOnlyColumn>,
+}
+
+/// A type with its nullability, as a computed field or transform has it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldType {
+    pub column_type: ColumnType,
+    #[serde(default)]
+    pub nullable: bool,
+}
+
+/// `"computed": { "<name>": { "type": …, "from": [columns] } }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputedField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: FieldType,
+    /// Stored columns of the same table the value is computed from, in order.
+    pub from: Vec<String>,
+}
+
+/// `"transforms": { "<name>": { "stored": <type>, "view": <type> } }`: a
+/// column stored as `stored` that code reads and writes as `view`. The
+/// column's nullability carries over to both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformDecl {
+    pub stored: ColumnType,
+    pub view: ColumnType,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,6 +231,7 @@ pub struct LoadedApp {
     bundle: BundleId,
     permissions: Permissions,
     codegen: Codegen,
+    warnings: Vec<String>,
 }
 
 impl LoadedApp {
@@ -210,6 +255,11 @@ impl LoadedApp {
 
     pub fn codegen(&self) -> &Codegen {
         &self.codegen
+    }
+
+    /// What loaded but is ignored, as `jazz.app.json: <path>: <why>` lines.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Every version the file ships, oldest first, policy-free.
@@ -283,7 +333,101 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
         bundle,
         permissions,
         codegen: app_file.codegen,
+        warnings: app_file
+            .warnings
+            .into_iter()
+            .map(|w| format!("{APP_FILE}: {w}"))
+            .collect(),
     })
+}
+
+/// `jazz.app.json` checked as [`load`] checks it, without permissions: what
+/// code generators and `jazz validate` read.
+#[derive(Debug, Clone)]
+pub struct AppDefinition {
+    history: History,
+    codegen: Codegen,
+    warnings: Vec<String>,
+}
+
+impl AppDefinition {
+    pub fn current_hash(&self) -> SchemaHash {
+        self.history.current
+    }
+
+    /// The current schema, without permissions.
+    pub fn current_schema(&self) -> &Schema {
+        self.history.current_schema()
+    }
+
+    /// Every version the file ships, oldest first, the current one last.
+    pub fn schemas(&self) -> &[(SchemaHash, Schema)] {
+        &self.history.schemas
+    }
+
+    /// The migrations, in the form a deployment publishes them.
+    pub fn migrations(&self) -> &[PublishMigrationRequest] {
+        &self.history.migrations
+    }
+
+    pub fn codegen(&self) -> &Codegen {
+        &self.codegen
+    }
+
+    /// What loaded but is ignored, as `jazz.app.json: <path>: <why>` lines.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// The bundle a client ships (JSON: `{schemas, migrations}`, what
+    /// [`published::client_migrations`](super::published::client_migrations)
+    /// lowers), exactly as [`load_client`] lowers it from the file.
+    pub fn client_bundle(&self) -> ClientMigrations {
+        self.history.bundle()
+    }
+
+    /// The schema versions and lenses a client opens along.
+    pub fn client_migrations(&self) -> crate::db::Migrations {
+        self.history.client_migrations()
+    }
+}
+
+/// Read and check `jazz.app.json` alone: references, lenses as a deployment
+/// checks them, relations, computed fields and transforms.
+pub fn load_app(json: &[u8]) -> Result<AppDefinition, ArtifactError> {
+    let app_file = read_app(json)?;
+    let history = check_history(&app_file)?;
+    check_decoded_client_migrations(history.bundle(), history.current)
+        .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
+    check_codegen(&app_file.codegen, history.current_schema())?;
+    // Lowering for a client must succeed too.
+    lower_client_migrations(history.bundle())
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    Ok(AppDefinition {
+        history,
+        codegen: app_file.codegen,
+        warnings: app_file
+            .warnings
+            .into_iter()
+            .map(|w| format!("{APP_FILE}: {w}"))
+            .collect(),
+    })
+}
+
+/// The `source` generated bindings record: `sha256:` and the hex SHA-256 of
+/// the file's bytes, with CRLF line ends read as LF so a Windows checkout
+/// of the same file has the same source.
+pub fn source_hash(file: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut rest = file;
+    while let Some(at) = rest.windows(2).position(|w| w == b"\r\n") {
+        hasher.update(&rest[..at]);
+        hasher.update(b"\n");
+        rest = &rest[at + 2..];
+    }
+    hasher.update(rest);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
@@ -310,7 +454,64 @@ pub fn client_migrations(app: Option<&[u8]>) -> Result<crate::db::Migrations, St
 
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
     let root = read_format(APP_FILE, json)?;
+    refuse_todos(&root)?;
     app_file::read(&root).map_err(|refusal| ArtifactError::at(APP_FILE, refusal))
+}
+
+/// A string value starting with this is a decision `jazz-tools migrations
+/// create` (or `upgrade`) left to the author.
+pub const TODO_PREFIX: &str = "TODO:";
+
+/// The JSON paths of every unresolved `"TODO: …"` in `root`, with its
+/// text, in file order. `$comment`s may say TODO freely.
+pub fn todos(root: &Json) -> Vec<(String, String)> {
+    fn walk(value: &Json, path: String, out: &mut Vec<(String, String)>) {
+        match value {
+            Json::String(text) if text.starts_with(TODO_PREFIX) => {
+                out.push((path, text.clone()));
+            }
+            Json::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    walk(item, format!("{path}[{i}]"), out);
+                }
+            }
+            Json::Object(entries) => {
+                for (key, item) in entries {
+                    if key != "$comment" {
+                        let path = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        walk(item, path, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, String::new(), &mut out);
+    out
+}
+
+/// Refuse a file with unresolved TODOs, naming each.
+fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
+    let todos = todos(root);
+    if todos.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = todos
+        .iter()
+        .map(|(path, text)| format!("  {path}: {text}"))
+        .collect();
+    Err(ArtifactError::new(format!(
+        "{} unresolved TODO{} left by `jazz-tools migrations create`; replace each with \
+         the value it asks for, then run `jazz-tools validate` again:\n{}",
+        todos.len(),
+        if todos.len() == 1 { "" } else { "s" },
+        list.join("\n")
+    )))
 }
 
 /// The file as JSON, once its `format` is one this version reads. The
@@ -442,20 +643,25 @@ fn compute_bundle(current: &Schema, permissions: &Permissions) -> Result<BundleI
 fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactError> {
     let table = |path: &str, name: &str| {
         current.get(&TableName::from(name)).ok_or_else(|| {
-            ArtifactError::new(format!("{path}: the current schema has no table {name}"))
+            ArtifactError::new(format!(
+                "{path}: the current schema has no table {name}{}",
+                expr::did_you_mean(name, current.keys().map(|t| t.as_str()))
+            ))
         })
     };
-    let has_column = |schema: &TableSchema, column: &str| {
+    let column_of = |schema: &TableSchema, column: &str| {
         schema
             .columns
             .columns
             .iter()
-            .any(|c| c.name_str() == column)
+            .find(|c| c.name_str() == column)
+            .cloned()
     };
+    let has_column = |schema: &TableSchema, column: &str| column_of(schema, column).is_some();
     for (name, entry) in &codegen.tables {
-        let schema = table(&format!("codegen.tables.{name}"), name)?;
+        let schema = table(&format!("tables.{name}"), name)?;
         for (relation, target) in &entry.relations {
-            let path = format!("codegen.tables.{name}.relations.{relation}");
+            let path = format!("tables.{name}.relations.{relation}");
             match target {
                 CodegenRelation::Forward {
                     table: other,
@@ -488,27 +694,97 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
                 }
             }
         }
-        for (index, column) in entry.ts_only.iter().enumerate() {
-            if let TsOnlyColumn::Transform { column } = column
-                && !has_column(schema, column)
-            {
+        let columns = || schema.columns.columns.iter().map(|c| c.name_str());
+        for (index, field) in entry.computed.iter().enumerate() {
+            let path = format!("tables.{name}.computed.{}", field.name);
+            if field.name == "id" || has_column(schema, &field.name) {
                 return Err(ArtifactError::new(format!(
-                    "codegen.tables.{name}.ts_only[{index}]: table {name} has no column {column}"
+                    "{path}: table {name} already has a column {}; a computed field needs its own name",
+                    field.name
+                )));
+            }
+            if entry.relations.contains_key(&field.name) {
+                return Err(ArtifactError::new(format!(
+                    "{path}: table {name} already has a relation {}; a computed field needs its own name",
+                    field.name
+                )));
+            }
+            if entry.computed[..index].iter().any(|f| f.name == field.name) {
+                return Err(ArtifactError::new(format!("{path} repeats")));
+            }
+            for (i, from) in field.from.iter().enumerate() {
+                if from != "id" && !has_column(schema, from) {
+                    let other_computed = entry.computed.iter().any(|f| &f.name == from);
+                    return Err(ArtifactError::new(format!(
+                        "{path}.from[{i}]: {}",
+                        if other_computed {
+                            format!(
+                                "`{from}` is a computed field; a computed field is computed from stored columns only"
+                            )
+                        } else {
+                            format!(
+                                "table {name} has no column {from}{}",
+                                expr::did_you_mean(from, columns())
+                            )
+                        }
+                    )));
+                }
+                if field.from[..i].contains(from) {
+                    return Err(ArtifactError::new(format!(
+                        "{path}.from[{i}]: `{from}` is listed twice"
+                    )));
+                }
+            }
+        }
+        for (column, transform) in &entry.transforms {
+            let path = format!("tables.{name}.columns.{column}.transform");
+            let descriptor = column_of(schema, column).ok_or_else(|| {
+                ArtifactError::new(format!("{path}: table {name} has no column {column}"))
+            })?;
+            let Some(decl) = codegen.transforms.get(transform) else {
+                return Err(ArtifactError::new(format!(
+                    "{path}: no transform `{transform}` in the top-level `transforms`{}",
+                    expr::did_you_mean(transform, codegen.transforms.keys().map(String::as_str))
+                )));
+            };
+            if decl.stored != descriptor.column_type {
+                return Err(ArtifactError::new(format!(
+                    "{path}: transform `{transform}` stores {}, but column {column} is {}",
+                    type_name(&decl.stored),
+                    type_name(&descriptor.column_type)
                 )));
             }
         }
     }
-    for (slice, tables) in &codegen.slices {
-        if tables.is_empty() {
-            return Err(ArtifactError::new(format!(
-                "codegen.slices.{slice} has no tables"
-            )));
-        }
-        for name in tables {
-            table(&format!("codegen.slices.{slice}"), name)?;
-        }
-    }
     Ok(())
+}
+
+/// A schema in the readable form of a `history` version's `tables` (no
+/// relations, computed fields or transforms), as the writer prints it.
+pub fn version_tables(schema: &Schema) -> Result<Json, ArtifactError> {
+    app_file::write_version_tables(schema)
+        .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// A column type in the file's form (`"string"`, `{ "enum": […] }`).
+pub fn column_type_spec(ty: &ColumnType) -> Result<Json, ArtifactError> {
+    app_file::type_spec(ty).map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// A value of `ty` in the file's form (a column `default`).
+pub fn value_spec(
+    value: &crate::tools::public_schema::Value,
+    ty: &ColumnType,
+) -> Result<Json, ArtifactError> {
+    app_file::value_spec(value, ty).map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// A column type as the file writes it, for messages.
+fn type_name(ty: &ColumnType) -> String {
+    app_file::type_spec(ty).map_or_else(
+        |_| format!("{ty:?}"),
+        |json| json::print(&json).trim_end().to_string(),
+    )
 }
 
 // ============================================================================
