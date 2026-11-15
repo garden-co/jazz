@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../../index.js";
-import { deploy, startLocalJazzServer, startTestJazz } from "../../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJazz, testApp } from "../../testing/index.js";
 
 // A Node client connected to a server, with nothing to sync, must go idle.
 // Its server pump used to re-arm itself after every core tick, so an idle
@@ -15,16 +14,17 @@ afterEach(() => {
 
 describe("an idle Node client", () => {
   it("stops pumping once a connected client has nothing to sync", async () => {
-    const app = s.defineApp({ notes: s.table({ label: s.string() }, {}) }, { migrations: "none" });
+    const app = testApp({ tables: { notes: { columns: { label: "string" } } } });
+    const permissions = { format: 1, tables: {} };
     const server = await startLocalJazzServer({ appId: randomUUID(), inMemory: true });
-    const session = await startTestJazz({ app, permissions: {}, core: server });
+    const session = await startTestJazz({ app, permissions, core: server });
     try {
       await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: app,
-        permissions: {},
+        app,
+        permissions,
       });
       const db = session.jazz.db;
       await db.insert(app.notes, { label: "first" }).wait({ tier: "global" });
