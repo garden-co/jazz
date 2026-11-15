@@ -49,8 +49,10 @@ if ! command -v gradle >/dev/null; then
   export PATH="$cache/gradle-$gradle_version/bin:$PATH"
 fi
 
-cargo build -p jazz-ffi -p jazz-cli --bin jazz-tools
-./target/debug/jazz-tools generate --dir "$example" --check
+cargo build -p jazz-ffi -p jazz-cli --bin jazz-tools  # jazz-tools: the e2e tests' server
+# Kotlin is switched off in the CLI until it ships: the codegen golden test
+# checks the example's committed bindings byte for byte instead.
+cargo test -p jazz-codegen --test golden the_stage_plan_kotlin_cli_commits_its_bindings_byte_for_byte
 
 gradle --no-daemon --console=plain -p packages/jazz-kotlin test
 gradle --no-daemon --console=plain -p "$example" test
