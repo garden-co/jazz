@@ -11,6 +11,7 @@
 // The full scope runs the trace in the typescript partition instead.
 import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** What the trace test guards: changes here run it on a ready PR. */
@@ -44,10 +45,13 @@ export function shouldRun({ env = process.env, git = runGit } = {}) {
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
 // In CI the decide step runs before setup marks the container's checkout a
-// safe directory (actions/checkout only does so while it runs), so git would
-// refuse the repository as owned by someone else: name it safe here.
+// safe directory (actions/checkout only does so while it runs), so git
+// refuses to discover the repository as owned by someone else, and the
+// container's git (2.43) ignores `-c safe.directory`. Naming the repository
+// with --git-dir skips that discovery; the diff of two commits needs no work
+// tree.
 function runGit(args) {
-  const result = spawnSync("git", ["-c", `safe.directory=${root}`, ...args], {
+  const result = spawnSync("git", [`--git-dir=${join(root, ".git")}`, ...args], {
     cwd: root,
     encoding: "utf8",
   });
