@@ -144,7 +144,7 @@ closure returns, rolls back when the closure throws, and rethrows that error. Re
 
 ## Mergeable text and permission advice
 
-A text-merge column (`"merge": "text"`, like StagePlan's `tasks.notes`) reads as a plain `String`.
+A text-merge column (`"merge": "text"`, like StagePlan's `tasks.notes`) reads as a plain `String?`.
 To edit it so that concurrent edits merge instead of overwriting each other, use a `JazzText`
 handle:
 
@@ -175,7 +175,7 @@ you try. They return `true`, `false`, or `nil` when there's nothing to ask, such
 
 ## Not supported yet
 
-These are refused with `JazzError.notSupported` (or when generating):
+Not supported yet:
 
 - iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
   or tested for them yet, and there are no prebuilt XCFrameworks.
