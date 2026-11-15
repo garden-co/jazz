@@ -5198,8 +5198,10 @@ impl Inner {
             .map_err(storage)?;
         let mut out = Vec::new();
         // A replica missing chunks reads on past the first blocked cell, so
-        // one round trip asks for every row's missing nodes.
-        let mut blocked = false;
+        // one round trip asks for every row's missing nodes. The first
+        // blocked cell's error is the read's: it says whether the chunks are
+        // on their way or were refused.
+        let mut blocked: Option<Error> = None;
         // A union's arm labels, shared by their rows.
         let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
@@ -5273,7 +5275,7 @@ impl Inner {
                     };
                     match value {
                         Err(error) if crate::large::is_missing(&error) => {
-                            blocked = true;
+                            blocked.get_or_insert(error);
                             Ok((name.clone(), None))
                         }
                         value => Ok((name.clone(), value?)),
@@ -5316,8 +5318,8 @@ impl Inner {
             let steps = statement.reset_status(rusqlite::StatementStatus::VmStep) as u64;
             VM_STEPS.with(|cell| cell.set(cell.get() + steps));
         }
-        if blocked {
-            return Err(crate::large::missing());
+        if let Some(error) = blocked {
+            return Err(error);
         }
         Ok(out)
     }

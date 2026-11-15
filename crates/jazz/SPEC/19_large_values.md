@@ -517,7 +517,16 @@ cancels the deletion. Branches and epochs never leave the file.
 
 Every byte a chunk store returns is verified against its hash. A leaf the
 chunk store does not hold is data loss and fails the read with a storage
-error. A read of a leaf only an asynchronous chunk store holds is demand: the
+error. A replica's pull of a node this store holds damaged (a leaf a chunk
+store that answers at once does not hold, or bytes that do not match their
+hash) is answered with the node in `missing`, since asking again would not
+cure it, and the store logs the damage; a chunk store that failed to answer
+is asked again instead. The replica's read then fails as missing chunks
+that the upstream cannot supply, and the replica asks for them again only on
+a new link or once a version of the row that may hold them arrives, even
+after the store holds the leaf again; a read on the store itself is served
+as soon as it does. A read
+of a leaf only an asynchronous chunk store holds is demand: the
 read fails as missing chunks, the leaf is fetched, and the read runs again.
 One-shot reads and writes on `Db` await the fetch; subscriptions refresh after
 the tick that fetched; a server holds a session's messages that need such

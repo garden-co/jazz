@@ -1318,3 +1318,466 @@ fn reads_are_fetched_beside_a_batch_that_is_out() {
         .finish_chunk_io(run_elsewhere(uploads, store.clone()))
         .unwrap();
 }
+
+/// How a one-shot read by a replica ended within a hard limit: `None` if
+/// it did not, else its rows' cells as text or its error.
+type Ended = Option<Result<Vec<Vec<String>>, jazz::db::Error>>;
+
+/// Run a replica's one-shot read (the bindings' path) against `server`,
+/// ticking both, until it ends or a hard limit passes: 400 rounds, then a
+/// tick every 10 ms up to 2 s of wall-clock, so a time-based give-up
+/// would show too.
+fn read_until_it_ends(server: &Db, alice: &Db, query: &Query, tier: ReadTier) -> Ended {
+    read_through(&[server], alice, query, tier)
+}
+
+/// [`read_until_it_ends`] by `alice`, ticking `upstream` (nearest first)
+/// after her.
+fn read_through(upstream: &[&Db], alice: &Db, query: &Query, tier: ReadTier) -> Ended {
+    use std::pin::pin;
+    use std::task::{Context, Waker};
+    let bytes = postcard::to_allocvec(query).unwrap();
+    let opts = ReadOpts {
+        tier,
+        ..ReadOpts::default()
+    };
+    let started = std::time::Instant::now();
+    let mut read = pin!(alice.all_serialized_query(&bytes, opts, None, None, None));
+    let mut context = Context::from_waker(Waker::noop());
+    for round in 0.. {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            return Some(result.map(|result| {
+                match result {
+                    jazz::db::SerializedReadResult::Rows(rows) => rows
+                        .iter()
+                        .map(|row| {
+                            row.cells()
+                                .map(|(name, value)| format!("{name}={value:?}"))
+                                .collect()
+                        })
+                        .collect(),
+                    other => panic!("{other:?}"),
+                }
+            }));
+        }
+        if round >= 400 {
+            if started.elapsed() > std::time::Duration::from_secs(2) {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        block_on(alice.tick()).unwrap();
+        for db in upstream {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    unreachable!()
+}
+
+/// A replica that holds a row whose value's leaves its authority's
+/// directory store has lost, or holds corrupt, and reads the value: the
+/// authority cannot answer the pull with those leaves, and says so, so
+/// the read ends with an error instead of waiting for chunks that are not
+/// coming. The row reached the replica through a read that did not need
+/// the value (it selected another column), so the authority never decoded
+/// it. Whole value and part, each fault.
+#[test]
+fn a_readers_one_shot_read_of_a_value_whose_leaves_its_authority_lost_ends() {
+    use jazz::query::Part;
+    let mut outcomes = Vec::new();
+    for fault in ["lost", "corrupt"] {
+        for part in [false, true] {
+            let (_dir, path) = scratch();
+            let directory = tempfile::tempdir().unwrap();
+            let store: Arc<dyn ChunkStore> =
+                Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+            {
+                let server = open(&path, Some(store.clone())).unwrap();
+                block_on(server.insert(
+                    "docs",
+                    BTreeMap::from([
+                        ("body".to_owned(), Value::String(text(79, LARGE))),
+                        ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(row(1)),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+                block_on(server.tick()).unwrap();
+            }
+            let leaves = walk(directory.path());
+            assert!(leaves.len() > 1, "{leaves:?}");
+            for leaf in &leaves {
+                if fault == "lost" {
+                    std::fs::remove_file(leaf).unwrap();
+                } else {
+                    let flipped: Vec<u8> = std::fs::read(leaf)
+                        .unwrap()
+                        .iter()
+                        .map(|b| b ^ 0x5a)
+                        .collect();
+                    std::fs::write(leaf, flipped).unwrap();
+                }
+            }
+            let server = open(&path, Some(store)).unwrap();
+            let sub = connect_to(&server);
+            // The row, through a read of its other column only.
+            let listed = read_until_it_ends(
+                &server,
+                &sub.alice,
+                &Query::from("docs").select(["blob"]),
+                ReadTier::Remote,
+            );
+            assert!(
+                matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+                "{fault}: {listed:?}"
+            );
+            let mut query = Query::from("docs").select(["body"]);
+            if part {
+                query = query.select_part(
+                    "body",
+                    Part::TextUtf8 {
+                        from: 1000,
+                        to: 1010,
+                    },
+                );
+            }
+            let read = read_until_it_ends(&server, &sub.alice, &query, ReadTier::LocalOnly);
+            // Nothing is on its way: the waits that ask `awaiting_chunks`
+            // (the bindings' reads, the client's) end too, and a read that
+            // does not wait reports the same.
+            assert!(!sub.alice.awaiting_chunks(), "{fault} part {part}");
+            if !part {
+                let now = cell(&sub.alice, 1, "body").map(|_| ());
+                let ended = read.as_ref().and_then(|read| read.as_ref().err());
+                let text = |error: Option<&jazz::db::Error>| {
+                    error
+                        .map(|error| (error.code, error.is_missing_chunks(), error.message.clone()))
+                };
+                assert_eq!(text(now.err().as_ref()), text(ended), "{fault}");
+            }
+            outcomes.push((fault, part, read));
+        }
+    }
+    let hung: Vec<_> = outcomes
+        .iter()
+        .filter(|(_, _, read)| read.is_none())
+        .map(|(fault, part, _)| format!("{fault}, {}", if *part { "part" } else { "whole" }))
+        .collect();
+    assert!(hung.is_empty(), "reads that never ended: {hung:?}");
+    for (fault, part, read) in &outcomes {
+        let Some(Err(error)) = read else {
+            panic!("{fault} part {part}: {read:?}");
+        };
+        assert!(error.is_missing_chunks(), "{fault} part {part}: {error:?}");
+        assert!(
+            !error.message.contains("retry after the next sync tick"),
+            "{fault} part {part}: {}",
+            error.message
+        );
+    }
+}
+
+/// A value its authority could not supply is asked for again on a new
+/// link: once the authority holds its leaves again (a restored
+/// directory), a replica that reconnects reads it.
+#[test]
+fn a_value_its_authority_could_not_supply_is_asked_for_again_on_a_new_link() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ChunkStore> =
+        Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+    let value = text(80, LARGE);
+    {
+        let server = open(&path, Some(store.clone())).unwrap();
+        block_on(server.insert(
+            "docs",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(value.clone())),
+                ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let saved: Vec<(PathBuf, Vec<u8>)> = walk(directory.path())
+        .into_iter()
+        .map(|leaf| {
+            let bytes = std::fs::read(&leaf).unwrap();
+            (leaf, bytes)
+        })
+        .collect();
+    for (leaf, _) in &saved {
+        std::fs::remove_file(leaf).unwrap();
+    }
+    let server = open(&path, Some(store)).unwrap();
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    let body = Query::from("docs").select(["body"]);
+    let refused = read_until_it_ends(&server, &sub.alice, &body, ReadTier::LocalOnly);
+    assert!(
+        matches!(&refused, Some(Err(error)) if error.is_missing_chunks()),
+        "{refused:?}"
+    );
+    for (leaf, bytes) in &saved {
+        std::fs::write(leaf, bytes).unwrap();
+    }
+    // The same link remembers the refusal.
+    let again = read_until_it_ends(&server, &sub.alice, &body, ReadTier::LocalOnly);
+    assert!(matches!(&again, Some(Err(_))), "{again:?}");
+    // A new link asks again.
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _ = block_on(sub.alice.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
+    let read = read_until_it_ends(&server, &sub.alice, &body, ReadTier::LocalOnly);
+    let expected = format!("body={:?}", Some(Value::String(value)));
+    assert!(
+        matches!(&read, Some(Ok(rows)) if rows.len() == 1 && rows[0] == [expected.clone()]),
+        "{:?}",
+        read.map(|read| read.map(|rows| rows.len()))
+    );
+}
+
+/// Through a relay: the authority answers the relay's pull of a lost leaf
+/// as one it cannot supply, and the relay answers its own session's pull
+/// so too, so the session's read ends rather than waiting on the relay.
+#[test]
+fn a_read_through_a_relay_of_a_value_whose_leaves_its_authority_lost_ends() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ChunkStore> =
+        Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+    {
+        let server = open(&path, Some(store.clone())).unwrap();
+        block_on(server.insert(
+            "docs",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(text(81, LARGE))),
+                ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    for leaf in walk(directory.path()) {
+        std::fs::remove_file(leaf).unwrap();
+    }
+    let server = open(&path, Some(store)).unwrap();
+    let relay = connect_to(&server);
+    let tab = block_on(Db::open(config(2, user(1)))).unwrap();
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _ = block_on(tab.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    relay
+        .alice
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
+    let chain = [&relay.alice, &server];
+    let listed = read_through(
+        &chain,
+        &tab,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    let read = read_through(
+        &chain,
+        &tab,
+        &Query::from("docs").select(["body"]),
+        ReadTier::LocalOnly,
+    );
+    let Some(Err(error)) = &read else {
+        panic!("{read:?}");
+    };
+    assert!(error.is_missing_chunks(), "{error:?}");
+    assert!(!tab.awaiting_chunks());
+}
+
+/// A leaf the directory store fails to read (here: no permission to read
+/// its file) is not data loss: the pull is not answered missing, and the
+/// replica's read waits. Once the store reads again, a new link serves
+/// it. (The pull the failure parked is asked of the store again only when
+/// an asynchronous store's batch clears its failures, so on the same link
+/// a store that answers at once does not serve it: measured, unchanged
+/// from before.)
+#[cfg(unix)]
+#[test]
+fn a_leaf_the_directory_store_fails_to_read_is_not_answered_missing() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ChunkStore> =
+        Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+    let value = text(82, LARGE);
+    {
+        let server = open(&path, Some(store.clone())).unwrap();
+        block_on(server.insert(
+            "docs",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(value.clone())),
+                ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let leaves = walk(directory.path());
+    let mode = |mode: u32| {
+        for leaf in &leaves {
+            std::fs::set_permissions(leaf, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    mode(0o000);
+    if std::fs::read(&leaves[0]).is_ok() {
+        // Permissions do not bind this process (root): nothing to test.
+        mode(0o644);
+        return;
+    }
+    let server = open(&path, Some(store)).unwrap();
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    let bytes = postcard::to_allocvec(&Query::from("docs").select(["body"])).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut read = std::pin::pin!(
+        sub.alice
+            .all_serialized_query(&bytes, opts, None, None, None)
+    );
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let from = sub.down.borrow().len();
+    for _ in 0..40 {
+        assert!(
+            read.as_mut().poll(&mut context).is_pending(),
+            "the read ended"
+        );
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let missing_sent = sub.down.borrow().iter().skip(from).any(
+        |message| matches!(message, SyncMessage::Chunks { missing, .. } if !missing.is_empty()),
+    );
+    assert!(
+        !missing_sent,
+        "a store that failed to read is not data loss"
+    );
+    mode(0o644);
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _ = block_on(sub.alice.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
+    let mut ended = None;
+    for _ in 0..200 {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            ended = Some(result);
+            break;
+        }
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    match ended {
+        Some(Ok(jazz::db::SerializedReadResult::Rows(rows))) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cell("body"), Some(Value::String(value)));
+        }
+        other => panic!("{:?}", other.map(|result| result.map(|_| ()))),
+    }
+}
+
+/// On the store itself a leaf its directory store lost, or holds
+/// corrupt, still fails the read with a storage error: data loss, not
+/// demand. Only a replica's pull of it is answered missing.
+#[test]
+fn a_leaf_its_directory_store_lost_fails_the_stores_own_read_as_data_loss() {
+    for fault in ["lost", "corrupt"] {
+        let (_dir, path) = scratch();
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ChunkStore> =
+            Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+        moved_to(&path, &store, &text(83, LARGE));
+        for leaf in walk(directory.path()) {
+            if fault == "lost" {
+                std::fs::remove_file(&leaf).unwrap();
+            } else {
+                let flipped: Vec<u8> = std::fs::read(&leaf)
+                    .unwrap()
+                    .iter()
+                    .map(|b| b ^ 0x5a)
+                    .collect();
+                std::fs::write(&leaf, flipped).unwrap();
+            }
+        }
+        let db = open(&path, Some(store)).unwrap();
+        let error = cell(&db, 1, "body").unwrap_err();
+        assert_eq!(error.code, ErrorCode::Storage, "{fault}: {error:?}");
+        assert!(!error.is_missing_chunks(), "{fault}");
+    }
+}

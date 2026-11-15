@@ -5724,9 +5724,7 @@ impl Inner {
         let mut by_root: BTreeMap<[u8; 32], WirePull> = BTreeMap::new();
         for request in wanted {
             let Some((root, via)) = crate::large::via_of(&self.conn, &request.object_hash)? else {
-                let client = self.client.as_mut().expect("client");
-                client.requested.remove(&request);
-                client.unavailable.insert(request);
+                self.mark_unavailable(request);
                 continue;
             };
             by_root
@@ -5744,6 +5742,27 @@ impl Inner {
                 .push(request.object_hash);
         }
         Ok(by_root.into_values().collect())
+    }
+
+    /// The upstream cannot supply `request` on this link: it is not asked
+    /// for again, and reads that need it fail with why, until
+    /// [`Self::clear_unavailable`]. The only way a node becomes unavailable,
+    /// so the client's set and the chunk cache's refusals stay one set.
+    fn mark_unavailable(&mut self, request: ChunkRequest) {
+        self.chunks.refuse(&request);
+        let client = self.client.as_mut().expect("client");
+        client.requested.remove(&request);
+        client.unavailable.insert(request);
+    }
+
+    /// Unavailable nodes may be supplied now (a new link, or a version that
+    /// may hold them): they are asked for again. Clears both halves of the
+    /// set [`Self::mark_unavailable`] fills.
+    fn clear_unavailable(&mut self) {
+        self.chunks.clear_refused();
+        if let Some(client) = self.client.as_mut() {
+            client.unavailable.clear();
+        }
     }
 
     /// Store requested nodes the server sent.
@@ -5768,12 +5787,10 @@ impl Inner {
             .sessions
             .iter()
             .any(|session| !session.parked_pulls.is_empty());
-        let client = self.client.as_mut().expect("client");
         for missing in missing {
-            let request = missing.request();
-            client.requested.remove(&request);
-            client.unavailable.insert(request);
+            self.mark_unavailable(missing.request());
         }
+        let client = self.client.as_mut().expect("client");
         client.arrived = true;
         // Pulls this relay parked for its sessions are answered now, and so
         // are its sessions' subscriptions that waited on these chunks: the
@@ -7757,12 +7774,12 @@ impl Db {
             .filter(|(version, _)| inner.deployed(*version))
             .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
             .collect();
+        // What the old session could not answer, the new one may.
+        inner.clear_unavailable();
         let client = inner.client.as_mut().expect("client");
         client
             .outbox
             .insert(0, SyncMessage::Join { version, known });
-        // What the old session could not answer, the new one may.
-        client.unavailable.clear();
         client.outbox.extend(resubscribe);
         // Rows still owed whole were asked of the old session.
         if !client.whole.is_empty() {
@@ -9224,7 +9241,7 @@ impl Db {
                                 if inner.record_vias(&named.0, &image)? {
                                     // A node no version held may be held by
                                     // this one: missing answers are transient.
-                                    inner.client.as_mut().expect("client").unavailable.clear();
+                                    inner.clear_unavailable();
                                 }
                                 inner.unwithhold(
                                     &image.table,
@@ -13923,7 +13940,10 @@ impl Db {
     /// Pulls the chunk store failed to answer are neither missing (the
     /// reader would not ask again until a new version or a reconnect) nor
     /// held (they would hold the session's backlog for the outage): they
-    /// come back as `store_failed`, asked again with the store.
+    /// come back as `store_failed`, asked again with the store. A node this
+    /// store has lost or holds damaged (its chunk store answered it does
+    /// not hold it, or its bytes do not match their hash) is missing:
+    /// asking again would not cure it.
     fn answer_pulls(
         &self,
         identity: Option<AuthorSubject>,
@@ -13983,7 +14003,7 @@ impl Db {
                 PULL_BYTES.min(ANSWER_PULL_BYTES - answered),
                 &mut sent,
             );
-            let (found, foreign, absent, rest) = match found {
+            let (found, foreign, absent, rest, damaged) = match found {
                 Err(error) if crate::large::is_missing(&error) => {
                     fetching = true;
                     continue;
@@ -13997,6 +14017,20 @@ impl Db {
                 found => found?,
             };
             missing.extend(foreign.into_iter().map(|hash| WireChunkRef { hash }));
+            // Lost or damaged here: asking again does not cure it, so the
+            // reader is told now, and the damage is reported here.
+            for (hash, error) in damaged {
+                tracing::warn!(
+                    target: "jazz::sync",
+                    table = %pull.table,
+                    row = ?RowUuid::from_bytes(pull.id),
+                    root = %crate::compile::hex(&pull.root),
+                    node = %crate::compile::hex(&hash),
+                    "a pulled large-value node is answered missing: {}",
+                    error.message
+                );
+                missing.push(WireChunkRef { hash });
+            }
             if !rest.is_empty() {
                 deferred.push(WirePull {
                     nodes: rest,
