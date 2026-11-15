@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/index.js";
 import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
   sleep,
@@ -23,6 +22,7 @@ import {
   jazzAppUserUrl,
   loginAtJazzAppUser,
   startJazzApp,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../jazz.generated.js";

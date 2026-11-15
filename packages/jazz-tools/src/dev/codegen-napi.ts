@@ -43,7 +43,11 @@ interface CodegenNapi {
 let napi: Promise<CodegenNapi> | undefined;
 
 async function codegen(): Promise<CodegenNapi> {
-  napi ??= import("jazz-napi").then((module) => {
+  // A specifier bundlers can't follow: this module is Node only, and a browser
+  // bundle that reaches it (through the isomorphic catalogue) must not pull in
+  // the native addon.
+  const specifier = "jazz-napi";
+  napi ??= import(/* @vite-ignore */ /* webpackIgnore: true */ specifier).then((module) => {
     const loaded = module as unknown as Partial<CodegenNapi>;
     if (typeof loaded.generate !== "function") {
       throw new Error(
