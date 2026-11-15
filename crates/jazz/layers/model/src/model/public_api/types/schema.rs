@@ -431,9 +431,11 @@ pub struct TableSchema {
     pub columns: RowDescriptor,
     /// User columns that should have secondary indexes.
     ///
-    /// `None` preserves historical behavior and indexes every declared user
-    /// column. `Some(columns)` opts into indexing only that explicit subset.
-    /// Internal `_id` and `_id_deleted` indexes are always maintained.
+    /// `None` (no `indexes` in `jazz.app.json`) declares none: storage then
+    /// indexes only the relation (reference) columns, which it always indexes
+    /// (`convert_table` maps `None` to an empty set). `Some(columns)` adds
+    /// single-column indexes on those columns. Internal `_id` and
+    /// `_id_deleted` indexes are always maintained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_columns: Option<Vec<ColumnName>>,
     /// Ordered multi-column indexes. The first column can be constrained by an

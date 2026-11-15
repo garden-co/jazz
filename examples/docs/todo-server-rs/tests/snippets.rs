@@ -75,11 +75,15 @@ async fn typed_snippets_run() {
             .unwrap()
             .is_none()
     );
-    snippets::write_todo_with_default_durability(&jazz)
-        .await
-        .unwrap();
-    // The created todos from the CRUD, transaction and durability snippets
-    // and the parent remain.
+    // The durability snippet needs a server: locally its plain write lands
+    // and its durable one is refused before it writes.
+    assert!(
+        snippets::write_todo_with_default_durability(&jazz)
+            .await
+            .is_err()
+    );
+    // The todos the CRUD, transaction and durability snippets created, and
+    // the parent, remain.
     assert_eq!(snippets::read_todos_oneshot(&jazz).await.unwrap().len(), 4);
 
     jazz.shutdown().await.unwrap();
