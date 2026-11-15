@@ -18,10 +18,7 @@ fn client_files() -> AppFiles {
 }
 
 fn new_todo(title: &str) -> NewTodo {
-    NewTodo {
-        title: title.into(),
-        ..Default::default()
-    }
+    NewTodo::new(title, false)
 }
 
 /// The handle is Send + Clone: it works from tasks of a multi-threaded
@@ -43,9 +40,8 @@ async fn typed_reads_and_writes_locally() {
     let milk = tokio::spawn(async move {
         writer
             .insert(NewTodo {
-                title: "Buy milk".into(),
                 project: Some(project.id),
-                ..Default::default()
+                ..NewTodo::new("Buy milk", false)
             })
             .await
     })
@@ -138,9 +134,8 @@ async fn transactions_commit_or_roll_back() {
         .transaction(|tx| {
             let a = tx.insert(new_todo("a"))?;
             let b = tx.insert(NewTodo {
-                title: "b".into(),
                 parent: Some(a.id),
-                ..Default::default()
+                ..NewTodo::new("b", false)
             })?;
             Ok((a, b))
         })
@@ -336,4 +331,100 @@ async fn shutdown_refuses_calls_made_while_it_drains() {
     assert!(matches!(inner, Err(Error::Stopped)), "{inner:?}");
     stopped.unwrap();
     again.unwrap();
+}
+
+/// A call that panics reports it, and the client runs on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_call_reports_it_and_the_client_runs_on() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let panicked = jazz
+        .with_client(|_| async { panic!("boom") as jazz_app::Result<()> })
+        .await;
+    assert!(
+        matches!(&panicked, Err(Error::Panicked(message)) if message == "boom"),
+        "{panicked:?}"
+    );
+    // A closure that panics before it returns its future.
+    let panicked = jazz
+        .with_client(|_| -> std::future::Ready<jazz_app::Result<()>> { panic!("sync boom") })
+        .await;
+    assert!(
+        matches!(&panicked, Err(Error::Panicked(message)) if message == "sync boom"),
+        "{panicked:?}"
+    );
+    jazz.insert(new_todo("still here")).await.unwrap();
+    assert_eq!(jazz.all(todos::query()).await.unwrap().len(), 1);
+}
+
+/// Text and array `contains`, `is_not_null`, comparisons that take what
+/// converts into the column's type, and ordering by `created_at` and `id`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_helpers() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let milk = jazz
+        .insert(NewTodo {
+            description: Some("semi-skimmed milk".into()),
+            ..NewTodo::new("Buy milk", false)
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let bread = jazz.insert(new_todo("Buy bread")).await.unwrap();
+
+    let titles = |rows: Vec<Todo>| rows.into_iter().map(|t| t.title).collect::<Vec<_>>();
+    assert_eq!(
+        titles(
+            jazz.all(todos::query().filter(todos::title().contains("milk")))
+                .await
+                .unwrap()
+        ),
+        ["Buy milk"]
+    );
+    assert_eq!(
+        titles(
+            jazz.all(todos::query().filter(todos::description().contains("skim")))
+                .await
+                .unwrap()
+        ),
+        ["Buy milk"]
+    );
+    assert_eq!(
+        titles(
+            jazz.all(todos::query().filter(todos::description().is_not_null()))
+                .await
+                .unwrap()
+        ),
+        ["Buy milk"]
+    );
+    // `&str` into a `String` column; a plain value into a nullable one.
+    assert_eq!(
+        titles(
+            jazz.all(todos::query().filter(todos::title().eq("Buy bread")))
+                .await
+                .unwrap()
+        ),
+        ["Buy bread"]
+    );
+    assert_eq!(
+        titles(
+            jazz.all(
+                todos::query().filter(todos::description().eq("semi-skimmed milk".to_owned()))
+            )
+            .await
+            .unwrap()
+        ),
+        ["Buy milk"]
+    );
+    let newest_first = jazz
+        .all(todos::query().order_by(jazz_app::created_at(), Order::Desc))
+        .await
+        .unwrap();
+    assert_eq!(titles(newest_first), ["Buy bread", "Buy milk"]);
+    let by_id = jazz
+        .all(todos::query().order_by(todos::id(), Order::Asc))
+        .await
+        .unwrap();
+    let mut ids = vec![milk.id, bread.id];
+    ids.sort_by_key(|id| *id.uuid());
+    assert_eq!(by_id.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
 }

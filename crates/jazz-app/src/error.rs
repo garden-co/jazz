@@ -31,6 +31,10 @@ pub enum Error {
     #[error("not supported yet: {0}")]
     Unsupported(String),
 
+    /// The call panicked on the client's thread. The client runs on.
+    #[error("the call panicked: {0}")]
+    Panicked(String),
+
     /// The client's worker thread stopped.
     #[error("the Jazz client stopped")]
     Stopped,

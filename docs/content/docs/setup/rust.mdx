@@ -1,0 +1,65 @@
+---
+title: Rust Backend
+description: "Open a Jazz app from Rust with the jazz-app crate and typed bindings generated from jazz.app.json."
+---
+
+A Rust service can be your app's backend. It opens the app from the same `jazz.app.json` and
+`jazz.permissions.json` as every other language, with typed bindings generated from them. On start
+it publishes the app's permissions bundle, as `createJazz` does. Then it acts as one user of the
+app, in a session pinned to that bundle.
+
+The `jazz-app` crate isn't on crates.io yet, so depend on it from the Jazz repository:
+
+```toml title="Cargo.toml"
+[dependencies]
+jazz-app = { git = "https://github.com/garden-co/jazz" }
+tokio = { version = "1", features = ["full"] }
+```
+
+## Generate the bindings
+
+With a `Cargo.toml` that depends on `jazz-app` beside `jazz.app.json`, `jazz-tools generate` writes
+`src/jazz_app.rs`:
+
+```bash
+npx jazz-tools generate            # checks the files, writes src/jazz_app.rs
+npx jazz-tools generate --check    # in CI: fails if src/jazz_app.rs is stale
+```
+
+Commit `src/jazz_app.rs` and declare it with `mod jazz_app;`. Per table it gives you:
+
+- a row struct (`Todo`), with snake_case fields;
+- `NewTodo`, where `NewTodo::new(…)` takes the required columns;
+- `TodoUpdate`;
+- a module (`todos`) with `query()`, typed columns and relations.
+
+If your app declares computed fields or transforms, the bindings also declare a `Computed` trait,
+and `open` takes your implementation of it.
+
+To generate the bindings at build time instead, call `jazz_codegen::rust::build()` from `build.rs`
+and `include!` its output.
+
+## Open the app
+
+<include cwd lang="rust" meta='title="src/main.rs"'>
+  ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
+</include>
+
+`jazz_app::Jazz` is `Send + Clone`, so it can sit in shared state, such as an Axum router's. The
+client runs on a thread of its own. Before the process exits, call `jazz.shutdown().await`, so that
+the calls already made finish and the local store closes.
+
+The backend needs the sync server's admin secret, to publish the bundle, and its backend secret, to
+vouch for the user it acts as. Like every backend, give it no HTTP surface that callers can reach
+without your own authentication.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Rust tab
+for each example. `examples/todo-server-rs` in the repository is a complete service.
+
+## Not supported yet
+
+In Rust, Jazz doesn't support these yet:
+
+- connecting as an end user with a JWT;
+- includes, `select` and recursive queries (use `jazz.with_client(…)` for the low-level client);
+- payload enums.
