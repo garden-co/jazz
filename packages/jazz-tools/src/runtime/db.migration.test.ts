@@ -18,10 +18,15 @@ import { waitForRows } from "./testing/support.js";
 import { shippedMigrations } from "./client-migrations.js";
 import type { WasmSchema } from "../drivers/types.js";
 
-import { generateTs, migrationsCreate } from "../dev/codegen-napi.js";
+import { generateTs, loadBackendAppFor, migrationsCreate } from "../dev/codegen-napi.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
 import { wasmSchemasEqual } from "../dev/schema-utils.js";
-import { fetchStoredWasmSchema } from "../dev/catalogue-api.js";
+import {
+  DeploymentError,
+  fetchStoredWasmSchema,
+  publishDeployment,
+  type DeploymentBody,
+} from "../dev/catalogue-api.js";
 
 /** Every operation allowed on each of `tables`, as a `jazz.permissions.json`. */
 function allowAll(tables: string[], ops = ["read", "insert", "update", "delete"]) {
@@ -306,10 +311,8 @@ it("publishes generated default-bearing relation migrations and preserves them a
     // The migration ships the previous version's schema, defaults included:
     // a shipped version whose defaults differ from what its hash names is
     // refused, and nothing is published.
-    // TODO(files-as-source): the DSL test had the server refuse this ("schema
-    // witness for table records does not match canonical schema"). Bindings
-    // carry no witness, so the loader's content check refuses it instead;
-    // deployApp itself publishes such an app (asked in #files-as-source-ts).
+    // The loader refuses it locally, and the server refuses a deployment body
+    // that ships it anyway.
     const compiled = compileTestApp(stub.app);
     const shippedBefore = compiled.schema.schemas.find((version) => version.hash === fromHash);
     expect(shippedBefore).toBeDefined();
@@ -328,6 +331,41 @@ it("publishes generated default-bearing relation migrations and preserves them a
       expect(() => testPermissions(invalidApp, permissionsAfter)).toThrow(
         new RegExp(`schema ${fromHash} doesn't match its content`),
       );
+      expect((await fetchMigrationGraph(catalogue)).migrations).toEqual([]);
+    }
+    // The deployment body `deploy` would publish, sent whole (deploy leaves
+    // out schemas the server already stores), with the previous version or
+    // the lens tampered.
+    const { deployment } = await loadBackendAppFor(afterApp, permissionsAfter);
+    const body = deployment as DeploymentBody;
+    expect(body.schemas.map(({ hash }) => hash)).toContain(fromHash);
+    const tamperedBodies: [DeploymentBody, RegExp, string][] = [];
+    for (const tamper of [
+      (status: { default?: unknown }) => delete status.default,
+      (status: { default?: unknown }) => (status.default = { type: "Text", value: "tampered" }),
+    ]) {
+      const invalid = structuredClone(body);
+      tamper(statusOf(invalid.schemas.find(({ hash }) => hash === fromHash)!.schema));
+      tamperedBodies.push([
+        invalid,
+        new RegExp(`schema ${fromHash} does not match its content hash`),
+        "schema_hash_mismatch",
+      ]);
+    }
+    const tamperedLens = structuredClone(body);
+    tamperedLens.migrations[0]!.forward = [
+      { table: "items", operations: [{ type: "rename", column: "status", value: "state" }] },
+    ];
+    tamperedBodies.push([
+      tamperedLens,
+      /the migration does not produce the columns of table "items"/,
+      "invalid_migration",
+    ]);
+    for (const [invalid, message, code] of tamperedBodies) {
+      const refused = publishDeployment(server.url, catalogue, invalid);
+      await expect(refused).rejects.toThrow(message);
+      await expect(refused).rejects.toBeInstanceOf(DeploymentError);
+      await expect(refused).rejects.toMatchObject({ code });
       expect((await fetchMigrationGraph(catalogue)).migrations).toEqual([]);
     }
     expect(
