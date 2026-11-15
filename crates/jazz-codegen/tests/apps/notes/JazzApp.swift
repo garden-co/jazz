@@ -68,9 +68,7 @@ public enum JazzApp {
         public static let table = "folders"
         public let id: Jazz.ID
         public var name: Swift.String
-    }
 
-    extension Folder {
         public init(id: Jazz.ID, name: Swift.String) {
             self.id = id
             self.name = name
@@ -86,9 +84,7 @@ public enum JazzApp {
     public struct NewFolder: Jazz.Insert {
         public typealias Row = Folder
         public var name: Swift.String
-    }
 
-    extension NewFolder {
         public init(name: Swift.String) {
             self.name = name
         }
@@ -102,9 +98,7 @@ public enum JazzApp {
     public struct FolderPatch: Jazz.Patch {
         public typealias Row = Folder
         public var name: Jazz.Change<Swift.String>
-    }
 
-    extension FolderPatch {
         public init(name: Jazz.Change<Swift.String> = .unchanged) {
             self.name = name
         }
@@ -138,9 +132,7 @@ public enum JazzApp {
         public var body: Swift.String
         public var pinned: Swift.Bool
         public var folderId: Jazz.ID?
-    }
 
-    extension Note {
         public init(id: Jazz.ID, body: Swift.String, pinned: Swift.Bool, folderId: Jazz.ID?) {
             self.id = id
             self.body = body
@@ -162,9 +154,7 @@ public enum JazzApp {
         public var body: Swift.String
         public var pinned: Swift.Bool?
         public var folderId: Jazz.ID?
-    }
 
-    extension NewNote {
         public init(body: Swift.String, pinned: Swift.Bool? = nil, folderId: Jazz.ID? = nil) {
             self.body = body
             self.pinned = pinned
@@ -184,9 +174,7 @@ public enum JazzApp {
         public var body: Jazz.Change<Swift.String>
         public var pinned: Jazz.Change<Swift.Bool>
         public var folderId: Jazz.Change<Jazz.ID?>
-    }
 
-    extension NotePatch {
         public init(body: Jazz.Change<Swift.String> = .unchanged, pinned: Jazz.Change<Swift.Bool> = .unchanged, folderId: Jazz.Change<Jazz.ID?> = .unchanged) {
             self.body = body
             self.pinned = pinned
