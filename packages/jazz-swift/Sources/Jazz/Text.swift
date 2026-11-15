@@ -157,13 +157,19 @@ public final class JazzText<R: Row>: @unchecked Sendable {
 
     private func received(_ text: String) {
         lock.withLock {
-            if let echoed = pending.firstIndex(of: text) {
-                // Our write came back: what was pending before it is settled too.
+            if let echoed = pending.lastIndex(of: text) {
+                // Our write came back: what was pending up to it is settled.
                 pending.removeSubrange(...echoed)
+                // While newer writes of ours are on their way, the text they
+                // were made from stays current.
+                if pending.isEmpty { _current = text }
+            } else {
+                // Anything else is someone else's change, or ours merged
+                // with it: it is the text to edit from now (as TS's text
+                // field sync).
+                pending = []
+                _current = text
             }
-            // While newer writes of ours are still on their way, the text
-            // they were made from stays current.
-            if pending.isEmpty { _current = text }
         }
     }
 }
