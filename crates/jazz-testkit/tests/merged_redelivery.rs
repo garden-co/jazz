@@ -448,16 +448,15 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
             .await
             .map(jazz::tools::test_support::ordinary_rows)
             .expect("charlie reads metadata after same-value write");
-        if rows.len() == 1 {
-            if let Value::Timestamp(updated_at) = rows[0].1[0] {
-                if updated_at > initial_updated_at {
-                    assert_eq!(
-                        updated_at, explicit_updated_at,
-                        "$updatedAt exposes the requested physical Unix millisecond"
-                    );
-                    break;
-                }
-            }
+        if rows.len() == 1
+            && let Value::Timestamp(updated_at) = rows[0].1[0]
+            && updated_at > initial_updated_at
+        {
+            assert_eq!(
+                updated_at, explicit_updated_at,
+                "$updatedAt exposes the requested physical Unix millisecond"
+            );
+            break;
         }
 
         let now = tokio::time::Instant::now();

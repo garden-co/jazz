@@ -11,14 +11,14 @@ use jazz::tools::public_schema::{
     TablePolicies,
 };
 use jazz::tools::{
-    AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, Schema, SchemaBuilder,
-    SubscriptionStreamItem, TableSchema, Value,
+    ColumnType, JazzClient, ObjectId, PolicyExpr, Schema, SchemaBuilder, SubscriptionStreamItem,
+    TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
     TestingClient, has_added_id, has_removed, publish_permissions, wait_for_query,
-    wait_for_remote_query_ready, wait_for_subscription_update,
+    wait_for_subscription_update,
 };
 use tempfile::TempDir;
 
@@ -851,40 +851,6 @@ fn mapping_rule_access_policy() -> PolicyExpr {
             ]),
         },
     }
-}
-
-fn todo_query() -> jazz::query::Query {
-    jazz::query::Query::from("todos").select(["title", "done"])
-}
-
-async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> JazzClient {
-    let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
-        .await
-        .expect("connect user");
-    wait_for_remote_query_ready(&client, "todos", Duration::from_secs(30)).await;
-    client
-}
-
-async fn wait_for_row(
-    client: &JazzClient,
-    tier: jazz::tools::ReadTier,
-    row_id: ObjectId,
-    expected: Vec<Value>,
-    description: &str,
-) {
-    wait_for_query(
-        client,
-        todo_query(),
-        tier,
-        Duration::from_secs(30),
-        description,
-        |rows| {
-            rows.iter()
-                .any(|(id, values)| *id == row_id && *values == expected)
-                .then_some(())
-        },
-    )
-    .await;
 }
 
 struct PolicyGraphSeedRows {
