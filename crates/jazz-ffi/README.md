@@ -171,7 +171,9 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   server would let this user `read` / `insert` / `update` / `delete`, without
   doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
   take `id`; `update` takes `id` and an optional `row` patch. `null` (no
-  server, or no decision) means unknown. Not inside a transaction.
+  server, or no decision) means unknown. It is advice: `true` doesn't promise
+  the write will succeed, as the data or permissions may change first. Not
+  inside a transaction.
 - **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
   `upsert {table, id, row}` write the row with this id: an insert if there is
   none, else its columns replaced; `row` is a whole row, as for an insert.
@@ -193,6 +195,23 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   lost to another write; retry it). UniFFI: `JazzError.Permission`,
   `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
   these as `refused`, as before.
+- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app's
+  `untyped` builder, as the typed Rust API and TS lower them):
+  - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
+…], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
+    of the last hop's table; the top-level clauses filter the rows hopped
+    from, `after` the rows reached.
+  - `{"table", "where"?, "gather": {"relation", "maxDepth"?}}`: the rows
+    matching `where` and every row reached along a forward relation of the
+    table to itself, up to `maxDepth` (default 10).
+  - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows;
+    arms read one table, with `where` only.
+  - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
+    versions the server accepted, each row with `"$history":
+{"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
+    tier `remote`. Not subscribable yet.
+  - `"includeDeleted": true` on any of these or a plain query reads deleted
+    rows too.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",
