@@ -1,0 +1,111 @@
+name: Kotlin distribution
+
+# Builds what a Kotlin app installs until jazz-kotlin is on Maven Central:
+# jazz-kotlin-<version>.jar (the JVM library with libjazz_ffi for Linux
+# x86-64 and arm64, macOS arm64 and x86-64, and Windows x86-64, where JNA
+# looks for them) and jazz-kotlin-android-<version>.aar, with SHA256SUMS.
+# With `upload`, attaches them to the release v<version> (as a draft's assets
+# too). dev/scripts/build-kotlin-dist.sh assembles them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version, e.g. 2.0.0-alpha.65 (the release is v<version>)."
+        required: true
+        type: string
+      upload:
+        description: "Attach the files to release v<version>."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  natives:
+    name: libjazz_ffi ${{ matrix.platform }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-x86-64
+            runs-on: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            lib: libjazz_ffi.so
+          - platform: linux-aarch64
+            runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+            target: aarch64-unknown-linux-gnu
+            lib: libjazz_ffi.so
+          - platform: darwin-aarch64
+            runs-on: blacksmith-6vcpu-macos-15
+            target: aarch64-apple-darwin
+            lib: libjazz_ffi.dylib
+          - platform: darwin-x86-64
+            runs-on: blacksmith-6vcpu-macos-15
+            target: x86_64-apple-darwin
+            lib: libjazz_ffi.dylib
+          - platform: win32-x86-64
+            runs-on: windows-2022
+            target: x86_64-pc-windows-msvc
+            lib: jazz_ffi.dll
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: v${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.target }}
+      - name: Build libjazz_ffi
+        shell: bash
+        run: |
+          cargo build -p jazz-ffi --release --target "${{ matrix.target }}"
+          mkdir -p "natives/${{ matrix.platform }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.lib }}" "natives/${{ matrix.platform }}/"
+          # Debug symbols out: the jar carries every platform's library.
+          case "${{ matrix.platform }}" in
+            linux-*) strip --strip-debug "natives/${{ matrix.platform }}/${{ matrix.lib }}" ;;
+            darwin-*) strip -x "natives/${{ matrix.platform }}/${{ matrix.lib }}" ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: natives-${{ matrix.platform }}
+          path: natives
+          if-no-files-found: error
+
+  dist:
+    name: jazz-kotlin jar and AAR
+    needs: natives
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: v${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: natives-*
+          path: natives
+          merge-multiple: true
+      - name: Assemble the jar and the AAR
+        run: bash dev/scripts/build-kotlin-dist.sh natives dist --android
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kotlin-dist
+          path: dist
+          if-no-files-found: error
+      - name: Attach to release v${{ inputs.version }}
+        if: inputs.upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release upload "v${VERSION}" dist/* --clobber

@@ -114,8 +114,6 @@ struct Writer<'a> {
     tables: BTreeMap<&'a str, Names>,
     /// Generated enums: Kotlin name → (variants (Kotlin, stored), what).
     enums: BTreeMap<String, (Vec<(String, String)>, String)>,
-    /// Generated sealed interfaces for enums with payloads: name → declaration.
-    payloads: BTreeMap<String, String>,
     types: BTreeMap<String, String>,
 }
 
@@ -125,7 +123,6 @@ impl<'a> Writer<'a> {
             app,
             tables: BTreeMap::new(),
             enums: BTreeMap::new(),
-            payloads: BTreeMap::new(),
             types: RESERVED
                 .iter()
                 .map(|n| (n.to_string(), "a name the bindings use".to_string()))
@@ -218,87 +215,10 @@ impl<'a> Writer<'a> {
             }
             out.push_str("}\n\n");
         }
-        for decl in self.payloads.values() {
-            out.push_str(decl);
-        }
         out.push_str(&items);
         while out.ends_with("\n\n") {
             out.pop();
         }
-        Ok(out)
-    }
-
-    /// A sealed interface for an enum with payloads, read as `{ "case", "fields" }`.
-    fn payload_enum(
-        &mut self,
-        name: &str,
-        cases: &[jazz::tools::public_schema::EnumCaseDescriptor],
-        what: &str,
-    ) -> Result<String, CodegenError> {
-        let mut out = String::new();
-        let _ = writeln!(
-            out,
-            "/** The values of {what}: one class per case. Reads only (writing one is not supported yet). */\n@kotlinx.serialization.Serializable(with = {name}.Serializer::class)\npublic sealed interface {name} {{"
-        );
-        let mut seen = BTreeMap::from([("Serializer".to_owned(), "the serializer".to_owned())]);
-        let mut entries = Vec::new();
-        for case in cases {
-            let ident = type_ident(&pascal(&words(&case.name).join("_")), &case.name)?;
-            if let Some(other) = seen.insert(ident.clone(), case.name.clone()) {
-                return Err(CodegenError::unsupported(format!(
-                    "{what}: cases `{other}` and `{}` are both the Kotlin class `{ident}`",
-                    case.name
-                )));
-            }
-            let _ = writeln!(out, "    /** Case `{}`. */", doc(&case.name));
-            if case.fields.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "    {SERIALIZABLE}\n    public data object {ident} : {name}"
-                );
-            } else {
-                let _ = writeln!(out, "    {SERIALIZABLE}\n    public data class {ident}(");
-                let mut idents = BTreeSet::new();
-                for field in &case.fields {
-                    let fname = field.name_str();
-                    let fident = value_ident(fname)?;
-                    if !idents.insert(fident.clone()) {
-                        return Err(CodegenError::unsupported(format!(
-                            "{what}: case `{}` has two fields named `{fident}` in Kotlin",
-                            case.name
-                        )));
-                    }
-                    let fwhat = format!("{what}, case `{}`, field `{fname}`", case.name);
-                    let inner = self.kotlin_type(
-                        &field.column_type,
-                        &format!("{name}{ident}{}", pascal(&words(fname).join("_"))),
-                        &fwhat,
-                    )?;
-                    let (ty, default) = if field.nullable {
-                        (format!("{}?", inner.ty), " = null")
-                    } else {
-                        (inner.ty, "")
-                    };
-                    let serial = if fident.trim_matches('`') == fname {
-                        String::new()
-                    } else {
-                        format!("{SERIAL_NAME}({}) ", string_literal(fname))
-                    };
-                    let _ = writeln!(out, "        {serial}val {fident}: {ty}{default},");
-                }
-                let _ = writeln!(out, "    ) : {name}");
-            }
-            entries.push(format!(
-                "            tools.jazz.PayloadCase({}, {ident}::class, {ident}.serializer())",
-                string_literal(&case.name)
-            ));
-        }
-        let _ = writeln!(
-            out,
-            "\n    /** Reads `{{ \"case\", \"fields\" }}`. */\n    public object Serializer : tools.jazz.PayloadEnumSerializer<{name}>(\n        {},\n        kotlin.collections.listOf(\n{},\n        ),\n    )\n}}\n",
-            string_literal(&format!("jazzapp.{name}")),
-            entries.join(",\n")
-        );
         Ok(out)
     }
 
@@ -463,14 +383,6 @@ impl<'a> Writer<'a> {
                     }
                 }
                 plain(name, &format!("{name}.serializer()"))
-            }
-            ColumnType::EnumPayload { cases } => {
-                if !self.payloads.contains_key(name) {
-                    self.take_type(name, what)?;
-                    let decl = self.payload_enum(name, cases, what)?;
-                    self.payloads.insert(name.to_owned(), decl);
-                }
-                plain(name, &format!("{name}.Serializer"))
             }
             other => {
                 return Err(CodegenError::unsupported(format!(

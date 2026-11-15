@@ -37,7 +37,13 @@ kotlin {
 val repo = rootDir.resolve("../..").canonicalFile
 val withFfi = (findProperty("jazzFfi") as String?) != "skip"
 val cargoProfile = (findProperty("cargoProfile") as String?) ?: "debug"
-val ffiLib = repo.resolve("target/$cargoProfile/libjazz_ffi.so")
+val ffiLib = repo.resolve(
+    "target/$cargoProfile/" + when {
+        System.getProperty("os.name").lowercase().startsWith("mac") -> "libjazz_ffi.dylib"
+        System.getProperty("os.name").lowercase().startsWith("windows") -> "jazz_ffi.dll"
+        else -> "libjazz_ffi.so"
+    },
+)
 val uniffiOut = layout.buildDirectory.dir("generated/uniffi")
 
 val cargoBuildFfi by tasks.registering(Exec::class) {
@@ -65,14 +71,37 @@ if (withFfi) {
         kotlin.srcDir(uniffiOut)
     }
     tasks.named("compileKotlin") { dependsOn(generateUniffi) }
-    // JNA finds the library on jna.library.path; also bundle it for this platform.
-    val bundleFfi by tasks.registering(Copy::class) {
-        dependsOn(cargoBuildFfi)
-        from(ffiLib)
-        into(layout.buildDirectory.dir("ffi-resources/linux-x86-64"))
+    // JNA loads libjazz_ffi from the classpath, at <os>-<arch>/ (linux-x86-64,
+    // linux-aarch64, darwin-aarch64, darwin-x86-64, win32-x86-64). A
+    // distribution jar bundles every platform's from -PnativeLibs=<dir>, laid
+    // out so (dev/scripts/build-kotlin-dist.sh); otherwise this platform's own.
+    val nativeLibs = findProperty("nativeLibs") as String?
+    if (nativeLibs != null) {
+        sourceSets.main { resources.srcDir(file(nativeLibs)) }
+    } else {
+        val bundleFfi by tasks.registering(Copy::class) {
+            dependsOn(cargoBuildFfi)
+            from(ffiLib)
+            into(layout.buildDirectory.dir("ffi-resources/${jnaPrefix()}"))
+        }
+        sourceSets.main { resources.srcDir(layout.buildDirectory.dir("ffi-resources")) }
+        tasks.named("processResources") { dependsOn(bundleFfi) }
     }
-    sourceSets.main { resources.srcDir(layout.buildDirectory.dir("ffi-resources")) }
-    tasks.named("processResources") { dependsOn(bundleFfi) }
+}
+
+/** JNA's resource prefix for the platform this build runs on. */
+fun jnaPrefix(): String {
+    val os = System.getProperty("os.name").lowercase()
+    val arch = when (val a = System.getProperty("os.arch").lowercase()) {
+        "amd64", "x86_64" -> "x86-64"
+        "arm64", "aarch64" -> "aarch64"
+        else -> a
+    }
+    return when {
+        os.startsWith("mac") -> "darwin-$arch"
+        os.startsWith("windows") -> "win32-$arch"
+        else -> "linux-$arch"
+    }
 }
 
 // jazz-codegen's Kotlin goldens must compile against this runtime: chat-react
@@ -84,8 +113,7 @@ val edges = sourceSets.create("edges") {
     compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
 }
 // Goldens with tests of their own (each declares package jazzapp, so each
-// gets a source set): kotlin-computed (transforms, computed fields) and
-// tasks (payload enums, uuid[] relations, bigint/bytes, JSON).
+// gets a source set): kotlin-computed (transforms, computed fields).
 fun goldenTest(name: String, app: String): TaskProvider<Test> {
     val set = sourceSets.create(name) {
         kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/$app"))
@@ -99,7 +127,7 @@ fun goldenTest(name: String, app: String): TaskProvider<Test> {
         useJUnitPlatform()
     }
 }
-val goldenTests = listOf(goldenTest("computedTest", "kotlin-computed"), goldenTest("tasksTest", "tasks"))
+val goldenTests = listOf(goldenTest("computedTest", "kotlin-computed"))
 tasks.named("check") { dependsOn("compileEdgesKotlin", goldenTests) }
 tasks.named("test") { dependsOn("compileEdgesKotlin"); finalizedBy(goldenTests) }
 
