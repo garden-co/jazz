@@ -2,6 +2,8 @@
 // Usage: SERVER=http://127.0.0.1:<p>/jazz JWKS=http://localhost:8690 APP_BINDINGS=<abs path to the app's jazz.generated.ts> npx tsx smoke-stageplan.ts
 // (run with jazz-tools resolvable from this dir, at the same build as the backend)
 import { createJazzClient } from "jazz-tools/client";
+if (process.env.DEBUG_FETCH) { const f = globalThis.fetch; globalThis.fetch = (async (u: any, i: any) => { const r = await f(u, i); console.error("FETCH", (u as any)?.method ?? i?.method ?? "GET", (u as any)?.url ?? String(u), r.status); return r; }) as any; }
+if (process.env.DEBUG_FETCH && (globalThis as any).WebSocket) { const W = (globalThis as any).WebSocket; (globalThis as any).WebSocket = class extends W { constructor(u: any, p: any) { super(u, p); console.error("WS open", String(u)); this.addEventListener("close", (e: any) => console.error("WS close", e.code, e.reason)); this.addEventListener("error", () => console.error("WS error")); } }; }
 const SERVER = process.env.SERVER!, JWKS = process.env.JWKS ?? "http://localhost:8690";
 const { app } = await import(process.env.APP_BINDINGS!);
 const tok = async (sub: string) => (await fetch(`${JWKS}/token?sub=${sub}&kind=valid`)).text();
