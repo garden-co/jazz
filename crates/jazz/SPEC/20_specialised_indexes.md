@@ -51,39 +51,40 @@ Invariant digest:
 
 ## 20.1 Declaration
 
-In `jazz.app.json`, a table's `indexes` list keeps its string (one column)
-and array (composite) forms and accepts an object form for specialised
-indexes. Every object has `name` (unique within the table, `[a-z][a-z0-9_]*`,
-at most 32 bytes) and `kind`.
+In `jazz.app.json` (10.10), a table's `indexes` list keeps its string (one
+column) and array (composite) forms and accepts an object form for
+specialised indexes. As with relations and columns, the object names its
+kind by key: it has `name` (unique within the table, `[a-z][a-z0-9_]*`, at
+most 32 bytes) and exactly one of `text`, `vector` or `geo`; any other
+combination is refused. New keys are additive in format 1, and readers
+refuse unknown keys, so an older Jazz refuses a file using them with a
+named error.
 
 ```json
 "indexes": [
   "owner",
   ["project", "$createdAt"],
-  { "name": "search", "kind": "text",
-    "fields": { "title": 4, "body": 1 },
-    "analyzer": "jazz-text/1:en",
-    "prefix": true },
-  { "name": "similar", "kind": "vector",
-    "column": "embedding", "metric": "cosine" },
-  { "name": "place", "kind": "geo",
-    "lat": "lat", "lng": "lng" }
+  { "name": "search", "text": { "title": 4, "body": 1 },
+    "analyzer": "jazz-text/1:en", "prefix": true },
+  { "name": "similar", "vector": "embedding", "metric": "cosine" },
+  { "name": "place", "geo": { "lat": "lat", "lng": "lng" } }
 ]
 ```
 
-| kind     | options                                                                                     |
-| -------- | ------------------------------------------------------------------------------------------- |
-| `text`   | `fields`: string column → integer weight 1–15; `analyzer` (20.10.1); `prefix` (default `false`); `serverOnly` |
-| `vector` | `column`: a `vector(n)` column; `metric`: `cosine`, `l2` or `dot`; `ann`: `exact` (default, only value accepted now); `serverOnly` |
-| `geo`    | `lat`, `lng`: `f64` columns in degrees (WGS84); `serverOnly`                                 |
+| kind key | value                                         | other keys                                                                 |
+| -------- | --------------------------------------------- | -------------------------------------------------------------------------- |
+| `text`   | string column → integer weight 1–15           | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`   |
+| `vector` | a `vector` column                             | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
+| `geo`    | `{ "lat": <f64 column>, "lng": <f64 column> }` (degrees, WGS84) | `serverOnly`                                             |
 
-The TypeScript builders `textIndex`, `vectorIndex` and `geoIndex` on a table
-emit the same objects. Other languages read them from the artifact.
+The artifact is the only place indexes are declared; generated bindings
+for each language read them from it. The JSON Schema in
+`docs/public/schemas/` lists the same keys as the reader.
 
 Validation, at schema construction, with a typed error naming the table,
 index and option:
 
-- unknown `kind`, unknown option, or an option value outside the table above
+- no kind key or more than one, an unknown key, or a value outside the table above
   ("`ann: \"ivf\"` is not supported yet");
 - an indexed column that is missing, of the wrong type, or encrypted (E2EE
   columns hold ciphertext; indexing them is not supported);
@@ -91,16 +92,21 @@ index and option:
   text-merge inline threshold is accepted (see 20.12 for its cost);
 - two specialised indexes with the same name.
 
-A new column type, `vector(n)` (`1 ≤ n ≤ 4096`), holds `n` IEEE-754 binary32
-values. It is a `ValueType` appended last (`INV-STORAGE` rules on variant
+A new column type, written `{ "vector": n }` (`1 ≤ n ≤ 4096`) with the usual
+column keys beside it, holds `n` IEEE-754 binary32 values. Generated
+bindings map it to `Float32Array` in TypeScript and `Vec<f32>` in Rust. A
+column changing to or from `vector` is refused by the migration diff (no lens
+converts it). It is a `ValueType` appended last (`INV-STORAGE` rules on variant
 order apply), stored in its cell as a BLOB of `4n` bytes, little-endian,
 encoding `f32le/1`, and carried on the wire as the same bytes. A write whose
 value has the wrong length or holds a NaN or infinity is refused at
 admission. Jazz never computes embeddings: they are ordinary values the
 application or a backend writes.
 
-Specialised indexes are part of a table's version id, not of its
-compatibility id, as composite indexes are: adding, changing or dropping one
+Specialised indexes are part of a table's version id (a new schema-id
+domain, `SchemaHash` only; the ids of schemas without specialised indexes are
+unchanged), not of its compatibility id, as composite indexes are; the
+migration diff treats them as an index-only change: adding, changing or dropping one
 does not change how rows are stored or synced. A store opening a schema
 that adds an index builds it (20.4); one that drops an index drops its
 shadow tables.
