@@ -35,12 +35,12 @@ export const LANGUAGES: readonly Language[] = [
   { label: "Effect", enabled: true },
   {
     label: "Rust",
-    setupPage: "setup/rust",
     bindings: {
       file: "examples/stage-plan/apps/rust-cli/src/jazz_app.rs",
       lang: "rust",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
+    setupPage: "setup/rust",
     enabled: true,
   },
   {
