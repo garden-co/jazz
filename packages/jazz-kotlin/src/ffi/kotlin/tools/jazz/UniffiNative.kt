@@ -39,17 +39,17 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun update(table: String, id: String, patchJson: String): Unit = live { handle.update(table, id, patchJson) }
     override fun delete(table: String, id: String): Unit = live { handle.delete(table, id) }
 
-    override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String) -> Unit): () -> Unit =
+    override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String, String) -> Unit): () -> Unit =
         listen(onDelta, onError) { handle.subscribe(queryJson, it) }
 
     private inline fun listen(
         crossinline onDelta: (String) -> Unit,
-        crossinline onError: (String) -> Unit,
+        crossinline onError: (String, String) -> Unit,
         subscribe: (SubscriptionListener) -> uniffi.jazz_ffi.Subscription,
     ): () -> Unit {
         val listener = object : SubscriptionListener {
             override fun onDelta(deltaJson: String) = onDelta(deltaJson)
-            override fun onError(message: String) = onError(message)
+            override fun onError(kind: String, message: String) = onError(kind, message)
         }
         val subscription = live { subscribe(listener) }
         return {
@@ -69,7 +69,7 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun deleteAt(table: String, id: String, tier: String): Unit = live { handle.deleteAt(table, id, tier) }
     override fun waitForSync(tier: String): Unit = live { handle.waitForSync(tier) }
 
-    override fun subscribeAt(queryJson: String, tier: String, onDelta: (String) -> Unit, onError: (String) -> Unit): () -> Unit =
+    override fun subscribeAt(queryJson: String, tier: String, onDelta: (String) -> Unit, onError: (String, String) -> Unit): () -> Unit =
         listen(onDelta, onError) { handle.subscribeAt(queryJson, tier, it) }
 
     override fun begin(): NativeTransaction {

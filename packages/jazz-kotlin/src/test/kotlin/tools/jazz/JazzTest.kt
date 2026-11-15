@@ -144,7 +144,7 @@ class JazzTest {
     fun subscription_errors_end_the_flow() = runBlocking {
         val fake = FakeNative().apply { failSubscriptionsWith = "lost the server" }
         val jazz = open(fake)
-        val error = assertFailsWith<JazzException.Subscription> { jazz.subscribe(Items.query()).collect {} }
+        val error = assertFailsWith<JazzException.Refused> { jazz.subscribe(Items.query()).collect {} }
         assertEquals("lost the server", error.message)
     }
 

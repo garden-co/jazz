@@ -11,12 +11,15 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
 import tools.jazz.JazzConfig
+import tools.jazz.JazzException
 import tools.jazz.JazzRow
 import tools.jazz.ReadTier
 import tools.jazz.WriteTier
 import tools.jazz.include
 import tools.jazz.select
+import jazzapp.Comment
 import jazzapp.Comments
+import jazzapp.NewComment
 import jazzapp.Crew
 import jazzapp.Shows
 import jazzapp.Task
@@ -220,5 +223,47 @@ object DocsSnippets {
         val tasks = jazz.all(Tasks.where(Tasks.showId eq showId), tier = ReadTier.Remote)
         // #endregion reading-durability-tier-kotlin
         return tasks
+    }
+
+    suspend fun requireIncludes(jazz: Jazz, taskId: String): List<JazzRow<Comment>> {
+        // #region reading-require-includes-kotlin
+        // Only comments whose author this user can read: `required()` drops the others,
+        // so `comment[Comments.author]` is there for every row it returns.
+        val comments = jazz.all(Comments.where(Comments.taskId eq taskId).include(Comments.author.required()))
+        // #endregion reading-require-includes-kotlin
+        return comments
+    }
+
+    suspend fun transactionErrors(jazz: Jazz, taskId: String): String {
+        // #region writing-transaction-errors-kotlin
+        // A block that throws rolls the transaction back and rethrows; a commit the
+        // server refuses throws too (at WriteTier.Global), with nothing applied.
+        val outcome = try {
+            jazz.transaction(tier = WriteTier.Global) { tx ->
+                tx.update(Tasks, taskId) { status(TaskStatus.Blocked) }
+                tx.insert(Comments, NewComment(taskId = taskId, authorId = java.util.UUID.randomUUID().toString(), body = "blocked"))
+            }
+            "committed"
+        } catch (e: JazzException.Permission) {
+            "refused: ${e.message}"
+        }
+        // #endregion writing-transaction-errors-kotlin
+        return outcome
+    }
+
+    suspend fun mutationErrors(jazz: Jazz, taskId: String, crewId: String): String {
+        // #region writing-mutation-errors-kotlin
+        // Local-first writes return at once; one the server refuses rolls back later.
+        // To see the refusal, write at WriteTier.Global (or call waitForSync).
+        val result = try {
+            jazz.update(Tasks, taskId, tier = WriteTier.Global) { assigneeId(crewId) }
+            "saved"
+        } catch (e: JazzException.Permission) {
+            "not allowed: ${e.message}"
+        } catch (e: JazzException.Refused) {
+            "invalid: ${e.message}"
+        }
+        // #endregion writing-mutation-errors-kotlin
+        return result
     }
 }

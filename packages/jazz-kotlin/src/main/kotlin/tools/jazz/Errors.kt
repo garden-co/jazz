@@ -22,4 +22,17 @@ public sealed class JazzException(message: String) : Exception(message) {
 
     /** The handle was closed. */
     public class Closed : JazzException("the Jazz handle is closed")
+
+    public companion object {
+        /** The exception for an error jazz-ffi reports by kind (a subscription's end). */
+        public fun of(kind: String, message: String): JazzException = when (kind) {
+            "closed" -> Closed()
+            "refused" -> Refused(message)
+            "io" -> Io(message)
+            "permission" -> Permission(message)
+            "notSupported" -> NotSupported(message)
+            "conflict" -> Conflict(message)
+            else -> Subscription(message)
+        }
+    }
 }

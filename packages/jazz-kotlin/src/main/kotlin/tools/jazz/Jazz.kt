@@ -39,9 +39,6 @@ internal fun openReflectively(className: String, config: String): Native {
     }
 }
 
-/** What jazz-ffi's `JazzError::Closed` reads as in a subscription's error. */
-internal const val CLOSED_MESSAGE: String = "the app is closed"
-
 /** The JSON settings rows, inserts and patches go through. */
 public val jazzJson: Json = Json {
     ignoreUnknownKeys = true
@@ -270,10 +267,9 @@ public class Jazz internal constructor(
                         ),
                     )
                 },
-                onError = { message ->
-                    // jazz-ffi ends every open subscription with its Closed error when the app closes.
-                    close(if (message == CLOSED_MESSAGE) JazzException.Closed() else JazzException.Subscription(message))
-                },
+                // jazz-ffi ends every open subscription with one last error, by kind
+                // (`closed` when the app closes).
+                onError = { kind, message -> close(JazzException.of(kind, message)) },
             )
             }
             awaitClose()
@@ -286,7 +282,7 @@ public class Jazz internal constructor(
         query: String,
         tier: ReadTier?,
         onDelta: (String) -> Unit,
-        onError: (String) -> Unit,
+        onError: (kind: String, message: String) -> Unit,
     ): () -> Unit =
         if (tier == null) native.subscribe(query, onDelta, onError) else native.subscribeAt(query, tier.wire, onDelta, onError)
 

@@ -136,6 +136,7 @@ class StagePlanTest {
             // A required include (through a non-optional reference) keeps only rows whose target is readable.
             val withAuthors = jazz.all(Comments.where(Comments.taskId eq load.id).include(Comments.author.required()))
             assertEquals(listOf("Ada", "Ada"), withAuthors.map { it[Comments.author]?.name })
+            assertEquals(2, DocsSnippets.requireIncludes(jazz, load.id).size)
             // Subscriptions deliver included rows, and an update when a related row changes.
             val seen = kotlinx.coroutines.channels.Channel<List<String?>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
             val job = launch {
@@ -193,6 +194,10 @@ class StagePlanTest {
             kotlin.test.assertFailsWith<tools.jazz.JazzException.Permission> {
                 jazz.update(Tasks, a.id, tier = tools.jazz.WriteTier.Global) { assigneeId(ada.id) }
             }
+            kotlin.test.assertTrue(DocsSnippets.mutationErrors(jazz, a.id, ada.id).startsWith("not allowed"))
+            kotlin.test.assertTrue(DocsSnippets.transactionErrors(jazz, a.id).startsWith("refused"))
+            // Nothing of the refused transaction applied.
+            kotlin.test.assertTrue(jazz.one(Tasks.where(Tasks.id eq a.id))!!.status != TaskStatus.Blocked)
         }
     }
 }

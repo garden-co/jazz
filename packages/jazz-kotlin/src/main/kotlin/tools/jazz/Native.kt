@@ -14,11 +14,15 @@ public interface Native : AutoCloseable {
     public fun update(table: String, id: String, patchJson: String)
     public fun delete(table: String, id: String)
 
-    /** Subscribes; the returned function cancels. */
+    /**
+     * Subscribes; the returned function cancels. [onError] gets the error
+     * that ends it: its kind (`closed`, `refused`, `io`, `permission`,
+     * `notSupported`, `conflict`) and message.
+     */
     public fun subscribe(
         queryJson: String,
         onDelta: (String) -> Unit,
-        onError: (String) -> Unit,
+        onError: (kind: String, message: String) -> Unit,
     ): () -> Unit
 
     /** [all] at a read tier: `local`, `localFirst` or `remote`. */
@@ -34,7 +38,7 @@ public interface Native : AutoCloseable {
         queryJson: String,
         tier: String,
         onDelta: (String) -> Unit,
-        onError: (String) -> Unit,
+        onError: (kind: String, message: String) -> Unit,
     ): () -> Unit = subscribe(queryJson, onDelta, onError)
 
     /** Returns once every write so far reached [tier]. */

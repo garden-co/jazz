@@ -89,7 +89,7 @@ class FakeNative : Native {
         put("coalesced", false)
     }.toString()
 
-    override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String) -> Unit): () -> Unit {
+    override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String, String) -> Unit): () -> Unit {
         val q = jazzJson.parseToJsonElement(queryJson).jsonObject
         if (closed) throw JazzException.Closed()
         subscribeGate?.await()
@@ -97,18 +97,18 @@ class FakeNative : Native {
         subs += entry
         errorCallbacks += onError
         onDelta(delta(matches(q), emptyList(), emptyList(), true))
-        failSubscriptionsWith?.let(onError)
+        failSubscriptionsWith?.let { onError("refused", it) }
         return { subs.remove(entry); errorCallbacks.remove(onError) }
     }
 
     /** Set to make subscribe wait (on another thread) until it opens. */
     var subscribeGate: java.util.concurrent.CountDownLatch? = null
-    val errorCallbacks = java.util.Collections.synchronizedList(ArrayList<(String) -> Unit>())
+    val errorCallbacks = java.util.Collections.synchronizedList(ArrayList<(String, String) -> Unit>())
 
     override fun close() {
         if (closed) return
         closed = true
         // As jazz-ffi: every open subscription ends with Closed.
-        errorCallbacks.toList().forEach { it(CLOSED_MESSAGE) }
+        errorCallbacks.toList().forEach { it("closed", "the app is closed") }
     }
 }
