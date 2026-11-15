@@ -2501,10 +2501,10 @@ fn indexed_todos() -> ArtifactInput {
     let mut input = todo_server();
     let schema = &mut input.schemas[0];
     let todos = schema.get_mut(&TableName::from("todos")).unwrap();
-    todos
-        .columns
-        .columns
-        .push(ColumnDescriptor::new("embedding", ColumnType::Bytea));
+    todos.columns.columns.push(ColumnDescriptor::new(
+        "embedding",
+        ColumnType::Vector { dimensions: 3 },
+    ));
     todos
         .columns
         .columns

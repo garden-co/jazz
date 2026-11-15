@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 /// Longest specialised index name, in bytes.
 pub const SPECIALISED_INDEX_NAME_MAX: usize = 32;
 
-/// Text analyzers this version knows (SPEC 20.10.1).
+/// Text analyzers this version knows (SPEC 20.10.1). Mirrors
+/// `jazz_index::text::ANALYZERS` (jazz-model cannot depend on jazz-index):
+/// change both together.
 pub const TEXT_ANALYZERS: &[&str] = &["jazz-text/1:en", "jazz-text/1:simple"];
 
 /// Highest weight of a text index field.

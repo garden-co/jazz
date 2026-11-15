@@ -2533,12 +2533,13 @@ pub fn validate_search(table: &TableSchema, search: &IndexSearch) -> Result<(), 
     Ok(())
 }
 
-/// The dimension of a runtime vector column, when it declares one.
-///
-/// The `vector` column type is added by the vector kind (SPEC 20.1);
-/// until then a `bytes` column stands in, with no declared dimension.
-fn vector_dimensions(_column_type: &ColumnType) -> Option<u32> {
-    None
+/// The dimension of a runtime vector column.
+fn vector_dimensions(column_type: &ColumnType) -> Option<u32> {
+    match column_type {
+        ColumnType::Vector(dimensions) => Some(*dimensions),
+        ColumnType::Nullable(inner) => vector_dimensions(inner),
+        _ => None,
+    }
 }
 
 fn validate_predicates(

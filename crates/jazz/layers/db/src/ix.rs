@@ -37,9 +37,7 @@ use crate::options::{Error, ErrorCode, Reason};
 use crate::query::{IndexOp, IndexSearch, Predicate, Query};
 use crate::records::Value;
 use crate::values::{Column, Schema, Sql, Table, quote, storage};
-use jazz_model::model::public_schema::{
-    SpecialisedIndex, SpecialisedIndexKind, SpecialisedIndexKindName,
-};
+use jazz_model::model::public_schema::{SpecialisedIndex, SpecialisedIndexKind};
 
 /// The registry and the dirty queue.
 pub(crate) const DDL: &str = "\
@@ -97,8 +95,6 @@ pub(crate) trait Kind {
     /// `_jazz_ix.encoding`: every byte-level choice the shadow rows depend
     /// on. A change rebuilds the index (`INV-IX-5`).
     fn encoding(&self) -> String;
-    /// The shadow tables' parts, for dropping them.
-    fn parts(&self) -> &'static [&'static str];
     /// `CREATE TABLE IF NOT EXISTS` (and indexes) of the shadow tables.
     fn ddl(&self, prefix: &str) -> String;
     /// Replace row `rid`'s shadow rows by those of its indexed `cells`
@@ -152,15 +148,27 @@ pub(crate) fn kind_for(
     if let Some(kind) = test_kind::override_for(index, columns) {
         return Ok(kind);
     }
-    let _ = columns;
-    Err(Error::new(
-        ErrorCode::Schema,
-        format!(
-            "{} indexes are not built into this Jazz yet (index `{}`)",
-            index.kind.kind_name(),
-            index.name
-        ),
-    ))
+    Ok(match &index.kind {
+        SpecialisedIndexKind::Text {
+            fields,
+            analyzer,
+            prefix,
+        } => Box::new(text::Text::new(
+            analyzer,
+            fields.values().copied().collect(),
+            *prefix,
+        )?),
+        SpecialisedIndexKind::Vector { metric, .. } => {
+            let dimensions = columns.first().and_then(|column| {
+                match crate::values::unwrap_nullable_type(&column.ty) {
+                    crate::records::ValueType::Vector(n) => Some(*n as usize),
+                    _ => None,
+                }
+            });
+            Box::new(vector::Vector::new(*metric, dimensions))
+        }
+        SpecialisedIndexKind::Geo { .. } => Box::new(geo::Geo),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -232,8 +240,6 @@ fn search_error(table: &str, index: &str, detail: impl std::fmt::Display) -> Err
 
 /// One maintained index.
 pub(crate) struct Index {
-    /// The logical table name, for errors.
-    pub table: String,
     /// The stored table it indexes.
     pub stored: String,
     pub decl: SpecialisedIndex,
@@ -317,6 +323,8 @@ fn recorded(conn: &Connection) -> Result<BTreeMap<(String, String), Recorded>, E
     rows.collect::<Result<_, _>>().map_err(storage)
 }
 
+/// Each kind's shadow table parts (SPEC 20.2), by `_jazz_ix.kind`: what
+/// dropping an index drops, whatever kind implements it now.
 fn kind_parts(kind: &str) -> &'static [&'static str] {
     match kind {
         "text" => &["terms", "post"],
@@ -361,7 +369,6 @@ pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Re
             desired.insert(
                 (table.stored.clone(), decl.name.clone()),
                 Rc::new(Index {
-                    table: table.name.clone(),
                     stored: table.stored.clone(),
                     prefix: prefix(&table.stored, &decl.name),
                     decl: decl.clone(),
@@ -815,15 +822,13 @@ pub(crate) fn bound_cte(candidates: &[(i64, i64)], bind: &mut dyn FnMut(Sql) -> 
     )
 }
 
-/// The kind of a declared index.
-pub(crate) fn kind_name(decl: &SpecialisedIndex) -> SpecialisedIndexKindName {
-    decl.kind.kind_name()
-}
-
 /// Whether `decl` is scored in Rust (vector) rather than in SQL.
 pub(crate) fn is_scored(decl: &SpecialisedIndexKind) -> bool {
     matches!(decl, SpecialisedIndexKind::Vector { .. })
 }
 
+mod geo;
 #[cfg(any(test, feature = "testing"))]
 pub(crate) mod test_kind;
+mod text;
+mod vector;

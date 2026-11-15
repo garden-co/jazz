@@ -57,10 +57,6 @@ impl Kind for Words {
         "jazz-ix-test-words/1".into()
     }
 
-    fn parts(&self) -> &'static [&'static str] {
-        &["terms", "post"]
-    }
-
     fn ddl(&self, prefix: &str) -> String {
         let terms = quote(&super::shadow(prefix, "terms"));
         let post = quote(&super::shadow(prefix, "post"));
@@ -146,10 +142,6 @@ struct Near;
 impl Kind for Near {
     fn encoding(&self) -> String {
         "jazz-ix-test-near/1".into()
-    }
-
-    fn parts(&self) -> &'static [&'static str] {
-        &["vec"]
     }
 
     fn ddl(&self, prefix: &str) -> String {

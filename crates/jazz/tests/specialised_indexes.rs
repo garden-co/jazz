@@ -57,7 +57,7 @@ fn schema_with(indexes: Indexes, restrict_inserts: bool) -> JazzSchema {
         .column("title", ColumnType::Text)
         .nullable_column("body", ColumnType::Text)
         .column("project", ColumnType::Text)
-        .column("embedding", ColumnType::Bytea)
+        .column("embedding", ColumnType::Vector { dimensions: 2 })
         .index_only(["project"])
         .policies(policies);
     table = match indexes {

@@ -733,6 +733,20 @@ fn convert_table(
                 .collect()
         })
         .unwrap_or_default();
+    // A B-tree index orders values; a vector has no useful order (search
+    // it through a `vector` index instead).
+    for column in table.indexed_columns.iter().flatten() {
+        if table
+            .columns
+            .column(column.as_str())
+            .is_some_and(|descriptor| matches!(descriptor.column_type, ColumnType::Vector { .. }))
+        {
+            return Err(err(
+                format!("$.{}.indexed_columns.{}", name.as_str(), column.as_str()),
+                "a vector column has no B-tree index; declare a `vector` index to search it",
+            ));
+        }
+    }
     for (index, group) in table.composite_indexes.iter().enumerate() {
         if group.len() < 2 {
             return Err(err(
@@ -1155,14 +1169,10 @@ fn validate_payload_enum_field(
 
 /// A latest-only table keeps no superseded versions (SPEC 4 §4.9), so a
 /// feature that reads them is refused when the schema compiles.
-/// The vector dimension of a column a `vector` index may index: `Some` for
-/// a vector column (`None` inside when its dimension is not declared).
-///
-/// The `vector` column type is added by the vector kind (SPEC 20.1); until
-/// it lands a `bytes` column stands in, with its dimension unchecked.
-pub fn vector_dimensions(column_type: &ColumnType) -> Option<Option<u32>> {
+/// The dimension of a column a `vector` index may index: a vector column's.
+pub fn vector_dimensions(column_type: &ColumnType) -> Option<u32> {
     match column_type {
-        ColumnType::Bytea => Some(None),
+        ColumnType::Vector { dimensions } => Some(*dimensions),
         _ => None,
     }
 }
@@ -4650,6 +4660,9 @@ mod tests {
             jazz_types::records::ValueType::Bool => RecordValue::Bool(true),
             jazz_types::records::ValueType::String => RecordValue::String("value".to_owned()),
             jazz_types::records::ValueType::Bytes => RecordValue::Bytes(vec![8]),
+            jazz_types::records::ValueType::Vector(dimensions) => {
+                RecordValue::Bytes(vec![0; 4 * *dimensions as usize])
+            }
             // Author columns hold dictionary codes.
             value_type if value_type.as_interned().is_some() => RecordValue::U32(0),
             jazz_types::records::ValueType::Internal(_) => {
@@ -6714,7 +6727,7 @@ mod specialised_index_tests {
         let table = TableSchemaBuilder::new("notes")
             .column("title", ColumnType::Text)
             .nullable_column("body", ColumnType::Text)
-            .column("embedding", ColumnType::Bytea)
+            .column("embedding", ColumnType::Vector { dimensions: 3 })
             .column("lat", ColumnType::Double)
             .column("lng", ColumnType::Double)
             .column("stars", ColumnType::Integer);
@@ -6745,7 +6758,17 @@ mod specialised_index_tests {
     /// `SchemaHash` are pinned to the values the base commit computes.
     #[test]
     fn ids_without_specialised_indexes_are_unchanged() {
-        let schema = notes(|table| table);
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .nullable_column("body", ColumnType::Text)
+                    .column("embedding", ColumnType::Bytea)
+                    .column("lat", ColumnType::Double)
+                    .column("lng", ColumnType::Double)
+                    .column("stars", ColumnType::Integer),
+            )
+            .build();
         let converted = convert_public_schema(&schema).unwrap();
         assert_eq!(
             converted.version_id().0.to_string(),
@@ -6910,6 +6933,11 @@ mod specialised_index_tests {
         assert_eq!(
             refusal(|t| t.geo_index("place", "lat", "lat")),
             "$.notes.specialised_indexes.place.geo: a geo index needs two different columns"
+        );
+        assert_eq!(
+            refusal(|t| t.index_only(["embedding"])),
+            "$.notes.indexed_columns.embedding: a vector column has no B-tree index; declare a \
+             `vector` index to search it"
         );
     }
 }

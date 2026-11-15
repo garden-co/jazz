@@ -187,6 +187,8 @@ mod shard_role;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../specialised_index_kinds.rs"]
+mod specialised_index_kinds;
 #[path = "../specialised_indexes.rs"]
 mod specialised_indexes;
 #[path = "../storage_corpus.rs"]
