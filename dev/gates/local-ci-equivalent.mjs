@@ -308,9 +308,7 @@ export const ciPartitions = Object.freeze({
     command("jazz-ffi Kotlin and Swift bindings", "bash", [
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
-    command("Jazz Swift package and StagePlan Swift example", "bash", [
-      "dev/gates/jazz-swift.sh",
-    ]),
+    command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
   ]),
 });
 

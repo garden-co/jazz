@@ -11,6 +11,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     case closed
     /// A row or delta didn't decode into the bindings' types (stale bindings?).
     case decoding(String)
+    /// The calling task was cancelled.
+    case cancelled
 
     public var description: String {
         switch self {
@@ -18,6 +20,7 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .io(let message): return "io: \(message)"
         case .closed: return "closed"
         case .decoding(let message): return "decoding: \(message)"
+        case .cancelled: return "cancelled"
         }
     }
 
@@ -26,6 +29,7 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     static func wrap(_ error: any Error) -> JazzError {
         switch from(error) {
         case let error as JazzError: return error
+        case is CancellationError: return .cancelled
         case let error as DecodingError: return .decoding("\(error)")
         case let error as EncodingError: return .decoding("\(error)")
         case let error: return .io("\(error)")
@@ -138,7 +142,7 @@ struct RawDelta: Decodable {
 }
 
 /// An open app. Every call runs jazz-ffi off the caller's thread.
-public final class Client: @unchecked Sendable {
+public final class Client: Sendable {
     let handle: JazzHandle
     /// The app's `JazzApp.Computed` (immutable, and `Sendable` by its protocol).
     let implementations: (any Sendable)?
