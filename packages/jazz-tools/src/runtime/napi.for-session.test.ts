@@ -24,7 +24,8 @@ const todoApp = testApp({
   },
 });
 
-const todoAppPermissions = testPermissions(todoApp, {
+const todoAppPermissionsFile = {
+  format: 1,
   tables: {
     todos: {
       read: "owner_id = session.user",
@@ -33,7 +34,8 @@ const todoAppPermissions = testPermissions(todoApp, {
       delete: "owner_id = session.user",
     },
   },
-});
+};
+const todoAppPermissions = testPermissions(todoApp, todoAppPermissionsFile);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -107,7 +109,7 @@ async function createTestContext(
     serverUrl: server.url,
     adminSecret,
     app: todoApp,
-    permissions: todoAppPermissions,
+    permissions: todoAppPermissionsFile,
   });
 
   const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-concurrent-request-"));
@@ -782,9 +784,11 @@ it.each(["table", "relation"] as const)(
       },
     });
     const query = kind === "relation" ? app.links.hopTo("roomRelation") : app.rooms;
-    const permissions = testPermissions(app, {
+    const permissionsFile = {
+      format: 1,
       tables: { links: { read: "true" }, rooms: { read: "code = session.claims.join_code" } },
-    });
+    };
+    const permissions = testPermissions(app, permissionsFile);
     const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
     onTestFinished(() => server.stop());
     const { bundle } = await deploy({
@@ -792,7 +796,7 @@ it.each(["table", "relation"] as const)(
       serverUrl: server.url,
       adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     const { createJazzContext } = await import("../backend/create-jazz-context.js");
     const writer = createJazzContext({
@@ -965,7 +969,8 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   const backendSecret = "shared-transport-backend";
   const adminSecret = "shared-transport-admin";
   const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
-  const permissions = testPermissions(app, { tables: { notes: { read: "true" } } });
+  const permissionsFile = { format: 1, tables: { notes: { read: "true" } } };
+  const permissions = testPermissions(app, permissionsFile);
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
   const { bundle } = await deploy({
@@ -973,7 +978,7 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
     serverUrl: server.url,
     adminSecret,
     app,
-    permissions,
+    permissions: permissionsFile,
   });
 
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
@@ -1028,7 +1033,8 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   const backendSecret = "shutdown-transport-backend";
   const adminSecret = "shutdown-transport-admin";
   const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
-  const permissions = testPermissions(app, { tables: { notes: { read: "true" } } });
+  const permissionsFile = { format: 1, tables: { notes: { read: "true" } } };
+  const permissions = testPermissions(app, permissionsFile);
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
   const { bundle } = await deploy({
@@ -1036,7 +1042,7 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
     serverUrl: server.url,
     adminSecret,
     app,
-    permissions,
+    permissions: permissionsFile,
   });
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({
