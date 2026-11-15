@@ -170,7 +170,13 @@ export class BrowserConnectionManager extends ConnectionManager {
       away.reopen(null);
       return;
     }
-    if (away.left.storeChangedSinceLeaving?.() && reloadAfterStorageInvalidation()) {
+    if (away.left.storeChangedSinceLeaving?.()) {
+      // Never reconnected, even when the reload guard refuses (a second
+      // invalidation within its window): what needs the worker fails instead.
+      this.connectionError = new Error(
+        "This page's store was reset while the page was in the back/forward cache: reload the page",
+      );
+      reloadAfterStorageInvalidation();
       away.reopen(null);
       return "stop";
     }

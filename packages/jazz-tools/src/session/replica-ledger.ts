@@ -545,8 +545,12 @@ export function replicaLifecycle(options: {
           // as after any other external storage invalidation.
           returned: () => {
             if (wipedSinceLeft()) {
-              // Never recorded again: that would keep what the wipe took.
-              return reloadAfterStorageInvalidation() ? "stop" : undefined;
+              // Never recorded again: that would keep what the wipe took. And
+              // never reconnected, even when the reload guard refuses (a second
+              // invalidation within its window): that would replay this
+              // page's writes into a store no ledger entry names.
+              reloadAfterStorageInvalidation();
+              return "stop";
             }
             record();
           },
