@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 
-# 1) Edit schema.ts during development and watch for Jazz migration warnings.
+# 1) Edit the tables in jazz.app.json, then check the files. validate refuses
+#    a changed schema until a migration records the change.
+npx jazz-tools validate
 
-# 2) Generate a typed migration stub after Jazz reports the old/new hashes.
-npx jazz-tools migrations create <appId> --fromHash <fromHash> --toHash <toHash>
+# 2) Write the migration stub, resolve any "TODO: …" it leaves, and validate
+#    again: that also regenerates src/jazz_app.rs.
+npx jazz-tools migrations create --name <name>
+npx jazz-tools validate
 
-# 3) Fill in migrate, rename the file, then publish the reviewed edge.
-npx jazz-tools deploy <appId>
+# 3) Commit jazz.app.json and src/jazz_app.rs. The backend publishes the new
+#    version with its permissions bundle when it next starts.
