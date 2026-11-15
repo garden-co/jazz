@@ -8,7 +8,7 @@
 //! Rows, queries and deltas are plain JSON typed by the app's schema; see
 //! the crate's README for the shapes. Not supported yet (refused with
 //! `JazzError::Refused`): includes, connecting to a sync server as an end
-//! user with a JWT, writing enums with payloads, reads inside transactions
+//! user with a JWT, reads inside transactions
 //! (and transactions altogether), computed columns and transforms (the
 //! language's bindings implement them over the stored values).
 

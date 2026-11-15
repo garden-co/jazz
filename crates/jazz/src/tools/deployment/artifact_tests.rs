@@ -8,8 +8,8 @@ use crate::query::{
 use crate::tools::deployment::{DeploymentCatalogue, prepare_deployment};
 use crate::tools::public_schema::Value;
 use crate::tools::public_schema::{
-    CmpOp, ColumnDescriptor, ColumnType, EnumCaseDescriptor, HistoryRetention, Operation,
-    OperationPolicy, PolicyExpr, PolicyValue, RowDescriptor, SchemaBuilder, TableName,
+    CmpOp, ColumnDescriptor, ColumnType, HistoryRetention, Operation, OperationPolicy, PolicyExpr,
+    PolicyValue, RowDescriptor, SchemaBuilder, TableName,
 };
 use std::collections::BTreeSet;
 
@@ -163,17 +163,8 @@ fn shared_todos() -> ArtifactInput {
                 ),
                 nullable(
                     "status",
-                    ColumnType::EnumPayload {
-                        cases: vec![
-                            EnumCaseDescriptor {
-                                name: "open".into(),
-                                fields: vec![],
-                            },
-                            EnumCaseDescriptor {
-                                name: "done".into(),
-                                fields: vec![ColumnDescriptor::new("at", ColumnType::Timestamp)],
-                            },
-                        ],
+                    ColumnType::Enum {
+                        variants: vec!["open".into(), "done".into()],
                     },
                 ),
                 nullable(
@@ -208,10 +199,7 @@ fn shared_todos() -> ArtifactInput {
                  "column_type": {"type": "Array", "element": {"type": "Text"}},
                  "value": {"type": "Array", "value": []}},
                 {"type": "introduce", "column": "status",
-                 "column_type": {"type": "EnumPayload", "cases": [
-                     {"name": "open", "fields": []},
-                     {"name": "done", "fields": [{"name": "at", "column_type": {"type": "Timestamp"}, "nullable": false}]}
-                 ]},
+                 "column_type": {"type": "Enum", "variants": ["open", "done"]},
                  "value": {"type": "Null"}},
                 {"type": "introduce", "column": "meta",
                  "column_type": {"type": "Json", "schema": {"type": "object"}},
@@ -882,11 +870,6 @@ fn every_policy_variant() -> PolicyExpr {
             left: column("g"),
             right: RelationValueRef::Literal(serde_json::json!("bare")),
         },
-        RelationPredicate::EnumMatch {
-            column: column("h"),
-            case: "done".into(),
-            payload: Box::new(RelationPredicate::True),
-        },
         RelationPredicate::And(vec![RelationPredicate::Not(Box::new(
             RelationPredicate::False,
         ))]),
@@ -1049,10 +1032,6 @@ fn every_policy_variant() -> PolicyExpr {
                 Value::Row {
                     id: None,
                     values: vec![],
-                },
-                Value::Enum {
-                    case: "done".into(),
-                    values: vec![Value::Timestamp(5)],
                 },
             ],
         },
@@ -1221,10 +1200,7 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
                 value(right, seen);
                 "Pred.Contains"
             }
-            RelationPredicate::EnumMatch { payload, .. } => {
-                pred(payload, seen);
-                "Pred.EnumMatch"
-            }
+            RelationPredicate::Removed(removed) => match *removed {},
             RelationPredicate::And(all) => {
                 all.iter().for_each(|p| pred(p, seen));
                 "Pred.And"
@@ -2363,10 +2339,8 @@ fn the_permissions_json_schema_names_every_grammar_construct() {
         "id(outer)",
         "id(frontier)",
         "param.",
-        "enumcase(",
         "row(",
         "json(",
-        "is ",
     ] {
         assert!(
             text.contains(construct),

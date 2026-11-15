@@ -10,9 +10,7 @@ use crate::schema::{
     TableSchema as CoreTableSchema, WritePolicies,
 };
 use jazz_types::column_schema::ColumnType as StorageColumnType;
-use jazz_types::records::{
-    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as RecordValue,
-};
+use jazz_types::records::{ScalarEnumSchema, Value as RecordValue};
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
@@ -509,9 +507,7 @@ fn coerce_predicate_typed_literals(
             }
         }
         Predicate::IsNull(_) => {}
-        Predicate::EnumMatch { payload, .. } => {
-            coerce_predicate_typed_literals(table, payload, column_types);
-        }
+        Predicate::Removed(removed) => match *removed {},
     }
 }
 
@@ -781,11 +777,7 @@ fn convert_table(
             if table.columns.column(column_name).is_some_and(|descriptor| {
                 matches!(
                     descriptor.column_type,
-                    ColumnType::Bytea
-                        | ColumnType::Array { .. }
-                        | ColumnType::Row { .. }
-                        | ColumnType::EnumPayload { .. }
-                        | ColumnType::CatalogueEnumPayload { .. }
+                    ColumnType::Bytea | ColumnType::Array { .. } | ColumnType::Row { .. }
                 )
             }) {
                 return Err(err(
@@ -942,66 +934,6 @@ fn convert_default_for_column_type(
             }
             Ok(RecordValue::String(value.clone()))
         }
-        (
-            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
-            Value::Enum { case, values },
-        ) => {
-            let (case_index, entry) = cases
-                .iter()
-                .enumerate()
-                .find(|(_, entry)| entry.name == *case)
-                .ok_or_else(|| {
-                    column_err(
-                        table,
-                        column,
-                        format!("payload enum default case {case:?} is not declared"),
-                    )
-                })?;
-            if entry.fields.len() != values.len() {
-                return Err(column_err(
-                    table,
-                    column,
-                    "payload enum default field count does not match its case",
-                ));
-            }
-            let mut fields = Vec::with_capacity(entry.fields.len());
-            let mut converted = Vec::with_capacity(values.len());
-            for (field, value) in entry.fields.iter().zip(values) {
-                let mut value_type =
-                    convert_column_type(table, field.name.as_str(), &field.column_type)?;
-                if field.nullable {
-                    value_type = value_type.nullable();
-                }
-                let value = if matches!(value, Value::Null) {
-                    if !field.nullable {
-                        return Err(err(
-                            format!("$.{}.{}.{}", table.as_str(), column, field.name.as_str()),
-                            "payload enum default cannot use null for a required field",
-                        ));
-                    }
-                    RecordValue::Nullable(None)
-                } else {
-                    let inner = convert_default_for_column_type(
-                        table,
-                        field.name.as_str(),
-                        &field.column_type,
-                        value,
-                    )?;
-                    if field.nullable {
-                        RecordValue::Nullable(Some(Box::new(inner)))
-                    } else {
-                        inner
-                    }
-                };
-                fields.push((field.name.as_str().to_owned(), value_type));
-                converted.push(value);
-            }
-            let case_tag = u32::try_from(case_index)
-                .map_err(|_| column_err(table, column, "payload enum case index exceeds u32"))?;
-            EnumValue::create(case_tag, RecordDescriptor::new(fields), &converted)
-                .map(RecordValue::Enum)
-                .map_err(|error| column_err(table, column, error.to_string()))
-        }
         (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(RecordValue::U64(*value)),
         (ColumnType::Double, Value::Double(value)) => Ok(RecordValue::F64(*value)),
         (ColumnType::Uuid, Value::Uuid(value)) => Ok(RecordValue::Uuid(*value.uuid())),
@@ -1049,35 +981,6 @@ fn convert_column_type(
                 .map(StorageColumnType::EnumTag)
                 .map_err(|error| column_err(table, column, error.to_string()))
         }
-        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
-            let mut converted_cases = Vec::with_capacity(cases.len());
-            for case in cases {
-                if case.name.is_empty() {
-                    return Err(column_err(table, column, "enum case names cannot be empty"));
-                }
-                let mut fields = Vec::with_capacity(case.fields.len());
-                for field in &case.fields {
-                    validate_payload_enum_field(table, column, &case.name, field)?;
-                    let mut value_type =
-                        convert_column_type(table, field.name.as_str(), &field.column_type)?;
-                    if field.nullable {
-                        value_type = value_type.nullable();
-                    }
-                    fields.push((field.name.as_str().to_owned(), value_type));
-                }
-                converted_cases.push(EnumCase::new(
-                    case.name.clone(),
-                    RecordDescriptor::new(fields),
-                ));
-            }
-            let enum_name = match column_type {
-                ColumnType::CatalogueEnumPayload { name, .. } => name.clone(),
-                _ => format!("{}_{}", table.as_str(), column),
-            };
-            EnumSchema::new(enum_name, converted_cases)
-                .map(|schema| StorageColumnType::Enum(Box::new(schema)))
-                .map_err(|error| column_err(table, column, error.to_string()))
-        }
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
@@ -1102,57 +1005,6 @@ fn convert_column_type(
 /// Enforce the same v1 payload-enum boundary for raw public-schema ingress as
 /// the TypeScript DSL. Schema JSON can bypass the DSL, so this must reject
 /// unsupported layouts before recursive column conversion admits them.
-fn validate_payload_enum_field(
-    table: &TableName,
-    column: &str,
-    case: &str,
-    field: &ColumnDescriptor,
-) -> Result<(), SchemaConversionError> {
-    let path = format!(
-        "$.{}.{}.{}.{}",
-        table.as_str(),
-        column,
-        case,
-        field.name.as_str()
-    );
-    if field.name.as_str() == "type" {
-        return Err(err(
-            path,
-            "enum payload field name \"type\" is reserved for the discriminant",
-        ));
-    }
-    if field.name.as_str().starts_with('$') {
-        return Err(err(
-            path,
-            "enum payload field names starting with \"$\" are reserved for magic columns",
-        ));
-    }
-    if field.references.is_some() {
-        return Err(err(
-            path,
-            "enum payload fields cannot use references; use UUID values instead",
-        ));
-    }
-    if !matches!(
-        field.column_type,
-        ColumnType::Boolean
-            | ColumnType::Text
-            | ColumnType::Timestamp
-            | ColumnType::Double
-            | ColumnType::Uuid
-            | ColumnType::Bytea
-            | ColumnType::Json { .. }
-            | ColumnType::Integer
-            | ColumnType::BigInt
-    ) {
-        return Err(err(
-            path,
-            "payload enum v1 fields must be scalar columns; arrays, rows, and nested enums are not supported",
-        ));
-    }
-    Ok(())
-}
-
 /// A latest-only table keeps no superseded versions (SPEC 4 §4.9), so a
 /// feature that reads them is refused when the schema compiles.
 fn validate_latest_only(
@@ -1898,9 +1750,7 @@ fn rel_has_outer_references(rel: &RelationExpr) -> bool {
             RelationPredicate::And(children) | RelationPredicate::Or(children) => {
                 children.iter().any(predicate_has_outer)
             }
-            RelationPredicate::Not(child) | RelationPredicate::EnumMatch { payload: child, .. } => {
-                predicate_has_outer(child)
-            }
+            RelationPredicate::Not(child) => predicate_has_outer(child),
             _ => false,
         }
     }
@@ -2442,10 +2292,10 @@ fn collect_rel_predicate_columns<'a>(
         RelationPredicate::Cmp { left, .. }
         | RelationPredicate::Contains { left, .. }
         | RelationPredicate::In { left, .. } => columns.push(left),
-        // Enum payload fields are relative to the matched record, not relation sources.
-        RelationPredicate::IsNull { column }
-        | RelationPredicate::IsNotNull { column }
-        | RelationPredicate::EnumMatch { column, .. } => columns.push(column),
+        RelationPredicate::IsNull { column } | RelationPredicate::IsNotNull { column } => {
+            columns.push(column)
+        }
+        RelationPredicate::Removed(removed) => match *removed {},
         RelationPredicate::True | RelationPredicate::False => {}
     }
 }
@@ -3619,7 +3469,6 @@ mod tests {
         );
     }
 
-    use crate::model::public_api::types::EnumCaseDescriptor;
     use crate::model::public_api::types::TableSchemaBuilder;
     use crate::model::public_schema::{
         ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, SchemaBuilder,
@@ -4261,240 +4110,6 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.starts_with("$.items.required_status: "));
         assert!(rendered.contains("null default requires a nullable column"));
-    }
-
-    #[test]
-    fn converts_payload_enum_default_to_tagged_record() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("events").column_with_default(
-                "event",
-                ColumnType::EnumPayload {
-                    cases: vec![
-                        EnumCaseDescriptor {
-                            name: "message".to_owned(),
-                            fields: vec![
-                                ColumnDescriptor::new("text", ColumnType::Text),
-                                ColumnDescriptor::new("level", ColumnType::Integer).nullable(),
-                            ],
-                        },
-                        EnumCaseDescriptor {
-                            name: "closed".to_owned(),
-                            fields: vec![ColumnDescriptor::new("code", ColumnType::Integer)],
-                        },
-                    ],
-                },
-                Value::Enum {
-                    case: "message".to_owned(),
-                    values: vec![Value::Text("hello".to_owned()), Value::Null],
-                },
-            ))
-            .build();
-        let table = convert_public_schema(&schema)
-            .unwrap()
-            .into_runtime()
-            .tables
-            .into_iter()
-            .find(|table| table.name == "events")
-            .unwrap();
-        let default = table
-            .columns
-            .iter()
-            .find(|column| column.name == "event")
-            .and_then(|column| column.default.as_ref())
-            .unwrap();
-        let RecordValue::Enum(value) = default else {
-            panic!("expected a payload enum default");
-        };
-        assert_eq!(value.tag(), 0);
-        assert_eq!(
-            value.record().to_values().unwrap(),
-            vec![
-                RecordValue::String("hello".to_owned()),
-                RecordValue::Nullable(None),
-            ]
-        );
-    }
-
-    #[test]
-    fn converts_payload_enums_with_more_than_u8_cases_and_a_supported_scalar_default() {
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("events").column_with_default(
-                    "event",
-                    ColumnType::EnumPayload {
-                        cases: (0..257)
-                            .map(|ordinal| EnumCaseDescriptor {
-                                name: format!("case-{ordinal}"),
-                                fields: if ordinal == 256 {
-                                    vec![ColumnDescriptor::new("text", ColumnType::Text)]
-                                } else {
-                                    Vec::new()
-                                },
-                            })
-                            .collect(),
-                    },
-                    Value::Enum {
-                        case: "case-256".to_owned(),
-                        values: vec![Value::Text("wide default".to_owned())],
-                    },
-                ),
-            )
-            .build();
-        let table = convert_public_schema(&schema)
-            .unwrap()
-            .into_runtime()
-            .tables
-            .into_iter()
-            .find(|table| table.name == "events")
-            .unwrap();
-        let event = table
-            .columns
-            .iter()
-            .find(|column| column.name == "event")
-            .unwrap();
-        let StorageColumnType::Enum(payload_enum) = &event.column_type else {
-            panic!("payload enum column expected");
-        };
-
-        assert_eq!(payload_enum.cases.len(), 257);
-        assert_eq!(payload_enum.tag("case-256").unwrap(), 256);
-        assert_eq!(
-            &payload_enum.cases[256].payload.fields()[0].value_type,
-            &StorageColumnType::String
-        );
-        let Some(RecordValue::Enum(default)) = &event.default else {
-            panic!("payload enum default expected");
-        };
-        assert_eq!(default.tag(), 256);
-        assert_eq!(
-            default.record().to_values().unwrap(),
-            vec![RecordValue::String("wide default".to_owned())]
-        );
-    }
-
-    // This is an internal converter test because public EnumPayload construction
-    // is intentionally not exposed until the client facade can round-trip enum
-    // values. It proves schema-default admission walks the selected case fields.
-    #[test]
-    fn rejects_schema_invalid_json_inside_payload_enum_default() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("events").column_with_default(
-                "event",
-                ColumnType::EnumPayload {
-                    cases: vec![EnumCaseDescriptor {
-                        name: "message".to_owned(),
-                        fields: vec![ColumnDescriptor::new(
-                            "payload",
-                            ColumnType::Json {
-                                schema: Some(serde_json::json!({
-                                    "type": "object",
-                                    "properties": { "name": { "type": "string" } },
-                                    "required": ["name"],
-                                })),
-                            },
-                        )],
-                    }],
-                },
-                Value::Enum {
-                    case: "message".to_owned(),
-                    values: vec![Value::Text("{\"name\":123}".to_owned())],
-                },
-            ))
-            .build();
-
-        let error = convert_public_schema(&schema)
-            .expect_err("schema-invalid payload-enum JSON default must reject conversion");
-        assert!(
-            error
-                .to_string()
-                .contains("JSON schema validation failed for column `event.message.payload`"),
-            "unexpected enum JSON default error: {error}"
-        );
-    }
-
-    #[test]
-    fn raw_payload_enum_ingress_rejects_non_scalar_and_reserved_fields() {
-        let nested_row = ColumnType::Row {
-            columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
-                "nested",
-                ColumnType::Text,
-            )])),
-        };
-        let nested_payload_enum = ColumnType::EnumPayload {
-            cases: vec![EnumCaseDescriptor {
-                name: "nested".to_owned(),
-                fields: vec![ColumnDescriptor::new("value", ColumnType::Text)],
-            }],
-        };
-        let cases = [
-            (
-                ColumnDescriptor::new("type", ColumnType::Text),
-                "reserved for the discriminant",
-            ),
-            (
-                ColumnDescriptor::new("$createdAt", ColumnType::Timestamp),
-                "reserved for magic columns",
-            ),
-            (
-                ColumnDescriptor::new("owner", ColumnType::Uuid).references("users"),
-                "cannot use references",
-            ),
-            (
-                ColumnDescriptor::new(
-                    "owners",
-                    ColumnType::Array {
-                        element: Box::new(ColumnType::Uuid),
-                    },
-                ),
-                "must be scalar columns",
-            ),
-            (
-                ColumnDescriptor::new(
-                    "owner_refs",
-                    ColumnType::Array {
-                        element: Box::new(ColumnType::Uuid),
-                    },
-                )
-                .references("users"),
-                "cannot use references",
-            ),
-            (
-                ColumnDescriptor::new("row", nested_row),
-                "must be scalar columns",
-            ),
-            (
-                ColumnDescriptor::new(
-                    "tag",
-                    ColumnType::Enum {
-                        variants: vec!["a".to_owned()],
-                    },
-                ),
-                "must be scalar columns",
-            ),
-            (
-                ColumnDescriptor::new("nested", nested_payload_enum),
-                "nested enums are not supported",
-            ),
-        ];
-
-        for (field, message) in cases {
-            let schema = SchemaBuilder::new()
-                .table(TableSchema::builder("events").column(
-                    "event",
-                    ColumnType::EnumPayload {
-                        cases: vec![EnumCaseDescriptor {
-                            name: "message".to_owned(),
-                            fields: vec![field],
-                        }],
-                    },
-                ))
-                .build();
-            let error = convert_public_schema(&schema).expect_err("raw payload field is rejected");
-            assert!(
-                error.to_string().contains(message),
-                "expected {message:?}, got {error}"
-            );
-        }
     }
 
     #[test]

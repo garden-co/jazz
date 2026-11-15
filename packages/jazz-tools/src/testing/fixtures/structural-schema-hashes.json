@@ -50,51 +50,6 @@
       "hash": "d8269ce5914aef59043ae907325f760e3a3bf587ff5dea6c41796acfbb8b5178"
     },
     {
-      "name": "enum-payload",
-      "columnType": {
-        "type": "EnumPayload",
-        "cases": [
-          {
-            "name": "created",
-            "fields": [{ "name": "title", "column_type": { "type": "Text" }, "nullable": false }]
-          },
-          { "name": "deleted", "fields": [] }
-        ]
-      },
-      "nullable": false,
-      "hash": "2556ae3abd5c72c359507a583419b0eec11d12f0d4fc9dd6bd06f7276097281f"
-    },
-    {
-      "name": "enum-payload-reordered",
-      "columnType": {
-        "type": "EnumPayload",
-        "cases": [
-          { "name": "deleted", "fields": [] },
-          {
-            "name": "created",
-            "fields": [{ "name": "title", "column_type": { "type": "Text" }, "nullable": false }]
-          }
-        ]
-      },
-      "nullable": false,
-      "hash": "89165a453f1d1805ffa2af2eaaf4d7014399a8d44ef0be690c538a610f1ea135"
-    },
-    {
-      "name": "enum-payload-nullable-field",
-      "columnType": {
-        "type": "EnumPayload",
-        "cases": [
-          {
-            "name": "created",
-            "fields": [{ "name": "title", "column_type": { "type": "Text" }, "nullable": true }]
-          },
-          { "name": "deleted", "fields": [] }
-        ]
-      },
-      "nullable": false,
-      "hash": "a820544a5c3f8e7632d9f578344fccfcf4e6ced02aae9b977359b53fc977bb3f"
-    },
-    {
       "name": "timestamp",
       "columnType": { "type": "Timestamp" },
       "nullable": false,
@@ -161,22 +116,6 @@
                 }
               },
               "nullable": false
-            },
-            {
-              "name": "event",
-              "column_type": {
-                "type": "EnumPayload",
-                "cases": [
-                  {
-                    "name": "changed",
-                    "fields": [
-                      { "name": "by", "column_type": { "type": "Uuid" }, "nullable": false },
-                      { "name": "diff", "column_type": { "type": "Bytea" }, "nullable": true }
-                    ]
-                  }
-                ]
-              },
-              "nullable": true
             }
           ]
         }
@@ -437,44 +376,6 @@
       },
       "hash": "a277a209b5c6247d0b40b4df75f54dbc362ec8b45750dec574b5d2c418d670c3",
       "name": "enum",
-      "nullable": false
-    },
-    {
-      "columnType": {
-        "cases": [
-          {
-            "fields": [
-              {
-                "column_type": {
-                  "type": "Text"
-                },
-                "name": "title",
-                "nullable": false
-              }
-            ],
-            "name": "created"
-          },
-          {
-            "fields": [],
-            "name": "deleted"
-          }
-        ],
-        "type": "EnumPayload"
-      },
-      "default": {
-        "type": "Enum",
-        "value": {
-          "case": "created",
-          "values": [
-            {
-              "type": "Text",
-              "value": "hello"
-            }
-          ]
-        }
-      },
-      "hash": "58b767e9b35d0b562958116df12c46b2f7b93e97c4ab523c073089107037d056",
-      "name": "enum-payload",
       "nullable": false
     },
     {

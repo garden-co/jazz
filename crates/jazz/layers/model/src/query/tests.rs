@@ -7,34 +7,11 @@ mod tests {
     use jazz_types::column_schema::{ColumnSchema, ColumnType};
     use crate::model::public_schema::{
         ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
-        EnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
+        SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,
     };
 
-    fn payload_enum_schema() -> JazzSchema {
-        let source = PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("events").column(
-                    "event",
-                    PublicColumnType::EnumPayload {
-                        cases: vec![EnumCaseDescriptor {
-                            name: "message".to_owned(),
-                            fields: vec![PublicColumnDescriptor::new(
-                                "level",
-                                PublicColumnType::Integer,
-                            )],
-                        }],
-                    },
-                ),
-            )
-            .build();
-        JazzSchema::new(&source).expect("payload enum public schema compiles")
-    }
 
-    fn payload_enum_literal() -> Value {
-        let payload = RecordDescriptor::new([("level", ValueType::I32)]);
-        Value::Enum(EnumValue::create(0, payload, &[Value::I32(2)]).unwrap())
-    }
 
     fn schema() -> RuntimeSchema {
         RuntimeSchema::new([
@@ -90,49 +67,7 @@ mod tests {
         assert!(!validated.canonical_bytes().is_empty());
     }
 
-    #[test]
-    fn payload_enum_literal_validation_returns_query_error() {
-        let error = Query::from("events")
-            .filter(eq(lit(payload_enum_literal()), lit(payload_enum_literal())))
-            .validate(&payload_enum_schema())
-            .expect_err("payload enum literals must be rejected as query operands");
 
-        assert_eq!(error, QueryError::OperandTypeMismatch);
-    }
-
-    #[test]
-    fn nested_payload_enum_literals_return_query_errors() {
-        let schema = payload_enum_schema();
-        let cases = [
-            (
-                "tuple",
-                Value::Tuple(vec![payload_enum_literal()]),
-                Value::Tuple(vec![Value::I32(2)]),
-            ),
-            (
-                "array",
-                Value::Array(vec![payload_enum_literal()]),
-                Value::Array(vec![Value::I32(2)]),
-            ),
-            (
-                "nullable",
-                Value::Nullable(Some(Box::new(payload_enum_literal()))),
-                Value::Nullable(Some(Box::new(Value::I32(2)))),
-            ),
-        ];
-
-        for (kind, value, comparable) in cases {
-            let error = Query::from("events")
-                .filter(eq(lit(value), lit(comparable)))
-                .validate(&schema)
-                .unwrap_err();
-            assert_eq!(
-                error,
-                QueryError::OperandTypeMismatch,
-                "nested {kind} payload enum literals must be rejected"
-            );
-        }
-    }
 
     #[test]
     fn record_literal_validation_remains_supported() {
@@ -224,21 +159,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bound_payload_enum_value_returns_param_type_mismatch() {
-        let validated = Query::from("events")
-            .filter(eq(col("event"), param("event")))
-            .validate(&payload_enum_schema())
-            .expect("payload enum column parameter shape is valid");
-        let error = validated
-            .bind(BTreeMap::from([("event".to_owned(), payload_enum_literal())]))
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            QueryError::ParamTypeMismatch { ref param, .. } if param == "event"
-        ));
-    }
 
     #[test]
     fn integer_literals_normalize_to_comparison_column_width() {
@@ -329,123 +249,7 @@ mod tests {
         );
     }
 
-    // This focused lowerer test is intentional: relation IR is the NAPI/WASM
-    // boundary, while end-to-end matching and subscription deltas are covered
-    // at the database boundary below it.
-    #[test]
-    fn relation_payload_enum_match_lowers_and_validates_against_case_fields() {
-        let event_payload = RecordDescriptor::new([("level", ValueType::I32)]);
-        let schema = RuntimeSchema::new([TableSchema::new(
-            "events",
-            [ColumnSchema::new(
-                "event",
-                ColumnType::Enum(Box::new(
-                    EnumSchema::new("event", [EnumCase::new("message", event_payload)]).unwrap(),
-                )),
-            )],
-        )]);
-        let relation = RelationQuery {
-            rel: RelationExpr::Project {
-                input: Box::new(RelationExpr::Filter {
-                    input: Box::new(RelationExpr::TableScan {
-                        table: "events".to_owned(),
-                        alias: None,
-                    }),
-                    predicate: RelationPredicate::EnumMatch {
-                        column: RelationColumnRef {
-                            scope: Some("events".to_owned()),
-                            column: "event".to_owned(),
-                        },
-                        case: "message".to_owned(),
-                        payload: Box::new(RelationPredicate::Cmp {
-                            left: RelationColumnRef {
-                                scope: None,
-                                column: "level".to_owned(),
-                            },
-                            op: RelationCmpOp::Eq,
-                            right: RelationValueRef::Literal(serde_json::json!({
-                                "type": "Integer",
-                                "value": 2,
-                            })),
-                        }),
-                    },
-                }),
-                columns: vec![RelationProjectColumn {
-                    alias: "event".to_owned(),
-                    expr: RelationProjectExpr::Column(RelationColumnRef {
-                        scope: Some("events".to_owned()),
-                        column: "event".to_owned(),
-                    }),
-                }],
-            },
-        };
 
-        let query = relation_query_to_query(&relation).unwrap();
-        assert_eq!(
-            query.filters,
-            vec![Predicate::EnumMatch {
-                column: "event".to_owned(),
-                case: "message".to_owned(),
-                payload: Box::new(Predicate::Eq(
-                    Operand::Column("level".to_owned()),
-                    Operand::Literal(Value::I32(2)),
-                )),
-            }]
-        );
-        assert!(query.validate_runtime(&schema).is_ok());
-    }
-
-    #[test]
-    fn enum_match_validation_uses_selected_case_fields_not_outer_table_fields() {
-        let payload =
-            RecordDescriptor::new([("case_only", ValueType::String), ("shared", ValueType::I32)]);
-        let schema = RuntimeSchema::new([TableSchema::new(
-            "events",
-            [
-                ColumnSchema::new("shared", ColumnType::String),
-                ColumnSchema::new("outer_only", ColumnType::String),
-                ColumnSchema::new(
-                    "event",
-                    ColumnType::Enum(Box::new(
-                        EnumSchema::new("event", [EnumCase::new("message", payload)]).unwrap(),
-                    )),
-                ),
-            ],
-        )]);
-        let matched = |payload| Predicate::EnumMatch {
-            column: "event".to_owned(),
-            case: "message".to_owned(),
-            payload: Box::new(payload),
-        };
-
-        assert!(
-            Query::from("events")
-                .filter(matched(Predicate::Eq(
-                    Operand::Column("case_only".to_owned()),
-                    Operand::Literal(Value::String("present only in the case".to_owned())),
-                )))
-                .validate_runtime(&schema)
-                .is_ok()
-        );
-        assert!(
-            Query::from("events")
-                .filter(matched(Predicate::Eq(
-                    Operand::Column("outer_only".to_owned()),
-                    Operand::Literal(Value::String("outer".to_owned())),
-                )))
-                .validate_runtime(&schema)
-                .is_err()
-        );
-        assert!(
-            Query::from("events")
-                .filter(matched(Predicate::Eq(
-                    Operand::Column("shared".to_owned()),
-                    Operand::Literal(Value::String("outer type".to_owned())),
-                )))
-                .validate_runtime(&schema)
-                .is_err()
-        );
-    }
 
     /// Alice may use an array parameter as the `contains` haystack; model
     /// validation infers its type from the compared UUID column. This
@@ -2021,11 +1825,7 @@ mod tests {
                     ],
                 ),
                 Predicate::Contains(col("d"), Operand::Literal(Value::Bytes(vec![1, 2]))),
-                Predicate::EnumMatch {
-                    column: "e".to_owned(),
-                    case: "k".to_owned(),
-                    payload: Box::new(Predicate::Any(vec![Predicate::IsNull(col("f"))])),
-                },
+                Predicate::IsNull(col("f")),
                 Predicate::All(vec![]),
             ])
         }
@@ -2051,8 +1851,8 @@ mod tests {
         #[test]
         fn predicate_json_and_postcard_encodings_are_pinned() {
             let predicate = every_variant();
-            let json = r#"{"All":[{"Any":[{"Eq":[{"Column":"a"},{"Param":"p"}]},{"Ne":[{"Column":"a"},{"Claim":"c"}]}]},{"Not":{"Gt":[{"Column":"b"},{"Literal":{"I64":-3}}]}},{"Gte":[{"Column":"b"},{"Literal":{"String":"s"}}]},{"Lt":[{"Column":"b"},{"Literal":{"Bool":true}}]},{"Lte":[{"Column":"b"},{"Literal":{"U64":7}}]},{"In":[{"Column":"c"},[{"Literal":{"I32":1}},{"Param":"q"}]]},{"Contains":[{"Column":"d"},{"Literal":{"Bytes":[1,2]}}]},{"EnumMatch":{"column":"e","case":"k","payload":{"Any":[{"IsNull":{"Column":"f"}}]}}},{"All":[]}]}"#;
-            let bytes = "0009010203000161010170040001610201630206000162030e05070001620306017308000162030501090001620303070500016302030f020101710a00016403070201020b0165016b01010c0001660000";
+            let json = r#"{"All":[{"Any":[{"Eq":[{"Column":"a"},{"Param":"p"}]},{"Ne":[{"Column":"a"},{"Claim":"c"}]}]},{"Not":{"Gt":[{"Column":"b"},{"Literal":{"I64":-3}}]}},{"Gte":[{"Column":"b"},{"Literal":{"String":"s"}}]},{"Lt":[{"Column":"b"},{"Literal":{"Bool":true}}]},{"Lte":[{"Column":"b"},{"Literal":{"U64":7}}]},{"In":[{"Column":"c"},[{"Literal":{"I32":1}},{"Param":"q"}]]},{"Contains":[{"Column":"d"},{"Literal":{"Bytes":[1,2]}}]},{"IsNull":{"Column":"f"}},{"All":[]}]}"#;
+            let bytes = "0009010203000161010170040001610201630206000162030e05070001620306017308000162030501090001620303070500016302030f020101710a00016403070201020c0001660000";
             assert_eq!(serde_json::to_string(&predicate).unwrap(), json);
             assert_eq!(
                 hex::encode(postcard::to_allocvec(&predicate).unwrap()),
@@ -2063,34 +1863,21 @@ mod tests {
                 postcard::from_bytes::<Predicate>(&hex::decode(bytes).unwrap()).unwrap(),
                 predicate
             );
-            assert_eq!(
-                serde_json::from_str::<Predicate>(
-                    r#"{"EnumMatch":["e","k",{"IsNull":{"Column":"f"}}]}"#
-                )
-                .unwrap(),
-                Predicate::EnumMatch {
-                    column: "e".to_owned(),
-                    case: "k".to_owned(),
-                    payload: Box::new(Predicate::IsNull(col("f"))),
-                }
-            );
+        }
+
+        /// Tag 11 held payload-enum matches until they were removed; the
+        /// variants after it keep their tags (`IsNull` is still 12, as the
+        /// pinned bytes show) and an encoding of tag 11 is refused.
+        #[test]
+        fn the_removed_enum_match_tag_is_refused() {
+            let old_enum_match = hex::decode("0b0165016b01010c000166").unwrap();
+            assert!(postcard::from_bytes::<Predicate>(&old_enum_match).is_err());
+            assert!(serde_json::from_str::<Predicate>(r#"{"Removed":null}"#).is_err());
         }
 
         #[test]
         fn predicate_decode_errors_are_pinned() {
             for (json, error) in [
-                (
-                    r#"{"EnumMatch":{"column":"e","case":"k","payload":{"IsNull":{"Column":"f"}},"extra":1}}"#,
-                    "unknown field `extra`, expected one of `column`, `case`, `payload` at line 1 column 81",
-                ),
-                (
-                    r#"{"EnumMatch":{"column":"e","column":"e","case":"k"}}"#,
-                    "duplicate field `column` at line 1 column 35",
-                ),
-                (
-                    r#"{"EnumMatch":{"case":"k","payload":{"IsNull":{"Column":"f"}}}}"#,
-                    "missing field `column` at line 1 column 61",
-                ),
                 (
                     r#"{"Eq":[{"Column":"a"},{"Column":"b"},{"Column":"c"}]}"#,
                     "trailing characters at line 1 column 38",
@@ -2103,7 +1890,7 @@ mod tests {
                 assert_eq!(json_err(json), error, "{json}");
             }
             for json in [
-                r#"{"EnumMatch":["e","k"]}"#,
+                r#"{"EnumMatch":{"column":"e","case":"k","payload":"True"}}"#,
                 r#"{"Eq":[{"Column":"a"}]}"#,
                 r#"{"In":[{"Column":"a"}]}"#,
                 r#"{"Nope":[]}"#,
