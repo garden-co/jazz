@@ -19,6 +19,9 @@ pub struct App {
     /// `sha256:<hex>` of the file ([`artifact::source_hash`]): what the
     /// bindings record so a stale copy is caught.
     pub source: String,
+    /// The file's text with CRLF read as LF: the bytes `source` hashes.
+    /// Empty when the app wasn't loaded from a file.
+    pub file: String,
     /// The current tables, by name.
     pub tables: Vec<Table>,
     /// The file's top-level `transforms`, by name.
@@ -164,10 +167,9 @@ impl App {
     /// Read and check `jazz.app.json` as `jazz validate` does.
     pub fn load(file: &[u8]) -> Result<App, ArtifactError> {
         let definition = artifact::load_app(file)?;
-        Ok(App::from_definition(
-            artifact::source_hash(file),
-            &definition,
-        ))
+        let mut app = App::from_definition(artifact::source_hash(file), &definition);
+        app.file = String::from_utf8_lossy(file).replace("\r\n", "\n");
+        Ok(app)
     }
 
     fn from_definition(source: String, definition: &AppDefinition) -> App {
@@ -183,6 +185,7 @@ impl App {
             .collect();
         App {
             source,
+            file: String::new(),
             tables,
             transforms: codegen
                 .transforms

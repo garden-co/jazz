@@ -24,6 +24,16 @@ pub const FILE: &str = "jazz.generated.ts";
 pub const HEADER: &str =
     "// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.";
 
+/// The version of the module's shape, on its second line. A generator
+/// that writes another shape bumps it, so `validate --check` catches
+/// bindings an older Jazz wrote for the same file.
+pub const FORMAT: u32 = 1;
+
+/// The second line.
+pub(crate) fn format_line() -> String {
+    format!("// Bindings format {FORMAT}. Formatters may reformat this file, except `app` below.")
+}
+
 /// The marker before the embedded `bindApp` options, which
 /// [`crate::bindings`] reads back.
 pub(crate) const BIND_APP: &str = "export const app = bindApp<";
@@ -154,6 +164,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
 
     let mut out = String::new();
     let _ = writeln!(out, "{HEADER}");
+    let _ = writeln!(out, "{}", format_line());
     let mut imports = vec!["bindApp", "type AppTypes"];
     if has_computed {
         imports.push("type ComputedImpl");
@@ -358,6 +369,11 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
     }
 
     let options = bind_options(app);
+    // Read back by `jazz-tools validate` and `migrations create`, so
+    // formatters must leave it as it is.
+    out.push_str("// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.\n");
+    out.push_str("// biome-ignore format: generated JSON\n");
+    out.push_str("// prettier-ignore\n");
     let _ = write!(
         out,
         "{BIND_APP}{}>(",
