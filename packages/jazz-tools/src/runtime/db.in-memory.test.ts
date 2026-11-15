@@ -587,18 +587,23 @@ describe("createDb in-memory driver", () => {
   it("clamps a range on a column a computed column makes it read whole (#5502)", async () => {
     // The engine reads body and payload whole for `size`, so the selection
     // is taken from the whole value in TypeScript; it clamps like the engine.
-    const computedApp = s.defineApp(
+    const computedApp = testApp(
       {
-        documents: s.table(
-          { body: s.string(), payload: s.bytes() },
-          {
-            size: s.computed(
-              (row: { body: string; payload: Uint8Array }) => row.body.length + row.payload.length,
-            ),
+        tables: {
+          documents: {
+            columns: { body: "string", payload: "bytes" },
+            computed: { size: { type: "int", from: ["body", "payload"] } },
           },
-        ),
+        },
       },
-      { migrations: "none" },
+      {
+        computed: {
+          documents: {
+            size: (row: { body: string; payload: Uint8Array }) =>
+              row.body.length + row.payload.length,
+          },
+        },
+      },
     );
     db = await createDb({
       ...(await localAccountConfig("in-memory-whole-read-range-clamp-test")),
