@@ -618,6 +618,31 @@ Partial selections in aggregate, union or joined queries fail explicitly. A
 column that a computed column or transform also depends on is read whole and
 its selection is taken from the whole value.
 
+Who reports a selection's error. An authority answering a session's
+one-shot read ships stored rows, not values. On a store that never has to
+fetch a leaf (no chunk store, or one whose lookups always answer at once,
+including that a leaf is not there) it does not decode the cells of the
+rows it ships. Errors of a partial selection's shape and bounds are
+decided from the cell and its descriptor's lengths, and the authority
+refuses the read with them: a range past the value's end, and any error
+of a partial selection on an inline value. An error that only a chunked
+value's content decides (a UTF-8 or UTF-16 range that splits a
+character, a JSON pointer that is not there) is reported by the reader:
+the authority sends the row and settles the read, and the reader's own
+read of the value fails with the same code and message. The authority
+also answers with the row where a leaf its chunk store should hold is not
+there or does not match its hash: its answer to the reader's pull lists
+that chunk as one it cannot supply (19.8), and the reader's read fails as
+missing chunks, not with the authority's own storage error. Where the
+store fails to read a leaf (a storage error, not "not there"), the
+reader's pull waits and is answered again after a wait (19.10), and the
+reader's read ends once the store reads again. A
+node that does not match its hash while still in the authority's SQLite
+file, and a cell, of any column, that does not decode as its type, are
+answered with the row as well; what the reader's read then reports is
+not specified here. A relay, and an authority whose chunk store answers
+only later, decode the cells and report all of these themselves.
+
 `Db.update` accepts ordinary replacements and an `applyDiffs` option. Both are
 one atomic mutation, but the same column must not appear in both inputs:
 

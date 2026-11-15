@@ -13394,7 +13394,19 @@ impl Db {
                 } else {
                     None
                 };
-                let rows = inner.run(&prepared, policy, &read)?;
+                // The answer ships stored images, never these rows' cells:
+                // an authority that never has to fetch a leaf (no chunk
+                // store, or one whose lookups always answer at once,
+                // including that a leaf is not there) does not decode
+                // them. A relay does, and so does an authority whose chunk
+                // store answers only later: there a missing chunk is what
+                // makes the read wait for the fetch before it answers.
+                let local = inner.client.is_none() && inner.chunks.never_fetches();
+                let rows = if local && !session_read_decodes_cells() {
+                    inner.run_without_cells(&prepared, policy, &read)?
+                } else {
+                    inner.run(&prepared, policy, &read)?
+                };
                 let unchanged: HashSet<RowUuid> = rows
                     .iter()
                     .filter(|row| {
@@ -15179,6 +15191,26 @@ fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
         }
         _ => None,
     }
+}
+
+#[cfg(feature = "testing")]
+thread_local! {
+    static SESSION_READ_CELLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make the authority decode a session read's cells, as a relay does, so
+/// a test can compare its answers with and without them.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn decode_session_read_cells_for_test(decode: bool) {
+    SESSION_READ_CELLS.with(|cell| cell.set(decode));
+}
+
+fn session_read_decodes_cells() -> bool {
+    #[cfg(feature = "testing")]
+    return SESSION_READ_CELLS.with(std::cell::Cell::get);
+    #[cfg(not(feature = "testing"))]
+    false
 }
 
 #[cfg(test)]

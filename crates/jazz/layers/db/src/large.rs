@@ -41,6 +41,15 @@ use crate::values::{Column, Sql, Table, quote, storage};
 #[cfg(feature = "testing")]
 thread_local! {
     static FULL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CELL_RANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many ranges of chunked or inline cells this thread has read for a
+/// partial selection (a read's `select_part`), so tests can tell whether a
+/// read decoded its cells at all.
+#[cfg(feature = "testing")]
+pub fn cell_ranges_for_test() -> usize {
+    CELL_RANGES.with(std::cell::Cell::get)
 }
 
 /// How many chunked values have been rebuilt whole on this thread, so tests

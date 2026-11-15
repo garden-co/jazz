@@ -865,6 +865,13 @@ struct Inner {
     withheld: std::cell::Cell<bool>,
 }
 
+/// Whether a read decodes its rows' projected cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decode {
+    Cells,
+    Nothing,
+}
+
 /// Large-value nodes one tick may reclaim.
 const RECLAIM_NODES_PER_TICK: usize = 256;
 
@@ -5101,12 +5108,53 @@ impl Inner {
         Ok(self.run_with_deps(prepared, identity, read)?.0)
     }
 
+    /// [`Inner::run`] for a caller that uses only each row's identity,
+    /// version, deletion, writer and joined rows, never its cells: the
+    /// projected cells are not decoded (each reads as `None`), so no chunk
+    /// of a large value is read. A partial selection is still refused where
+    /// the cell alone says so ([`Inner::check_part`]). A session's read at
+    /// the authority answers with stored images, not these rows.
+    pub(crate) fn run_without_cells(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let (compiled, _) = self.compile_visible(prepared, identity, read)?;
+        let mut run = crate::slow::Run::default();
+        let started = web_time::Instant::now();
+        let rows = self.execute_sql(
+            &compiled.sql,
+            &compiled,
+            &prepared.query.table,
+            &mut run,
+            None,
+            Decode::Nothing,
+        )?;
+        run.elapsed = started.elapsed();
+        self.record_slow(&compiled, &prepared.query.table, run, rows.len());
+        Ok(rows)
+    }
+
     fn run_with_deps(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
+        let (compiled, tables) = self.compile_visible(prepared, identity, read)?;
+        let rows = self.execute(&compiled, &prepared.query.table)?;
+        Ok((rows, tables))
+    }
+
+    /// `prepared` compiled for `read` as visible over its tables, and those
+    /// tables (its root's and its array relations').
+    fn compile_visible(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<(Compiled, BTreeSet<String>), Error> {
         let mut compiled = self.compile(prepared, identity, read)?;
         // Array relations are part of a subscription's dependencies, and
         // of the tables its cut is decided over.
@@ -5115,8 +5163,7 @@ impl Inner {
         if let std::borrow::Cow::Owned(visible) = &visible {
             compiled = self.compile(prepared, identity, visible)?;
         }
-        let rows = self.execute(&compiled, &prepared.query.table)?;
-        Ok((rows, tables))
+        Ok((compiled, tables))
     }
 
     /// `tables` (a compiled root's) and the stored tables of `prepared`'s
@@ -5159,11 +5206,30 @@ impl Inner {
     ) -> Result<Vec<CurrentRow>, Error> {
         let started = web_time::Instant::now();
         let mut run = crate::slow::Run::default();
-        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run, keys)?;
+        let rows = self.execute_sql(
+            &compiled.sql,
+            compiled,
+            table,
+            &mut run,
+            keys,
+            Decode::Cells,
+        )?;
         run.elapsed = started.elapsed();
+        self.record_slow(compiled, table, run, rows.len());
+        Ok(rows)
+    }
+
+    /// Note `run` of `compiled` in the slow-query log if it was slow.
+    fn record_slow(
+        &self,
+        compiled: &Compiled,
+        table: &str,
+        mut run: crate::slow::Run,
+        rows: usize,
+    ) {
         let mut slow = self.slow.borrow_mut();
         if slow.is_slow(run.elapsed) {
-            run.rows = rows.len() as u64;
+            run.rows = rows as u64;
             let schema_version = self
                 .conn
                 .query_row("PRAGMA schema_version", [], |r| r.get(0))
@@ -5173,7 +5239,6 @@ impl Inner {
                     .unwrap_or_else(|error| format!("(no plan: {error})"))
             });
         }
-        Ok(rows)
     }
 
     /// SQLite's plan for `sql`, one step per line.
@@ -5199,6 +5264,7 @@ impl Inner {
         table: &str,
         run: &mut crate::slow::Run,
         mut keys: Option<&mut Vec<i64>>,
+        decode: Decode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         // Cached statements keep counting across runs: start this one at 0.
@@ -5288,6 +5354,14 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty, tags))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
+                    if decode == Decode::Nothing {
+                        // A part past its value's end refuses the read all
+                        // the same: the lengths are in the cell.
+                        if let Some(part) = compiled.partial.get(i).and_then(Option::as_ref) {
+                            self.check_part(ty, cell, part)?;
+                        }
+                        return Ok((name.clone(), None));
+                    }
                     let value = match compiled.partial.get(i).and_then(Option::as_ref) {
                         Some(part) => self.partial_cell(ty, cell, part),
                         None => cell_from_sql(ty, tags.as_ref(), cell, &self.chunks),

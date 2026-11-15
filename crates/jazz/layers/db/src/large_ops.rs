@@ -398,6 +398,8 @@ impl Inner {
         range: std::ops::Range<u64>,
         utf16: bool,
     ) -> Result<Vec<u8>, Error> {
+        #[cfg(feature = "testing")]
+        crate::large::CELL_RANGES.with(|count| count.set(count.get() + 1));
         match self.chunks.logical(cell)? {
             Logical::Inline(bytes) if utf16 => {
                 let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
@@ -435,6 +437,40 @@ impl Inner {
                     })
                 }
             }
+        }
+    }
+
+    /// Whether [`Inner::partial_cell`] would refuse `part` of `cell`, as far
+    /// as that is decided without reading a chunk: an inline value is read
+    /// as it would be (it is in the cell), a chunked one is checked against
+    /// the lengths in its descriptor. What only a chunked value's content
+    /// decides (a range splitting a code point or a surrogate pair, a JSON
+    /// pointer that is not there) is not checked.
+    pub(crate) fn check_part(
+        &self,
+        ty: &ValueType,
+        cell: ValueRef<'_>,
+        part: &crate::query::Part,
+    ) -> Result<(), Error> {
+        use crate::query::Part;
+        if let ValueType::Nullable(inner) = ty {
+            return match cell {
+                ValueRef::Null => Ok(()),
+                cell => self.check_part(inner, cell, part),
+            };
+        }
+        let value = match self.chunks.logical(cell)? {
+            Logical::Inline(_) => return self.partial_cell(ty, cell, part).map(drop),
+            Logical::Chunked(value) => value,
+        };
+        match part {
+            Part::Bytes { from, to } | Part::TextUtf8 { from, to } => {
+                check_range(&(*from..*to), value.byte_length)
+            }
+            Part::TextUtf16 { from, to } => {
+                check_range(&(*from..*to), value.utf16_length.unwrap_or(0))
+            }
+            Part::JsonPointer(_) => Ok(()),
         }
     }
 
