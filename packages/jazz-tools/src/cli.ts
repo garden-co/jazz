@@ -137,9 +137,22 @@ export interface CreateMigrationOptions {
   lang?: string[];
 }
 
-/** Every `--lang <lang>` given. */
-function langFlags(args: string[]): string[] {
-  return args.flatMap((arg, i) => (arg === "--lang" && args[i + 1] ? [args[i + 1]!] : []));
+/** Every `--lang <lang>` (or `--lang=<lang>`) given; one without a value is refused. */
+export function langFlags(args: readonly string[]): string[] {
+  const langs: string[] = [];
+  args.forEach((arg, i) => {
+    if (arg.startsWith("--lang=")) {
+      const lang = arg.slice("--lang=".length);
+      if (!lang) throw new Error("Missing value for --lang (e.g. --lang ts).");
+      langs.push(lang);
+    } else if (arg === "--lang") {
+      const lang = args[i + 1];
+      if (!lang || lang.startsWith("--"))
+        throw new Error("Missing value for --lang (e.g. --lang ts).");
+      langs.push(lang);
+    }
+  });
+  return langs;
 }
 
 // Framework bundlers (Vite, SvelteKit, Next.js, Expo) expose public env vars
@@ -531,7 +544,12 @@ if (isMainModule()) {
     let task: Promise<unknown>;
 
     if (subcommand === "create") {
-      const commandArgs = args.slice(2);
+      // `--lang=x` is `--lang x`, so the pairs below check it like any flag.
+      const commandArgs = args
+        .slice(2)
+        .flatMap((arg) =>
+          arg.startsWith("--lang=") ? ["--lang", arg.slice("--lang=".length)] : [arg],
+        );
       task = (async () => {
         assertFlagPairs(commandArgs, ["--schema-dir", "--name", "--lang"], (arg) =>
           ["--fromHash", "--toHash", "--migrations-dir"].includes(arg)

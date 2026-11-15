@@ -2,10 +2,13 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../../tests/cli/fixtures.js";
+import { createMigration, generate, langFlags } from "../cli.js";
 import { generateForDir } from "./codegen-napi.js";
 import { generateApp } from "./project.js";
 
-const { createWorkspace, fileExists, writeAppFiles } = createCliFixtures(import.meta.url);
+const { createWorkspace, fileExists, writeAppFiles, captureConsoleLogs } = createCliFixtures(
+  import.meta.url,
+);
 
 /**
  * `npx jazz-tools generate` picks languages and writes bindings through
@@ -60,5 +63,45 @@ describe("generate picks the app's languages as the binary does", () => {
     expect(again.current).toEqual(["jazz.generated.ts"]);
     expect(again.written).toEqual([]);
     expect(await readFile(join(root, "jazz.generated.ts"), "utf8")).toBe(written);
+  });
+});
+
+describe("npm CLI flags and messages from the shared code", () => {
+  it("reads --lang in both forms and refuses one without a value", () => {
+    expect(langFlags(["--lang", "rust", "--check", "--lang=ts"])).toEqual(["rust", "ts"]);
+    expect(langFlags(["--check"])).toEqual([]);
+    for (const args of [["--lang"], ["--lang", "--check"], ["--lang="]]) {
+      expect(() => langFlags(args)).toThrow("Missing value for --lang");
+    }
+  });
+
+  it("generates the languages --lang names, and refuses one that isn't available", async () => {
+    const { root } = await createWorkspace();
+    await writeAppFiles(root);
+    await captureConsoleLogs(() => generate({ schemaDir: root, lang: ["rust"] }));
+    expect(await fileExists(join(root, "src", "jazz_app.rs"))).toBe(true);
+    expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
+    for (const lang of ["swift", "kotlin", "go"]) {
+      await expect(generate({ schemaDir: root, lang: [lang] })).rejects.toThrow(
+        /not (supported|available) yet/,
+      );
+    }
+  });
+
+  it("prints the shared code's note when only indexes changed", async () => {
+    const { root } = await createWorkspace();
+    const app = { format: 1, tables: { todos: { columns: { title: "string" } } } };
+    await writeAppFiles(root, app, { format: 1, tables: { todos: { read: "true" } } });
+    await captureConsoleLogs(() => generate({ schemaDir: root }));
+    await writeAppFiles(
+      root,
+      { format: 1, tables: { todos: { columns: { title: "string" }, indexes: ["title"] } } },
+      { format: 1, tables: { todos: { read: "true" } } },
+    );
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({ schemaDir: root, name: "index-title" }),
+    );
+    expect(result).toBeNull();
+    expect(logs.join("\n")).toContain("Only single-column indexes changed: no migration needed");
   });
 });

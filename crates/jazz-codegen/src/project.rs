@@ -201,11 +201,11 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
             Err(error) => return Err(format!("{}: {error}", shown(&path))),
         };
         if check {
-            return Err(format!(
-                "{}: {}",
-                shown(&path),
-                staleness.message(selected.lang)
-            ));
+            return Err(match staleness {
+                // "no <file>: …" names the file already.
+                Staleness::Missing => Staleness::Missing.message(selected.lang),
+                other => format!("{}: {}", shown(&path), other.message(selected.lang)),
+            });
         }
         generated.push((selected.lang, path, text));
     }
@@ -494,6 +494,20 @@ mod tests {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[test]
+    fn messages_show_paths_below_the_current_directory_relative_to_it() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            shown(&cwd.join("app").join("jazz.generated.ts")),
+            format!("app{}jazz.generated.ts", std::path::MAIN_SEPARATOR)
+        );
+        assert_eq!(shown(&cwd), ".");
+        let outside = Path::new("/elsewhere/jazz.app.json");
+        if !outside.starts_with(&cwd) {
+            assert_eq!(shown(outside), "/elsewhere/jazz.app.json");
+        }
+    }
 
     /// A TS app's files may sit in `src/` or `src/lib/` of the package whose
     /// `package.json` says it's TS, where the npm CLI finds them.
