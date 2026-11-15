@@ -62,8 +62,12 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "txCommit"   {"tx", "tier"?}              -> null
  *   "txRollback" {"tx"}                       -> null
  *   "editText" {"table", "id", "column", "editedFrom", "text"} -> null
+ *   "textEdit" {"table", "id", "column", "units"?: "utf8"|"utf16",
+ *               "edits": [{"pos", "delete", "insert"}]}       -> null
  *   "edit"     {"table", "id", "patch"?, "edits": [...]}      -> null
  *              (edits: text / splice / jsonSet, see the README)
+ *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
+ *               "id"?, "row"?}                               -> true|false|null
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
