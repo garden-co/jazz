@@ -23,29 +23,45 @@ private operator fun <T> List<T>.component6(): T = this[5]
 private operator fun <T> List<T>.component7(): T = this[6]
 
 class StagePlanTest {
-    private lateinit var backend: Process
-    private lateinit var appId: String
+    private lateinit var core: Process
+    private lateinit var relay: Process
+    private val appId = java.util.UUID.randomUUID().toString()
     private lateinit var endpoint: String
 
-    /** StagePlan's backend for the test: a Jazz server, the app's backend and its endpoint (a test harness). */
+    /**
+     * StagePlan's backend for the test: a Jazz server (`jazz-tools server`)
+     * and `jazz-app-test-relay`, which publishes StagePlan's permissions and
+     * stands in for the backend's Jazz endpoint. A test harness, not a backend
+     * to copy: real backends are TypeScript, Rust or Go.
+     */
     @BeforeTest
     fun startBackend() {
-        backend = ProcessBuilder(
-            System.getenv("JAZZ_TEST_APP_BACKEND"),
-            java.io.File("jazz.app.json").absolutePath,
-            java.io.File("jazz.permissions.json").absolutePath,
-        ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
-        val line = backend.inputStream.bufferedReader().readLine() ?: error("the test backend didn't start")
-        val info = kotlinx.serialization.json.Json.parseToJsonElement(line) as kotlinx.serialization.json.JsonObject
-        appId = (info["appId"] as kotlinx.serialization.json.JsonPrimitive).content
-        endpoint = (info["endpoint"] as kotlinx.serialization.json.JsonPrimitive).content
+        val backendSecret = "backend-" + java.util.UUID.randomUUID()
+        val adminSecret = "admin-" + java.util.UUID.randomUUID()
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        core = ProcessBuilder(System.getenv("JAZZ_TOOLS"), "server", appId, "--in-memory", "--port", "$port")
+            .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.INHERIT)
+            .apply { environment()["JAZZ_BACKEND_SECRET"] = backendSecret; environment()["JAZZ_ADMIN_SECRET"] = adminSecret }
+            .start()
+        val deadline = System.currentTimeMillis() + 30_000
+        while (runCatching { java.net.Socket("127.0.0.1", port).close() }.isFailure) {
+            check(core.isAlive && System.currentTimeMillis() < deadline) { "jazz-tools server didn't start" }
+            Thread.sleep(100)
+        }
+        relay = ProcessBuilder(
+            System.getenv("JAZZ_APP_TEST_RELAY"), "--core", "http://127.0.0.1:$port", "--app-id", appId,
+            "--app", java.io.File("jazz.app.json").absolutePath,
+            "--permissions", java.io.File("jazz.permissions.json").absolutePath,
+        ).redirectError(ProcessBuilder.Redirect.INHERIT)
+            .apply { environment()["JAZZ_BACKEND_SECRET"] = backendSecret; environment()["JAZZ_ADMIN_SECRET"] = adminSecret }
+            .start()
+        endpoint = relay.inputStream.bufferedReader().readLine() ?: error("jazz-app-test-relay didn't start")
     }
 
     @AfterTest
     fun stopBackend() {
-        backend.outputStream.close()
-        backend.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)
-        backend.destroy()
+        relay.destroy()
+        core.destroy()
     }
 
     /** [user], signed in with the backend's sign-in (the harness takes `token-<user>`). */

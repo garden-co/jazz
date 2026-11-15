@@ -31,11 +31,13 @@ val ffiLibDir = repo.resolve("target/debug")
 tasks.test {
     useJUnitPlatform()
     systemProperty("jna.library.path", ffiLibDir.path)
-    // The tests' StagePlan backend: a test harness, not an example backend
-    // (cargo build -p jazz-app --example test_app_backend).
+    // The tests' StagePlan backend, a test harness: a Jazz server and the test
+    // stand-in for a backend's Jazz endpoint (cargo build -p jazz-cli --bin
+    // jazz-tools; cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay).
+    environment("JAZZ_TOOLS", System.getenv("JAZZ_TOOLS") ?: repo.resolve("target/debug/jazz-tools").path)
     environment(
-        "JAZZ_TEST_APP_BACKEND",
-        System.getenv("JAZZ_TEST_APP_BACKEND") ?: repo.resolve("target/debug/examples/test_app_backend").path,
+        "JAZZ_APP_TEST_RELAY",
+        System.getenv("JAZZ_APP_TEST_RELAY") ?: repo.resolve("target/debug/jazz-app-test-relay").path,
     )
     testLogging { events("passed", "failed"); showStandardStreams = true }
 }

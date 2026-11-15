@@ -20,6 +20,6 @@ gradle run --args='"Opening night" move <task id> doing'
 ```
 
 `gradle test` runs the slice and every docs snippet in `DocsSnippets.kt` against a StagePlan
-backend started by the test: `crates/jazz-app/examples/test_app_backend.rs`, a **test harness** (a
-Jazz server, the app's backend and a stand-in for its endpoint), not a backend to copy.
+backend the test starts, a **test harness** and not a backend to copy: `jazz-tools server` and
+`jazz-app-test-relay`, which publishes StagePlan's permissions and stands in for its Jazz endpoint.
 `dev/scripts/test-kotlin.sh` is the CI entry point.
