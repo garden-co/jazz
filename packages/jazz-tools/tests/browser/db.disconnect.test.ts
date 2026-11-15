@@ -3,7 +3,6 @@ import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
   createBrowserTestDb as createDb,
@@ -13,12 +12,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import {
-  compileTestPermissions,
-  getJazzServerInfo,
-  startJazzApp,
-  type JazzServerInfo,
-} from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
 import { app, type Todo } from "./apps/disconnect-todos/jazz.generated.js";
 import allowAllPermissions from "./apps/disconnect-todos/jazz.permissions.json";
 
@@ -134,7 +128,7 @@ describe("Db disconnect/reconnect", () => {
         },
       },
     };
-    await deploy({ ...core, app, permissions: await compileTestPermissions(app, permissions) });
+    await deploy({ ...core, app, permissions: permissions });
     const server = await startJazzApp(core, { schema: app, permissions });
     const secret = generateAuthSecret();
     const db = await createWorkerDb(ctx, `${label}-reader`, secret, server);
@@ -986,7 +980,7 @@ async function publishSyncServerSchemaAndPermissions(
     serverUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, allowAllPermissions),
+    permissions: allowAllPermissions,
   });
   return startJazzApp(testingServer, { schema: app, permissions: allowAllPermissions });
 }

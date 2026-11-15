@@ -2,7 +2,6 @@ import type { WasmSchema } from "./types.js";
 import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { isRecord } from "../runtime/util.js";
 
-
 interface RuntimeSchemaEnvelope {
   __jazzRuntimeSchema: 1;
   schema: WasmSchema;

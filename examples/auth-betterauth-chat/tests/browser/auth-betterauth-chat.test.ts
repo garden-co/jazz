@@ -103,7 +103,9 @@ async function remove(client: JazzClient, messageId: string): Promise<void> {
 
 describe("auth-betterauth-chat permissions", () => {
   it("denies every operation on every generated Better Auth table", () => {
-    const betterAuthTables = Object.keys(app.wasmSchema).filter((name) => name.startsWith("better_auth_"));
+    const betterAuthTables = Object.keys(app.wasmSchema).filter((name) =>
+      name.startsWith("better_auth_"),
+    );
     expect(betterAuthTables.length).toBeGreaterThan(0);
     const tables = permissions.tables as Record<string, unknown>;
     for (const tableName of betterAuthTables) {

@@ -101,7 +101,10 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       'deploy requires the app\'s jazz.permissions.json (`{ "format": 1, "tables": {} }` denies all access).',
     );
   }
-  return publishLoadedDeployment(options, await loadBackendAppFor(options.app, options.permissions));
+  return publishLoadedDeployment(
+    options,
+    await loadBackendAppFor(options.app, options.permissions),
+  );
 }
 
 /** {@link deploy}, by the name `createJazz` and the test servers use. */

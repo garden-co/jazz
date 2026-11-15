@@ -2,7 +2,15 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type JsonValue } from "jazz-tools";
 
-export type BlockKind = "paragraph" | "heading" | "todo" | "bullet" | "quote" | "divider" | "image" | "file";
+export type BlockKind =
+  | "paragraph"
+  | "heading"
+  | "todo"
+  | "bullet"
+  | "quote"
+  | "divider"
+  | "image"
+  | "file";
 export type InviteRole = "member" | "viewer" | "editor";
 export type IssueStatus = "backlog" | "todo" | "in_progress" | "done";
 export type IssuePriority = "none" | "low" | "medium" | "high" | "urgent";

@@ -1,23 +1,23 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type ComputedImpl, type TransformImpl } from "jazz-tools";
-import { computed, transforms } from "./jazz.computed";
+import { computed, transforms } from "./jazz.computed.js";
 
 export type RowJson = { extra: string; title: string };
 
-export interface Row {
+export type Row = {
   readonly id: string;
   text: string;
   json: RowJson;
   bytes: Uint8Array;
   readonly summary: string;
-}
+};
 
-export interface RowInsert {
+export type RowInsert = {
   text: string;
   json: RowJson;
   bytes: Uint8Array;
-}
+};
 
 interface Types extends AppTypes {
   rows: {

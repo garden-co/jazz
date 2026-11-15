@@ -33,7 +33,7 @@ it("disconnects before any query and reconnects using only native credentials", 
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(

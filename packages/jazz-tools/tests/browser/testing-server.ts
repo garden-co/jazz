@@ -4,7 +4,11 @@ import type { AccountHandle } from "../../src/accounts/state.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
 import { boundApp, type BoundApp } from "../../src/typed-app.js";
 import type { TestPermissionsFile } from "../../src/testing/test-app.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
+import {
+  publishLoadedDeployment,
+  type DeployOptions,
+  type DeployResult,
+} from "../../src/dev/catalogue.js";
 import {
   jazzServerBrowserCommands,
   jazzServerTransportControlBrowserCommands,
@@ -52,17 +56,19 @@ export async function startJazzApp(
 }
 
 /**
- * The engine's policies for `permissions` (a `jazz.permissions.json`, as an
- * object), compiled against `app` in Node as a backend compiles them: what
- * `deploy` publishes. `app` comes from a committed `jazz.generated.ts`.
+ * Publish `app` with `permissions` (its `jazz.permissions.json`, as an
+ * object) to the core in `options`, as `deploy` from `src/dev/catalogue.ts`
+ * does in Node. Jazz's Rust loader builds the deployment in Node (the
+ * `jazzTestDeployment` command); the browser publishes it.
  */
-export async function compileTestPermissions(
-  app: SchemaSourceInput,
-  permissions: TestPermissionsFile,
-): Promise<CompiledPermissionsMap> {
-  const compile = jazzServerBrowserCommands().jazzTestPermissions;
-  if (!compile) throw new Error("Browser test project is missing the jazzTestPermissions command.");
-  return compile(boundOf(app), permissions);
+export async function deploy(options: DeployOptions): Promise<DeployResult> {
+  const { app, permissions, ...server } = options;
+  const build = jazzServerBrowserCommands().jazzTestDeployment;
+  if (!build) throw new Error("Browser test project is missing the jazzTestDeployment command.");
+  return publishLoadedDeployment(
+    server,
+    await build(boundOf(app), permissions as TestPermissionsFile),
+  );
 }
 
 function boundOf(app: SchemaSourceInput): BoundApp {

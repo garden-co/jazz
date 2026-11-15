@@ -1,9 +1,9 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type TransformImpl } from "jazz-tools";
-import { transforms } from "./jazz.computed";
+import { transforms } from "./jazz.computed.js";
 
-export interface Item {
+export type Item = {
   readonly id: string;
   count: number;
   tags: string[];
@@ -13,9 +13,9 @@ export interface Item {
   optionalDefaulted: number | null;
   transformedOptional: number | null;
   defaultedMerge: number;
-}
+};
 
-export interface ItemInsert {
+export type ItemInsert = {
   count: number;
   tags: string[];
   transformed: number;
@@ -24,7 +24,7 @@ export interface ItemInsert {
   optionalDefaulted?: number | null;
   transformedOptional?: number | null;
   defaultedMerge?: number;
-}
+};
 
 interface Types extends AppTypes {
   items: {

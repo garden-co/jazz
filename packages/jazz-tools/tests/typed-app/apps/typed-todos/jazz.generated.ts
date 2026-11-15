@@ -1,19 +1,19 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type TodoOptionalStatus = "new" | "done";
 
-export interface Project {
+export type Project = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   name: string;
-}
+};
 
-export interface Todo {
+export type Todo = {
   readonly id: string;
   title: string;
   optionalTitle: string | null;
@@ -26,9 +26,9 @@ export interface Todo {
   optionalStatus: TodoOptionalStatus | null;
   project: string;
   owner: string | null;
-}
+};
 
-export interface TodoInsert {
+export type TodoInsert = {
   title: string;
   optionalTitle?: string | null;
   done: boolean;
@@ -40,16 +40,16 @@ export interface TodoInsert {
   optionalStatus?: TodoOptionalStatus | null;
   project: string;
   owner?: string | null;
-}
+};
 
-export interface User {
+export type User = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface UserInsert {
+export type UserInsert = {
   name: string;
-}
+};
 
 interface Types extends AppTypes {
   projects: {

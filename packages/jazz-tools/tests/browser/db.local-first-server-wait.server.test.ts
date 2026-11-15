@@ -1,11 +1,10 @@
 import { afterEach, expect, it } from "vitest";
 import { generateAuthSecret, ReadTier } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { app } from "./apps/local-first-server-wait/jazz.generated.js";
 import permissions from "./apps/local-first-server-wait/jazz.permissions.json";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
 import {
-  compileTestPermissions,
+  deploy,
   createJazzServerTransportControl,
   getJazzServerInfo,
   startJazzApp,
@@ -29,7 +28,7 @@ it("shows local rows at the deadline when a live server has not answered", async
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },

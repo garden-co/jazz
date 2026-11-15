@@ -8,7 +8,6 @@
 
 import { afterEach, expect, it } from "vitest";
 import { ReadTier, generateAuthSecret, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -18,7 +17,7 @@ import {
 } from "./support.js";
 import { app } from "./apps/serializable-worker-tab/jazz.generated.js";
 import permissions from "./apps/serializable-worker-tab/jazz.permissions.json";
-import { compileTestPermissions, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 // The app (apps/serializable-worker-tab): seats everyone may read, insert and update; an
 // audit log everyone may read and append to.
@@ -30,7 +29,7 @@ afterEach(async () => {
 
 async function setup(label: string) {
   const core = await getJazzServerInfo(uniqueDbName(label));
-  await deploy({ ...core, app, permissions: await compileTestPermissions(app, permissions) });
+  await deploy({ ...core, app, permissions: permissions });
   const server = await startJazzApp(core, { schema: app, permissions });
   const open = async (persistent: boolean): Promise<Db> =>
     ctx.track(

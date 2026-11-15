@@ -1,4 +1,12 @@
-import { readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  readdirSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -153,9 +161,15 @@ describe("Rust apps", () => {
       expect(isRustApp(dir)).toBe(false);
       writeFileSync(join(dir, "Cargo.toml"), '[workspace]\nmembers = ["a"]\n');
       expect(isRustApp(dir), "a workspace root").toBe(false);
-      writeFileSync(join(dir, "Cargo.toml"), '[package]\nname = "x"\n\n[dependencies]\nserde = "1"\n');
+      writeFileSync(
+        join(dir, "Cargo.toml"),
+        '[package]\nname = "x"\n\n[dependencies]\nserde = "1"\n',
+      );
       expect(isRustApp(dir), "an unrelated crate").toBe(false);
-      writeFileSync(join(dir, "Cargo.toml"), '[package]\nname = "x"\n\n[dependencies]\njazz-app = { path = "../jazz-app" }\n');
+      writeFileSync(
+        join(dir, "Cargo.toml"),
+        '[package]\nname = "x"\n\n[dependencies]\njazz-app = { path = "../jazz-app" }\n',
+      );
       expect(isRustApp(dir)).toBe(true);
       writeFileSync(join(dir, "Cargo.toml"), '[package]\nname = "x"\n');
       mkdirSync(join(dir, "src"));

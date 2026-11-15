@@ -13,11 +13,10 @@ import { describe, it, expect, afterEach, beforeAll, afterAll } from "vitest";
 import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { app } from "./apps/history-conflict/jazz.generated.js";
 import permissions from "./apps/history-conflict/jazz.permissions.json";
 import {
-  compileTestPermissions,
+  deploy,
   getJazzServerInfo,
   startJazzApp,
   stopJazzServer,
@@ -74,7 +73,7 @@ describe("History & Conflict Management", () => {
   // Cases use fresh clients and distinct row IDs; the deployed schema is shared.
   beforeAll(async () => {
     const core = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
-    await deploy({ ...core, app, permissions: await compileTestPermissions(app, permissions) });
+    await deploy({ ...core, app, permissions: permissions });
     testingServer = await startJazzApp(core, { schema: app, permissions });
   });
 

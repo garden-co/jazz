@@ -35,7 +35,7 @@ it("isolates pending advice handles and retires them on cancel and close", async
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
@@ -143,7 +143,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(

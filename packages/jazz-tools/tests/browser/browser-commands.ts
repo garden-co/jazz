@@ -6,7 +6,7 @@ import {
 } from "./transport-control-commands.js";
 
 import type { JazzServerInfo } from "./testing-server.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
+import type { LoadedDeployment } from "../../src/dev/catalogue.js";
 import type { BoundApp } from "../../src/typed-app.js";
 import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 
@@ -14,15 +14,12 @@ export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
   /**
-   * Optional: only configs whose tests deploy permissions register it.
-   * The engine's policies for a `jazz.permissions.json`, compiled in Node
-   * against what the app's bindings passed to `bindApp` (the browser can't
-   * load jazz-napi, which compiles them).
+   * Optional: only configs whose tests deploy from the browser register it.
+   * What `deploy` publishes for the app whose bindings passed `bound` to
+   * `bindApp` and its `jazz.permissions.json`, built in Node by Jazz's Rust
+   * loader (the browser can't load jazz-napi).
    */
-  jazzTestPermissions?(
-    bound: BoundApp,
-    permissions: TestPermissionsFile,
-  ): Promise<CompiledPermissionsMap>;
+  jazzTestDeployment?(bound: BoundApp, permissions: TestPermissionsFile): Promise<LoadedDeployment>;
   jazzAppFront(
     coreUrl: string,
     app: {
