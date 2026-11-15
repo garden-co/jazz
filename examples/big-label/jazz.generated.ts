@@ -2,24 +2,24 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Artist {
+export type Artist = {
   readonly id: string;
   organizationId: string;
   name: string;
   genre: string;
   status: string;
   searchKey: string;
-}
+};
 
-export interface ArtistInsert {
+export type ArtistInsert = {
   organizationId: string;
   name: string;
   genre: string;
   status: string;
   searchKey: string;
-}
+};
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -33,9 +33,9 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
@@ -48,9 +48,9 @@ export interface BetterAuthAccountInsert {
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -58,18 +58,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -78,9 +78,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -88,9 +88,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -98,124 +98,124 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface Catalogue {
+export type Catalogue = {
   readonly id: string;
   organizationId: string;
   name: string;
   code: string;
-}
+};
 
-export interface CatalogueInsert {
+export type CatalogueInsert = {
   organizationId: string;
   name: string;
   code: string;
-}
+};
 
-export interface Membership {
+export type Membership = {
   readonly id: string;
   organizationId: string;
   personId: string;
   userId: string;
   role: string;
-}
+};
 
-export interface MembershipInsert {
+export type MembershipInsert = {
   organizationId: string;
   personId: string;
   userId: string;
   role: string;
-}
+};
 
-export interface Organization {
+export type Organization = {
   readonly id: string;
   name: string;
   slug: string;
-}
+};
 
-export interface OrganizationInsert {
+export type OrganizationInsert = {
   name: string;
   slug: string;
-}
+};
 
-export interface Person {
+export type Person = {
   readonly id: string;
   userId: string;
   name: string;
-}
+};
 
-export interface PersonInsert {
+export type PersonInsert = {
   userId: string;
   name: string;
-}
+};
 
-export interface PersonEmail {
+export type PersonEmail = {
   readonly id: string;
   personId: string;
   email: string;
-}
+};
 
-export interface PersonEmailInsert {
+export type PersonEmailInsert = {
   personId: string;
   email: string;
-}
+};
 
-export interface ReleaseAssignment {
+export type ReleaseAssignment = {
   readonly id: string;
   organizationId: string;
   releaseId: string;
   membershipId: string;
   role: string;
-}
+};
 
-export interface ReleaseAssignmentInsert {
+export type ReleaseAssignmentInsert = {
   organizationId: string;
   releaseId: string;
   membershipId: string;
   role: string;
-}
+};
 
-export interface ReleaseTeam {
+export type ReleaseTeam = {
   readonly id: string;
   organizationId: string;
   releaseId: string;
   teamId: string;
-}
+};
 
-export interface ReleaseTeamInsert {
+export type ReleaseTeamInsert = {
   organizationId: string;
   releaseId: string;
   teamId: string;
-}
+};
 
-export interface Release {
+export type Release = {
   readonly id: string;
   organizationId: string;
   artistId: string;
@@ -227,9 +227,9 @@ export interface Release {
   releaseDate: Date;
   status: string;
   searchKey: string;
-}
+};
 
-export interface ReleaseInsert {
+export type ReleaseInsert = {
   organizationId: string;
   artistId: string;
   catalogueId?: string | null;
@@ -240,33 +240,33 @@ export interface ReleaseInsert {
   releaseDate: Date;
   status: string;
   searchKey: string;
-}
+};
 
-export interface TeamAssignment {
+export type TeamAssignment = {
   readonly id: string;
   organizationId: string;
   teamId: string;
   membershipId: string;
   role: string;
-}
+};
 
-export interface TeamAssignmentInsert {
+export type TeamAssignmentInsert = {
   organizationId: string;
   teamId: string;
   membershipId: string;
   role: string;
-}
+};
 
-export interface Team {
+export type Team = {
   readonly id: string;
   organizationId: string;
   name: string;
-}
+};
 
-export interface TeamInsert {
+export type TeamInsert = {
   organizationId: string;
   name: string;
-}
+};
 
 interface Types extends AppTypes {
   artists: {

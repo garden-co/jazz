@@ -2,15 +2,7 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type JsonValue } from "jazz-tools";
 
-export type BlockKind =
-  | "paragraph"
-  | "heading"
-  | "todo"
-  | "bullet"
-  | "quote"
-  | "divider"
-  | "image"
-  | "file";
+export type BlockKind = "paragraph" | "heading" | "todo" | "bullet" | "quote" | "divider" | "image" | "file";
 export type InviteRole = "member" | "viewer" | "editor";
 export type IssueStatus = "backlog" | "todo" | "in_progress" | "done";
 export type IssuePriority = "none" | "low" | "medium" | "high" | "urgent";
@@ -18,7 +10,7 @@ export type MemberRole = "owner" | "member" | "viewer" | "guest";
 export type PageGrantRole = "editor" | "viewer";
 export type PageKind = "doc" | "issues" | "issue" | "song";
 
-export interface Attachment {
+export type Attachment = {
   readonly id: string;
   workspaceId: string;
   pageId: string;
@@ -26,18 +18,18 @@ export interface Attachment {
   mimeType: string;
   byteLength: number;
   bytes: Uint8Array;
-}
+};
 
-export interface AttachmentInsert {
+export type AttachmentInsert = {
   workspaceId: string;
   pageId: string;
   name: string;
   mimeType: string;
   byteLength: number;
   bytes: Uint8Array;
-}
+};
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -45,18 +37,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -64,18 +56,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -84,9 +76,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -94,9 +86,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -104,35 +96,35 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface Block {
+export type Block = {
   readonly id: string;
   workspaceId: string;
   pageId: string;
@@ -142,9 +134,9 @@ export interface Block {
   text: string;
   checked: boolean;
   attachmentId: string | null;
-}
+};
 
-export interface BlockInsert {
+export type BlockInsert = {
   workspaceId: string;
   pageId: string;
   parentBlockId?: string | null;
@@ -153,26 +145,26 @@ export interface BlockInsert {
   text: string;
   checked: boolean;
   attachmentId?: string | null;
-}
+};
 
-export interface Invite {
+export type Invite = {
   readonly id: string;
   workspaceId: string;
   pageId: string | null;
   role: InviteRole;
   token: string;
   label: string;
-}
+};
 
-export interface InviteInsert {
+export type InviteInsert = {
   workspaceId: string;
   pageId?: string | null;
   role: InviteRole;
   token: string;
   label: string;
-}
+};
 
-export interface Issue {
+export type Issue = {
   readonly id: string;
   workspaceId: string;
   pageId: string;
@@ -181,9 +173,9 @@ export interface Issue {
   priority: IssuePriority;
   assignee: string | null;
   labels: string[];
-}
+};
 
-export interface IssueInsert {
+export type IssueInsert = {
   workspaceId: string;
   pageId: string;
   databaseId: string;
@@ -191,54 +183,54 @@ export interface IssueInsert {
   priority: IssuePriority;
   assignee?: string | null;
   labels: string[];
-}
+};
 
-export interface Member {
+export type Member = {
   readonly id: string;
   workspaceId: string;
   account: string;
   displayName: string;
   role: MemberRole;
-}
+};
 
-export interface MemberInsert {
+export type MemberInsert = {
   workspaceId: string;
   account: string;
   displayName: string;
   role: MemberRole;
-}
+};
 
-export interface PageGrant {
+export type PageGrant = {
   readonly id: string;
   workspaceId: string;
   pageId: string;
   account: string;
   role: PageGrantRole;
-}
+};
 
-export interface PageGrantInsert {
+export type PageGrantInsert = {
   workspaceId: string;
   pageId: string;
   account: string;
   role: PageGrantRole;
-}
+};
 
-export interface Page {
+export type Page = {
   readonly id: string;
   workspaceId: string;
   parentId: string | null;
   title: string;
   kind: PageKind;
-}
+};
 
-export interface PageInsert {
+export type PageInsert = {
   workspaceId: string;
   parentId?: string | null;
   title: string;
   kind: PageKind;
-}
+};
 
-export interface SheetComment {
+export type SheetComment = {
   readonly id: string;
   workspaceId: string;
   pageId: string;
@@ -246,18 +238,18 @@ export interface SheetComment {
   range: JsonValue;
   text: string;
   resolved: boolean;
-}
+};
 
-export interface SheetCommentInsert {
+export type SheetCommentInsert = {
   workspaceId: string;
   pageId: string;
   author: string;
   range: JsonValue;
   text: string;
   resolved: boolean;
-}
+};
 
-export interface SheetPresence {
+export type SheetPresence = {
   readonly id: string;
   workspaceId: string;
   pageId: string;
@@ -265,38 +257,38 @@ export interface SheetPresence {
   cursor: JsonValue;
   selection: JsonValue | null;
   seenAt: number;
-}
+};
 
-export interface SheetPresenceInsert {
+export type SheetPresenceInsert = {
   workspaceId: string;
   pageId: string;
   account: string;
   cursor: JsonValue;
   selection?: JsonValue | null;
   seenAt: number;
-}
+};
 
-export interface SongSheet {
+export type SongSheet = {
   readonly id: string;
   workspaceId: string;
   pageId: string;
   body: string;
-}
+};
 
-export interface SongSheetInsert {
+export type SongSheetInsert = {
   workspaceId: string;
   pageId: string;
   body: string;
-}
+};
 
-export interface Workspace {
+export type Workspace = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface WorkspaceInsert {
+export type WorkspaceInsert = {
   name: string;
-}
+};
 
 interface Types extends AppTypes {
   attachments: {

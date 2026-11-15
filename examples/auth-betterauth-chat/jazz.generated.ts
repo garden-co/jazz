@@ -2,7 +2,7 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -16,9 +16,9 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
@@ -31,9 +31,9 @@ export interface BetterAuthAccountInsert {
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -41,18 +41,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -62,9 +62,9 @@ export interface BetterAuthSession {
   userAgent: string | null;
   userId: string;
   impersonatedBy: string | null;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -73,9 +73,9 @@ export interface BetterAuthSessionInsert {
   userAgent?: string | null;
   userId: string;
   impersonatedBy?: string | null;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -87,9 +87,9 @@ export interface BetterAuthUser {
   banned: boolean | null;
   banReason: string | null;
   banExpires: Date | null;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
@@ -100,39 +100,39 @@ export interface BetterAuthUserInsert {
   banned?: boolean | null;
   banReason?: string | null;
   banExpires?: Date | null;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface Message {
+export type Message = {
   readonly id: string;
   author_name: string;
   chat_id: string;
   text: string;
   sent_at: Date;
-}
+};
 
-export interface MessageInsert {
+export type MessageInsert = {
   author_name: string;
   chat_id: string;
   text: string;
   sent_at: Date;
-}
+};
 
 interface Types extends AppTypes {
   better_auth_account: {

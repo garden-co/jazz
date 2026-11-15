@@ -4,33 +4,33 @@ import { bindApp, type AppTypes } from "jazz-tools";
 
 export type ScenarioStatus = "open" | "approved" | "archived";
 
-export interface Scenario {
+export type Scenario = {
   readonly id: string;
   name: string;
   base_scenario_id: string | null;
   base_snapshot_ref: string | null;
   status: ScenarioStatus;
-}
+};
 
-export interface ScenarioInsert {
+export type ScenarioInsert = {
   name: string;
   base_scenario_id?: string | null;
   base_snapshot_ref?: string | null;
   status: ScenarioStatus;
-}
+};
 
-export interface Task {
+export type Task = {
   readonly id: string;
   scenario_id: string;
   title: string;
   estimate: number;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   scenario_id: string;
   title: string;
   estimate: number;
-}
+};
 
 interface Types extends AppTypes {
   scenarios: {

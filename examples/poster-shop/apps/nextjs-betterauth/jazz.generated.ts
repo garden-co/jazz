@@ -6,7 +6,7 @@ export type CanvasInviteRole = "viewer" | "editor";
 export type CanvasMemberRole = "viewer" | "editor" | "admin";
 export type ShapeKind = "rect" | "ellipse" | "text" | "image";
 
-export interface Asset {
+export type Asset = {
   readonly id: string;
   canvasId: string;
   name: string;
@@ -15,9 +15,9 @@ export interface Asset {
   width: number;
   height: number;
   bytes: Uint8Array;
-}
+};
 
-export interface AssetInsert {
+export type AssetInsert = {
   canvasId: string;
   name: string;
   mimeType: string;
@@ -25,9 +25,9 @@ export interface AssetInsert {
   width: number;
   height: number;
   bytes: Uint8Array;
-}
+};
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -35,18 +35,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -54,18 +54,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -74,9 +74,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -84,9 +84,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -94,89 +94,89 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface CanvasInvite {
+export type CanvasInvite = {
   readonly id: string;
   canvasId: string;
   token: string;
   role: CanvasInviteRole;
   singleUse: boolean;
-}
+};
 
-export interface CanvasInviteInsert {
+export type CanvasInviteInsert = {
   canvasId: string;
   token: string;
   role: CanvasInviteRole;
   singleUse?: boolean;
-}
+};
 
-export interface CanvasMember {
+export type CanvasMember = {
   readonly id: string;
   canvasId: string;
   memberAuthor: string;
   role: CanvasMemberRole;
-}
+};
 
-export interface CanvasMemberInsert {
+export type CanvasMemberInsert = {
   canvasId: string;
   memberAuthor: string;
   role: CanvasMemberRole;
-}
+};
 
-export interface Canvas {
+export type Canvas = {
   readonly id: string;
   title: string;
   width: number;
   height: number;
-}
+};
 
-export interface CanvasInsert {
+export type CanvasInsert = {
   title: string;
   width: number;
   height: number;
-}
+};
 
-export interface Checkpoint {
+export type Checkpoint = {
   readonly id: string;
   canvasId: string;
   label: string;
   snapshot: JsonValue;
-}
+};
 
-export interface CheckpointInsert {
+export type CheckpointInsert = {
   canvasId: string;
   label: string;
   snapshot: JsonValue;
-}
+};
 
-export interface Cursor {
+export type Cursor = {
   readonly id: string;
   canvasId: string;
   author: string;
@@ -185,9 +185,9 @@ export interface Cursor {
   color: string;
   name: string;
   active: boolean;
-}
+};
 
-export interface CursorInsert {
+export type CursorInsert = {
   canvasId: string;
   author: string;
   x: number;
@@ -195,26 +195,26 @@ export interface CursorInsert {
   color: string;
   name?: string;
   active?: boolean;
-}
+};
 
-export interface Layer {
+export type Layer = {
   readonly id: string;
   canvasId: string;
   name: string;
   zIndex: number;
   visible: boolean;
   locked: boolean;
-}
+};
 
-export interface LayerInsert {
+export type LayerInsert = {
   canvasId: string;
   name: string;
   zIndex: number;
   visible: boolean;
   locked?: boolean;
-}
+};
 
-export interface Shape {
+export type Shape = {
   readonly id: string;
   canvasId: string;
   layerId: string;
@@ -228,9 +228,9 @@ export interface Shape {
   zIndex: number;
   text: string | null;
   fill: string;
-}
+};
 
-export interface ShapeInsert {
+export type ShapeInsert = {
   canvasId: string;
   layerId: string;
   assetId?: string | null;
@@ -243,7 +243,7 @@ export interface ShapeInsert {
   zIndex: number;
   text?: string | null;
   fill: string;
-}
+};
 
 interface Types extends AppTypes {
   assets: {
