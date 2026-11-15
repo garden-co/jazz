@@ -10,9 +10,34 @@ Use `include(...)` to load related rows as nested objects in a single query resu
 
 Including a relation adds the resolved object alongside the foreign-key column&hairsp;—&hairsp;it does not replace it. For example, `include({ project: true })` gives you both `projectId` (the FK string) and `project` (the resolved row).
 
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
-</include>
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "priority": "int?",
+        "description": "string?",
+        "owner_id": "uuid?",
+        "parentId": "uuid?",
+        "projectId": "uuid?"
+      },
+      "relations": {
+        "parent": { "rel": "todos", "column": "parentId" },
+        "project": { "rel": "projects", "column": "projectId" },
+        "children": { "reverse": "todos", "relation": "parent" }
+      }
+    },
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "todos": { "reverse": "todos", "relation": "project" } }
+    }
+  }
+}
+```
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -29,9 +54,9 @@ Including a relation adds the resolved object alongside the foreign-key column&h
 
 ### Reverse relations
 
-Declare reverse relations explicitly on the target table. For example, if `todos` declares
-`project: s.rel("projects", "projectId")`, `projects` can declare
-`todos: s.reverse("todos", "project")` and load it with `include({ todos: true })`.
+Declare reverse relations explicitly on the target table. For example, if `todos` declares the
+relation `"project": { "rel": "projects", "column": "projectId" }`, `projects` can declare
+`"todos": { "reverse": "todos", "relation": "project" }` and load it with `include({ todos: true })`.
 The reverse relation returns matching source rows as an array. Its name is your choice;
 Jazz does not generate an inverse or infer names from UUID columns.
 
