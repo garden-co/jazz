@@ -240,12 +240,22 @@ async fn a_bearer_signs_in_the_user_the_backend_names() {
             >= 2
     );
 
-    // The app signs Alice out: the provider names no one.
+    // The app signs Alice out: the provider names no one. The client stops,
+    // so nothing syncs as her any more.
     *token.lock().unwrap() = None;
     session.refresh().await.unwrap();
     assert_eq!(session.state(), SessionState::SignedOut);
+    assert!(matches!(
+        alice.insert(NewTodo::new("After signing out", false)).await,
+        Err(Error::Stopped)
+    ));
+    assert!(matches!(
+        alice.shutdown().await,
+        Err(Error::Stopped) | Ok(())
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(remote_todos(&app.backend, 2).await.len(), 2);
 
-    alice.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -280,11 +290,160 @@ async fn an_end_user_needs_someone_signed_in_and_the_apps_endpoint() {
     .await;
     assert!(matches!(at_core, Err(Error::Server(_))), "{at_core:?}");
 
+    let plain = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server("http://todos.example/jazz")
+            .user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await;
+    assert!(matches!(plain, Err(Error::Config(_))), "{plain:?}");
+
     let local = Jazz::open(
         client_files(),
         Config::new(app.app_id).user(Auth::Device(DeviceKey::generate().unwrap())),
     )
     .await;
     assert!(matches!(local, Err(Error::Config(_))), "{local:?}");
+    app.stop().await;
+}
+
+/// The session's state once `done` holds for it.
+async fn session_until(
+    session: &jazz_app::Session,
+    done: impl Fn(&SessionState) -> bool,
+) -> SessionState {
+    let mut changes = session.changes();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(state) = changes.next().await {
+            if done(&state) {
+                return state;
+            }
+        }
+        panic!("the session's changes ended");
+    })
+    .await
+    .expect("the session gets there")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_bearer_is_renewed_expires_and_recovers_but_a_revoked_one_is_not() {
+    use jazz_app::AuthFailure;
+    let app = App::start().await;
+    let token = Arc::new(Mutex::new("token-alice".to_owned()));
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let provider = {
+        let (token, asked) = (token.clone(), asked.clone());
+        move |reason: TokenReason| {
+            asked.lock().unwrap().push(reason);
+            let token = token.lock().unwrap().clone();
+            async move { Ok(Some(token)) }
+        }
+    };
+    let alice = Jazz::open(client_files(), app.user(Auth::bearer(provider)))
+        .await
+        .unwrap();
+    let session = alice.session().unwrap().clone();
+    connected(&alice).await;
+
+    // The backend refuses her bearer: the session asks for a new one at
+    // once, and reads expired when that one is refused too.
+    app.relay.refuse("token-alice", "token expired");
+    app.relay.kick();
+    let expired = session_until(&session, |state| {
+        matches!(state, SessionState::Expired { .. })
+    })
+    .await;
+    assert!(matches!(
+        expired,
+        SessionState::Expired {
+            reason: AuthFailure::Expired,
+            ..
+        }
+    ));
+    assert!(asked.lock().unwrap().contains(&TokenReason::Expired));
+
+    // Her auth gets a new token: a renewal retried with backoff picks it up.
+    *token.lock().unwrap() = "token-alice.2".to_owned();
+    session_until(&session, |state| {
+        matches!(state, SessionState::SignedIn { .. })
+    })
+    .await;
+    alice
+        .insert(NewTodo::new("Back again", false))
+        .await
+        .unwrap();
+    assert_eq!(remote_todos(&app.backend, 1).await.len(), 1);
+
+    // A revoked account no new token fixes: it is not asked for one.
+    app.relay.refuse("token-alice.2", "account revoked");
+    let before = asked.lock().unwrap().len();
+    app.relay.kick();
+    let revoked = session_until(&session, |state| {
+        matches!(state, SessionState::Expired { .. })
+    })
+    .await;
+    assert!(matches!(
+        revoked,
+        SessionState::Expired {
+            reason: AuthFailure::Revoked,
+            ..
+        }
+    ));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(asked.lock().unwrap().len(), before);
+
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_provider_does_not_hold_up_signing_out() {
+    let app = App::start().await;
+    let slow = Arc::new(AtomicUsize::new(0));
+    let provider = {
+        let slow = slow.clone();
+        move |reason: TokenReason| {
+            let wait = reason == TokenReason::Refresh;
+            if wait {
+                slow.fetch_add(1, Ordering::SeqCst);
+            }
+            async move {
+                if wait {
+                    // An interactive sign-in nobody completes.
+                    std::future::pending::<()>().await;
+                }
+                Ok(Some("token-dana".to_owned()))
+            }
+        }
+    };
+    let dana = Jazz::open(client_files(), app.user(Auth::bearer(provider)))
+        .await
+        .unwrap();
+    let session = dana.session().unwrap().clone();
+    let refreshing = tokio::spawn({
+        let session = session.clone();
+        async move { session.refresh().await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while slow.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), dana.sign_out())
+        .await
+        .expect("signing out does not wait for the provider")
+        .unwrap();
+    assert_eq!(session.state(), SessionState::SignedOut);
+    // The refresh that waited ends with the session.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), refreshing)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
     app.stop().await;
 }
