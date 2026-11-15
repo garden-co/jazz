@@ -230,10 +230,12 @@ Cloud; a Rust or Go backend connects to the same sync URL with the same admin se
     `scope` to it: `<JazzProvider config={{ serverUrl: "/jazz", scope: "<app id>" }}>`.
 
     ```go
-    import "github.com/google/uuid"
-
     // The URL your clients sync with, exactly as they resolve it.
-    appID := uuid.NewSHA1(uuid.NameSpaceDNS, []byte("https://app.example.com/jazz")).String()
+    appID, err := jazz.EndpointAppID("https://app.example.com/jazz")
+    if err != nil {
+    	return err // a relative or non-http(s)/ws(s) URL has no app id
+    }
+    backend, err := jazzapp.Open(ctx, jazz.Config{AppID: appID /* … */})
     ```
 
     What Go's backend doesn't do yet is listed in [Language support](/docs/reference/language-support#go).
