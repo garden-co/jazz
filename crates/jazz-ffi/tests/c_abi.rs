@@ -266,6 +266,8 @@ async fn a_backend_through_the_c_abi() {
     let config = backend_config(&server, &app_id.to_string(), "carol");
     let result = tokio::task::spawn_blocking(move || {
         let h = open(&config).unwrap();
+        let bundle = call(h, "bundle", json!({})).unwrap();
+        assert!(bundle.as_str().is_some_and(|b| !b.is_empty()), "{bundle}");
         let account = call(h, "account", json!({})).unwrap();
         let account = account.as_str().expect("carol's account").to_owned();
         let show = call(

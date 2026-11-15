@@ -314,3 +314,42 @@ async fn no_token_callback_runs_after_close() {
     app.stop().await;
     result.unwrap();
 }
+
+/// Through the C ABI: a device account links to the app's sign-in (the
+/// session becomes that user's), a bearer the backend rejects is a refusal
+/// (not I/O) and leaves the session as it was, and a backend's `bundle`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c_hosts_link_and_read_a_backends_bundle() {
+    let app = app().await;
+    let device = (app.config)(json!({ "deviceKey": "PLACEHOLDER" }));
+    let bundle = app.backend.bundle().unwrap().to_owned();
+    let result = tokio::task::spawn_blocking(move || unsafe {
+        let mut err = ptr::null_mut();
+        let key = jazz_generate_device_key(&mut err);
+        let key_text = CStr::from_ptr(key).to_str().unwrap().to_owned();
+        jazz_string_free(key);
+        let carol = jazz_open(
+            c(&device.replace("PLACEHOLDER", &key_text)).as_ptr(),
+            &mut err,
+        );
+        assert!(!carol.is_null());
+        let rejected = call(carol, "link", json!({ "bearer": "not-a-token" })).unwrap_err();
+        assert_eq!(rejected["kind"], "refused", "{rejected}");
+        assert_eq!(
+            call(carol, "session", json!({})).unwrap()["user"]["kind"],
+            "device"
+        );
+        let user = call(carol, "link", json!({ "bearer": "token-carol" })).unwrap();
+        assert_eq!(user["kind"], "backend", "{user}");
+        assert_eq!(
+            call(carol, "session", json!({})).unwrap()["user"]["subject"],
+            "carol"
+        );
+        assert_eq!(call(carol, "bundle", json!({})).unwrap(), Value::Null);
+        jazz_close(carol);
+    })
+    .await;
+    let _ = bundle;
+    app.stop().await;
+    result.unwrap();
+}
