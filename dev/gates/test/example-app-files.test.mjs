@@ -15,7 +15,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 /**
  * TS apps: every app with a jazz.app.json, except Rust crates (a Cargo.toml
  * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app`
- * crate's checks cover.
+ * crate's checks cover, and Go modules (a go.mod beside it), whose bindings
+ * are `jazzapp/jazz_app.go` and which jazz-codegen's golden tests cover.
  */
 function projects() {
   return execFileSync(
@@ -26,7 +27,8 @@ function projects() {
     .split("\n")
     .filter(Boolean)
     .map(dirname)
-    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")));
+    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")))
+    .filter((dir) => !existsSync(join(root, dir, "go.mod")));
 }
 
 test("every example app commits its files and its bindings", () => {
