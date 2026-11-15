@@ -11,6 +11,9 @@ use crate::tools::public_schema::{
     CmpOp, ColumnDescriptor, ColumnType, EnumCaseDescriptor, HistoryRetention, Operation,
     OperationPolicy, PolicyExpr, PolicyValue, RowDescriptor, SchemaBuilder, TableName,
 };
+use crate::tools::public_schema::{
+    SpecialisedIndex, SpecialisedIndexKind, VectorAnn, VectorMetric,
+};
 use std::collections::BTreeSet;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/app-artifact");
@@ -2296,8 +2299,43 @@ fn the_json_schemas_take_the_keys_the_readers_take() {
             properties(&defs["table"]["properties"]["computed"]["additionalProperties"]),
             keys(app_file::COMPUTED_KEYS),
         ),
+        (
+            "a text index",
+            properties(&defs["textIndex"]),
+            keys(app_file::TEXT_INDEX_KEYS),
+        ),
+        (
+            "a vector index",
+            properties(&defs["vectorIndex"]),
+            keys(app_file::VECTOR_INDEX_KEYS),
+        ),
+        (
+            "a geo index",
+            properties(&defs["geoIndex"]),
+            keys(app_file::GEO_INDEX_KEYS),
+        ),
+        (
+            "a geo index's point",
+            properties(&defs["geoIndex"]["properties"]["geo"]),
+            keys(app_file::GEO_POINT_KEYS),
+        ),
     ] {
         assert_eq!(schema, reader, "{what}");
+    }
+    // Each index object takes `name` and exactly its own kind key.
+    for (def, kind) in [
+        ("textIndex", "text"),
+        ("vectorIndex", "vector"),
+        ("geoIndex", "geo"),
+    ] {
+        let taken = properties(&defs[def]);
+        for other in app_file::INDEX_KIND_KEYS {
+            assert_eq!(
+                taken.contains(*other),
+                *other == kind,
+                "{def} and `{other}`"
+            );
+        }
     }
     let permissions = json_schema("jazz.permissions.schema.json");
     assert_eq!(
@@ -2452,4 +2490,191 @@ fn an_index_names_a_stored_column() {
     edited_app_loads(|v| {
         v["tables"]["todos"]["indexes"] = serde_json::json!(["owner", ["owner", "$createdAt"]])
     });
+}
+
+// ---------------------------------------------------------------------------
+// Specialised indexes (SPEC 20.1)
+// ---------------------------------------------------------------------------
+
+/// `todo_server` with a text, a vector and a geo index on `todos`.
+fn indexed_todos() -> ArtifactInput {
+    let mut input = todo_server();
+    let schema = &mut input.schemas[0];
+    let todos = schema.get_mut(&TableName::from("todos")).unwrap();
+    todos
+        .columns
+        .columns
+        .push(ColumnDescriptor::new("embedding", ColumnType::Bytea));
+    todos
+        .columns
+        .columns
+        .push(ColumnDescriptor::new("lat", ColumnType::Double));
+    todos
+        .columns
+        .columns
+        .push(ColumnDescriptor::new("lng", ColumnType::Double));
+    todos.specialised_indexes = vec![
+        SpecialisedIndex {
+            name: "search".into(),
+            kind: SpecialisedIndexKind::Text {
+                fields: BTreeMap::from([("title".into(), 4), ("description".into(), 1)]),
+                analyzer: "jazz-text/1:en".into(),
+                prefix: true,
+            },
+            server_only: false,
+        },
+        SpecialisedIndex {
+            name: "similar".into(),
+            kind: SpecialisedIndexKind::Vector {
+                column: "embedding".into(),
+                metric: VectorMetric::Cosine,
+                ann: VectorAnn::Exact,
+            },
+            server_only: true,
+        },
+        SpecialisedIndex {
+            name: "place".into(),
+            kind: SpecialisedIndexKind::Geo {
+                lat: "lat".into(),
+                lng: "lng".into(),
+            },
+            server_only: false,
+        },
+    ];
+    input.current = SchemaHash::compute(&input.schemas[0]).to_string();
+    input
+}
+
+/// A table's text, vector and geo indexes are written as objects in its
+/// `indexes` (name, kind key, options; defaults left out, in name order),
+/// fit the JSON Schema, and read back to the same declarations.
+#[test]
+fn specialised_indexes_round_trip_through_the_app_file() {
+    let input = indexed_todos();
+    let expected = input.schemas[0][&TableName::from("todos")]
+        .specialised_indexes
+        .clone();
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    assert_eq!(
+        app["tables"]["todos"]["indexes"],
+        serde_json::json!([
+            { "name": "place", "geo": { "lat": "lat", "lng": "lng" } },
+            {
+                "name": "search",
+                "text": { "description": 1, "title": 4 },
+                "analyzer": "jazz-text/1:en",
+                "prefix": true
+            },
+            { "name": "similar", "vector": "embedding", "metric": "cosine", "serverOnly": true }
+        ])
+    );
+    let validator = jsonschema::validator_for(&json_schema("jazz.app.schema.json")).unwrap();
+    assert!(validator.is_valid(&app));
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    let mut read = loaded.current_schema()[&TableName::from("todos")]
+        .specialised_indexes
+        .clone();
+    let mut expected = expected;
+    read.sort_by(|a, b| a.name.cmp(&b.name));
+    expected.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(read, expected);
+}
+
+fn edited_indexes(index: serde_json::Value) -> String {
+    let written = write(indexed_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value["tables"]["todos"]["indexes"] = serde_json::json!([index]);
+    load(value.to_string().as_bytes(), written.permissions.as_bytes())
+        .expect_err("the index must be refused")
+        .to_string()
+}
+
+/// An index object names its kind by exactly one key, takes only that
+/// kind's keys, and every refusal names the path and option.
+#[test]
+fn malformed_specialised_indexes_are_refused_by_path() {
+    let cases = [
+        (
+            serde_json::json!({ "name": "x" }),
+            "tables.todos.indexes[0]: an index object names its kind by key",
+        ),
+        (
+            serde_json::json!({ "name": "x", "geo": { "lat": "lat", "lng": "lng" }, "vector": "embedding" }),
+            "an index object has exactly one kind key, not `vector` and `geo`",
+        ),
+        (
+            serde_json::json!({ "name": "x", "geo": { "lat": "lat", "lng": "lng" }, "metric": "l2" }),
+            "tables.todos.indexes[0]: unknown key `metric`",
+        ),
+        (
+            serde_json::json!({ "name": "X", "geo": { "lat": "lat", "lng": "lng" } }),
+            "tables.todos.indexes[0].name: `X` is not an index name",
+        ),
+        (
+            serde_json::json!({ "geo": { "lat": "lat", "lng": "lng" } }),
+            "an index object needs `name`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": 16 }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title: a field weight is an integer from 1 to 15",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": 1 } }),
+            "a text index needs `analyzer`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": 1 }, "analyzer": "jazz-text/1:fr" }),
+            "tables.todos.indexes[0].analyzer: unknown analyzer `jazz-text/1:fr`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "nope": 1 }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.nope: table todos has no column `nope`",
+        ),
+        (
+            serde_json::json!({ "name": "v", "vector": "embedding", "metric": "cosine", "ann": "ivf" }),
+            "tables.todos.indexes[0].ann: `ann: \"ivf\"` is not supported yet",
+        ),
+        (
+            serde_json::json!({ "name": "v", "vector": "embedding", "metric": "hamming" }),
+            "tables.todos.indexes[0].metric: unknown metric `hamming`",
+        ),
+        (
+            serde_json::json!({ "name": "v", "vector": "embedding" }),
+            "a vector index needs `metric`",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": { "lat": "lat", "lon": "lng" } }),
+            "tables.todos.indexes[0].geo: unknown key `lon`",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": { "lat": "lat", "lng": "lng" }, "serverOnly": "yes" }),
+            "tables.todos.indexes[0].serverOnly: must be true or false",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": { "lat": "title", "lng": "lng" } }),
+            "a geo index coordinate must be an f64 column",
+        ),
+        (
+            serde_json::json!(7),
+            "an index is a column name, an array of names or a text, vector or geo index object",
+        ),
+    ];
+    for (index, expected) in cases {
+        let error = edited_indexes(index.clone());
+        assert!(error.contains(expected), "{index}: {error}");
+    }
+    let written = write(indexed_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value["tables"]["todos"]["indexes"] = serde_json::json!([
+        { "name": "g", "geo": { "lat": "lat", "lng": "lng" } },
+        { "name": "g", "vector": "embedding", "metric": "l2" }
+    ]);
+    let error = load(value.to_string().as_bytes(), written.permissions.as_bytes())
+        .expect_err("same names")
+        .to_string();
+    assert!(
+        error.contains("tables.todos.indexes[1].name: two specialised indexes are named `g`"),
+        "{error}"
+    );
 }

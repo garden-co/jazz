@@ -842,7 +842,14 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 - `indexes`: array; a name is a single-column index, an array of names a
   composite index (`compositeIndex`, which may name `$createdAt` and
   `$updatedAt`). When any single names are listed, only those columns get
-  single-column indexes (`indexOnly`); otherwise every column does.
+  single-column indexes (`indexOnly`); otherwise every column does. An
+  object is a specialised index (SPEC 20.1): `name` and exactly one kind
+  key, with that kind's options:
+  - `{"name", "text": {<column>: <weight 1–15>, …}, "analyzer", "prefix"?, "serverOnly"?}`;
+  - `{"name", "vector": <column>, "metric", "ann"?, "serverOnly"?}`;
+  - `{"name", "geo": {"lat": <column>, "lng": <column>}, "serverOnly"?}`.
+  The writer puts them after the B-tree indexes, in name order, and leaves
+  out defaults (`prefix: false`, `ann: "exact"`, `serverOnly: false`).
 - `branchBy`: array of column names.
 - `history`: `"latest"` keeps only each row's newest version; absent keeps
   full history.

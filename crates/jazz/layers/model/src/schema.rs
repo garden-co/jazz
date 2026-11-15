@@ -510,6 +510,7 @@ impl RuntimeSchema {
             table.merge_strategies.clear();
             table.composite_indexes.clear();
             table.history = HistoryRetention::Full;
+            table.specialised_indexes.clear();
         }
         let mut bytes = b"jazz-schema-compatibility".to_vec();
         bytes.extend(canonical_schema_bytes(&schema));
@@ -877,6 +878,12 @@ pub struct TableSchema {
     /// stored, so not of the compatibility id.
     #[serde(default)]
     pub history: HistoryRetention,
+    /// Text, vector and geo indexes (SPEC 20.1), in name order. Part of
+    /// the version id (a domain of its own, see
+    /// [`SCHEMA_ID_DOMAIN_SPECIALISED_INDEXES`]), not of the compatibility
+    /// id: they change neither how rows are stored nor how they sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub specialised_indexes: Vec<crate::model::public_schema::SpecialisedIndex>,
 }
 
 impl TableSchema {
@@ -896,6 +903,7 @@ impl TableSchema {
             composite_indexes: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -1577,7 +1585,41 @@ const SCHEMA_ID_DOMAIN_V3_ENUM_VARIANTS: &str = "jazz-schema-v3-enum-variants";
 /// schema with full-history tables only keeps its id.
 const SCHEMA_ID_DOMAIN_LATEST_ONLY: &str = "jazz-schema-latest-only-tables";
 
+/// Domain tag used exactly when some table declares a specialised index
+/// (SPEC 20.1): a `u64` count and, per such table in name order, its
+/// length-prefixed name, a `u64` index count and each index's
+/// length-prefixed `jazz-ix-decl/1` bytes in name order, then the encoding
+/// the schema would have without them. Every schema without specialised
+/// indexes keeps its id.
+const SCHEMA_ID_DOMAIN_SPECIALISED_INDEXES: &str = "jazz-schema-specialised-indexes";
+
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
+    let mut indexed = schema
+        .tables
+        .iter()
+        .filter(|table| !table.specialised_indexes.is_empty())
+        .collect::<Vec<_>>();
+    if indexed.is_empty() {
+        return latest_only_schema_bytes(schema);
+    }
+    indexed.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, SCHEMA_ID_DOMAIN_SPECIALISED_INDEXES);
+    put_u64(&mut bytes, indexed.len() as u64);
+    for table in indexed {
+        put_str(&mut bytes, &table.name);
+        let mut indexes = table.specialised_indexes.iter().collect::<Vec<_>>();
+        indexes.sort_by(|left, right| left.name.cmp(&right.name));
+        put_u64(&mut bytes, indexes.len() as u64);
+        for index in indexes {
+            put_bytes(&mut bytes, &index.canonical_bytes());
+        }
+    }
+    bytes.extend(latest_only_schema_bytes(schema));
+    bytes
+}
+
+fn latest_only_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut latest = schema
         .tables
         .iter()

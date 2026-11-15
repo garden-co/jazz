@@ -463,6 +463,10 @@ pub struct TableSchema {
     /// hashes as it did before retention existed.
     #[serde(default, skip_serializing_if = "HistoryRetention::is_full")]
     pub history: HistoryRetention,
+    /// Text, vector and geo indexes (SPEC 20.1), by name. Empty is
+    /// omitted, so a table without any serializes and hashes as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub specialised_indexes: Vec<SpecialisedIndex>,
 }
 
 /// How much of a table's row history nodes keep (SPEC 4 §4.9).
@@ -492,7 +496,15 @@ impl PartialEq for TableSchema {
             && self.policies == other.policies
             && self.branch_by == other.branch_by
             && self.history == other.history
+            && sorted_specialised(&self.specialised_indexes)
+                == sorted_specialised(&other.specialised_indexes)
     }
+}
+
+fn sorted_specialised(indexes: &[SpecialisedIndex]) -> Vec<&SpecialisedIndex> {
+    let mut sorted: Vec<&SpecialisedIndex> = indexes.iter().collect();
+    sorted.sort_by(|left, right| left.name.cmp(&right.name));
+    sorted
 }
 
 /// Canonical order of a table's composite indexes: lexicographic over each
@@ -559,6 +571,7 @@ impl TableSchema {
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -571,6 +584,7 @@ impl TableSchema {
             policies,
             branch_by: Vec::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -618,6 +632,7 @@ pub struct TableSchemaBuilder {
     policies: TablePolicies,
     branch_by: Vec<ColumnName>,
     history: HistoryRetention,
+    specialised_indexes: Vec<SpecialisedIndex>,
 }
 
 impl TableSchemaBuilder {
@@ -631,6 +646,7 @@ impl TableSchemaBuilder {
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -731,6 +747,67 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Add a specialised index (SPEC 20.1).
+    pub fn specialised_index(mut self, index: SpecialisedIndex) -> Self {
+        self.specialised_indexes.push(index);
+        self
+    }
+
+    /// Add a text index over `fields` (column, weight 1–15).
+    pub fn text_index<'a>(
+        self,
+        name: &str,
+        fields: impl IntoIterator<Item = (&'a str, u8)>,
+        analyzer: &str,
+        prefix: bool,
+    ) -> Self {
+        self.specialised_index(SpecialisedIndex {
+            name: name.to_owned(),
+            kind: SpecialisedIndexKind::Text {
+                fields: fields
+                    .into_iter()
+                    .map(|(column, weight)| (column.to_owned(), weight))
+                    .collect(),
+                analyzer: analyzer.to_owned(),
+                prefix,
+            },
+            server_only: false,
+        })
+    }
+
+    /// Add an exact vector index over `column`.
+    pub fn vector_index(self, name: &str, column: &str, metric: VectorMetric) -> Self {
+        self.specialised_index(SpecialisedIndex {
+            name: name.to_owned(),
+            kind: SpecialisedIndexKind::Vector {
+                column: column.to_owned(),
+                metric,
+                ann: VectorAnn::Exact,
+            },
+            server_only: false,
+        })
+    }
+
+    /// Add a geo index over two `f64` columns in degrees.
+    pub fn geo_index(self, name: &str, lat: &str, lng: &str) -> Self {
+        self.specialised_index(SpecialisedIndex {
+            name: name.to_owned(),
+            kind: SpecialisedIndexKind::Geo {
+                lat: lat.to_owned(),
+                lng: lng.to_owned(),
+            },
+            server_only: false,
+        })
+    }
+
+    /// Mark the most recently added specialised index server-only.
+    pub fn server_only(mut self) -> Self {
+        if let Some(index) = self.specialised_indexes.last_mut() {
+            index.server_only = true;
+        }
+        self
+    }
+
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -745,6 +822,7 @@ impl TableSchemaBuilder {
             policies: self.policies,
             branch_by: self.branch_by,
             history: self.history,
+            specialised_indexes: self.specialised_indexes,
         }
     }
 
@@ -758,6 +836,7 @@ impl TableSchemaBuilder {
             policies: self.policies,
             branch_by: self.branch_by,
             history: self.history,
+            specialised_indexes: self.specialised_indexes,
         };
         (name, schema)
     }

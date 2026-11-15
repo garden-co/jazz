@@ -8,7 +8,8 @@ use base64::Engine as _;
 use crate::tools::ObjectId;
 use crate::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, EnumCaseDescriptor, HistoryRetention,
-    RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    RowDescriptor, Schema, SchemaHash, SpecialisedIndex, SpecialisedIndexKind, TableName,
+    TablePolicies, TableSchema, Value, VectorAnn, VectorMetric,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
@@ -84,6 +85,13 @@ pub const MIGRATION_KEYS: &[&str] = &[
 pub const TRANSFORM_KEYS: &[&str] = &["stored", "view"];
 pub const COMPUTED_KEYS: &[&str] = &["type", "from"];
 pub const VERSION_KEYS: &[&str] = &["tables"];
+/// A specialised index names its kind by key (SPEC 20.1): exactly one of
+/// these, besides `name`.
+pub const INDEX_KIND_KEYS: &[&str] = &["text", "vector", "geo"];
+pub const TEXT_INDEX_KEYS: &[&str] = &["name", "text", "analyzer", "prefix", "serverOnly"];
+pub const VECTOR_INDEX_KEYS: &[&str] = &["name", "vector", "metric", "ann", "serverOnly"];
+pub const GEO_INDEX_KEYS: &[&str] = &["name", "geo", "serverOnly"];
+pub const GEO_POINT_KEYS: &[&str] = &["lat", "lng"];
 
 /// Keys of `object` that aren't `allowed` (nor `$comment`) are refused.
 fn only_keys(object: &[(String, Json)], allowed: &[&str], path: &str) -> Result<(), Refusal> {
@@ -379,6 +387,7 @@ fn read_tables(
         }
         let mut indexed_columns: Option<Vec<String>> = None;
         let mut composite_indexes = Vec::new();
+        let mut specialised_indexes = Vec::new();
         if let Some(indexes) = table.get("indexes") {
             let Json::Array(items) = indexes else {
                 return Err(refuse(format!("{path}.indexes"), "must be an array"));
@@ -390,11 +399,14 @@ fn read_tables(
                         .get_or_insert_with(Vec::new)
                         .push(column.clone()),
                     Json::Array(_) => composite_indexes.push(names(item, &item_path)?),
+                    Json::Object(_) => specialised_indexes
+                        .push((item_path.clone(), read_specialised_index(item, &item_path)?)),
                     other => {
                         return Err(refuse(
                             item_path,
                             format!(
-                                "an index is a column name or an array of names, not {}",
+                                "an index is a column name, an array of names or a text, vector \
+                                 or geo index object, not {}",
                                 other.kind()
                             ),
                         ));
@@ -436,6 +448,27 @@ fn read_tables(
             for column in index {
                 check_index(column, format!("{path}.indexes"), true)
                     .map_err(|(p, m)| (format!("{p}.composite[{i}]"), m))?;
+            }
+        }
+        let mut seen_index_names = std::collections::BTreeSet::new();
+        for (item_path, index) in &specialised_indexes {
+            if !seen_index_names.insert(index.name.as_str()) {
+                return Err(refuse(
+                    format!("{item_path}.name"),
+                    format!("two specialised indexes are named `{}`", index.name),
+                ));
+            }
+            let option_of = |i: usize| match &index.kind {
+                SpecialisedIndexKind::Text { .. } => "text".to_string(),
+                SpecialisedIndexKind::Vector { .. } => "vector".to_string(),
+                SpecialisedIndexKind::Geo { .. } => ["geo.lat", "geo.lng"][i].to_string(),
+            };
+            for (i, column) in index.kind.columns().into_iter().enumerate() {
+                let option = match &index.kind {
+                    SpecialisedIndexKind::Text { .. } => format!("text.{column}"),
+                    _ => option_of(i),
+                };
+                check_index(column, format!("{item_path}.{option}"), false)?;
             }
         }
         let branch_by = match table.get("branchBy") {
@@ -506,6 +539,10 @@ fn read_tables(
                 policies: TablePolicies::default(),
                 branch_by: branch_by.iter().map(|c| c.as_str().into()).collect(),
                 history,
+                specialised_indexes: specialised_indexes
+                    .into_iter()
+                    .map(|(_, index)| index)
+                    .collect(),
             },
         );
     }
@@ -532,6 +569,249 @@ fn read_tables(
         }
     }
     Ok(schema)
+}
+
+/// A specialised index object of a table's `indexes` (SPEC 20.1): `name`
+/// and exactly one kind key, with that kind's options.
+fn read_specialised_index(item: &Json, path: &str) -> Result<SpecialisedIndex, Refusal> {
+    let fields = object(item, path)?;
+    let kinds: Vec<&str> = INDEX_KIND_KEYS
+        .iter()
+        .copied()
+        .filter(|kind| item.get(kind).is_some())
+        .collect();
+    let kind = match kinds.as_slice() {
+        [kind] => *kind,
+        [] => {
+            return Err(refuse(
+                path,
+                "an index object names its kind by key: exactly one of `text`, `vector` or \
+                 `geo`, e.g. { \"name\": \"search\", \"text\": { \"title\": 1 }, \
+                 \"analyzer\": \"jazz-text/1:en\" }",
+            ));
+        }
+        _ => {
+            return Err(refuse(
+                path,
+                format!(
+                    "an index object has exactly one kind key, not {}",
+                    kinds
+                        .iter()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                ),
+            ));
+        }
+    };
+    only_keys(
+        fields,
+        match kind {
+            "text" => TEXT_INDEX_KEYS,
+            "vector" => VECTOR_INDEX_KEYS,
+            _ => GEO_INDEX_KEYS,
+        },
+        path,
+    )?;
+    let name = string(
+        item.get("name")
+            .ok_or_else(|| refuse(path, "an index object needs `name`"))?,
+        &format!("{path}.name"),
+    )?;
+    if !crate::tools::public_schema::is_specialised_index_name(name) {
+        return Err(refuse(
+            format!("{path}.name"),
+            format!(
+                "`{name}` is not an index name: [a-z][a-z0-9_]*, at most {} bytes",
+                crate::tools::public_schema::SPECIALISED_INDEX_NAME_MAX
+            ),
+        ));
+    }
+    let flag = |key: &str| -> Result<bool, Refusal> {
+        match item.get(key) {
+            None => Ok(false),
+            Some(Json::Bool(value)) => Ok(*value),
+            Some(other) => Err(refuse(
+                format!("{path}.{key}"),
+                format!("must be true or false, not {}", other.kind()),
+            )),
+        }
+    };
+    let server_only = flag("serverOnly")?;
+    let value = item.get(kind).expect("kind key present");
+    let kind_path = format!("{path}.{kind}");
+    let kind = match kind {
+        "text" => {
+            let mut fields = BTreeMap::new();
+            for (column, weight) in object(value, &kind_path)? {
+                let weight_path = format!("{kind_path}.{column}");
+                let max = crate::tools::public_schema::TEXT_WEIGHT_MAX;
+                let weight = match weight {
+                    Json::Number(n) => n.parse::<u8>().ok().filter(|w| (1..=max).contains(w)),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    refuse(
+                        &weight_path,
+                        format!("a field weight is an integer from 1 to {max}"),
+                    )
+                })?;
+                fields.insert(column.clone(), weight);
+            }
+            if fields.is_empty() {
+                return Err(refuse(
+                    kind_path,
+                    "a text index needs at least one field, e.g. { \"title\": 4, \"body\": 1 }",
+                ));
+            }
+            let analyzer_path = format!("{path}.analyzer");
+            let analyzer = string(
+                item.get("analyzer").ok_or_else(|| {
+                    refuse(
+                        path,
+                        format!("a text index needs `analyzer`, one of {}", analyzers_list()),
+                    )
+                })?,
+                &analyzer_path,
+            )?;
+            if !crate::tools::public_schema::TEXT_ANALYZERS.contains(&analyzer) {
+                return Err(refuse(
+                    analyzer_path,
+                    format!(
+                        "unknown analyzer `{analyzer}`{}; analyzers are {}",
+                        super::expr::did_you_mean(
+                            analyzer,
+                            crate::tools::public_schema::TEXT_ANALYZERS.iter().copied()
+                        ),
+                        analyzers_list()
+                    ),
+                ));
+            }
+            SpecialisedIndexKind::Text {
+                fields,
+                analyzer: analyzer.to_string(),
+                prefix: flag("prefix")?,
+            }
+        }
+        "vector" => {
+            let column = string(value, &kind_path)?;
+            let metric_path = format!("{path}.metric");
+            let metric = string(
+                item.get("metric").ok_or_else(|| {
+                    refuse(
+                        path,
+                        "a vector index needs `metric`: \"cosine\", \"l2\" or \"dot\"",
+                    )
+                })?,
+                &metric_path,
+            )?;
+            let metric = VectorMetric::parse(metric).ok_or_else(|| {
+                refuse(
+                    &metric_path,
+                    format!("unknown metric `{metric}`; metrics are cosine, l2 and dot"),
+                )
+            })?;
+            let ann = match item.get("ann") {
+                None => VectorAnn::Exact,
+                Some(Json::String(ann)) if ann == "exact" => VectorAnn::Exact,
+                Some(Json::String(ann)) if ann == "ivf" => {
+                    return Err(refuse(
+                        format!("{path}.ann"),
+                        "`ann: \"ivf\"` is not supported yet; the only value is \"exact\"",
+                    ));
+                }
+                Some(_) => {
+                    return Err(refuse(
+                        format!("{path}.ann"),
+                        "the only `ann` value is \"exact\"",
+                    ));
+                }
+            };
+            SpecialisedIndexKind::Vector {
+                column: column.to_string(),
+                metric,
+                ann,
+            }
+        }
+        _ => {
+            let point = object(value, &kind_path)?;
+            only_keys(point, GEO_POINT_KEYS, &kind_path)?;
+            let coordinate = |key: &str| -> Result<String, Refusal> {
+                let column = value.get(key).ok_or_else(|| {
+                    refuse(
+                        &kind_path,
+                        "a geo index is { \"lat\": <f64 column>, \"lng\": <f64 column> }",
+                    )
+                })?;
+                string(column, &format!("{kind_path}.{key}")).map(str::to_string)
+            };
+            SpecialisedIndexKind::Geo {
+                lat: coordinate("lat")?,
+                lng: coordinate("lng")?,
+            }
+        }
+    };
+    Ok(SpecialisedIndex {
+        name: name.to_string(),
+        kind,
+        server_only,
+    })
+}
+
+fn analyzers_list() -> String {
+    crate::tools::public_schema::TEXT_ANALYZERS
+        .iter()
+        .map(|a| format!("\"{a}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A specialised index as `jazz.app.json` writes it: `name`, the kind key,
+/// then its options; defaults are omitted.
+fn write_specialised_index(index: &SpecialisedIndex) -> Json {
+    let mut fields = vec![("name", Json::string(&index.name))];
+    match &index.kind {
+        SpecialisedIndexKind::Text {
+            fields: columns,
+            analyzer,
+            prefix,
+        } => {
+            fields.push((
+                "text",
+                Json::Object(
+                    columns
+                        .iter()
+                        .map(|(column, weight)| (column.clone(), Json::Number(weight.to_string())))
+                        .collect(),
+                ),
+            ));
+            fields.push(("analyzer", Json::string(analyzer)));
+            if *prefix {
+                fields.push(("prefix", Json::Bool(true)));
+            }
+        }
+        SpecialisedIndexKind::Vector {
+            column,
+            metric,
+            ann,
+        } => {
+            fields.push(("vector", Json::string(column)));
+            fields.push(("metric", Json::string(metric.as_str())));
+            match ann {
+                VectorAnn::Exact => {}
+            }
+        }
+        SpecialisedIndexKind::Geo { lat, lng } => {
+            fields.push((
+                "geo",
+                Json::object(vec![("lat", Json::string(lat)), ("lng", Json::string(lng))]),
+            ));
+        }
+    }
+    if index.server_only {
+        fields.push(("serverOnly", Json::Bool(true)));
+    }
+    Json::object(fields)
 }
 
 /// A computed field's or transform's type: a type and `?`, without the
@@ -1100,6 +1380,9 @@ fn write_tables(schema: &Schema, codegen: Option<&Codegen>) -> Result<Json, Stri
                 index.iter().map(|c| Json::string(c.as_str())).collect(),
             ));
         }
+        let mut specialised: Vec<&SpecialisedIndex> = table.specialised_indexes.iter().collect();
+        specialised.sort_by(|left, right| left.name.cmp(&right.name));
+        indexes.extend(specialised.into_iter().map(write_specialised_index));
         if !indexes.is_empty() {
             fields.push(("indexes".into(), Json::Array(indexes)));
         }

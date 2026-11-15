@@ -17,7 +17,9 @@ use jazz_types::records::{
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, Operation, PolicyExpr,
-    Schema, TableName, TableSchema, Value,
+    SPECIALISED_INDEX_NAME_MAX, Schema, SpecialisedIndex, SpecialisedIndexKind, TEXT_ANALYZERS,
+    TEXT_WEIGHT_MAX, TableName, TableSchema, Value, canonical_specialised_index_order,
+    is_specialised_index_name,
 };
 use crate::query::{
     RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
@@ -787,6 +789,7 @@ fn convert_table(
     if table.history == HistoryRetention::Latest {
         validate_latest_only(name, table)?;
     }
+    converted.specialised_indexes = validate_specialised_indexes(name, table)?;
     converted.read_policy = convert_optional_policy(
         schema,
         table,
@@ -1128,6 +1131,114 @@ fn validate_payload_enum_field(
 
 /// A latest-only table keeps no superseded versions (SPEC 4 §4.9), so a
 /// feature that reads them is refused when the schema compiles.
+/// The vector dimension of a column a `vector` index may index: `Some` for
+/// a vector column (`None` inside when its dimension is not declared).
+///
+/// The `vector` column type is added by the vector kind (SPEC 20.1); until
+/// it lands a `bytes` column stands in, with its dimension unchecked.
+pub fn vector_dimensions(column_type: &ColumnType) -> Option<Option<u32>> {
+    match column_type {
+        ColumnType::Bytea => Some(None),
+        _ => None,
+    }
+}
+
+/// Check a table's specialised indexes (SPEC 20.1) and return them in
+/// canonical (name) order.
+fn validate_specialised_indexes(
+    name: &TableName,
+    table: &TableSchema,
+) -> Result<Vec<SpecialisedIndex>, SchemaConversionError> {
+    let mut seen = BTreeSet::new();
+    let mut indexes = table.specialised_indexes.clone();
+    for index in &table.specialised_indexes {
+        let path = format!("$.{}.specialised_indexes.{}", name.as_str(), index.name);
+        if !is_specialised_index_name(&index.name) {
+            return Err(err(
+                path,
+                format!(
+                    "a specialised index name is [a-z][a-z0-9_]*, at most {SPECIALISED_INDEX_NAME_MAX} bytes"
+                ),
+            ));
+        }
+        if !seen.insert(index.name.as_str()) {
+            return Err(err(path, "two specialised indexes with the same name"));
+        }
+        let column = |column: &str, option: &str| {
+            table.columns.column(column).ok_or_else(|| {
+                err(
+                    format!("{path}.{option}"),
+                    format!("table {} has no column `{column}`", name.as_str()),
+                )
+            })
+        };
+        match &index.kind {
+            SpecialisedIndexKind::Text {
+                fields, analyzer, ..
+            } => {
+                if fields.is_empty() {
+                    return Err(err(
+                        format!("{path}.text"),
+                        "a text index needs at least one field",
+                    ));
+                }
+                for (field, weight) in fields {
+                    let descriptor = column(field, &format!("text.{field}"))?;
+                    if descriptor.column_type != ColumnType::Text {
+                        return Err(err(
+                            format!("{path}.text.{field}"),
+                            "a text index field must be a string column",
+                        ));
+                    }
+                    if !(1..=TEXT_WEIGHT_MAX).contains(weight) {
+                        return Err(err(
+                            format!("{path}.text.{field}"),
+                            format!("a field weight is an integer from 1 to {TEXT_WEIGHT_MAX}"),
+                        ));
+                    }
+                }
+                if !TEXT_ANALYZERS.contains(&analyzer.as_str()) {
+                    return Err(err(
+                        format!("{path}.analyzer"),
+                        format!(
+                            "unknown analyzer `{analyzer}`; analyzers are {}",
+                            TEXT_ANALYZERS.join(", ")
+                        ),
+                    ));
+                }
+            }
+            SpecialisedIndexKind::Vector { column: vector, .. } => {
+                let descriptor = column(vector, "vector")?;
+                if vector_dimensions(&descriptor.column_type).is_none() {
+                    return Err(err(
+                        format!("{path}.vector"),
+                        "a vector index needs a vector column",
+                    ));
+                }
+            }
+            SpecialisedIndexKind::Geo { lat, lng } => {
+                for (option, coordinate) in [("geo.lat", lat), ("geo.lng", lng)] {
+                    let descriptor = column(coordinate, option)?;
+                    if descriptor.column_type != ColumnType::Double {
+                        return Err(err(
+                            format!("{path}.{option}"),
+                            "a geo index coordinate must be an f64 column",
+                        ));
+                    }
+                }
+                if lat == lng {
+                    return Err(err(
+                        format!("{path}.geo"),
+                        "a geo index needs two different columns",
+                    ));
+                }
+            }
+        }
+    }
+    canonical_specialised_index_order(&mut indexes);
+    Ok(indexes)
+}
+
 fn validate_latest_only(
     name: &TableName,
     table: &TableSchema,
@@ -6562,5 +6673,219 @@ mod tests {
         assert_eq!(seed.user_column.as_deref(), Some("user_id"));
         assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(seed.team_column, "team");
+    }
+}
+
+/// Specialised index declarations (SPEC 20.1): validation, ids and the
+/// declaration encoding. Lower-level than the black-box tests in
+/// `crates/jazz/tests`: ids and encodings are byte contracts, pinned here.
+#[cfg(test)]
+mod specialised_index_tests {
+    use super::*;
+    use crate::model::public_api::types::{
+        SchemaBuilder, SchemaHash, TableSchemaBuilder, VectorMetric,
+    };
+
+    fn notes(with: impl FnOnce(TableSchemaBuilder) -> TableSchemaBuilder) -> Schema {
+        let table = TableSchemaBuilder::new("notes")
+            .column("title", ColumnType::Text)
+            .nullable_column("body", ColumnType::Text)
+            .column("embedding", ColumnType::Bytea)
+            .column("lat", ColumnType::Double)
+            .column("lng", ColumnType::Double)
+            .column("stars", ColumnType::Integer);
+        SchemaBuilder::new().table(with(table)).build()
+    }
+
+    fn all_kinds(table: TableSchemaBuilder) -> TableSchemaBuilder {
+        table
+            .text_index(
+                "search",
+                [("title", 4), ("body", 1)],
+                "jazz-text/1:en",
+                true,
+            )
+            .vector_index("similar", "embedding", VectorMetric::Cosine)
+            .geo_index("place", "lat", "lng")
+            .server_only()
+    }
+
+    fn refusal(with: impl FnOnce(TableSchemaBuilder) -> TableSchemaBuilder) -> String {
+        convert_public_schema(&notes(with))
+            .expect_err("the declaration is refused")
+            .to_string()
+    }
+
+    /// A schema without specialised indexes keeps the ids it had before
+    /// they existed: its runtime version id, compatibility id and public
+    /// `SchemaHash` are pinned to the values the base commit computes.
+    #[test]
+    fn ids_without_specialised_indexes_are_unchanged() {
+        let schema = notes(|table| table);
+        let converted = convert_public_schema(&schema).unwrap();
+        assert_eq!(
+            converted.version_id().0.to_string(),
+            "79947f8f-1d52-5066-ae92-8630785fa04d",
+            "version id"
+        );
+        assert_eq!(
+            converted.compatibility_id().0.to_string(),
+            "56c2431b-dc46-53a2-850c-2ea08846f089",
+            "compatibility id"
+        );
+        assert_eq!(
+            SchemaHash::compute(&schema).to_hex(),
+            "e2c1d294a9158cd1a514ff903b35f39b18915df70cae62c2ae0d77372fbcd6df",
+            "SchemaHash"
+        );
+    }
+
+    /// Adding, changing or dropping a specialised index is a new version
+    /// with the same compatibility id: rows are stored and synced as before.
+    #[test]
+    fn specialised_indexes_are_part_of_the_version_id_only() {
+        let plain = convert_public_schema(&notes(|table| table)).unwrap();
+        let indexed = convert_public_schema(&notes(all_kinds)).unwrap();
+        let reweighted = convert_public_schema(&notes(|table| {
+            table.text_index("search", [("title", 5)], "jazz-text/1:en", true)
+        }))
+        .unwrap();
+        assert_ne!(plain.version_id(), indexed.version_id());
+        assert_ne!(indexed.version_id(), reweighted.version_id());
+        assert_eq!(plain.compatibility_id(), indexed.compatibility_id());
+        assert_eq!(plain.compatibility_id(), reweighted.compatibility_id());
+        assert_ne!(
+            SchemaHash::compute(&notes(|table| table)),
+            SchemaHash::compute(&notes(all_kinds))
+        );
+        // Declaration order does not matter: indexes are kept by name.
+        let reordered = notes(|table| {
+            table
+                .geo_index("place", "lat", "lng")
+                .server_only()
+                .vector_index("similar", "embedding", VectorMetric::Cosine)
+                .text_index(
+                    "search",
+                    [("body", 1), ("title", 4)],
+                    "jazz-text/1:en",
+                    true,
+                )
+        });
+        // `server_only` marks the last-added index: make `place` the
+        // server-only one in both.
+        let mut expected = notes(all_kinds);
+        for index in &mut expected
+            .get_mut(&TableName::new("notes"))
+            .unwrap()
+            .specialised_indexes
+        {
+            index.server_only = index.name == "place";
+        }
+        assert_eq!(
+            convert_public_schema(&reordered).unwrap().version_id(),
+            convert_public_schema(&expected).unwrap().version_id()
+        );
+        assert_eq!(
+            SchemaHash::compute(&reordered),
+            SchemaHash::compute(&expected)
+        );
+        assert_eq!(
+            indexed.tables()[0]
+                .specialised_indexes
+                .iter()
+                .map(|index| index.name.as_str())
+                .collect::<Vec<_>>(),
+            ["place", "search", "similar"]
+        );
+    }
+
+    /// `jazz-ix-decl/1` is a durable encoding (the `_jazz_ix.decl` bytes
+    /// and part of schema ids): pinned per kind.
+    #[test]
+    fn declaration_bytes_are_pinned() {
+        let schema = notes(all_kinds);
+        let table = &schema[&TableName::new("notes")];
+        let hex = |name: &str| {
+            let index = table
+                .specialised_indexes
+                .iter()
+                .find(|index| index.name == name)
+                .unwrap();
+            ::hex::encode(index.canonical_bytes())
+        };
+        assert_eq!(
+            hex("search"),
+            "000000000000000e6a617a7a2d69782d6465636c2f3100000000000000067365617263680000000000000000020000000000000004626f64790100000000000000057469746c6504000000000000000e6a617a7a2d746578742f313a656e0100"
+        );
+        assert_eq!(
+            hex("similar"),
+            "000000000000000e6a617a7a2d69782d6465636c2f31000000000000000773696d696c6172010000000000000009656d62656464696e67000000"
+        );
+        assert_eq!(
+            hex("place"),
+            "000000000000000e6a617a7a2d69782d6465636c2f310000000000000005706c6163650200000000000000036c617400000000000000036c6e6701"
+        );
+    }
+
+    /// Every declaration error names the table, the index and the option.
+    #[test]
+    fn invalid_declarations_are_refused_with_their_path() {
+        assert_eq!(
+            refusal(|t| t.text_index("Search", [("title", 1)], "jazz-text/1:en", false)),
+            "$.notes.specialised_indexes.Search: a specialised index name is [a-z][a-z0-9_]*, at \
+             most 32 bytes"
+        );
+        assert_eq!(
+            refusal(|t| t.text_index(&"s".repeat(33), [("title", 1)], "jazz-text/1:en", false))
+                .split(':')
+                .nth(1)
+                .unwrap()
+                .trim(),
+            "a specialised index name is [a-z][a-z0-9_]*, at most 32 bytes"
+        );
+        assert_eq!(
+            refusal(|t| t
+                .text_index("search", [("title", 1)], "jazz-text/1:en", false)
+                .geo_index("search", "lat", "lng")),
+            "$.notes.specialised_indexes.search: two specialised indexes with the same name"
+        );
+        assert_eq!(
+            refusal(|t| t.text_index("search", [], "jazz-text/1:en", false)),
+            "$.notes.specialised_indexes.search.text: a text index needs at least one field"
+        );
+        assert_eq!(
+            refusal(|t| t.text_index("search", [("missing", 1)], "jazz-text/1:en", false)),
+            "$.notes.specialised_indexes.search.text.missing: table notes has no column `missing`"
+        );
+        assert_eq!(
+            refusal(|t| t.text_index("search", [("stars", 1)], "jazz-text/1:en", false)),
+            "$.notes.specialised_indexes.search.text.stars: a text index field must be a string \
+             column"
+        );
+        for weight in [0, 16] {
+            assert_eq!(
+                refusal(|t| t.text_index("search", [("title", weight)], "jazz-text/1:en", false)),
+                "$.notes.specialised_indexes.search.text.title: a field weight is an integer from \
+                 1 to 15"
+            );
+        }
+        assert_eq!(
+            refusal(|t| t.text_index("search", [("title", 1)], "jazz-text/2:en", false)),
+            "$.notes.specialised_indexes.search.analyzer: unknown analyzer `jazz-text/2:en`; \
+             analyzers are jazz-text/1:en, jazz-text/1:simple"
+        );
+        assert_eq!(
+            refusal(|t| t.vector_index("similar", "title", VectorMetric::L2)),
+            "$.notes.specialised_indexes.similar.vector: a vector index needs a vector column"
+        );
+        assert_eq!(
+            refusal(|t| t.geo_index("place", "lat", "stars")),
+            "$.notes.specialised_indexes.place.geo.lng: a geo index coordinate must be an f64 \
+             column"
+        );
+        assert_eq!(
+            refusal(|t| t.geo_index("place", "lat", "lat")),
+            "$.notes.specialised_indexes.place.geo: a geo index needs two different columns"
+        );
     }
 }

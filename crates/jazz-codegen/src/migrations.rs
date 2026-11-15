@@ -473,7 +473,16 @@ fn unchanged_rows_changes(from: &TableSchema, to: &TableSchema) -> Vec<&'static 
         .iter()
         .filter_map(|c| column(from, &c.name).map(|s| (s, c.clone())))
         .collect();
-    if from.indexed_columns != to.indexed_columns || from.composite_indexes != to.composite_indexes
+    let mut specialised = |t: &TableSchema| {
+        let mut indexes = t.specialised_indexes.clone();
+        indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        indexes
+    };
+    // Specialised indexes (SPEC 20.1) are derived state too: adding,
+    // changing or dropping one is an index-only change.
+    if from.indexed_columns != to.indexed_columns
+        || from.composite_indexes != to.composite_indexes
+        || specialised(from) != specialised(to)
     {
         changes.push("indexes");
     }

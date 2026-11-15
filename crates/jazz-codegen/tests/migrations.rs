@@ -327,6 +327,10 @@ fn a_change_that_keeps_every_row_needs_an_empty_step() {
             "indexes",
         ),
         (
+            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": [{ "name": "search", "text": { "title": 1 }, "analyzer": "jazz-text/1:en" }] } }"#,
+            "indexes",
+        ),
+        (
             r#"{ "todos": { "columns": { "title": { "type": "string", "merge": "text" }, "done": "boolean" } } }"#,
             "merge strategies",
         ),
