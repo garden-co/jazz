@@ -46,7 +46,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "swift",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: true,
+    enabled: false,
   },
   {
     label: "Kotlin",
