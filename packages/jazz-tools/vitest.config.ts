@@ -31,7 +31,12 @@ export default defineConfig({
     // groups 192, 197 and 198 each failed one at vitest's 5s default), so the
     // suite gets the same headroom the browser suite has.
     testTimeout: 30_000,
-    include: ["src/**/*.test.ts", "tests/ts-dsl/**/*.test.ts", "tests/topology/**/*.test.ts"],
+    include: [
+      "src/**/*.test.ts",
+      "tests/ts-dsl/**/*.test.ts",
+      "tests/typed-app/**/*.test.ts",
+      "tests/topology/**/*.test.ts",
+    ],
     exclude: ["tests/browser/**", "node_modules/**", "src/**/*.svelte.test.ts", "src/solid/**"],
   },
 });
