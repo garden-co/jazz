@@ -113,6 +113,31 @@ thread_local! {
     static TRANSACTIONS: RefCell<Transactions> = RefCell::new(Transactions::default());
 }
 
+/// The streaming uploads in progress on this thread's client.
+#[derive(Default)]
+struct Uploads(HashMap<u64, Upload>);
+
+struct Upload {
+    upload: jazz_app::jazz::tools::StreamingUpload,
+    kind: jazz_app::jazz::db::StreamingMutationKind,
+    id: Option<jazz_app::ObjectId>,
+    table: TableSchema,
+    name: String,
+}
+
+impl Drop for Uploads {
+    fn drop(&mut self) {
+        // As for transactions: the client is gone when the thread exits.
+        for entry in std::mem::take(&mut self.0).into_values() {
+            std::mem::forget(entry);
+        }
+    }
+}
+
+thread_local! {
+    static UPLOADS: RefCell<Uploads> = RefCell::new(Uploads::default());
+}
+
 /// The open transactions. Close rolls them back; any left when the client's
 /// thread exits are forgotten, not dropped: the client they belong to is
 /// already gone, and dropping them then would abort the process.
@@ -626,6 +651,106 @@ impl Core {
             Advice::Denied => Some(false),
             Advice::Unknown => None,
         })
+    }
+
+    /// Begins uploading a large value of `column` piece by piece: of a new
+    /// row (`id` none: an insert, its other columns `row_json`), or of the
+    /// row with `id` (`kind` `update` or `upsert`). Returns the upload's id.
+    pub fn upload_begin(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        kind: &str,
+        id: Option<&str>,
+        row_json: Option<&str>,
+    ) -> Result<String> {
+        use jazz_app::jazz::db::StreamingMutationKind as Kind;
+        let table = self.table(table_name)?.clone();
+        convert::column(&table, table_name, column_name)?;
+        let kind = match kind {
+            "insert" => Kind::Insert,
+            "update" => Kind::Update,
+            "upsert" => Kind::Upsert,
+            other => {
+                return Err(refused(format!(
+                    "an upload's kind is \"insert\", \"update\" or \"upsert\", not {other:?}"
+                )));
+            }
+        };
+        let id = id.map(|id| convert::parse_id(id, "the id")).transpose()?;
+        if id.is_none() != matches!(kind, Kind::Insert) {
+            return Err(refused(
+                "an insert upload takes no \"id\"; an update or upsert needs one",
+            ));
+        }
+        let cells = match row_json {
+            Some(row) => convert::cells(&table, table_name, row, "the row")?.1,
+            None => Vec::new(),
+        };
+        let upload_id = self.next_tx.fetch_add(1, Ordering::Relaxed);
+        let (name, column) = (table_name.to_owned(), column_name.to_owned());
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let upload =
+                client.begin_streaming_upload(&name, cells.into_iter().collect(), &column)?;
+            UPLOADS.with(|u| {
+                u.borrow_mut().0.insert(
+                    upload_id,
+                    Upload {
+                        upload,
+                        kind,
+                        id,
+                        table,
+                        name,
+                    },
+                )
+            });
+            Ok(())
+        }))?;
+        Ok(upload_id.to_string())
+    }
+
+    /// Feeds the next piece of an upload.
+    pub fn upload_push(&self, upload: u64, bytes: Vec<u8>) -> Result<()> {
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let mut entry = UPLOADS
+                .with(|u| u.borrow_mut().0.remove(&upload))
+                .ok_or_else(|| jazz_app::Error::Config(format!("upload {upload} is not open")))?;
+            let pushed = client
+                .push_streaming_upload(&mut entry.upload, &bytes)
+                .await;
+            UPLOADS.with(|u| u.borrow_mut().0.insert(upload, entry));
+            Ok(pushed?)
+        }))?;
+        Ok(())
+    }
+
+    /// Finishes an upload, committing the row with its value; returns the
+    /// row.
+    pub fn upload_finish(&self, upload: u64, opts: &Opts) -> Result<String> {
+        self.reachable(opts.write_tier)?;
+        let tier = opts.write_tier;
+        let row = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let entry = UPLOADS
+                .with(|u| u.borrow_mut().0.remove(&upload))
+                .ok_or_else(|| jazz_app::Error::Config(format!("upload {upload} is not open")))?;
+            let (id, committed) = client
+                .finish_streaming_upload(entry.upload, entry.kind, entry.id)
+                .await?;
+            settle(&client, Some(committed), tier).await?;
+            read_back(&client, &entry.table, &entry.name, id).await
+        }))?;
+        Ok(row.to_string())
+    }
+
+    /// Abandons an upload: nothing is written.
+    pub fn upload_abort(&self, upload: u64) -> Result<()> {
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let entry = UPLOADS
+                .with(|u| u.borrow_mut().0.remove(&upload))
+                .ok_or_else(|| jazz_app::Error::Config(format!("upload {upload} is not open")))?;
+            Ok(client.abort_streaming_upload(entry.upload).await?)
+        }))?;
+        Ok(())
     }
 
     /// Begins a serializable transaction: its reads see a snapshot and its

@@ -270,6 +270,34 @@ pub unsafe extern "C" fn jazz_call(
                     &opts(false)?,
                 )?
             }
+            "uploadBegin" => {
+                let row = args
+                    .get("row")
+                    .filter(|r| !r.is_null())
+                    .map(Json::to_string);
+                let kind = args.get("kind").and_then(Json::as_str).unwrap_or("insert");
+                json!({ "upload": core.upload_begin(
+                    &string("table")?,
+                    &string("column")?,
+                    kind,
+                    args.get("id").and_then(Json::as_str),
+                    row.as_deref(),
+                )? })
+                .to_string()
+            }
+            "uploadPush" => {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(string("bytes")?)
+                    .map_err(|_| refused("args_json.bytes must be base64"))?;
+                core.upload_push(parse_tx(&string("upload")?)?, bytes)?;
+                "null".into()
+            }
+            "uploadFinish" => core.upload_finish(parse_tx(&string("upload")?)?, &opts(false)?)?,
+            "uploadAbort" => {
+                core.upload_abort(parse_tx(&string("upload")?)?)?;
+                "null".into()
+            }
             "txBegin" => {
                 let serializable = match args.get("serializable") {
                     None | Some(Json::Null) => true,

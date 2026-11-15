@@ -280,6 +280,28 @@ impl JazzHandle {
         ))
     }
 
+    /// Begins uploading a large value of `column` piece by piece: `kind`
+    /// `"insert"` (a new row, `id` none, its other columns `row_json`),
+    /// `"update"` or `"upsert"` (the row with `id`).
+    pub fn begin_upload(
+        self: Arc<Self>,
+        table: String,
+        column: String,
+        kind: String,
+        id: Option<String>,
+        row_json: Option<String>,
+    ) -> Result<Arc<Upload>> {
+        let upload = self.core.surface(
+            self.core
+                .upload_begin(&table, &column, &kind, id.as_deref(), row_json.as_deref())
+                .and_then(|id| core::parse_tx(&id)),
+        )?;
+        Ok(Arc::new(Upload {
+            handle: self,
+            upload,
+        }))
+    }
+
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
@@ -557,6 +579,38 @@ impl Watch {
     /// When it returns, no callback is running (unless called from one).
     pub fn cancel(&self) {
         self.inner.cancel();
+    }
+}
+
+/// A large value being uploaded: `push` its pieces, then `finish` (or
+/// `abort`). Use it from one thread at a time.
+#[derive(uniffi::Object)]
+pub struct Upload {
+    handle: Arc<JazzHandle>,
+    upload: u64,
+}
+
+#[uniffi::export]
+impl Upload {
+    pub fn push(&self, bytes: Vec<u8>) -> Result<()> {
+        self.handle
+            .core
+            .surface(self.handle.core.upload_push(self.upload, bytes))
+    }
+
+    /// Commits the row with its value; returns the row.
+    pub fn finish(&self) -> Result<String> {
+        self.handle.core.surface(
+            self.handle
+                .core
+                .upload_finish(self.upload, &Default::default()),
+        )
+    }
+
+    pub fn abort(&self) -> Result<()> {
+        self.handle
+            .core
+            .surface(self.handle.core.upload_abort(self.upload))
     }
 }
 
