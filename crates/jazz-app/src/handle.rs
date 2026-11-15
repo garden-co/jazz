@@ -180,7 +180,7 @@ impl Jazz {
         {
             return Err(Error::Config(
                 "an end user's credentials would cross the network in plain text: use \
-                 https://, or Config::allow_insecure_http for a dev server"
+                 https:// (or wss://), or Config::allow_insecure_http for a dev server"
                     .into(),
             ));
         }
