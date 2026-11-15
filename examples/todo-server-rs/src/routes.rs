@@ -115,9 +115,8 @@ async fn list_todos(State(jazz): State<Jazz>) -> Response {
 
 async fn create_todo(State(jazz): State<Jazz>, Json(request): Json<CreateTodoRequest>) -> Response {
     let new = NewTodo {
-        title: request.title,
         description: request.description,
-        ..Default::default()
+        ..NewTodo::new(request.title, false)
     };
     match jazz.insert(new).await {
         Ok(todo) => (StatusCode::CREATED, Json(Todo::from(todo))).into_response(),
