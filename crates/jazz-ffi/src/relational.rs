@@ -9,7 +9,8 @@
 //! - `{ "table", "where"?, "gather": { "relation", "maxDepth"? } }`: the seed
 //!   rows and every row reached along a self relation (default depth 10).
 //! - `{ "union": [Q, ...], "orderBy"?, "limit"?, "offset"? }`: every arm's
-//!   rows (arms read one table, with `where` only).
+//!   rows, a row once per arm that matches it, as TS's union (arms read one
+//!   table, with `where` only).
 //! - `{ "table", "history": true, "where"?, "orderBy"?, "limit"? }`: the
 //!   table's versions, each row with `"$history": { "transactionId",
 //!   "acceptedAt" }`.
@@ -342,7 +343,21 @@ pub(crate) fn lower(schema: &Schema, relations: &Relations, json: &Json) -> Resu
                 .get(&at_table, hop)
                 .ok_or_else(|| refused(format!("table {at_table} has no relation {hop}")))?;
             let (_, to) = table_of(schema, &relation.to_table)?;
-            query = query.hop_to(if relation.forward {
+            let (from_table, _) = table_of(schema, &at_table)?;
+            let many = relation.forward
+                && convert::column(&from_table, &at_table, &relation.column).is_ok_and(|c| {
+                    matches!(
+                        c.column_type.as_ref(),
+                        jazz_app::jazz::tools::ColumnType::Array { .. }
+                    )
+                });
+            query = query.hop_to(if many {
+                // Over a `uuid[]` reference: to every row it names.
+                Hop::ForwardArray {
+                    column: relation.column.clone(),
+                    to,
+                }
+            } else if relation.forward {
                 Hop::Forward {
                     column: relation.column.clone(),
                     to,

@@ -219,10 +219,28 @@ impl Core {
         let has_server = config.server_url.is_some();
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
-        Ok(Self {
+        Ok(Self::from_parts(
             jazz,
-            schema: Arc::new(schema),
-            relations: convert::Relations::read(&app_text),
+            Arc::new(schema),
+            convert::Relations::read(&app_text),
+            has_server,
+            contract,
+        ))
+    }
+
+    /// A handle over an already open app, e.g. a backend acting as one of
+    /// its users ([`crate::endpoint`]).
+    pub(crate) fn from_parts(
+        jazz: Jazz,
+        schema: Arc<Schema>,
+        relations: convert::Relations,
+        has_server: bool,
+        contract: u64,
+    ) -> Self {
+        Self {
+            jazz,
+            schema,
+            relations,
             closed: AtomicBool::new(false),
             subscriptions: Mutex::new(Vec::new()),
             // Ids start at a random point, so a stale id from another
@@ -231,7 +249,20 @@ impl Core {
             next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
             has_server,
             contract,
-        })
+        }
+    }
+
+    pub(crate) fn parts(&self) -> (Jazz, Arc<Schema>, convert::Relations, bool) {
+        (
+            self.jazz.clone(),
+            self.schema.clone(),
+            self.relations.clone(),
+            self.has_server,
+        )
+    }
+
+    pub(crate) fn jazz(&self) -> Result<&Jazz> {
+        self.open_jazz()
     }
 
     /// An error as this host's contract version names it.
@@ -941,7 +972,12 @@ impl Core {
             .cloned()
             .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
         let bearer = bearer.to_owned();
-        let user = block_on(async move { session.link(&bearer).await })?;
+        // On the client's runtime: linking talks to the app's endpoint
+        // (tokio I/O), and the caller's thread may have no runtime at all.
+        let user = block_on(
+            self.open_jazz()?
+                .with_client(move |_| async move { session.link(&bearer).await }),
+        )?;
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
@@ -1341,6 +1377,7 @@ fn config(
     let mut admin_secret = None;
     let mut session = None;
     let mut auth = None;
+    let mut insecure = false;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -1362,6 +1399,13 @@ fn config(
             "adminSecret" => admin_secret = Some(text()?),
             "session" => session = Some(value.clone()),
             "auth" => auth = Some(value.clone()),
+            // An end user over plain http:// to a host other than
+            // localhost, for development only.
+            "allowInsecureHttp" => {
+                insecure = value
+                    .as_bool()
+                    .ok_or_else(|| refused("config.allowInsecureHttp must be true or false"))?;
+            }
             // Read by `Core::open`; checked here.
             "contract" => match value.as_u64() {
                 Some(1 | 2) => {}
@@ -1472,6 +1516,9 @@ fn config(
             }
         };
         result = result.user(auth);
+        if insecure {
+            result = result.allow_insecure_http();
+        }
     } else if result.server_url.is_some() {
         return Err(refused(
             "a \"serverUrl\" needs \"permissions\" (a backend) or \"auth\" (an end user)",

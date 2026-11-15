@@ -604,16 +604,29 @@ impl<'a> Writer<'a> {
                 ))
             })?;
         Ok(match &relation.kind {
-            RelationKind::One { column, nullable } => format!(
-                "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}{}> {{\n        {RT}::One::new({column:?})\n    }}\n",
-                relation.name,
-                relation.target,
-                if *nullable {
+            RelationKind::One { column, nullable } => {
+                let nullable = if *nullable {
                     format!(", {RT}::Nullable")
                 } else {
                     String::new()
+                };
+                // A relation over a uuid array references several rows.
+                let array = table
+                    .columns
+                    .iter()
+                    .any(|c| &c.name == column && matches!(c.ty.ty, ColumnType::Array { .. }));
+                if array {
+                    format!(
+                        "\n    /// Relation `{}`: the `{}` rows `{column}` references.\n    pub fn {ident}() -> {RT}::Refs<{row}, {target}{nullable}> {{\n        {RT}::Refs::new({column:?})\n    }}\n",
+                        relation.name, relation.target
+                    )
+                } else {
+                    format!(
+                        "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}{nullable}> {{\n        {RT}::One::new({column:?})\n    }}\n",
+                        relation.name, relation.target
+                    )
                 }
-            ),
+            }
             RelationKind::Many { relation: forward } => {
                 let column = self
                     .app

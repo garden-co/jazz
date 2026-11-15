@@ -27,6 +27,10 @@
 //! `history()` reads its rows' accepted versions ([`Version`]) and
 //! [`Query::include_deleted`] reads deleted rows too.
 //!
+//! A backend serves its users' clients with an [`Endpoint`]: the app's
+//! `/jazz` handler, as TS `createJazz` serves it, with the app's own
+//! sign-in deciding who each request's user is.
+//!
 //! Not supported yet: subscribing to history, and partial
 //! reads of large values.
 
@@ -36,6 +40,7 @@ mod auth;
 mod backend;
 mod config;
 mod edit;
+pub mod endpoint;
 mod error;
 mod handle;
 mod history;
@@ -56,14 +61,17 @@ pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
+pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::Jazz;
 pub use history::Version;
-pub use include::{Include, IntoInclude, Nullability, OneInclude, Partial, Row, Selection, With};
+pub use include::{
+    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+};
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, created_at, deleted_at, id,
-    updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, deleted_at,
+    id, updated_at,
 };
 pub use relation::{Hop, Step};
 pub use session::{
