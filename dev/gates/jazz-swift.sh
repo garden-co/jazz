@@ -42,13 +42,17 @@ cargo test -q -p jazz-codegen --test golden -- swift
 cargo build -q -p jazz-cli --bin jazz-tools
 # The app endpoint the end-user tests sign in through.
 cargo build -q -p jazz-app --features test-relay --bin jazz-app-test-relay
-"$root/packages/jazz-swift/scripts/build-ffi.sh" --debug
-export JAZZ_FFI_LIB_DIR="$root/target/debug/jazz-ffi-static"
+# The committed UniFFI sources match what uniffi-bindgen generates from
+# this tree's jazz-ffi; then the library and its jazz_ffi.pc.
+"$root/packages/jazz-swift/scripts/build-ffi.sh" --debug --check
+"$root/packages/jazz-swift/scripts/build-ffi.sh" --debug --lib-only
+export PKG_CONFIG_PATH="$root/target/debug/jazz-ffi-static${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export JAZZ_TOOLS_BIN="$root/target/debug/jazz-tools"
 export JAZZ_TEST_RELAY_BIN="$root/target/debug/jazz-app-test-relay"
 export CI="${CI:-1}"
 
-(cd "$root/packages/jazz-swift" && swift test)
+# The root Package.swift is the Jazz Swift package.
+(cd "$root" && swift test)
 (cd "$example" && swift test)
 
 export JAZZ_SERVER_URL=http://127.0.0.1:41625
