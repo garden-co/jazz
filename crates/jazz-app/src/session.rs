@@ -292,18 +292,17 @@ impl SyncTracker {
     }
 }
 
-/// How often the status is read: the client publishes it as a value, not
-/// as changes.
-const STATUS_POLL: Duration = Duration::from_millis(100);
-
-/// Publishes the client's sync status as it changes, until the client's
-/// thread ends.
+/// Publishes the client's sync status as it changes, until the client
+/// shuts down.
 pub(crate) fn watch_sync(client: JazzClient) -> watch::Receiver<SyncStatus> {
     let mut tracker = SyncTracker::default();
+    let mut changes = client.status_changes();
     let (sender, receiver) = watch::channel(tracker.status(&client));
     tokio::task::spawn_local(async move {
         loop {
-            tokio::time::sleep(STATUS_POLL).await;
+            if changes.changed().await.is_err() {
+                return;
+            }
             let status = tracker.status(&client);
             sender.send_if_modified(|current| {
                 let changed = *current != status;
