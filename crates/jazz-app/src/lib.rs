@@ -20,8 +20,10 @@
 mod app;
 mod backend;
 mod config;
+mod edit;
 mod error;
 mod handle;
+mod large;
 mod query;
 mod subscription;
 mod table;
@@ -31,8 +33,10 @@ mod writes;
 
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
+pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
+pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
