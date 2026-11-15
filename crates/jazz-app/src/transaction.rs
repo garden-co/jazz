@@ -30,6 +30,15 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    pub(crate) fn client(&self) -> &JazzClient {
+        &self.client
+    }
+
+    /// Marks the transaction as having written, so it commits.
+    pub(crate) fn wrote(&self) {
+        self.wrote.set(true);
+    }
+
     pub fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let (row, _) = insert(&self.client, new, &self.implementations)?;
         self.wrote.set(true);
