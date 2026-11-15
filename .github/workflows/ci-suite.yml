@@ -240,7 +240,10 @@ jobs:
   test-go:
     if: inputs.scope == 'full'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
@@ -251,7 +254,9 @@ jobs:
       GO_SHA256: 6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-blacksmith
+      # The toolchain image has Rust; this job needs no pnpm install.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
       - name: Install Go
         run: |
           curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz

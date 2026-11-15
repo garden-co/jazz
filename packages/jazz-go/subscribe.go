@@ -31,7 +31,8 @@ type Delta[R any] struct {
 	Err error `json:"-"`
 }
 
-// subscriber is what a jazz-ffi callback reaches through its cgo.Handle.
+// subscriber is what a jazz-ffi callback reaches, through the integer id
+// it gets as its context (see subscribers).
 type subscriber struct {
 	mu     sync.Mutex
 	closed bool
