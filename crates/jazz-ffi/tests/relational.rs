@@ -80,15 +80,20 @@ fn hops_unions_and_deleted_rows() {
         ], "orderBy": [{ "column": "title" }] }),
     );
     assert_eq!(names(&union, "title"), ["Rig", "Tent"]);
-    // A row two arms match comes once.
-    let overlapping = rows(
-        &jazz,
-        json!({ "union": [
-            { "table": "tasks", "where": [{ "column": "showId", "op": "eq", "value": gala }] },
-            { "table": "tasks", "where": [{ "column": "id", "op": "eq", "value": rig }] },
-        ] }),
+    // As TS (UNION ALL): a row two arms match comes once per arm, and the
+    // window counts every occurrence.
+    let overlapping = json!({ "union": [
+        { "table": "tasks", "where": [{ "column": "showId", "op": "eq", "value": gala }] },
+        { "table": "tasks", "where": [{ "column": "id", "op": "eq", "value": rig }] },
+    ], "orderBy": [{ "column": "title" }] });
+    assert_eq!(
+        names(&rows(&jazz, overlapping.clone()), "title"),
+        ["Doors", "Rig", "Rig"]
     );
-    assert_eq!(names(&overlapping, "title"), ["Doors", "Rig"]);
+    let mut windowed = overlapping;
+    windowed["offset"] = json!(1);
+    windowed["limit"] = json!(2);
+    assert_eq!(names(&rows(&jazz, windowed), "title"), ["Rig", "Rig"]);
 
     jazz.delete("tasks".into(), rig.clone()).unwrap();
     assert!(
