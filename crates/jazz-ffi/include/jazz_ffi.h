@@ -68,6 +68,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              (edits: text / splice / jsonSet, see the README)
  *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
  *               "id"?, "row"?}                               -> true|false|null
+ *              (advisory: true does not promise the write succeeds; null =
+ *              unknown, e.g. no server; not available inside a transaction)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run

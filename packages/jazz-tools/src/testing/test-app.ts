@@ -19,6 +19,7 @@
  * gets {@link LooseAppTypes}: any table, column and relation.
  */
 import { createRequire } from "node:module";
+import { assertNoEnumCases } from "../app-file-enums.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { bindApp, boundApp, type App, type AppTypes, type BindAppOptions } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
@@ -97,7 +98,7 @@ interface ParsedType {
   readonly kind: string;
   /** The row form. */
   readonly value: unknown;
-  /** The insert form (payload fields that may be left out are optional). */
+  /** The insert form. */
   readonly init: unknown;
   readonly nullable: boolean;
 }
@@ -120,22 +121,15 @@ type ParseType<S> = S extends `${infer B extends ScalarName}?`
       ? ParseType<T>
       : S extends { readonly enum: readonly (infer V extends string)[] }
         ? { kind: "enum"; value: V; init: V; nullable: false }
-        : S extends { readonly enum: infer Cases extends object }
-          ? {
-              kind: "enum";
-              value: Payload<Cases, false>;
-              init: Payload<Cases, true>;
-              nullable: false;
-            }
-          : S extends { readonly json: true }
-            ? { kind: "json"; value: JsonValue; init: JsonValue; nullable: false }
-            : S extends { readonly json: unknown }
-              ? SchemaJsonType
-              : S extends { readonly array: infer E }
-                ? ParseType<E> extends infer P extends ParsedType
-                  ? { kind: "array"; value: P["value"][]; init: P["init"][]; nullable: false }
-                  : never
-                : never;
+        : S extends { readonly json: true }
+          ? { kind: "json"; value: JsonValue; init: JsonValue; nullable: false }
+          : S extends { readonly json: unknown }
+            ? SchemaJsonType
+            : S extends { readonly array: infer E }
+              ? ParseType<E> extends infer P extends ParsedType
+                ? { kind: "array"; value: P["value"][]; init: P["init"][]; nullable: false }
+                : never
+              : never;
 
 /** A column's type with its `optional`. */
 type ParseColumn<S> =
@@ -147,7 +141,7 @@ type ParseColumn<S> =
 
 type OrNull<T, TNullable> = TNullable extends true ? T | null : T;
 
-/** Whether an insert may leave the column (or payload field) out. */
+/** Whether an insert may leave the column out. */
 type OptionalOnInsert<S> = ParseColumn<S>["nullable"] extends true
   ? true
   : S extends { readonly default: unknown }
@@ -167,30 +161,6 @@ type InsertFields<TFields, TValue extends Record<keyof TFields, unknown>> = Flat
       : never]?: TValue[K];
   }
 >;
-
-/** A payload enum's union: `{ type: <case>; …fields }` per case. */
-type Payload<TCases, TInit extends boolean> = {
-  [C in keyof TCases & string]: TInit extends true
-    ? Flat<
-        { type: C } & InsertFields<
-          FieldsOf<TCases[C]>,
-          {
-            [F in keyof FieldsOf<TCases[C]>]: OrNull<
-              ParseColumn<FieldsOf<TCases[C]>[F]>["init"],
-              ParseColumn<FieldsOf<TCases[C]>[F]>["nullable"]
-            >;
-          }
-        >
-      >
-    : Flat<
-        { type: C } & {
-          -readonly [F in keyof FieldsOf<TCases[C]>]: OrNull<
-            ParseColumn<FieldsOf<TCases[C]>[F]>["value"],
-            ParseColumn<FieldsOf<TCases[C]>[F]>["nullable"]
-          >;
-        }
-      >;
-}[keyof TCases & string];
 
 type TransformsOf<TApp> = TApp extends { readonly transforms: infer T extends object } ? T : {};
 
@@ -341,7 +311,9 @@ function fileText(file: TestAppFile | TestPermissionsFile | string): string {
 
 /** What the bindings of `app` would pass to `bindApp`. */
 export function compileTestApp(app: TestAppFile | string): BindAppOptions<AppTypes> {
-  return JSON.parse(loadNapi().compileApp(fileText(app))) as BindAppOptions<AppTypes>;
+  const text = fileText(app);
+  assertNoEnumCases(JSON.parse(text));
+  return JSON.parse(loadNapi().compileApp(text)) as BindAppOptions<AppTypes>;
 }
 
 /**
