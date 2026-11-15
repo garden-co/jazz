@@ -2107,9 +2107,11 @@ dependencies = [
 name = "jazz-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "futures-core",
  "futures-util",
+ "getrandom 0.3.4",
  "jazz",
  "jazz-codegen",
  "jazz-native-transport",
@@ -2120,6 +2122,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
