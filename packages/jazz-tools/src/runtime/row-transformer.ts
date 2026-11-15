@@ -278,9 +278,12 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
     case "Boolean":
       return v.value;
     case "Integer":
-    case "BigInt":
     case "Double":
       return v.value;
+    case "BigInt":
+      // A schema default (what an insert returns for an omitted column)
+      // carries its value as the decimal string of the bindings' JSON.
+      return typeof v.value === "bigint" ? v.value : BigInt(v.value as number | string);
     case "Timestamp":
       return timestampToDate(v.value, columnName);
     case "Bytea":
