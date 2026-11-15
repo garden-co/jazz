@@ -109,6 +109,8 @@ async fn a_write_the_permissions_refuse_is_permission() {
             .as_str()
             .unwrap()
             .to_owned();
+        alice.wait_for_sync("global".into()).unwrap();
+        alice.wait_for_sync("local".into()).unwrap();
         let denied = bob.insert_at(
             "tasks".into(),
             task(&show_id, "Sneaky", 1.0),

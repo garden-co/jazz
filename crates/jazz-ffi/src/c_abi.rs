@@ -199,6 +199,13 @@ pub unsafe extern "C" fn jazz_call(
                 core.tx_commit(parse_tx(&string("tx")?)?, tier)?;
                 "null".into()
             }
+            "waitForSync" => {
+                let tier = args.get("tier").and_then(Json::as_str).ok_or_else(|| {
+                    refused("waitForSync needs \"tier\": \"local\" or \"global\"")
+                })?;
+                core.wait_for_sync(write_tier(tier)?)?;
+                "null".into()
+            }
             "txRollback" => {
                 core.tx_rollback(parse_tx(&string("tx")?)?)?;
                 "null".into()

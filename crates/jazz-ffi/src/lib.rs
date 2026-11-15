@@ -136,6 +136,13 @@ impl JazzHandle {
         )
     }
 
+    /// Returns once every write committed so far reaches `tier`
+    /// (`"local"` or `"global"`).
+    pub fn wait_for_sync(&self, tier: String) -> Result<()> {
+        self.core
+            .surface(core::write_tier(&tier).and_then(|tier| self.core.wait_for_sync(tier)))
+    }
+
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
