@@ -226,6 +226,11 @@ impl Core {
         convert::table(&self.schema, name)
     }
 
+    /// The permissions bundle a backend published and is pinned to.
+    pub fn bundle(&self) -> Result<Option<String>> {
+        Ok(self.open_jazz()?.bundle().map(str::to_owned))
+    }
+
     /// The account of the user a backend acts as (`session.user`).
     pub fn account(&self) -> Result<Option<String>> {
         Ok(self
@@ -318,6 +323,64 @@ impl Core {
                 })
                 .collect();
             Ok(convert::row_json(&convert::Shape::of(table), id, fields))
+        }))?;
+        Ok(row.to_string())
+    }
+
+    /// Writes the row with this id: inserts it if there is none, otherwise
+    /// replaces its columns. `row_json` is a whole row, as for an insert
+    /// (TS's `upsert`). Returns the row as stored.
+    pub fn upsert(
+        &self,
+        table_name: &str,
+        id: &str,
+        row_json: &str,
+        opts: &Opts,
+    ) -> Result<String> {
+        self.reachable(opts.write_tier)?;
+        let id = convert::parse_id(id, "the id")?;
+        let table = self.table(table_name)?.clone();
+        let (given, cells) = convert::cells(&table, table_name, row_json, "the row")?;
+        if given.is_some_and(|given| given != id) {
+            return Err(refused("the row's id must be the upserted id"));
+        }
+        let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
+        let row = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await?;
+            read_back(&client, &table, &name, id).await
+        }))?;
+        Ok(row.to_string())
+    }
+
+    /// Brings back a deleted row, as it was or with `row_json` as its new
+    /// content (a whole row: the engine replaces the content atomically).
+    /// Returns the row.
+    pub fn restore(
+        &self,
+        table_name: &str,
+        id: &str,
+        patch_json: Option<&str>,
+        opts: &Opts,
+    ) -> Result<String> {
+        self.reachable(opts.write_tier)?;
+        let id = convert::parse_id(id, "the id")?;
+        let table = self.table(table_name)?.clone();
+        let cells = match patch_json {
+            Some(patch) => Some(convert::cells(&table, table_name, patch, "the patch")?.1),
+            None => None,
+        };
+        let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
+        let row = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let committed = client.restore(&name, id, cells)?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await?;
+            read_back(&client, &table, &name, id).await
         }))?;
         Ok(row.to_string())
     }
@@ -675,6 +738,20 @@ impl Core {
         Ok(())
     }
 
+    /// Links this device account to the user's account with the app's
+    /// own sign-in (`bearer`, a token from it): the session becomes that
+    /// user's, on the device's account. Returns the user as JSON.
+    pub fn link(&self, bearer: &str) -> Result<String> {
+        let session = self
+            .open_jazz()?
+            .session()
+            .cloned()
+            .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
+        let bearer = bearer.to_owned();
+        let user = block_on(async move { session.link(&bearer).await })?;
+        Ok(serde_json::to_string(&user).unwrap_or_default())
+    }
+
     /// Signs the end user out and closes the app.
     pub fn sign_out(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
@@ -782,6 +859,32 @@ impl Drop for EndGuard {
             let _ = sender.send(Some(Event::Error(JazzError::Closed)));
         }
     }
+}
+
+/// The row with this id as the writer now sees it.
+async fn read_back(
+    client: &JazzClient,
+    table: &TableSchema,
+    name: &str,
+    id: jazz_app::ObjectId,
+) -> jazz_app::Result<Json> {
+    use jazz_app::jazz::query as q;
+    let mut query = q::Query::from(name);
+    query.filters.push(q::eq(
+        q::col("id"),
+        q::lit(jazz_app::jazz::records::Value::Uuid(*id.uuid())),
+    ));
+    let row = client
+        .query(query, ReadTier::LocalFirst)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| jazz_app::Error::Config(format!("no {name} row {id}")))?;
+    Ok(convert::row_json(
+        &convert::Shape::of(table.clone()),
+        id,
+        row.fields,
+    ))
 }
 
 /// Resolves splice pages given as the whole value to the value's current

@@ -246,9 +246,29 @@ pub unsafe extern "C" fn jazz_call(
                 core.refresh()?;
                 "null".into()
             }
+            "link" => core.link(&string("bearer")?)?,
+            "bundle" => Json::from(core.bundle()?).to_string(),
             "signOut" => {
                 core.sign_out()?;
                 "null".into()
+            }
+            "upsert" => core.upsert(
+                &string("table")?,
+                &string("id")?,
+                &field("row")?.to_string(),
+                &opts(false)?,
+            )?,
+            "restore" => {
+                let patch = args
+                    .get("patch")
+                    .filter(|p| !p.is_null())
+                    .map(Json::to_string);
+                core.restore(
+                    &string("table")?,
+                    &string("id")?,
+                    patch.as_deref(),
+                    &opts(false)?,
+                )?
             }
             "txBegin" => {
                 let serializable = match args.get("serializable") {

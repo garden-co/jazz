@@ -3,7 +3,8 @@
 //! and the sync socket, whose prelude it admits and relays to the core the
 //! way `admitPrelude` does (`packages/jazz-tools/src/backend/create-jazz.ts`).
 //!
-//! Its `authenticate` reads `Authorization: Bearer token-<user>`.
+//! It also links a device account to a user (`backend-link`, with its
+//! challenge). Its `authenticate` reads `Authorization: Bearer token-<user>`.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +23,10 @@ struct Backend {
     core: String,
     app: AppId,
     backend_secret: String,
+    admin_secret: String,
     bundle: String,
+    /// Link challenges issued, with the user each is for.
+    challenges: Arc<Mutex<std::collections::HashMap<String, String>>>,
 }
 
 pub struct Relay {
@@ -39,14 +43,22 @@ impl Drop for Relay {
     }
 }
 
-pub async fn start(core: &str, app: AppId, backend_secret: &str, bundle: &str) -> Relay {
+pub async fn start(
+    core: &str,
+    app: AppId,
+    backend_secret: &str,
+    admin_secret: &str,
+    bundle: &str,
+) -> Relay {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/jazz", listener.local_addr().unwrap());
     let backend = Backend {
         core: core.trim_end_matches('/').to_owned(),
         app,
         backend_secret: backend_secret.to_owned(),
+        admin_secret: admin_secret.to_owned(),
         bundle: bundle.to_owned(),
+        challenges: Arc::default(),
     };
     let admitted = Arc::new(Mutex::new(Vec::new()));
     let log = admitted.clone();
@@ -103,8 +115,35 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
                 .then(|| value.trim().to_owned())
         })
     };
-    let (status, body) = if path.ends_with("/accounts/backend-sign-in") {
-        match authenticate(header("authorization").as_deref()) {
+    let length: usize = header("content-length")
+        .and_then(|length| length.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.unwrap();
+    let user = authenticate(header("authorization").as_deref());
+    let (status, body) = if path.ends_with("/accounts/backend-link/challenge") {
+        match user {
+            None => ("401 Unauthorized", "signed_out".to_owned()),
+            Some(user) => {
+                let challenge = format!("{user}:{}", uuid_v4());
+                backend
+                    .challenges
+                    .lock()
+                    .unwrap()
+                    .insert(challenge.clone(), user);
+                ("200 OK", json!({ "challenge": challenge }).to_string())
+            }
+        }
+    } else if path.ends_with("/accounts/backend-link") {
+        match user {
+            None => ("401 Unauthorized", "signed_out".to_owned()),
+            Some(user) => match link(&backend, &user, &body).await {
+                Some(body) => ("200 OK", body.to_string()),
+                None => ("409 Conflict", "link_refused".to_owned()),
+            },
+        }
+    } else if path.ends_with("/accounts/backend-sign-in") {
+        match user {
             None => ("401 Unauthorized", "signed_out".to_owned()),
             Some(user) => {
                 let account = account_of(&backend, &user).await;
@@ -125,6 +164,68 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
+}
+
+fn uuid_v4() -> String {
+    jazz_app::ObjectId::new().to_string()
+}
+
+/// `backendLink`: the challenge was issued for this user, the device's proof
+/// signs it; the core founds the device's account and links the user to it.
+async fn link(backend: &Backend, user: &str, body: &[u8]) -> Option<Value> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let challenge = body["challenge"].as_str()?;
+    let issued_for = backend.challenges.lock().unwrap().remove(challenge)?;
+    if issued_for != user {
+        return None;
+    }
+    let subject = jazz_app::jazz::tools::identity::verify_local_first_challenge(
+        body["proof"].as_str()?,
+        challenge,
+    )
+    .ok()?
+    .to_string();
+    let guest = json!({
+        "issuer": jazz_app::jazz::tools::identity::LOCAL_FIRST_ISSUER,
+        "subject": subject,
+    });
+    let admin = |operation: &str, body: Value| {
+        reqwest::Client::new()
+            .post(format!(
+                "{}/apps/{}/admin/accounts/{operation}",
+                backend.core, backend.app
+            ))
+            .header("X-Jazz-Admin-Secret", &backend.admin_secret)
+            .json(&body)
+            .send()
+    };
+    let founded = admin("found-local-first", json!({ "identity": guest }))
+        .await
+        .ok()?;
+    if !founded.status().is_success() {
+        return None;
+    }
+    let linked = admin(
+        "link",
+        json!({
+            "from": guest,
+            "to": { "issuer": BACKEND_ISSUER, "subject": user },
+            // The challenge's single-use intent, as createJazz passes it.
+            "nonce": challenge.rsplit(':').next(),
+        }),
+    )
+    .await
+    .ok()?;
+    if !linked.status().is_success() {
+        return None;
+    }
+    let account: Value = linked.json().await.ok()?;
+    Some(json!({
+        "account": account["account"],
+        "identity": { "issuer": BACKEND_ISSUER, "subject": user },
+        "claims": {},
+        "expiresAt": 0,
+    }))
 }
 
 /// The core resolves (or creates) the user's account.

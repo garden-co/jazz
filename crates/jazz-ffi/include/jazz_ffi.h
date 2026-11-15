@@ -68,11 +68,16 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              (edits: text / splice / jsonSet, see the README)
  *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
  *               "id"?, "row"?}                               -> true|false|null
+ *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
+ *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
  *                     | null (a local app or a backend)
  *   "syncStatus" {} -> {"link": ...}
  *   "refresh"  {}  -> null (asks the token callback for a fresh token)
+ *   "link"     {"bearer"} -> the user (links a device account to the app's
+ *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
+ *   "bundle"   {}  -> "<published permissions bundle>" | null (a backend's)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
