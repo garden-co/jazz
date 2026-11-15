@@ -58,6 +58,11 @@ export async function generateTs(appJson: string): Promise<string> {
   return (await codegen()).generate("ts", appJson);
 }
 
+/** `src/jazz_app.rs` (the `jazz-app` crate's bindings) for `appJson`. */
+export async function generateRust(appJson: string): Promise<string> {
+  return (await codegen()).generate("rust", appJson);
+}
+
 /** `"sha256:<hex>"` of `appJson`, with CRLF read as LF: what the bindings' `source` holds. */
 export async function schemaSourceHash(appJson: string): Promise<string> {
   return (await codegen()).schemaSourceHash(appJson);

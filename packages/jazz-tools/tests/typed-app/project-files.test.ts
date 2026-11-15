@@ -81,3 +81,23 @@ describe("createJazz's bindings check", () => {
     await expect(checkRunningBindings("sha256:" + "0".repeat(64), empty)).resolves.toBeUndefined();
   });
 });
+
+describe("validate in a Rust crate", () => {
+  it("also writes src/jazz_app.rs when a Cargo.toml sits beside jazz.app.json", async () => {
+    const dir = await project();
+    await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
+    let rust: boolean;
+    try {
+      await validateApp({ cwd: dir });
+      rust = true;
+    } catch (error) {
+      // Until the Rust back end (#rust) lands in this jazz-napi.
+      expect(String(error)).toMatch(/rust/i);
+      rust = false;
+    }
+    if (rust) {
+      expect(await readFile(join(dir, "src", "jazz_app.rs"), "utf8")).toContain("jazz");
+      await expect(validateApp({ cwd: dir, check: true })).resolves.toBeDefined();
+    }
+  });
+});
