@@ -389,9 +389,16 @@ async fn requiring_a_not_null_relation_is_an_inner_join() {
         .insert(NewTask::new("Ship", 1, Vec::new()))
         .await
         .unwrap();
-    let held = jazz.insert(NewStep::new("held", task.id)).await.unwrap();
+    let held = jazz
+        .insert(NewStep::new("held", task.id, Vec::new()))
+        .await
+        .unwrap();
     let dangling = jazz
-        .insert(NewStep::new("dangling", jazz_app::ObjectId::new()))
+        .insert(NewStep::new(
+            "dangling",
+            jazz_app::ObjectId::new(),
+            Vec::new(),
+        ))
         .await
         .unwrap();
 
@@ -413,6 +420,89 @@ async fn requiring_a_not_null_relation_is_an_inner_join() {
         .await
         .unwrap();
     assert_eq!(required, [(held, task)]);
+}
+
+/// A relation over a uuid array includes a `Vec` of the rows it references;
+/// requiring it keeps only the rows whose every referenced row is there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn array_relations_include_vecs() {
+    use task_bindings::{NewStep, NewTask, Step, Task, steps};
+
+    let jazz = task_bindings::open(Config::new(AppId::random()), NoComputed)
+        .await
+        .unwrap();
+    let a = jazz.insert(NewTask::new("A", 1, Vec::new())).await.unwrap();
+    let b = jazz.insert(NewTask::new("B", 2, Vec::new())).await.unwrap();
+    let both = jazz
+        .insert(NewStep::new("both", a.id, vec![a.id, b.id]))
+        .await
+        .unwrap();
+    let none = jazz
+        .insert(NewStep::new("none", a.id, Vec::new()))
+        .await
+        .unwrap();
+    let dangling = jazz
+        .insert(NewStep::new(
+            "dangling",
+            a.id,
+            vec![b.id, jazz_app::ObjectId::new()],
+        ))
+        .await
+        .unwrap();
+
+    let rows: Vec<(Step, Vec<Task>)> = jazz
+        .all(
+            steps::query()
+                .order_by(steps::label(), Order::Asc)
+                .include(steps::blocker_rows()),
+        )
+        .await
+        .unwrap();
+    let mut got: Vec<_> = rows
+        .iter()
+        .map(|(step, tasks)| {
+            let mut ids: Vec<_> = tasks.iter().map(|t| t.id).collect();
+            ids.sort();
+            (step.id, ids)
+        })
+        .collect();
+    got.sort();
+    let mut ab = vec![a.id, b.id];
+    ab.sort();
+    let mut wanted = vec![(both.id, ab), (none.id, vec![]), (dangling.id, vec![b.id])];
+    wanted.sort();
+    assert_eq!(got, wanted);
+
+    // Narrowed by a query.
+    let rows = jazz
+        .all(
+            steps::query().id(both.id).include(
+                steps::blocker_rows().with(
+                    task_bindings::tasks::query().filter(task_bindings::tasks::title().eq("B")),
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows[0].1, [b]);
+
+    // Required: every referenced row must be there.
+    let required: Vec<(Step, Vec<Task>)> = jazz
+        .all(steps::query().include(steps::blocker_rows().require()))
+        .await
+        .unwrap();
+    let mut kept: Vec<_> = required.iter().map(|(step, _)| step.id).collect();
+    kept.sort();
+    let mut wanted = vec![both.id, none.id];
+    wanted.sort();
+    assert_eq!(kept, wanted);
+
+    // Filtering by a referenced row.
+    let blocked_by_a = jazz
+        .all(steps::query().filter(steps::blocker_rows().referencing(a.id)))
+        .await
+        .unwrap();
+    assert_eq!(blocked_by_a, [both]);
 }
 
 struct NoComputed;
