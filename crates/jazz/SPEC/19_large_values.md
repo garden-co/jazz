@@ -575,7 +575,17 @@ app.things.where({ id: thingId }).select({
 Ranges are half-open `[from, to)`. Byte ranges apply only to bytes; `{from,to}`
 on text is in UTF-16 code units; `{fromUtf8,toUtf8}` opts into UTF-8 bytes.
 `{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results are an
-ordinary `Uint8Array`, `string`, or decoded JSON subtree. Selecting a field by
+ordinary `Uint8Array`, `string`, or decoded JSON subtree.
+
+A range is clamped to the value it reads, in one-shot reads and
+subscriptions alike: `[min(from, end), end)` with `end = min(to, len)`, so a
+range that starts past the end reads as empty and one that runs past it
+reads what the value covers. A subscribed range thus outlives the value
+shrinking below it and follows it as it grows back. Clamping never rounds:
+an inverted range (`from > to`) fails, and so do clamped bounds that split a
+UTF-8 code point or a UTF-16 surrogate pair. The direct native range read
+(`Db::read_value_range`) names exact bytes and fails past the end, and so do
+`applyDiffs` pages (below). Selecting a field by
 name (or omitting `select`) materializes the complete value. Object-form
 partial selections apply to the root query only; in an include builder they
 fail explicitly rather than returning the complete value.

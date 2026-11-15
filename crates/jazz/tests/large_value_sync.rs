@@ -3622,3 +3622,262 @@ fn a_subscriber_joining_a_result_that_awaits_chunks_opens_on_current_rows() {
         "the joiner opens on the current row: {later:?}"
     );
 }
+
+// ---- ranges past the end (#5502) ---------------------------------------------
+
+/// The values `column` took in `stream`'s events since it was last read,
+/// in order. A rejection fails the test: the subscription must live on.
+fn shown(stream: &mut SubscriptionStream, column: &str) -> Vec<Option<Value>> {
+    let mut out = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        match event {
+            jazz::db::SubscriptionEvent::Delta { added, updated, .. } => {
+                for row in added.iter().chain(&updated) {
+                    out.push(
+                        row.cells()
+                            .find(|(name, _)| *name == column)
+                            .and_then(|(_, value)| value.cloned()),
+                    );
+                }
+            }
+            other => panic!("the subscription ended: {other:?}"),
+        }
+    }
+    out
+}
+
+fn update(db: &Db, n: u8, cells: Vec<(&str, Value)>) {
+    block_on(
+        db.update(
+            "docs",
+            row(n),
+            cells
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect(),
+            jazz::db::UpdateOptions::default(),
+        ),
+    )
+    .unwrap();
+    block_on(db.tick()).unwrap();
+}
+
+/// #5502: a value that shrinks below a subscribed range clamps the range
+/// to its new end (empty when it starts past it), and the subscription
+/// follows the value as it grows again. UTF-16, UTF-8 and byte ranges.
+#[test]
+fn a_subscribed_range_past_a_shrunk_values_end_clamps_and_lives_on() {
+    use jazz::query::Part;
+    let db = open(0, AuthorSubject::SYSTEM);
+    insert(
+        &db,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("abcdefgh".into())),
+            ("blob", Value::Bytes(b"abcdefgh".to_vec())),
+        ],
+    );
+    let string = |s: &str| Some(Value::String(s.into()));
+    let bytes = |b: &[u8]| Some(Value::Bytes(b.to_vec()));
+    let ranged = |column: &str, part: Part| {
+        Query::from("docs")
+            .select(["body", "blob"])
+            .select_part(column, part)
+    };
+    let whole = ranged("body", Part::TextUtf16 { from: 0, to: 8 });
+    let tail = ranged("body", Part::TextUtf16 { from: 4, to: 8 });
+    let middle = ranged("body", Part::TextUtf8 { from: 2, to: 6 });
+    let blob = ranged("blob", Part::Bytes { from: 2, to: 6 });
+    let mut whole_s = subscribe(&db, whole.clone());
+    let mut tail_s = subscribe(&db, tail.clone());
+    let mut middle_s = subscribe(&db, middle.clone());
+    let mut blob_s = subscribe(&db, blob.clone());
+    block_on(db.tick()).unwrap();
+    assert_eq!(
+        shown(&mut whole_s, "body").last(),
+        Some(&string("abcdefgh"))
+    );
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("efgh")));
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("cdef")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"cdef")));
+
+    // Shrunk below every range: each clamps, the one past the end to empty.
+    update(
+        &db,
+        1,
+        vec![
+            ("body", Value::String("ab".into())),
+            ("blob", Value::Bytes(b"ab".to_vec())),
+        ],
+    );
+    assert_eq!(shown(&mut whole_s, "body").last(), Some(&string("ab")));
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("")));
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"")));
+    // A one-shot read of the same query clamps alike.
+    assert_eq!(partial_rows(&db, &tail, "body"), vec![string("")]);
+    assert_eq!(partial_rows(&db, &blob, "blob"), vec![bytes(b"")]);
+
+    // Partly overlapping: the part the value still covers.
+    update(
+        &db,
+        1,
+        vec![
+            ("body", Value::String("abcdé".into())),
+            ("blob", Value::Bytes(b"abcd".to_vec())),
+        ],
+    );
+    assert_eq!(shown(&mut whole_s, "body").last(), Some(&string("abcdé")));
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("é")));
+    // "abcdé" is 6 UTF-8 bytes: [2, 6) is all there.
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("cdé")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"cd")));
+    assert_eq!(partial_rows(&db, &blob, "blob"), vec![bytes(b"cd")]);
+
+    // Grown back: every range shows its whole window again.
+    update(
+        &db,
+        1,
+        vec![
+            ("body", Value::String("abcdefgh".into())),
+            ("blob", Value::Bytes(b"abcdefgh".to_vec())),
+        ],
+    );
+    assert_eq!(
+        shown(&mut whole_s, "body").last(),
+        Some(&string("abcdefgh"))
+    );
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("efgh")));
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("cdef")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"cdef")));
+}
+
+/// #5502 on chunked values a replica reads in part: the clamped range
+/// reads through the shrunk value's tree, and grows back with it.
+#[test]
+fn a_subscribed_range_on_a_replica_clamps_as_a_chunked_value_shrinks() {
+    use jazz::query::Part;
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let body = text(17, LARGE * 4);
+    let blob = text(19, LARGE * 4).into_bytes();
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    let (from, to) = (700_000_u64, 700_050_u64);
+    let text_q = Query::from("docs")
+        .select(["body"])
+        .select_part("body", Part::TextUtf16 { from, to });
+    let bytes_q = Query::from("docs")
+        .select(["blob"])
+        .select_part("blob", Part::Bytes { from, to });
+    let mut text_s = subscribe(&alice, text_q.clone());
+    let mut bytes_s = subscribe(&alice, bytes_q.clone());
+    pump(&server, &[&alice]);
+    let window = |s: &[u8], len: usize| s[from as usize..len.min(to as usize)].to_vec();
+    let as_text = |b: Vec<u8>| Some(Value::String(String::from_utf8(b).unwrap()));
+    assert_eq!(
+        shown(&mut text_s, "body").last(),
+        Some(&as_text(window(body.as_bytes(), body.len())))
+    );
+    assert_eq!(
+        shown(&mut bytes_s, "blob").last(),
+        Some(&Some(Value::Bytes(window(&blob, blob.len()))))
+    );
+
+    // Shrunk to end inside the window, then before it; both stay chunked.
+    for len in [from as usize + 20, from as usize - 1000] {
+        let short_body = body[..len].to_owned();
+        let short_blob = blob[..len].to_vec();
+        update(
+            &server,
+            1,
+            vec![
+                ("body", Value::String(short_body.clone())),
+                ("blob", Value::Bytes(short_blob.clone())),
+            ],
+        );
+        pump(&server, &[&alice]);
+        let expected = |value: &[u8]| {
+            if len > from as usize {
+                window(value, len)
+            } else {
+                Vec::new()
+            }
+        };
+        assert_eq!(
+            shown(&mut text_s, "body").last(),
+            Some(&as_text(expected(short_body.as_bytes()))),
+            "{len}"
+        );
+        assert_eq!(
+            shown(&mut bytes_s, "blob").last(),
+            Some(&Some(Value::Bytes(expected(&short_blob)))),
+            "{len}"
+        );
+    }
+
+    // Grown back: the whole window again.
+    update(
+        &server,
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    assert_eq!(
+        shown(&mut text_s, "body").last(),
+        Some(&as_text(window(body.as_bytes(), body.len())))
+    );
+    assert_eq!(
+        shown(&mut bytes_s, "blob").last(),
+        Some(&Some(Value::Bytes(window(&blob, blob.len()))))
+    );
+}
+
+/// The direct range read (`Db::read_value_range`) names exact bytes, like
+/// a file read: past the end it still fails, and says so. A query's
+/// inverted range, which no value can satisfy, is refused as it prepares.
+#[test]
+fn a_direct_range_read_past_the_end_still_fails_explicitly() {
+    use jazz::query::Part;
+    let db = open(0, AuthorSubject::SYSTEM);
+    insert(
+        &db,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("ab".into())),
+            ("blob", Value::Bytes(b"ab".to_vec())),
+        ],
+    );
+    for column in ["body", "blob"] {
+        let error = block_on(db.read_value_range("docs", row(1), column, 0..8)).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("value range is out of bounds"),
+            "{error:?}"
+        );
+        assert_eq!(
+            block_on(db.read_value_range("docs", row(1), column, 0..2)).unwrap(),
+            b"ab"
+        );
+    }
+    let inverted = Query::from("docs")
+        .select(["body"])
+        .select_part("body", Part::TextUtf16 { from: 2, to: 1 });
+    let error = db.prepare_query(&inverted).map(|_| ()).unwrap_err();
+    assert!(
+        format!("{error:?}").contains("ends before it starts"),
+        "{error:?}"
+    );
+}

@@ -481,6 +481,62 @@ describe("createDb in-memory driver", () => {
     expect(metadata).toEqual({ id: inserted.id, metadata: 43 });
   });
 
+  it("keeps a range subscription alive as the text shrinks below the range and grows back (#5502)", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-range-shrink-test")),
+      driver: { type: "memory" },
+    });
+    const { value: note } = db.insert(texts.pages, { body: "abcdefgh" });
+    await Promise.resolve();
+    const pages = texts.pages.where({ id: note.id });
+    const seen = (from: number, to: number) => {
+      const bodies: string[] = [];
+      const errors: unknown[] = [];
+      const stop = db!.subscribe(pages.select({ body: { from, to } }), {
+        onUpdate: (rows) => bodies.push(...rows.map((row) => row.body)),
+        onError: (error) => errors.push(error),
+      });
+      return { bodies, errors, stop };
+    };
+    const whole = seen(0, 8);
+    const middle = seen(2, 6);
+    const tail = seen(4, 8);
+    const settled = async (body: string, wants: Array<[typeof whole, string]>) => {
+      await db!.update(texts.pages, note.id, { body }).wait({ tier: "local" });
+      for (const [subscription, want] of wants) {
+        await expect.poll(() => subscription.bodies.at(-1)).toBe(want);
+        expect(subscription.errors).toEqual([]);
+      }
+    };
+    await expect.poll(() => tail.bodies.at(-1)).toBe("efgh");
+
+    // Shrunk below the ranges: clamped, empty where the range starts past the end.
+    await settled("ab", [
+      [whole, "ab"],
+      [middle, ""],
+      [tail, ""],
+    ]);
+    // A one-shot read of the same selection clamps alike.
+    expect(await db.all(pages.select({ body: { from: 4, to: 8 } }))).toEqual([
+      { id: note.id, body: "" },
+    ]);
+    // Partly overlapping, with a surrogate pair inside the value.
+    await settled("abcd🚀", [
+      [whole, "abcd🚀"],
+      [middle, "cd🚀"],
+      [tail, "🚀"],
+    ]);
+    // Grown back: the windows show again.
+    await settled("abcdefgh", [
+      [whole, "abcdefgh"],
+      [middle, "cdef"],
+      [tail, "efgh"],
+    ]);
+    whole.stop();
+    middle.stop();
+    tail.stop();
+  });
+
   it("delivers opted-in columns' changes as splices, page-relative on a range select", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-large-value-subscription-splices-test")),

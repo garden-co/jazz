@@ -1099,8 +1099,10 @@ function applyPartialValueSelections<T>(
       projected[column] = jsonPointerValue(value, selection.at);
       continue;
     }
+    // Like the engine (#5502): a range past the end of the value clamps to
+    // it, empty when it starts past it; an inverted range fails.
     if (value instanceof Uint8Array) {
-      if ("fromUtf8" in selection || selection.from > selection.to || selection.to > value.length) {
+      if ("fromUtf8" in selection || selection.from > selection.to) {
         throw new Error(`Byte range for "${column}" is out of bounds.`);
       }
       projected[column] = value.slice(selection.from, selection.to);
@@ -1111,29 +1113,24 @@ function applyPartialValueSelections<T>(
     }
     if ("fromUtf8" in selection) {
       const bytes = new TextEncoder().encode(value);
+      const to = Math.min(selection.toUtf8, bytes.length);
+      const from = Math.min(selection.fromUtf8, to);
       if (
         selection.fromUtf8 > selection.toUtf8 ||
-        selection.toUtf8 > bytes.length ||
-        (selection.fromUtf8 < bytes.length &&
-          (bytes[selection.fromUtf8]! & 0b1100_0000) === 0b1000_0000) ||
-        (selection.toUtf8 < bytes.length &&
-          (bytes[selection.toUtf8]! & 0b1100_0000) === 0b1000_0000)
+        (from < bytes.length && (bytes[from]! & 0b1100_0000) === 0b1000_0000) ||
+        (to < bytes.length && (bytes[to]! & 0b1100_0000) === 0b1000_0000)
       ) {
         throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
       }
-      projected[column] = new Utf8Decoder({ fatal: true }).decode(
-        bytes.slice(selection.fromUtf8, selection.toUtf8),
-      );
+      projected[column] = new Utf8Decoder({ fatal: true }).decode(bytes.slice(from, to));
       continue;
     }
-    if (
-      selection.from > selection.to ||
-      !utf16Boundary(value, selection.from) ||
-      !utf16Boundary(value, selection.to)
-    ) {
+    const to = Math.min(selection.to, value.length);
+    const from = Math.min(selection.from, to);
+    if (selection.from > selection.to || !utf16Boundary(value, from) || !utf16Boundary(value, to)) {
       throw new Error(`UTF-16 range for "${column}" splits a surrogate pair or is out of bounds.`);
     }
-    projected[column] = value.slice(selection.from, selection.to);
+    projected[column] = value.slice(from, to);
   }
   return projected as T;
 }

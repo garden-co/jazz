@@ -30,8 +30,8 @@ function inspector(
   ],
 ) {
   const reads = { whole: 0, parts: [] as unknown[] };
-  // Like the store: a partial select reads only that part, and refuses a
-  // range past the end of the value.
+  // Like the store: a partial select reads only that part, clamped to the
+  // end of the value (#5502).
   const db = {
     all: async (builder: { _build(): string }) => {
       const query = JSON.parse(builder._build());
@@ -46,8 +46,8 @@ function inspector(
       const [[column, { from, to }]] = parts as [[string, { from: number; to: number }]];
       reads.parts.push({ column, from, to });
       const value = row[column] as string | Uint8Array;
-      if (to > value.length) throw new Error("query error: value range is out of bounds");
-      return [{ id: ID, [column]: value.slice(from, to) }];
+      const part = value.slice(Math.min(from, value.length), Math.min(to, value.length));
+      return [{ id: ID, [column]: part }];
     },
   };
   const handle = createInspector({

@@ -790,28 +790,29 @@ export function createInspector(deps: InspectorDeps) {
           `a part is at most ${partLimit} ${unit}: ask for ${column} in smaller parts`,
         );
       }
-      try {
-        return answerWith(await read({ from, to: body.to }), { from, to: body.to });
-      } catch (error) {
-        if (!isOutOfBounds(error)) throw error;
+      // A partial select clamps a range past the end of the value
+      // (#5502); a part shorter than asked for ran past it.
+      const found = await read({ from, to: body.to });
+      const length = partLength(found.value);
+      if (length !== undefined && length < body.to - from) {
         throw new InspectError(
           "bad_request",
           `${from}–${body.to} is past the end of ${column} (its size is in its row's $large summary)`,
         );
       }
+      return answerWith(found, { from, to: body.to });
     }
 
     if (ranged) {
       // Not the whole value to find out it's too large: a part one past what
-      // an answer carries either exists (too large) or is out of bounds.
-      try {
-        await read({ from: 0, to: partLimit + 1 });
+      // an answer carries is either that long (too large) or clamped to a
+      // value that fits.
+      const probe = await read({ from: 0, to: partLimit + 1 });
+      if ((partLength(probe.value) ?? 0) > partLimit) {
         throw new InspectError(
           "bad_request",
           `${column} is longer than one answer carries (${partLimit} ${unit}): ask for it in parts with from and to`,
         );
-      } catch (error) {
-        if (!isOutOfBounds(error)) throw error;
       }
     }
     const found = await read();
@@ -1210,9 +1211,11 @@ const MAX_PART_BYTES = 512 * 1024;
 /** The most UTF-16 code units of a text value `get` answers at once. */
 const MAX_PART_TEXT = 256 * 1024;
 
-/** The store refused a range past the end of a value. */
-function isOutOfBounds(error: unknown): boolean {
-  return /out of bounds/.test(error instanceof Error ? error.message : String(error));
+/** The length of a part of a text (UTF-16 code units) or bytes value. */
+function partLength(value: unknown): number | undefined {
+  if (typeof value === "string") return value.length;
+  const bytes = fromJsonValue(value);
+  return bytes instanceof Uint8Array ? bytes.length : undefined;
 }
 
 function asInspectError(error: unknown): InspectError {
