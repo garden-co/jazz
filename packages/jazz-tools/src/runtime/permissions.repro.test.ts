@@ -279,6 +279,89 @@ function sortGrantRoles(rows: ReadonlyArray<{ readonly grant_role: string }>): s
 
 type JazzContext = import("../backend/create-jazz-context.js").JazzContext;
 
+// The alpha.33 grant-closure repro: the teams reachable from the user's own
+// teams along non-admin parent edges (at most 8 hops), from `seed`.
+const joinSeed =
+  "from teams join user_team_edges as __join_0 on teams.id = __join_0.team " +
+  "where __join_0.user_id = session.user";
+const hopSeed =
+  "from user_team_edges join teams as __hop_0 on user_team_edges.team = __hop_0.id " +
+  "where user_team_edges.user_id = session.user select __hop_0.id as id";
+/** The engine's refusal of `joinSeed`, which the `it.fails` repro expects. */
+const JOIN_SEED_REFUSAL =
+  "Gather seeds other than a filtered table scan are not supported in policies yet";
+const reachableTeamsFrom = (seed: string) =>
+  `from recursive(seed: ${seed}, ` +
+  "step: from team_team_edges where team_team_edges.administrator = bool(false) " +
+  "and team_team_edges.child_team = id(frontier) select team_team_edges.parent_team as id, " +
+  "frontier: id(row), dedupe: (id(row)), maxDepth: 8)";
+
+/** The repro's five read rules, one per route_key, its gather seeded with `seed`. */
+function grantClosurePermissions(seed: string): TestPermissionsFile {
+  const reachableTeams = reachableTeamsFrom(seed);
+  return {
+    tables: {
+      teams: {
+        read: {
+          anyOf: [
+            {
+              allOf: [
+                "route_key = 'base-direct'",
+                "exists user_team_edges(user_id = session.user, team = this.id)",
+              ],
+            },
+            {
+              allOf: [
+                "route_key = 'relation-direct'",
+                "exists user_team_edges(user_id = session.user).teamRelation(id = this.id)",
+              ],
+            },
+            "exists (from teams join user_team_edges as __join_0 on teams.id = __join_0.team where teams.route_key = text('qualified-predicate') and __join_0.user_id = session.user where teams.id = id(outer))",
+            {
+              allOf: [
+                "route_key = 'gather-target'",
+                `exists (${reachableTeams} where teams.id = outer.id)`,
+              ],
+            },
+            {
+              allOf: [
+                "route_key = 'grant-target'",
+                `exists (${reachableTeams} join team_access_edges as __recursive_join_0 on teams.id = __recursive_join_0.team ` +
+                  "where __recursive_join_0.target_team = outer.id " +
+                  "and __recursive_join_0.grant_role in [text('viewer'), text('editor'), text('manager')] " +
+                  "and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)",
+              ],
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/** Every team seedScenario gives alice a way to read; only "Hidden Team" is left out. */
+const ALL_ALICE_TEAMS = [
+  "Direct Membership",
+  "Incident Desk",
+  "Operations",
+  "Qualified Predicate",
+  "Relation Membership",
+];
+
+async function aliceTeamNames(context: JazzContext): Promise<string[]> {
+  const aliceDb = context.forSession(
+    {
+      user_id: "alice",
+      account_id: reproUser("alice"),
+      claims: {},
+      issuer: REPRO_ISSUER,
+      authMode: "external",
+    },
+    reproApp,
+  );
+  return sortNames(await aliceDb.all(reproApp.teams.where({})));
+}
+
 async function createReproContext(permissionsFile: TestPermissionsFile): Promise<JazzContext> {
   const appId = randomUUID();
   const dataRoot = await mkdtemp(join(tmpdir(), "jazz-permissions-repro-"));
@@ -532,6 +615,36 @@ describe("runtime permission repros for recursive gather and qualified predicate
     expect(() => testPermissions(reproApp, permissions)).toThrow(
       "Gather seeds other than a filtered table scan are not supported in policies yet",
     );
+  });
+
+  // The target behaviour of the repro above, end to end: all five rules,
+  // including "grant-target" (teams a reachable team holds a grant on), with
+  // the gather seeded on the join. Known failing while the engine refuses
+  // join seeds in policies. It fails only with that exact refusal: any other
+  // error (a typo, a wrong result once the limit is lifted) and a pass both
+  // turn it red. When the engine accepts the seed, make it a plain `it`.
+  it.fails("supports the full alpha.33 grant-closure repro end to end", async () => {
+    try {
+      const context = await createReproContext(grantClosurePermissions(joinSeed));
+      seedScenario(context);
+
+      expect(await aliceTeamNames(context)).toEqual(ALL_ALICE_TEAMS);
+    } catch (error) {
+      // The expected failure: rethrown, so `it.fails` passes.
+      if (error instanceof Error && error.message.includes(JOIN_SEED_REFUSAL)) throw error;
+      // Anything else returns normally, so `it.fails` fails.
+      console.error("grant-closure repro failed for another reason:", error);
+    }
+  });
+
+  // The same five rules with the seed written as the supported hop (from the
+  // user's edges to their teams): the expected result is reachable, so the
+  // `it.fails` above differs only by the seed's shape.
+  it("supports the full alpha.33 grant-closure repro with a hop seed", async () => {
+    const context = await createReproContext(grantClosurePermissions(hopSeed));
+    seedScenario(context);
+
+    expect(await aliceTeamNames(context)).toEqual(ALL_ALICE_TEAMS);
   });
 
   it("evaluates explicit gather seeds through a same-table double-ref edge", async () => {
