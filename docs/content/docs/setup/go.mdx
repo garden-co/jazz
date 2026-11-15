@@ -41,8 +41,15 @@ Commit `jazzapp/jazz_app.go` and import it as `<your module>/jazzapp`. Per table
 - `NewTask`, the row to insert. Nullable and defaulted columns are pointers you may leave nil;
 - `TaskPatch`, whose fields change a column only when you set them with `jazz.Set(…)`;
 - a string type with constants for each enum column (`TaskStatus`, `TaskStatusTodo`, …);
-- a table value (`jazzapp.Tasks`) with typed columns (`jazzapp.Tasks.Status.Eq(…)`), `Query()`,
-  `Insert`, `Update` and `Delete`.
+- the table's relations as optional fields of the row (`Task.Show *Show`, `Task.Comments
+[]Comment`), filled when a query includes them: `q.Include(jazzapp.Tasks.Show)`;
+- a table value (`jazzapp.Tasks`) with typed columns (`jazzapp.Tasks.Status.Eq(…)`), relations,
+  `Query()`, `Insert`, `Update` and `Delete`. Writes and reads take a `jazz.Querier`: the `*jazz.DB`,
+  or a `*jazz.Tx` inside `db.Tx(ctx, func(tx *jazz.Tx) error { … })`.
+
+If your app declares computed fields or transforms, the bindings also declare a `jazzapp.Computed`
+interface: a method per computed field, and a `View` and `Stored` method per transform.
+`jazzapp.Open(ctx, cfg, computed)` takes your implementation, so a missing method is a compile error.
 
 ## Open the app
 
@@ -52,6 +59,10 @@ Commit `jazzapp/jazz_app.go` and import it as `<your module>/jazzapp`. Per table
 
 Writes are local-first: a write the server's permissions refuse returns no error. It is never
 synced, and other users never see it.
+
+Errors match their kind with `errors.Is`: `jazz.ErrPermission`, `jazz.ErrRefused`,
+`jazz.ErrNotSupported`, `jazz.ErrConflict`, `jazz.ErrIO` and `jazz.ErrClosed`. Use `errors.As` with a
+`*jazz.Error` for the details.
 
 A `*jazz.DB` is safe for concurrent use. Every call takes a `context.Context`. A cancelled context
 returns at once, but the call still runs to its end, so a write may still apply. Before the process
@@ -67,18 +78,16 @@ command-line app.
 
 ## Not supported yet
 
-- computed fields and transforms: `jazz-tools generate` refuses Go bindings for an app that
-  declares them;
+- mergeable text: a `merge: "text"` column (like StagePlan's `tasks.notes`) reads and writes as a
+  plain string, and a write replaces the whole text; there is no edit (splice) API yet;
+- files and large values as streams (`bytea` columns work as `[]byte`);
+- syncing as an end user (with a JWT or a device account): without a backend's permissions and
+  secrets, the app opens as a local client only;
+- `hopTo`, `gather` (recursive queries), `union` and history (`$history`) queries;
+- permission advice (`canRead`, `canInsert`, `canUpdate`, `canDelete`);
 - payload enums (enums with fields), nested rows and catalogue enums;
-- collaborative text merging: a `merge: "text"` column (like StagePlan's `tasks.notes`) reads and
-  writes as a plain string, and a write replaces the whole text;
-- includes, relations in queries, `select` and recursive queries;
-- transactions;
-- durability tiers (reads and writes use the defaults);
-- subscription deltas carry no positions: re-sort an `OrderBy` subscription's rows yourself;
+- subscription deltas carry no positions: `q.Live(ctx, db)` keeps a query's rows in order for you;
 - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
   reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
   column. In a subscription, such a row ends it with an error delta;
-- syncing as an end user (with a JWT): without a backend's permissions and secrets, the app opens
-  as a local client only;
 - a published, tagged Go module, and Windows builds.
