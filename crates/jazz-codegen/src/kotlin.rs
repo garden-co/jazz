@@ -12,6 +12,9 @@
 //! qualified (`kotlin.String`, `tools.jazz.Column`), so a table may be any
 //! name (`Result`, `Unit`, `Column`) that doesn't clash inside `jazzapp`.
 //!
+//! Each relation is a handle on the table object (`Tasks.assignee`,
+//! `Tasks.comments`), for `query().include(...)` and `JazzRow.get`.
+//!
 //! Computed fields and transforms are not supported in Kotlin yet: an app
 //! that declares any is refused.
 
@@ -21,14 +24,14 @@ use std::fmt::Write as _;
 use jazz::tools::public_schema::ColumnType;
 
 use crate::CodegenError;
-use crate::model::{App, Column, FieldType, Table};
+use crate::model::{App, Column, FieldType, RelationKind, Table};
 use crate::names::{pascal, singular};
 
 /// Where the bindings go, relative to `jazz.app.json`.
 pub const FILE: &str = "src/main/kotlin/JazzApp.kt";
 
 /// The version of the bindings' shape this generator writes.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
@@ -414,6 +417,7 @@ impl<'a> Writer<'a> {
             "rowSerializer",
             "insertSerializer",
             "newPatch",
+            "include",
             "equals",
             "hashCode",
             "toString",
@@ -443,6 +447,43 @@ impl<'a> Writer<'a> {
                 doc(&f.column.name),
                 string_literal(&f.column.name),
                 f.ty.ser
+            );
+        }
+        for relation in &table.relations {
+            let mut ident = value_ident(&relation.name)?;
+            if props.contains(ident.trim_matches('`')) {
+                ident = format!("{}Relation", ident.trim_matches('`'));
+            }
+            if !props.insert(ident.clone()) {
+                return Err(clash(table, &relation.name, &ident));
+            }
+            let target = self.tables.get(relation.target.as_str()).ok_or_else(|| {
+                CodegenError::new(format!(
+                    "relation `{}.{}` leads to `{}`, which is not a table",
+                    table.name, relation.name, relation.target
+                ))
+            })?;
+            let (kind, what) = match &relation.kind {
+                RelationKind::One { column, .. } => (
+                    "One",
+                    format!("the `{}` row `{column}` references", relation.target),
+                ),
+                RelationKind::Many { relation: forward } => (
+                    "Many",
+                    format!(
+                        "the `{}` rows whose `{forward}` is this row",
+                        relation.target
+                    ),
+                ),
+            };
+            let _ = writeln!(
+                out,
+                "    /** Relation `{}`: {}. */\n    public val {ident}: tools.jazz.{kind}<{row}, {}> =\n        tools.jazz.{kind}({}) {{ {} }}",
+                doc(&relation.name),
+                doc(&what),
+                target.row,
+                string_literal(&relation.name),
+                target.object
             );
         }
         out.push_str("}\n\n");

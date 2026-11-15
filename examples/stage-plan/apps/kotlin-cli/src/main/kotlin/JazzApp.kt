@@ -1,5 +1,5 @@
 // JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Regenerate it after changing jazz.app.json.
+// Bindings format 2. Regenerate it after changing jazz.app.json.
 @file:kotlin.Suppress("unused", "RedundantVisibilityModifier")
 
 package jazzapp
@@ -191,6 +191,15 @@ public object ActivityTable : tools.jazz.Table<Activity, NewActivity, ActivityPa
     /** Column `detail`. */
     public val detail: tools.jazz.Column<kotlin.String?> =
         tools.jazz.Column("detail", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
+    /** Relation `actor`: the `crew` row `actorId` references. */
+    public val actor: tools.jazz.One<Activity, Crew> =
+        tools.jazz.One("actor") { CrewTable }
+    /** Relation `show`: the `shows` row `showId` references. */
+    public val show: tools.jazz.One<Activity, Show> =
+        tools.jazz.One("show") { Shows }
+    /** Relation `task`: the `tasks` row `taskId` references. */
+    public val task: tools.jazz.One<Activity, Task> =
+        tools.jazz.One("task") { Tasks }
 }
 
 /** A row of `checklistItems`. */
@@ -287,6 +296,12 @@ public object Comments : tools.jazz.Table<Comment, NewComment, CommentPatch>(
     /** Column `body`. */
     public val body: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("body", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `author`: the `crew` row `authorId` references. */
+    public val author: tools.jazz.One<Comment, Crew> =
+        tools.jazz.One("author") { CrewTable }
+    /** Relation `task`: the `tasks` row `taskId` references. */
+    public val task: tools.jazz.One<Comment, Task> =
+        tools.jazz.One("task") { Tasks }
 }
 
 /** A row of `crew`. */
@@ -328,6 +343,12 @@ public object CrewTable : tools.jazz.Table<Crew, NewCrew, CrewPatch>(
     /** Column `name`. */
     public val name: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("name", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `assignedTasks`: the `tasks` rows whose `assignee` is this row. */
+    public val assignedTasks: tools.jazz.Many<Crew, Task> =
+        tools.jazz.Many("assignedTasks") { Tasks }
+    /** Relation `memberships`: the `showCrew` rows whose `crew` is this row. */
+    public val memberships: tools.jazz.Many<Crew, ShowCrew> =
+        tools.jazz.Many("memberships") { ShowCrewTable }
 }
 
 /** A row of `showCrew`. */
@@ -390,6 +411,12 @@ public object ShowCrewTable : tools.jazz.Table<ShowCrew, NewShowCrew, ShowCrewPa
     /** Column `inviteCode`. */
     public val inviteCode: tools.jazz.Column<kotlin.String?> =
         tools.jazz.Column("inviteCode", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
+    /** Relation `crew`: the `crew` row `crewId` references. */
+    public val crew: tools.jazz.One<ShowCrew, Crew> =
+        tools.jazz.One("crew") { CrewTable }
+    /** Relation `show`: the `shows` row `showId` references. */
+    public val show: tools.jazz.One<ShowCrew, Show> =
+        tools.jazz.One("show") { Shows }
 }
 
 /** A row of `showInvites`. */
@@ -431,6 +458,9 @@ public object ShowInvites : tools.jazz.Table<ShowInvite, NewShowInvite, ShowInvi
     /** Column `code`. */
     public val code: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("code", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `show`: the `shows` row `showId` references. */
+    public val show: tools.jazz.One<ShowInvite, Show> =
+        tools.jazz.One("show") { Shows }
 }
 
 /** A row of `shows`. */
@@ -493,6 +523,18 @@ public object Shows : tools.jazz.Table<Show, NewShow, ShowPatch>(
     /** Column `chiefAccount`. */
     public val chiefAccount: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("chiefAccount", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `activity`: the `activity` rows whose `show` is this row. */
+    public val activity: tools.jazz.Many<Show, Activity> =
+        tools.jazz.Many("activity") { ActivityTable }
+    /** Relation `crew`: the `showCrew` rows whose `show` is this row. */
+    public val crew: tools.jazz.Many<Show, ShowCrew> =
+        tools.jazz.Many("crew") { ShowCrewTable }
+    /** Relation `invites`: the `showInvites` rows whose `show` is this row. */
+    public val invites: tools.jazz.Many<Show, ShowInvite> =
+        tools.jazz.Many("invites") { ShowInvites }
+    /** Relation `tasks`: the `tasks` rows whose `show` is this row. */
+    public val tasks: tools.jazz.Many<Show, Task> =
+        tools.jazz.Many("tasks") { Tasks }
 }
 
 /** A row of `tasks`. */
@@ -562,4 +604,16 @@ public object Tasks : tools.jazz.Table<Task, NewTask, TaskPatch>(
     /** Column `rank`. */
     public val rank: tools.jazz.Column<kotlin.Double> =
         tools.jazz.Column("rank", kotlinx.serialization.serializer<kotlin.Double>())
+    /** Relation `activity`: the `activity` rows whose `task` is this row. */
+    public val activity: tools.jazz.Many<Task, Activity> =
+        tools.jazz.Many("activity") { ActivityTable }
+    /** Relation `assignee`: the `crew` row `assigneeId` references. */
+    public val assignee: tools.jazz.One<Task, Crew> =
+        tools.jazz.One("assignee") { CrewTable }
+    /** Relation `comments`: the `comments` rows whose `task` is this row. */
+    public val comments: tools.jazz.Many<Task, Comment> =
+        tools.jazz.Many("comments") { Comments }
+    /** Relation `show`: the `shows` row `showId` references. */
+    public val show: tools.jazz.One<Task, Show> =
+        tools.jazz.One("show") { Shows }
 }

@@ -1,5 +1,5 @@
 // JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Regenerate it after changing jazz.app.json.
+// Bindings format 2. Regenerate it after changing jazz.app.json.
 @file:kotlin.Suppress("unused", "RedundantVisibilityModifier")
 
 package jazzapp
@@ -96,6 +96,12 @@ public object Canvases : tools.jazz.Table<Canvas, NewCanvas, CanvasPatch>(
     /** Column `chatId`. */
     public val chatId: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("chatId", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `chat`: the `chats` row `chatId` references. */
+    public val chat: tools.jazz.One<Canvas, Chat> =
+        tools.jazz.One("chat") { Chats }
+    /** Relation `strokesViaCanvas`: the `strokes` rows whose `canvas` is this row. */
+    public val strokesViaCanvas: tools.jazz.Many<Canvas, Stroke> =
+        tools.jazz.Many("strokesViaCanvas") { Strokes }
 }
 
 /** A row of `chatMembers`. */
@@ -144,6 +150,9 @@ public object ChatMembers : tools.jazz.Table<ChatMember, NewChatMember, ChatMemb
     /** Column `joinCode`. */
     public val joinCode: tools.jazz.Column<kotlin.String?> =
         tools.jazz.Column("joinCode", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
+    /** Relation `chat`: the `chats` row `chatId` references. */
+    public val chat: tools.jazz.One<ChatMember, Chat> =
+        tools.jazz.One("chat") { Chats }
 }
 
 /** A row of `chats`. */
@@ -192,6 +201,15 @@ public object Chats : tools.jazz.Table<Chat, NewChat, ChatPatch>(
     /** Column `joinCode`. */
     public val joinCode: tools.jazz.Column<kotlin.String?> =
         tools.jazz.Column("joinCode", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
+    /** Relation `canvasesViaChat`: the `canvases` rows whose `chat` is this row. */
+    public val canvasesViaChat: tools.jazz.Many<Chat, Canvas> =
+        tools.jazz.Many("canvasesViaChat") { Canvases }
+    /** Relation `chatMembersViaChat`: the `chatMembers` rows whose `chat` is this row. */
+    public val chatMembersViaChat: tools.jazz.Many<Chat, ChatMember> =
+        tools.jazz.Many("chatMembersViaChat") { ChatMembers }
+    /** Relation `messagesViaChat`: the `messages` rows whose `chat` is this row. */
+    public val messagesViaChat: tools.jazz.Many<Chat, Message> =
+        tools.jazz.Many("messagesViaChat") { Messages }
 }
 
 /** A row of `messages`. */
@@ -240,6 +258,15 @@ public object Messages : tools.jazz.Table<Message, NewMessage, MessagePatch>(
     /** Column `senderId`. */
     public val senderId: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("senderId", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `chat`: the `chats` row `chatId` references. */
+    public val chat: tools.jazz.One<Message, Chat> =
+        tools.jazz.One("chat") { Chats }
+    /** Relation `reactionsViaMessage`: the `reactions` rows whose `message` is this row. */
+    public val reactionsViaMessage: tools.jazz.Many<Message, Reaction> =
+        tools.jazz.Many("reactionsViaMessage") { Reactions }
+    /** Relation `sender`: the `profiles` row `senderId` references. */
+    public val sender: tools.jazz.One<Message, Profile> =
+        tools.jazz.One("sender") { Profiles }
 }
 
 /** A row of `profiles`. */
@@ -288,6 +315,9 @@ public object Profiles : tools.jazz.Table<Profile, NewProfile, ProfilePatch>(
     /** Column `avatar`. */
     public val avatar: tools.jazz.Column<kotlin.String?> =
         tools.jazz.Column("avatar", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
+    /** Relation `messagesViaSender`: the `messages` rows whose `sender` is this row. */
+    public val messagesViaSender: tools.jazz.Many<Profile, Message> =
+        tools.jazz.Many("messagesViaSender") { Messages }
 }
 
 /** A row of `reactions`. */
@@ -336,6 +366,9 @@ public object Reactions : tools.jazz.Table<Reaction, NewReaction, ReactionPatch>
     /** Column `emoji`. */
     public val emoji: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("emoji", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `message`: the `messages` row `messageId` references. */
+    public val message: tools.jazz.One<Reaction, Message> =
+        tools.jazz.One("message") { Messages }
 }
 
 /** A row of `strokes`. */
@@ -391,4 +424,7 @@ public object Strokes : tools.jazz.Table<Stroke, NewStroke, StrokePatch>(
     /** Column `pointsJson`. */
     public val pointsJson: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("pointsJson", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `canvas`: the `canvases` row `canvasId` references. */
+    public val canvas: tools.jazz.One<Stroke, Canvas> =
+        tools.jazz.One("canvas") { Canvases }
 }

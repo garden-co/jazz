@@ -11,6 +11,12 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
 import tools.jazz.JazzConfig
+import tools.jazz.JazzRow
+import tools.jazz.include
+import tools.jazz.select
+import jazzapp.Comments
+import jazzapp.Crew
+import jazzapp.Shows
 import jazzapp.Task
 
 object DocsSnippets {
@@ -132,5 +138,46 @@ object DocsSnippets {
         val assigned = jazz.all(Tasks.where(Tasks.showId eq showId, Tasks.assigneeId.isNotNull()))
         // #endregion where-null-kotlin
         return listOf(blocked, notDone, topTen, later, soundTasks, unassigned, assigned)
+    }
+
+    suspend fun includes(jazz: Jazz, showId: String): List<String> {
+        // #region reading-includes-kotlin
+        // Each task with the crew member it's assigned to and its comments, each
+        // comment with its author: typed by the relations jazz.app.json declares.
+        val tasks: List<JazzRow<Task>> = jazz.all(
+            Tasks.where(Tasks.showId eq showId)
+                .orderBy(Tasks.rank.asc())
+                .include(
+                    Tasks.assignee,
+                    Tasks.comments.orderBy(Comments.body.asc()).include(Comments.author),
+                ),
+        )
+        val lines = tasks.map { task ->
+            val assignee: Crew? = task[Tasks.assignee]
+            val comments = task.rows(Tasks.comments).map { comment ->
+                "${comment[Comments.author]?.name}: ${comment[Comments.body]}"
+            }
+            "${task[Tasks.title]} (${assignee?.name ?: "unassigned"}) $comments"
+        }
+        // #endregion reading-includes-kotlin
+        return lines
+    }
+
+    suspend fun reverseRelation(jazz: Jazz, showId: String): Map<String, Int> {
+        // #region reading-reverse-relation-kotlin
+        // A show's rows with the tasks that point at it (the reverse of `tasks.show`).
+        val shows = jazz.all(Shows.where(Shows.id eq showId).include(Shows.tasks.where(Tasks.status ne TaskStatus.Done)))
+        val openTasks: Map<String, Int> = shows.associate { it[Shows.name] to it[Shows.tasks].size }
+        // #endregion reading-reverse-relation-kotlin
+        return openTasks
+    }
+
+    suspend fun select(jazz: Jazz, showId: String): List<Pair<String, TaskStatus>> {
+        // #region reading-select-kotlin
+        // Only the columns a list needs; `id` comes along always.
+        val rows = jazz.all(Tasks.where(Tasks.showId eq showId).select(Tasks.title, Tasks.status))
+        val titles = rows.map { it[Tasks.title] to it[Tasks.status] }
+        // #endregion reading-select-kotlin
+        return titles
     }
 }

@@ -1,5 +1,5 @@
 // JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Regenerate it after changing jazz.app.json.
+// Bindings format 2. Regenerate it after changing jazz.app.json.
 @file:kotlin.Suppress("unused", "RedundantVisibilityModifier")
 
 package jazzapp

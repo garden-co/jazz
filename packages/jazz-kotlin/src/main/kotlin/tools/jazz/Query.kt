@@ -32,6 +32,9 @@ public abstract class Table<Row : Any, Insert : Any, P : Patch>(
 
     /** `query().orderBy(...)`. */
     public fun orderBy(vararg orders: Order): Query<Row> = query().orderBy(*orders)
+
+    /** `query().include(...)`. */
+    public fun include(vararg relations: Relation<Row, *>): Query<JazzRow<Row>> = query().include(*relations)
 }
 
 /** A column of type [T], to filter and sort by. */
@@ -75,7 +78,10 @@ public enum class Direction { Asc, Desc }
 /** An `orderBy` entry. */
 public data class Order(val column: String, val direction: Direction)
 
-/** A query of rows of type [Row]; immutable, each method returns a new one. */
+/**
+ * A query of rows of type [Row]; immutable, each method returns a new one.
+ * [include] and [select] make it a query of [JazzRow]s.
+ */
 public data class Query<Row : Any>(
     val table: String,
     val rowSerializer: KSerializer<Row>,
@@ -83,6 +89,8 @@ public data class Query<Row : Any>(
     val orders: List<Order> = emptyList(),
     val limit: Int? = null,
     val offset: Int? = null,
+    val includes: List<Relation<*, *>> = emptyList(),
+    val columns: List<String>? = null,
 ) {
     public fun where(vararg conditions: Condition): Query<Row> = copy(conditions = this.conditions + conditions)
     public fun orderBy(vararg orders: Order): Query<Row> = copy(orders = this.orders + orders)
@@ -92,39 +100,12 @@ public data class Query<Row : Any>(
     /** The contract's query JSON. */
     public fun toJson(): String = buildJsonObject {
         put("table", table)
-        if (conditions.isNotEmpty()) {
-            put(
-                "where",
-                buildJsonArray {
-                    for (c in conditions) {
-                        add(
-                            buildJsonObject {
-                                put("column", c.column)
-                                put("op", c.op)
-                                c.value?.let { put("value", it) }
-                            },
-                        )
-                    }
-                },
-            )
-        }
-        if (orders.isNotEmpty()) {
-            put(
-                "orderBy",
-                buildJsonArray {
-                    for (o in orders) {
-                        add(
-                            buildJsonObject {
-                                put("column", o.column)
-                                put("direction", if (o.direction == Direction.Asc) "asc" else "desc")
-                            },
-                        )
-                    }
-                },
-            )
-        }
+        if (conditions.isNotEmpty()) put("where", whereJson(conditions))
+        if (orders.isNotEmpty()) put("orderBy", orderJson(orders))
         limit?.let { put("limit", it) }
         offset?.let { put("offset", it) }
+        columns?.let { c -> put("select", buildJsonArray { c.forEach { add(JsonPrimitive(it)) } }) }
+        if (includes.isNotEmpty()) put("include", JsonArray(includes.map { it.spec() }))
     }.toString()
 
     /** Orders raw rows as [orders] says (subscription deltas carry no positions). */
@@ -171,3 +152,44 @@ public open class Patch {
 }
 
 internal fun JsonArray.objects(): List<JsonObject> = map { it as JsonObject }
+
+/** Brings the rows [relations] lead to along with each row: read them with [JazzRow.get]. */
+public fun <Row : Any> Query<Row>.include(vararg relations: Relation<Row, *>): Query<JazzRow<Row>> =
+    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes + relations, columns)
+
+/** More relations for a query that already includes some. */
+@JvmName("includeMore")
+public fun <Row : Any> Query<JazzRow<Row>>.include(vararg relations: Relation<Row, *>): Query<JazzRow<Row>> =
+    copy(includes = includes + relations)
+
+/** Only these columns of each row (and its `id`): read them with [JazzRow.get]. */
+public fun <Row : Any> Query<Row>.select(vararg columns: Column<*>): Query<JazzRow<Row>> =
+    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes, columns.map { it.name })
+
+/** Only these columns, for a query that already includes relations. */
+@JvmName("selectMore")
+public fun <Row : Any> Query<JazzRow<Row>>.select(vararg columns: Column<*>): Query<JazzRow<Row>> =
+    copy(columns = columns.map { it.name })
+
+internal fun whereJson(conditions: List<Condition>): JsonArray = buildJsonArray {
+    for (c in conditions) {
+        add(
+            buildJsonObject {
+                put("column", c.column)
+                put("op", c.op)
+                c.value?.let { put("value", it) }
+            },
+        )
+    }
+}
+
+internal fun orderJson(orders: List<Order>): JsonArray = buildJsonArray {
+    for (o in orders) {
+        add(
+            buildJsonObject {
+                put("column", o.column)
+                put("direction", if (o.direction == Direction.Asc) "asc" else "desc")
+            },
+        )
+    }
+}

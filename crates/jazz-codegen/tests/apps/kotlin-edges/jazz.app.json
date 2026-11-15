@@ -14,7 +14,11 @@
       }
     },
     "units": {
-      "columns": { "tableName": "string", "result": "uuid?", "tags": { "type": { "array": "string" } } }
+      "columns": {
+        "tableName": "string",
+        "result": "uuid?",
+        "tags": { "type": { "array": "string" } }
+      }
     }
   }
 }

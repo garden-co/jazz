@@ -1,5 +1,5 @@
 // JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Regenerate it after changing jazz.app.json.
+// Bindings format 2. Regenerate it after changing jazz.app.json.
 @file:kotlin.Suppress("unused", "RedundantVisibilityModifier")
 
 package jazzapp
@@ -90,6 +90,9 @@ public object Folders : tools.jazz.Table<Folder, NewFolder, FolderPatch>(
     /** Column `name`. */
     public val name: tools.jazz.Column<kotlin.String> =
         tools.jazz.Column("name", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `notesViaFolder`: the `notes` rows whose `folder` is this row. */
+    public val notesViaFolder: tools.jazz.Many<Folder, Note> =
+        tools.jazz.Many("notesViaFolder") { Notes }
 }
 
 /** A row of `notes`. */
@@ -138,4 +141,7 @@ public object Notes : tools.jazz.Table<Note, NewNote, NotePatch>(
     /** Column `folderId`. */
     public val folderId: tools.jazz.Column<kotlin.String?> =
         tools.jazz.Column("folderId", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
+    /** Relation `folder`: the `folders` row `folderId` references. */
+    public val folder: tools.jazz.One<Note, Folder> =
+        tools.jazz.One("folder") { Folders }
 }

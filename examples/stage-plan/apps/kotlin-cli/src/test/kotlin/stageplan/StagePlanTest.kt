@@ -1,6 +1,12 @@
 package stageplan
 
+import jazzapp.Comments
+import jazzapp.CrewTable
+import jazzapp.NewComment
+import jazzapp.NewCrew
 import jazzapp.TaskStatus
+import kotlinx.coroutines.launch
+import tools.jazz.include
 import jazzapp.Tasks
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
@@ -102,6 +108,44 @@ class StagePlanTest {
             }
             assertEquals(listOf("A", "B"), results[0])
             assertEquals(listOf("A", "B", "C"), results[1])
+        }
+    }
+
+    @Test
+    fun includes_and_select() = runBlocking {
+        open("user-3").use { jazz ->
+            val me = jazz.account()!!
+            val show = showNamed(jazz, "Encore")
+            val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"))
+            val load = addTask(jazz, show, "Load in")
+            addTask(jazz, show, "Sound check")
+            jazz.update(Tasks, load.id) { assigneeId(ada.id) }
+            jazz.insert(Comments, NewComment(taskId = load.id, authorId = ada.id, body = "b: trucks at 9"))
+            jazz.insert(Comments, NewComment(taskId = load.id, authorId = ada.id, body = "a: dock 2"))
+            assertEquals(
+                listOf("Load in (Ada) [Ada: a: dock 2, Ada: b: trucks at 9]", "Sound check (unassigned) []"),
+                DocsSnippets.includes(jazz, show.id),
+            )
+            assertEquals(mapOf("Encore" to 2), DocsSnippets.reverseRelation(jazz, show.id))
+            assertEquals(
+                listOf("Load in" to TaskStatus.Todo, "Sound check" to TaskStatus.Todo),
+                DocsSnippets.select(jazz, show.id).sortedBy { it.first },
+            )
+            // A required include keeps only tasks whose assignee exists.
+            val assigned = jazz.all(Tasks.where(Tasks.showId eq show.id).include(Tasks.assignee.required()))
+            assertEquals(listOf("Load in"), assigned.map { it[Tasks.title] })
+            // Subscriptions deliver included rows, and an update when a related row changes.
+            val seen = kotlinx.coroutines.channels.Channel<List<String?>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val job = launch {
+                jazz.watch(Tasks.where(Tasks.showId eq show.id).orderBy(Tasks.rank.asc()).include(Tasks.assignee))
+                    .collect { rows -> seen.send(rows.map { it[Tasks.assignee]?.name }) }
+            }
+            kotlinx.coroutines.withTimeout(30_000) {
+                while (seen.receive() != listOf("Ada", null)) Unit
+                jazz.update(CrewTable, ada.id) { name("Ada L.") }
+                while (seen.receive() != listOf("Ada L.", null)) Unit
+            }
+            job.cancel()
         }
     }
 }
