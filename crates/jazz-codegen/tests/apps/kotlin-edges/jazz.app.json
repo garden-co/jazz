@@ -1,0 +1,20 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "results": {
+      "columns": {
+        "tools": "string",
+        "kotlin": "int?",
+        "kotlinx": "boolean",
+        "java": "float",
+        "query": "string?",
+        "object": "string?",
+        "due_at": "timestamp?"
+      }
+    },
+    "units": {
+      "columns": { "tableName": "string", "result": "uuid?", "tags": { "type": { "array": "string" } } }
+    }
+  }
+}
