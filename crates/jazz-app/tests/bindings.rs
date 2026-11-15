@@ -55,9 +55,10 @@ fn committed_bindings_read_back() {
         );
 
         let edited = committed.replacen("\"format\": 1", "\"format\":  1", 1);
+        let error = jazz_codegen::bindings::read(Lang::Rust, &edited).unwrap_err();
         assert!(
-            jazz_codegen::bindings::read(Lang::Rust, &edited).is_err(),
-            "an edited APP"
+            error.message().contains("Restore it from version control"),
+            "{error}"
         );
     }
     let foreign = "// some other file\n";

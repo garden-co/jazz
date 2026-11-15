@@ -829,7 +829,12 @@ pub fn is_app_manifest(manifest: &str) -> bool {
             continue;
         }
         if section.ends_with("dependencies") {
-            let key = line.split(['=', '.']).next().unwrap_or("").trim().trim_matches('"');
+            let key = line
+                .split(['=', '.'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"');
             depends |= key == "jazz-app";
         }
     }
@@ -877,11 +882,22 @@ pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenE
         .strip_prefix(&open)
         .and_then(|body| body.find(&close).map(|end| &body[..end]))
         .ok_or_else(|| refuse("`APP` is cut short"))?;
+    // Regenerating can't repair these: the file is the record of the
+    // version the app last generated against.
+    let unusable = |what: &str| {
+        CodegenError::new(format!(
+            "{FILE}: {what}. Restore it from version control; or delete it and run \
+             `jazz-tools generate` (an edit of `tables` since it was generated then \
+             has no recorded version to migrate from)"
+        ))
+    };
     if jazz::tools::deployment::artifact::source_hash(file.as_bytes()) != source {
-        return Err(refuse("`APP` was edited (it no longer matches `SOURCE`)"));
+        return Err(unusable(
+            "its `APP` was edited (it no longer matches `SOURCE`)",
+        ));
     }
     let app = App::load(file.as_bytes())
-        .map_err(|error| refuse(&format!("its `APP` no longer loads ({error})")))?;
+        .map_err(|error| unusable(&format!("its `APP` no longer loads ({error})")))?;
     Ok(crate::bindings::Recorded {
         source,
         format,
@@ -963,15 +979,28 @@ mod tests {
 
     #[test]
     fn app_manifests_depend_on_jazz_app() {
-        let app = "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app = { path = \"../jazz-app\" }\n";
+        let app =
+            "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app = { path = \"../jazz-app\" }\n";
         assert!(is_app_manifest(app));
-        assert!(is_app_manifest("[package]\nname = \"x\"\n[dependencies]\njazz-app.workspace = true\n"));
-        assert!(is_app_manifest("[package]\nname = \"x\"\n[dependencies.jazz-app]\nversion = \"1\"\n"));
+        assert!(is_app_manifest(
+            "[package]\nname = \"x\"\n[dependencies]\njazz-app.workspace = true\n"
+        ));
+        assert!(is_app_manifest(
+            "[package]\nname = \"x\"\n[dependencies.jazz-app]\nversion = \"1\"\n"
+        ));
         // A workspace root, a crate without jazz-app, a commented-out one.
-        assert!(!is_app_manifest("[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\njazz-app = \"1\"\n"));
-        assert!(!is_app_manifest("[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n"));
-        assert!(!is_app_manifest("[package]\nname = \"x\"\n[dependencies]\n# jazz-app = \"1\"\n"));
-        assert!(!is_app_manifest("[package]\nname = \"x\"\n[dependencies]\njazz-application = \"1\"\n"));
+        assert!(!is_app_manifest(
+            "[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\njazz-app = \"1\"\n"
+        ));
+        assert!(!is_app_manifest(
+            "[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n"
+        ));
+        assert!(!is_app_manifest(
+            "[package]\nname = \"x\"\n[dependencies]\n# jazz-app = \"1\"\n"
+        ));
+        assert!(!is_app_manifest(
+            "[package]\nname = \"x\"\n[dependencies]\njazz-application = \"1\"\n"
+        ));
     }
 
     #[test]
