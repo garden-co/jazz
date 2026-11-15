@@ -815,7 +815,9 @@ impl AppStore {
 
     /// Why the runtime stopped serving, if it failed (panicked) and could
     /// not be restarted. The host tables stay available; the server
-    /// reports itself unhealthy so it is restarted.
+    /// reports itself unhealthy so it is restarted. In test builds it also
+    /// records a dead large-value lane, which outside tests ends the
+    /// process instead ([`StoreLoop::lane_died`]).
     pub fn fault(&self) -> Option<String> {
         self.inner.fault.lock().ok().and_then(|fault| fault.clone())
     }
