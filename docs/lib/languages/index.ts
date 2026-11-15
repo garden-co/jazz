@@ -49,7 +49,6 @@ export const LANGUAGES: readonly Language[] = [
       lang: "rust",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    setupPage: "setup/rust",
     enabled: true,
   },
   {
@@ -77,7 +76,6 @@ export const LANGUAGES: readonly Language[] = [
   {
     label: "Go",
     backend: true,
-    setupPage: "setup/go",
     bindings: {
       file: "examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go",
       lang: "go",

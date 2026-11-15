@@ -83,6 +83,16 @@ const config = {
     return [
       { source: "/perf-timeline", destination: "/examples", permanent: false },
       { source: "/changelog", destination: "/docs/changelog", permanent: false },
+      {
+        source: "/docs/setup/rust",
+        destination: "/docs/setup/deployment/jazz-cloud",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/go",
+        destination: "/docs/setup/deployment/jazz-cloud",
+        permanent: false,
+      },
       // Older create-jazz builds fetch the agent brief from its old URL.
       { source: "/agent-brief.md", destination: "/quickstart.md", permanent: false },
       {

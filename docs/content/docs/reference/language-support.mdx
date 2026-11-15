@@ -1,0 +1,81 @@
+---
+title: Language Support
+description: "What each language's Jazz support doesn't do yet, compared with TypeScript."
+---
+
+TypeScript has all of Jazz. The other languages open the same `jazz.app.json` and
+`jazz.permissions.json`, with bindings generated from them, and this page lists what each of them
+doesn't support yet. Rust and Go run your [main backend](/docs/setup/deployment/jazz-cloud#connect-your-backend);
+Swift and Kotlin are for apps.
+
+<Tabs groupId="jazz-environment" items={["Rust", "Go"]} persist updateAnchor>
+  <Tab value="Rust">
+    In Rust, Jazz doesn't support these yet:
+
+    - includes, `select` and recursive queries (use `jazz.with_client(…)` for the low-level client);
+    - payload enums;
+    - a handle with the backend's own authority, where your permissions aren't checked (TS `jazz.db`):
+      the backend's handle acts as the user you name in `Backend::new`;
+    - running the sync server in the backend's process (TS `sqlite()` and `memory()` stores): point
+      `Config::server` at a Jazz server;
+    - `linkIdentity`.
+
+    The endpoint doesn't support these yet:
+
+    - linking a device account to a signed-in user (`backend-link`);
+    - trusted backend clients (`backendClients`);
+    - the HTTP-stream transport, for hosts without WebSockets: clients connect over the WebSocket;
+    - renewing a cookie session in place: sessions reconnect at their expiry instead;
+    - `revokeUser`;
+    - `refresh`;
+    - `allowedOrigins` and `publicUrl`;
+    - device-account proofs signed for the endpoint's URL: only the app id is accepted;
+    - `withAttribution`;
+    - the Inspector (`inspect`);
+    - on a user's handle (`for_user`): permission advice, byte-range reads and streaming inserts.
+  </Tab>
+  <Tab value="Go">
+    What TypeScript's main backend (`createJazz`) does that Go's doesn't yet:
+
+    - a backend-authority handle (TS `jazz.db`): reads and writes that bypass permissions, as the system;
+    - `jazz.revokeUser` (ending a user's sessions) and the `refresh` hook;
+    - trusted backend clients (`backendClients`);
+    - linking a device account to a user (the endpoint's `backend-link` routes);
+
+    And in reading and writing:
+
+    - guest (anonymous) users;
+    - history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
+      select columns or be subscribed to yet;
+    - nested rows and catalogue enums;
+    - subscription deltas carry no positions: `q.Live(ctx, db)` keeps a query's rows in order for you;
+    - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
+      reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
+      column. In a subscription, such a row ends it with an error delta;
+    - Windows builds, and macOS in CI.
+
+    A Go program can also be a client of your app, syncing as one of its users through your
+    backend's `/jazz`, as a browser does:
+
+    A Go program can also be a client of your app, syncing as one of its users through your backend's
+    Jazz endpoint (the `/jazz` route `createJazz` serves), as a browser does:
+
+    ```go
+    db, err := jazzapp.Open(ctx, jazz.Config{
+    	AppID:     appID,
+    	ServerURL: "https://app.example/jazz",
+    	Storage:   jazz.StoragePersistent,
+    	DataDir:   "./jazz-data",
+    	// A local-first device account, created on first open; or
+    	// jazz.Token(func(ctx context.Context, reason jazz.TokenReason) (string, error) { … })
+    	// to sign in with a JWT from your auth provider.
+    	Auth: jazz.DeviceAccount(jazz.FileStore("./jazz-data/device-key")),
+    })
+    ```
+
+    `db.Session(ctx)` is who is signed in, `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of
+    their changes, and `db.Refresh(ctx)` and `db.SignOut(ctx)` do what they say. Keep a device key like a
+    password: `jazz.FileStore` keeps it in a file only its owner can read; implement `jazz.SecretStore`
+    to keep it in the OS keychain.
+  </Tab>
+</Tabs>
