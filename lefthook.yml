@@ -19,10 +19,12 @@ pre-commit:
         - "*.rs"
         - "Cargo.toml"
         - "**/Cargo.toml"
-      # `{staged_files}` is the exact staged-file list already computed by
-      # Lefthook. The native shell wrapper invokes Cargo directly, avoiding
-      # Node child_process spawns that restricted shells may reject.
-      run: sh dev/scripts/clippy-staged.sh {staged_files}
+      # CI's exact command (`pnpm lint:rust`, pinned equal by
+      # dev/gates/test/lint-hook-parity.test.mjs). Cargo unifies features over
+      # the selected packages, so linting only the staged crates compiles them
+      # differently from CI and can pass what CI rejects. Called directly, not
+      # through pnpm, so the hook needs no Node child process.
+      run: cargo clippy --workspace -- -D warnings
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,mjs,cjs,md,mdx,json,html}"
       exclude:
@@ -34,8 +36,9 @@ pre-commit:
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
-      exclude: "crates/jazz-rn/src/**, examples/*/schema/app.ts, examples/docs/*/schema/app.ts, crates/jazz-napi/index.d.ts, crates/jazz-napi/index.js"
-      run: pnpm oxlint --fix {staged_files}
+      # CI's ignore file, so the hook never lints or autofixes a file that
+      # `pnpm lint` skips (oxlint drops explicitly passed ignored paths).
+      run: pnpm oxlint --fix --ignore-path .oxlintignore {staged_files}
       stage_fixed: true
     # Type-check the docs snippet packages. `--only` skips the topological
     # `^build` chain, which otherwise drags in jazz-rn's native (NDK) build —
