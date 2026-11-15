@@ -117,11 +117,13 @@ void jazz_close(JazzHandle *handle);
 
 /*
  * An end user's token callback: called on a thread of its own (it may
- * block) with reason "connect" | "renew" | "expired" | "refresh"; returns
- * the token as a malloc'ed string (Go: C.CString), which jazz frees, or
- * NULL when no one is signed in.
+ * block) with reason "connect" | "renew" | "expired" | "refresh". Return 0
+ * with *token set to the token as a malloc'ed string (Go: C.CString), which
+ * jazz frees, or to NULL when no one is signed in (the app stops). Return
+ * non-zero when the fetch failed (e.g. a network blip): the session stays
+ * signed in and asks again; *token may hold the failure's message.
  */
-typedef char *(*JazzTokenCallback)(void *ctx, const char *reason);
+typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 
 /*
  * Opens an app as an end user signing in with the app's bearer
