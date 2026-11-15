@@ -111,3 +111,33 @@ fn vector_admission_refuses_wrong_length_and_non_finite_values() {
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
     assert!(db.read(&prepared).unwrap().is_empty());
 }
+
+/// Outside a vector index search (SPEC 20.4), a filter compares vectors as
+/// whole values, bit for bit, as for `bytes`: `-0.0` and `0.0` differ.
+#[test]
+fn vector_filters_compare_whole_values_bit_for_bit() {
+    use jazz::query::{Operand, Predicate};
+    let db = open_db();
+    let null = || Value::Nullable(None);
+    insert(&db, 1, f32le(&[1.0, 2.0, 3.0]), null()).unwrap();
+    insert(&db, 2, f32le(&[0.0, 2.0, 3.0]), null()).unwrap();
+    insert(&db, 3, f32le(&[-0.0, 2.0, 3.0]), null()).unwrap();
+    let ids = |literal: Value| {
+        let query = Query::from("docs").filter(Predicate::Eq(
+            Operand::Column("embedding".to_owned()),
+            Operand::Literal(literal),
+        ));
+        let prepared = db.prepare_query(&query).unwrap();
+        let mut ids: Vec<u8> = db
+            .read(&prepared)
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid().as_bytes()[0])
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(f32le(&[1.0, 2.0, 3.0])), [1]);
+    assert_eq!(ids(f32le(&[0.0, 2.0, 3.0])), [2]);
+    assert_eq!(ids(f32le(&[-0.0, 2.0, 3.0])), [3]);
+}
