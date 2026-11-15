@@ -83,11 +83,19 @@ const config = {
     return [
       { source: "/perf-timeline", destination: "/examples", permanent: false },
       { source: "/changelog", destination: "/docs/changelog", permanent: false },
-      { source: "/docs/setup/rust", destination: "/docs/setup/deployment/jazz-cloud", permanent: false },
-      { source: "/docs/setup/go", destination: "/docs/setup/deployment/jazz-cloud", permanent: false },
       {
         source: "/docs/setup/nextjs-better-auth",
         destination: "/docs/reference/nextjs-better-auth",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/rust",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/go",
+        destination: "/docs/setup/deployment/own-server",
         permanent: false,
       },
       // Older create-jazz builds fetch the agent brief from its old URL.

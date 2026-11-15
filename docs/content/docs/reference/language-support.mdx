@@ -5,7 +5,7 @@ description: "What each language's Jazz support doesn't do yet, compared with Ty
 
 TypeScript has all of Jazz. The other languages open the same `jazz.app.json` and
 `jazz.permissions.json`, with bindings generated from them, and this page lists what each of them
-doesn't support yet. Rust and Go run your [main backend](/docs/setup/deployment/jazz-cloud#connect-your-backend);
+doesn't support yet. Rust and Go run your [main backend](/docs/setup/deployment/own-server#create-jazz-once);
 Swift and Kotlin are for apps.
 
 <Tabs groupId="jazz-environment" items={["Rust", "Go"]} persist updateAnchor>
@@ -55,9 +55,6 @@ Swift and Kotlin are for apps.
       reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
       column. In a subscription, such a row ends it with an error delta;
     - Windows builds, and macOS in CI.
-
-    A Go program can also be a client of your app, syncing as one of its users through your
-    backend's `/jazz`, as a browser does:
 
     A Go program can also be a client of your app, syncing as one of its users through your backend's
     Jazz endpoint (the `/jazz` route `createJazz` serves), as a browser does:
