@@ -129,8 +129,11 @@ shadow tables.
 
 ## 20.2 Storage
 
-Each index owns shadow tables named `<stored>__ix_<name>_<part>` on the
-current table only (never on `__h`), plus one row in `_jazz_ix`:
+Each index owns shadow tables named `_jazz_ix_<stored>__<name>_<part>` on
+the current table only (never on `__h`), plus one row in `_jazz_ix`. The
+`_jazz_` prefix keeps them out of what a store lists as its tables, so a
+build of Jazz without specialised indexes opening the file leaves them
+alone (its triggers keep queueing rows, which a later build drains):
 
 ```sql
 CREATE TABLE _jazz_ix (
@@ -139,8 +142,13 @@ CREATE TABLE _jazz_ix (
   encoding TEXT NOT NULL,    -- e.g. 'jazz-ix-text/1 jazz-text/1:en'
   decl BLOB NOT NULL,        -- canonical declaration bytes
   state INTEGER NOT NULL,    -- 0 building, 1 ready
+  built INTEGER NOT NULL,    -- while building: the highest rid indexed so far
   PRIMARY KEY (tbl, name));
 ```
+
+`decl` is the declaration's `jazz-ix-decl/1` bytes with each column under
+its stored name, so a column rename that keeps the stored column keeps the
+index.
 
 `encoding` names every byte-level choice the shadow rows depend on: the
 kind's row layout and, for text, the analyzer. A store opening with a
@@ -165,7 +173,8 @@ for given inputs.
 
 For each table with a specialised index, Jazz creates three triggers on the
 current table, `AFTER INSERT`, `AFTER DELETE` and `AFTER UPDATE OF` the
-indexed columns. They only record the row's `rid` in
+indexed columns and `_state` (a soft delete or restore changes only
+`_state`). They only record the row's `rid` in
 
 ```sql
 CREATE TABLE _jazz_ix_dirty (tbl TEXT NOT NULL, rid INTEGER NOT NULL, PRIMARY KEY (tbl, rid));
@@ -177,18 +186,24 @@ know about indexes: local writes, synced versions, rebases, pending-version
 removal, eviction to cold copies and migrations all reach them.
 
 Rust **drains** the queue inside the same transaction: before the
-transaction commits, and before any statement that reads a shadow table.
-Draining a `rid` reads the row's current indexed values (a missing row means
-delete), computes its new shadow rows, and replaces the old ones. For text
+transaction commits (as the outermost savepoint is released; a drain that
+fails rolls the transaction back), and before any statement that reads a
+shadow table. Draining a `rid` reads the row's current indexed values (a
+missing or deleted row means delete: a deleted row is never indexed), computes its new shadow rows, and replaces the old ones. For text
 the old postings are diffed against the new so an edit touching one word
-writes one posting. Large values (19) are read as their logical value. Draining never fails
+writes one posting. Large values (19) are read as their logical value. A
+replica that holds a row before its large value's chunks indexes the row
+without that value and records it in `_jazz_ix_incomplete(tbl, rid)`;
+when chunks arrive, those rows are queued again, so the replica's index
+ends up equal to the authority's. Draining never fails
 because of a value (`INV-IX-7`): a write admitted under the table's own
 rules is always indexable, or else unindexed, so the same row can never be
 accepted by one node and wedge another's sync.
 
-Building an index (a new declaration, or a rebuilt one) enqueues every
-current row and drains in batches of bounded size, each its own transaction,
-with `_jazz_ix.state = 0` meanwhile; a query using an index that is still
+Building an index (a new declaration, or a rebuilt one) indexes every
+current row in `rid` order, in batches of bounded size (512 rows, one per
+tick), each its own transaction, with `_jazz_ix.state = 0` and `built`
+advancing meanwhile (an index on an empty table is built at once); a query using an index that is still
 building waits for the build on a client and is refused with a typed retryable
 error on the authority.
 
@@ -231,8 +246,9 @@ protocol version: the wire version stays 6 and queries without a search are
 byte-identical. A node sends a query with a search upstream only if the
 upstream offered the feature; otherwise that query is answered from the
 replica alone and, at `Remote` tier, refused with "the server does not
-support index search". The new types get byte fixtures in the message
-corpus.
+support index search". A transport reports what its link negotiated; one
+that cannot say (an in-process link aside) offers no optional feature. The
+new predicate's JSON and postcard bytes are pinned per op.
 
 Validation refuses, with typed errors: an unknown index; an op not of the
 index's kind; an empty text after analysis; a vector of the wrong
@@ -272,20 +288,23 @@ ix(rid, score) AS (
 **Vector** needs a distance SQL cannot compute on every target, so it runs
 in two phases:
 
-1. **Candidates.** Rust picks which rows to score:
-   - _filter-first_ when the query's filters, policy and other clauses narrow
-     the table through a B-tree index: SQL returns the matching `rid`s (the
-     same statement without the `search` clause, ordered by `rid`, capped at
-     `VECTOR_EXACT_MAX` = 50 000 + 1 rows; exceeding the cap is a typed
-     error). "Narrow" is decided from `EXPLAIN QUERY PLAN` of that
-     statement: the root table must be read by `SEARCH … USING INDEX`, not
-     `SCAN`;
-   - _whole replica_ on a client, where the table holds only replicated rows:
-     every row of `__vec`, under the same cap.
-     Rust reads those vectors, scores them (20.10.2) and keeps the best `k`.
-2. **Rows.** The `k` pairs `(rid, score)` are bound as one JSON array, and the
-   statement runs with `ix` as `json_each` over it, so filters, policy,
-   includes and order apply as above.
+1. **Candidates.** On every node the candidates are the rows the query's
+   other clauses and read policy match (_filter-first_): SQL returns their
+   `(rid, id, v)` (the same statement without the `search` clause, joined to
+   `__vec`, ordered by `rid`, capped at `VECTOR_EXACT_MAX` = 50 000 + 1 rows;
+   exceeding the cap is a typed error). Rust scores them (20.10.2) and keeps
+   the best `k` by `(score, id)`, `id` being the row's object id (a `rid` is
+   local to a node). Scoring the whole replica and filtering afterwards
+   would keep fewer than `k` rows whenever the other clauses drop some of
+   the nearest, and so differ from the authority. On the authority the
+   clauses must also narrow the table, as decided from the statement's
+   `EXPLAIN QUERY PLAN`: its root table must be read by
+   `SEARCH … USING INDEX`, not `SCAN`.
+2. **Rows.** The `k` pairs `(rid, score key)` are bound as one JSON array,
+   and the statement runs with `ix` as `json_each` over it, so filters,
+   policy, includes and order apply as above. The score key is the score's
+   order-preserving `i64` (the `f64` bits, negatives' magnitude flipped), so
+   SQL compares it exactly.
 
 On the authority, a vector search whose other clauses do not narrow the
 table through an index is refused: "unfiltered vector search on the server
@@ -301,6 +320,9 @@ two clients holding different subsets, rank the rows they share identically,
 and a change to one row cannot move another.
 
 Scores are computed so that every node gets the same bits:
+
+In `ix(rid, score)` every kind's score is smaller-better, so `$score`
+ascending is best first: text binds the negated sum.
 
 - **text:** an integer. Each posting's `impact` (0–255) is computed in Rust
   at index time from the term's frequency in the field, the field's length in
@@ -349,8 +371,10 @@ only the changed row's shadow rows, so re-running the statement narrowed to
 spliced into the window by `(score, id)`. Because scores depend on the row
 alone, unchanged rows keep their scores and positions (`INV-IX-6`).
 
-A vector subscription rechecks the same way: a changed row is scored alone and
-spliced in. A full page whose last row is removed refetches, as today.
+A live search's sort keys read each row's score through the search's own
+candidate relation. A vector subscription re-runs whole instead: `Nearest`
+keeps only its `k` best, so a changed row can push out a row the recheck
+never read. A full page whose last row is removed refetches, as today.
 
 ## 20.9 Replicas and tiers
 
@@ -365,6 +389,9 @@ A query using an index runs at its requested tier:
 An index declared `"serverOnly": true` is not maintained on clients. A
 query using it is answered at `Remote` tier only; offline, or at
 `LocalOnly`, it fails with "index `<table>.<name>` is server-only".
+(Implementation status: a client re-evaluates every query over the rows it
+holds, which it cannot do without the index, so a client refuses a search
+through a server-only index at every tier for now; see Open questions.)
 
 A local result covers only the rows the replica holds: it is complete for
 data the client's subscriptions cover, and otherwise grows as the authority's
@@ -498,6 +525,11 @@ All are typed, name the table and index, and carry no data about rows:
 - `VectorSearchUnbounded`: unfiltered vector search on the authority (20.5);
 - `VectorCandidatesOverCap`: more than `VECTOR_EXACT_MAX` candidates (20.5).
 
+The last five are `Reason`s (`index_server_only`,
+`index_search_unsupported_upstream`, `index_building`,
+`vector_search_unbounded`, `vector_candidates_over_cap`) on codes `query`,
+except `index_building`, which is `backpressure` (retry later).
+
 ## 20.12 Costs
 
 - **Write:** one trigger insert per row change, then at drain: text, one
@@ -518,6 +550,10 @@ All are typed, name the table and index, and carry no data about rows:
   every build, so each one's size is measured and can be dropped.
 
 ## Open questions
+
+- How a client answers a `Remote` search through a server-only index: it
+  cannot re-evaluate it over its replica (6.5), so it would have to take the
+  authority's result rows and order as given.
 
 - An ANN vector kind (`ann: "ivf"`) in shadow tables, so the authority can
   answer unfiltered vector search.
