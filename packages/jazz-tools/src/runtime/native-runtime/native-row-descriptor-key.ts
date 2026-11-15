@@ -6,7 +6,7 @@ import { writeNativeRowDescriptor, writeValueType, type ValueType } from "./nati
  * A wire-exact key for a native ValueType.
  *
  * ValueType is recursive and several tags carry semantic data beyond their
- * numeric tag (record fields, enum registry ids, and payload enum cases). The
+ * numeric tag (record fields, enum registry ids, and enum cases). The
  * native wire codec is the canonical representation of that data, so using it
  * here keeps cache identity aligned with the protocol rather than maintaining
  * a second partial structural encoder.

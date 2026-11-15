@@ -82,7 +82,7 @@ Values are plain JSON, typed by the schema:
 | optional           | `null`                                         |
 
 A float that isn't finite (NaN, ±infinity) reads as `null`; JSON can't
-write one. Enums with payloads read as `{ "case": …, "fields": { … } }`. Text-merge
+write one. Text-merge
 columns (`merge: "text"`) take plain string writes.
 
 - **Query:** `{ "table", "where": [{ "column", "op", "value"? }], "orderBy":
@@ -185,7 +185,6 @@ yet":
 - `offset` in an include, and `required` on reverse relations or on optional
   references;
 - connecting to a sync server as an end user (with a JWT);
-- writing enums with payloads;
 - a session issuer other than `jazz:backend`;
 - transactions, and with them reads inside transactions.
 
