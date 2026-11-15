@@ -509,6 +509,8 @@ impl Core {
     /// The server's advice on whether this user may do `op` (`read`,
     /// `insert`, `update`, `delete`) without doing it: `Some(true)`,
     /// `Some(false)`, or `None` when no server can say (TS's `canRead` …).
+    /// Advisory: `true` doesn't promise the write will succeed (the data or
+    /// the permissions may change before it runs). Not in a transaction.
     /// `insert` takes `row_json`; `read` and `delete` take `id`; `update`
     /// takes `id` and an optional `row_json` patch.
     pub fn can(
@@ -528,7 +530,15 @@ impl Core {
         };
         let cells = |what: &str| -> Result<Vec<(String, Value)>> {
             match row_json {
-                Some(row) => Ok(convert::cells(table, table_name, row, what)?.1),
+                Some(row) => {
+                    let (given, cells) = convert::cells(table, table_name, row, what)?;
+                    if given.is_some() {
+                        return Err(refused(format!(
+                            "can {op}: {what} takes no \"id\" (advice is about the row's columns)"
+                        )));
+                    }
+                    Ok(cells)
+                }
                 None => Ok(Vec::new()),
             }
         };
