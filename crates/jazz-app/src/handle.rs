@@ -355,17 +355,17 @@ fn run(
         }
     };
     let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async move {
+    let stopped = local.block_on(&runtime, async move {
         let (client, opened) = match connect(files, config).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
-                return;
+                return None;
             }
         };
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
-            return;
+            return None;
         }
         // Refused writes no durable wait claimed go to `mutation_errors`.
         if !client_serverless {
@@ -421,21 +421,30 @@ fn run(
             while jobs.join_next().await.is_some() {}
         }
         let result = client.shutdown().await;
-        // The store is closed: a caller woken below may delete it.
-        drop(store);
-        let failure = result.as_ref().err().map(ToString::to_string);
-        let mut replies = stopped.into_iter();
-        if let Some(first) = replies.next() {
-            let _ = first.send(result.map_err(Error::from));
-        }
-        // Every other caller learns the same outcome.
-        for reply in replies {
-            let _ = reply.send(match &failure {
-                None => Ok(()),
-                Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
-            });
-        }
+        Some((result, stopped))
     });
+    // The store's connections close with the last clone of the client, and
+    // the tasks holding clones go with the `LocalSet`: only once both are
+    // gone is the store closed, for `delete_client_storage` to remove (a
+    // file it unlinks while SQLite still maps it is a SIGBUS).
+    drop(local);
+    drop(runtime);
+    drop(store);
+    let Some((result, stopped)) = stopped else {
+        return;
+    };
+    let failure = result.as_ref().err().map(ToString::to_string);
+    let mut replies = stopped.into_iter();
+    if let Some(first) = replies.next() {
+        let _ = first.send(result.map_err(Error::from));
+    }
+    // Every other caller learns the same outcome.
+    for reply in replies {
+        let _ = reply.send(match &failure {
+            None => Ok(()),
+            Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
+        });
+    }
 }
 
 pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
