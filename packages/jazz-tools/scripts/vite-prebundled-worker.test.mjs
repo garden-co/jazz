@@ -35,6 +35,13 @@ const { vitePrebundledBrokerWorkerUrl } = await import(
   pathToFileURL(join(packageDir, "dist/runtime/browser-worker-config.js")).href
 );
 
+/** The bindings' options for `{ todos: { title: string } }`, compiled by Jazz's Rust loader. */
+const todosApp = JSON.parse(
+  require("jazz-napi").compileApp(
+    JSON.stringify({ format: 1, tables: { todos: { columns: { title: "string" } } } }),
+  ),
+);
+
 /** A project that depends on jazz-tools the way an npm install lays it out. */
 function createConsumerProject() {
   const root = mkdtempSync(join(tmpdir(), "jazz-vite-prebundle-"));
@@ -50,12 +57,13 @@ function createConsumerProject() {
   writeFileSync(
     join(root, "src/main.js"),
     `import * as localFirst from "jazz-tools/local-first";
-import { schema as s } from "jazz-tools";
+import { bindApp } from "jazz-tools";
 import { createJazzClient } from "jazz-tools/client";
 
 // The local-first client on this device only, as an app's first run opens
 // it: no backend, IndexedDB through the broker SharedWorker.
-const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+// What jazz.generated.ts passes to bindApp for a one-table app.
+const app = bindApp(${JSON.stringify(todosApp)});
 window.__jazzResult = (async () => {
   const session = await createJazzClient({ serverUrl: null, client: async () => localFirst });
   const db = session.getSnapshot().client.db;

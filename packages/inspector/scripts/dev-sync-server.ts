@@ -1,4 +1,4 @@
-import { startLocalJazzServer, testPermissions } from "jazz-tools/testing";
+import { startLocalJazzServer } from "jazz-tools/testing";
 import { deploy } from "jazz-tools/dev";
 import {
   ADMIN_SECRET,
@@ -30,7 +30,7 @@ export default async function runServer({
       appId: serverHandle.appId,
       adminSecret: serverHandle.adminSecret,
       app,
-      permissions: testPermissions(app, serverPermissions),
+      permissions: serverPermissions,
     });
 
     // Seed through the app's backend, as the app writes its own data.
