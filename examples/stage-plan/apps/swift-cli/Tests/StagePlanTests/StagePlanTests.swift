@@ -193,4 +193,25 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(stored?.notes, "Pack gaffer tape. ")
         try await app.jazz.close()
     }
+
+    func testPermissionAdvice() async throws {
+        let server = try await TestServer()
+        let chief = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await chief.show(named: "Advice")
+        let task = try await chief.addTask("Load in", to: show)
+        try await chief.jazz.waitForSync(.global)
+        let stranger = try await StagePlanApp.open(
+            user: "00000000-0000-4000-8000-0000000000dd", server: server.server)
+        let newTask = JazzApp.NewTask(showId: show.id, title: "Sneaky", status: .todo, rank: 2)
+        let chiefMay = try await chief.jazz.canInsert(newTask)
+        let strangerMay = try await stranger.jazz.canInsert(newTask)
+        XCTAssertEqual(chiefMay, true)
+        XCTAssertEqual(strangerMay, false)
+        let chiefDeletes = try await chief.jazz.canDelete(JazzApp.Task.self, id: task.id)
+        let strangerUpdates = try await stranger.jazz.canUpdate(task.id, JazzApp.TaskPatch(status: .set(.done)))
+        XCTAssertEqual(chiefDeletes, true)
+        XCTAssertEqual(strangerUpdates, false)
+        try await stranger.jazz.close()
+        try await chief.jazz.close()
+    }
 }
