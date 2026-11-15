@@ -90,6 +90,23 @@ columns (`merge: "text"`) take plain string writes.
   ANDed. Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `contains` (string or
   array column), `in`, `isNull`, `isNotNull`. Columns also include `id`,
   `$createdAt` and `$updatedAt`.
+- **Include:** `"include": [{ "relation": "<name>", "required"?: bool,
+"query"?: { "where", "orderBy", "limit", "select", "include" } }]`, at the
+  root or nested in an include's `query`, which has no `table` and no
+  `offset`. Relations are the ones `jazz.app.json` declares. In a row, an
+  included relation sits under its name: a forward relation as a row or
+  `null`, a reverse one as an array. `required` (as TS's `requireIncludes`)
+  keeps only rows whose target is readable, for forward relations through a
+  non-optional column. Subscriptions deliver included rows too, and deliver
+  an `updated` row when its related rows change.
+- **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
+  always) instead of all of them, at the root or in an include. `"*"` selects
+  every column.
+- A forward relation through a `uuid[]` column reads as an array of the
+  referenced rows; `required` on it keeps only rows whose every reference is
+  readable. Stricter than TS: `required` on reverse relations or optional
+  references, an `offset` other than 0 in an include, and a relation named
+  like a column of its table are refused by name.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",
@@ -124,7 +141,8 @@ call.
 These are refused with `Refused`, and the message starts with "not supported
 yet":
 
-- includes (nested related rows);
+- `offset` in an include, and `required` on reverse relations or on optional
+  references;
 - connecting to a sync server as an end user (with a JWT);
 - writing enums with payloads;
 - a session issuer other than `jazz:backend`;
