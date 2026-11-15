@@ -2045,6 +2045,15 @@ pub enum PermissionAdviceRequest {
     },
 }
 
+/// A large value being uploaded piece by piece: see
+/// [`JazzClient::begin_streaming_upload`]. It lives on the client's thread.
+pub struct StreamingUpload {
+    upload: crate::db::StreamingValueUpload,
+    table: String,
+    column: String,
+    cells: BTreeMap<String, CoreValue>,
+}
+
 /// A transaction-scoped client handle.
 pub struct JazzTransaction {
     transaction_id: OpenTransactionId,
