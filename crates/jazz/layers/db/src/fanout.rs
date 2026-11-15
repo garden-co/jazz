@@ -317,6 +317,10 @@ pub(super) struct Group {
     /// Each root row's share of `held`, with the cells it was read from
     /// (kept alive, so their address names them).
     by_root: HashMap<RowUuid, (Arc<Vec<(String, Option<Value>)>>, Vec<Held>)>,
+    /// A re-nest follows this re-check: the refresh oracle compares after
+    /// that, not here.
+    #[cfg(any(test, feature = "testing"))]
+    renest_follows: bool,
     /// When the root table is watched by correlation too (a
     /// self-relation): the root rows the result holds, which wake it
     /// whatever their images say.
@@ -363,8 +367,13 @@ pub struct FanoutStats {
     pub shared_joins: u64,
     pub woken: u64,
     pub skipped: u64,
-    /// Woken groups that applied their root rows by re-checking ids.
+    /// Woken groups refreshed without a re-run: their root rows re-checked
+    /// by id, or the relations of the roots a correlated write reached
+    /// nested again, or both (a re-check that failed and ended the
+    /// subscription counts here too).
     pub rechecked: u64,
+    /// Of those, refreshes that nested relations again (a re-nest).
+    pub renested: u64,
     /// Woken groups that re-ran their query and diffed the whole result.
     pub reran: u64,
     /// Changed rows of a correlation-watched table that a watching group
@@ -706,6 +715,8 @@ impl Inner {
             correlations,
             held: Vec::new(),
             by_root: HashMap::new(),
+            #[cfg(any(test, feature = "testing"))]
+            renest_follows: false,
             root_held: None,
         }));
         Self::hold(&mut handle.borrow_mut());
@@ -1155,7 +1166,7 @@ impl Inner {
     }
 
     /// Record what `group`'s result holds at each of its correlation
-    /// levels, after a run or a re-check changed its rows.
+    /// levels, after a run, a re-check or a re-nest changed its rows.
     fn hold(group: &mut Group) {
         let levels = group.correlations.len();
         if levels == 0 {
@@ -1336,6 +1347,14 @@ impl Inner {
         // Tables watched by correlation: the groups whose relation levels
         // hold the row, or a parent its old or new link names.
         let mut uncorrelated = 0;
+        // Groups woken only by correlation, with the levels and parents
+        // that matched: their roots stand, only the relations of the roots
+        // holding a match are nested again (see `Inner::renest`).
+        let mut scoped: BTreeMap<u64, Vec<(usize, Hit)>> = BTreeMap::new();
+        // Groups re-checking a held root row that some relation level also
+        // holds (as a child or a parent): re-nested where it is held, after
+        // the re-check, instead of a full run.
+        let mut selfhits: BTreeMap<u64, Vec<(usize, Hit)>> = BTreeMap::new();
         let mut related = |table: &str, row: RowUuid, images: Option<&[Vec<(String, Sql)>]>| {
             for gid in self.fan.related.get(table).into_iter().flatten() {
                 if woken.get(gid).is_some_and(Option::is_none) {
@@ -1344,6 +1363,42 @@ impl Inner {
                 let Some(group) = self.fan.groups.get(gid) else {
                     continue;
                 };
+                let rechecking = woken
+                    .get(gid)
+                    .is_some_and(|ids| ids.as_ref().is_some_and(|ids| ids.contains(&row)))
+                    && group.borrow().root == table;
+                if rechecking
+                    && group
+                        .borrow()
+                        .root_held
+                        .as_ref()
+                        .is_some_and(|held| held.contains(&row))
+                {
+                    match correlated_hits(&group.borrow(), table, row, images, false) {
+                        None => {
+                            selfhits.remove(gid);
+                            woken.insert(*gid, None);
+                        }
+                        Some(hits) if !hits.is_empty() => {
+                            selfhits.entry(*gid).or_default().extend(hits);
+                        }
+                        Some(_) => uncorrelated += 1,
+                    }
+                    continue;
+                }
+                if !woken.contains_key(gid) {
+                    match correlated_hits(&group.borrow(), table, row, images, true) {
+                        None => {
+                            scoped.remove(gid);
+                            woken.insert(*gid, None);
+                        }
+                        Some(hits) if !hits.is_empty() => {
+                            scoped.entry(*gid).or_default().extend(hits);
+                        }
+                        Some(_) => uncorrelated += 1,
+                    }
+                    continue;
+                }
                 if correlated(&group.borrow(), table, row, images) {
                     woken.insert(*gid, None);
                 } else {
@@ -1446,6 +1501,7 @@ impl Inner {
         self.fan.stats.uncorrelated += uncorrelated;
         self.fan.stats.woken += woken.len() as u64;
         self.fan.stats.skipped += (self.fan.groups.len() - woken.len()) as u64;
+        let woken_ids: BTreeSet<u64> = woken.keys().copied().collect();
         let groups: Vec<_> = woken
             .into_iter()
             .filter_map(|(gid, ids)| Some((gid, self.fan.groups.get(&gid).cloned()?, ids)))
@@ -1454,7 +1510,31 @@ impl Inner {
             let mut group = group.borrow_mut();
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
-                if self.refresh_group(&mut group, ids.as_ref()) {
+                #[cfg(any(test, feature = "testing"))]
+                {
+                    group.renest_follows = selfhits.contains_key(&gid) && ids.is_some();
+                }
+                let refreshed = self.refresh(&mut group, ids.as_ref());
+                #[cfg(any(test, feature = "testing"))]
+                {
+                    group.renest_follows = false;
+                }
+                let mut reran = matches!(refreshed, Refresh::Reran);
+                // After a re-check that applied: a rejection ended the
+                // subscription, a re-run read the relations already.
+                if let Some(hits) = selfhits.remove(&gid)
+                    && matches!(refreshed, Refresh::Rechecked)
+                {
+                    if self.renest(&mut group, &hits).is_some() {
+                        self.fan.stats.renested += 1;
+                        #[cfg(any(test, feature = "testing"))]
+                        oracle::compare(self, &group, "selfhit");
+                    } else {
+                        self.refresh_group(&mut group, None);
+                        reran = true;
+                    }
+                }
+                if reran {
                     self.fan.stats.reran += 1;
                 } else {
                     self.fan.stats.rechecked += 1;
@@ -1463,6 +1543,28 @@ impl Inner {
             if let Some(changed) = targets.remove(&gid) {
                 refresh_includes(&mut group, &changed);
             }
+        }
+        // Woken any other way too (an evidence match after the
+        // correlation one): those re-ran above. Nothing else can enter
+        // `woken` after `related`: root ids and include targets come from
+        // `wake`, before it.
+        scoped.retain(|gid, _| !woken_ids.contains(gid));
+        for (gid, hits) in scoped {
+            let Some(group) = self.fan.groups.get(&gid).cloned() else {
+                continue;
+            };
+            let mut group = group.borrow_mut();
+            if self.renest(&mut group, &hits).is_some() {
+                self.fan.stats.rechecked += 1;
+                self.fan.stats.renested += 1;
+                #[cfg(any(test, feature = "testing"))]
+                oracle::compare(self, &group, "renest");
+            } else {
+                self.refresh_group(&mut group, None);
+                self.fan.stats.reran += 1;
+            }
+            // No include targets: those are found by `wake`, which puts
+            // the group in `woken`.
         }
     }
 
@@ -2141,6 +2243,12 @@ impl Inner {
 
     /// Bring a group's result up to date; true when it re-ran the query.
     fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+        matches!(self.refresh(group, ids), Refresh::Reran)
+    }
+
+    /// [`Inner::refresh_group`], telling a re-check that ended the
+    /// subscription (a rejection) from one that applied.
+    fn refresh(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> Refresh {
         // The versions the result showed, which splices start from.
         let prior: HashMap<RowUuid, CurrentRow> = if group.key.splices.is_empty() {
             HashMap::new()
@@ -2158,14 +2266,14 @@ impl Inner {
                         #[cfg(any(test, feature = "testing"))]
                         oracle::compare(self, group, "recheck");
                     }
-                    return false;
+                    return Refresh::Rechecked;
                 }
                 Some(Ok(None)) => {
                     #[cfg(any(test, feature = "testing"))]
                     if relations {
                         oracle::compare(self, group, "recheck");
                     }
-                    return false;
+                    return Refresh::Rechecked;
                 }
                 // Missing chunks: the full run below decides to wait.
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
@@ -2175,7 +2283,7 @@ impl Inner {
                         message: error.message.clone(),
                         reason: error.to_string(),
                     });
-                    return false;
+                    return Refresh::Rejected;
                 }
                 None => {}
             }
@@ -2184,7 +2292,7 @@ impl Inner {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
-                return true;
+                return Refresh::Reran;
             }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
@@ -2193,7 +2301,7 @@ impl Inner {
                     reason: error.to_string(),
                 };
                 group.push(event);
-                return true;
+                return Refresh::Reran;
             }
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
@@ -2213,7 +2321,110 @@ impl Inner {
         Self::hold(group);
         group.keys.clear();
         self.read_keys(group);
-        true
+        Refresh::Reran
+    }
+
+    /// Refresh a group woken only through correlated relations (or, after
+    /// a re-check, through a root row a relation level also holds) by
+    /// nesting the relations again for the root rows whose subtree holds a
+    /// matched parent or row. A `Related` table
+    /// is read only through optional relations, so the roots, their cells
+    /// and their order are unchanged. `None`: undecided, re-run instead.
+    fn renest(&self, group: &mut Group, hits: &[(usize, Hit)]) -> Option<()> {
+        if group.awaiting || group.prepared.query.array_subqueries.is_empty() {
+            return None;
+        }
+        let read = self.visible_read(&group.read, &group.tables);
+        if cut_of(&read) != group.applied {
+            return None;
+        }
+        let mut affected = Vec::new();
+        for (index, row) in group.rows.iter().enumerate() {
+            let mut hit_any = false;
+            for (level, hit) in hits {
+                let level = group.correlations.get(*level)?;
+                match root_hit(level, row, hit) {
+                    None => return None,
+                    Some(true) => {
+                        hit_any = true;
+                        break;
+                    }
+                    Some(false) => {}
+                }
+            }
+            if hit_any {
+                affected.push(index);
+            }
+        }
+        if affected.is_empty() {
+            return None;
+        }
+        let relations: HashSet<&str> = group
+            .prepared
+            .query
+            .array_subqueries
+            .iter()
+            .map(|array| array.column_name.as_str())
+            .collect();
+        // The roots without their relation cells: those are appended after
+        // the row's own cells, one per relation, and only those go (a
+        // relation may share its name with one of the row's columns).
+        let mut bare: Vec<CurrentRow> = Vec::with_capacity(affected.len());
+        for index in &affected {
+            let row = &group.rows[*index];
+            let own = row.cells.len().checked_sub(relations.len())?;
+            let trailing: HashSet<&str> = row.cells[own..]
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if trailing != relations || row.types.len() != row.cells.len() {
+                return None;
+            }
+            bare.push(CurrentRow {
+                cells: Arc::new(row.cells[..own].to_vec()),
+                types: row.types[..own].to_vec().into(),
+                ..row.clone()
+            });
+        }
+        let nested = self.nest_relations(&group.prepared, group.identity, &read, bare);
+        let nested = nested.ok()?;
+        // The same roots, in the same order: checked before anything is
+        // merged or replaced, so a refusal leaves the result as it was.
+        if nested.len() != affected.len()
+            || nested
+                .iter()
+                .zip(&affected)
+                .any(|(row, index)| row.id != group.rows[*index].id)
+        {
+            return None;
+        }
+        let prior: HashMap<RowUuid, CurrentRow> = if group.key.splices.is_empty() {
+            HashMap::new()
+        } else {
+            affected
+                .iter()
+                .map(|index| (group.rows[*index].id, group.rows[*index].clone()))
+                .collect()
+        };
+        let mut updated = Vec::new();
+        for (index, row) in affected.into_iter().zip(nested) {
+            if row.cells != group.rows[index].cells {
+                updated.push(SubscriptionOutputRow {
+                    row: row.clone(),
+                    previous_index: Some(index),
+                    index,
+                    splices: Vec::new(),
+                });
+            }
+            group.rows[index] = row;
+        }
+        if !updated.is_empty() {
+            let mut event = delta(false, Vec::new(), updated, Vec::new());
+            self.add_splices(group, &prior, &mut event);
+            group.push(event);
+        }
+        Self::hold(group);
+        Some(())
     }
 
     /// Reads the sort keys of a re-checkable group whose order is not
@@ -2227,6 +2438,17 @@ impl Inner {
             group.keys = keys;
         }
     }
+}
+
+/// How [`Inner::refresh`] brought a group up to date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refresh {
+    /// Its changed root rows re-checked by id, in place.
+    Rechecked,
+    /// The re-check failed and ended the subscription.
+    Rejected,
+    /// The query ran again (or now waits for chunks).
+    Reran,
 }
 
 /// Report as updated the result rows that reference a changed include
@@ -2339,9 +2561,106 @@ impl Group {
     }
 }
 
+/// What matched at one correlation level: the held row, and the held
+/// parents' `outer` atoms the row's old or new `inner` names.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Hit {
+    row: Option<RowUuid>,
+    atoms: HashSet<String>,
+}
+
+/// [`correlated`] with what matched: `None` when only a full run decides
+/// (awaiting, a held root row, an incomplete level, no images), else the
+/// matched levels (empty: no match).
+fn correlated_hits(
+    group: &Group,
+    table: &str,
+    row: RowUuid,
+    images: Option<&[Vec<(String, Sql)>]>,
+    root_shortcut: bool,
+) -> Option<Vec<(usize, Hit)>> {
+    if group.awaiting
+        || (root_shortcut
+            && group.root == table
+            && group
+                .root_held
+                .as_ref()
+                .is_some_and(|held| held.contains(&row)))
+    {
+        return None;
+    }
+    let mut hits = Vec::new();
+    for (index, (level, held)) in group.correlations.iter().zip(&group.held).enumerate() {
+        if level.table != table {
+            continue;
+        }
+        if !held.complete() {
+            return None;
+        }
+        let mut hit = Hit {
+            row: held.rows.contains_key(&row).then_some(row),
+            atoms: HashSet::new(),
+        };
+        if level.inner == "id" {
+            let atom = canon(&Sql::Blob(row.0.as_bytes().to_vec()));
+            if held.parents.contains_key(&atom) {
+                hit.atoms.insert(atom);
+            }
+        } else {
+            let images = images?;
+            for image in images {
+                for (_, cell) in image.iter().filter(|(column, _)| *column == level.inner) {
+                    for atom in stored_atoms(cell, level.inner_list)? {
+                        if held.parents.contains_key(&atom) {
+                            hit.atoms.insert(atom);
+                        }
+                    }
+                }
+            }
+        }
+        if hit.row.is_some() || !hit.atoms.is_empty() {
+            hits.push((index, hit));
+        }
+    }
+    Some(hits)
+}
+
+/// Whether `root`'s subtree holds, at `level`, a parent whose `outer`
+/// value is one of `hit`'s atoms or the hit row; `None` when undecided.
+fn root_hit(level: &Correlation, root: &CurrentRow, hit: &Hit) -> Option<bool> {
+    let (last, through) = level.path.split_last()?;
+    let mut parents: Vec<Node> = vec![Node::Row(root)];
+    for column in through {
+        let mut next = Vec::new();
+        for parent in &parents {
+            next.extend(parent.children(column)?);
+        }
+        parents = next;
+    }
+    for parent in &parents {
+        if !hit.atoms.is_empty() {
+            let mut atoms = HashSet::new();
+            if !value_atoms(&parent.value(&level.outer)?, &mut atoms) {
+                return None;
+            }
+            if atoms.iter().any(|atom| hit.atoms.contains(atom)) {
+                return Some(true);
+            }
+        }
+        if let Some(row) = hit.row {
+            for child in parent.children(last)? {
+                if child.id()? == row {
+                    return Some(true);
+                }
+            }
+        }
+    }
+    Some(false)
+}
+
 /// A test-build check of every refresh that does not re-run against one
 /// that does, off unless a test turns it on for its thread: after a
-/// re-check of a group with relations, the group's rows
+/// re-check of a group with relations, or a re-nest, the group's rows
 /// (ids, cells, deletion and declared types) must be the rows a full run
 /// reads now, and after every [`Inner::hold`] the kept counts must hold
 /// the keys a full count holds. A mismatch panics. The full run only
@@ -2364,7 +2683,8 @@ mod oracle {
     }
 
     pub(super) fn compare(fanout: &Inner, group: &Group, label: &str) {
-        if !on() {
+        // A re-nest follows this re-check: the rows are compared after it.
+        if !on() || (group.renest_follows && label == "recheck") {
             return;
         }
         let read = fanout.visible_read(&group.read, &group.tables);
