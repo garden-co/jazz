@@ -46,7 +46,8 @@ fun serveJazz(endpoint: JazzEndpoint, port: Int): EmbeddedServer<*, *> =
                 )
                 val sender = launch { for (frame in outgoing) send(frame) }
                 try {
-                    for (frame in incoming) if (frame is Frame.Binary) socket.receive(frame.data)
+                    // Every data message, binary or text (TS clients send their prelude as text).
+                    for (frame in incoming) if (frame is Frame.Binary || frame is Frame.Text) socket.receive(frame.data)
                 } finally {
                     socket.close()
                     sender.cancel()
