@@ -66,7 +66,9 @@ JazzSubscription *jazz_subscribe(JazzHandle *handle, const char *query_json, Jaz
  * or will start, so cb and ctx may be freed. Called from inside the
  * callback, it returns without waiting for that callback to finish. A
  * subscription owns what it needs: free it before or after jazz_close of
- * its handle.
+ * its handle. Because it waits, don't call jazz_unsubscribe while holding a
+ * lock the callback takes, or from another subscription's callback that
+ * this one may also unsubscribe: either deadlocks.
  */
 void jazz_unsubscribe(JazzSubscription *subscription);
 

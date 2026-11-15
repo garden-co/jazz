@@ -251,6 +251,13 @@ impl Core {
         let mut subscriptions = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
         subscriptions.retain(|subscription| subscription.strong_count() > 0);
         subscriptions.push(Arc::downgrade(&delivery));
+        drop(subscriptions);
+        // A close racing this subscribe may have taken the list before the
+        // push: tell this subscription itself. A second `Closed` is never
+        // delivered (an error is the last event).
+        if self.closed.load(Ordering::Acquire) {
+            delivery.send(Some(Event::Error(JazzError::Closed)));
+        }
         Ok(SubscriptionCore {
             delivery,
             delivery_thread: thread.thread().id(),
