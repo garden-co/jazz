@@ -1129,6 +1129,33 @@ export async function createJazzSessionOwner<
       await next.shutdown().catch(() => {});
       throw superseded();
     }
+    // The upgrade's client is the first to take the store (a thin sign-in
+    // takes no hold), so another tab's discard may have wiped and forgotten
+    // this device account before it: `next` opened an empty store. As a
+    // sign-in would, refuse it, and sign out.
+    if (
+      account.identity.issuer === "urn:jazz:local-first" &&
+      options.pendingDiscards &&
+      (await accountForgotten(accounts, account.id))
+    ) {
+      await next.shutdown().catch(() => {});
+      if (token === generation && client === current && !closed) {
+        await session.logout().catch(() => {});
+        // Narrowed above, but the logout moved it on.
+        const now = snapshot as SessionCoreSnapshot<Client>;
+        if (!selected && !closed && now.status === "signed-out")
+          publish({
+            status: "signed-out",
+            error: new DiscardedDeviceAccountError(),
+            recovery: "action",
+          });
+      }
+      throw new DiscardedDeviceAccountError();
+    }
+    if (token !== generation || client !== current || closed) {
+      await next.shutdown().catch(() => {});
+      throw superseded();
+    }
     if (adopt) {
       adopt(current, next);
       // Same client, upgraded in place: the core publishes nothing (there is

@@ -1,10 +1,14 @@
 import { it, expect, vi } from "vitest";
-import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
+import {
+  forgetDeviceAccount,
+  prepareAccountManager,
+  type AccountStore,
+} from "../accounts/persistence.js";
 import { accountToken } from "../accounts/enrollment.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { mintLocalFirstTokenInJs } from "../thin/index.js";
 import { followUser } from "./follow-user.js";
-import { createJazzSessionOwner } from "./state.js";
+import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 
 const settle = async (ms = 0) => {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -514,4 +518,49 @@ it("refuses a sign-in as a device account another tab's discard forgot while it 
   expect(tabY.getSnapshot().account).toBeUndefined();
   await tabX.close();
   await tabY.close();
+});
+
+it("refuses the local-first upgrade of a device account another tab's discard forgot meanwhile", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  const pendingDiscards = { record() {}, clear() {}, list: () => [] as string[] };
+  // A thin sign-in: no hold on the store, so its check passes.
+  const thin = { shutdown: vi.fn(async () => {}) };
+  const session = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient: vi.fn(async () => thin),
+    pendingDiscards,
+  });
+  await session.createLocalFirst();
+  const account = session.getSnapshot().account!.id;
+  expect(session.getSnapshot().status).toBe("ready");
+  // Another tab's discard finishes: the account's data and key are gone.
+  await forgetDeviceAccount(await manager(), account);
+  // The upgrade opens the store, now empty: refused, and signed out.
+  const replica = { shutdown: vi.fn(async () => {}) };
+  await expect(replaceJazzSessionClient(session, async () => replica)).rejects.toThrow(
+    "discarded on this device",
+  );
+  expect(replica.shutdown).toHaveBeenCalled();
+  expect(session.getSnapshot()).toMatchObject({
+    status: "signed-out",
+    recovery: "action",
+    error: { name: "DiscardedDeviceAccountError" },
+  });
+  expect(session.getSnapshot().client).toBeUndefined();
+  await session.close();
 });
