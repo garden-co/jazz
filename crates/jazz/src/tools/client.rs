@@ -1421,7 +1421,6 @@ impl JazzClient {
                     identity: self.write_identity()?,
                     updated_at_ms,
                     target: target.clone(),
-                    ..Default::default()
                 },
             ))
             .map_err(write_error)?;
@@ -1436,7 +1435,6 @@ impl JazzClient {
                 identity: self.write_identity()?,
                 updated_at_ms,
                 target,
-                ..Default::default()
             },
         ))
         .map_err(write_error)?;
@@ -1467,7 +1465,6 @@ impl JazzClient {
                     identity: self.write_identity()?,
                     updated_at_ms,
                     target: target.clone(),
-                    ..Default::default()
                 },
             ))
             .map_err(write_error)?;
@@ -1482,7 +1479,6 @@ impl JazzClient {
                 identity: self.write_identity()?,
                 updated_at_ms,
                 target,
-                ..Default::default()
             },
         ))
         .map_err(write_error)?;
@@ -1551,7 +1547,6 @@ impl JazzClient {
                     identity: self.write_identity()?,
                     updated_at_ms,
                     target: target.clone(),
-                    ..Default::default()
                 },
             ))
             .map_err(write_error)?;
@@ -1566,7 +1561,6 @@ impl JazzClient {
                 identity: self.write_identity()?,
                 updated_at_ms,
                 target,
-                ..Default::default()
             },
         ))
         .map_err(write_error)?;
