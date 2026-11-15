@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use jazz::tools::AppId;
 
+use crate::auth::Auth;
+
 /// How to open an app.
 ///
 /// ```no_run
@@ -14,15 +16,34 @@ use jazz::tools::AppId;
 /// let jazz = jazz_app::Jazz::open(AppFiles::read(".")?, config).await?;
 /// # Ok(()) }
 /// ```
+///
+/// An end user's client connects to the app's Jazz endpoint (its backend's
+/// `createJazz` handler) as a browser does, never to the core:
+///
+/// ```no_run
+/// # async fn open() -> jazz_app::Result<()> {
+/// use jazz_app::{AppFiles, Auth, Config, DeviceKey, Storage};
+/// let key = DeviceKey::generate()?; // keep it: it is the account
+/// let config = Config::new(jazz_app::AppId::from_name("todos"))
+///     .server("https://todos.example/jazz")
+///     .storage(Storage::Dir("./todo-data".into()))
+///     .user(Auth::Device(key));
+/// let jazz = jazz_app::Jazz::open(AppFiles::read(".")?, config).await?;
+/// let session = jazz.session().expect("an end user's session");
+/// # Ok(()) }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_id: AppId,
-    /// The sync server, e.g. `http://localhost:1625`. Without one the app
-    /// runs locally only.
+    /// The sync server: the core (`http://localhost:1625`) for a backend,
+    /// the app's Jazz endpoint (`https://app.example/jazz`) for an end user.
+    /// Without one the app runs locally only.
     pub server_url: Option<String>,
     pub storage: Storage,
     /// Open as the app's backend.
     pub backend: Option<Backend>,
+    /// Open as an end user of the app, signed in with this.
+    pub user: Option<Auth>,
 }
 
 impl Config {
@@ -33,6 +54,7 @@ impl Config {
             server_url: None,
             storage: Storage::Memory,
             backend: None,
+            user: None,
         }
     }
 
@@ -48,6 +70,11 @@ impl Config {
 
     pub fn backend(mut self, backend: Backend) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    pub fn user(mut self, auth: Auth) -> Self {
+        self.user = Some(auth);
         self
     }
 }
