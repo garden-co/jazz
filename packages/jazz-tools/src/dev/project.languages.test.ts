@@ -81,7 +81,8 @@ describe("npm CLI flags and messages from the shared code", () => {
     await captureConsoleLogs(() => generate({ schemaDir: root, lang: ["rust"] }));
     expect(await fileExists(join(root, "src", "jazz_app.rs"))).toBe(true);
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
-    for (const lang of ["swift", "kotlin", "go"]) {
+    // Kotlin and Go aren't switched on yet (Swift is with #5704, tested below).
+    for (const lang of ["kotlin", "go"]) {
       await expect(generate({ schemaDir: root, lang: [lang] })).rejects.toThrow(
         /not (supported|available) yet/,
       );
@@ -103,5 +104,40 @@ describe("npm CLI flags and messages from the shared code", () => {
     );
     expect(result).toBeNull();
     expect(logs.join("\n")).toContain("Only single-column indexes changed: no migration needed");
+  });
+});
+
+/** A Swift package depending on the Jazz Swift runtime: what makes it a Swift app's. */
+const SWIFT_PACKAGE = `// swift-tools-version:5.9
+import PackageDescription
+let package = Package(
+  name: "App",
+  dependencies: [.package(url: "https://github.com/garden-co/jazz-swift", from: "2.0.0")]
+)
+`;
+
+describe("generate in a Swift app", () => {
+  // Runs once Swift is switched on in jazz-codegen (`Lang::ALL`); until then
+  // the npm CLI, like the binary, has no Swift to generate.
+  it("writes JazzApp.swift and no jazz.generated.ts, and --check passes on it", async (context) => {
+    const { root } = await createWorkspace();
+    const dir = join(root, "app");
+    await writeAppFiles(dir);
+    await writeFile(join(dir, "Package.swift"), SWIFT_PACKAGE);
+
+    let result;
+    try {
+      result = await generateApp({ cwd: dir });
+    } catch (error) {
+      if (/says which language|not available yet/.test(String(error))) context.skip();
+      throw error;
+    }
+
+    expect(result.bindings).toEqual(["JazzApp.swift"]);
+    expect(await fileExists(join(dir, "JazzApp.swift"))).toBe(true);
+    expect(await fileExists(join(dir, "jazz.generated.ts"))).toBe(false);
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
+    await writeFile(join(dir, "JazzApp.swift"), "// edited\n");
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/JazzApp\.swift/);
   });
 });
