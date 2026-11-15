@@ -22,6 +22,7 @@ use crate::app::AppFiles;
 use crate::backend;
 use crate::config::{Config, Storage};
 use crate::error::{Error, Result};
+use crate::include::Row;
 use crate::query::Query;
 use crate::subscription::{self, Subscription};
 use crate::table::{self, Implementations, Insert, Table, Update};
@@ -159,12 +160,12 @@ impl Jazz {
     }
 
     /// Every row `query` matches, reading local data first.
-    pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
+    pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
         self.all_with(query, ReadTier::LocalFirst).await
     }
 
     /// Every row `query` matches, read at `tier`.
-    pub async fn all_with<T: Table>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
+    pub async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
         let query = query.into_untyped();
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
@@ -177,7 +178,7 @@ impl Jazz {
     }
 
     /// The first row `query` matches.
-    pub async fn one<T: Table>(&self, query: Query<T>) -> Result<Option<T>> {
+    pub async fn one<T: Row>(&self, query: Query<T>) -> Result<Option<T>> {
         Ok(self.all(query.limit(1)).await?.into_iter().next())
     }
 
@@ -247,12 +248,12 @@ impl Jazz {
 
     /// Subscribes to `query`: a stream of its changes, starting with the
     /// rows it matches now.
-    pub async fn subscribe<T: Table>(&self, query: Query<T>) -> Result<Subscription<T>> {
+    pub async fn subscribe<T: Row>(&self, query: Query<T>) -> Result<Subscription<T>> {
         self.subscribe_with(query, ReadTier::LocalFirst).await
     }
 
     /// [`Jazz::subscribe`] at `tier`.
-    pub async fn subscribe_with<T: Table>(
+    pub async fn subscribe_with<T: Row>(
         &self,
         query: Query<T>,
         tier: ReadTier,
@@ -337,9 +338,9 @@ fn insert<N: Insert>(
     table::decode(id, fields, implementations)
 }
 
-fn decode_result<T: Table>(row: QueryResult, implementations: &Implementations) -> Result<T> {
+fn decode_result<T: Row>(row: QueryResult, implementations: &Implementations) -> Result<T> {
     let id = row.key.row_id().ok_or_else(|| Error::Decode {
-        table: T::NAME,
+        table: <T::Table as Table>::NAME,
         message: "a joined result is not a row".into(),
     })?;
     table::decode(id, row.fields, implementations)

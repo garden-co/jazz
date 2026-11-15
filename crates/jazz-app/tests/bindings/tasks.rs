@@ -1,10 +1,10 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 3. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:bb0ea977086496f447db27a19a5d100660c7ffad3b3e44bfe55d260335155cc3";
+pub const SOURCE: &str = "sha256:83a2a5385e9c7409b3da7bc9e05d54a1a7cc80a8a57f797d1039e4154c4b3f91";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,6 +62,7 @@ pub struct BoxUpdate {
 
 impl ::jazz_app::Table for Box {
     const NAME: &'static str = "boxes";
+    const COLUMNS: &'static [&'static str] = &["label", "query", "task"];
     type New = NewBox;
     type Update = BoxUpdate;
 
@@ -150,6 +151,11 @@ pub mod boxes {
     pub fn task() -> ::jazz_app::Column<Box, ::std::option::Option<::jazz_app::ObjectId>> {
         ::jazz_app::Column::new("task")
     }
+
+    /// Relation `taskRelation`: the `tasks` row `task` references.
+    pub fn task_relation() -> ::jazz_app::One<Box, Task> {
+        ::jazz_app::One::new("task")
+    }
 }
 
 /// A row of `tasks`.
@@ -213,6 +219,7 @@ pub struct TaskUpdate {
 
 impl ::jazz_app::Table for Task {
     const NAME: &'static str = "tasks";
+    const COLUMNS: &'static [&'static str] = &["title", "priority", "score", "type", "dueAt", "tags", "meta"];
     type New = NewTask;
     type Update = TaskUpdate;
 
@@ -378,7 +385,14 @@ pub const APP: &str = r#"{
   "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
   "tables": {
-    "boxes": { "columns": { "label": "string", "query": "string?", "task": { "type": "uuid", "optional": true, "references": "tasks" } } },
+    "boxes": {
+      "columns": {
+        "label": "string",
+        "query": "string?",
+        "task": { "type": "uuid", "optional": true, "references": "tasks" }
+      },
+      "relations": { "taskRelation": { "rel": "tasks", "column": "task" } }
+    },
     "tasks": {
       "columns": {
         "title": "string",

@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The version of the bindings' shape this generator writes: the second
 /// line records it.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
@@ -407,6 +407,15 @@ impl<'a> Writer<'a> {
         // Table.
         let _ = writeln!(out, "impl {RT}::Table for {row} {{");
         let _ = writeln!(out, "    const NAME: &'static str = {:?};", table.name);
+        let _ = writeln!(
+            out,
+            "    const COLUMNS: &'static [&'static str] = &[{}];",
+            fields
+                .iter()
+                .map(|f| format!("{:?}", f.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let _ = writeln!(out, "    type New = {new};");
         let _ = writeln!(out, "    type Update = {update};\n");
         let _ = writeln!(

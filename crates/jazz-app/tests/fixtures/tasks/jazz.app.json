@@ -2,7 +2,14 @@
   "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
   "tables": {
-    "boxes": { "columns": { "label": "string", "query": "string?", "task": { "type": "uuid", "optional": true, "references": "tasks" } } },
+    "boxes": {
+      "columns": {
+        "label": "string",
+        "query": "string?",
+        "task": { "type": "uuid", "optional": true, "references": "tasks" }
+      },
+      "relations": { "taskRelation": { "rel": "tasks", "column": "task" } }
+    },
     "tasks": {
       "columns": {
         "title": "string",
