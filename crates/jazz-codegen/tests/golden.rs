@@ -179,7 +179,7 @@ fn a_backend_with_only_the_bindings_loads_what_the_files_load() {
 #[test]
 fn every_go_app_generates_its_committed_go_byte_for_byte() {
     let mut generated_any = 0;
-    for dir in apps() {
+    for dir in apps().into_iter().chain(go_apps()) {
         let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
         let path = dir.join(jazz_codegen::go::FILE);
         let generated = match generate(Lang::Go, &app_json) {
@@ -213,7 +213,7 @@ fn every_go_app_generates_its_committed_go_byte_for_byte() {
         });
         assert_eq!(generated, committed, "{} differs", path.display());
     }
-    assert!(generated_any >= 2);
+    assert!(generated_any >= 3);
 }
 
 #[test]
@@ -241,45 +241,69 @@ fn go_bindings_refuse_computed_fields_and_read_back_backquotes() {
     assert!(bindings::read(Lang::Go, &edited).is_err());
 }
 
+/// Go-only apps (what the other back ends refuse, such as tables named
+/// `strings`), whose bindings CI also runs `go vet` on.
+fn go_apps() -> Vec<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/go-apps");
+    let mut apps: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("jazz.app.json").exists())
+        .collect();
+    apps.sort();
+    apps
+}
+
 /// Names that look like the bindings' own (`source`, `app`, `open`) or a
 /// Go builtin or import (`string`, `error`, `json`, `context`) are fields
 /// and types of their own, and the bindings still read back.
 #[test]
 fn go_names_never_shadow_the_bindings_or_go() {
-    let app_json = r#"{ "format": 1, "tables": {
-        "strings": { "columns": { "source": "string", "app": "string", "open": "boolean", "string": "string" } },
-        "errors": { "columns": { "error": "string?", "json": { "json": true, "optional": true }, "context": "int" } },
-        "contexts": { "columns": { "at": "timestamp", "big": "bigint", "x": "float" } }
-    } }"#;
-    let generated = generate(Lang::Go, app_json.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
-    let app = App::load(app_json.as_bytes()).unwrap();
-    let recorded = bindings::read(Lang::Go, &generated).unwrap();
-    assert_eq!(recorded.source, app.source);
-    assert_eq!(
-        bindings::staleness(&app, Lang::Go, Some(&generated)).unwrap(),
-        None
-    );
+    let generated = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/go-apps/names/jazzapp/jazz_app.go"),
+    )
+    .unwrap();
     for expected in [
         "type String struct {",
         "\tSource string `json:\"source\"`",
         "\tApp    string `json:\"app\"`",
         "type Error struct {",
         "\tJSON    *json.RawMessage `json:\"json\"`",
-        "\tAt  jazz.Timestamp `json:\"at\"`",
-        "\tBig jazz.BigInt    `json:\"big\"`",
+        "\tErrorLevel1          ErrorLevel = \"1\"",
+        "\tAt   jazz.Timestamp `json:\"at\"`",
+        "\tBig  jazz.BigInt    `json:\"big\"`",
         "var Strings = stringsTable{",
-        "var Contexts = contextsTable{",
+        "var ActivityTable = activityTable{",
     ] {
         assert!(generated.contains(expected), "{expected:?} in\n{generated}");
     }
-    // A table whose row would be one of the bindings' own names is refused.
-    let error = generate(
-        Lang::Go,
-        br#"{ "format": 1, "tables": { "apps": { "columns": { "a": "string" } } } }"#,
-    )
-    .unwrap_err();
-    assert!(
-        error.is_unsupported() && error.to_string().contains("`App`"),
-        "{error}"
+    let refused = |app_json: &str, name: &str| {
+        let error = generate(Lang::Go, app_json.as_bytes()).unwrap_err();
+        assert!(
+            error.is_unsupported() && error.to_string().contains(name),
+            "{error}"
+        );
+    };
+    // A table whose row would be one of the bindings' own names.
+    refused(
+        r#"{ "format": 1, "tables": { "apps": { "columns": { "a": "string" } } } }"#,
+        "`App`",
     );
+    // A column whose Go name is a patch's or a table value's method.
+    refused(
+        r#"{ "format": 1, "tables": { "notes": { "columns": { "marshalJSON": "string" } } } }"#,
+        "`MarshalJSON`",
+    );
+    refused(
+        r#"{ "format": 1, "tables": { "notes": { "columns": { "query": "string" } } } }"#,
+        "`Query`",
+    );
+}
+
+#[test]
+fn go_is_switched_off_in_the_cli() {
+    let error = Lang::parse("go").unwrap_err();
+    assert!(error.is_unsupported(), "{error}");
+    assert!(error.to_string().contains("not available yet"), "{error}");
+    assert!(!Lang::ALL.contains(&Lang::Go));
 }
