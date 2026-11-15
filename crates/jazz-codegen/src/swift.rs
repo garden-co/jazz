@@ -66,15 +66,26 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
 }
 
 /// Whether `manifest` (a `Package.swift`) is a package that uses the Jazz
-/// Swift runtime: it names the `jazz-swift` package, as a quoted name or the
-/// last part of a quoted path or URL (`"jazz-swift"`, `".../jazz-swift"`,
-/// `".../jazz-swift.git"`), not merely mentions it.
+/// Swift runtime: a target depends on its product, `.product(name: "Jazz",
+/// …)` (the Jazz repository's root package, by URL or path), or it names
+/// the `jazz-swift` package, as a quoted name or the last part of a quoted
+/// path or URL, not merely mentions it.
 pub fn is_app_manifest(manifest: &str) -> bool {
-    manifest.match_indices("jazz-swift").any(|(at, word)| {
-        let before = manifest[..at].chars().next_back();
-        let after = &manifest[at + word.len()..];
-        matches!(before, Some('"' | '/')) && (after.starts_with('"') || after.starts_with(".git\""))
-    })
+    let uses_product = manifest.match_indices(".product(").any(|(at, word)| {
+        let args = &manifest[at + word.len()..];
+        let args: String = args[..args.find(')').unwrap_or(args.len())]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        args.starts_with("name:\"Jazz\"")
+    });
+    uses_product
+        || manifest.match_indices("jazz-swift").any(|(at, word)| {
+            let before = manifest[..at].chars().next_back();
+            let after = &manifest[at + word.len()..];
+            matches!(before, Some('"' | '/'))
+                && (after.starts_with('"') || after.starts_with(".git\""))
+        })
 }
 
 struct TableNames {
@@ -1231,6 +1242,16 @@ mod tests {
             r#".package(url: "https://github.com/garden-co/jazz-swift.git", from: "1.0.0")"#
         ));
         assert!(!is_app_manifest("let package = Package(name: \"x\")"));
+        // The Jazz repository's root package, by URL.
+        assert!(is_app_manifest(
+            r#"dependencies: [.product(name: "Jazz", package: "jazz")]"#
+        ));
+        assert!(is_app_manifest(
+            ".product(\n    name: \"Jazz\",\n    package: \"jazz\"\n)"
+        ));
+        assert!(!is_app_manifest(
+            r#".product(name: "JazzKit", package: "other")"#
+        ));
         assert!(!is_app_manifest(
             "// not jazz-swift-tools, see jazz-swiftly"
         ));

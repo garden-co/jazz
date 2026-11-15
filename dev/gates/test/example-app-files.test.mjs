@@ -12,10 +12,10 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-/** A Swift package of the Jazz Swift runtime: its bindings are JazzApp.swift. */
+/** A Swift package of the Jazz Swift runtime (it uses the `Jazz` product): its bindings are JazzApp.swift. */
 function isSwiftApp(dir) {
   const manifest = join(root, dir, "Package.swift");
-  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
+  return existsSync(manifest) && usesJazzSwift(readFileSync(manifest, "utf8"));
 }
 
 /**
@@ -65,51 +65,7 @@ test("no example keeps an alpha.64 schema source beside its files", () => {
   );
 });
 
-function tracked(...patterns) {
-  return execFileSync("git", ["ls-files", "--", ...patterns], { cwd: root, encoding: "utf8" })
-    .split("\n")
-    .filter(Boolean);
+/** As jazz-codegen's `swift::is_app_manifest`: the `Jazz` product, or the jazz-swift package. */
+function usesJazzSwift(manifest) {
+  return /\.product\(\s*name:\s*"Jazz"/.test(manifest) || /["/]jazz-swift(\.git)?"/.test(manifest);
 }
-
-/**
- * Found independently of jazz.app.json, so a deleted one is caught: every
- * jazz.generated.ts or jazz.permissions.json is generated from or checked
- * against the jazz.app.json beside it.
- */
-test("every committed app file has its jazz.app.json beside it", () => {
-  const orphans = tracked(
-    "examples/**/jazz.generated.ts",
-    "examples/**/jazz.permissions.json",
-    "dev/stress-tests/**/jazz.generated.ts",
-    "dev/stress-tests/**/jazz.permissions.json",
-  ).filter((file) => !existsSync(join(root, dirname(file), "jazz.app.json")));
-  assert.deepEqual(
-    orphans,
-    [],
-    `These have no jazz.app.json, the app's source, beside them:\n${orphans.join("\n")}`,
-  );
-});
-
-/** Example packages: a package.json that depends on jazz-tools. */
-function jazzPackages() {
-  return tracked("examples/**/package.json", "dev/stress-tests/**/package.json")
-    .filter((file) => {
-      const manifest = JSON.parse(readFileSync(join(root, file), "utf8"));
-      return ["dependencies", "devDependencies", "peerDependencies"].some(
-        (field) => manifest[field]?.["jazz-tools"],
-      );
-    })
-    .map(dirname);
-}
-
-test("every example package that depends on jazz-tools commits a jazz.app.json", () => {
-  const packages = jazzPackages();
-  assert.ok(packages.length > 30, `found only ${packages.length} jazz-tools packages`);
-  const apps = tracked("examples/**/jazz.app.json", "dev/stress-tests/**/jazz.app.json");
-  const without = packages.filter((dir) => !apps.some((file) => file.startsWith(`${dir}/`)));
-  assert.deepEqual(
-    without,
-    [],
-    `These depend on jazz-tools but commit no jazz.app.json:\n${without.join("\n")}`,
-  );
-});

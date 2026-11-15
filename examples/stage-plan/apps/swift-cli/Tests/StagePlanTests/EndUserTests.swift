@@ -4,8 +4,8 @@ import StagePlan
 import XCTest
 
 final class EndUserTests: XCTestCase {
-    func endUser(_ relay: TestRelay, _ server: TestServer, auth: Jazz.Auth) async throws -> Jazz.Client {
-        try await JazzApp.open(.client(appId: server.server.appId, serverUrl: relay.endpoint, auth: auth, storage: .memory))
+    func endUser(_ relay: TestRelay, auth: Jazz.Auth) async throws -> Jazz.Client {
+        try await JazzApp.open(.client(appId: relay.appId, serverUrl: relay.endpoint, auth: auth, storage: .memory))
     }
 
     func firstSignedIn(_ jazz: Jazz.Client) async throws -> Jazz.User {
@@ -16,10 +16,9 @@ final class EndUserTests: XCTestCase {
     }
 
     func testADeviceAccountSignsInAndSyncs() async throws {
-        let server = try await TestServer()
-        let relay = try await TestRelay(server)
+        let relay = try await TestRelay()
         let key = try Jazz.generateDeviceKey()
-        let carol = try await endUser(relay, server, auth: .deviceKey(key))
+        let carol = try await endUser(relay, auth: .deviceKey(key))
         let user = try await firstSignedIn(carol)
         XCTAssertEqual(user.kind, .device)
         let me = try await carol.account()
@@ -37,7 +36,7 @@ final class EndUserTests: XCTestCase {
         try await carol.close()
 
         // The same key signs in as the same account again.
-        let again = try await endUser(relay, server, auth: .deviceKey(key))
+        let again = try await endUser(relay, auth: .deviceKey(key))
         let sameUser = try await firstSignedIn(again)
         XCTAssertEqual(sameUser.account, user.account)
         try await again.close()
@@ -51,10 +50,9 @@ final class EndUserTests: XCTestCase {
     }
 
     func testTheAppsSignInGivesBearerTokens() async throws {
-        let server = try await TestServer()
-        let relay = try await TestRelay(server)
+        let relay = try await TestRelay()
         let reasons = Reasons()
-        let alice = try await endUser(relay, server, auth: .bearer { reason in
+        let alice = try await endUser(relay, auth: .bearer { reason in
             reasons.add(reason)
             return "token-alice"
         })
@@ -76,12 +74,34 @@ final class EndUserTests: XCTestCase {
     }
 
     func testADeviceAccountLinksToTheAppsSignIn() async throws {
-        let server = try await TestServer()
-        let relay = try await TestRelay(server)
-        let device = try await endUser(relay, server, auth: .deviceKey(try Jazz.generateDeviceKey()))
+        let relay = try await TestRelay()
+        let device = try await endUser(relay, auth: .deviceKey(try Jazz.generateDeviceKey()))
         _ = try await firstSignedIn(device)
         let linked = try await device.link(bearer: "token-bob")
         XCTAssertEqual(linked.subject, "bob")
         try await device.close()
+    }
+
+    struct Flaky: Error {}
+
+    /// A thrown token error is a failed fetch, not a sign-out.
+    func testAThrownTokenErrorKeepsTheSessionSignedIn() async throws {
+        let relay = try await TestRelay()
+        let alice = try await endUser(relay, auth: .bearer { reason in
+            if reason == .refresh { throw Flaky() }
+            return "token-alice"
+        })
+        let user = try await firstSignedIn(alice)
+        do {
+            try await alice.refresh()
+            XCTFail("refresh should surface the failed fetch")
+        } catch {
+            guard case .io = error else { return XCTFail("\(error)") }
+        }
+        let state = try await alice.sessionState()
+        XCTAssertEqual(state, .signedIn(user))
+        // Reads still work.
+        _ = try await alice.all(JazzApp.shows.query())
+        try await alice.close()
     }
 }
