@@ -33,7 +33,7 @@ export const jazz = createJazz({
 The examples on this page are ES modules and use top-level `await`, so the backend package needs
 `"type": "module"` (or `.mts` files). `jazz.generated.ts` must be an ES module too. In a CommonJS
 package, such as an Expo app's, importing it gives `{ default }`, and `createJazz` fails with
-"jazz.generated.ts arrived as { default: … }". A backend in its own ESM package isn't enough while
+`jazz.generated.ts arrived as { default: … }`. A backend in its own ESM package isn't enough while
 the app files stay in the CommonJS package: put `jazz.app.json`, `jazz.permissions.json` and
 `jazz.generated.ts` in a folder (for example `jazz/`) with a `package.json` of
 `{ "type": "module" }`, run `npx jazz-tools generate` there, and import them from there in both the
