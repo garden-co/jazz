@@ -64,22 +64,6 @@ const INITIALISMS: &[&str] = &[
 ];
 
 pub fn generate(app: &App) -> Result<String, CodegenError> {
-    if let Some(transform) = app.transforms.first() {
-        return Err(CodegenError::unsupported(format!(
-            "transform `{}`: transforms are not supported in Go bindings yet",
-            transform.name
-        )));
-    }
-    if let Some((table, computed)) = app
-        .tables
-        .iter()
-        .find_map(|t| t.computed.first().map(|c| (t, c)))
-    {
-        return Err(CodegenError::unsupported(format!(
-            "computed field `{}.{}`: computed fields are not supported in Go bindings yet",
-            table.name, computed.name
-        )));
-    }
     Writer::new(app)?.write()
 }
 
@@ -119,6 +103,11 @@ struct Writer<'a> {
     /// Every package-level name taken, with what took it.
     names: BTreeMap<String, String>,
     uses_json: bool,
+    /// Transforms by name, once their types were generated.
+    transforms: BTreeMap<String, (String, String, String)>,
+    /// The methods of the `Computed` interface, with their doc lines.
+    computed_methods: Vec<(String, String)>,
+    has_computed: bool,
 }
 
 /// A column as the bindings hold it.
@@ -131,6 +120,25 @@ struct Field {
     value: String,
     optional_on_insert: bool,
     nullable: bool,
+    /// The transform the column goes through: `ty` is then its view type,
+    /// `value` (and the JSON) its stored one.
+    transform: Option<FieldTransform>,
+}
+
+struct FieldTransform {
+    /// The method stem: `IsoDate` for `IsoDateView` / `IsoDateStored`.
+    stem: String,
+    /// The stored type, never a pointer.
+    stored: String,
+    /// The view type, never a pointer.
+    view: String,
+}
+
+/// A transform's Go names and types.
+struct GoTransform {
+    stem: String,
+    stored: String,
+    view: String,
 }
 
 impl<'a> Writer<'a> {
@@ -144,7 +152,14 @@ impl<'a> Writer<'a> {
                 .map(|name| (name.to_string(), "a name the bindings use".to_string()))
                 .collect(),
             uses_json: false,
+            transforms: BTreeMap::new(),
+            computed_methods: Vec::new(),
+            has_computed: !app.transforms.is_empty()
+                || app.tables.iter().any(|t| !t.computed.is_empty()),
         };
+        if writer.has_computed {
+            writer.take("Computed", "the Computed interface")?;
+        }
         for table in &app.tables {
             let row = go_ident(&pascal(&singular(&table.name)), &table.name)?;
             let mut value = go_ident(&pascal(&table.name), &table.name)?;
@@ -221,8 +236,23 @@ impl<'a> Writer<'a> {
         out.push_str(
             "// Open opens this app: a client, or a backend when cfg.Permissions is set.\n",
         );
-        out.push_str("func Open(ctx context.Context, cfg jazz.Config) (*jazz.DB, error) {\n");
-        out.push_str("\tcfg.App = App\n\treturn jazz.Open(ctx, cfg)\n}\n\n");
+        if self.has_computed {
+            out.push_str("// computed is your Computed: what this app's computed fields and transforms run.\n");
+            out.push_str("func Open(ctx context.Context, cfg jazz.Config, computed Computed) (*jazz.DB, error) {\n");
+            out.push_str("\tif computed == nil {\n\t\treturn nil, jazz.ErrNoComputed\n\t}\n");
+            out.push_str(
+                "\tcfg.App = App\n\tcfg.Computed = computed\n\treturn jazz.Open(ctx, cfg)\n}\n\n",
+            );
+            out.push_str("// Computed is what this app computes, which you implement and pass to Open: its\n// computed fields, and its transforms' conversions.\n");
+            out.push_str("type Computed interface {\n");
+            for (signature, doc) in &self.computed_methods {
+                let _ = writeln!(out, "\t// {doc}\n\t{signature}");
+            }
+            out.push_str("}\n\n");
+        } else {
+            out.push_str("func Open(ctx context.Context, cfg jazz.Config) (*jazz.DB, error) {\n");
+            out.push_str("\tcfg.App = App\n\treturn jazz.Open(ctx, cfg)\n}\n\n");
+        }
         for (name, (values, what)) in &self.enums {
             let _ = writeln!(out, "// {name} is a value of {what}.");
             let _ = writeln!(out, "type {name} string\n");
@@ -299,18 +329,60 @@ impl<'a> Writer<'a> {
         let what = format!("column `{}.{}`", table.name, column.name);
         let value = self.go_type(&column.ty.ty, &format!("{row}{ident}"), &what)?;
         let nullable = column.ty.nullable;
+        let transform = match &column.transform {
+            Some(name) => {
+                let t = self.transform(name)?;
+                Some(FieldTransform {
+                    stem: t.stem,
+                    stored: t.stored,
+                    view: t.view,
+                })
+            }
+            None => None,
+        };
+        let shown = transform.as_ref().map_or(value.clone(), |t| t.view.clone());
         Ok(Field {
             name: column.name.clone(),
             ident,
-            ty: if nullable {
-                format!("*{value}")
-            } else {
-                value.clone()
-            },
+            ty: if nullable { format!("*{shown}") } else { shown },
             value,
             optional_on_insert: column.optional_on_insert(),
             nullable,
+            transform,
         })
+    }
+
+    /// The Go names and types of transform `name`, declaring its methods
+    /// on `Computed` the first time.
+    fn transform(&mut self, name: &str) -> Result<GoTransform, CodegenError> {
+        if let Some((stem, stored, view)) = self.transforms.get(name) {
+            return Ok(GoTransform {
+                stem: stem.clone(),
+                stored: stored.clone(),
+                view: view.clone(),
+            });
+        }
+        let declared = self
+            .app
+            .transform(name)
+            .ok_or_else(|| CodegenError::new(format!("transform `{name}` is not declared")))?;
+        let stem = go_ident(&pascal_words(name), name)?;
+        let what = format!("transform `{name}`");
+        let stored = self.go_type(&declared.stored.clone(), &format!("{stem}Stored"), &what)?;
+        let view = self.go_type(&declared.view.clone(), &format!("{stem}View"), &what)?;
+        self.computed_methods.push((
+            format!("{stem}View(stored {stored}) ({view}, error)"),
+            format!("{stem}View reads a value stored through transform `{name}`."),
+        ));
+        self.computed_methods.push((
+            format!("{stem}Stored(view {view}) ({stored}, error)"),
+            format!("{stem}Stored is what transform `{name}` stores for view."),
+        ));
+        self.transforms.insert(
+            name.to_owned(),
+            (stem.clone(), stored.clone(), view.clone()),
+        );
+        Ok(GoTransform { stem, stored, view })
     }
 
     fn table(&mut self, table: &'a Table) -> Result<String, CodegenError> {
@@ -353,6 +425,55 @@ impl<'a> Writer<'a> {
             };
             relations.push((ident, relation.name.clone(), target, ty));
         }
+        // Computed fields: filled from the row by the app's Computed.
+        let mut computed = Vec::new();
+        for c in &table.computed {
+            let ident = go_ident(&pascal_words(&c.name), &c.name)?;
+            if !idents.insert(ident.clone()) {
+                return Err(CodegenError::unsupported(format!(
+                    "computed field `{}.{}` is the Go name `{ident}`, which a column, a relation or a method of `{value}` already is",
+                    table.name, c.name
+                )));
+            }
+            let what = format!("computed field `{}.{}`", table.name, c.name);
+            let inner = self.go_type(&c.ty.ty, &format!("{row}{ident}"), &what)?;
+            let ty = if c.ty.nullable {
+                format!("*{inner}")
+            } else {
+                inner
+            };
+            let mut params = Vec::new();
+            let mut args = Vec::new();
+            for from in &c.from {
+                let f = fields.iter().find(|f| &f.name == from).ok_or_else(|| {
+                    CodegenError::new(format!(
+                        "{what} is computed from `{from}`, which isn't a column"
+                    ))
+                })?;
+                let param = go_param(&f.ident);
+                params.push(format!("{param} {}", f.ty));
+                args.push(format!("r.{}", f.ident));
+            }
+            let method = format!("{row}{ident}");
+            self.computed_methods.push((
+                format!("{method}({}) {ty}", params.join(", ")),
+                format!(
+                    "{method} computes `{}.{}` from {}.",
+                    table.name,
+                    c.name,
+                    c.from
+                        .iter()
+                        .map(|f| format!("`{f}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+            computed.push((ident, ty, method, args));
+        }
+        let hooks = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
+        if hooks {
+            self.uses_json = true;
+        }
 
         let mut out = String::new();
         let tag = |name: &str, omitempty: bool| {
@@ -368,12 +489,92 @@ impl<'a> Writer<'a> {
         let _ = writeln!(out, "// {row} is a row of `{}`.", table.name);
         let mut lines = vec![["ID".to_owned(), "string".to_owned(), tag("id", false)]];
         for f in &fields {
-            lines.push([f.ident.clone(), f.ty.clone(), tag(&f.name, false)]);
+            let t = if f.transform.is_some() {
+                "`json:\"-\"`".to_owned()
+            } else {
+                tag(&f.name, false)
+            };
+            lines.push([f.ident.clone(), f.ty.clone(), t]);
+        }
+        for (ident, ty, _, _) in &computed {
+            lines.push([ident.clone(), ty.clone(), "`json:\"-\"`".to_owned()]);
         }
         for (ident, name, _, ty) in &relations {
             lines.push([ident.clone(), ty.clone(), tag(name, true)]);
         }
         write_struct(&mut out, &row, &lines);
+        if hooks {
+            let _ = writeln!(
+                out,
+                "// JazzDecode reads the transformed columns' views and fills the computed fields."
+            );
+            let _ = writeln!(
+                out,
+                "func (r *{row}) JazzDecode(app any, fields map[string]json.RawMessage) error {{"
+            );
+            out.push_str(
+                "	c, ok := app.(Computed)
+	if !ok {
+		return jazz.ErrNoComputed
+	}
+",
+            );
+            for f in &fields {
+                let Some(t) = &f.transform else { continue };
+                let key = go_string(&f.name);
+                if f.nullable {
+                    let _ = write!(
+                        out,
+                        "	if raw, ok := fields[{key}]; ok {{
+		var stored *{s}
+		if err := json.Unmarshal(raw, &stored); err != nil {{
+			return err
+		}}
+		r.{id} = nil
+		if stored != nil {{
+			view, err := c.{stem}View(*stored)
+			if err != nil {{
+				return err
+			}}
+			r.{id} = &view
+		}}
+	}}
+",
+                        s = t.stored,
+                        id = f.ident,
+                        stem = t.stem
+                    );
+                } else {
+                    let _ = write!(
+                        out,
+                        "	if raw, ok := fields[{key}]; ok {{
+		var stored {s}
+		if err := json.Unmarshal(raw, &stored); err != nil {{
+			return err
+		}}
+		view, err := c.{stem}View(stored)
+		if err != nil {{
+			return err
+		}}
+		r.{id} = view
+	}}
+",
+                        s = t.stored,
+                        id = f.ident,
+                        stem = t.stem
+                    );
+                }
+            }
+            for (ident, _, method, args) in &computed {
+                let _ = writeln!(out, "	r.{ident} = c.{method}({})", args.join(", "));
+            }
+            out.push_str(
+                "	return nil
+}
+
+",
+            );
+        }
 
         // The insert.
         let _ = writeln!(
@@ -389,10 +590,81 @@ impl<'a> Writer<'a> {
                 } else {
                     f.ty.clone()
                 };
-                [f.ident.clone(), ty, tag(&f.name, f.optional_on_insert)]
+                let ty = match &f.transform {
+                    Some(t) if f.optional_on_insert => format!("*{}", t.view),
+                    Some(t) => t.view.clone(),
+                    None => ty,
+                };
+                let t = if f.transform.is_some() {
+                    "`json:\"-\"`".to_owned()
+                } else {
+                    tag(&f.name, f.optional_on_insert)
+                };
+                [f.ident.clone(), ty, t]
             })
             .collect();
         write_struct(&mut out, &new, &lines);
+        if fields.iter().any(|f| f.transform.is_some()) {
+            let _ = writeln!(
+                out,
+                "// JazzEncode is the row to insert, its transformed columns stored."
+            );
+            let _ = writeln!(out, "func (r {new}) JazzEncode(app any) (any, error) {{");
+            out.push_str(
+                "	c, ok := app.(Computed)
+	if !ok {
+		return nil, jazz.ErrNoComputed
+	}
+",
+            );
+            let _ = writeln!(
+                out,
+                "	type plain {new}
+	out, err := jazz.Fields(plain(r))
+	if err != nil {{
+		return nil, err
+	}}"
+            );
+            for f in &fields {
+                let Some(t) = &f.transform else { continue };
+                let key = go_string(&f.name);
+                if f.optional_on_insert {
+                    let _ = write!(
+                        out,
+                        "	if r.{id} != nil {{
+		stored, err := c.{stem}Stored(*r.{id})
+		if err != nil {{
+			return nil, err
+		}}
+		out[{key}] = stored
+	}}
+",
+                        id = f.ident,
+                        stem = t.stem
+                    );
+                } else {
+                    let _ = write!(
+                        out,
+                        "	{{
+		stored, err := c.{stem}Stored(r.{id})
+		if err != nil {{
+			return nil, err
+		}}
+		out[{key}] = stored
+	}}
+",
+                        id = f.ident,
+                        stem = t.stem
+                    );
+                }
+            }
+            out.push_str(
+                "	return out, nil
+}
+
+",
+            );
+        }
 
         // The patch.
         let _ = writeln!(
@@ -411,16 +683,62 @@ impl<'a> Writer<'a> {
             })
             .collect();
         write_struct(&mut out, &patch, &lines);
-        let _ = writeln!(out, "// MarshalJSON writes the fields that are set.");
-        let _ = writeln!(out, "func (p {patch}) MarshalJSON() ([]byte, error) {{");
-        if fields.is_empty() {
-            out.push_str("\treturn jazz.MarshalPatch()\n}\n\n");
-        } else {
-            out.push_str("\treturn jazz.MarshalPatch(\n");
-            for f in &fields {
-                let _ = writeln!(out, "\t\tp.{}.Entry({}),", f.ident, go_string(&f.name));
+        let entries: Vec<String> = fields
+            .iter()
+            .filter(|f| f.transform.is_none())
+            .map(|f| format!("p.{}.Entry({})", f.ident, go_string(&f.name)))
+            .collect();
+        if fields.iter().any(|f| f.transform.is_some()) {
+            let _ = writeln!(
+                out,
+                "// JazzEncode is the patch, its transformed columns stored."
+            );
+            let _ = writeln!(out, "func (p {patch}) JazzEncode(app any) (any, error) {{");
+            out.push_str(
+                "\tc, ok := app.(Computed)\n\tif !ok {\n\t\treturn nil, jazz.ErrNoComputed\n\t}\n",
+            );
+            if entries.is_empty() {
+                out.push_str("\tentries := []jazz.PatchEntry{}\n");
+            } else {
+                out.push_str("\tentries := []jazz.PatchEntry{\n");
+                for e in &entries {
+                    let _ = writeln!(out, "\t\t{e},");
+                }
+                out.push_str("\t}\n");
             }
-            out.push_str("\t)\n}\n\n");
+            for f in &fields {
+                let Some(t) = &f.transform else { continue };
+                let key = go_string(&f.name);
+                if f.nullable {
+                    let _ = write!(
+                        out,
+                        "\tif p.{id}.IsSet() {{\n\t\tvar stored *{s}\n\t\tif view := p.{id}.Value(); view != nil {{\n\t\t\tv, err := c.{stem}Stored(*view)\n\t\t\tif err != nil {{\n\t\t\t\treturn nil, err\n\t\t\t}}\n\t\t\tstored = &v\n\t\t}}\n\t\tentries = append(entries, jazz.Set(stored).Entry({key}))\n\t}}\n",
+                        id = f.ident,
+                        s = t.stored,
+                        stem = t.stem
+                    );
+                } else {
+                    let _ = write!(
+                        out,
+                        "\tif p.{id}.IsSet() {{\n\t\tstored, err := c.{stem}Stored(p.{id}.Value())\n\t\tif err != nil {{\n\t\t\treturn nil, err\n\t\t}}\n\t\tentries = append(entries, jazz.Set(stored).Entry({key}))\n\t}}\n",
+                        id = f.ident,
+                        stem = t.stem
+                    );
+                }
+            }
+            out.push_str("\treturn jazz.PatchJSON(entries...)\n}\n\n");
+        } else {
+            let _ = writeln!(out, "// MarshalJSON writes the fields that are set.");
+            let _ = writeln!(out, "func (p {patch}) MarshalJSON() ([]byte, error) {{");
+            if entries.is_empty() {
+                out.push_str("\treturn jazz.MarshalPatch()\n}\n\n");
+            } else {
+                out.push_str("\treturn jazz.MarshalPatch(\n");
+                for e in &entries {
+                    let _ = writeln!(out, "\t\t{e},");
+                }
+                out.push_str("\t)\n}\n\n");
+            }
         }
 
         // The table value: columns, query, writes.
@@ -488,7 +806,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "func ({ty}) Insert(ctx context.Context, db jazz.Querier, row {new}) ({row}, error) {{\n\treturn jazz.Insert[{new}, {row}](ctx, db, {table_name}, row)\n}}\n"
+            "func ({ty}) Insert(ctx context.Context, db jazz.Querier, row {new}, opts ...jazz.WriteOption) ({row}, error) {{\n\treturn jazz.Insert[{new}, {row}](ctx, db, {table_name}, row, opts...)\n}}\n"
         );
         let _ = writeln!(
             out,
@@ -497,7 +815,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch)\n}}\n"
+            "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}, opts ...jazz.WriteOption) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch, opts...)\n}}\n"
         );
         let _ = writeln!(
             out,
@@ -506,7 +824,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "func ({ty}) Delete(ctx context.Context, db jazz.Querier, id string) error {{\n\treturn jazz.Delete(ctx, db, {table_name}, id)\n}}\n"
+            "func ({ty}) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {{\n\treturn jazz.Delete(ctx, db, {table_name}, id, opts...)\n}}\n"
         );
         Ok(out)
     }
@@ -669,6 +987,26 @@ fn go_ident(ident: &str, name: &str) -> Result<String, CodegenError> {
         )));
     }
     Ok(ident.to_owned())
+}
+
+/// A parameter name from a field's: `ShowID` → `showID`, `Type` → `type_`.
+fn go_param(ident: &str) -> String {
+    let lower = match ident.char_indices().find(|(_, c)| c.is_ascii_lowercase()) {
+        // Lower the leading capitals, keeping the last one of a run before
+        // a lowercase letter as the next word's start: `URLPath` → `urlPath`.
+        Some((0, _)) | None => ident.to_ascii_lowercase(),
+        Some((1, _)) => lower_first(ident),
+        Some((i, _)) => ident[..i - 1].to_ascii_lowercase() + &ident[i - 1..],
+    };
+    match lower.as_str() {
+        "break" | "case" | "chan" | "const" | "continue" | "default" | "defer" | "else"
+        | "fallthrough" | "for" | "func" | "go" | "goto" | "if" | "import" | "interface"
+        | "map" | "package" | "range" | "return" | "select" | "struct" | "switch" | "type"
+        | "var" | "r" | "c" | "app" | "fields" | "ok" | "err" | "jazz" | "json" | "context" => {
+            format!("{lower}_")
+        }
+        _ => lower,
+    }
 }
 
 fn lower_first(name: &str) -> String {

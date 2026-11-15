@@ -105,18 +105,18 @@ func (foldersTable) Query() *jazz.Query[Folder] {
 }
 
 // Insert inserts a row into `folders` and returns it, with its id.
-func (foldersTable) Insert(ctx context.Context, db jazz.Querier, row NewFolder) (Folder, error) {
-	return jazz.Insert[NewFolder, Folder](ctx, db, "folders", row)
+func (foldersTable) Insert(ctx context.Context, db jazz.Querier, row NewFolder, opts ...jazz.WriteOption) (Folder, error) {
+	return jazz.Insert[NewFolder, Folder](ctx, db, "folders", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `folders` with id.
-func (foldersTable) Update(ctx context.Context, db jazz.Querier, id string, patch FolderPatch) error {
-	return jazz.Update(ctx, db, "folders", id, patch)
+func (foldersTable) Update(ctx context.Context, db jazz.Querier, id string, patch FolderPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "folders", id, patch, opts...)
 }
 
 // Delete deletes the row of `folders` with id.
-func (foldersTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "folders", id)
+func (foldersTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "folders", id, opts...)
 }
 
 // Note is a row of `notes`.
@@ -175,16 +175,16 @@ func (notesTable) Query() *jazz.Query[Note] {
 }
 
 // Insert inserts a row into `notes` and returns it, with its id.
-func (notesTable) Insert(ctx context.Context, db jazz.Querier, row NewNote) (Note, error) {
-	return jazz.Insert[NewNote, Note](ctx, db, "notes", row)
+func (notesTable) Insert(ctx context.Context, db jazz.Querier, row NewNote, opts ...jazz.WriteOption) (Note, error) {
+	return jazz.Insert[NewNote, Note](ctx, db, "notes", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `notes` with id.
-func (notesTable) Update(ctx context.Context, db jazz.Querier, id string, patch NotePatch) error {
-	return jazz.Update(ctx, db, "notes", id, patch)
+func (notesTable) Update(ctx context.Context, db jazz.Querier, id string, patch NotePatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "notes", id, patch, opts...)
 }
 
 // Delete deletes the row of `notes` with id.
-func (notesTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "notes", id)
+func (notesTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "notes", id, opts...)
 }

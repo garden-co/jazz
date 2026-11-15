@@ -84,6 +84,7 @@ type Query[R any] struct {
 	offset   *int
 	include  []Include[R]
 	selected []string
+	tier     ReadTier
 	// raw holds the parts of a query Select made from a query of another
 	// row type; the typed parts above add to it.
 	raw *queryJSON
@@ -157,6 +158,24 @@ func (q *Query[R]) toJSON() queryJSON {
 	return out
 }
 
+// args is the query's jazz-ffi arguments: the query, and its tier.
+func (q *Query[R]) args() map[string]any {
+	args := map[string]any{"query": q}
+	if q.tier != "" {
+		args["tier"] = string(q.tier)
+	}
+	return args
+}
+
+// subscription is what jazz_subscribe takes: the query, or with a tier
+// {"query", "tier"}.
+func (q *Query[R]) subscription() any {
+	if q.tier == "" {
+		return q
+	}
+	return map[string]any{"query": q, "tier": string(q.tier)}
+}
+
 // MarshalJSON writes the query in the jazz-ffi query form.
 func (q *Query[R]) MarshalJSON() ([]byte, error) {
 	for _, w := range q.where {
@@ -175,10 +194,10 @@ func (q *Query[R]) All(ctx context.Context, db Querier) ([]R, error) {
 		return nil, err
 	}
 	var raws []json.RawMessage
-	if err := db.call(ctx, "all", map[string]any{"query": q}, &raws); err != nil {
+	if err := db.call(ctx, "all", q.args(), &raws); err != nil {
 		return nil, err
 	}
-	return decodeRows[R](q.table, raws)
+	return decodeRows[R](db.computed(), q.table, raws)
 }
 
 // One is the first row the query matches, or nil if none does.
@@ -187,14 +206,14 @@ func (q *Query[R]) One(ctx context.Context, db Querier) (*R, error) {
 		return nil, err
 	}
 	var raw json.RawMessage
-	if err := db.call(ctx, "one", map[string]any{"query": q}, &raw); err != nil {
+	if err := db.call(ctx, "one", q.args(), &raw); err != nil {
 		return nil, err
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
 	var row R
-	if err := decodeRow(q.table, raw, &row); err != nil {
+	if err := decodeRow(db.computed(), q.table, raw, &row); err != nil {
 		return nil, err
 	}
 	return &row, nil
@@ -202,12 +221,16 @@ func (q *Query[R]) One(ctx context.Context, db Querier) (*R, error) {
 
 // Insert inserts row (an insert struct N) into table and returns the
 // inserted row R, with its id.
-func Insert[N, R any](ctx context.Context, db Querier, table string, row N) (R, error) {
+func Insert[N, R any](ctx context.Context, db Querier, table string, row N, opts ...WriteOption) (R, error) {
 	var inserted R
 	var raw json.RawMessage
-	if err := db.call(ctx, "insert", map[string]any{"table": table, "row": row}, &raw); err != nil {
+	encoded, err := encode(db, row)
+	if err != nil {
 		return inserted, err
 	}
-	err := decodeRow(table, raw, &inserted)
+	if err := db.call(ctx, "insert", withOptions(map[string]any{"table": table, "row": encoded}, opts), &raw); err != nil {
+		return inserted, err
+	}
+	err = decodeRow(db.computed(), table, raw, &inserted)
 	return inserted, err
 }

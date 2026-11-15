@@ -217,14 +217,15 @@ fn every_go_app_generates_its_committed_go_byte_for_byte() {
 }
 
 #[test]
-fn go_bindings_refuse_computed_fields_and_read_back_backquotes() {
+fn go_bindings_refuse_payload_enums_and_read_back_backquotes() {
+    // tasks has an enum with payloads, which Go can't bind yet.
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
     let error = generate(Lang::Go, &std::fs::read(dir.join("jazz.app.json")).unwrap()).unwrap_err();
     assert!(error.is_unsupported(), "{error}");
     assert!(
         error
             .to_string()
-            .contains("not supported in Go bindings yet"),
+            .contains("enum-with-payload values in Go bindings"),
         "{error}"
     );
     // A backquote in the file survives the raw string it is embedded in.
@@ -328,4 +329,28 @@ fn the_stage_plan_go_example_commits_current_bindings() {
         "{} is stale; run with JAZZ_UPDATE_FIXTURES=1",
         path.display()
     );
+}
+
+/// Computed fields and transforms run in Go: a generated `Computed`
+/// interface the app implements, which `Open` takes.
+#[test]
+fn go_computed_fields_and_transforms_are_an_interface() {
+    let generated = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/go-apps/computed/jazzapp/jazz_app.go"),
+    )
+    .unwrap();
+    for expected in [
+        "func Open(ctx context.Context, cfg jazz.Config, computed Computed) (*jazz.DB, error) {",
+        "\tTaskPriority(score int32, status TaskStatus) TaskPriority",
+        "\tTaskLabel(title string, dueAt *string) *string",
+        "\tIsoDateView(stored jazz.Timestamp) (string, error)",
+        "\tIsoDateStored(view string) (jazz.Timestamp, error)",
+        "\tLowercaseView(stored string) (string, error)",
+        "func (r *Task) JazzDecode(app any, fields map[string]json.RawMessage) error {",
+        "func (r NewTask) JazzEncode(app any) (any, error) {",
+        "func (p TaskPatch) JazzEncode(app any) (any, error) {",
+    ] {
+        assert!(generated.contains(expected), "{expected:?} in\n{generated}");
+    }
 }

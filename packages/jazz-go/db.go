@@ -41,6 +41,9 @@ type Config struct {
 	// Storage is StorageMemory or StoragePersistent (the default).
 	Storage       Storage `json:"storage,omitempty"`
 	BackendSecret string  `json:"backendSecret,omitempty"`
+	// Computed is the app's implementation of its generated Computed
+	// interface (jazzapp.Open sets it).
+	Computed any `json:"-"`
 	// AdminSecret lets a backend publish the app's schema and permissions.
 	AdminSecret string `json:"adminSecret,omitempty"`
 	// Session is the user a backend acts as. Its Issuer is "jazz:backend"
@@ -78,7 +81,10 @@ func takeError(err *C.char) error {
 type DB struct {
 	mu     sync.RWMutex
 	handle *C.JazzHandle
+	app    any
 }
+
+func (db *DB) computed() any { return db.app }
 
 // Open opens the app cfg describes. Prefer the generated jazzapp.Open,
 // which embeds the app's jazz.app.json.
@@ -88,7 +94,10 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		session.Issuer = BackendIssuer
 		cfg.Session = &session
 	}
-	config, err := json.Marshal(cfg)
+	config, err := json.Marshal(struct {
+		Config
+		Contract int `json:"contract"`
+	}{cfg, 2})
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +118,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		if o.err != nil {
 			return nil, o.err
 		}
-		return &DB{handle: o.h}, nil
+		return &DB{handle: o.h, app: cfg.Computed}, nil
 	case <-ctx.Done():
 		go func() {
 			if o := <-done; o.h != nil {
@@ -186,13 +195,13 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 // Update changes the fields patch (a generated patch struct, or any value
 // that marshals to a JSON object of columns) sets on the row of table
 // with id.
-func (db *DB) Update(ctx context.Context, table, id string, patch any) error {
-	return update(ctx, db, table, id, patch)
+func (db *DB) Update(ctx context.Context, table, id string, patch any, opts ...WriteOption) error {
+	return update(ctx, db, table, id, patch, opts)
 }
 
 // Delete deletes the row of table with id.
-func (db *DB) Delete(ctx context.Context, table, id string) error {
-	return remove(ctx, db, table, id)
+func (db *DB) Delete(ctx context.Context, table, id string, opts ...WriteOption) error {
+	return remove(ctx, db, table, id, opts)
 }
 
 // Account is the id of the account the app acts as (its session's user),

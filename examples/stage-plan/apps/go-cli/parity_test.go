@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -67,5 +68,83 @@ func TestIncludesAndSelect(t *testing.T) {
 	}
 	if len(titles) != 1 || titles[0].Title != "Rig lights" || titles[0].ID != task.ID {
 		t.Fatalf("selected: %+v", titles)
+	}
+}
+
+func TestTransactionsAndTiers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Tx Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Commit: both tasks land, readable inside the transaction too.
+	err = db.Tx(ctx, func(tx *jazz.Tx) error {
+		for i, title := range []string{"Load-in", "Soundcheck"} {
+			if _, err := jazzapp.Tasks.Insert(ctx, tx, jazzapp.NewTask{
+				ShowID: show.ID, Title: title, Status: jazzapp.TaskStatusTodo, Rank: float64(i + 1),
+			}); err != nil {
+				return err
+			}
+		}
+		inside, err := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ShowID.Eq(show.ID)).All(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if len(inside) != 2 {
+			t.Errorf("read inside the transaction: %d tasks", len(inside))
+		}
+		return nil
+	}, jazz.CommitAt(jazz.WriteGlobal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := listTasks(ctx, db, show.ID)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("after commit: %+v, %v", tasks, err)
+	}
+
+	// An error rolls back.
+	sentinel := errors.New("changed my mind")
+	err = db.Tx(ctx, func(tx *jazz.Tx) error {
+		if _, err := jazzapp.Tasks.Insert(ctx, tx, jazzapp.NewTask{
+			ShowID: show.ID, Title: "Encore", Status: jazzapp.TaskStatusTodo, Rank: 3,
+		}); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("rollback error: %v", err)
+	}
+	// A panic rolls back too, and panics on.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic didn't propagate")
+			}
+		}()
+		_ = db.Tx(ctx, func(tx *jazz.Tx) error {
+			_, _ = jazzapp.Tasks.Insert(ctx, tx, jazzapp.NewTask{ShowID: show.ID, Title: "Panic", Status: jazzapp.TaskStatusTodo, Rank: 4})
+			panic("boom")
+		})
+	}()
+	if tasks, err := listTasks(ctx, db, show.ID); err != nil || len(tasks) != 2 {
+		t.Fatalf("after rollbacks: %+v, %v", tasks, err)
+	}
+
+	// Tiers: a write that waits for the server, a read from it, and
+	// waiting for every write so far.
+	if _, err := jazzapp.Tasks.Insert(ctx, db, jazzapp.NewTask{
+		ShowID: show.ID, Title: "Backline", Status: jazzapp.TaskStatusTodo, Rank: 5,
+	}, jazz.WaitFor(jazz.WriteGlobal)); err != nil {
+		t.Fatal(err)
+	}
+	remote, err := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ShowID.Eq(show.ID)).Tier(jazz.ReadRemote).All(ctx, db)
+	if err != nil || len(remote) != 3 {
+		t.Fatalf("remote read: %d, %v", len(remote), err)
 	}
 }

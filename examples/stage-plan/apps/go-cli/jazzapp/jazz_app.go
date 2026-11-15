@@ -214,18 +214,18 @@ func (activityTable) Query() *jazz.Query[Activity] {
 }
 
 // Insert inserts a row into `activity` and returns it, with its id.
-func (activityTable) Insert(ctx context.Context, db jazz.Querier, row NewActivity) (Activity, error) {
-	return jazz.Insert[NewActivity, Activity](ctx, db, "activity", row)
+func (activityTable) Insert(ctx context.Context, db jazz.Querier, row NewActivity, opts ...jazz.WriteOption) (Activity, error) {
+	return jazz.Insert[NewActivity, Activity](ctx, db, "activity", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `activity` with id.
-func (activityTable) Update(ctx context.Context, db jazz.Querier, id string, patch ActivityPatch) error {
-	return jazz.Update(ctx, db, "activity", id, patch)
+func (activityTable) Update(ctx context.Context, db jazz.Querier, id string, patch ActivityPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "activity", id, patch, opts...)
 }
 
 // Delete deletes the row of `activity` with id.
-func (activityTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "activity", id)
+func (activityTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "activity", id, opts...)
 }
 
 // ChecklistItem is a row of `checklistItems`.
@@ -281,18 +281,18 @@ func (checklistItemsTable) Query() *jazz.Query[ChecklistItem] {
 }
 
 // Insert inserts a row into `checklistItems` and returns it, with its id.
-func (checklistItemsTable) Insert(ctx context.Context, db jazz.Querier, row NewChecklistItem) (ChecklistItem, error) {
-	return jazz.Insert[NewChecklistItem, ChecklistItem](ctx, db, "checklistItems", row)
+func (checklistItemsTable) Insert(ctx context.Context, db jazz.Querier, row NewChecklistItem, opts ...jazz.WriteOption) (ChecklistItem, error) {
+	return jazz.Insert[NewChecklistItem, ChecklistItem](ctx, db, "checklistItems", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `checklistItems` with id.
-func (checklistItemsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ChecklistItemPatch) error {
-	return jazz.Update(ctx, db, "checklistItems", id, patch)
+func (checklistItemsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ChecklistItemPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "checklistItems", id, patch, opts...)
 }
 
 // Delete deletes the row of `checklistItems` with id.
-func (checklistItemsTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "checklistItems", id)
+func (checklistItemsTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "checklistItems", id, opts...)
 }
 
 // Comment is a row of `comments`.
@@ -354,18 +354,18 @@ func (commentsTable) Query() *jazz.Query[Comment] {
 }
 
 // Insert inserts a row into `comments` and returns it, with its id.
-func (commentsTable) Insert(ctx context.Context, db jazz.Querier, row NewComment) (Comment, error) {
-	return jazz.Insert[NewComment, Comment](ctx, db, "comments", row)
+func (commentsTable) Insert(ctx context.Context, db jazz.Querier, row NewComment, opts ...jazz.WriteOption) (Comment, error) {
+	return jazz.Insert[NewComment, Comment](ctx, db, "comments", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `comments` with id.
-func (commentsTable) Update(ctx context.Context, db jazz.Querier, id string, patch CommentPatch) error {
-	return jazz.Update(ctx, db, "comments", id, patch)
+func (commentsTable) Update(ctx context.Context, db jazz.Querier, id string, patch CommentPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "comments", id, patch, opts...)
 }
 
 // Delete deletes the row of `comments` with id.
-func (commentsTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "comments", id)
+func (commentsTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "comments", id, opts...)
 }
 
 // Crew is a row of `crew`.
@@ -421,18 +421,18 @@ func (crewTable) Query() *jazz.Query[Crew] {
 }
 
 // Insert inserts a row into `crew` and returns it, with its id.
-func (crewTable) Insert(ctx context.Context, db jazz.Querier, row NewCrew) (Crew, error) {
-	return jazz.Insert[NewCrew, Crew](ctx, db, "crew", row)
+func (crewTable) Insert(ctx context.Context, db jazz.Querier, row NewCrew, opts ...jazz.WriteOption) (Crew, error) {
+	return jazz.Insert[NewCrew, Crew](ctx, db, "crew", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `crew` with id.
-func (crewTable) Update(ctx context.Context, db jazz.Querier, id string, patch CrewPatch) error {
-	return jazz.Update(ctx, db, "crew", id, patch)
+func (crewTable) Update(ctx context.Context, db jazz.Querier, id string, patch CrewPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "crew", id, patch, opts...)
 }
 
 // Delete deletes the row of `crew` with id.
-func (crewTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "crew", id)
+func (crewTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "crew", id, opts...)
 }
 
 // ShowCrew is a row of `showCrew`.
@@ -506,18 +506,18 @@ func (showCrewTable) Query() *jazz.Query[ShowCrew] {
 }
 
 // Insert inserts a row into `showCrew` and returns it, with its id.
-func (showCrewTable) Insert(ctx context.Context, db jazz.Querier, row NewShowCrew) (ShowCrew, error) {
-	return jazz.Insert[NewShowCrew, ShowCrew](ctx, db, "showCrew", row)
+func (showCrewTable) Insert(ctx context.Context, db jazz.Querier, row NewShowCrew, opts ...jazz.WriteOption) (ShowCrew, error) {
+	return jazz.Insert[NewShowCrew, ShowCrew](ctx, db, "showCrew", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `showCrew` with id.
-func (showCrewTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowCrewPatch) error {
-	return jazz.Update(ctx, db, "showCrew", id, patch)
+func (showCrewTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowCrewPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "showCrew", id, patch, opts...)
 }
 
 // Delete deletes the row of `showCrew` with id.
-func (showCrewTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "showCrew", id)
+func (showCrewTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "showCrew", id, opts...)
 }
 
 // ShowInvite is a row of `showInvites`.
@@ -570,18 +570,18 @@ func (showInvitesTable) Query() *jazz.Query[ShowInvite] {
 }
 
 // Insert inserts a row into `showInvites` and returns it, with its id.
-func (showInvitesTable) Insert(ctx context.Context, db jazz.Querier, row NewShowInvite) (ShowInvite, error) {
-	return jazz.Insert[NewShowInvite, ShowInvite](ctx, db, "showInvites", row)
+func (showInvitesTable) Insert(ctx context.Context, db jazz.Querier, row NewShowInvite, opts ...jazz.WriteOption) (ShowInvite, error) {
+	return jazz.Insert[NewShowInvite, ShowInvite](ctx, db, "showInvites", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `showInvites` with id.
-func (showInvitesTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowInvitePatch) error {
-	return jazz.Update(ctx, db, "showInvites", id, patch)
+func (showInvitesTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowInvitePatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "showInvites", id, patch, opts...)
 }
 
 // Delete deletes the row of `showInvites` with id.
-func (showInvitesTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "showInvites", id)
+func (showInvitesTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "showInvites", id, opts...)
 }
 
 // Show is a row of `shows`.
@@ -661,18 +661,18 @@ func (showsTable) Query() *jazz.Query[Show] {
 }
 
 // Insert inserts a row into `shows` and returns it, with its id.
-func (showsTable) Insert(ctx context.Context, db jazz.Querier, row NewShow) (Show, error) {
-	return jazz.Insert[NewShow, Show](ctx, db, "shows", row)
+func (showsTable) Insert(ctx context.Context, db jazz.Querier, row NewShow, opts ...jazz.WriteOption) (Show, error) {
+	return jazz.Insert[NewShow, Show](ctx, db, "shows", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `shows` with id.
-func (showsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowPatch) error {
-	return jazz.Update(ctx, db, "shows", id, patch)
+func (showsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "shows", id, patch, opts...)
 }
 
 // Delete deletes the row of `shows` with id.
-func (showsTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "shows", id)
+func (showsTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "shows", id, opts...)
 }
 
 // Task is a row of `tasks`.
@@ -758,16 +758,16 @@ func (tasksTable) Query() *jazz.Query[Task] {
 }
 
 // Insert inserts a row into `tasks` and returns it, with its id.
-func (tasksTable) Insert(ctx context.Context, db jazz.Querier, row NewTask) (Task, error) {
-	return jazz.Insert[NewTask, Task](ctx, db, "tasks", row)
+func (tasksTable) Insert(ctx context.Context, db jazz.Querier, row NewTask, opts ...jazz.WriteOption) (Task, error) {
+	return jazz.Insert[NewTask, Task](ctx, db, "tasks", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `tasks` with id.
-func (tasksTable) Update(ctx context.Context, db jazz.Querier, id string, patch TaskPatch) error {
-	return jazz.Update(ctx, db, "tasks", id, patch)
+func (tasksTable) Update(ctx context.Context, db jazz.Querier, id string, patch TaskPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "tasks", id, patch, opts...)
 }
 
 // Delete deletes the row of `tasks` with id.
-func (tasksTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
-	return jazz.Delete(ctx, db, "tasks", id)
+func (tasksTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "tasks", id, opts...)
 }

@@ -52,7 +52,7 @@ func TestIncludesNestAsTheContractSays(t *testing.T) {
 	// Rows decode with their included relations; a forward relation that
 	// isn't there is nil.
 	var row incTask
-	err := decodeRow("tasks", json.RawMessage(`{"id":"t","title":"T","rank":1,"show":null,"comments":[{"id":"c","body":"hi","author":{"id":"a","name":"Ann"}}]}`), &row)
+	err := decodeRow(nil, "tasks", json.RawMessage(`{"id":"t","title":"T","rank":1,"show":null,"comments":[{"id":"c","body":"hi","author":{"id":"a","name":"Ann"}}]}`), &row)
 	if err != nil || row.Show != nil || row.Comments[0].Author.Name != "Ann" {
 		t.Fatalf("%+v %v", row, err)
 	}

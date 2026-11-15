@@ -77,11 +77,11 @@ func jazzGoSubscriptionCallback(ctx C.uintptr_t, kind *C.char, text *C.char) {
 // subscription fails (a last delta with Err, then the channel closes).
 // Deltas are buffered in order; a slow reader never blocks Jazz.
 func (q *Query[R]) Subscribe(ctx context.Context, db *DB) (<-chan Delta[R], error) {
-	return subscribe(ctx, db, q, func(e event) (Delta[R], bool) {
+	return subscribe(ctx, db, q.subscription(), func(e event) (Delta[R], bool) {
 		if e.kind == "error" {
 			return Delta[R]{Err: parseError(e.json)}, true
 		}
-		d, err := decodeDelta[R](q.table, e.json)
+		d, err := decodeDelta[R](db.computed(), q.table, e.json)
 		if err != nil {
 			return Delta[R]{Err: err}, true
 		}
