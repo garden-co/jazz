@@ -848,8 +848,8 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   - `{"name", "text": {<column>: <weight 1–15>, …}, "analyzer", "prefix"?, "serverOnly"?}`;
   - `{"name", "vector": <column>, "metric", "ann"?, "serverOnly"?}`;
   - `{"name", "geo": {"lat": <column>, "lng": <column>}, "serverOnly"?}`.
-  The writer puts them after the B-tree indexes, in name order, and leaves
-  out defaults (`prefix: false`, `ann: "exact"`, `serverOnly: false`).
+    The writer puts them after the B-tree indexes, in name order, and leaves
+    out defaults (`prefix: false`, `ann: "exact"`, `serverOnly: false`).
 - `branchBy`: array of column names.
 - `history`: `"latest"` keeps only each row's newest version; absent keeps
   full history.
