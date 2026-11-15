@@ -318,8 +318,8 @@ async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
 #[tokio::test]
 async fn refuses_what_it_cannot_do() {
     let app_id = AppId::random();
-    let as_user = Jazz::open(files(), Config::new(app_id).server("http://localhost:1")).await;
-    assert!(matches!(as_user, Err(Error::Unsupported(_))), "{as_user:?}");
+    let as_nobody = Jazz::open(files(), Config::new(app_id).server("http://localhost:1")).await;
+    assert!(matches!(as_nobody, Err(Error::Config(_))), "{as_nobody:?}");
 
     let backend = Backend::new("b", "a", "u");
     let serverless = Jazz::open(files(), Config::new(app_id).backend(backend.clone())).await;
@@ -480,4 +480,54 @@ async fn query_helpers() {
     let mut ids = vec![milk.id, bread.id];
     ids.sort_by_key(|id| *id.uuid());
     assert_eq!(by_id.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
+}
+
+/// A write that lands between a transaction's read and its own write: a
+/// mergeable transaction merges with it, a serializable one is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mergeable_and_serializable_transactions() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    for serializable in [false, true] {
+        let todo = jazz.insert(new_todo("contended")).await.unwrap();
+        let id = todo.id;
+        let other = jazz.clone();
+        let body = move |tx: jazz_app::Transaction| async move {
+            let seen = tx.get::<Todo>(id).await?.expect("the row");
+            // Someone else renames it meanwhile.
+            other
+                .update(
+                    id,
+                    TodoUpdate {
+                        title: Some("renamed".into()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            tx.update(
+                id,
+                TodoUpdate {
+                    done: Some(!seen.done),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        };
+        let committed = if serializable {
+            jazz.serializable_transaction(body).await
+        } else {
+            jazz.transaction(body).await
+        };
+        let row = jazz.get::<Todo>(id).await.unwrap().unwrap();
+        if serializable {
+            assert!(committed.is_err(), "a serializable commit is refused");
+            assert_eq!((row.title.as_str(), row.done), ("renamed", false));
+        } else {
+            committed.unwrap();
+            assert_eq!(
+                (row.title.as_str(), row.done),
+                ("renamed", true),
+                "both writes merge"
+            );
+        }
+    }
 }

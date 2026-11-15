@@ -24,6 +24,8 @@ import { app as acknowledgementApp } from "./apps/acknowledgement/jazz.generated
 import acknowledgementPermissions from "./apps/acknowledgement/jazz.permissions.json" with { type: "json" };
 import { app as recipientApp } from "./apps/recipient/jazz.generated.js";
 import recipientPermissions from "./apps/recipient/jazz.permissions.json" with { type: "json" };
+import { app as relationalRecipientApp } from "./apps/relational-recipient/jazz.generated.js";
+import relationalRecipientPermissions from "./apps/relational-recipient/jazz.permissions.json" with { type: "json" };
 import {
   ALBUM_TRACK_LIMIT,
   JazzRecordPlayerStore,
@@ -43,12 +45,17 @@ afterEach(async () => ctx.cleanup());
 // it is the smallest external-JWT receipt for a row routed to a recipient by
 // an application-owned canonical session user rather than by `$createdBy`.
 // (tests/browser/apps/recipient)
-// The relational control is RecordPlayer itself: a correlated owner path
-// through a referenced playlist, exactly as the app ships it.
-const relationalRecipientApp = app;
-const relationalRecipientPermissions = permissions;
+// This adds exactly the branch which distinguishes RecordPlayer from the
+// scalar control: a correlated owner path through a referenced playlist.
+// It is its own app (tests/browser/apps/relational-recipient), kept equal to
+// RecordPlayer's current schema and policies by the first test below.
 
 describe("RecordPlayer authenticated playlist topology", () => {
+  it("keeps the phased recipient control schema and access paths identical to RecordPlayer", () => {
+    expect(relationalRecipientApp.wasmSchema).toEqual(app.wasmSchema);
+    expect(relationalRecipientPermissions).toEqual(permissions);
+  });
+
   it("delivers RecordPlayer pending invitations outside the scenario envelope", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-recipient-settlement"));
     await deployApp({
