@@ -207,6 +207,19 @@ fn refuse_shared_column_changes(
             continue;
         };
         let name = format!("{table}.{}", column.name_str());
+        if let (Some(from), Some(to)) = (&source.references, &column.references)
+            && from != to
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Moving the reference of column `{name}` from {} to {} is not supported yet: its \
+                 values name rows of {}. Add a new column referencing {} next to this one, and \
+                 drop this one in a later release.",
+                from.as_str(),
+                to.as_str(),
+                from.as_str(),
+                to.as_str()
+            )));
+        }
         if source.nullable != column.nullable {
             return Err(CodegenError::unsupported(format!(
                 "Changing column `{name}` from {} to {} is not supported yet. {KEEP_VALUES_ADVICE}",

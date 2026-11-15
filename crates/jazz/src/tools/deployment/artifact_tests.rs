@@ -2379,3 +2379,48 @@ fn recursive_relations_with_several_selected_columns_print_and_read_back() {
     let again = expr::compile(&expr::parse(&printed).unwrap(), &context, "shares").unwrap();
     assert_eq!(again, policy, "{printed}");
 }
+
+#[test]
+fn a_migration_may_not_move_a_reference_to_another_table() {
+    let file = r#"{ "format": 1,
+        "tables": {
+            "a": { "columns": { "x": "string" } }, "b": { "columns": { "x": "string" } },
+            "notes": { "columns": { "owner": { "type": "uuid", "references": "b" }, "body": "string" } } },
+        "history": { "v1": { "tables": {
+            "a": { "columns": { "x": "string" } }, "b": { "columns": { "x": "string" } },
+            "notes": { "columns": { "owner": { "type": "uuid", "references": "a" } } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": { "body": { "add": "string", "default": "" } } } }] }"#;
+    let error = load_app(file.as_bytes()).unwrap_err().to_string();
+    assert!(
+        error.contains("migrations[0]: column notes.owner moves its reference from a to b, which is not supported yet"),
+        "{error}"
+    );
+    // Gaining a reference is fine.
+    let gains = file.replace(r#"{ "type": "uuid", "references": "a" }"#, r#""uuid""#);
+    load_app(gains.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    // Nor is such a version bridged by an identity step.
+    let bridged = file
+        .replace(r#", "body": "string""#, "")
+        .replace(r#",
+        "migrations": [{ "from": "v1", "migrate": { "notes": { "body": { "add": "string", "default": "" } } } }]"#, "");
+    assert_eq!(load_app(bridged.as_bytes()).unwrap().stranded().len(), 1);
+}
+
+#[test]
+fn a_computed_field_cant_be_indexed() {
+    let error = edited_app(|v| v["tables"]["todos"]["indexes"] = serde_json::json!(["shareCount"]));
+    assert!(
+        error
+            .contains("tables.todos.indexes: `shareCount` is a computed field, which isn't stored"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_schema_hash_is_the_engines_without_policies() {
+    let written = write(shared_todos()).unwrap();
+    let app = load_app(written.app.as_bytes()).unwrap();
+    let json = serde_json::to_vec(app.current_schema()).unwrap();
+    assert_eq!(schema_hash(&json).unwrap(), app.current_hash());
+    assert!(schema_hash(b"{\"tables\": 1}").is_err());
+}
