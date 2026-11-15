@@ -589,11 +589,17 @@ impl SubscriptionStream {
             }
             return Some(event);
         }
+        let mut queue = self.queue.borrow_mut();
+        if !queue.reset_due() {
+            return queue.pop_front(None);
+        }
+        // A group is borrowed mutably only inside the store's own calls
+        // (dispatching a commit), which never run a reader's code, so it
+        // is free here. Were it not, the reset stays due for the next read.
         let group = self.group.upgrade();
         let group = group.as_ref().and_then(|group| group.try_borrow().ok());
-        self.queue
-            .borrow_mut()
-            .pop_front(group.as_ref().map(|group| group.rows.as_slice()))
+        debug_assert!(group.is_some(), "a reader reads outside dispatch");
+        queue.pop_front(group.as_ref().map(|group| group.rows.as_slice()))
     }
 
     /// Changed rows its undelivered deltas hold: at most its backlog limit

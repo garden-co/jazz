@@ -566,3 +566,52 @@ describe("Db local-first reads with firstLoadRemoteWaitMs", () => {
     expect(client.linkHints.mock.calls).toEqual([["none"]]);
   });
 });
+
+describe("coalesced subscription backlogs", () => {
+  it("passes a coalesced reset to onUpdate as reason backlog, and nothing else", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "backlog-reason",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const updates: Array<{ titles: string[]; reason: string | undefined }> = [];
+    const unsubscribe = db.subscribe(query(), {
+      onUpdate: (rows, update) =>
+        updates.push({ titles: publicationTitles(rows).sort(), reason: update.reason }),
+    });
+    await settle();
+    const onDelta = client.subscriptionCallbacks.get(1)!;
+    onDelta({ ...added("opening", "first"), reset: true });
+    onDelta(added("second", "second"));
+    onDelta({ ...added("current", "current"), reset: true, reason: "backlog" });
+    expect(updates).toEqual([
+      { titles: ["first"], reason: undefined },
+      { titles: ["first", "second"], reason: undefined },
+      { titles: ["current"], reason: "backlog" },
+    ]);
+    unsubscribe();
+  });
+
+  it("refuses a backlog limit that is not a whole number of rows of at least 1", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "backlog-rows",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    for (const backlogRows of [0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      expect(() => db.subscribe(query(), () => undefined, { backlogRows })).toThrow(
+        /backlogRows must be a whole number of rows, at least 1/,
+      );
+    }
+  });
+});

@@ -1502,9 +1502,10 @@ fn a_store_is_rebuilt_once_per_schema_version() {
 }
 
 /// A foreground that stops draining its subscription holds a bounded relay
-/// buffer: past it, events wait in the core (which coalesces a backlog
-/// past its limit) and each drain returns at most the buffer's worth,
-/// refilling from the core, until the foreground has every row.
+/// buffer: past it, events wait in the core, which coalesces the backlog
+/// past its limit (5 rows here) into one reset. Each drain returns at most
+/// the buffer's worth, refilling from the core, and the foreground ends
+/// with every row.
 #[test]
 fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
     let directory = tempfile::tempdir().unwrap();
@@ -1515,7 +1516,7 @@ fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
         alice,
         ForegroundDbCommandRequest::Subscribe {
             query: todos_query(),
-            options_json: r#"{"backlog_rows":100000}"#.into(),
+            options_json: r#"{"backlog_rows":5}"#.into(),
         },
     ) else {
         panic!("subscription opens");
@@ -1524,6 +1525,7 @@ fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
         fixture.insert_todo(alice, [0x40 + n; 16], &format!("todo {n}"));
     }
     let mut seen = std::collections::BTreeSet::new();
+    let mut resets = 0;
     for _ in 0..100 {
         let ForegroundDbCommandResponse::SubscriptionEvents { events } = fixture.execute(
             alice,
@@ -1537,11 +1539,15 @@ fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
             events.len()
         );
         for event in events {
-            let (ForegroundSubscriptionEvent::Delta { delta, .. }
-            | ForegroundSubscriptionEvent::StructuredDelta { delta, .. }) = event
+            let (ForegroundSubscriptionEvent::Delta { delta, reset, .. }
+            | ForegroundSubscriptionEvent::StructuredDelta { delta, reset, .. }) = event
             else {
                 panic!("unexpected event: {event:?}");
             };
+            if reset {
+                resets += 1;
+                seen.clear();
+            }
             let (added, _) = decode_subscription_delta_rows(&delta).unwrap();
             seen.extend(
                 added
@@ -1555,5 +1561,9 @@ fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
         }
     }
     assert_eq!(seen.len(), 40, "every row reaches the foreground");
+    assert!(
+        resets >= 2,
+        "the opening, then the coalesced backlog: {resets} resets"
+    );
     fixture.close(alice);
 }
