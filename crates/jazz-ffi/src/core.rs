@@ -34,6 +34,8 @@ pub(crate) struct Core {
     /// The contract version the host speaks (`"contract"` in the config):
     /// 1 unless it says 2.
     pub(crate) contract: u64,
+    /// Run first when the app closes: a C host's callbacks stop here.
+    close_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// How a call runs: inside a transaction, and/or at a durability or read
@@ -206,6 +208,7 @@ impl Core {
             next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
             has_server,
             contract,
+            close_hook: Mutex::new(None),
         })
     }
 
@@ -760,9 +763,22 @@ impl Core {
 
     /// Closes the app: the calls already made finish, subscriptions end,
     /// and every later call fails with `Closed`. Closing again does nothing.
+    /// Runs `hook` first when the app closes (once).
+    pub(crate) fn on_close(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.close_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
     pub fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
+        }
+        if let Some(hook) = self
+            .close_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            hook();
         }
         // Open transactions roll back while their client still runs.
         let _ = block_on(self.jazz.with_client(|_| async {
