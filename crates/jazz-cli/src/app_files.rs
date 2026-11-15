@@ -89,17 +89,23 @@ pub fn generate(dir: &Path, langs: &[Lang], check: bool) -> Result<Outcome, Stri
             Some(staleness) => stale.push((lang, path, staleness)),
         }
     }
-    for (lang, path, staleness) in stale {
-        if check {
-            return Err(format!("{}: {}", path.display(), staleness.message(lang)));
-        }
-        let generated =
-            jazz_codegen::generate_app(lang, &app).map_err(|error| error.to_string())?;
+    if check && let Some((lang, path, staleness)) = stale.first() {
+        return Err(format!("{}: {}", path.display(), staleness.message(*lang)));
+    }
+    // Generate every language before writing any, so a refusal in one
+    // leaves no file half-updated.
+    let mut generated = Vec::new();
+    for (lang, path, _) in stale {
+        let text = jazz_codegen::generate_app(lang, &app)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        generated.push((path, text));
+    }
+    for (path, text) in generated {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("{}: {error}", parent.display()))?;
         }
-        std::fs::write(&path, generated).map_err(|error| format!("{}: {error}", path.display()))?;
+        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
         outcome.notes.push(format!("wrote {}", path.display()));
     }
     Ok(outcome)
