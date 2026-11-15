@@ -289,14 +289,16 @@ enum Commands {
         #[arg(long, env = "JAZZ_SESSION_BACKLOG_MAX_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
         session_backlog_max_bytes: Option<u64>,
 
-        /// Bytes of unread output all client sessions together may hold.
-        /// Past it, the sessions holding the most are closed first.
-        /// Defaults to a quarter of the memory limit, else 2 GiB.
+        /// Best-effort budget for the unwritten output of all client
+        /// sessions together. Past it, sessions whose socket has written
+        /// nothing for 30 s are closed, biggest first; sessions still
+        /// writing are left alone. Defaults to a quarter of the memory
+        /// limit, else 2 GiB.
         #[arg(long, env = "JAZZ_EGRESS_BUDGET_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
         egress_budget_bytes: Option<u64>,
 
-        /// Seconds a client session may stay at its egress budget without
-        /// reading before it is closed. Defaults to 300.
+        /// Seconds a client session's socket may write nothing while its
+        /// output waits before it is closed. Defaults to 300.
         #[arg(long, env = "JAZZ_SLOW_READER_TIMEOUT_SECS", value_parser = clap::value_parser!(u64).range(1..))]
         slow_reader_timeout_secs: Option<u64>,
 

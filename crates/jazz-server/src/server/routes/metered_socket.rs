@@ -24,6 +24,9 @@ pub(crate) struct PeerActivity {
     origin: tokio::time::Instant,
     /// Nanoseconds after `origin`.
     last: AtomicU64,
+    /// Where the raw bytes the socket writes are counted, once a session
+    /// is open on it.
+    writes: std::sync::OnceLock<crate::runtime::WrittenBytes>,
 }
 
 impl PeerActivity {
@@ -31,7 +34,25 @@ impl PeerActivity {
         Arc::new(Self {
             origin: tokio::time::Instant::now(),
             last: AtomicU64::new(0),
+            writes: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Count the raw bytes the socket writes in `sink` from now on. Once
+    /// the send buffer is full, every byte the kernel takes is one the peer
+    /// made room for: a client reading slowly is seen reading while a large
+    /// message is still going out.
+    pub(crate) fn report_writes(&self, sink: crate::runtime::WrittenBytes) {
+        let _ = self.writes.set(sink);
+    }
+
+    fn wrote(&self, polled: &Poll<std::io::Result<usize>>) {
+        if let Poll::Ready(Ok(bytes)) = polled
+            && *bytes > 0
+            && let Some(sink) = self.writes.get()
+        {
+            sink.add(*bytes);
+        }
     }
 
     fn touch(&self) {
@@ -46,8 +67,8 @@ impl PeerActivity {
 }
 
 /// Upgraded IO that touches its [`PeerActivity`] on every read that fills
-/// bytes. Writes are passed through: bytes the kernel accepts say nothing
-/// about the peer.
+/// bytes. Writes are passed through, and counted for the session's egress
+/// ([`PeerActivity::report_writes`]), not as hearing from the peer.
 struct Metered<S> {
     inner: S,
     activity: Arc<PeerActivity>,
@@ -75,7 +96,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Metered<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.inner).poll_write(cx, buf);
+        this.activity.wrote(&polled);
+        polled
     }
 
     fn poll_write_vectored(
@@ -83,7 +107,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Metered<S> {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
+        this.activity.wrote(&polled);
+        polled
     }
 
     fn is_write_vectored(&self) -> bool {

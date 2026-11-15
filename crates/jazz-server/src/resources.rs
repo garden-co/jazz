@@ -131,6 +131,7 @@ impl ServerResourceLimits {
             slow_reader_timeout: self
                 .slow_reader_timeout_secs
                 .map_or(defaults.slow_reader_timeout, std::time::Duration::from_secs),
+            stall_grace: defaults.stall_grace,
         }
     }
 

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 use jazz::binding_codec;
 use jazz::binding_host::{
@@ -24,7 +24,7 @@ use jazz::thin::{ThinBody, ThinOp, ThinRequest, ThinResponse};
 use jazz::wire::{WireErrorCode, WireFrame, WireRetry, encode_frame};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::{Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
+use super::{Egress, Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
 
 /// A transaction a thin session began and has not ended.
 struct ThinTransaction {
@@ -83,7 +83,7 @@ pub(super) struct ThinSession {
     /// cannot keep the others' events waiting.
     next_subscription: u64,
     output: tokio_mpsc::UnboundedSender<Outbound>,
-    egress: Arc<AtomicUsize>,
+    egress: Arc<Egress>,
     /// Whether its client is reading.
     clock: super::ReadClock,
 }
@@ -94,7 +94,7 @@ impl ThinSession {
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
-        egress: Arc<AtomicUsize>,
+        egress: Arc<Egress>,
     ) -> Self {
         Self {
             identity,
@@ -116,11 +116,11 @@ impl ThinSession {
     /// How long its client has read nothing with its egress at the
     /// budget, if it has ([`super::ReadClock`]).
     pub(super) fn stalled_for(&self, now: std::time::Instant) -> Option<std::time::Duration> {
-        self.clock.check(self.egress.load(Ordering::Acquire), now)
+        self.clock.check(&self.egress, now)
     }
 
     /// Output it holds in server memory: handed to the socket side, not yet
-    /// taken by the connection's writer.
+    /// written.
     /// (Its live queries' undelivered events are bounded in the core,
     /// which coalesces a backlog past its limit.)
     pub(super) fn undrained(&self) -> usize {
@@ -391,7 +391,7 @@ impl Owner {
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
-        egress: Arc<AtomicUsize>,
+        egress: Arc<Egress>,
     ) -> Result<(), jazz::db::Error> {
         // Admitted on the same terms as a sync session: a pinned bundle must
         // resolve here, and a createJazz app serves only pinned sessions.
