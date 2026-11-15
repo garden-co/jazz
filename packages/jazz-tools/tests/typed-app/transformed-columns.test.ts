@@ -1,58 +1,15 @@
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import { schema as s } from "../../src/index.js";
+import type { RowOf } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db } from "../../src/runtime/db.js";
 import { uniqueDbName } from "./factories.js";
 
+import { app as priorityApp } from "./apps/transformed-priority/jazz.generated.js";
+import { app as relatedApp } from "./apps/transformed-related/jazz.generated.js";
+
 type Priority = "low" | "medium" | "high";
 
-const prioritySchema = {
-  priorities: s.table(
-    {
-      label: s.string(),
-      score: s.int().transform<Priority>({
-        from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
-        to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
-      }),
-    },
-    {},
-  ),
-};
-
-type PriorityAppSchema = s.Schema<typeof prioritySchema>;
-const priorityApp: s.App<PriorityAppSchema> = s.defineApp(prioritySchema, { migrations: "none" });
-const relatedSchema = {
-  parents: s.table(
-    {
-      item: s
-        .uuid()
-        .optional()
-        .transform<string | null>({
-          from: (value) => (value === null ? null : `item:${value}`),
-          to: (value) => (value === null ? null : value.replace(/^item:/, "")),
-        }),
-      itemIds: s.array(s.uuid()),
-    },
-    { itemRelation: s.rel("items", "item"), items: s.rel("items", "itemIds") },
-  ),
-  items: s.table(
-    {
-      score: s.int().transform<number>({
-        from: (value) => value * 10,
-        to: (value) => value / 10,
-      }),
-      label: s.string().transform<string>({
-        from: (value) => `label:${value}`,
-        to: (value) => value.replace(/^label:/, ""),
-      }),
-    },
-    { parentsViaItems: s.reverse("parents", "items") },
-  ),
-};
-
-type RelatedAppSchema = s.Schema<typeof relatedSchema>;
-const relatedApp: s.App<RelatedAppSchema> = s.defineApp(relatedSchema, { migrations: "none" });
 describe("TS transformed columns", () => {
   let db: Db | undefined;
 
@@ -87,8 +44,8 @@ describe("TS transformed columns", () => {
       score: "low",
     });
 
-    let resolveUpdate: (all: s.RowOf<typeof priorityApp.priorities>[]) => void = () => {};
-    const nextUpdate = new Promise<s.RowOf<typeof priorityApp.priorities>[]>((resolve) => {
+    let resolveUpdate: (all: RowOf<typeof priorityApp.priorities>[]) => void = () => {};
+    const nextUpdate = new Promise<RowOf<typeof priorityApp.priorities>[]>((resolve) => {
       resolveUpdate = resolve;
     });
     const unsubscribe = activeDb.subscribe(priorityApp.priorities.where({}), (rows) => {

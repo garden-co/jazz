@@ -52,7 +52,7 @@ describe("typed app prototype", () => {
 
   it("reserves $history for the history namespace", () => {
     expect(() => testApp({ tables: { $history: { columns: { title: "string" } } } })).toThrow(
-      'Schema name "$history" is reserved for Jazz schema controls.',
+      /tables\.\$history: `\$history` is not a name/,
     );
   });
 
