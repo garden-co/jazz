@@ -67,7 +67,7 @@ nothing and doesn't fail: `db.transaction(...)` resolves with the callback's val
 resolves at once, and its `txId` rejects, since there is no transaction to name (from alpha.65;
 earlier versions throw "empty mergeable transaction has no committed unit").
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
@@ -77,6 +77,12 @@ earlier versions throw "empty mergeable transaction has no committed unit").
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-rust
+    </include>
+
   </Tab>
 </Tabs>
 

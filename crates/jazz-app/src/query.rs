@@ -7,7 +7,7 @@ use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
 
 use crate::table::Table;
-use crate::value::ColumnValue;
+use crate::value::{ColumnValue, Timestamp};
 
 /// A query of rows of `T`.
 #[derive(Debug, Clone)]
@@ -129,39 +129,99 @@ impl<T, V: ColumnValue> Column<T, V> {
         self.name
     }
 
-    fn compare(self, compare: fn(q::Operand, q::Operand) -> Predicate, value: V) -> Condition<T> {
-        Condition::new(compare(q::col(self.name), literal(value.into_value())))
-    }
-
-    pub fn eq(self, value: V) -> Condition<T> {
-        self.compare(q::eq, value)
-    }
-    pub fn ne(self, value: V) -> Condition<T> {
-        self.compare(q::ne, value)
-    }
-    pub fn gt(self, value: V) -> Condition<T> {
-        self.compare(q::gt, value)
-    }
-    pub fn gte(self, value: V) -> Condition<T> {
-        self.compare(q::gte, value)
-    }
-    pub fn lt(self, value: V) -> Condition<T> {
-        self.compare(q::lt, value)
-    }
-    pub fn lte(self, value: V) -> Condition<T> {
-        self.compare(q::lte, value)
-    }
-    pub fn is_in(self, values: impl IntoIterator<Item = V>) -> Condition<T> {
-        Condition::new(q::in_list(
+    fn compare(
+        self,
+        compare: fn(q::Operand, q::Operand) -> Predicate,
+        value: impl Into<V>,
+    ) -> Condition<T> {
+        Condition::new(compare(
             q::col(self.name),
-            values.into_iter().map(|value| literal(value.into_value())),
+            literal(value.into().into_value()),
         ))
     }
+
+    // Each takes what converts into the column's type: `title().eq("milk")`
+    // on a `String` column, `priority().gte(3)` on an `Option<i32>` one.
+
+    pub fn eq(self, value: impl Into<V>) -> Condition<T> {
+        self.compare(q::eq, value)
+    }
+    pub fn ne(self, value: impl Into<V>) -> Condition<T> {
+        self.compare(q::ne, value)
+    }
+    pub fn gt(self, value: impl Into<V>) -> Condition<T> {
+        self.compare(q::gt, value)
+    }
+    pub fn gte(self, value: impl Into<V>) -> Condition<T> {
+        self.compare(q::gte, value)
+    }
+    pub fn lt(self, value: impl Into<V>) -> Condition<T> {
+        self.compare(q::lt, value)
+    }
+    pub fn lte(self, value: impl Into<V>) -> Condition<T> {
+        self.compare(q::lte, value)
+    }
+    pub fn is_in<I>(self, values: I) -> Condition<T>
+    where
+        I: IntoIterator,
+        I::Item: Into<V>,
+    {
+        Condition::new(q::in_list(
+            q::col(self.name),
+            values
+                .into_iter()
+                .map(|value| literal(value.into().into_value())),
+        ))
+    }
+}
+
+/// The row's id: a column of every table.
+pub fn id<T>() -> Column<T, ObjectId> {
+    Column::new("id")
+}
+
+/// When the row was created: a column of every table.
+pub fn created_at<T>() -> Column<T, Timestamp> {
+    Column::new("$createdAt")
+}
+
+/// When the row was last updated: a column of every table.
+pub fn updated_at<T>() -> Column<T, Timestamp> {
+    Column::new("$updatedAt")
+}
+
+impl<T> Column<T, String> {
+    /// The text contains `part`.
+    pub fn contains(self, part: impl Into<String>) -> Condition<T> {
+        contains(self.name, Value::Text(part.into()))
+    }
+}
+
+impl<T> Column<T, Option<String>> {
+    /// The text is set and contains `part`.
+    pub fn contains(self, part: impl Into<String>) -> Condition<T> {
+        contains(self.name, Value::Text(part.into()))
+    }
+}
+
+impl<T, V: ColumnValue> Column<T, Vec<V>> {
+    /// The array holds `element`.
+    pub fn contains(self, element: impl Into<V>) -> Condition<T> {
+        contains(self.name, element.into().into_value())
+    }
+}
+
+fn contains<T>(column: &'static str, value: Value) -> Condition<T> {
+    Condition::new(q::contains(q::col(column), literal(value)))
 }
 
 impl<T, V: ColumnValue> Column<T, Option<V>> {
     pub fn is_null(self) -> Condition<T> {
         Condition::new(q::is_null(q::col(self.name)))
+    }
+
+    pub fn is_not_null(self) -> Condition<T> {
+        Condition::new(q::not(q::is_null(q::col(self.name))))
     }
 }
 
