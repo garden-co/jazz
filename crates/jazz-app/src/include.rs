@@ -37,7 +37,7 @@ use jazz::query::{ArraySubquery, ArraySubqueryRequirement};
 use jazz::tools::{ObjectId, QueryResultField, Value};
 
 use crate::error::{Error, Result};
-use crate::query::{Column, Many, NotNull, Nullable, One, Query};
+use crate::query::{Column, Many, NotNull, Nullable, One, Query, Refs};
 use crate::table::{Fields, Implementations, Table};
 use crate::value::ColumnValue;
 
@@ -360,6 +360,8 @@ pub trait Nullability: Copy + Send + 'static {
     type Required<S: Row>: Included;
     #[doc(hidden)]
     const REQUIREMENT: ArraySubqueryRequirement;
+    #[doc(hidden)]
+    const ARRAY_REQUIREMENT: ArraySubqueryRequirement;
 }
 
 /// The column always holds a reference: requiring its row includes the
@@ -367,6 +369,8 @@ pub trait Nullability: Copy + Send + 'static {
 impl Nullability for NotNull {
     type Required<S: Row> = S;
     const REQUIREMENT: ArraySubqueryRequirement = ArraySubqueryRequirement::AtLeastOne;
+    const ARRAY_REQUIREMENT: ArraySubqueryRequirement =
+        ArraySubqueryRequirement::MatchCorrelationCardinality;
 }
 
 /// The column may be null: requiring its row changes nothing, as in
@@ -374,6 +378,7 @@ impl Nullability for NotNull {
 impl Nullability for Nullable {
     type Required<S: Row> = Option<S>;
     const REQUIREMENT: ArraySubqueryRequirement = ArraySubqueryRequirement::Optional;
+    const ARRAY_REQUIREMENT: ArraySubqueryRequirement = ArraySubqueryRequirement::Optional;
 }
 
 /// A forward relation's include: an `Option<S>`, unless required.
@@ -400,6 +405,58 @@ impl<T, S: Row, N: Nullability> OneInclude<T, S, N> {
 impl<T, S: Row, N> IntoInclude<T> for OneInclude<T, S, N> {
     type Output = Option<S>;
     fn into_include(self) -> Include<T, Option<S>> {
+        Include::new(self.subquery)
+    }
+}
+
+impl<T: Table, U: Table, N: Nullability> Refs<T, U, N> {
+    /// Includes the referenced rows as `query` narrows and shapes them.
+    pub fn with<S: Row<Table = U>>(self, query: Query<S>) -> RefsInclude<T, S, N> {
+        RefsInclude {
+            subquery: subquery(query, "id", self.column()),
+            types: PhantomData,
+            nullability: PhantomData,
+        }
+    }
+
+    /// Requires the referenced rows: see [`RefsInclude::require`].
+    pub fn require(self) -> Include<T, Vec<U>> {
+        self.with(Query::all()).require()
+    }
+}
+
+impl<T: Table, U: Table, N: Nullability> IntoInclude<T> for Refs<T, U, N> {
+    type Output = Vec<U>;
+    fn into_include(self) -> Include<T, Vec<U>> {
+        self.with(Query::all()).into_include()
+    }
+}
+
+/// An array forward relation's include: a `Vec<S>` of the rows the array
+/// references that the query matches.
+#[derive(Debug, Clone)]
+pub struct RefsInclude<T, S, N = NotNull> {
+    subquery: ArraySubquery,
+    types: PhantomData<fn() -> (T, S)>,
+    nullability: PhantomData<N>,
+}
+
+impl<T, S: Row, N: Nullability> RefsInclude<T, S, N> {
+    /// Requires the rows, as TypeScript's `requireIncludes` does. On a
+    /// [`NotNull`] column only the rows whose every referenced row is
+    /// there (and readable) are kept. On a [`Nullable`] one every row is
+    /// kept. The include is a `Vec<S>` either way.
+    pub fn require(self) -> Include<T, Vec<S>> {
+        Include::new(ArraySubquery {
+            requirement: N::ARRAY_REQUIREMENT,
+            ..self.subquery
+        })
+    }
+}
+
+impl<T, S: Row, N> IntoInclude<T> for RefsInclude<T, S, N> {
+    type Output = Vec<S>;
+    fn into_include(self) -> Include<T, Vec<S>> {
         Include::new(self.subquery)
     }
 }
