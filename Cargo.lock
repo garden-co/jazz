@@ -1907,6 +1907,7 @@ dependencies = [
  "jazz-model",
  "jazz-protocol",
  "jazz-types",
+ "jsonschema",
  "jsonwebtoken",
  "libc",
  "postcard",

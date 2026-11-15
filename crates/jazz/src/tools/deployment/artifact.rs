@@ -564,15 +564,6 @@ pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> 
     Ok(crate::db::Migrations { schemas, lenses })
 }
 
-/// What a binding's open configuration ships (a `jazz.app.json`, see
-/// [`load_client`]), lowered for a store; none ships nothing.
-pub fn client_migrations(app: Option<&[u8]>) -> Result<crate::db::Migrations, String> {
-    match app {
-        None => Ok(crate::db::Migrations::default()),
-        Some(json) => load_client(json).map_err(|error| error.to_string()),
-    }
-}
-
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
     let root = read_format(APP_FILE, json)?;
     refuse_todos(&root)?;

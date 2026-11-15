@@ -41,6 +41,50 @@ pub struct AppFile {
     pub warnings: Vec<String>,
 }
 
+// The keys each object of the file takes (besides `$comment`), which the
+// JSON Schema in docs/public/schemas/ must list too.
+pub const TOP_KEYS: &[&str] = &[
+    "format",
+    "$schema",
+    "tables",
+    "history",
+    "migrations",
+    "transforms",
+    "slices",
+];
+pub const TABLE_KEYS: &[&str] = &[
+    "columns",
+    "relations",
+    "indexes",
+    "branchBy",
+    "history",
+    "computed",
+    "tsOnly",
+];
+pub const COLUMN_KEYS: &[&str] = &[
+    "type",
+    "enum",
+    "json",
+    "array",
+    "optional",
+    "default",
+    "merge",
+    "references",
+    "transform",
+];
+pub const MIGRATION_KEYS: &[&str] = &[
+    "name",
+    "from",
+    "to",
+    "createTables",
+    "dropTables",
+    "renameTables",
+    "migrate",
+];
+pub const TRANSFORM_KEYS: &[&str] = &["stored", "view"];
+pub const COMPUTED_KEYS: &[&str] = &["type", "from"];
+pub const VERSION_KEYS: &[&str] = &["tables"];
+
 /// Keys of `object` that aren't `allowed` (nor `$comment`) are refused.
 fn only_keys(object: &[(String, Json)], allowed: &[&str], path: &str) -> Result<(), Refusal> {
     for (key, value) in object {
@@ -114,19 +158,7 @@ fn identifier(name: &str, path: &str) -> Result<(), Refusal> {
 
 pub fn read(root: &Json) -> Result<AppFile, Refusal> {
     let top = object(root, "(top)")?;
-    only_keys(
-        top,
-        &[
-            "format",
-            "$schema",
-            "tables",
-            "history",
-            "migrations",
-            "transforms",
-            "slices",
-        ],
-        "(top)",
-    )?;
+    only_keys(top, TOP_KEYS, "(top)")?;
     let mut warnings = Vec::new();
     let tables_json = root
         .get("tables")
@@ -138,7 +170,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
             let path = format!("transforms.{name}");
             identifier(name, &path)?;
             let fields = object(spec, &path)?;
-            only_keys(fields, &["stored", "view"], &path)?;
+            only_keys(fields, TRANSFORM_KEYS, &path)?;
             let side = |key: &str| -> Result<ColumnType, Refusal> {
                 let value = spec.get(key).ok_or_else(|| {
                     refuse(
@@ -185,7 +217,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
                 ));
             }
             let fields = object(version, &path)?;
-            only_keys(fields, &["tables"], &path)?;
+            only_keys(fields, VERSION_KEYS, &path)?;
             let tables = version
                 .get("tables")
                 .ok_or_else(|| refuse(&path, "no `tables`"))?;
@@ -241,19 +273,7 @@ fn read_tables(
         let path = format!("{path}.{name}");
         identifier(name, &path)?;
         let fields = object(table, &path)?;
-        only_keys(
-            fields,
-            &[
-                "columns",
-                "relations",
-                "indexes",
-                "branchBy",
-                "history",
-                "computed",
-                "tsOnly",
-            ],
-            &path,
-        )?;
+        only_keys(fields, TABLE_KEYS, &path)?;
         let current = codegen.is_some();
         for key in ["computed", "tsOnly"] {
             if !current && table.get(key).is_some() {
@@ -290,7 +310,7 @@ fn read_tables(
                 let field_path = format!("{path}.computed.{field}");
                 identifier(field, &field_path)?;
                 let entries = object(spec, &field_path)?;
-                only_keys(entries, &["type", "from"], &field_path)?;
+                only_keys(entries, COMPUTED_KEYS, &field_path)?;
                 let example = "e.g. { \"type\": \"int\", \"from\": [\"score\"] }";
                 let ty = spec.get("type").ok_or_else(|| {
                     refuse(
@@ -531,21 +551,7 @@ fn read_column(name: &str, spec: &Json, path: &str) -> Result<ColumnDescriptor, 
     let (column_type, mut nullable) = read_type(spec, path)?;
     let mut descriptor = ColumnDescriptor::new(name, column_type);
     if let Json::Object(fields) = spec {
-        only_keys(
-            fields,
-            &[
-                "type",
-                "enum",
-                "json",
-                "array",
-                "optional",
-                "default",
-                "merge",
-                "references",
-                "transform",
-            ],
-            path,
-        )?;
+        only_keys(fields, COLUMN_KEYS, path)?;
         if let Some(optional) = spec.get("optional") {
             match optional {
                 Json::Bool(b) => nullable |= b,
@@ -747,19 +753,7 @@ fn read_migration(
     current: &Schema,
 ) -> Result<(String, Option<String>, Vec<PublishTableLens>), Refusal> {
     let fields = object(item, path)?;
-    only_keys(
-        fields,
-        &[
-            "name",
-            "from",
-            "to",
-            "createTables",
-            "dropTables",
-            "renameTables",
-            "migrate",
-        ],
-        path,
-    )?;
+    only_keys(fields, MIGRATION_KEYS, path)?;
     let version = |key: &str| -> Result<Option<String>, Refusal> {
         let Some(value) = item.get(key) else {
             return Ok(None);

@@ -440,7 +440,7 @@ const TYPED: &[&str] = &[
 ];
 
 /// Words a name must be quoted (`` `order` ``) to be read as a name.
-const KEYWORDS: &[&str] = &[
+pub(crate) const KEYWORDS: &[&str] = &[
     "and",
     "or",
     "not",

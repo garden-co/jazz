@@ -2169,3 +2169,205 @@ fn recursive_relations_end_their_queries_at_the_next_field() {
     assert_eq!(reloaded.permissions(), loaded.permissions());
     assert_eq!(reloaded.bundle(), loaded.bundle());
 }
+
+// ---------------------------------------------------------------------------
+// The JSON Schemas editors read (docs/public/schemas/)
+// ---------------------------------------------------------------------------
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn json_schema(file: &str) -> serde_json::Value {
+    let path = repo_root().join("docs/public/schemas").join(file);
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+/// Every app file in the repository: fixtures, examples, codegen test apps.
+fn committed(file: &str) -> Vec<std::path::PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", &format!("*{file}")])
+        .current_dir(repo_root())
+        .output()
+        .expect("git");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| repo_root().join(line))
+        .collect()
+}
+
+#[test]
+fn every_committed_app_file_fits_its_json_schema() {
+    for (file, schema) in [
+        (APP_FILE, "jazz.app.schema.json"),
+        (PERMISSIONS_FILE, "jazz.permissions.schema.json"),
+    ] {
+        let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
+        let files = committed(file);
+        assert!(files.len() > 10, "{file}: {files:?}");
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let errors: Vec<String> = validator
+                .iter_errors(&instance)
+                .map(|e| format!("{} at {}", e, e.instance_path()))
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "{}:\n{}",
+                path.display(),
+                errors.join("\n")
+            );
+        }
+    }
+    // And what the writer writes.
+    let written = write(shared_todos()).unwrap();
+    for (text, schema) in [
+        (&written.app, "jazz.app.schema.json"),
+        (&written.permissions, "jazz.permissions.schema.json"),
+    ] {
+        let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
+        let instance: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(validator.is_valid(&instance), "{schema}");
+    }
+}
+
+fn properties(value: &serde_json::Value) -> BTreeSet<String> {
+    value["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no properties in {value}"))
+        .keys()
+        .filter(|k| *k != "$comment")
+        .cloned()
+        .collect()
+}
+
+fn keys(list: &[&str]) -> BTreeSet<String> {
+    // `slices` and `tsOnly` load (with a warning) but aren't written any
+    // more: the JSON Schema flags them.
+    list.iter()
+        .filter(|k| !matches!(**k, "slices" | "tsOnly"))
+        .map(|k| k.to_string())
+        .collect()
+}
+
+#[test]
+fn the_json_schemas_take_the_keys_the_readers_take() {
+    let app = json_schema("jazz.app.schema.json");
+    let defs = &app["$defs"];
+    for (what, schema, reader) in [
+        ("the top level", properties(&app), keys(app_file::TOP_KEYS)),
+        (
+            "a table",
+            properties(&defs["table"]),
+            keys(app_file::TABLE_KEYS),
+        ),
+        (
+            "a column",
+            properties(&defs["column"]["anyOf"][1]),
+            keys(app_file::COLUMN_KEYS),
+        ),
+        (
+            "a migration",
+            properties(&defs["migration"]),
+            keys(app_file::MIGRATION_KEYS),
+        ),
+        (
+            "a version",
+            properties(&app["properties"]["history"]["additionalProperties"]),
+            keys(app_file::VERSION_KEYS),
+        ),
+        (
+            "a transform",
+            properties(&app["properties"]["transforms"]["additionalProperties"]),
+            keys(app_file::TRANSFORM_KEYS),
+        ),
+        (
+            "a computed field",
+            properties(&defs["table"]["properties"]["computed"]["additionalProperties"]),
+            keys(app_file::COMPUTED_KEYS),
+        ),
+    ] {
+        assert_eq!(schema, reader, "{what}");
+    }
+    let permissions = json_schema("jazz.permissions.schema.json");
+    assert_eq!(
+        properties(&permissions),
+        keys(&["format", "$schema", "defs", "tables"])
+    );
+}
+
+#[test]
+fn the_permissions_json_schema_names_every_grammar_construct() {
+    let text = std::fs::read_to_string(
+        repo_root().join("docs/public/schemas/jazz.permissions.schema.json"),
+    )
+    .unwrap();
+    let words: BTreeSet<&str> = text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .collect();
+    let missing: Vec<&str> = expr::KEYWORDS
+        .iter()
+        .copied()
+        .filter(|keyword| !words.contains(keyword))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "keywords the description doesn't name: {missing:?}"
+    );
+    for construct in [
+        "session.user",
+        "session.identity",
+        "session.identity.subject",
+        "session.identity.issuer",
+        "session.authMode",
+        "session.claims",
+        "$createdBy.identity",
+        "$deletedBy",
+        "$deletedAt",
+        "allowedTo.update",
+        "maxDepth",
+        "recursive(",
+        "union(",
+        "distinct on",
+        "order by",
+        "left join",
+        "id(row)",
+        "id(outer)",
+        "id(frontier)",
+        "param.",
+        "enumcase(",
+        "row(",
+        "json(",
+        "is ",
+    ] {
+        assert!(
+            text.contains(construct),
+            "the description doesn't name `{construct}`"
+        );
+    }
+}
+
+/// A multi-column `select` in a recursive relation's seed and step prints
+/// and reads back as the same policy (the printer refuses a spelling that
+/// doesn't read back).
+#[test]
+fn recursive_relations_with_several_selected_columns_print_and_read_back() {
+    let codegen = shared_todos().codegen;
+    let relations = codegen.relations();
+    let loaded = loaded(shared_todos());
+    let defs = expr::Defs::new();
+    let context = expr::Context {
+        schema: loaded.current_schema(),
+        relations: &relations,
+        defs: &defs,
+    };
+    let text = "exists (from recursive(seed: from todos where todos.owner = session.user select todos.id as id, todos.name as name, step: from todos where todos.id = id(frontier) order by todos.name, todos.id select todos.id as id, todos.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: 3) where todos.id = outer.id)";
+    let ast = expr::parse(text).unwrap_or_else(|e| panic!("{}", e.render(text)));
+    let policy =
+        expr::compile(&ast, &context, "shares").unwrap_or_else(|e| panic!("{}", e.render(text)));
+    let printed = expr::print(&policy, &context, "shares").unwrap_or_else(|e| panic!("{e}"));
+    let again = expr::compile(&expr::parse(&printed).unwrap(), &context, "shares").unwrap();
+    assert_eq!(again, policy, "{printed}");
+}
