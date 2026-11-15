@@ -9,12 +9,12 @@ mod bindings;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bindings::{NewProject, NewTodo, Project, Todo, projects, todos};
+use bindings::{NewProject, NewTodo, Todo, projects, todos};
 use futures::{SinkExt, StreamExt};
 use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, Request};
 use jazz_app::{
-    AppFiles, AppId, Auth, Backend, Config, DeviceKey, Error, Jazz, ReadTier, SessionState,
-    TokenReason,
+    AppFiles, AppId, Auth, Backend, Config, DeviceKey, DurabilityTier, Error, Jazz, ReadTier,
+    SessionState, TokenReason,
 };
 use jazz_server::JazzServer;
 use serde_json::{Value, json};
@@ -23,11 +23,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request as Upgrade, Response as Upgraded};
 
-/// Anyone reads; only an admin (by their claims) makes projects.
+/// Todos are public. A project is private to the user who made it, and
+/// only an admin (by their claims) makes one.
 const PERMISSIONS: &str = r#"{
   "format": 1,
   "tables": {
-    "projects": { "read": "true", "insert": "session.claims.role = 'admin'" },
+    "projects": {
+      "read": "$createdBy.account = session.user",
+      "insert": "session.claims.role = 'admin'"
+    },
     "todos": { "read": "true", "insert": "true", "update": "true", "delete": "true" }
   }
 }"#;
@@ -37,10 +41,71 @@ fn client_files() -> AppFiles {
     AppFiles::new(std::fs::read(format!("{dir}/jazz.app.json")).unwrap(), None)
 }
 
+/// The issuer and key of the app's own JWTs (HS256), as an app's auth
+/// provider would sign them.
+const JWT_ISSUER: &str = "https://auth.test";
+const JWT_KEY: &[u8] = b"the app's signing key";
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn hs256(input: &str, key: &[u8]) -> String {
+    use hmac::Mac as _;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+    mac.update(input.as_bytes());
+    b64(&mac.finalize().into_bytes())
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A JWT for `sub` from `issuer`, expiring at `exp`, signed with `key`.
+fn jwt(sub: &str, issuer: &str, exp: u64, key: &[u8]) -> String {
+    let head = b64(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let claims = b64(json!({ "iss": issuer, "sub": sub, "exp": exp })
+        .to_string()
+        .as_bytes());
+    let input = format!("{head}.{claims}");
+    let signature = hs256(&input, key);
+    format!("{input}.{signature}")
+}
+
+/// The app's check of its own JWT: its signature, issuer and expiry. The
+/// answer holds until the token's `exp`.
+fn verify_jwt(token: &str) -> Option<AuthUser> {
+    use base64::Engine as _;
+    let (input, signature) = token.rsplit_once('.')?;
+    if hs256(input, JWT_KEY) != signature {
+        return None;
+    }
+    let claims: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(input.split('.').nth(1)?)
+            .ok()?,
+    )
+    .ok()?;
+    if claims["iss"] != json!(JWT_ISSUER) {
+        return None;
+    }
+    // The expiry is passed on: the endpoint treats a lapsed answer as no one.
+    Some(AuthUser::new(
+        claims["sub"].as_str()?,
+        claims["exp"].as_u64()?,
+    ))
+}
+
 /// The app's sign-in: `Bearer token-<user>[:admin]` names a user (an admin
-/// with `:admin`); a request without one may be a device account's.
+/// with `:admin`), as does a JWT `verify_jwt` accepts; a request without a
+/// bearer may be a device account's.
 fn authenticate(request: Request) -> impl Future<Output = jazz_app::Result<Option<Answer>>> {
     let answer = match request.bearer() {
+        Some(token) if token.matches('.').count() == 2 => verify_jwt(token).map(Answer::User),
         Some(token) => token.strip_prefix("token-").map(|user| {
             let (user, admin) = match user.split_once(':') {
                 Some((user, "admin")) => (user, true),
@@ -274,9 +339,23 @@ fn bearer(token: &'static str) -> Auth {
     Auth::bearer(move |_reason: TokenReason| async move { Ok(Some(token.to_owned())) })
 }
 
+/// Every project `jazz` reads from the server.
+async fn remote_projects(jazz: &Jazz) -> Vec<String> {
+    jazz.all_with(projects::query(), ReadTier::Remote)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|project| project.name)
+        .collect()
+}
+
+/// Check 2 (a user sees and writes only what the permissions allow) and
+/// check 3 (a second user can't read the first user's private rows), over
+/// the endpoint's sockets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_signed_in_user_syncs_through_the_backend_under_their_permissions() {
     let app = App::start().await;
+    let server = DurabilityTier::GlobalServer;
 
     let alice = Jazz::open(client_files(), app.user(bearer("token-alice:admin")))
         .await
@@ -285,10 +364,24 @@ async fn a_signed_in_user_syncs_through_the_backend_under_their_permissions() {
         panic!("signed in");
     };
     assert_eq!(user.subject, "alice");
-    let project = alice.insert(NewProject::new("Launch")).await.unwrap();
-    let todo = alice.insert(NewTodo::new("Ship it", false)).await.unwrap();
-
-    // The writes reach the backend, through the relay, as alice's.
+    // The core takes alice's project (she is an admin) and her todo.
+    let project = alice
+        .durable(server)
+        .insert(NewProject::new("Launch"))
+        .await
+        .expect("the core takes an admin's project");
+    let todo = alice
+        .durable(server)
+        .insert(NewTodo::new("Ship it", false))
+        .await
+        .unwrap();
+    assert!(
+        app.admitted
+            .lock()
+            .unwrap()
+            .contains(&Admitted::User("alice".into()))
+    );
+    // The backend sees the public todo, through the relay, as alice's.
     let seen: Vec<Todo> = eventually(async || {
         let rows = app
             .backend
@@ -298,48 +391,39 @@ async fn a_signed_in_user_syncs_through_the_backend_under_their_permissions() {
         (!rows.is_empty()).then_some(rows)
     })
     .await;
-    assert_eq!(seen, vec![todo]);
-    let projects_seen: Vec<Project> = eventually(async || {
-        let rows = app
-            .backend
-            .all_with(projects::query(), ReadTier::Remote)
-            .await
-            .unwrap();
-        (!rows.is_empty()).then_some(rows)
-    })
-    .await;
-    assert_eq!(projects_seen, vec![project]);
-    assert!(
-        app.admitted
-            .lock()
-            .unwrap()
-            .contains(&Admitted::User("alice".into()))
-    );
+    assert_eq!(seen, vec![todo.clone()]);
+    assert_eq!(remote_projects(&alice).await, vec![project.name]);
 
-    // Bob is no admin: the core refuses his project, and his todo goes through.
+    // Bob is no admin: the core refuses his project; his todo goes through.
     let bob = Jazz::open(client_files(), app.user(bearer("token-bob")))
         .await
         .expect("bob signs in");
-    let _ = bob.insert(NewProject::new("Not bob's to make")).await;
-    let bobs = bob.insert(NewTodo::new("Bob's todo", false)).await.unwrap();
-    eventually(async || {
-        let rows = app
-            .backend
+    assert!(
+        bob.durable(server)
+            .insert(NewProject::new("Not bob's to make"))
+            .await
+            .is_err(),
+        "the core refuses a non-admin's project"
+    );
+    let bobs = bob
+        .durable(server)
+        .insert(NewTodo::new("Bob's todo", false))
+        .await
+        .unwrap();
+    // Bob reads the public todos, alice's among them, and none of her
+    // private projects.
+    let todos_bob_sees = eventually(async || {
+        let rows = bob
             .all_with(todos::query(), ReadTier::Remote)
             .await
             .unwrap();
-        rows.contains(&bobs).then_some(())
+        (rows.len() == 2).then_some(rows)
     })
     .await;
-    let names: Vec<String> = app
-        .backend
-        .all_with(projects::query(), ReadTier::Remote)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|project| project.name)
-        .collect();
-    assert_eq!(names, vec!["Launch".to_owned()]);
+    assert!(todos_bob_sees.contains(&todo) && todos_bob_sees.contains(&bobs));
+    assert_eq!(remote_projects(&bob).await, Vec::<String>::new());
+    // Nor does the backend's own user.
+    assert_eq!(remote_projects(&app.backend).await, Vec::<String>::new());
 
     bob.shutdown().await.unwrap();
     alice.shutdown().await.unwrap();
@@ -401,39 +485,32 @@ async fn the_backend_acts_as_a_request_user() {
         Err(Error::SignedOut)
     ));
 
+    // Checks 2 and 3, acting as each user on the backend.
+    let server = DurabilityTier::GlobalServer;
     let alice = app.endpoint.for_user(&as_alice).await.unwrap();
     assert_eq!(alice.account(), Some(account));
-    alice.insert(NewProject::new("Alice's")).await.unwrap();
+    alice
+        .durable(server)
+        .insert(NewProject::new("Alice's"))
+        .await
+        .expect("the core takes an admin's project");
     let bob = app.endpoint.for_user(&as_bob).await.unwrap();
-    // Bob's permissions refuse his project at the core; his todo goes through.
-    let _ = bob.insert(NewProject::new("Bob's")).await;
-    let bobs = bob.insert(NewTodo::new("Bob's todo", false)).await.unwrap();
+    assert!(
+        bob.durable(server)
+            .insert(NewProject::new("Bob's"))
+            .await
+            .is_err(),
+        "the core refuses a non-admin's project"
+    );
+    bob.durable(server)
+        .insert(NewTodo::new("Bob's todo", false))
+        .await
+        .unwrap();
+    assert_eq!(remote_projects(&alice).await, vec!["Alice's".to_owned()]);
+    assert_eq!(remote_projects(&bob).await, Vec::<String>::new());
     // A user's handle never stops the backend.
     bob.shutdown().await.unwrap();
     assert!(app.backend.all(todos::query()).await.is_ok());
-
-    // Another user, through the endpoint, sees what the core took.
-    let reader = Jazz::open(client_files(), app.user(bearer("token-carol")))
-        .await
-        .unwrap();
-    eventually(async || {
-        let rows = reader
-            .all_with(todos::query(), ReadTier::Remote)
-            .await
-            .unwrap();
-        rows.contains(&bobs).then_some(())
-    })
-    .await;
-    let names: Vec<String> = eventually(async || {
-        let rows = reader
-            .all_with(projects::query(), ReadTier::Remote)
-            .await
-            .unwrap();
-        (!rows.is_empty()).then(|| rows.into_iter().map(|project| project.name).collect())
-    })
-    .await;
-    assert_eq!(names, vec!["Alice's".to_owned()]);
-    reader.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -527,5 +604,316 @@ async fn the_endpoint_refuses_what_it_should() {
     );
     let forged = serde_json::to_vec(&json!({ "auth": { "jwt_token": "a.b.c" } })).unwrap();
     assert_eq!(app.endpoint.admits(&as_carol, &forged).await.unwrap(), None);
+    app.stop().await;
+}
+
+/// Check 1: a missing, expired, wrong-issuer or badly signed JWT signs no
+/// one in, on the account routes, the sockets and `for_user`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_expired_or_foreign_jwt_is_refused() {
+    let app = App::start().await;
+    let hour = now() + 3600;
+    let valid = jwt("gail", JWT_ISSUER, hour, JWT_KEY);
+    let refused = [
+        ("missing", None),
+        ("expired", Some(jwt("gail", JWT_ISSUER, now() - 1, JWT_KEY))),
+        (
+            "wrong issuer",
+            Some(jwt("gail", "https://evil.test", hour, JWT_KEY)),
+        ),
+        (
+            "bad signature",
+            Some(jwt("gail", JWT_ISSUER, hour, b"another key")),
+        ),
+    ];
+    let sign_in = app.path("accounts/backend-sign-in");
+    let request = |token: Option<&str>| {
+        let request = Request::new("POST", &sign_in);
+        match token {
+            Some(token) => request.header("authorization", format!("Bearer {token}")),
+            None => request,
+        }
+    };
+    let ok = app.endpoint.handle(request(Some(&valid))).await;
+    assert_eq!(ok.status, 200, "a valid JWT signs in");
+    let stating_gail =
+        serde_json::to_vec(&json!({ "auth": { "backend_session": { "user_id": "gail" } } }))
+            .unwrap();
+    for (what, token) in &refused {
+        let response = app.endpoint.handle(request(token.as_deref())).await;
+        assert_eq!(
+            (response.status, response.text_body().as_str()),
+            (401, "signed_out"),
+            "{what}"
+        );
+        let mut socket = request(token.as_deref());
+        socket.path = app.path("ws");
+        assert_eq!(
+            app.endpoint.admits(&socket, &stating_gail).await.unwrap(),
+            None,
+            "{what}"
+        );
+        assert!(
+            matches!(app.endpoint.for_user(&socket).await, Err(Error::SignedOut)),
+            "{what}"
+        );
+    }
+    // A client whose bearer is an expired JWT never opens.
+    let expired = jwt("gail", JWT_ISSUER, now() - 1, JWT_KEY);
+    let expired = Auth::bearer(move |_| {
+        let expired = expired.clone();
+        async move { Ok(Some(expired)) }
+    });
+    assert!(matches!(
+        Jazz::open(client_files(), app.user(expired)).await,
+        Err(Error::SignedOut)
+    ));
+    // The valid one syncs.
+    let valid = Auth::bearer(move |_| {
+        let valid = valid.clone();
+        async move { Ok(Some(valid)) }
+    });
+    let gail = Jazz::open(client_files(), app.user(valid)).await.unwrap();
+    gail.durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo::new("Gail's", false))
+        .await
+        .unwrap();
+    gail.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// What reaches the core is built by the endpoint: the backend secret and
+/// exactly one identity, read from `auth` only. A credential stated
+/// anywhere else (a top-level `jwt_token` beside the secret the endpoint
+/// adds would have read as the backend's own trusted link) refuses the
+/// socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_vouched_credential_reaches_the_core() {
+    let app = App::start().await;
+    app.endpoint.create_account_for("hal").await.unwrap();
+    let seed: [u8; 32] = rand_seed();
+    let device_token = jazz_app::jazz::tools::identity::mint_jazz_self_signed_token(
+        &seed,
+        "urn:jazz:local-first",
+        &app.app_id.to_string(),
+        3600,
+    )
+    .unwrap();
+    let socket = Request::new("GET", app.path("ws"));
+    let as_hal = socket.clone().header("authorization", "Bearer token-hal");
+    let forwarded = |request: Request, prelude: Value| {
+        let endpoint = app.endpoint.clone();
+        async move {
+            endpoint
+                .forwarded_prelude(&request, &serde_json::to_vec(&prelude).unwrap())
+                .await
+                .unwrap()
+        }
+    };
+    let keys = |value: &Value| {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+
+    // A device account: its token, and the secret.
+    let guest = forwarded(
+        socket.clone(),
+        json!({ "peer_identity": "p", "auth": { "jwt_token": device_token }, "bundle": "laxer" }),
+    )
+    .await
+    .expect("a device account is admitted");
+    assert_eq!(keys(&guest), ["auth", "bundle", "peer_identity"]);
+    assert_eq!(keys(&guest["auth"]), ["backend_secret", "jwt_token"]);
+    assert_eq!(guest["auth"]["jwt_token"], json!(device_token));
+    assert_eq!(guest["bundle"], json!(app.backend.bundle().unwrap()));
+
+    // A user: the vouched session, and the secret.
+    let user = forwarded(
+        as_hal.clone(),
+        json!({ "auth": { "jwt_token": null, "backend_session": { "user_id": "hal", "claims": { "role": "admin" } } } }),
+    )
+    .await
+    .expect("hal is admitted");
+    assert_eq!(keys(&user), ["auth", "bundle"]);
+    assert_eq!(keys(&user["auth"]), ["backend_secret", "backend_session"]);
+    // The claims are the ones `authenticate` gave, not the client's.
+    assert_eq!(
+        user["auth"]["backend_session"]["claims"],
+        json!({ "role": "member" })
+    );
+
+    // A TS client's prelude repeats `auth` beside it, with `sub`: admitted,
+    // and nothing but the rebuilt fields reaches the core.
+    let ts_shaped = forwarded(
+        socket.clone(),
+        json!({
+            "peer_identity": "p",
+            "jwt_token": device_token,
+            "backend_secret": null,
+            "sub": "s",
+            "auth": { "jwt_token": device_token, "backend_secret": null, "sub": "s" },
+            "jazz_renewal": 1,
+        }),
+    )
+    .await
+    .expect("a TS client's prelude is admitted");
+    assert_eq!(keys(&ts_shaped), ["auth", "bundle", "peer_identity"]);
+    assert_eq!(keys(&ts_shaped["auth"]), ["backend_secret", "jwt_token"]);
+
+    // Credentials outside `auth` that differ from it, secrets, or requests
+    // only a backend makes.
+    let refused = [
+        json!({ "jwt_token": device_token, "auth": {} }),
+        json!({ "jwt_token": device_token }),
+        json!({ "jwt_token": "another", "auth": { "jwt_token": device_token } }),
+        json!({ "backend_secret": "x", "auth": { "jwt_token": device_token } }),
+        json!({ "backend_session": { "user_id": "hal" }, "auth": { "jwt_token": device_token } }),
+        json!({ "auth": { "jwt_token": device_token, "backend_session": { "user_id": "hal" } } }),
+        json!({ "auth": { "jwt_token": device_token, "backend_secret": "x" } }),
+        json!({ "auth": { "jwt_token": device_token }, "bootstrap_catalogue": true }),
+        json!({ "auth": { "jwt_token": device_token }, "local_first_audience": "https://x" }),
+        json!({ "auth": { "admin_secret": "x", "backend_session": { "user_id": "hal" } } }),
+        json!({ "peer_identity": 1, "auth": { "jwt_token": device_token } }),
+    ];
+    for prelude in refused {
+        assert_eq!(
+            forwarded(as_hal.clone(), prelude.clone()).await,
+            None,
+            "{prelude}"
+        );
+    }
+    app.stop().await;
+}
+
+fn rand_seed() -> [u8; 32] {
+    let mut seed = [0; 32];
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = (now() as u8).wrapping_add(i as u8).wrapping_mul(31);
+    }
+    seed
+}
+
+/// An `authenticate` answer whose expiry has passed signs no one in,
+/// anywhere: `backend-sign-in`, `backend-user`, sockets, `for_user` and
+/// `account_for` (S1). Without the check, sign-in answers 200 with the
+/// account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_answer_is_no_one() {
+    let app = App::start().await;
+    app.endpoint.create_account_for("ivy").await.unwrap();
+    let lapsed = jwt("ivy", JWT_ISSUER, now() - 5, JWT_KEY);
+    // The test's `verify_jwt` passes a lapsed `exp` through, as an app
+    // that forgets to check it would.
+    let request = Request::new("POST", app.path("accounts/backend-user"))
+        .header("authorization", format!("Bearer {lapsed}"));
+    let user = app.endpoint.handle(request.clone()).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&user.body).unwrap(),
+        json!({ "user": null })
+    );
+    assert_eq!(app.endpoint.account_for(&request).await.unwrap(), None);
+    assert!(matches!(
+        app.endpoint.for_user(&request).await,
+        Err(Error::SignedOut)
+    ));
+    // Nor does sign-in answer with her account, nor a socket open.
+    let sign_in = Request {
+        path: app.path("accounts/backend-sign-in"),
+        ..request.clone()
+    };
+    let signed_in = app.endpoint.handle(sign_in).await;
+    assert_eq!(
+        (signed_in.status, signed_in.text_body().as_str()),
+        (401, "signed_out")
+    );
+    let socket = Request {
+        path: app.path("ws"),
+        method: "GET".into(),
+        ..request
+    };
+    let stating_ivy =
+        serde_json::to_vec(&json!({ "auth": { "backend_session": { "user_id": "ivy" } } }))
+            .unwrap();
+    assert_eq!(
+        app.endpoint.admits(&socket, &stating_ivy).await.unwrap(),
+        None
+    );
+    app.stop().await;
+}
+
+/// Check 4: a malformed or oversized prelude, an oversized message and a
+/// flood of sockets are refused, and the endpoint keeps serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_and_oversized_input_is_refused_and_the_endpoint_serves_on() {
+    let app = App::start().await;
+    let ws = app.url.replacen("http", "ws", 1) + &format!("/apps/{}/ws", app.app_id);
+    // Sends `messages` on a raw socket, and reads until the endpoint closes it.
+    let refused = async |messages: Vec<Vec<u8>>| {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&ws).await.unwrap();
+        for message in messages {
+            if socket.send(Message::Binary(message.into())).await.is_err() {
+                break;
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(Ok(message)) = socket.next().await {
+                if message.is_close() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the endpoint closes the socket");
+    };
+    refused(vec![b"\xff\x00not json".to_vec()]).await;
+    refused(vec![b"[1, 2, 3]".to_vec()]).await;
+    refused(vec![vec![b' '; 70 * 1024]]).await;
+    let mut big = br#"{"auth":{"jwt_token":""#.to_vec();
+    big.extend(std::iter::repeat_n(b'a', 70 * 1024));
+    big.extend(br#""}}"#);
+    refused(vec![big]).await;
+
+    // An admitted socket that sends more than the core takes in one
+    // message is closed with 1009.
+    app.endpoint.create_account_for("jo").await.unwrap();
+    let prelude =
+        serde_json::to_vec(&json!({ "auth": { "backend_session": { "user_id": "jo" } } })).unwrap();
+    let incoming = futures::stream::iter(vec![prelude, vec![0; 3 * 1024 * 1024]])
+        .chain(futures::stream::pending());
+    let closed = app
+        .endpoint
+        .serve_socket(
+            Request::new("GET", app.path("ws")).header("authorization", "Bearer token-jo"),
+            Box::pin(incoming),
+            futures::sink::drain(),
+        )
+        .await;
+    assert_eq!(closed.code, 1009, "{closed:?}");
+
+    // Past the socket cap, a socket is turned away with 1013.
+    let capped = app.endpoint.clone().max_sockets(0);
+    let closed = capped
+        .serve_socket(
+            Request::new("GET", app.path("ws")),
+            Box::pin(futures::stream::pending()),
+            futures::sink::drain(),
+        )
+        .await;
+    assert_eq!(closed.code, 1013);
+    // An oversized request body is refused.
+    let mut sign_in = Request::new("POST", app.path("accounts/backend-sign-in"));
+    sign_in.body = vec![0; 65 * 1024];
+    assert_eq!(app.endpoint.handle(sign_in).await.status, 413);
+
+    // And the endpoint still serves a user.
+    let kim = Jazz::open(client_files(), app.user(bearer("token-kim")))
+        .await
+        .unwrap();
+    kim.durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo::new("Still serving", false))
+        .await
+        .unwrap();
+    kim.shutdown().await.unwrap();
     app.stop().await;
 }

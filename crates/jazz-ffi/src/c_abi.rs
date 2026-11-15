@@ -442,11 +442,14 @@ pub unsafe extern "C" fn jazz_string_free(text: *mut c_char) {
 }
 
 /// A host's token callback: called on a thread of its own (it may block)
-/// with `reason` (`"connect"`, `"renew"`, `"expired"`, `"refresh"`); returns
-/// the token as a string allocated with `malloc` (Go's `C.CString`), which
-/// jazz frees, or NULL when no one is signed in.
-pub type JazzTokenCallback =
-    Option<unsafe extern "C" fn(ctx: *mut c_void, reason: *const c_char) -> *mut c_char>;
+/// with `reason` (`"connect"`, `"renew"`, `"expired"`, `"refresh"`). Returns
+/// 0 with `*token` set to the token, a `malloc`ed string (Go's `C.CString`)
+/// jazz frees, or to NULL when no one is signed in (the app stops); or
+/// non-zero when the fetch failed (a network blip): the session stays and
+/// asks again, and `*token`, if set, is the failure's message (freed too).
+pub type JazzTokenCallback = Option<
+    unsafe extern "C" fn(ctx: *mut c_void, reason: *const c_char, token: *mut *mut c_char) -> i32,
+>;
 
 unsafe extern "C" {
     fn free(pointer: *mut c_void);
@@ -485,17 +488,23 @@ pub unsafe extern "C" fn jazz_open_user(
         let host = crate::core::HostTokens(std::sync::Arc::new(move |reason: &str| {
             let ctx = &ctx;
             let reason = CString::new(reason).unwrap_or_default();
+            let mut token: *mut c_char = ptr::null_mut();
             // SAFETY: per `jazz_open_user`'s contract.
-            let token = unsafe { cb(ctx.0, reason.as_ptr()) };
-            if token.is_null() {
-                return None;
+            let failed = unsafe { cb(ctx.0, reason.as_ptr(), &mut token) };
+            let text = if token.is_null() {
+                None
+            } else {
+                // SAFETY: the callback sets a NUL-terminated `malloc`ed string.
+                let text = unsafe { CStr::from_ptr(token) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { free(token.cast()) };
+                Some(text)
+            };
+            if failed != 0 {
+                return Err(text.unwrap_or_else(|| "the token callback failed".into()));
             }
-            // SAFETY: the callback returns a NUL-terminated `malloc`ed string.
-            let text = unsafe { CStr::from_ptr(token) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { free(token.cast()) };
-            Some(text)
+            Ok(text)
         }));
         Ok(Box::into_raw(Box::new(JazzHandle(Core::open_with_tokens(
             config,
@@ -593,7 +602,7 @@ pub type JazzSocketClosed =
     Option<unsafe extern "C" fn(ctx: *mut c_void, code: u16, reason: *const c_char)>;
 
 /// The `/jazz` endpoint of a backend handle. `options_json`:
-/// `{"basePath"?: "/jazz", "sessionTtlSecs"?}` (or NULL).
+/// `{"basePath"?: "/jazz", "sessionTtlSecs"?, "maxSockets"?}` (or NULL).
 ///
 /// # Safety
 /// `handle` is an open backend handle; `auth_cb` and `ctx` stay valid, from
@@ -643,6 +652,10 @@ pub unsafe extern "C" fn jazz_endpoint_new(
             auth,
             options.get("basePath").and_then(Json::as_str),
             options.get("sessionTtlSecs").and_then(Json::as_u64),
+            options
+                .get("maxSockets")
+                .and_then(Json::as_u64)
+                .and_then(|max| usize::try_from(max).ok()),
         )?;
         Ok(Box::into_raw(Box::new(JazzEndpoint(endpoint))))
     })

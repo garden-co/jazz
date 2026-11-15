@@ -97,6 +97,7 @@ impl EndpointCore {
         authenticate: Arc<HostAuthFn>,
         base_path: Option<&str>,
         session_ttl_secs: Option<u64>,
+        max_sockets: Option<usize>,
     ) -> Result<Self> {
         let auth = move |request: Request| {
             let callback = authenticate.clone();
@@ -132,6 +133,10 @@ impl EndpointCore {
         }
         if let Some(secs) = session_ttl_secs {
             endpoint = endpoint.session_ttl(std::time::Duration::from_secs(secs));
+        }
+        // Sockets past it are refused with close 1013 (default 10 000).
+        if let Some(max) = max_sockets {
+            endpoint = endpoint.max_sockets(max);
         }
         let (jazz, schema, relations, has_server) = backend.parts();
         Ok(Self {
