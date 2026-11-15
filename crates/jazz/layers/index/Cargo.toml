@@ -1,0 +1,15 @@
+[package]
+name = "jazz-index"
+version = "0.1.0"
+edition = "2024"
+description = "Jazz's specialised index kinds (SPEC 20): text analysis and impacts, vector scores, geo cells. Pure functions, no storage."
+
+[features]
+default = ["text", "vector", "geo"]
+# Each kind is a feature so its WASM size can be measured and dropped (SPEC 20.12).
+text = ["dep:jazz-text"]
+vector = []
+geo = []
+
+[dependencies]
+jazz-text = { workspace = true, optional = true }

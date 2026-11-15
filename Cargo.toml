@@ -4,6 +4,7 @@ members = [
   "crates/benchmark-guard",
   "crates/jazz",
   "crates/jazz/layers/db",
+  "crates/jazz/layers/index",
   "crates/jazz/layers/model",
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
@@ -59,6 +60,7 @@ sqlite-wasm-rs = { path = "vendor/sqlite-wasm-rs" }
 [workspace.dependencies]
 jazz = { path = "crates/jazz", default-features = false }
 jazz-db = { path = "crates/jazz/layers/db", default-features = false }
+jazz-index = { path = "crates/jazz/layers/index" }
 jazz-model = { path = "crates/jazz/layers/model", default-features = false }
 jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
 jazz-types = { path = "crates/jazz/layers/types", default-features = false }
