@@ -1143,6 +1143,41 @@ describe("createJazz", () => {
     await expect(jazz.revokeUser("")).rejects.toThrow(/pass the user's id/);
   }, 30_000);
 
+  // The HTTP stream hands the revoke's auth_failed and its close over in one
+  // read: the client went offline: auth on a socket, but read the stream's
+  // close as a dropped connection and kept reopening (refused each time).
+  it("ends a user's open HTTP stream session at once on revokeUser, as a refusal", async () => {
+    const signedOut = new Set<string>();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId && !signedOut.has(userId) ? { userId, expiresAt: inAnHour() } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const streamPath = `/jazz/apps/${jazz.appId}/stream`;
+    expect(requestPaths).toContain(streamPath);
+
+    signedOut.add("alice");
+    expect(await jazz.revokeUser("alice")).toBe(1);
+    await expect
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    // A refusal: the client stops opening streams.
+    const opened = requestPaths.filter((path) => path === streamPath).length;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(requestPaths.filter((path) => path === streamPath).length).toBe(opened);
+    expect(alice.db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "auth" });
+  }, 30_000);
+
   it("picks up a user's changed claims when the session re-authenticates", async () => {
     // Anyone reads their own todos; only an admin (a claim) may create one.
     const byRole = s.definePermissions(app, ({ policy, session }) => {

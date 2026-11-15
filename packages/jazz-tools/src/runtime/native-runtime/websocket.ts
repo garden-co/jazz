@@ -321,6 +321,14 @@ export class WebSocketCarrier {
   private closing = false;
   private terminated = false;
   private lastInbound = performance.now();
+  /**
+   * Settles once the messages received so far are handled. A socket's
+   * error and close are reported only then: the HTTP stream hands a
+   * backend's last message and its close over in one read, and a refusal
+   * (`auth_failed`, say after `jazz.revokeUser`) read after the close would
+   * count as a dropped connection, retried for good.
+   */
+  private inbound: Promise<void> = Promise.resolve();
   private silenceTimer: ReturnType<typeof setTimeout> | undefined;
   private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   /** Where to renew this session in place, when it rides on the app's cookie. */
@@ -366,9 +374,18 @@ export class WebSocketCarrier {
         this.close();
       },
     );
+    const afterInbound = (run: () => void) => {
+      // A listener that throws fails as it would in the event itself,
+      // without stopping the messages after it.
+      this.inbound = this.inbound.then(run).catch((error: unknown) => {
+        queueMicrotask(() => {
+          throw error;
+        });
+      });
+    };
     this.socket.addEventListener("message", (event) => {
       this.lastInbound = performance.now();
-      void this.handleMessage(event.data).catch((error) => {
+      const handled = this.handleMessage(event.data).catch((error) => {
         this.reportTerminal(
           {
             code: "protocol_error",
@@ -380,23 +397,28 @@ export class WebSocketCarrier {
         );
         this.close();
       });
+      this.inbound = Promise.all([this.inbound, handled]).then(() => {});
     });
-    this.socket.addEventListener("error", (event) => {
-      this.reportTerminal({
-        code: "websocket_error",
-        retry: "later",
-        // A native socket's error event says nothing; the HTTP stream and a
-        // backend client's failed upgrade hand an Error that does.
-        message: event instanceof Error ? event.message : "websocket transport error",
-      });
-    });
+    this.socket.addEventListener("error", (event) =>
+      afterInbound(() =>
+        this.reportTerminal({
+          code: "websocket_error",
+          retry: "later",
+          // A native socket's error event says nothing; the HTTP stream and a
+          // backend client's failed upgrade hand an Error that does.
+          message: event instanceof Error ? event.message : "websocket transport error",
+        }),
+      ),
+    );
     this.socket.addEventListener("close", (event) => {
       const close = websocketCloseDetails(event);
-      this.reportTerminal({
-        code: "websocket_closed",
-        retry: "later",
-        message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
-      });
+      afterInbound(() =>
+        this.reportTerminal({
+          code: "websocket_closed",
+          retry: "later",
+          message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
+        }),
+      );
     });
   }
 
