@@ -163,7 +163,9 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   server would let this user `read` / `insert` / `update` / `delete`, without
   doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
   take `id`; `update` takes `id` and an optional `row` patch. `null` (no
-  server, or no decision) means unknown. Not inside a transaction.
+  server, or no decision) means unknown. It is advice: `true` doesn't promise
+  the write will succeed, as the data or permissions may change first. Not
+  inside a transaction.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`
