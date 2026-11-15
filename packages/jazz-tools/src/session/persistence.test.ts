@@ -441,3 +441,77 @@ it("finishes a discard another tab held off on the next page load, forgetting th
   await expect(next.reopenLocalFirst()).rejects.toThrow("keeps no device account");
   await next.close();
 });
+
+it("refuses a sign-in as a device account another tab's discard forgot while it opened", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  const pending = new Set<string>();
+  const pendingDiscards = {
+    record: (account: string) => void pending.add(account),
+    clear: (account: string) => void pending.delete(account),
+    list: () => [...pending],
+  };
+  // The store's exclusive lock, as tab X's wipe holds it.
+  let releaseLock!: () => void;
+  let lockFree: Promise<void> = Promise.resolve();
+  let inDelete!: () => void;
+  const deleting = new Promise<void>((resolve) => (inDelete = resolve));
+  let otherTabOpen = true;
+  const deleteSignedOutStore = vi.fn(
+    async (_account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+      if (otherTabOpen) return "held" as const;
+      if (finishing && !finishing.wanted()) return "cancelled" as const;
+      lockFree = new Promise<void>((resolve) => (releaseLock = resolve));
+      inDelete();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await finishing?.forget();
+      releaseLock();
+      return "deleted" as const;
+    },
+  );
+  const tabX = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient: vi.fn(async () => ({ shutdown: async () => {} })),
+    deleteSignedOutStore,
+    pendingDiscards,
+  });
+  await tabX.createLocalFirst();
+  const account = tabX.getSnapshot().account!.id;
+  await tabX.logout({ discardUnsynced: true });
+  await settle();
+  expect(pending.has(account)).toBe(true);
+  // Tab X finishes the discard; tab Y reopens the account just then.
+  otherTabOpen = false;
+  const finishing = tabX.retry();
+  await deleting;
+  const tabY = await createJazzSessionOwner({
+    accounts: await manager(),
+    // Its client waits for the store's lock, as a browser open does.
+    openClient: vi.fn(async () => {
+      await lockFree;
+      return { shutdown: async () => {} };
+    }),
+    pendingDiscards,
+  });
+  const reopening = tabY.reopenLocalFirst();
+  await finishing;
+  await expect(reopening).rejects.toThrow("discarded on this device");
+  expect(tabY.getSnapshot()).toMatchObject({ status: "signed-out", recovery: "action" });
+  expect(tabY.getSnapshot().account).toBeUndefined();
+  await tabX.close();
+  await tabY.close();
+});

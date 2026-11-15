@@ -3,6 +3,7 @@ import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import {
   attachSessionCoreConsumer,
   createJazzSessionOwner,
+  PENDING_WIPE_FAILURE_SPACING_MS,
   SESSION_VIEW_ACKNOWLEDGE_TIMEOUT_MS,
   replaceJazzSessionClient,
   switchJazzSessionUser,
@@ -718,17 +719,31 @@ describe("Jazz session lifecycle", () => {
       const deleteSignedOutStore = vi.fn(async (_account: string) => {
         throw new Error("IndexedDB unavailable");
       });
+      let now = 1_000_000;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
       const { session, net } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
       net.online = true;
       await tick();
-      // Each settled operation runs another pass.
+      // Each settled operation runs another pass. Quick passes count once:
+      // a failure that passes can't use the attempts up in seconds.
       for (let i = 0; i < 3; i++) {
         await session.createLocalFirst();
         await tick();
         await session.logout();
         await tick();
       }
-      expect(deleteSignedOutStore).toHaveBeenCalledTimes(5);
+      expect(deleteSignedOutStore).toHaveBeenCalledTimes(7);
+      expect(session.getSnapshot().error).toBeUndefined();
+      // Failures spread over time (at least 10 minutes in all) give up.
+      for (let i = 0; i < 4; i++) {
+        now += PENDING_WIPE_FAILURE_SPACING_MS;
+        await session.createLocalFirst();
+        await tick();
+        await session.logout();
+        await tick();
+      }
+      clock.mockRestore();
+      const calls = deleteSignedOutStore.mock.calls.length;
       // Still pending, and the signed-out session says so.
       expect([...pending]).toEqual(["discarded"]);
       expect(session.getSnapshot()).toMatchObject({
@@ -736,7 +751,7 @@ describe("Jazz session lifecycle", () => {
         error: { message: expect.stringContaining("couldn't wipe the signed-out account's data") },
       });
       await expect(session.retry()).rejects.toThrow("couldn't wipe");
-      expect(deleteSignedOutStore).toHaveBeenCalledTimes(6);
+      expect(deleteSignedOutStore).toHaveBeenCalledTimes(calls + 1);
       expect([...pending]).toEqual(["discarded"]);
       await session.close();
     } finally {

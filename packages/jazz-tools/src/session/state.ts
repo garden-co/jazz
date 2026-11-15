@@ -1,4 +1,5 @@
 import {
+  accountForgotten,
   ensureAutomaticLocalFirst,
   forgetDeviceAccount,
   keepDeviceKeyOnSignOut,
@@ -155,8 +156,25 @@ export function jazzSessionSignOuts(session: SessionCore<unknown>): number {
  * whenever the client reconnects.
  */
 export const SIGN_OUT_RETRY_MS = 2_000;
-/** Failed deletes after which a pending discard's wipe is given up (it stays on the device). */
+/**
+ * Failed deletes after which passes stop trying a pending discard on their
+ * own (it stays pending and visible; `retry()` tries again). Failures count
+ * at most once per {@link PENDING_WIPE_FAILURE_SPACING_MS}, so a passing
+ * failure can't use them up in seconds: giving up takes at least ~10 minutes.
+ */
 const MAX_PENDING_WIPE_FAILURES = 5;
+/** @internal */
+export const PENDING_WIPE_FAILURE_SPACING_MS = 150_000;
+
+/** A sign-in as a device account a discard on this device forgot while it opened. */
+export class DiscardedDeviceAccountError extends Error {
+  override readonly name = "DiscardedDeviceAccountError";
+  constructor() {
+    super(
+      "Jazz couldn't sign in: this device account was discarded on this device (signOut({ discardUnsynced })) while it opened, so its data and key are gone here. Restore it with its key (restoreDeviceAccount) to use it again.",
+    );
+  }
+}
 const SIGN_OUT_RETRY_MAX_MS = 60_000;
 const upgradeListeners = new WeakMap<object, Set<() => void>>();
 
@@ -332,7 +350,7 @@ export async function createJazzSessionOwner<
       "Jazz signed out, but another tab still has this account open, so its data stays on this device (that tab may still upload its unsynced writes). Close that tab, then call retry() to finish wiping it (discardUnsynced).",
     );
   let finishing: Promise<void> | undefined;
-  const wipeFailures = new Map<string, number>();
+  const wipeFailures = new Map<string, { count: number; at: number }>();
   // Discards whose wipe failed (an explicit try, or every automatic one):
   // their entry stays, and they are the signed-out error until a wipe
   // succeeds or someone signs in as that account. Passes on their own stop
@@ -399,8 +417,12 @@ export async function createJazzSessionOwner<
             // a few passes (an explicit retry gives up at once), but stays
             // pending, and visible: the signed-out error says so until a
             // wipe succeeds. Never dropped while its data may be here.
-            const failed = (wipeFailures.get(account) ?? 0) + 1;
-            wipeFailures.set(account, failed);
+            const now = Date.now();
+            const last = wipeFailures.get(account);
+            // Counted at most once per spacing: quick passes don't add up.
+            const counts = !last || now - last.at >= PENDING_WIPE_FAILURE_SPACING_MS;
+            const failed = (last?.count ?? 0) + (counts ? 1 : 0);
+            if (counts) wipeFailures.set(account, { count: failed, at: now });
             if (explicit || failed >= MAX_PENDING_WIPE_FAILURES) {
               console.error(
                 `Jazz couldn't wipe a discarded account's data (${failed} failed attempt(s)); it stays on this device until retry() wipes it.`,
@@ -686,7 +708,28 @@ export async function createJazzSessionOwner<
       await accounts.settleSelection(operation === "retry");
       if (token !== generation) throw superseded();
       client = selected ? await openClient(selected) : undefined;
+      // A discard in another tab may have wiped and forgotten this device
+      // account while its client waited for the store: the store it opened
+      // is a fresh, empty one, and a reload couldn't reopen it. Say so
+      // instead of signing in.
+      if (
+        client &&
+        selected?.identity.issuer === "urn:jazz:local-first" &&
+        options.pendingDiscards &&
+        (await accountForgotten(accounts, selected.id))
+      ) {
+        const fresh = client;
+        client = undefined;
+        await fresh.shutdown().catch(() => {});
+        accounts.logout();
+        selected = undefined;
+        await accounts.settleSelection().catch(() => {});
+        const error = new DiscardedDeviceAccountError();
+        if (token === generation) publish({ status: "signed-out", error, recovery: "action" });
+        throw error;
+      }
     } catch (cause) {
+      if (cause instanceof DiscardedDeviceAccountError) throw cause;
       if (token === generation)
         publish({ status: "error", account: selected, error: toError(cause), recovery: "session" });
       // A sign-out that left its upload pending still uploads it.
