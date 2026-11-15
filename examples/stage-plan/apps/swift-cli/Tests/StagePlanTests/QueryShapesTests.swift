@@ -12,8 +12,8 @@ final class QueryShapesTests: XCTestCase {
     }
 
     func testHopsUnionHistoryDeletedPartsAndUploads() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Hops")
         let load = try await app.addTask("Load in", to: show)
         let sound = try await app.addTask("Sound check", to: show)
@@ -95,13 +95,8 @@ private enum Nodes {
 
 final class GatherTests: XCTestCase {
     func testGatherFollowsASelfRelation() async throws {
-        let server = try await TestServer()
-        let jazz = try await Jazz.Client.open(
-            app: treeApp,
-            config: .backend(
-                appId: server.server.appId, permissions: treePermissions, serverUrl: server.server.url,
-                backendSecret: server.server.backendSecret, adminSecret: server.server.adminSecret,
-                user: "00000000-0000-4000-8000-0000000000f2"))
+        let relay = try await TestRelay(app: treeApp, permissions: treePermissions)
+        let jazz = try await relay.client(auth: .deviceKey(try Jazz.generateDeviceKey()))
         let root = try await jazz.insert(NewNode(name: "root", parentId: nil))
         let mid = try await jazz.insert(NewNode(name: "mid", parentId: root.id))
         _ = try await jazz.insert(NewNode(name: "leaf", parentId: mid.id))

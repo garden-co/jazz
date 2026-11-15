@@ -1,12 +1,13 @@
 ---
 title: Swift
-description: "Open a Jazz app from Swift with the Jazz Swift package and typed bindings generated from jazz.app.json."
+description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from jazz.app.json."
 ---
 
-A Swift program can open your app from the same `jazz.app.json` and `jazz.permissions.json` as every
-other language, with typed bindings generated from them. As a backend, it publishes the app's
-permissions bundle when it starts and then acts as one user of the app. As a client, it syncs with
-your server. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
+For apps: run your backend in TypeScript, Rust or Go.
+
+A Swift app is an end-user client of your app. It opens the same `jazz.app.json` as every other
+language, with typed bindings generated from it, signs a user in, and syncs through your backend's
+Jazz endpoint. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
 `async`, and subscriptions are `AsyncSequence`s.
 
 CI builds and tests the Swift package on Linux only, with command-line tools and servers. It
@@ -76,19 +77,8 @@ gives `JazzApp.Task`, not `Task`. For each table, it gives you:
 
 ## Open the app
 
-<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
-  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-backend
-</include>
-
-`StagePlanApp.permissions()` reads `jazz.permissions.json`, which the example ships as a SwiftPM
-resource. The backend needs the sync server's admin secret (`adminSecret:`) to publish the bundle,
-and its backend secret (`backendSecret:`) to vouch for the user it acts as. Never ship those
-secrets in an app on users' devices. `try await jazz.account()` gives the account id of the user
-it acts as.
-
-An app on a user's device opens as an end user instead. It syncs through your app's Jazz endpoint
-(its backend's `createJazz` handler, never the sync server itself), signed in with a device
-account or with your own sign-in's bearer tokens:
+The app syncs through your app's Jazz endpoint (its backend's `createJazz` handler, never the sync
+server itself), signed in with a device account or with your own sign-in's bearer tokens:
 
 <include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-client
@@ -105,7 +95,11 @@ Before the process exits, call `try await jazz.close()`. It ends every live `wat
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Swift
 tab for each example. `examples/stage-plan/apps/swift-cli` in the repository is a complete
-command-line tool over StagePlan's files.
+command-line client of StagePlan: it signs in with a device account (its key in a file, mode
+0600) or a bearer token, and creates a show, lists, adds and moves tasks.
+
+A device key is the account: keep it as a password in the Keychain on Apple platforms, and in a
+file only its user can read on Linux. The Jazz Swift package has no helper for either yet.
 
 ## Computed fields and transforms
 
@@ -139,7 +133,7 @@ On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live resu
 
 Every call `throws(JazzError)`. The cases are `refused` (validation, permissions or not supported
 yet), `io`, `closed`, `decoding`, `cancelled` (the calling task was cancelled),
-`permissionDenied` (the app's permissions refused it, seen when waiting for the `global` tier),
+`permissionDenied` (your backend's permissions refused it, seen when waiting for the `global` tier),
 `notSupported` and `conflict` (a serializable transaction lost to another write: retry it).
 
 ## Relations, transactions and tiers
@@ -194,9 +188,12 @@ Not supported yet:
   or tested for them yet, and there are no prebuilt XCFrameworks.
 - Prebuilt `libjazz_ffi` and XCFrameworks: build the library from the release's source, as above.
 - A SwiftUI `Binding` for `JazzText`.
-- Keychain storage for device keys: keep the key from `Jazz.generateDeviceKey()` with your own
-  Keychain code. (`JazzQuery` and `JazzSession`, the `@Observable` models for SwiftUI, exist for
-  Apple platforms only, and CI, which runs on Linux, doesn't build or test them.)
+- Running a backend in Swift (publishing permissions, acting for users) or serving the app's Jazz
+  endpoint: run your backend in TypeScript, Rust or Go.
+- Keychain (or file) storage for device keys: keep the key from `Jazz.generateDeviceKey()` with
+  your own code.
+- An `@Observable` session model for SwiftUI: follow `jazz.session`. (`JazzQuery` exists for Apple
+  platforms only, and CI, which runs on Linux, doesn't build or test it.)
 - Anonymous (guest) users, as in TypeScript.
 - Subscribing to history queries.
 - Parts of large values inside includes: parts are for root queries.
