@@ -925,7 +925,11 @@ ways). A version that isn't, but whose rows pass unchanged to a later one
 an enum may gain variants at the end), is joined to the next such version
 by the identity step that change implies, as files written before alpha.65
 hold them (their `migrations create` wrote no migration for an index,
-merge-strategy or column-order change). Any other is refused.
+merge-strategy or column-order change). Any other loads with a warning
+(such files are what `jazz-tools validate` wrote before alpha.65 while a
+migration was still to be written), and `generate` refuses it, since
+bindings must not ship a version clients couldn't open; `migrations create`
+writes the migration that connects it.
 
 **Relation names.** A relation may not take the name of a column of its
 table, nor `id`, as the TS DSL refused.

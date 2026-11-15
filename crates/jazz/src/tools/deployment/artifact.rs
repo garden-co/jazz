@@ -345,6 +345,7 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
         permissions_file::read(&permissions_json, history.current_schema(), &relations)
             .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
     let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    let stranded = history.stranded.clone();
     Ok(LoadedApp {
         history,
         bundle,
@@ -354,6 +355,7 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
             .warnings
             .into_iter()
             .map(|w| format!("{APP_FILE}: {w}"))
+            .chain(stranded)
             .collect(),
     })
 }
@@ -423,6 +425,7 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
         current,
         schemas,
         migrations: bound.schema.migrations,
+        stranded: Vec::new(),
     };
     check_decoded_client_migrations(history.bundle(), history.current)
         .map_err(|error| refuse(format!("migrations: {error}")))?;
@@ -500,6 +503,15 @@ impl AppDefinition {
         &self.warnings
     }
 
+    /// History versions no chain of migrations connects to the current one
+    /// (and whose rows would need transforming), as refusals: also among
+    /// [`AppDefinition::warnings`]. `generate` refuses a file with any, since
+    /// bindings must not ship a version clients couldn't open;
+    /// `migrations create` writes what connects them.
+    pub fn stranded(&self) -> &[String] {
+        &self.history.stranded
+    }
+
     /// The bundle a client ships (JSON: `{schemas, migrations}`, what
     /// [`published::client_migrations`](super::published::client_migrations)
     /// lowers), exactly as [`load_client`] lowers it from the file.
@@ -524,6 +536,7 @@ pub fn load_app(json: &[u8]) -> Result<AppDefinition, ArtifactError> {
     // Lowering for a client must succeed too.
     lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    let stranded = history.stranded.clone();
     Ok(AppDefinition {
         history,
         codegen: app_file.codegen,
@@ -531,6 +544,7 @@ pub fn load_app(json: &[u8]) -> Result<AppDefinition, ArtifactError> {
             .warnings
             .into_iter()
             .map(|w| format!("{APP_FILE}: {w}"))
+            .chain(stranded)
             .collect(),
     })
 }
@@ -714,6 +728,11 @@ struct History {
     /// Oldest first, policy-free, the current one last.
     schemas: Vec<(SchemaHash, Schema)>,
     migrations: Vec<PublishMigrationRequest>,
+    /// Versions no chain of migrations connects to the current one, and
+    /// whose rows would need transforming: why, for each. Loaders warn
+    /// (`jazz-tools validate` in .64 wrote such files while a migration was
+    /// still to be written); `generate` refuses them.
+    stranded: Vec<String>,
 }
 
 impl History {
@@ -802,9 +821,14 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             }
         }
     };
+    let mut stranded = Vec::new();
+    let mut stranded_hashes = Vec::new();
     loop {
         let reached = reached_from(&migrations);
-        let Some(index) = schemas.iter().position(|(hash, _)| !reached.contains(hash)) else {
+        let Some(index) = schemas
+            .iter()
+            .position(|(hash, _)| !reached.contains(hash) && !stranded_hashes.contains(hash))
+        else {
             break;
         };
         let (hash, schema) = &schemas[index];
@@ -819,11 +843,13 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
                 .find(|(_, h)| *h == hash)
                 .map(|(n, _)| n.clone())
                 .expect("a history version");
-            return Err(ArtifactError::new(format!(
-                "history.{name}: no migration leads from it to the current `tables`, directly or \
-                 through other versions, so clients holding its rows couldn't open; add one \
-                 (`jazz-tools migrations create` writes it) or remove the version"
-            )));
+            stranded.push(format!(
+                "{APP_FILE}: history.{name}: no migration leads from it to the current `tables`, \
+                 directly or through other versions, so clients holding its rows couldn't open; \
+                 add one (`jazz-tools migrations create` writes it) or remove the version"
+            ));
+            stranded_hashes.push(*hash);
+            continue;
         };
         migrations.push(PublishMigrationRequest {
             from_hash: hash.to_string(),
@@ -835,6 +861,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
         current,
         schemas,
         migrations,
+        stranded,
     })
 }
 
