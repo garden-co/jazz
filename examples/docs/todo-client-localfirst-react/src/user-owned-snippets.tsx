@@ -1,29 +1,5 @@
-import { schema as s } from "jazz-tools";
 import { useAll, useDb, useSession } from "jazz-tools/react";
-
-// #region owned-schema
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
-// #endregion owned-schema
-
-// #region owned-permissions
-s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ $createdBy: session.user });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ $createdBy: session.user });
-  policy.todos.allowDelete.where({ $createdBy: session.user });
-});
-// #endregion owned-permissions
+import { app } from "./recipes/user-owned/jazz.generated.js";
 
 // #region owned-query
 export function MyTodos() {
@@ -53,30 +29,3 @@ export function AddTodo() {
   return <button onClick={() => handleAdd("Buy milk")}>Add</button>;
 }
 // #endregion owned-insert
-
-// #region owned-schema-explicit
-const schemaExplicit = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      owner_id: s.uuid(),
-    },
-    {},
-  ),
-};
-
-type ExplicitAppSchema = s.Schema<typeof schemaExplicit>;
-export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit, {
-  migrations: "none",
-});
-// #endregion owned-schema-explicit
-
-// #region owned-permissions-explicit
-s.definePermissions(explicitApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.whereOld({ owner_id: session.user });
-  policy.todos.allowDelete.where({ owner_id: session.user });
-});
-// #endregion owned-permissions-explicit
