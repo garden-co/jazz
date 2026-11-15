@@ -1,0 +1,118 @@
+# jazz-ffi
+
+A dynamic, JSON-in/JSON-out layer over [`jazz-app`](../jazz-app), so the
+Swift, Kotlin and Go bindings only (de)serialize JSON. Two surfaces over one
+handle:
+
+- **UniFFI** (proc-macros, no UDL), for Swift and Kotlin: `JazzHandle`
+  (`open`, `account`, `all`, `one`, `insert`, `update`, `delete`,
+  `subscribe`, `shutdown`), `Subscription` (`cancel`), `SubscriptionListener`
+  (`on_delta`, `on_error`) and `JazzError` (`Refused { reason }`,
+  `Io { reason }`, `Closed`). The names `shutdown` and `reason` avoid
+  clashing with Kotlin's `AutoCloseable.close` and `Throwable.message`.
+- **A C ABI** declared in [`include/jazz_ffi.h`](include/jazz_ffi.h), for Go
+  via cgo: `jazz_open`, `jazz_call`, `jazz_subscribe`, `jazz_unsubscribe`,
+  `jazz_close`, `jazz_string_free`.
+
+The crate builds as `lib`, `cdylib` and `staticlib`. UniFFI is pinned to
+`=0.32.2`, and only this crate depends on it (jazz-wasm, jazz-napi and
+jazz-rn don't).
+
+## Generating Swift and Kotlin sources
+
+```sh
+cargo build -p jazz-ffi
+cargo run -p jazz-ffi --features bindgen --bin uniffi-bindgen -- \
+  generate --library target/debug/libjazz_ffi.so --language swift --out-dir out/swift
+cargo run -p jazz-ffi --features bindgen --bin uniffi-bindgen -- \
+  generate --library target/debug/libjazz_ffi.so --language kotlin --out-dir out/kotlin
+```
+
+On macOS the library is `libjazz_ffi.dylib`. The namespace is `jazz_ffi`, so
+the Kotlin package is `uniffi.jazz_ffi`, and there are no `uniffi.toml`
+overrides. CI runs [`dev/gates/jazz-ffi.sh`](../../dev/gates/jazz-ffi.sh) in
+the `rust-workspace` partition. It links `libjazz_ffi.a` into
+[`tests/c/jazz_ffi_test.c`](tests/c/jazz_ffi_test.c) and runs it, writes both
+languages' sources to `target/jazz-ffi-bindings`, and uploads them as the
+`jazz-ffi-bindings` artifact. The `test-jazz-ffi-bindings` job runs
+[`dev/gates/jazz-ffi-compile-bindings.sh`](../../dev/gates/jazz-ffi-compile-bindings.sh),
+which compiles the generated Kotlin (with JNA) and Swift sources together
+with small smoke programs ([`tests/kotlin`](tests/kotlin),
+[`tests/swift`](tests/swift)) and runs them against the library.
+
+## Config
+
+```json
+{ "app": "<jazz.app.json text>", "permissions": "<jazz.permissions.json text>",
+  "appId": "<uuid>", "serverUrl": "http://localhost:1625",
+  "storage": "memory" | "persistent", "dataDir": "./data",
+  "backendSecret": "…", "adminSecret": "…",
+  "session": { "issuer": "jazz:backend", "subject": "alice" } }
+```
+
+With `permissions`, the handle opens as the app's backend. It publishes the
+permissions bundle (which takes `adminSecret`), then acts as the session's
+user, and `account()` returns that user's account id (`session.user`). The
+backend needs `serverUrl`, `appId`, `backendSecret`, `adminSecret` and
+`session.subject`.
+
+Without `permissions`, it opens as a local client. `appId` is required for
+`"persistent"` storage.
+
+## Values, queries, rows, deltas
+
+Values are plain JSON, typed by the schema:
+
+| Column type        | JSON                                           |
+| ------------------ | ---------------------------------------------- |
+| string, uuid, enum | string                                         |
+| int, float         | number                                         |
+| bigint             | decimal string (a number is accepted on input) |
+| boolean            | boolean                                        |
+| timestamp          | number, ms since the epoch                     |
+| json               | any JSON                                       |
+| bytes              | base64 string                                  |
+| array              | JSON array                                     |
+| optional           | `null`                                         |
+
+Enums with payloads read as `{ "case": …, "fields": { … } }`. Text-merge
+columns (`merge: "text"`) take plain string writes.
+
+- **Query:** `{ "table", "where": [{ "column", "op", "value"? }], "orderBy":
+[{ "column", "direction" }], "limit", "offset" }`. The `where` entries are
+  ANDed. Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `contains` (string or
+  array column), `in`, `isNull`, `isNotNull`. Columns also include `id`,
+  `$createdAt` and `$updatedAt`.
+- **Row:** `{ "id", "<column>": … }`, with the authored column names. An
+  insert may give its own `id`.
+- **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",
+"coalesced" }`. The first delta has `reset: true` and holds the full result.
+  `coalesced` stays `false` until the engine coalesces lagging readers
+  ([jazz#5635](https://github.com/garden-co/jazz/pull/5635)). Deltas carry no
+  positions, so an ordered subscription re-sorts locally. A row that only
+  moved is left out.
+
+Listeners run on a thread owned by the subscription, so they may call back
+into the handle. Every method blocks and is safe to call from any thread.
+
+On the C ABI, `*err` is `{"kind":"refused"|"io"|"closed","message":…}`.
+Returned strings belong to the caller, who frees them with
+`jazz_string_free`. Strings passed to a callback are valid only during that
+call.
+
+## Not supported yet
+
+These are refused with `Refused`, and the message starts with "not supported
+yet":
+
+- includes (nested related rows);
+- connecting to a sync server as an end user (with a JWT);
+- writing enums with payloads;
+- a session issuer other than `jazz:backend`;
+- transactions, and with them reads inside transactions.
+
+Computed columns and transforms are the language bindings' job: this layer
+reads and writes the stored values.
+
+Writes are local-first, as in jazz-app. A write that the server's permissions
+refuse is not refused by the call. It just never syncs.
