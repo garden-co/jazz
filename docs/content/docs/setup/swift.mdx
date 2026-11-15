@@ -9,12 +9,13 @@ permissions bundle when it starts and then acts as one user of the app. As a cli
 your server. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
 `async`, and subscriptions are `AsyncSequence`s.
 
-This release builds and tests Swift on Linux and macOS: command-line tools and servers. iOS and
-macOS UI apps aren't built or tested yet (see [Not supported yet](#not-supported-yet)).
+CI builds and tests the Swift package on Linux only, with command-line tools and servers. It
+should work on macOS, but isn't tested there yet. iOS and macOS UI apps aren't built or tested yet
+(see [Not supported yet](#not-supported-yet)).
 
 ## Install
 
-The package isn't published yet. Build it from the Jazz repository, which needs Rust and Swift 5.9
+The package isn't published yet. Build it from the Jazz repository, which needs Rust and Swift 6.0
 or newer:
 
 ```bash
@@ -78,30 +79,79 @@ To connect to your server as a client instead:
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-client
 </include>
 
-Before the process exits, call `try await jazz.close()`.
+Before the process exits, call `try await jazz.close()`. It ends every live `watch` and
+`subscribe` loop with `JazzError.closed`.
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Swift
 tab for each example. `examples/stage-plan/apps/swift-cli` in the repository is a complete
 command-line tool over StagePlan's files.
 
+## Computed fields and transforms
+
+If `jazz.app.json` declares computed fields or transforms, the bindings declare a
+`JazzApp.Computed` protocol. It has one method per computed field (`tasksPriority(score:)`) and a
+`View`/`Stored` pair per transform (`isoDateView(_:)`, `isoDateStored(_:)`).
+`JazzApp.open(_:computed:)` takes your implementation, so a missing method is a compile error:
+
+```swift
+struct AppComputed: JazzApp.Computed {
+    func tasksPriority(score: Int) -> JazzApp.TaskPriority { score > 5 ? .high : .low }
+    func isoDateView(_ stored: Date) -> String { ISO8601DateFormatter().string(from: stored) }
+    func isoDateStored(_ view: String) -> Date { ISO8601DateFormatter().date(from: view)! }
+}
+
+let jazz = try await JazzApp.open(config, computed: AppComputed())
+```
+
+Rows hold the computed values and the view form of transformed columns. Inserts and patches take
+the view form and write the stored one. Filters on a transformed column compare stored values.
+
+## SwiftUI and errors
+
+On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live result for a view, like
+`useAll` in TypeScript:
+
+```swift
+@State var tasks = JazzQuery(jazz, JazzApp.tasks.query().orderBy(JazzApp.tasks.rank))
+// tasks.rows, tasks.isLoading, tasks.error
+```
+
+Every call `throws(JazzError)`. The cases are `refused` (validation, permissions or not supported
+yet), `io`, `closed` and `decoding`.
+
+## Relations, transactions and tiers
+
+Each relation is a row property, filled when the query includes it and `nil` otherwise:
+`JazzApp.tasks.query().include(JazzApp.tasks.show)` fills `task.show`. A relation narrows like a
+query: `JazzApp.shows.tasks.orderBy(JazzApp.tasks.rank).limit(3)`, plus a nested `.include(…)` or
+`.required()`. `query.select(columns…)` reads only some columns into a `Decodable` type of yours,
+with `jazz.all(selection, as: MyType.self)`.
+
+`jazz.transaction(commit:) { tx in … }` runs a serializable transaction. It commits when the
+closure returns, rolls back when the closure throws, and rethrows that error. Reads take a
+`tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
+`jazz.waitForSync(.global)` waits until everything written so far has reached the server.
+
 ## Not supported yet
+
+These are refused with `JazzError.notSupported` (or when generating):
 
 - iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
   or tested for them yet, and there are no prebuilt XCFrameworks.
 - Installing the package from a URL: depend on a local checkout by path.
-- Computed fields and transforms. `jazz-tools generate` refuses an app that declares them, so
-  there's no `JazzComputed` protocol yet.
-- Includes and relations: the bindings leave relations out. Query the related table by its id
-  column instead.
-- Mergeable text (`"merge": "text"`, like StagePlan's `tasks.notes`). It reads and writes as a
-  plain `String?`, and a write replaces the whole value.
+- Editing mergeable text (`"merge": "text"`, like StagePlan's `tasks.notes`). It reads as a plain
+  `String?`, and a write replaces the whole value.
+- Connecting as an end user (JWT, device accounts) and session state: open the app as a backend.
+- Files and streams.
+- `hopTo`, `gather`, `union` and history queries, and permission advice.
+- `offset` in an include, and `required` on reverse relations or optional references.
 - Payload enums, nested rows and other column types the bindings can't type: they're refused when
   generating.
-- Transactions, and choosing a durability tier for reads or writes.
-- Connecting as an end user with a JWT.
-- Non-finite floats (`NaN`, infinities) read back as `null`, so they fail to decode into a `Double`.
+- Non-finite floats (`NaN`, infinities) read back as `null`. In a `Double` column that fails to
+  decode. In a nullable `Double?` column, it silently reads as `nil`.
 - Positions in subscription deltas: `subscribe` deltas carry none, and `watch` re-sorts its rows
   locally by the query's `orderBy`.
 
-A backend's write that the server's permissions refuse doesn't throw. Writes are local-first, so it
-stays in the local store and never syncs. Check permissions before you write.
+A write that the server's permissions refuse doesn't throw by default. Writes are local-first, so
+it stays in the local store and never syncs. Write with `tier: .global` (or call
+`waitForSync(.global)`) to get `JazzError.permissionDenied` instead.
