@@ -269,13 +269,11 @@ function seedScenario(context: JazzContext): void {
   });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- testApp rows are loosely typed
-function sortNames(rows: Array<{ [column: string]: any }>): string[] {
+function sortNames(rows: ReadonlyArray<{ readonly name: string }>): string[] {
   return rows.map((row) => row.name).sort();
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- testApp rows are loosely typed
-function sortGrantRoles(rows: Array<{ [column: string]: any }>): string[] {
+function sortGrantRoles(rows: ReadonlyArray<{ readonly grant_role: string }>): string[] {
   return rows.map((row) => row.grant_role).sort();
 }
 
