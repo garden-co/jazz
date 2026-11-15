@@ -101,6 +101,23 @@ fn a_text_edit_merges_over_changes_its_writer_did_not_see() {
     );
     assert!(refused(json!([{ "kind": "poke", "column": "notes" }])).contains("kind must be"));
     assert!(
+        refused(json!([{ "kind": "splice", "column": "title", "units": "words", "splices": [] }]))
+            .contains("edits[0].units must be")
+    );
+    assert!(refused(json!([{ "kind": "splice", "column": "title", "splices": [{ "at": 0, "delete": "2" }] }]))
+        .contains("delete"));
+    let missing = jazz.edit_text(
+        "tasks".into(),
+        "01a1e200-0000-7000-8000-00000000dead".into(),
+        "notes".into(),
+        "a".into(),
+        "b".into(),
+    );
+    assert!(
+        matches!(&missing, Err(JazzError::Refused { reason }) if reason.contains("no tasks row")),
+        "{missing:?}"
+    );
+    assert!(
         refused(json!([{ "kind": "text", "column": "nope", "text": "x", "editedFrom": "y" }]))
             .contains("no column nope")
     );
