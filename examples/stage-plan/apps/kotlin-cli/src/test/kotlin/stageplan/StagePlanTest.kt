@@ -117,6 +117,8 @@ class StagePlanTest {
             val me = jazz.account()!!
             val show = showNamed(jazz, "Encore")
             val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"))
+            // Permissions let a task be assigned only to the show's crew.
+            jazz.insert(jazzapp.ShowCrewTable, jazzapp.NewShowCrew(showId = show.id, crewId = ada.id, account = me, role = jazzapp.ShowCrewRole.Chief))
             val load = addTask(jazz, show, "Load in")
             addTask(jazz, show, "Sound check")
             jazz.update(Tasks, load.id) { assigneeId(ada.id) }
@@ -131,9 +133,9 @@ class StagePlanTest {
                 listOf("Load in" to TaskStatus.Todo, "Sound check" to TaskStatus.Todo),
                 DocsSnippets.select(jazz, show.id).sortedBy { it.first },
             )
-            // A required include keeps only tasks whose assignee exists.
-            val assigned = jazz.all(Tasks.where(Tasks.showId eq show.id).include(Tasks.assignee.required()))
-            assertEquals(listOf("Load in"), assigned.map { it[Tasks.title] })
+            // A required include (through a non-optional reference) keeps only rows whose target is readable.
+            val withAuthors = jazz.all(Comments.where(Comments.taskId eq load.id).include(Comments.author.required()))
+            assertEquals(listOf("Ada", "Ada"), withAuthors.map { it[Comments.author]?.name })
             // Subscriptions deliver included rows, and an update when a related row changes.
             val seen = kotlinx.coroutines.channels.Channel<List<String?>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
             val job = launch {

@@ -25,7 +25,18 @@ public abstract class Table<Row : Any, Insert : Any, P : Patch>(
     public val newPatch: () -> P,
 ) {
     /** Every row of the table; narrow it with [Query.where]. */
-    public fun query(): Query<Row> = Query(tableName, rowSerializer)
+    public fun query(): Query<Row> = Query(tableName, rowSerializer, source = this)
+
+    /**
+     * A row as the native core returned it, as the row class reads it:
+     * transforms applied (stored → view) and computed fields added, with
+     * the app's `JazzComputed` ([implementations]). Generated for apps that
+     * declare any.
+     */
+    public open fun fromStored(row: JsonObject, implementations: Any?): JsonObject = row
+
+    /** An insert's or patch's values as the native core stores them: transforms applied (view → stored). */
+    public open fun toStored(values: JsonObject, implementations: Any?): JsonObject = values
 
     /** `query().where(...)`. */
     public fun where(vararg conditions: Condition): Query<Row> = query().where(*conditions)
@@ -91,6 +102,8 @@ public data class Query<Row : Any>(
     val offset: Int? = null,
     val includes: List<Relation<*, *>> = emptyList(),
     val columns: List<String>? = null,
+    /** The table object it reads, for its transforms and computed fields. */
+    val source: Table<*, *, *>? = null,
 ) {
     public fun where(vararg conditions: Condition): Query<Row> = copy(conditions = this.conditions + conditions)
     public fun orderBy(vararg orders: Order): Query<Row> = copy(orders = this.orders + orders)
@@ -155,7 +168,7 @@ internal fun JsonArray.objects(): List<JsonObject> = map { it as JsonObject }
 
 /** Brings the rows [relations] lead to along with each row: read them with [JazzRow.get]. */
 public fun <Row : Any> Query<Row>.include(vararg relations: Relation<Row, *>): Query<JazzRow<Row>> =
-    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes + relations, columns)
+    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes + relations, columns, source)
 
 /** More relations for a query that already includes some. */
 @JvmName("includeMore")
@@ -164,7 +177,7 @@ public fun <Row : Any> Query<JazzRow<Row>>.include(vararg relations: Relation<Ro
 
 /** Only these columns of each row (and its `id`): read them with [JazzRow.get]. */
 public fun <Row : Any> Query<Row>.select(vararg columns: Column<*>): Query<JazzRow<Row>> =
-    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes, columns.map { it.name })
+    Query(table, JazzRowSerializer(rowSerializer), conditions, orders, limit, offset, includes, columns.map { it.name }, source)
 
 /** Only these columns, for a query that already includes relations. */
 @JvmName("selectMore")
@@ -192,4 +205,24 @@ internal fun orderJson(orders: List<Order>): JsonArray = buildJsonArray {
             },
         )
     }
+}
+
+/** [row] through [table]'s transforms and computed fields, and each included row through its own. */
+internal fun prepareRow(table: Table<*, *, *>?, includes: List<Relation<*, *>>, row: JsonObject, implementations: Any?): JsonObject {
+    if (table == null) return row
+    var out = table.fromStored(row, implementations)
+    if (includes.isEmpty()) return out
+    val fields = out.toMutableMap()
+    for (relation in includes) {
+        val target = relation.target
+        val nested = relation.nestedIncludes()
+        when (val value = fields[relation.name]) {
+            is JsonObject -> fields[relation.name] = prepareRow(target, nested, value, implementations)
+            is JsonArray -> fields[relation.name] =
+                JsonArray(value.map { if (it is JsonObject) prepareRow(target, nested, it, implementations) else it })
+            else -> {}
+        }
+    }
+    out = JsonObject(fields)
+    return out
 }

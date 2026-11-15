@@ -211,14 +211,16 @@ fn every_app_generates_its_committed_kotlin_byte_for_byte() {
 }
 
 #[test]
-fn kotlin_refuses_computed_fields_and_edited_bindings() {
+fn kotlin_refuses_payload_enums_and_edited_bindings() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
     let error = generate(
         Lang::Kotlin,
         &std::fs::read(dir.join("jazz.app.json")).unwrap(),
     )
     .unwrap_err();
-    assert!(error.to_string().contains("not supported yet"), "{error}");
+    // The fixture's payload enum `review` isn't supported in Kotlin yet.
+    assert!(error.is_unsupported(), "{error}");
+    assert!(error.to_string().contains("enum-with-payload"), "{error}");
 
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/notes");
     let generated = generate(

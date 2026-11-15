@@ -55,15 +55,19 @@ public data class Delta<Row>(
 )
 
 /** An open app. Every call may be made from any coroutine; [close] when done. */
-public class Jazz internal constructor(private val native: Native) : AutoCloseable {
+public class Jazz internal constructor(
+    private val native: Native,
+    /** The app's `JazzComputed`, for transforms and computed fields. */
+    private val implementations: Any? = null,
+) : AutoCloseable {
     public companion object {
         /** How [open] reaches jazz-ffi; replace it to open through something else. */
         @Volatile
         public var opener: Native.Opener = Native.Opener { config -> openReflectively("tools.jazz.UniffiNative", config) }
 
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
-        public suspend fun open(app: String, config: JazzConfig): Jazz = io {
-            Jazz(opener.open(config.toJson(app)))
+        public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz = io {
+            Jazz(opener.open(config.toJson(app)), implementations)
         }
 
         private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
@@ -74,19 +78,21 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
 
     /** Every row [query] matches. */
     public suspend fun <Row : Any> all(query: Query<Row>): List<Row> = io {
-        jazzJson.decodeFromString(ListSerializer(query.rowSerializer), native.all(query.toJson()))
+        (jazzJson.parseToJsonElement(native.all(query.toJson())) as JsonArray).map { decode(query, it as JsonObject) }
     }
 
     /** The first row [query] matches, or `null`. */
     public suspend fun <Row : Any> one(query: Query<Row>): Row? = io {
-        native.one(query.toJson())?.let { jazzJson.decodeFromString(query.rowSerializer, it) }
+        native.one(query.toJson())?.let { decode(query, jazzJson.parseToJsonElement(it) as JsonObject) }
     }
 
     /** Inserts [row] into [table]; returns the stored row with its `id`. */
     public suspend fun <Row : Any, Insert : Any, P : Patch> insert(table: Table<Row, Insert, P>, row: Insert): Row =
         io {
-            val json = jazzJson.encodeToString(table.insertSerializer, row)
-            jazzJson.decodeFromString(table.rowSerializer, native.insert(table.tableName, json))
+            val values = jazzJson.encodeToJsonElement(table.insertSerializer, row) as JsonObject
+            val json = table.toStored(values, implementations).toString()
+            val stored = jazzJson.parseToJsonElement(native.insert(table.tableName, json)) as JsonObject
+            jazzJson.decodeFromJsonElement(table.rowSerializer, table.fromStored(stored, implementations))
         }
 
     /** Changes the row [id] of [table]: `jazz.update(Tasks, id) { status(TaskStatus.Done) }`. */
@@ -96,7 +102,8 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
         patch: P.() -> Unit,
     ): Unit = io {
         val p = table.newPatch().apply(patch)
-        native.update(table.tableName, id, p.toJson())
+        val values = jazzJson.parseToJsonElement(p.toJson()) as JsonObject
+        native.update(table.tableName, id, table.toStored(values, implementations).toString())
     }
 
     /** Deletes the row [id] of [table]. */
@@ -110,8 +117,8 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
      */
     public fun <Row : Any> subscribe(query: Query<Row>): Flow<Delta<Row>> = raw(query).map { d ->
         Delta(
-            added = d.added.map { jazzJson.decodeFromJsonElement(query.rowSerializer, it) },
-            updated = d.updated.map { jazzJson.decodeFromJsonElement(query.rowSerializer, it) },
+            added = d.added.map { decode(query, it) },
+            updated = d.updated.map { decode(query, it) },
             removed = d.removed,
             reset = d.reset,
             coalesced = d.coalesced,
@@ -129,7 +136,7 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
             if (d.reset) rows.clear()
             for (id in d.removed) rows.remove(id)
             for (row in d.added + d.updated) rows[(row["id"] as JsonPrimitive).content] = row
-            emit(query.sort(rows.values.toList()).map { jazzJson.decodeFromJsonElement(query.rowSerializer, it) })
+            emit(query.sort(rows.values.toList()).map { decode(query, it) })
         }
     }.distinctUntilChanged()
 
@@ -170,6 +177,9 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
             cancel?.invoke()
         }
     }.buffer(Channel.UNLIMITED)
+
+    private fun <Row : Any> decode(query: Query<Row>, row: JsonObject): Row =
+        jazzJson.decodeFromJsonElement(query.rowSerializer, prepareRow(query.source, query.includes, row, implementations))
 
     /** Closes the app; later calls fail with [JazzException.Closed]. */
     override fun close(): Unit = native.close()

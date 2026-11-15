@@ -30,6 +30,8 @@ public sealed class Relation<Owner : Any, Target : Any>(
     public val target: Table<Target, *, *> by lazy(target)
 
     internal abstract fun spec(): JsonObject
+
+    internal abstract fun nestedIncludes(): List<Relation<*, *>>
 }
 
 /** A forward relation: this row's column references at most one [Target] row. */
@@ -55,6 +57,8 @@ public class One<Owner : Any, Target : Any> private constructor(
         One(name, targetFn, isRequired, columns, includes + relations)
 
     override fun spec(): JsonObject = includeSpec(name, isRequired, subQuery(emptyList(), emptyList(), null, columns, includes))
+
+    override fun nestedIncludes(): List<Relation<*, *>> = includes
 }
 
 /** A reverse relation: the [Target] rows whose forward relation points at this row. */
@@ -94,6 +98,8 @@ public class Many<Owner : Any, Target : Any> private constructor(
     public fun include(vararg relations: Relation<Target, *>): Many<Owner, Target> = copy(includes = includes + relations)
 
     override fun spec(): JsonObject = includeSpec(name, false, subQuery(conditions, orders, limit, columns, includes))
+
+    override fun nestedIncludes(): List<Relation<*, *>> = includes
 }
 
 private fun includeSpec(name: String, required: Boolean, query: JsonObject?): JsonObject = buildJsonObject {

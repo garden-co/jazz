@@ -30,3 +30,38 @@ public object JazzBytes : KSerializer<ByteArray> {
 
 /** [serializer] with `null` as a value too: what generated bindings use for optional columns. */
 public fun <T : Any> nullable(serializer: KSerializer<T>): KSerializer<T?> = serializer.nullable
+
+/**
+ * For generated `fromStored`/`toStored`: replaces [column]'s value in [row]
+ * (read with [from]) by [convert]'s result (written with [to]). A column
+ * the row lacks (a `select` left it out) stays out.
+ */
+public fun <A, B> transformColumn(
+    row: MutableMap<String, kotlinx.serialization.json.JsonElement>,
+    column: String,
+    from: KSerializer<A>,
+    to: KSerializer<B>,
+    convert: (A) -> B,
+) {
+    val value = row[column] ?: return
+    row[column] = jazzJson.encodeToJsonElement(to, convert(jazzJson.decodeFromJsonElement(from, value)))
+}
+
+/**
+ * For generated `fromStored`: adds computed field [name] to [row], from
+ * the (view) values of the columns [from] names, as [compute] gives it. A
+ * row lacking one of those columns (a `select` left it out) gets none.
+ */
+public fun <R> computeField(
+    row: MutableMap<String, kotlinx.serialization.json.JsonElement>,
+    name: String,
+    result: KSerializer<R>,
+    from: List<Pair<String, KSerializer<*>>>,
+    compute: (List<Any?>) -> R,
+) {
+    val args = from.map { (column, serializer) ->
+        val value = row[column] ?: return
+        jazzJson.decodeFromJsonElement(serializer, value)
+    }
+    row[name] = jazzJson.encodeToJsonElement(result, compute(args))
+}

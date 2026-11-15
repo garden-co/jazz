@@ -15,8 +15,9 @@
 //! Each relation is a handle on the table object (`Tasks.assignee`,
 //! `Tasks.comments`), for `query().include(...)` and `JazzRow.get`.
 //!
-//! Computed fields and transforms are not supported in Kotlin yet: an app
-//! that declares any is refused.
+//! Computed fields and transforms are declared in a generated
+//! `JazzComputed` interface the app implements and passes to `open`: rows
+//! carry each computed field and each transformed column's view value.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -98,20 +99,6 @@ const KEYWORDS: &[&str] = &[
 ];
 
 pub fn generate(app: &App) -> Result<String, CodegenError> {
-    if !app.transforms.is_empty() || app.tables.iter().any(|t| !t.computed.is_empty()) {
-        return Err(CodegenError::unsupported(
-            "computed fields and transforms in Kotlin bindings are not supported yet",
-        ));
-    }
-    if app
-        .tables
-        .iter()
-        .any(|t| t.columns.iter().any(|c| c.transform.is_some()))
-    {
-        return Err(CodegenError::unsupported(
-            "transforms in Kotlin bindings are not supported yet",
-        ));
-    }
     Writer::new(app)?.write()
 }
 
@@ -206,9 +193,16 @@ impl<'a> Writer<'a> {
         out.push_str(
             "/**\n * Opens the app. A backend (`JazzConfig.permissions` set to its\n * `jazz.permissions.json`) first publishes the app's permissions bundle\n * and pins the session it acts in to it.\n */\n",
         );
-        out.push_str(
-            "public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =\n    tools.jazz.Jazz.open(APP, config)\n\n",
-        );
+        if self.has_computed() {
+            out.push_str(
+                "public suspend fun open(config: tools.jazz.JazzConfig, computed: JazzComputed): tools.jazz.Jazz =\n    tools.jazz.Jazz.open(APP, config, computed)\n\n",
+            );
+            out.push_str(&self.computed_interface()?);
+        } else {
+            out.push_str(
+                "public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =\n    tools.jazz.Jazz.open(APP, config)\n\n",
+            );
+        }
         for (name, (variants, what)) in &self.enums {
             let _ = writeln!(out, "/** The values of {what}. */");
             let _ = writeln!(out, "{SERIALIZABLE}\npublic enum class {name} {{");
@@ -225,6 +219,108 @@ impl<'a> Writer<'a> {
         while out.ends_with("\n\n") {
             out.pop();
         }
+        Ok(out)
+    }
+
+    fn has_computed(&self) -> bool {
+        !self.app.transforms.is_empty() || self.app.tables.iter().any(|t| !t.computed.is_empty())
+    }
+
+    /// The stored and view types of transform `name`.
+    fn transform_types(&mut self, name: &str) -> Result<(Ty, Ty), CodegenError> {
+        let transform = self
+            .app
+            .transform(name)
+            .ok_or_else(|| CodegenError::new(format!("transform `{name}` is not declared")))?
+            .clone();
+        let what = format!("transform `{name}`");
+        let base = pascal(&words(name).join("_"));
+        let stored = self.kotlin_type(&transform.stored, &format!("{base}Stored"), &what)?;
+        let view = self.kotlin_type(&transform.view, &format!("{base}View"), &what)?;
+        Ok((stored, view))
+    }
+
+    /// `interface JazzComputed`: each computed field, and each transform both ways.
+    fn computed_interface(&mut self) -> Result<String, CodegenError> {
+        let mut out = String::from(
+            "/**\n * What the app's code computes: each computed field `jazz.app.json`\n * declares, and each transform both ways. [open] takes an implementation.\n */\npublic interface JazzComputed {\n",
+        );
+        let mut fns = BTreeSet::new();
+        for table in &self.app.tables {
+            let row = self.tables[table.name.as_str()].row.clone();
+            for c in &table.computed {
+                let what = format!("computed field `{}.{}`", table.name, c.name);
+                let ret = self.field_type(
+                    &c.ty,
+                    &format!("{row}{}", pascal(&words(&c.name).join("_"))),
+                    &what,
+                )?;
+                let mut params = Vec::new();
+                for from in &c.from {
+                    if from == "id" {
+                        params.push("id: kotlin.String".to_owned());
+                        continue;
+                    }
+                    let column = table.column(from).ok_or_else(|| {
+                        CodegenError::new(format!(
+                            "{what} is computed from `{from}`, which is not a column"
+                        ))
+                    })?;
+                    let ty = match &column.transform {
+                        Some(t) => {
+                            let (_, view) = self.transform_types(t)?;
+                            if column.ty.nullable {
+                                nullable_ty(view)
+                            } else {
+                                view
+                            }
+                        }
+                        None => self.field_type(
+                            &column.ty,
+                            &format!("{row}{}", pascal(&words(&column.name).join("_"))),
+                            &what,
+                        )?,
+                    };
+                    params.push(format!("{}: {}", value_ident(from)?, plain_type(&ty.ty)));
+                }
+                let name = computed_fn(table, c)?;
+                if !fns.insert(name.clone()) {
+                    return Err(CodegenError::unsupported(format!(
+                        "two `JazzComputed` methods are named `{name}`"
+                    )));
+                }
+                let _ = writeln!(
+                    out,
+                    "    /** `{}.{}`. */\n    public fun {name}({}): {}\n",
+                    doc(&table.name),
+                    doc(&c.name),
+                    params.join(", "),
+                    plain_type(&ret.ty)
+                );
+            }
+        }
+        for transform in &self.app.transforms.clone() {
+            let (stored, view) = self.transform_types(&transform.name)?;
+            let t = transform_fn(&transform.name)?;
+            for name in [format!("{t}View"), format!("{t}Stored")] {
+                if !fns.insert(name.clone()) {
+                    return Err(CodegenError::unsupported(format!(
+                        "two `JazzComputed` methods are named `{name}`"
+                    )));
+                }
+            }
+            let _ = writeln!(
+                out,
+                "    /** Transform `{0}`: a stored value, as the app reads it. */\n    public fun {t}View(stored: {1}): {2}\n\n    /** Transform `{0}`: a value the app writes, as stored. */\n    public fun {t}Stored(view: {2}): {1}\n",
+                doc(&transform.name),
+                plain_type(&stored.ty),
+                plain_type(&view.ty)
+            );
+        }
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        out.push_str("}\n\n");
         Ok(out)
     }
 
@@ -325,12 +421,64 @@ impl<'a> Writer<'a> {
                 return Err(clash(table, &column.name, &ident));
             }
             let what = format!("column `{}.{}`", table.name, column.name);
+            let (ty, stored) = match &column.transform {
+                Some(name) => {
+                    let (stored, view) = self.transform_types(name)?;
+                    let wrap = |t: Ty| {
+                        if column.ty.nullable {
+                            nullable_ty(t)
+                        } else {
+                            t
+                        }
+                    };
+                    (wrap(view), wrap(stored))
+                }
+                None => {
+                    let ty = self.field_type(
+                        &column.ty,
+                        &format!("{row}{}", pascal(&words(&column.name).join("_"))),
+                        &what,
+                    )?;
+                    (ty.clone(), ty)
+                }
+            };
+            fields.push(Field {
+                column,
+                ident,
+                ty,
+                stored,
+                transform: column.transform.clone(),
+            });
+        }
+        let mut computed = Vec::new();
+        for c in &table.computed {
+            let ident = value_ident(&c.name)?;
+            if !idents.insert(ident.clone()) {
+                return Err(clash(table, &c.name, &ident));
+            }
+            let what = format!("computed field `{}.{}`", table.name, c.name);
             let ty = self.field_type(
-                &column.ty,
-                &format!("{row}{}", pascal(&words(&column.name).join("_"))),
+                &c.ty,
+                &format!("{row}{}", pascal(&words(&c.name).join("_"))),
                 &what,
             )?;
-            fields.push(Field { column, ident, ty });
+            let mut from = Vec::new();
+            for name in &c.from {
+                if name == "id" {
+                    from.push(("id".to_owned(), prim_ty("kotlin.String")));
+                    continue;
+                }
+                let f = fields
+                    .iter()
+                    .find(|f| &f.column.name == name)
+                    .ok_or_else(|| {
+                        CodegenError::new(format!(
+                            "{what} is computed from `{name}`, which is not a column"
+                        ))
+                    })?;
+                from.push((name.clone(), f.ty.clone()));
+            }
+            computed.push((c, ident, ty, from));
         }
 
         let mut out = String::new();
@@ -346,6 +494,24 @@ impl<'a> Writer<'a> {
                 f.serial_name(),
                 f.ident,
                 f.ty.ty
+            );
+        }
+        for (c, ident, ty, _) in &computed {
+            let default = if c.ty.nullable { " = null" } else { "" };
+            let _ = writeln!(
+                out,
+                "    /** Computed from {}. */\n    {}val {ident}: {}{default},",
+                c.from
+                    .iter()
+                    .map(|f| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if ident.trim_matches('`') == c.name {
+                    String::new()
+                } else {
+                    format!("{SERIAL_NAME}({}) ", string_literal(&c.name))
+                },
+                ty.ty
             );
         }
         out.push_str(")\n\n");
@@ -418,6 +584,8 @@ impl<'a> Writer<'a> {
             "insertSerializer",
             "newPatch",
             "include",
+            "fromStored",
+            "toStored",
             "equals",
             "hashCode",
             "toString",
@@ -440,14 +608,80 @@ impl<'a> Writer<'a> {
             if !props.insert(ident.clone()) {
                 return Err(clash(table, &f.column.name, &ident));
             }
-            let ty = plain_type(&f.ty.ty);
+            let ty = plain_type(&f.stored.ty);
+            let note = if f.transform.is_some() {
+                " Compared as stored, before its transform."
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
-                "    /** Column `{}`. */\n    public val {ident}: tools.jazz.Column<{ty}> =\n        tools.jazz.Column({}, {})",
+                "    /** Column `{}`.{note} */\n    public val {ident}: tools.jazz.Column<{ty}> =\n        tools.jazz.Column({}, {})",
                 doc(&f.column.name),
                 string_literal(&f.column.name),
-                f.ty.ser
+                f.stored.ser
             );
+        }
+        if !computed.is_empty() || fields.iter().any(|f| f.transform.is_some()) {
+            out.push_str("    override fun fromStored(row: kotlinx.serialization.json.JsonObject, implementations: kotlin.Any?): kotlinx.serialization.json.JsonObject {\n        val computed = implementations as JazzComputed\n        val out = row.toMutableMap()\n");
+            for f in fields.iter().filter(|f| f.transform.is_some()) {
+                let t = transform_fn(f.transform.as_deref().unwrap())?;
+                let call = if f.column.ty.nullable {
+                    format!("{{ it?.let(computed::{t}View) }}")
+                } else {
+                    format!("{{ computed.{t}View(it) }}")
+                };
+                let _ = writeln!(
+                    out,
+                    "        tools.jazz.transformColumn(out, {}, {}, {}) {call}",
+                    string_literal(&f.column.name),
+                    f.stored.ser,
+                    f.ty.ser
+                );
+            }
+            for (c, _, ty, from) in &computed {
+                let args = from
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, t))| format!("args[{i}] as {}", plain_type(&t.ty)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let froms = from
+                    .iter()
+                    .map(|(n, t)| format!("{} to {}", string_literal(n), t.ser))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    out,
+                    "        tools.jazz.computeField(out, {}, {}, kotlin.collections.listOf({froms})) {{ args -> computed.{}({args}) }}",
+                    string_literal(&c.name),
+                    ty.ser,
+                    computed_fn(table, c)?
+                );
+            }
+            out.push_str("        return kotlinx.serialization.json.JsonObject(out)\n    }\n");
+            out.push_str("    override fun toStored(values: kotlinx.serialization.json.JsonObject, implementations: kotlin.Any?): kotlinx.serialization.json.JsonObject {\n");
+            if fields.iter().any(|f| f.transform.is_some()) {
+                out.push_str("        val computed = implementations as JazzComputed\n        val out = values.toMutableMap()\n");
+                for f in fields.iter().filter(|f| f.transform.is_some()) {
+                    let t = transform_fn(f.transform.as_deref().unwrap())?;
+                    let call = if f.column.ty.nullable {
+                        format!("{{ it?.let(computed::{t}Stored) }}")
+                    } else {
+                        format!("{{ computed.{t}Stored(it) }}")
+                    };
+                    let _ = writeln!(
+                        out,
+                        "        tools.jazz.transformColumn(out, {}, {}, {}) {call}",
+                        string_literal(&f.column.name),
+                        f.ty.ser,
+                        f.stored.ser
+                    );
+                }
+                out.push_str("        return kotlinx.serialization.json.JsonObject(out)\n    }\n");
+            } else {
+                out.push_str("        return values\n    }\n");
+            }
         }
         for relation in &table.relations {
             let mut ident = value_ident(&relation.name)?;
@@ -507,6 +741,50 @@ fn plain_type(ty: &str) -> String {
     )
 }
 
+fn nullable_ty(t: Ty) -> Ty {
+    Ty {
+        ty: format!("{}?", t.ty),
+        ser: format!("tools.jazz.nullable({})", t.ser),
+    }
+}
+
+fn prim_ty(ty: &str) -> Ty {
+    Ty {
+        ty: ty.to_owned(),
+        ser: format!("kotlinx.serialization.serializer<{ty}>()"),
+    }
+}
+
+/// `tasksPriority` for computed field `priority` of `tasks`.
+fn computed_fn(table: &Table, computed: &crate::model::Computed) -> Result<String, CodegenError> {
+    let mut words = words(&table.name);
+    words.extend(self::words(&computed.name));
+    camel_ident(&words, &format!("{}.{}", table.name, computed.name))
+}
+
+/// `isoDate` for transform `isoDate`: its methods are `isoDateView` / `isoDateStored`.
+fn transform_fn(name: &str) -> Result<String, CodegenError> {
+    camel_ident(&words(name), name)
+}
+
+fn camel_ident(words: &[String], name: &str) -> Result<String, CodegenError> {
+    let mut ident = String::new();
+    for (i, word) in words.iter().enumerate() {
+        if i == 0 {
+            ident.push_str(word);
+        } else {
+            ident.push_str(&pascal(word));
+        }
+    }
+    if ident.is_empty() || !ident.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return Err(CodegenError::unsupported(format!(
+            "`{name}` has no Kotlin name: it must start with a letter"
+        )));
+    }
+    Ok(ident)
+}
+
+#[derive(Clone)]
 struct Ty {
     /// The Kotlin type, with any serializer annotation it needs.
     ty: String,
@@ -517,7 +795,12 @@ struct Ty {
 struct Field<'c> {
     column: &'c Column,
     ident: String,
+    /// What the row, insert and patch hold: the transform's view type, if any.
     ty: Ty,
+    /// What the engine stores (and queries compare).
+    stored: Ty,
+    /// The transform's name.
+    transform: Option<String>,
 }
 
 impl Field<'_> {

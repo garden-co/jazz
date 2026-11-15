@@ -83,8 +83,19 @@ val edges = sourceSets.create("edges") {
     kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/kotlin-edges"))
     compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
 }
-tasks.named("check") { dependsOn("compileEdgesKotlin") }
-tasks.named("test") { dependsOn("compileEdgesKotlin") }
+// kotlin-computed (transforms and computed fields) runs a test of its own.
+val computedTest = sourceSets.create("computedTest") {
+    kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/kotlin-computed"))
+    compileClasspath += sourceSets.main.get().output + sourceSets.test.get().output + configurations.testCompileClasspath.get()
+    runtimeClasspath += output + compileClasspath + configurations.testRuntimeClasspath.get()
+}
+val testComputed by tasks.registering(Test::class) {
+    testClassesDirs = computedTest.output.classesDirs
+    classpath = computedTest.runtimeClasspath
+    useJUnitPlatform()
+}
+tasks.named("check") { dependsOn("compileEdgesKotlin", testComputed) }
+tasks.named("test") { dependsOn("compileEdgesKotlin"); finalizedBy(testComputed) }
 
 tasks.test {
     useJUnitPlatform()

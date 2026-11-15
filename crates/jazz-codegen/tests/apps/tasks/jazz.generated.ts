@@ -1,24 +1,12 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
-import {
-  bindApp,
-  type AppTypes,
-  type ComputedImpl,
-  type JsonValue,
-  type TransformImpl,
-} from "jazz-tools";
+import { bindApp, type AppTypes, type ComputedImpl, type JsonValue, type TransformImpl } from "jazz-tools";
 import { computed, transforms } from "./jazz.computed.js";
 
 export type TaskStatus = "todo" | "doing" | "done";
 export type TaskMeta = { color: string; links?: string[]; size?: "s" | "m" | "l" };
-export type TaskReview =
-  | { type: "pending" }
-  | { type: "approved"; by: string; note: string | null }
-  | { type: "rejected"; reason: string };
-export type TaskReviewInit =
-  | { type: "pending" }
-  | { type: "approved"; by: string; note?: string | null }
-  | { type: "rejected"; reason: string };
+export type TaskReview = { type: "pending" } | { type: "approved"; by: string; note: string | null } | { type: "rejected"; reason: string };
+export type TaskReviewInit = { type: "pending" } | { type: "approved"; by: string; note?: string | null } | { type: "rejected"; reason: string };
 export type TaskPriority = "low" | "high";
 
 export type Person = {
