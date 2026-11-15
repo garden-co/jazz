@@ -147,6 +147,9 @@ struct State {
     /// The last upstream connect attempt that failed, and its error.
     connect_failed: Option<(u64, String)>,
     /// The upstream link's last published status; `None` without a server.
+    /// How many times the server refused the credential: each refusal,
+    /// even one that leaves the status as it was.
+    auth_refusals: u64,
     link_status: Option<LinkStatus>,
     /// Consecutive recoverable tick failures.
     tick_failures: u32,
@@ -701,10 +704,23 @@ impl LinkKeeper {
     /// Hand the machine's view to the read gate and the status accessor.
     fn publish(&mut self, shared: &Shared) {
         shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        let mut changed = false;
         for event in self.link.drain_events() {
-            if let LinkEvent::Status(status) = event {
-                shared.state().link_status = Some(status);
+            match event {
+                LinkEvent::Status(status) => {
+                    shared.state().link_status = Some(status);
+                    changed = true;
+                }
+                LinkEvent::AuthFailed { .. } => {
+                    shared.state().auth_refusals += 1;
+                    changed = true;
+                }
+                LinkEvent::AuthRestored => {}
             }
+        }
+        // Status readers (`JazzClient::status_changes`) re-read it.
+        if changed {
+            shared.progress.send_modify(|generation| *generation += 1);
         }
     }
 }
@@ -1366,6 +1382,87 @@ impl JazzClient {
         ))
     }
 
+    /// Begin a resumable upload of `column`'s value for a row with
+    /// `values`' other cells: feed it with
+    /// [`JazzClient::push_streaming_upload`] piece by piece (as an async
+    /// stream yields them), then [`JazzClient::finish_streaming_upload`].
+    /// Nothing commits until the finish; the value is never held whole.
+    pub fn begin_streaming_upload(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        column: &str,
+    ) -> Result<StreamingUpload> {
+        self.reject_updated_at_override("streaming uploads")?;
+        if self.transaction_id().is_some() {
+            return Err(JazzError::Write(
+                "streaming uploads in a transaction are not supported".into(),
+            ));
+        }
+        let cells = self.core_cells(table, values)?;
+        let upload = self
+            .db()?
+            .begin_streaming_value_upload(table, &cells, column)
+            .map_err(write_error)?;
+        Ok(StreamingUpload {
+            upload,
+            table: table.to_owned(),
+            column: column.to_owned(),
+            cells,
+        })
+    }
+
+    /// Feed the next piece of `upload`.
+    pub async fn push_streaming_upload(
+        &self,
+        upload: &mut StreamingUpload,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.db()?
+            .push_streaming_value_upload(&mut upload.upload, bytes)
+            .await
+            .map_err(write_error)
+    }
+
+    /// Abandon `upload`, releasing what it stored.
+    pub async fn abort_streaming_upload(&self, upload: StreamingUpload) -> Result<()> {
+        self.db()?
+            .abort_streaming_value_upload(upload.upload)
+            .await
+            .map_err(write_error)
+    }
+
+    /// Finish `upload` as `kind` of row `object_id` (a new row's id when
+    /// `None`), committing the row with its streamed value.
+    pub async fn finish_streaming_upload(
+        &self,
+        upload: StreamingUpload,
+        kind: crate::db::StreamingMutationKind,
+        object_id: Option<ObjectId>,
+    ) -> Result<(ObjectId, TransactionId)> {
+        let db = self.db()?;
+        let row = object_id.map_or_else(|| db.next_row_id(), |id| RowUuid(*id.uuid()));
+        let write = db
+            .finish_streaming_value_upload(
+                upload.upload,
+                kind,
+                &upload.table,
+                row,
+                upload.cells,
+                &upload.column,
+                self.write_identity()?,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(write_error)?;
+        Ok((
+            ObjectId::from_uuid(write.row_uuid().0),
+            self.committed(write.mergeable_tx_id()),
+        ))
+    }
+
     /// Create a new row in a table.
     pub fn insert(
         &self,
@@ -1866,10 +1963,25 @@ impl JazzClient {
         self.shared.db.set_slow_query_threshold(threshold);
     }
 
+    /// Changes when [`Self::upstream_status`] or [`Self::upload_status`] may
+    /// have: after each tick of the client and each change of the link's
+    /// status. A counter, for readers to re-read the status on, instead of
+    /// polling it. It closes when the client shuts down.
+    pub fn status_changes(&self) -> watch::Receiver<u64> {
+        self.shared.progress.subscribe()
+    }
+
     /// This client's uploads: commits awaiting the server's verdict (since
     /// when), and those it refused since the client opened.
     pub fn upload_status(&self) -> crate::db::UploadStatus {
         self.shared.db.upload_status()
+    }
+
+    /// How many times the server has refused this client's credential. A
+    /// refusal of a renewed credential leaves [`Self::upstream_status`] as
+    /// it was; this tells the two apart.
+    pub fn auth_refusals(&self) -> u64 {
+        self.shared.state.borrow().auth_refusals
     }
 
     /// Check if connected to server.
@@ -2030,6 +2142,15 @@ pub enum PermissionAdviceRequest {
     },
 }
 
+/// A large value being uploaded piece by piece: see
+/// [`JazzClient::begin_streaming_upload`]. It lives on the client's thread.
+pub struct StreamingUpload {
+    upload: crate::db::StreamingValueUpload,
+    table: String,
+    column: String,
+    cells: BTreeMap<String, CoreValue>,
+}
+
 /// A transaction-scoped client handle.
 pub struct JazzTransaction {
     transaction_id: OpenTransactionId,
@@ -2171,9 +2292,9 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     })
 }
 
-/// The session a backend client states for its user, as the core reads it.
-/// The session the prelude states: on the backend secret, or (`bearer`) on
-/// the word of the app's bearer, which the app's backend checks it against.
+/// The session the prelude states for the client's user, as the core reads
+/// it: on the backend secret, or (`bearer`) on the word of the app's bearer,
+/// which the app's backend checks it against.
 fn stated_session(context: &AppContext, bearer: bool) -> Result<Option<serde_json::Value>> {
     let Some(session) = context.backend_session.as_ref() else {
         return Ok(None);
