@@ -635,6 +635,8 @@ fn init_tracing(to_stderr: bool) {
             // before the process dies; see otel::install_panic_hook.
             otel::install_panic_hook(logger_provider.clone());
             let _ = OTEL_LOGGER_PROVIDER.set(logger_provider);
+            // A fatal server error exits at once: ship its log line first.
+            jazz_server::runtime::set_before_fatal_exit(flush_otel_logs);
 
             let meter_provider = otel::init_meter_provider();
             opentelemetry::global::set_meter_provider(meter_provider.clone());
@@ -654,6 +656,15 @@ fn init_tracing(to_stderr: bool) {
         .with(make_env_filter())
         .with(fmt_layer)
         .init();
+}
+
+/// Force-flush the OTLP log batch (bounded, on the exporter's own thread),
+/// as the panic hook does.
+#[cfg(feature = "otel")]
+fn flush_otel_logs() {
+    if let Some(provider) = OTEL_LOGGER_PROVIDER.get() {
+        let _ = provider.force_flush();
+    }
 }
 
 fn shutdown_tracing() {

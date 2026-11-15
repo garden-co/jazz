@@ -693,7 +693,13 @@ impl Chunks {
     /// Want `requests` again: their fetch was dropped before it was
     /// answered.
     pub(crate) fn want_again(&self, requests: Vec<ChunkRequest>) {
-        let mut state = self.state.lock().expect("chunk cache");
+        // Called from a batch's `Drop`, often on a large-value lane thread
+        // (a cancelled or undelivered batch): a cache poisoned by a panic
+        // elsewhere has nothing left to hand the requests to, and a panic
+        // here would only take the lane down with it.
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
         for request in &requests {
             state.in_flight.remove(request);
         }
@@ -771,7 +777,13 @@ impl Chunks {
     /// until one succeeds, so a batch that ends without running loses
     /// nothing.
     pub(crate) fn end_fetch(&self, batch: u64, unfetched: Vec<ChunkRequest>) {
-        let mut state = self.state.lock().expect("chunk cache");
+        // Called from a batch's `Drop`, often on a large-value lane thread
+        // (a cancelled or undelivered batch): a cache poisoned by a panic
+        // elsewhere has nothing left to hand the requests to, and a panic
+        // here would only take the lane down with it.
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
         if state.batch == Some(batch) {
             state.batch = None;
             for request in &unfetched {

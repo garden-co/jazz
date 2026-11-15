@@ -474,6 +474,37 @@ impl Backoff {
     }
 }
 
+/// A large-value store lane's thread ended while the runtime needed it.
+/// Large values are a core feature, so this is fatal for the server
+/// process (see [`StoreLoop::lane_died`]), not a degraded mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LaneDied {
+    /// Which lane: `"chunk-io"` (batches) or `"chunk-fetch"`.
+    lane: &'static str,
+}
+
+impl LaneDied {
+    const IO: Self = Self { lane: "chunk-io" };
+    const FETCH: Self = Self {
+        lane: "chunk-fetch",
+    };
+}
+
+/// The exit code of a server process that stops on a fatal error
+/// (`EX_SOFTWARE`): its orchestrator restarts it.
+const FATAL_EXIT_CODE: i32 = 70;
+
+static BEFORE_FATAL_EXIT: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Run `hook` right before the server process exits on a fatal error (a
+/// dead large-value lane), after the fatal error is logged: for the host
+/// to flush what it buffers, such as its OTLP log exporter's batch, which
+/// `std::process::exit` would otherwise drop with the fatal line. Set once
+/// per process; returns false (and keeps the first) if one is set already.
+pub fn set_before_fatal_exit(hook: fn()) -> bool {
+    BEFORE_FATAL_EXIT.set(hook).is_ok()
+}
+
 /// A thread that runs chunk I/O and hands each outcome to `finish` on the
 /// store thread.
 struct Lane {
@@ -529,6 +560,15 @@ impl Lane {
     fn send(&self, io: jazz::chunk_store::ChunkIo) -> bool {
         self.sender.send(io).is_ok()
     }
+
+    /// Whether the thread has ended (only [`Drop`] ends it on purpose, so
+    /// this means it panicked): what it held never comes back.
+    fn gone(&self) -> bool {
+        matches!(
+            self.ended.try_recv(),
+            Err(std_mpsc::TryRecvError::Disconnected)
+        )
+    }
 }
 
 impl Drop for Lane {
@@ -567,7 +607,20 @@ impl ChunkIoRunner {
     /// Hand the runtime's next batch over, unless one is out or the last
     /// failed too recently; then hand over what reads wait on beside it,
     /// unless fetches are out or failed too recently.
-    fn pump(&self, owner: &Owner) {
+    ///
+    /// Fails once a lane's thread is gone: the work it held (and every
+    /// later batch) would wait for an answer that never comes. Store
+    /// failures come back as failed batches, so a lane only dies of a bug:
+    /// fatal for the server (see [`StoreLoop::lane_died`]).
+    fn pump(&self, owner: &Owner) -> Result<(), LaneDied> {
+        for (lane, name) in [
+            (&self.batches, LaneDied::IO),
+            (&self.fetches, LaneDied::FETCH),
+        ] {
+            if lane.gone() {
+                return Err(name);
+            }
+        }
         let Plan {
             batch,
             fetches,
@@ -583,28 +636,29 @@ impl ChunkIoRunner {
                 // Nothing to do: dropping an empty batch ends it.
                 Ok(Some(io)) if io.is_empty() => {}
                 Ok(Some(io)) => {
-                    self.out.set(true);
                     if !self.batches.send(io) {
-                        tracing::error!("the chunk I/O thread is gone");
+                        return Err(LaneDied::IO);
                     }
+                    self.out.set(true);
                 }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(%error, "take large-value store I/O"),
             }
         }
         if !fetch_lane {
-            return;
+            return Ok(());
         }
         match owner.db.take_chunk_fetches() {
             Ok(Some(io)) => {
-                self.fetching.set(true);
                 if !self.fetches.send(io) {
-                    tracing::error!("the chunk fetch thread is gone");
+                    return Err(LaneDied::FETCH);
                 }
+                self.fetching.set(true);
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "take large-value store fetches"),
         }
+        Ok(())
     }
 
     /// What [`Self::pump`] may hand over now.
@@ -772,7 +826,9 @@ impl AppStore {
 
     /// Why the runtime stopped serving, if it failed (panicked) and could
     /// not be restarted. The host tables stay available; the server
-    /// reports itself unhealthy so it is restarted.
+    /// reports itself unhealthy so it is restarted. In test builds it also
+    /// records a dead large-value lane, which outside tests ends the
+    /// process instead ([`StoreLoop::lane_died`]).
     pub fn fault(&self) -> Option<String> {
         self.inner.fault.lock().ok().and_then(|fault| fault.clone())
     }
@@ -1020,7 +1076,7 @@ impl StoreLoop {
             self.host_work(deadline);
             if tick && self.owner().is_some() {
                 self.tick_queued.store(false, Ordering::Release);
-                self.on_owner(Owner::tick);
+                self.tick_owner();
                 #[cfg(test)]
                 self.ticks.fetch_add(1, Ordering::Relaxed);
             }
@@ -1149,6 +1205,66 @@ impl StoreLoop {
                 "server runtime panicked: {}",
                 panic_message(&*panic)
             ));
+        }
+    }
+
+    /// Tick the runtime, if one is running: a panic faults it, a dead
+    /// large-value lane ends the server.
+    fn tick_owner(&mut self) {
+        let State::Running(owner) = &mut self.state else {
+            return;
+        };
+        match catch_unwind(AssertUnwindSafe(|| owner.tick())) {
+            Ok(Ok(())) => {}
+            Ok(Err(died)) => {
+                let app = owner.app.clone();
+                self.lane_died(app.as_deref().unwrap_or("?"), died);
+            }
+            Err(panic) => self.fault(format!(
+                "server runtime panicked: {}",
+                panic_message(&*panic)
+            )),
+        }
+    }
+
+    /// A large-value store lane died. Store failures come back as failed
+    /// batches (retried with backoff), so this is a bug, and large values
+    /// are a core feature: the server does not run degraded or restart the
+    /// runtime in place. It logs one fatal error and exits non-zero, for
+    /// its orchestrator to restart the process. That holds for an embedded
+    /// core too (a Node or Next app's `createJazz` backend with S3 or
+    /// Vercel Blob): the host process exits with it.
+    ///
+    /// The line also goes straight to stderr, as a host's subscriber may
+    /// not print it (the NAPI host's telemetry mode only exports spans).
+    /// Test builds, this crate's and its dependents' with the `test`
+    /// feature, record the error as the store's fault and stop the runtime
+    /// instead of exiting.
+    fn lane_died(&mut self, app: &str, died: LaneDied) {
+        tracing::error!(
+            app,
+            lane = died.lane,
+            "large-value chunk lane died; the server exits"
+        );
+        eprintln!(
+            "large-value chunk lane died; the server exits (app={app}, lane={})",
+            died.lane
+        );
+        // An OTLP exporter only buffered the line above: flush it.
+        if let Some(hook) = BEFORE_FATAL_EXIT.get() {
+            hook();
+        }
+        #[cfg(not(any(test, feature = "test")))]
+        std::process::exit(FATAL_EXIT_CODE);
+        #[cfg(any(test, feature = "test"))]
+        {
+            self.stop();
+            if let Ok(mut fault) = self.fault.lock() {
+                *fault = Some(format!(
+                    "large-value chunk lane died; the server exits (app {app}, lane {}, exit code {FATAL_EXIT_CODE})",
+                    died.lane
+                ));
+            }
         }
     }
 
@@ -2678,7 +2794,9 @@ impl Owner {
         }
     }
 
-    fn tick(&mut self) {
+    /// Fails only when a large-value store lane is gone, which is fatal
+    /// for the server ([`StoreLoop::lane_died`]).
+    fn tick(&mut self) -> Result<(), LaneDied> {
         start_tick(self.sessions.values().map(|session| &*session.queues));
         let started = std::time::Instant::now();
         let ticked = block_on(self.db.tick());
@@ -2688,7 +2806,7 @@ impl Owner {
         }
         self.retry_parked_thin();
         if let Some(runner) = &self.chunk_io {
-            runner.pump(self);
+            runner.pump(self)?;
         }
         self.report_slow_queries();
         self.report_merge_fallbacks();
@@ -2731,6 +2849,7 @@ impl Owner {
             self.close_session(id);
         }
         self.pump_thin();
+        Ok(())
     }
 }
 
@@ -3485,7 +3604,7 @@ mod tests {
                     };
                     owner.receive(ServerSession(1), frames, ingress);
                 }
-                owner.tick();
+                owner.tick().unwrap();
                 while let Ok((frames, bytes)) = alice_rx.try_recv() {
                     egress.fetch_sub(bytes, Ordering::AcqRel);
                     for frame in frames.unwrap() {
@@ -4141,6 +4260,208 @@ mod tests {
             tick_for(Duration::from_millis(50));
         }
         store.close().unwrap();
+    }
+
+    /// A chunk store whose first `put` panics, taking the I/O lane's thread
+    /// down with the batch it held; later puts land in `inner`.
+    struct PanicsOnFirstPut {
+        inner: jazz::chunk_store::FileChunkStore,
+        panicked: std::sync::atomic::AtomicBool,
+    }
+
+    impl jazz::chunk_store::ChunkStore for PanicsOnFirstPut {
+        fn put<'a>(
+            &'a self,
+            node: &'a jazz::chunk_store::NodeKey,
+            bytes: &'a [u8],
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            if !self.panicked.swap(true, Ordering::SeqCst) {
+                panic!("injected chunk store panic");
+            }
+            self.inner.put(node, bytes)
+        }
+
+        fn get<'a>(
+            &'a self,
+            node: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, Option<bytes::Bytes>> {
+            self.inner.get(node)
+        }
+
+        fn delete<'a>(
+            &'a self,
+            node: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            self.inner.delete(node)
+        }
+    }
+
+    /// A chunk I/O lane whose thread dies mid-batch never answers, and only
+    /// a bug kills one (store failures fail the batch): the server takes
+    /// its fatal path, which in a test build records the fatal error as the
+    /// store's fault and stops the runtime instead of exiting the process.
+    #[test]
+    fn a_dead_chunk_io_lane_is_fatal_for_the_server() {
+        // The only test that sets the process-wide hook.
+        static FLUSHED: AtomicBool = AtomicBool::new(false);
+        assert!(set_before_fatal_exit(
+            || FLUSHED.store(true, Ordering::SeqCst)
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = tempfile::tempdir().unwrap();
+        let chunk_store = Arc::new(PanicsOnFirstPut {
+            inner: jazz::chunk_store::FileChunkStore::new(blobs.path()).unwrap(),
+            panicked: std::sync::atomic::AtomicBool::new(false),
+        });
+        let storage =
+            StorageConfig::data_dir(dir.path()).with_blobs(Blobs::Network(NetworkChunkStore {
+                store: chunk_store.clone(),
+                name: "panicking store".to_owned(),
+            }));
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let store = AppStore::open(&storage).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        block_on(runtime.run(move |owner| {
+            block_on(owner.db.insert(
+                "docs",
+                BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(value))]),
+                Default::default(),
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        }))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let fault = loop {
+            if let Some(fault) = store.fault() {
+                break fault;
+            }
+            assert!(Instant::now() < deadline, "the dead lane was never noticed");
+            let _ = block_on(runtime.run(|_| Ok(())));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(chunk_store.panicked.load(Ordering::SeqCst));
+        assert!(
+            FLUSHED.load(Ordering::SeqCst),
+            "the host's flush ran before the exit"
+        );
+        assert!(
+            fault.starts_with("large-value chunk lane died; the server exits")
+                && fault.contains("lane chunk-io")
+                && fault.contains("exit code 70"),
+            "{fault}"
+        );
+        assert!(
+            block_on(runtime.run(|_| Ok(()))).is_err(),
+            "no runtime goes on in place"
+        );
+        assert_eq!(walkdir_files(blobs.path()), 0, "nothing was uploaded");
+        store.close().unwrap();
+    }
+
+    /// A chunk store whose first `put` fails with a storage error.
+    struct FailsFirstPut {
+        inner: jazz::chunk_store::FileChunkStore,
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    impl jazz::chunk_store::ChunkStore for FailsFirstPut {
+        fn put<'a>(
+            &'a self,
+            node: &'a jazz::chunk_store::NodeKey,
+            bytes: &'a [u8],
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return Box::pin(std::future::ready(Err(jazz::db::Error::new(
+                    jazz::db::ErrorCode::Storage,
+                    "injected chunk store failure",
+                ))));
+            }
+            self.inner.put(node, bytes)
+        }
+
+        fn get<'a>(
+            &'a self,
+            node: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, Option<bytes::Bytes>> {
+            self.inner.get(node)
+        }
+
+        fn delete<'a>(
+            &'a self,
+            node: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            self.inner.delete(node)
+        }
+    }
+
+    /// A store error is a failed batch, not a dead lane: the next batch
+    /// retries after the backoff and the leaves land, with no fault.
+    #[test]
+    fn a_chunk_store_error_fails_the_batch_and_the_next_one_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = tempfile::tempdir().unwrap();
+        let chunk_store = Arc::new(FailsFirstPut {
+            inner: jazz::chunk_store::FileChunkStore::new(blobs.path()).unwrap(),
+            failed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let storage =
+            StorageConfig::data_dir(dir.path()).with_blobs(Blobs::Network(NetworkChunkStore {
+                store: chunk_store.clone(),
+                name: "failing store".to_owned(),
+            }));
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let store = AppStore::open(&storage).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        block_on(runtime.run(move |owner| {
+            block_on(owner.db.insert(
+                "docs",
+                BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(value))]),
+                Default::default(),
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        }))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while walkdir_files(blobs.path()) < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the leaves never landed after the failure"
+            );
+            assert_eq!(store.fault(), None, "a store error is not fatal");
+            let _ = block_on(runtime.run(|_| Ok(())));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            chunk_store.failed.load(Ordering::SeqCst),
+            "the first put failed"
+        );
+        assert_eq!(store.fault(), None);
+        store.close().unwrap();
+    }
+
+    /// Files under `dir`, recursively.
+    fn walkdir_files(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            walkdir_files(&path)
+                        } else {
+                            1
+                        }
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 
     /// The same through a Vercel Blob store: the core writes every leaf
