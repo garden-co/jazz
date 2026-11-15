@@ -132,6 +132,22 @@ closure returns, rolls back when the closure throws, and rethrows that error. Re
 `tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
 `jazz.waitForSync(.global)` waits until everything written so far has reached the server.
 
+## Mergeable text and permission advice
+
+A text-merge column (`"merge": "text"`, like StagePlan's `tasks.notes`) reads as a plain `String`.
+To edit it so that concurrent edits merge instead of overwriting each other, use a `JazzText`
+handle:
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-mergeable-text-swift
+</include>
+
+`notes.changes` yields the merged text each time the row changes. Lower level, `jazz.edit(id,
+patch, edits: [.text(…), .splice(…), .jsonSet(…)])` makes several partial edits as one write.
+
+`jazz.canInsert(newRow)`, `canRead`, `canUpdate` and `canDelete` ask the app's permissions before
+you try. They return `true`, `false`, or `nil` when there's nothing to ask, such as no server.
+
 ## Not supported yet
 
 These are refused with `JazzError.notSupported` (or when generating):
@@ -139,11 +155,10 @@ These are refused with `JazzError.notSupported` (or when generating):
 - iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
   or tested for them yet, and there are no prebuilt XCFrameworks.
 - Installing the package from a URL: depend on a local checkout by path.
-- Editing mergeable text (`"merge": "text"`, like StagePlan's `tasks.notes`). It reads as a plain
-  `String?`, and a write replaces the whole value.
+- A SwiftUI `Binding` for `JazzText`.
 - Connecting as an end user (JWT, device accounts) and session state: open the app as a backend.
 - Files and streams.
-- `hopTo`, `gather`, `union` and history queries, and permission advice.
+- `hopTo`, `gather`, `union` and history queries.
 - `offset` in an include, and `required` on reverse relations or optional references.
 - Payload enums, nested rows and other column types the bindings can't type: they're refused when
   generating.
