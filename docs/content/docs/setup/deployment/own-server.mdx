@@ -33,7 +33,8 @@ export const jazz = createJazz({
 The examples on this page are ES modules and use top-level `await`, so the backend package needs
 `"type": "module"` (or `.mts` files). `schema.ts` and `permissions.ts` must be ES modules too. In a
 CommonJS package, such as an Expo app's, importing them gives `{ default }`, and `createJazz` fails
-with "permissions.ts defines permissions for unknown table(s): default". A backend in its own ESM
+with `permissions.ts arrived as { default: … }: an ES module imported it as CommonJS` (or the
+same for `schema.ts`). A backend in its own ESM
 package isn't enough while those two files stay in the CommonJS package: put them in a folder (for
 example `jazz/`) with a `package.json` of `{ "type": "module" }`, and import them from there in both
 the app and the backend.
