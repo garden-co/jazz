@@ -15,6 +15,7 @@ swift test
 library is linked from `target/release/jazz-ffi-static` of this repository,
 or from `$JAZZ_FFI_LIB_DIR`.
 
-Built and tested on Linux in CI (`.github/workflows/swift.yml`). iOS apps are
+Built and tested on Linux in CI (`dev/gates/jazz-swift.sh`, in the required
+`jazz-ffi-bindings` partition). Needs Swift 6.0 or newer. iOS apps are
 not supported yet. See `examples/stage-plan/apps/swift-cli` for a complete
 command-line tool, and the docs' Swift setup page for what's not supported yet.

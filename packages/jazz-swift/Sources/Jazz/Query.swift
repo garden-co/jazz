@@ -7,7 +7,7 @@ public struct Column<R: Row, Value: Encodable & Sendable>: Sendable {
     public init(_ name: String) { self.name = name }
 
     func condition(_ op: String, _ value: (any Encodable & Sendable)?) -> Condition<R> {
-        Condition(column: name, op: op, value: value.map { v in { try Coding.value(v) } })
+        Condition(column: name, op: op, value: value)
     }
 
     public func eq(_ value: Value) -> Condition<R> { condition("eq", value) }
@@ -33,11 +33,11 @@ public struct Column<R: Row, Value: Encodable & Sendable>: Sendable {
 public struct Condition<R: Row>: Sendable {
     let column: String
     let op: String
-    let value: (@Sendable () throws -> JSONValue)?
+    let value: (any Encodable & Sendable)?
 
     func json() throws -> JSONValue {
         var entry: [String: JSONValue] = ["column": .string(column), "op": .string(op)]
-        if let value { entry["value"] = try value() }
+        if let value { entry["value"] = try Coding.value(value) }
         return .object(entry)
     }
 }
@@ -59,6 +59,7 @@ public struct Query<R: Row>: Sendable {
     var offsetCount: Int?
 
     public init() {}
+
 
     public func `where`(_ conditions: Condition<R>...) -> Query<R> {
         var query = self
@@ -89,7 +90,12 @@ public struct Query<R: Row>: Sendable {
 
     /// The query JSON.
     public func json() throws -> String {
-        var object: [String: JSONValue] = ["table": .string(R.table)]
+        try Coding.json(JSONValue.object(object(withTable: true)))
+    }
+
+    func object(withTable: Bool) throws -> [String: JSONValue] {
+        var object: [String: JSONValue] = [:]
+        if withTable { object["table"] = .string(R.table) }
         if !conditions.isEmpty { object["where"] = .array(try conditions.map { try $0.json() }) }
         if !orders.isEmpty {
             object["orderBy"] = .array(
@@ -99,7 +105,7 @@ public struct Query<R: Row>: Sendable {
         }
         if let limitCount { object["limit"] = .number(Double(limitCount)) }
         if let offsetCount { object["offset"] = .number(Double(offsetCount)) }
-        return try Coding.json(JSONValue.object(object))
+        return object
     }
 
     /// Sorts rows (as JSON objects) by `orderBy`, then by id: deltas carry

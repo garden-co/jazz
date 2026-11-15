@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 // The Jazz Swift runtime. The typed bindings that `jazz-tools generate` writes
 // (`JazzApp.swift`) call it, and it wraps crates/jazz-ffi through UniFFI.
 //

@@ -11,7 +11,7 @@ import StagePlan
 //   move <task-id> <stage>  todo | doing | done | blocked
 //   demo                    create a show, add tasks, move one, list them
 var args = Array(CommandLine.arguments.dropFirst())
-func option(_ name: String) -> String? {
+@MainActor func option(_ name: String) -> String? {
     guard let at = args.firstIndex(of: name), at + 1 < args.count else { return nil }
     defer { args.removeSubrange(at...at + 1) }
     return args[at + 1]

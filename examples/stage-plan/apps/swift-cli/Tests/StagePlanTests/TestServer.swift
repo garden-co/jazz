@@ -16,6 +16,10 @@ final class TestServer {
             ProcessInfo.processInfo.environment["JAZZ_TOOLS_BIN"]
             ?? repo.appendingPathComponent("target/debug/jazz-tools").path
         guard FileManager.default.isExecutableFile(atPath: binary) else {
+            // On CI a missing server fails: a skip would pass silently.
+            if ProcessInfo.processInfo.environment["CI"] != nil {
+                throw TestServerError("no jazz-tools at \(binary)")
+            }
             throw XCTSkip("no jazz-tools at \(binary): build it (cargo build -p jazz-cli --bin jazz-tools) or set JAZZ_TOOLS_BIN")
         }
         let port = Int.random(in: 20_000..<40_000)
@@ -43,7 +47,7 @@ final class TestServer {
             try await _Concurrency.Task.sleep(nanoseconds: 50_000_000)
         }
         kill(process.processIdentifier, SIGKILL)
-        throw XCTSkip("jazz-tools server didn't start at \(server.url)")
+        throw TestServerError("jazz-tools server didn't start at \(server.url)")
     }
 
     deinit {
@@ -54,3 +58,8 @@ final class TestServer {
     }
 }
 
+
+struct TestServerError: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
+}

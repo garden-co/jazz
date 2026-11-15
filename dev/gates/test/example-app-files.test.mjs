@@ -5,17 +5,25 @@
 // deletes those, and a leftover would read as a second source of truth.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
+/** A Swift package of the Jazz Swift runtime: its bindings are JazzApp.swift. */
+function isSwiftApp(dir) {
+  const manifest = join(root, dir, "Package.swift");
+  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
+}
+
 /**
  * TS apps: every app with a jazz.app.json, except Rust crates (a Cargo.toml
  * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app`
- * crate's checks cover.
+ * crate's checks cover, and Swift packages (a Package.swift naming
+ * jazz-swift), whose bindings are `JazzApp.swift` and which
+ * dev/gates/jazz-swift.sh covers.
  */
 function projects() {
   return execFileSync(
@@ -26,7 +34,7 @@ function projects() {
     .split("\n")
     .filter(Boolean)
     .map(dirname)
-    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")));
+    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")) && !isSwiftApp(dir));
 }
 
 test("every example app commits its files and its bindings", () => {
