@@ -73,9 +73,8 @@ async function trackedJazzLayer(name: string) {
   return { layer, openSubscriptions: () => open };
 }
 
-// Rows of an inline app are loosely typed.
-const titles = (rows: ReadonlyArray<{ readonly [column: string]: unknown }>) =>
-  rows.map((row) => row.title as string).sort();
+const titles = (rows: ReadonlyArray<{ readonly title: string }>) =>
+  rows.map((row) => row.title).sort();
 
 // The first test pays for loading the native runtime, which can exceed
 // vitest's default 5 s when other suites load theirs concurrently.

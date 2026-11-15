@@ -1083,7 +1083,6 @@ describe("TS Query API branch history", () => {
   it.each(["local-first", "remote"] as const)(
     "subscribes to accepted versions in one branch with %s reads",
     async (tier) => {
-      // The app is defined inline, so its rows are loosely typed.
       let latest: unknown[] | undefined;
       let failure: Error | undefined;
       stop = reader.subscribe(
