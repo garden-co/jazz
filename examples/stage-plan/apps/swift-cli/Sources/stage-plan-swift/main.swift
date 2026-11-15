@@ -2,11 +2,13 @@ import Foundation
 import Jazz
 import StagePlan
 
-// stage-plan-swift [--key-file <path>] [--bearer <token>] [--data-dir <dir>] [--show <name>] <command>
+// stage-plan-swift [--key-file <path>] [--bearer-stdin] [--data-dir <dir>] [--show <name>] <command>
 // An end user of StagePlan: it signs in to the app's Jazz endpoint
 // (JAZZ_ENDPOINT, the backend's handler; JAZZ_APP_ID) with a device account,
 // whose key lives in --key-file (made on first use, mode 0600; default
-// ~/.config/stage-plan-swift/device-key), or with the app's bearer token.
+// ~/.config/stage-plan-swift/device-key), or with the app's bearer token,
+// from $JAZZ_BEARER or, with --bearer-stdin, a line on stdin (never argv,
+// which `ps` and shell history show).
 //   list                    the show's tasks, by rank
 //   add <title>             add a task
 //   move <task-id> <stage>  todo | doing | done | blocked
@@ -20,7 +22,12 @@ var args = Array(CommandLine.arguments.dropFirst())
 let keyFile = option("--key-file")
     ?? FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/stage-plan-swift/device-key").path
-let bearer = option("--bearer")
+let bearerFromStdin = args.contains("--bearer-stdin")
+args.removeAll { $0 == "--bearer-stdin" }
+let bearer: String? =
+    bearerFromStdin
+    ? readLine(strippingNewline: true)
+    : ProcessInfo.processInfo.environment["JAZZ_BEARER"]
 let dataDir = option("--data-dir")
 let showName = option("--show") ?? "Opening night"
 
@@ -60,7 +67,7 @@ do {
         try await app.move(load.id, to: .doing)
         printTasks(try await app.tasks(of: show))
     default:
-        print("usage: stage-plan-swift [--key-file <path>] [--bearer <token>] [--data-dir <dir>] [--show <name>] list | add <title> | move <task-id> <stage> | demo")
+        print("usage: stage-plan-swift [--key-file <path>] [--bearer-stdin] [--data-dir <dir>] [--show <name>] list | add <title> | move <task-id> <stage> | demo")
         exit(2)
     }
     try await app.jazz.close()
@@ -69,14 +76,35 @@ do {
     exit(1)
 }
 
-/// The device account's key at `path`, made (mode 0600) if there's none.
+/// The device account's key at `path`, made if there's none. The key is the
+/// account: only a missing file makes a new one (any other read error is
+/// thrown, never overwritten), and a new file is created exclusively with
+/// mode 0600 from the start.
 func deviceKey(at path: String) throws -> String {
-    if let key = try? String(contentsOfFile: path, encoding: .utf8) {
-        return key.trimmingCharacters(in: .whitespacesAndNewlines)
+    do {
+        let key = try String(contentsOfFile: path, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw JazzError.refused("\(path) is empty: restore the device key or delete the file") }
+        return key
+    } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+        // No key yet: make one below.
     }
     let key = try Jazz.generateDeviceKey()
     let url = URL(fileURLWithPath: path)
-    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    FileManager.default.createFile(atPath: path, contents: Data(key.utf8), attributes: [.posixPermissions: 0o600])
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+    let fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+    guard fd >= 0 else {
+        throw JazzError.io("can't create \(path): \(String(cString: strerror(errno)))")
+    }
+    defer { close(fd) }
+    let bytes = Array((key + "\n").utf8)
+    let written = bytes.withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count) }
+    guard written == bytes.count, fsync(fd) == 0 else {
+        let reason = String(cString: strerror(errno))
+        unlink(path)
+        throw JazzError.io("can't write \(path): \(reason)")
+    }
     return key
 }
