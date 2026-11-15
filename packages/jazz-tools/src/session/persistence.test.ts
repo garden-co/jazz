@@ -376,3 +376,62 @@ it("forgets a device account's key when its sign-out discards unsynced writes", 
   await expect(session.reopenLocalFirst()).rejects.toThrow("keeps no device account");
   await session.close();
 });
+
+it("finishes a discard another tab held off on the next page load, forgetting the key", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  // localStorage's view, shared by every page of this browser.
+  const pending = new Set<string>();
+  const pendingDiscards = {
+    record: (account: string) => void pending.add(account),
+    clear: (account: string) => void pending.delete(account),
+    list: () => [...pending],
+  };
+  let otherTabOpen = true;
+  const deleteSignedOutStore = vi.fn(async (_account: string) =>
+    otherTabOpen ? ("held" as const) : ("deleted" as const),
+  );
+  const openClient = vi.fn(async () => ({ shutdown: async () => {} }));
+  const first = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient,
+    deleteSignedOutStore,
+    pendingDiscards,
+  });
+  await first.createLocalFirst();
+  const account = first.getSnapshot().account!.id;
+  await first.logout({ discardUnsynced: true });
+  await settle();
+  // Another tab still has it: the data and the key stay, for now.
+  expect(first.getSnapshot().error?.message).toContain("another tab still has this account open");
+  expect(first.keptLocalFirstKey()).toBeDefined();
+  // A reload, after that tab closed: the next page finishes it.
+  await first.close();
+  otherTabOpen = false;
+  const next = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient,
+    deleteSignedOutStore,
+    pendingDiscards,
+  });
+  await settle();
+  expect(deleteSignedOutStore).toHaveBeenLastCalledWith(account);
+  expect(pending.size).toBe(0);
+  expect(next.keptLocalFirstKey()).toBeUndefined();
+  await expect(next.reopenLocalFirst()).rejects.toThrow("keeps no device account");
+  await next.close();
+});

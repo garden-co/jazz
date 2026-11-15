@@ -361,11 +361,17 @@ describe("Jazz session lifecycle", () => {
   // credential is revoked, it stops waiting for sync and tears itself down.
   async function realEnrollmentSetup(
     hostOptions: {
-      deleteSignedOutStore?: (account: AccountHandle) => Promise<"deleted" | "held">;
+      deleteSignedOutStore?: (account: string) => Promise<"deleted" | "held">;
+      pendingDiscards?: {
+        record(account: string): void;
+        clear(account: string): void;
+        list(): string[];
+      };
     } = {},
   ) {
     // The account store's saves, which a test can make fail.
     const save = { fail: false };
+    let created = 0;
     const accounts = createAccountManagerWithRuntime({
       selectionDurability: {
         selectionChanged() {},
@@ -376,7 +382,8 @@ describe("Jazz session lifecycle", () => {
       registry: "https://core.example/apps/test/accounts",
       localFirst: {
         create: () => ({
-          accountId: "00000000-0000-4000-8000-000000000001",
+          // A new device account each time.
+          accountId: `00000000-0000-4000-8000-00000000000${++created}`,
           identity: { issuer: "urn:jazz:local-first", subject: "local" },
           auth: "e30.e30.signature",
         }),
@@ -526,7 +533,7 @@ describe("Jazz session lifecycle", () => {
   it("wipes by account after the client closed, even when the upload finished as discard was asked", async () => {
     const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const deleteSignedOutStore = vi.fn(async (_account: AccountHandle) => "deleted" as const);
+      const deleteSignedOutStore = vi.fn(async (_account: string) => "deleted" as const);
       const { session, net, opened } = await realEnrollmentSetup({ deleteSignedOutStore });
       await session.createLocalFirst();
       const client = opened.at(-1)!;
@@ -549,7 +556,7 @@ describe("Jazz session lifecycle", () => {
       expect(session.getSnapshot().error).toBeUndefined();
       // Through the host, by account, once the client was down: no
       // delete through a client that may be shutting down.
-      expect(deleteSignedOutStore).toHaveBeenCalledWith(account);
+      expect(deleteSignedOutStore).toHaveBeenCalledWith(account.id);
       expect(client.db.deleteClientStorage).not.toHaveBeenCalled();
       await session.close();
     } finally {
@@ -558,9 +565,10 @@ describe("Jazz session lifecycle", () => {
   });
   it("tells the app when another tab holds off a discard's wipe, and retry() finishes it", async () => {
     let holder: "held" | "deleted" = "held";
-    const deleteSignedOutStore = vi.fn(async (_account: AccountHandle) => holder);
+    const deleteSignedOutStore = vi.fn(async (_account: string) => holder);
     const { session, opened } = await realEnrollmentSetup({ deleteSignedOutStore });
     await session.createLocalFirst();
+    const a = session.getSnapshot().account!;
     const client = opened.at(-1)!;
     await session.logout({ discardUnsynced: true });
     // Signed out, but the data stays while that tab has it: the app is told.
@@ -575,7 +583,39 @@ describe("Jazz session lifecycle", () => {
     // That tab closed: retrying wipes it.
     holder = "deleted";
     await session.retry();
-    expect(deleteSignedOutStore).toHaveBeenCalledTimes(3);
+    expect(deleteSignedOutStore).toHaveBeenLastCalledWith(a.id);
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error).toBeUndefined();
+    await session.close();
+  });
+  it("doesn't bring a held-off discard back after another account's session", async () => {
+    const deleteSignedOutStore = vi.fn(async (_account: string) => "held" as const);
+    const pending = new Set<string>();
+    const pendingDiscards = {
+      record: (account: string) => void pending.add(account),
+      clear: (account: string) => void pending.delete(account),
+      list: () => [...pending],
+    };
+    const { session, net } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+    net.online = true;
+    await session.createLocalFirst();
+    const a = session.getSnapshot().account!;
+    await session.logout({ discardUnsynced: true });
+    expect(session.getSnapshot().error?.message).toContain(
+      "another tab still has this account open",
+    );
+    expect([...pending]).toEqual([a.id]);
+    // B signs in and out while the other tab still has A open.
+    await session.createLocalFirst();
+    expect(session.getSnapshot().account?.id).not.toBe(a.id);
+    await session.logout();
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    // A's error stays gone: finishing A is the pending entry's, which only
+    // wipes once no tab holds A's store.
+    expect(session.getSnapshot().error).toBeUndefined();
+    expect([...pending]).toEqual([a.id]);
+    for (const [account] of deleteSignedOutStore.mock.calls.slice(1)) expect(account).toBe(a.id);
+    await session.retry();
     expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
     expect(session.getSnapshot().error).toBeUndefined();
     await session.close();

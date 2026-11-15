@@ -356,6 +356,52 @@ async function whileNoTabHolds<T>(
 }
 
 /**
+ * @internal The accounts whose `signOut({ discardUnsynced })` wipe another
+ * tab held off, one localStorage key each (so tabs never overwrite each
+ * other's): any page finishes it once no tab holds the store, and signing
+ * in as the account clears it. Without storage, nothing is kept.
+ */
+export function pendingDiscardLedger(registry: string) {
+  const prefix = `jazz-discard-pending-v1:${encodeURIComponent(registry)}:`;
+  const storage = (): Storage | undefined => {
+    try {
+      return globalThis.localStorage;
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    record(account: string) {
+      try {
+        storage()?.setItem(prefix + account, "1");
+      } catch {
+        // Unwritable storage: only this page can finish it (on retry()).
+      }
+    },
+    clear(account: string) {
+      try {
+        storage()?.removeItem(prefix + account);
+      } catch {
+        // Nothing recorded.
+      }
+    },
+    list(): string[] {
+      const accounts: string[] = [];
+      try {
+        const store = storage();
+        for (let i = 0; i < (store?.length ?? 0); i++) {
+          const key = store!.key(i);
+          if (key?.startsWith(prefix)) accounts.push(key.slice(prefix.length));
+        }
+      } catch {
+        // Unreadable storage: nothing pending.
+      }
+      return accounts;
+    },
+  };
+}
+
+/**
  * @internal Let go of a client's store hold (`release`) once the client has
  * shut down, however that ended, except for a graceful shutdown whose sync
  * failed: the client is still open then (a `signing-out` session keeps it

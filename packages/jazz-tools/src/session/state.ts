@@ -268,7 +268,17 @@ export async function createJazzSessionOwner<
    * lock, `"held"` while another tab has it open). Without it the session
    * deletes through the client (`db.deleteClientStorage()`) before closing it.
    */
-  deleteSignedOutStore?(account: AccountHandle): Promise<"deleted" | "held">;
+  deleteSignedOutStore?(account: string): Promise<"deleted" | "held">;
+  /**
+   * @internal Where a discard another tab held off is kept, so a reload or
+   * another page finishes it (the browser: localStorage). Signing in as that
+   * account clears its entry.
+   */
+  pendingDiscards?: {
+    record(account: string): void;
+    clear(account: string): void;
+    list(): string[];
+  };
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: SessionCore<Client>): Extra;
 }): Promise<SessionCore<Client> & Extra> {
@@ -283,6 +293,8 @@ export async function createJazzSessionOwner<
     selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.backend);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
+  // Signed in as an account a discard left pending: it's in use again.
+  if (selected) options.pendingDiscards?.clear(selected.id);
   let snapshot: SessionCoreSnapshot<Client> = Object.freeze({
     status: client ? "ready" : "signed-out",
     account: selected,
@@ -298,29 +310,68 @@ export async function createJazzSessionOwner<
   let closing: Promise<void> | undefined;
   let loggingOut: Promise<void> | undefined;
   let signOuts = 0;
-  // A discard another tab held off: that account's store (and the writes
-  // in it, which that tab may still upload) stays until `retry()` wipes it.
+  // This session's own discard another tab held off, shown as the
+  // signed-out error until it is finished or someone signs in. Finishing
+  // it is kept in `pendingDiscards`, so a reload or another page does it
+  // if this one doesn't.
   let pendingWipe: AccountHandle | undefined;
   const wipeHeld = () =>
     new Error(
       "Jazz signed out, but another tab still has this account open, so its data stays on this device (that tab may still upload its unsynced writes). Close that tab, then call retry() to finish wiping it (discardUnsynced).",
     );
-  /** Wipe what a held-off discard left, once no tab holds the store. */
+  let finishing: Promise<void> | undefined;
+  /**
+   * Finish the discards other tabs held off (this session's and earlier
+   * pages'), each once no tab holds its store: wipe it and forget its key.
+   * Runs on start, once each operation settles, and on `retry()`. Not while
+   * an operation runs, nor for the account signed in here (it's in use).
+   */
+  const finishPendingWipes = (): Promise<void> => {
+    const deleteStore = options.deleteSignedOutStore;
+    if (!deleteStore) return Promise.resolve();
+    if (finishing) return finishing;
+    let run: Promise<void> | undefined = undefined;
+    run = (async () => {
+      // Started first, so a pass that ends at once still clears `finishing`.
+      await Promise.resolve();
+      try {
+        const pending = new Set(options.pendingDiscards?.list() ?? []);
+        if (pendingWipe) pending.add(pendingWipe.id);
+        for (const account of pending) {
+          if (closed || busy || loggingOut || draining) return;
+          if (selected?.id === account) {
+            options.pendingDiscards?.clear(account);
+            continue;
+          }
+          const outcome = await deleteStore(account).catch((error: unknown) => {
+            console.warn("Jazz couldn't finish a discarded account's wipe yet.", error);
+            return "held" as const;
+          });
+          if (outcome === "held") continue;
+          options.pendingDiscards?.clear(account);
+          await forgetDeviceAccount(accounts, account).catch((error: unknown) =>
+            console.warn("Jazz couldn't forget the signed-out device account's key.", error),
+          );
+          if (pendingWipe?.id === account) {
+            pendingWipe = undefined;
+            if (!selected && !closed && snapshot.status === "signed-out")
+              publish({ status: "signed-out" });
+          }
+        }
+      } finally {
+        if (finishing === run) finishing = undefined;
+      }
+    })();
+    finishing = run;
+    return finishing;
+  };
+  /** `retry()` with this session's discard held off: try to finish it now. */
   const finishWipe = async () => {
-    const account = pendingWipe;
-    if (!account || !options.deleteSignedOutStore) return;
-    if ((await options.deleteSignedOutStore(account)) === "held") {
-      const error = wipeHeld();
-      if (pendingWipe === account && !selected && !closed)
-        publish({ status: "signed-out", error, recovery: "action" });
-      throw error;
-    }
-    if (pendingWipe !== account) return;
-    pendingWipe = undefined;
-    await forgetDeviceAccount(accounts, account.id).catch((error: unknown) =>
-      console.warn("Jazz couldn't forget the signed-out device account's key.", error),
-    );
-    if (!selected && !closed && snapshot.status === "signed-out") publish({ status: "signed-out" });
+    await finishPendingWipes();
+    if (!pendingWipe) return;
+    const error = wipeHeld();
+    if (!selected && !closed) publish({ status: "signed-out", error, recovery: "action" });
+    throw error;
   };
   // A sign-out that couldn't reach the server (`signing-out`): the
   // signed-out user's client, still open so it can upload its last writes.
@@ -585,8 +636,13 @@ export async function createJazzSessionOwner<
       watchDrain(draining);
       return;
     }
-    // Signed in as the account a held-off discard left: its store is in use.
-    if (selected && pendingWipe?.id === selected.id) pendingWipe = undefined;
+    // Someone signed in: this session's held-off discard is no longer its
+    // error (another account's sign-out mustn't bring it back). Finishing it
+    // is left to `pendingDiscards`; signing in as that account cancels it.
+    if (selected) {
+      pendingWipe = undefined;
+      options.pendingDiscards?.clear(selected.id);
+    }
     publish({
       status: client ? "ready" : "signed-out",
       account: selected,
@@ -646,7 +702,10 @@ export async function createJazzSessionOwner<
     // from an earlier session too.
     if (options.deleteSignedOutStore && account)
       try {
-        held = (await options.deleteSignedOutStore(account)) === "held";
+        held = (await options.deleteSignedOutStore(account.id)) === "held";
+        // Kept, so a reload or another page finishes it.
+        if (held) options.pendingDiscards?.record(account.id);
+        else options.pendingDiscards?.clear(account.id);
       } catch (cause) {
         failure ??= cause;
       }
@@ -785,6 +844,7 @@ export async function createJazzSessionOwner<
     void task
       .finally(() => {
         if (busy === task) busy = undefined;
+        void finishPendingWipes();
       })
       .catch(() => {});
     return task;
@@ -875,6 +935,7 @@ export async function createJazzSessionOwner<
       void task
         .finally(() => {
           if (loggingOut === task) loggingOut = undefined;
+          void finishPendingWipes();
         })
         .catch(() => {});
       return task;
@@ -989,6 +1050,8 @@ export async function createJazzSessionOwner<
     };
   });
   if (options.decorate) Object.assign(session, options.decorate(session));
+  // Discards an earlier page left for another tab to let go of.
+  void finishPendingWipes();
   return Object.freeze(session) as SessionCore<Client> & Extra;
 }
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   holdReplicaStore,
   replicaLedger,
+  pendingDiscardLedger,
   releaseHoldOnShutdown,
   replicaLifecycle,
   wipeAccountStoreNow,
@@ -898,5 +899,31 @@ describe("releaseHoldOnShutdown", () => {
     releaseHoldOnShutdown(client, release);
     await expect(client.shutdown()).rejects.toThrow("teardown failed");
     expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pendingDiscardLedger", () => {
+  it("keeps each pending discard in its own key, readable by any page", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      get length() {
+        return values.size;
+      },
+      key: (i: number) => [...values.keys()][i] ?? null,
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => void values.set(key, value),
+      removeItem: (key: string) => void values.delete(key),
+    };
+    vi.stubGlobal("localStorage", storage);
+    try {
+      pendingDiscardLedger(REGISTRY).record(alice.id);
+      pendingDiscardLedger(REGISTRY).record(guest.id);
+      expect(pendingDiscardLedger(REGISTRY).list().sort()).toEqual([alice.id, guest.id].sort());
+      expect(pendingDiscardLedger("https://other.example/accounts").list()).toEqual([]);
+      pendingDiscardLedger(REGISTRY).clear(alice.id);
+      expect(pendingDiscardLedger(REGISTRY).list()).toEqual([guest.id]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

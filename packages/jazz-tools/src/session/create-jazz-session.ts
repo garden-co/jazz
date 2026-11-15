@@ -40,6 +40,7 @@ import {
 } from "./follow-user.js";
 import {
   holdReplicaStore,
+  pendingDiscardLedger,
   releaseHoldOnShutdown,
   replicaLedger,
   wipeAccountStoreNow,
@@ -405,8 +406,9 @@ export async function openBrowserSessionCore(
     // `signOut({ discardUnsynced })` wipes by account, under the store's lock.
     ...(loadLocalFirst
       ? {
-          deleteSignedOutStore: (account: AccountHandle) =>
-            wipeAccountStoreNow(registry, account.id, deleteStore),
+          deleteSignedOutStore: (account: string) =>
+            wipeAccountStoreNow(registry, account, deleteStore),
+          pendingDiscards: pendingDiscardLedger(registry),
         }
       : {}),
     ...(replicas
