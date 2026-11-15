@@ -87,31 +87,6 @@ const everyKind = {
           enum: ["low", "high"],
           optional: true,
         },
-        event: {
-          enum: {
-            created: {
-              by: "uuid",
-            },
-            moved: {
-              to: "int",
-              note: "string?",
-              reason: {
-                type: "string",
-                default: "none",
-              },
-            },
-          },
-        },
-        events: {
-          array: {
-            enum: {
-              ping: {
-                at: "timestamp?",
-              },
-              pong: {},
-            },
-          },
-        },
         statuses: {
           array: {
             enum: ["a", "b"],

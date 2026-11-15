@@ -349,7 +349,10 @@ impl Kind {
 }
 
 // Uploads in progress live on the client's thread, between the jobs that
-// feed them.
+// feed them. Unlike parked transactions, one still here when the thread
+// exits (shutdown mid-upload) is safe to drop with it: an upload holds no
+// client, only weak references to the store, and its staged chunks are
+// reclaimed when its lease expires (`shutdown_mid_upload` covers it).
 thread_local! {
     static UPLOADS: std::cell::RefCell<(u64, std::collections::HashMap<u64, StreamingUpload>)> =
         Default::default();
