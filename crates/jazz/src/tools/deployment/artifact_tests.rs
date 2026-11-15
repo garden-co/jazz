@@ -93,6 +93,7 @@ fn todo_server() -> ArtifactInput {
                         reverse("todos", "projectRelation"),
                     )]),
                     ts_only: vec![],
+                    ..Default::default()
                 },
             ),
             (
@@ -104,10 +105,11 @@ fn todo_server() -> ArtifactInput {
                         ("projectRelation".into(), forward("projects", "project")),
                     ]),
                     ts_only: vec![],
+                    ..Default::default()
                 },
             ),
         ]),
-        slices: BTreeMap::new(),
+        ..Default::default()
     };
     ArtifactInput {
         current: SchemaHash::compute(&current).to_string(),
@@ -272,26 +274,38 @@ fn shared_todos() -> ArtifactInput {
             (
                 "todos".into(),
                 CodegenTable {
-                    relations: BTreeMap::from([("shares".into(), reverse("shares", "todo"))]),
-                    ts_only: vec![
-                        TsOnlyColumn::Computed {
-                            column: "shareCount".into(),
+                    relations: BTreeMap::from([("shares".into(), reverse("shares", "todoRow"))]),
+                    computed: vec![ComputedField {
+                        name: "shareCount".into(),
+                        field_type: FieldType {
+                            column_type: ColumnType::Integer,
+                            nullable: false,
                         },
-                        TsOnlyColumn::Transform {
-                            column: "meta".into(),
-                        },
-                    ],
+                        from: vec!["id".into()],
+                    }],
+                    transforms: BTreeMap::from([("meta".into(), "jsonText".into())]),
+                    ..Default::default()
                 },
             ),
             (
                 "shares".into(),
                 CodegenTable {
-                    relations: BTreeMap::from([("todo".into(), forward("todos", "todo"))]),
+                    relations: BTreeMap::from([("todoRow".into(), forward("todos", "todo"))]),
                     ts_only: vec![],
+                    ..Default::default()
                 },
             ),
         ]),
-        slices: BTreeMap::from([("sharing".into(), vec!["shares".into()])]),
+        transforms: BTreeMap::from([(
+            "jsonText".into(),
+            TransformDecl {
+                stored: ColumnType::Json {
+                    schema: Some(serde_json::json!({ "type": "object" })),
+                },
+                view: ColumnType::Text,
+            },
+        )]),
+        ..Default::default()
     };
     ArtifactInput {
         current: h2.to_string(),
@@ -422,8 +436,8 @@ fn the_files_read_like_the_dsl() {
     for present in [
         "\"owner\": \"uuid?\"",
         "\"tags\": { \"array\": \"string\" }",
-        "\"todo\": { \"rel\": \"todos\", \"column\": \"todo\" }",
-        "\"shares\": { \"reverse\": \"shares\", \"relation\": \"todo\" }",
+        "\"todoRow\": { \"rel\": \"todos\", \"column\": \"todo\" }",
+        "\"shares\": { \"reverse\": \"shares\", \"relation\": \"todoRow\" }",
         "\"history\": \"latest\"",
         "\"renameFrom\": \"title\"",
     ] {
@@ -435,7 +449,7 @@ fn the_files_read_like_the_dsl() {
     }
     for present in [
         "\"anyOf\": [\"owner = session.user\", \"exists shares(todo = this.id, user = session.user)\"]",
-        "\"read\": \"allowedTo.read(todo)\"",
+        "\"read\": \"allowedTo.read(todoRow)\"",
         "\"delete\": { \"allOf\": [\"owner = session.user\", \"not owner = null\"] }",
     ] {
         assert!(
@@ -506,8 +520,8 @@ fn every_construct_reads_and_prints_back() {
         ),
         ("todos", "exists shares()"),
         ("todos", "allowedTo.read(shares)"),
-        ("shares", "allowedTo.read(todo)"),
-        ("shares", "allowedTo.update(todo, maxDepth: 3)"),
+        ("shares", "allowedTo.read(todoRow)"),
+        ("shares", "allowedTo.update(todoRow, maxDepth: 3)"),
         ("todos", "not owner = session.user"),
         ("todos", "owner = session.user or name = 'x'"),
         (
@@ -619,8 +633,8 @@ fn expression_errors_point_at_the_spot_and_suggest() {
             "two columns of the same row can't be compared",
         ),
         (
-            "exists shares(todo = this.id).todoo(name = 'x')",
-            "unknown relation `todoo` on shares; did you mean `todo`?",
+            "exists shares(todo = this.id).todoRw(name = 'x')",
+            "unknown relation `todoRw` on shares; did you mean `todoRow`?",
         ),
         (
             "outer.owner = session.user",
@@ -692,7 +706,7 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
     app["tables"]["todos"]["$comment"] = "A to-do".into();
     let mut permissions: serde_json::Value = serde_json::from_str(&written.permissions).unwrap();
     permissions["tables"]["shares"]["read"] =
-        serde_json::json!({"$comment": "Inherited", "where": "allowedTo.read(todo)"});
+        serde_json::json!({"$comment": "Inherited", "where": "allowedTo.read(todoRow)"});
     load(
         app.to_string().as_bytes(),
         permissions.to_string().as_bytes(),
@@ -731,7 +745,7 @@ fn migrations_must_name_versions_and_pass_their_lens_checks() {
 #[test]
 fn relations_must_name_real_columns() {
     let error =
-        edited_app(|v| v["tables"]["shares"]["relations"]["todo"]["column"] = "nope".into());
+        edited_app(|v| v["tables"]["shares"]["relations"]["todoRow"]["column"] = "nope".into());
     assert!(
         error.contains("names column `nope`, which shares doesn't have"),
         "{error}"
@@ -1405,13 +1419,13 @@ fn relation_hops_and_nested_exists_round_trip() {
     let text = printed("todos", &hop);
     assert_eq!(
         text,
-        "exists shares(todo = this.id).todo(owner = session.user)"
+        "exists shares(todo = this.id).todoRow(owner = session.user)"
     );
     // The hop sugar compiles to the same relation.
     assert_eq!(
         read_policy(
             "todos",
-            "exists shares(todo = this.id).todo(owner = session.user)",
+            "exists shares(todo = this.id).todoRow(owner = session.user)",
             serde_json::json!({})
         )
         .unwrap(),
@@ -1793,4 +1807,365 @@ fn readable_leaves_stay_strings() {
         "{}",
         written.permissions
     );
+}
+
+// ---------------------------------------------------------------------------
+// Computed fields, transforms, TODOs and .63 leftovers
+// ---------------------------------------------------------------------------
+
+fn edited_app_loads(edit: impl FnOnce(&mut serde_json::Value)) -> AppDefinition {
+    let written = write(shared_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    edit(&mut value);
+    load_app(value.to_string().as_bytes()).unwrap_or_else(|error| panic!("{error}"))
+}
+
+#[test]
+fn computed_fields_and_transforms_load_into_the_codegen_metadata() {
+    let app = edited_app_loads(|_| {});
+    let todos = &app.codegen().tables["todos"];
+    assert_eq!(todos.computed.len(), 1);
+    assert_eq!(todos.computed[0].name, "shareCount");
+    assert_eq!(todos.computed[0].from, vec!["id".to_string()]);
+    assert_eq!(todos.transforms["meta"], "jsonText");
+    assert_eq!(app.codegen().transforms["jsonText"].view, ColumnType::Text);
+    // A column's transform doesn't change the stored schema.
+    let plain = edited_app_loads(|v| {
+        v["tables"]["todos"]["columns"]["meta"]
+            .as_object_mut()
+            .unwrap()
+            .remove("transform");
+        v["tables"]["todos"]
+            .as_object_mut()
+            .unwrap()
+            .remove("computed");
+    });
+    assert_eq!(app.current_hash(), plain.current_hash());
+}
+
+#[test]
+fn computed_fields_and_transforms_must_name_what_exists() {
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["shareCount"]["from"] = serde_json::json!(["nmae"])
+    });
+    assert!(
+        error.contains("tables.todos.computed.shareCount.from[0]: table todos has no column nmae; did you mean `name`?"),
+        "{error}"
+    );
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["name"] = serde_json::json!({"type": "string", "from": []})
+    });
+    assert!(
+        error.contains("tables.todos.computed.name: table todos already has a column name"),
+        "{error}"
+    );
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["shares"] = serde_json::json!({"type": "int", "from": []})
+    });
+    assert!(error.contains("already has a relation shares"), "{error}");
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["twice"] =
+            serde_json::json!({"type": "int", "from": ["shareCount"]})
+    });
+    assert!(
+        error.contains("`shareCount` is a computed field"),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["todos"]["computed"]["x"] = serde_json::json!({"from": []}));
+    assert!(error.contains("a computed field needs `type`"), "{error}");
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["computed"]["x"] =
+            serde_json::json!({"type": {"type": "int", "default": 1}, "from": []})
+    });
+    assert!(
+        error.contains("computed.x.type.default: `default` is for stored columns"),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["todos"]["columns"]["meta"]["transform"] = "jsonTxt".into());
+    assert!(
+        error.contains("tables.todos.columns.meta.transform: no transform `jsonTxt` in the top-level `transforms`; did you mean `jsonText`?"),
+        "{error}"
+    );
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["columns"]["name"] =
+            serde_json::json!({"type": "string", "transform": "jsonText"})
+    });
+    assert!(
+        error.contains("transform `jsonText` stores { \"json\": { \"type\": \"object\" } }, but column name is \"string\""),
+        "{error}"
+    );
+    let error = edited_app(|v| {
+        v["transforms"]["bad"] = serde_json::json!({"stored": "string?", "view": "string"})
+    });
+    assert!(
+        error.contains("transforms.bad.stored: a transform's types carry no `?`"),
+        "{error}"
+    );
+    let error = edited_app(|v| v["transforms"]["bad"] = serde_json::json!({"stored": "string"}));
+    assert!(error.contains("a transform needs `view`"), "{error}");
+    let error = edited_app(|v| {
+        v["history"]["00304e9bce65"]["tables"]["todos"]["computed"] = serde_json::json!({})
+    });
+    assert!(
+        error.contains("only the current `tables` declare computed fields"),
+        "{error}"
+    );
+}
+
+#[test]
+fn unresolved_todos_are_refused_with_every_path() {
+    let error = edited_app(|v| {
+        v["migrations"][0]["migrate"]["todos"]["tags"]["default"] =
+            "TODO: a value for existing rows".into();
+        v["migrations"][0]["migrate"]["todos"]["meta"] = "TODO: rename or add?".into();
+    });
+    assert!(error.contains("2 unresolved TODOs"), "{error}");
+    assert!(
+        error.contains(
+            "  migrations[0].migrate.todos.tags.default: TODO: a value for existing rows"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains("  migrations[0].migrate.todos.meta: TODO: rename or add?"),
+        "{error}"
+    );
+    // A comment may say TODO.
+    edited_app_loads(|v| v["$comment"] = "TODO: tidy up".into());
+    // The client loader refuses them too.
+    let written = write(shared_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value["tables"]["todos"]["computed"]["shareCount"]["type"] = "TODO: the type".into();
+    assert!(load_client(value.to_string().as_bytes()).is_err());
+}
+
+#[test]
+fn slices_and_ts_only_from_alpha63_load_with_a_warning() {
+    let app = edited_app_loads(|v| {
+        v["slices"] = serde_json::json!({ "sharing": ["shares"] });
+        v["tables"]["shares"]["tsOnly"] = serde_json::json!({ "user": "transform" });
+    });
+    assert_eq!(app.warnings().len(), 2, "{:?}", app.warnings());
+    assert!(
+        app.warnings()
+            .iter()
+            .any(|w| w.contains("slices: schema slicing is gone in alpha.65"))
+    );
+    assert!(app.warnings().iter().any(|w| {
+        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.65) is ignored")
+    }));
+    assert!(edited_app_loads(|_| {}).warnings().is_empty());
+}
+
+#[test]
+fn migrations_take_a_name_and_comments() {
+    let app = edited_app_loads(|v| {
+        v["migrations"][0]["name"] = "rename-title".into();
+        v["migrations"][0]["migrate"]["$comment"] = "why".into();
+        v["migrations"][0]["migrate"]["todos"]["$comment"] = "title is now name".into();
+    });
+    assert_eq!(app.migrations().len(), 1);
+    let error = edited_app(|v| v["migrations"][0]["name"] = 3.into());
+    assert!(
+        error.contains("migrations[0].name: must be a string"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_source_hash_ignores_formatting_but_not_content() {
+    let canonical = source_hash(b"{\n  \"format\": 1,\n  \"tables\": {}\n}\n");
+    for same in [
+        &b"{\r\n  \"format\": 1,\r\n  \"tables\": {}\r\n}\r\n"[..],
+        b"{\"format\":1,\"tables\":{}}",
+        b"\xef\xbb\xbf{\n\t\"format\": 1, \"tables\": {  }\n}",
+    ] {
+        assert_eq!(
+            source_hash(same),
+            canonical,
+            "{}",
+            String::from_utf8_lossy(same)
+        );
+    }
+    assert_ne!(source_hash(b"{\"format\": 2, \"tables\": {}}"), canonical);
+    // Key order is content: columns are in declared order.
+    assert_ne!(source_hash(b"{\"tables\": {}, \"format\": 1}"), canonical);
+    assert!(
+        canonical.starts_with("sha256:") && canonical.len() == 7 + 64,
+        "{canonical}"
+    );
+}
+
+#[test]
+fn a_version_whose_rows_pass_unchanged_needs_no_written_migration() {
+    // A .64 file: `migrations create` wrote a snapshot, but no migration,
+    // for a change of indexes alone.
+    let file = r#"{ "format": 1,
+        "tables": { "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title"] } },
+        "history": { "a1b2c3d4e5f6": { "tables": { "todos": { "columns": { "title": "string", "done": "boolean" } } } } } }"#;
+    let app = load_app(file.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(app.migrations().len(), 1, "the implied identity step");
+    assert!(
+        app.migrations()[0]
+            .forward
+            .iter()
+            .all(|lens| lens.operations.is_empty())
+    );
+    assert_eq!(load_client(file.as_bytes()).unwrap().schemas.len(), 2);
+    // A version whose rows would need transforming still needs its migration.
+    let structural = file.replace(
+        r#""done": "boolean" } } } } }"#,
+        r#""note": "string?" } } } } }"#,
+    );
+    let error = load_app(structural.as_bytes()).unwrap_err().to_string();
+    assert!(
+        error.contains("history.a1b2c3d4e5f6: no migration leads from it"),
+        "{error}"
+    );
+}
+
+#[test]
+fn todo_is_only_a_placeholder_where_the_tools_write_one() {
+    let file = |extra: &str| {
+        format!(
+            r#"{{ "format": 1, "tables": {{ "notes": {{ "columns": {{
+                "title": {{ "type": "string", "default": "TODO: later" }},
+                "kind": {{ "enum": ["TODO:x", "done"] }},
+                "meta": {{ "json": {{ "type": "object", "description": "TODO: describe" }}, "transform": "metaText" }}
+            }} }} }},
+            "transforms": {{ "metaText": {{ "stored": {{ "json": {{ "type": "object", "description": "TODO: describe" }} }}, "view": {extra} }} }} }}"#
+        )
+    };
+    load_app(file("\"string\"").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let error = load_app(file("\"TODO: the view type\"").as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("transforms.metaText.view: TODO: the view type"),
+        "{error}"
+    );
+    let error = load_app(file("{ \"json\": \"TODO: a schema\" }").as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("transforms.metaText.view.json: TODO: a schema"),
+        "{error}"
+    );
+}
+
+#[test]
+fn load_app_checks_what_load_checks_of_the_app_file() {
+    let written = write(shared_todos()).unwrap();
+    let app = load_app(written.app.as_bytes()).unwrap();
+    let full = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(app.current_hash(), full.current_hash());
+    assert_eq!(app.schemas().len(), full.schemas().len());
+    assert_eq!(app.codegen(), full.codegen());
+}
+
+#[test]
+fn version_names_javascript_would_reorder_are_refused() {
+    let error = edited_app(|v| {
+        let history = v["history"].as_object_mut().unwrap();
+        let version = history.remove("00304e9bce65").unwrap();
+        history.insert("12".into(), version);
+        v["migrations"][0]["from"] = "12".into();
+    });
+    assert!(
+        error.contains("history.12: `12` can't name a version"),
+        "{error}"
+    );
+    // Twelve digits are never an array index.
+    for name in ["123456789012", "000000000001", "4294967295"] {
+        edited_app_loads(|v| {
+            let history = v["history"].as_object_mut().unwrap();
+            let version = history.remove("00304e9bce65").unwrap();
+            history.insert(name.into(), version);
+            v["migrations"][0]["from"] = name.into();
+        });
+    }
+}
+
+#[test]
+fn the_exact_login_is_session_identity() {
+    let expr = read_policy(
+        "todos",
+        "$createdBy.identity = session.identity",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(
+        printed("todos", &expr),
+        "$createdBy.identity = session.identity"
+    );
+    let account = read_policy("todos", "$createdBy = session.user", serde_json::json!({})).unwrap();
+    assert_ne!(expr, account);
+    let error = read_policy(
+        "todos",
+        "$createdBy.identity = session.identty",
+        serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(error.contains("`session.identity`"), "{error}");
+}
+
+#[test]
+fn every_history_version_must_lead_to_the_current_one() {
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("migrations");
+    });
+    assert!(
+        error.contains("history.00304e9bce65: no migration leads from it to the current `tables`"),
+        "{error}"
+    );
+    let written = write(shared_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value.as_object_mut().unwrap().remove("migrations");
+    assert!(load_client(value.to_string().as_bytes()).is_err());
+}
+
+/// `policy.<t>.gather(…)` policies from the TS DSL: a query inside
+/// `recursive(…)` ends at the next `, <field>:`, so a `select` or `order by`
+/// list doesn't run on into it. The writer prints them and reads them back.
+#[test]
+fn recursive_relations_end_their_queries_at_the_next_field() {
+    // permissions.repro.test.ts's "explicit gather seeds through a
+    // same-table double-ref edge".
+    let app = r#"{ "format": 1, "tables": {
+        "teams": { "columns": { "name": "string" }, "relations": {
+            "team_entryViaTeam": { "reverse": "team_entry", "relation": "teamRelation" },
+            "team_entryViaTarget": { "reverse": "team_entry", "relation": "target" },
+            "dropdowns_access_edgesViaTeam": { "reverse": "dropdowns_access_edges", "relation": "teamRelation" } } },
+        "team_entry": { "columns": { "team_id": "uuid", "target_id": "uuid", "user_id": "uuid", "administrator": "boolean" },
+            "relations": { "teamRelation": { "rel": "teams", "column": "team_id" }, "target": { "rel": "teams", "column": "target_id" } } },
+        "dropdowns": { "columns": { "name": "string" }, "relations": {
+            "dropdowns_access_edgesViaResource": { "reverse": "dropdowns_access_edges", "relation": "resource" } } },
+        "dropdowns_access_edges": { "columns": { "resource_id": "uuid", "team_id": "uuid", "grant_role": "string", "administrator": "boolean" },
+            "relations": { "resource": { "rel": "dropdowns", "column": "resource_id" }, "teamRelation": { "rel": "teams", "column": "team_id" } } }
+    } }"#;
+    let dropdowns = "exists (from recursive(seed: from team_entry join teams as __hop_0 on team_entry.target_id = __hop_0.id where team_entry.user_id = session.user select __hop_0.id as id, step: from team_entry where team_entry.administrator = bool(false) and team_entry.team_id = id(frontier) select team_entry.target_id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 8) join dropdowns_access_edges as __recursive_join_0 on teams.id = __recursive_join_0.team_id where __recursive_join_0.resource_id = outer.id and __recursive_join_0.grant_role in [text('viewer')] and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)";
+    let ordered = "exists (from recursive(seed: from teams select teams.id as id, teams.name as name, step: from teams where teams.id = id(frontier) order by teams.name, teams.id select teams.id as id, teams.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: fixpoint) where teams.id = outer.id)";
+    for text in [dropdowns, ordered] {
+        expr::parse(text).unwrap_or_else(|e| panic!("{}", e.render(text)));
+    }
+    let permissions = serde_json::json!({
+        "format": 1,
+        "tables": { "dropdowns": { "read": dropdowns }, "teams": { "read": "true" } },
+    });
+    let loaded =
+        load(app.as_bytes(), permissions.to_string().as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let codegen = load_app(app.as_bytes()).unwrap().codegen().clone();
+    let written = write(ArtifactInput {
+        current: loaded.current_hash().to_string(),
+        schemas: vec![loaded.current_schema().clone()],
+        migrations: vec![],
+        permissions: loaded.permissions().clone(),
+        codegen,
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let reloaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(reloaded.permissions(), loaded.permissions());
+    assert_eq!(reloaded.bundle(), loaded.bundle());
 }
