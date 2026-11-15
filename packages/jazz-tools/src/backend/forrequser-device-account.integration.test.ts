@@ -84,6 +84,10 @@ describe("forReqUser for a device account", () => {
     // What a browser attaches to its own fetch.
     const proof = client.db.getLocalFirstIdentityProof();
     expect(proof).toEqual(expect.any(String));
+    // It is for this app's endpoint only.
+    expect(client.db.getLocalFirstIdentityProof({ audience: "https://other.example/jazz" })).toBe(
+      null,
+    );
     const request = () => route(origin, bearer(proof!));
 
     await expect(jazz.accountFor(request())).resolves.toBe(account);
@@ -191,7 +195,7 @@ describe("forReqUser for a device account", () => {
     ).rejects.toMatchObject({ code: "invalid_device_proof" });
 
     // No proof: signed out, as before.
-    for (const headers of [{}, { authorization: "Bearer not-a-jwt" }]) {
+    for (const headers of [{}, { authorization: "Bearer not-a-jwt" }] as Record<string, string>[]) {
       await expect(jazz.forReqUser(route(origin, headers))).rejects.toMatchObject({
         name: "RequestAuthenticationError",
         code: "signed_out",

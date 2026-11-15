@@ -65,7 +65,12 @@ export function isAuthenticationUnavailableError(
 }
 
 // Only verified requests that completed account admission receive this capability.
-const localFirstProofs = new WeakMap<Session, Readonly<{ token: string; appId: string }>>();
+// `audience` is what the proof was verified for, when it isn't `appId` (an
+// endpoint URL an app-less browser names): the account's namespace too.
+const localFirstProofs = new WeakMap<
+  Session,
+  Readonly<{ token: string; appId: string; audience?: string }>
+>();
 export function verifiedLocalFirstRequestProof(session: Session) {
   return localFirstProofs.get(session);
 }
@@ -128,12 +133,23 @@ export function deviceProofOf(request: Request): string | null {
 }
 
 /**
- * The session of a device account whose `token` the caller verified (its
- * signature, issuer, audience and expiry proved `subject`), on the account
- * the core admitted it as.
+ * The session of a device account whose `token` the caller verified for
+ * `audience` (its signature, issuer and expiry proved `subject`), on the
+ * account the core admitted it as. The backend's runtime admits it from the
+ * same proof, which it verifies again on each use, so the session acts only
+ * while the proof is unexpired.
  */
-export function deviceAccountSession(token: string, subject: string, account: string): Session {
-  const session = localFirstSessionFromVerifiedProof(requireJwtPayload(token), subject);
-  session.account_id = account;
+export function deviceAccountSession(
+  proof: { token: string; subject: string; account: string },
+  appId: string,
+  audience: string,
+): Session {
+  const session = localFirstSessionFromVerifiedProof(requireJwtPayload(proof.token), proof.subject);
+  session.account_id = proof.account;
+  localFirstProofs.set(session, {
+    token: proof.token,
+    appId,
+    ...(audience === appId ? {} : { audience }),
+  });
   return session;
 }

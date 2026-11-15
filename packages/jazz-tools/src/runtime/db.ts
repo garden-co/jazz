@@ -100,7 +100,9 @@ import {
 } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
+import { accountAppId } from "../accounts/local-first.js";
 import {
+  LOCAL_FIRST_JWT_ISSUER,
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
@@ -2969,16 +2971,33 @@ export class Db {
   }
 
   /**
-   * Mint a short-lived local-first JWT proving possession of the current identity.
-   * Returns `null` if the current session is not local-first.
+   * A short-lived local-first JWT proving possession of the current identity:
+   * what a device account sends its own backend's routes as
+   * `Authorization: Bearer` (`jazz.forReqUser(request)` there). Returns
+   * `null` if the current session is not local-first.
+   *
+   * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
+   * device key: it returns the session's current sync proof, which lasts up
+   * to an hour and is for this app, so `ttlSeconds` doesn't apply and any
+   * other `audience` returns `null`. Ask for one per request.
    */
   getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+    const audience = options?.audience ?? clientScope(this.config);
     if (!this._localFirstSecret) {
-      return null;
+      const token = this.config.jwtToken;
+      const payload = token ? parseJwtPayload(token) : null;
+      if (
+        !token ||
+        payload?.iss !== LOCAL_FIRST_JWT_ISSUER ||
+        typeof payload.exp !== "number" ||
+        payload.exp <= Date.now() / 1000 ||
+        (options?.audience !== undefined && payload.aud !== accountAppId(options.audience))
+      )
+        return null;
+      return token;
     }
 
     const ttl = options?.ttlSeconds ?? 60;
-    const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 

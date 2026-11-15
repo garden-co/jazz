@@ -152,7 +152,7 @@ await fetch("/api/notes", {
 const db = await jazz.forReqUser(request);
 ```
 
-The proof lasts 60 seconds by default; mint one per request. Your backend checks it as it checks a
+The proof is short-lived (at most an hour), so ask for it for each request. Your backend checks it as it checks a
 sync connection: its signature and expiry, that it was made for this app (your `publicUrl`, when
 browsers reach Jazz through a proxy), that `authenticate` returns `acceptDeviceAccounts(request)`,
 and that the key wasn't revoked when the account was linked to a user. A request that fails a check

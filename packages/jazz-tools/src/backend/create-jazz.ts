@@ -3108,7 +3108,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (answer === null) return null;
     if (answer !== "device-account") return sessionFor(answer, caller);
     const device = await deviceAccountOf(request);
-    return device && deviceAccountSession(device.token, device.subject, device.account);
+    return device && deviceAccountSession(device, appId, device.audience);
   }
 
   /**
@@ -3124,7 +3124,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    */
   async function deviceAccountOf(
     request: Request,
-  ): Promise<{ token: string; subject: string; account: string } | null> {
+  ): Promise<{ token: string; subject: string; account: string; audience: string } | null> {
     const token = deviceProofOf(request);
     if (token === null) return null;
     const audience = guestAudience(request, token);
@@ -3134,7 +3134,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         { code: "invalid_device_proof" },
       );
     }
-    const subject = verifyLocalFirstToken(token, audience.endpoint ?? appId);
+    const verifiedFor = audience.endpoint ?? appId;
+    const subject = verifyLocalFirstToken(token, verifiedFor);
     let account: string;
     try {
       ({ account } = await adminAccounts("found-local-first", {
@@ -3155,7 +3156,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       throw error;
     }
-    return { token, subject, account };
+    return { token, subject, account, audience: verifiedFor };
   }
 
   /**
