@@ -24,18 +24,16 @@ async fn typed_snippets_run() {
         .unwrap();
     let parent = jazz
         .insert(NewTodo {
-            title: "B: parent".into(),
             priority: Some(5),
             project: Some(project.id),
-            ..Default::default()
+            ..NewTodo::new("B: parent", false)
         })
         .await
         .unwrap();
     let child = jazz
         .insert(NewTodo {
-            title: "A: buy milk".into(),
             parent: Some(parent.id),
-            ..Default::default()
+            ..NewTodo::new("A: buy milk", false)
         })
         .await
         .unwrap();

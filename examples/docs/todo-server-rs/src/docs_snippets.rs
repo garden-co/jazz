@@ -3,24 +3,21 @@
 //! The docs include each `#region` by name. Most use the typed API the
 //! generated bindings (`crate::jazz_app`) give the [`Jazz`] handle. What it
 //! doesn't cover yet (per-request sessions, includes, select, recursive
-//! queries, files, serializable transactions with reads, Rust permission
-//! builders, filters and sorts on magic columns or `contains`) uses the
+//! queries, files, serializable transactions with reads) uses the
 //! low-level `JazzClient`, either directly or through [`Jazz::with_client`].
+//! Permissions are the app's `jazz.permissions.json`.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
 use ::jazz_app::jazz;
-use ::jazz_app::{Jazz, ObjectId, Order, ReadTier, Subscription};
+use ::jazz_app::{Jazz, ObjectId, Order, ReadTier, Subscription, Timestamp};
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz::db::{Db, UpdateOptions};
 use jazz::ids::RowUuid;
-use jazz::query::{
-    ArraySubquery, ArraySubqueryRequirement, Gather, OrderDirection, Query, col, contains, eq, gt,
-    lit,
-};
+use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Gather, Query, col, eq, lit};
 use jazz::records::Value as DbValue;
-use jazz::tools::{JazzClient, Operation, PolicyExpr, Session, TablePolicies, Value};
+use jazz::tools::{JazzClient, Session, Value};
 
 use crate::jazz_app::{NewTodo, Todo, TodoUpdate, projects, todos};
 
@@ -66,48 +63,6 @@ pub async fn list_todos_for_request(headers: &HeaderMap, jazz: &Jazz) -> Result<
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 // #endregion backend-request-handler-rust
-
-// #region permissions-simple-rust
-pub fn simple_owner_policies() -> TablePolicies {
-    TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_update(
-            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        )
-}
-// #endregion permissions-simple-rust
-
-// #region permissions-inherits-rust
-pub fn inherits_select_policy() -> TablePolicies {
-    TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits(Operation::Select, "folder_id"),
-    ]))
-}
-// #endregion permissions-inherits-rust
-
-// #region permissions-combinators-rust
-pub fn combinator_policy() -> TablePolicies {
-    TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::and(vec![
-            PolicyExpr::True,
-            PolicyExpr::inherits(Operation::Select, "project"),
-        ]),
-    ]))
-}
-// #endregion permissions-combinators-rust
-
-// #region permissions-recursive-inherits-rust
-pub fn recursive_inherits_policy() -> TablePolicies {
-    TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits_with_depth(Operation::Select, "parent", 10),
-    ]))
-}
-// #endregion permissions-recursive-inherits-rust
 
 // #region reading-oneshot-rust
 pub async fn read_todos_oneshot(jazz: &Jazz) -> ::jazz_app::Result<Vec<Todo>> {
@@ -157,6 +112,8 @@ pub async fn read_todo_page(
     let query = todos::query()
         .filter(todos::done().eq(false))
         .order_by(todos::title(), Order::Asc)
+        // The id breaks ties, so pages never overlap.
+        .order_by(todos::id(), Order::Asc)
         .limit(page_size)
         .offset(offset);
 
@@ -224,12 +181,7 @@ pub fn build_todo_lineage_query() -> Query {
 
 // #region writing-crud-rust
 pub async fn write_todo_crud(jazz: &Jazz, existing_id: ObjectId) -> ::jazz_app::Result<()> {
-    let _new_todo = jazz
-        .insert(NewTodo {
-            title: "Write docs".into(),
-            ..Default::default()
-        })
-        .await?;
+    let _new_todo = jazz.insert(NewTodo::new("Write docs", false)).await?;
     jazz.update(
         existing_id,
         TodoUpdate {
@@ -246,10 +198,10 @@ pub async fn write_todo_crud(jazz: &Jazz, existing_id: ObjectId) -> ::jazz_app::
 // #region writing-durability-tier-rust
 pub async fn write_todo_with_default_durability(jazz: &Jazz) -> ::jazz_app::Result<ObjectId> {
     let todo = jazz
-        .insert(NewTodo {
-            title: "Write docs with default durability behavior".into(),
-            ..Default::default()
-        })
+        .insert(NewTodo::new(
+            "Write docs with default durability behavior",
+            false,
+        ))
         .await?;
 
     // Rust currently does not expose per-write durability tier arguments.
@@ -266,10 +218,7 @@ pub async fn group_todo_writes(
     // Committed together if the closure returns `Ok`, rolled back if it
     // returns `Err`.
     jazz.transaction(move |tx| {
-        let created = tx.insert(NewTodo {
-            title: "Write transaction docs".into(),
-            ..Default::default()
-        })?;
+        let created = tx.insert(NewTodo::new("Write transaction docs", false))?;
         tx.update(
             existing_todo_id,
             TodoUpdate {
@@ -309,41 +258,27 @@ pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app::Result<()> {
     let incomplete_todos = jazz.all(query).await?;
 
     // Not equal
-    let query = todos::query().filter(todos::title().ne("Draft".into()));
+    let query = todos::query().filter(todos::title().ne("Draft"));
     let non_draft_todos = jazz.all(query).await?;
     // #endregion where-eq-ne-rust
 
     // #region where-numeric-rust
-    let query = todos::query().filter(todos::priority().gte(Some(3)));
+    let query = todos::query().filter(todos::priority().gte(3));
     let high_priority = jazz.all(query).await?;
 
-    let query = todos::query().filter(todos::priority().lt(Some(10)));
+    let query = todos::query().filter(todos::priority().lt(10));
     let low_priority = jazz.all(query).await?;
 
-    // Magic columns such as `$createdAt` have no typed column yet: filter
-    // on them with the low-level query.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let one_week_ago = now_ms - 7 * 24 * 60 * 60 * 1000;
-
-    let query = Query::from("todos").filter(gt(col("$createdAt"), lit(one_week_ago)));
-    let recent_todos = jazz
-        .with_client(
-            move |client| async move { Ok(client.query(query, ReadTier::LocalFirst).await?) },
-        )
-        .await?;
+    // Every table has `created_at()` and `updated_at()` columns.
+    let one_week_ago = Timestamp(Timestamp::now().0 - 7 * 24 * 60 * 60 * 1000);
+    let query = todos::query().filter(::jazz_app::created_at().gt(one_week_ago));
+    let recent_todos = jazz.all(query).await?;
     // #endregion where-numeric-rust
 
     // #region where-contains-rust
-    // Substring match (case-sensitive), with the low-level query
-    let query = Query::from("todos").filter(contains(col("title"), lit(search_term)));
-    let matches = jazz
-        .with_client(
-            move |client| async move { Ok(client.query(query, ReadTier::LocalFirst).await?) },
-        )
-        .await?;
+    // Substring match (case-sensitive)
+    let query = todos::query().filter(todos::title().contains(search_term));
+    let matches = jazz.all(query).await?;
     // #endregion where-contains-rust
 
     // #region where-null-rust
@@ -352,7 +287,7 @@ pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app::Result<()> {
     let unlinked_todos = jazz.all(query).await?;
 
     // Rows where it is set
-    let query = todos::query().filter(todos::parent().is_null().not());
+    let query = todos::query().filter(todos::parent().is_not_null());
     let linked_todos = jazz.all(query).await?;
     // #endregion where-null-rust
 
@@ -360,21 +295,16 @@ pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app::Result<()> {
     // Multiple filter calls are AND-combined
     let query = todos::query()
         .filter(todos::done().eq(true))
-        .filter(todos::project().is_null().not());
+        .filter(todos::project().is_not_null());
     let done_with_project = jazz.all(query).await?;
     // #endregion where-and-rust
 
     // #region where-order-limit-rust
-    // Sorting by `$createdAt` needs the low-level query.
-    let query = Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .order_by("$createdAt", OrderDirection::Asc)
+    let query = todos::query()
+        .filter(todos::done().eq(false))
+        .order_by(::jazz_app::created_at(), Order::Asc)
         .limit(50);
-    let recent_incomplete = jazz
-        .with_client(
-            move |client| async move { Ok(client.query(query, ReadTier::LocalFirst).await?) },
-        )
-        .await?;
+    let recent_incomplete = jazz.all(query).await?;
     // #endregion where-order-limit-rust
 
     // #region where-subscription-rust
@@ -402,10 +332,13 @@ pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app::Result<()> {
 pub fn composing_queries() {
     // Build two views from the same base conditions: queries are values.
     let open = todos::query().filter(todos::done().eq(false));
-    let by_title = open.clone().order_by(todos::title(), Order::Asc).limit(20);
+    let newest = open
+        .clone()
+        .order_by(::jazz_app::created_at(), Order::Desc)
+        .limit(20);
     let by_priority = open.order_by(todos::priority(), Order::Desc);
 
-    let _ = (by_title, by_priority);
+    let _ = (newest, by_priority);
 }
 // #endregion reading-composing-queries-rust
 

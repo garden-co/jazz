@@ -11,14 +11,12 @@ The documentation copy of [`examples/todo-server-rs`](../../todo-server-rs): the
 - `src/routes.rs`: CRUD over `/todos` and the `/todos/live` SSE stream.
 - `src/docs_snippets.rs`: the snippets. The docs include each `// #region <name>` by name, so keep the names when you edit them.
 
-Most snippets use the typed API: `jazz.all`, `one`, `get`, `insert`, `update`, `delete`, `transaction` and `subscribe`, with `todos::query()`, `todos::done().eq(false)`, `projects::todos().of(id)` and `TodoUpdate { parent: Some(None), .. }`. What `jazz-app` doesn't cover yet uses the low-level `JazzClient`, either directly or through `Jazz::with_client`:
+Most snippets use the typed API: `jazz.all`, `one`, `get`, `insert`, `update`, `delete`, `transaction` and `subscribe`, with `todos::query()`, `todos::done().eq(false)`, `todos::title().contains("milk")`, `order_by(jazz_app::created_at(), …)`, `projects::todos().of(id)`, `NewTodo::new(title, done)` and `TodoUpdate { parent: Some(None), .. }`. What `jazz-app` doesn't cover yet uses the low-level `JazzClient`, either directly or through `Jazz::with_client`:
 
 - per-request sessions (`for_session`): the typed handle acts as the backend's one user;
 - includes, `select`, recursive queries (`gather`);
-- filters and sorts on magic columns (`$createdAt`) and `contains`;
 - files (large values);
-- serializable transactions that read;
-- the Rust permission builders (`permissions-*-rust`). The app's permissions come from `jazz.permissions.json`.
+- serializable transactions that read.
 
 ## Schema
 
