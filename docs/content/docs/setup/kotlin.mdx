@@ -1,0 +1,93 @@
+---
+title: Kotlin Backend
+description: "Open a Jazz app from Kotlin on the JVM with the jazz-kotlin library and typed bindings generated from jazz.app.json."
+---
+
+A Kotlin/JVM service can be your app's backend. It opens the app from the same `jazz.app.json` and
+`jazz.permissions.json` as every other language, with typed bindings generated from them. On start
+it publishes the app's permissions bundle, as `createJazz` does. Then it acts as one user of the
+app, in a session pinned to that bundle.
+
+The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). Its calls are
+`suspend` functions, and subscriptions are `Flow`s. It isn't on Maven Central yet, so build it from
+the Jazz repository. With a checkout next to your project, include it as a composite build:
+
+```kotlin title="settings.gradle.kts"
+includeBuild("../jazz/packages/jazz-kotlin")
+```
+
+```kotlin title="build.gradle.kts"
+plugins {
+    kotlin("jvm") version "2.2.21"
+    kotlin("plugin.serialization") version "2.2.21"
+    application
+}
+
+dependencies {
+    implementation("tools.jazz:jazz-kotlin")
+}
+```
+
+Building `jazz-kotlin` runs `cargo build -p jazz-ffi`, so it needs a Rust toolchain. It loads
+`libjazz_ffi` through JNA: set `-Djna.library.path` to the directory that holds it
+(`target/debug` in the Jazz checkout). It runs on JDK 17 or later.
+
+## Generate the bindings
+
+With a `build.gradle.kts` beside `jazz.app.json`, `jazz-tools generate` writes
+`src/main/kotlin/JazzApp.kt`, in the package `jazzapp`:
+
+```bash
+npx jazz-tools generate            # checks the files, writes src/main/kotlin/JazzApp.kt
+npx jazz-tools generate --check    # in CI: fails if JazzApp.kt is stale
+```
+
+Commit `JazzApp.kt`. Per table it gives you:
+
+- a `@Serializable` row data class (`Task`), with the authored column names;
+- an insert data class (`TaskInsert`), whose optional columns default to `null`;
+- a patch builder (`TaskPatch`), used as `jazz.update(Tasks, id) { status(TaskStatus.Done) }`;
+- a table object (`Tasks`) with typed columns, for queries:
+  `Tasks.where(Tasks.showId eq id).orderBy(Tasks.rank.asc())`;
+- an `enum class` per enum column (`TaskStatus`).
+
+## Open the app
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-backend
+</include>
+
+`Jazz` is safe to use from any coroutine. Its calls run on `Dispatchers.IO`, and the native core
+runs the client on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) before the
+process exits.
+
+`jazz.account()` is the account id of the user the backend acts as. Write it into columns that
+policies compare with `session.user`, like StagePlan's `shows.chiefAccount`.
+
+The backend needs the sync server's admin secret, to publish the bundle, and its backend secret, to
+vouch for the user it acts as. Like every backend, give it no HTTP surface that callers can reach
+without your own authentication.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Kotlin
+tab for each example. `examples/stage-plan/apps/kotlin-cli` in the repository is a complete
+command-line app: it creates a show, lists its tasks by rank, adds tasks and moves them between
+stages.
+
+Writes are local-first. A write that the server's permissions refuse doesn't fail the call: it
+stays local and never syncs.
+
+## Not supported yet
+
+In Kotlin, Jazz doesn't support these yet:
+
+- Android apps (the library is JVM-only for now) and other Kotlin Multiplatform targets;
+- connecting as an end user with a JWT: the app opens locally or as a backend;
+- includes and relations, `select` and recursive queries;
+- computed fields and transforms: `jazz-tools generate` refuses an app that declares them;
+- transactions;
+- choosing a durability tier for reads or writes;
+- payload enums, nested rows and catalogue enums in bindings;
+- text merge for `merge: "text"` columns (like StagePlan's `tasks.notes`): a write sets the whole
+  string;
+- files and blobs;
+- publishing `jazz-kotlin` to Maven Central: build it from the repository.

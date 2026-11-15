@@ -61,7 +61,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "kotlin",
       symbols: ["TaskStatus", "Task", "TaskInsert"],
     },
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Go",
