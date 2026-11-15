@@ -14,9 +14,10 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 <include>../../../partials/install-alpha.mdx</include>
 
-This page is for a TypeScript backend. Rust and Go backends don't run on Vercel yet: their endpoint
-syncs only over WebSockets, which Vercel Functions can't serve, and it keeps a long-lived
-connection to the core, which a function that sleeps between requests doesn't. Run them on
+This page is for a TypeScript backend. Rust and Go backends don't run on Vercel yet: on Vercel only
+a Node function can upgrade a sync socket, and their endpoints have no HTTP-stream fallback, so
+users' clients couldn't sync. They also keep a long-lived connection to the core, and have no
+counterpart to `vercel()`. Run them on
 [your own server](/docs/setup/deployment/own-server#create-jazz-once) or a container platform.
 
 ## Set it up
