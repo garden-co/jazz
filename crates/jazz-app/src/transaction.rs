@@ -16,9 +16,8 @@ use crate::table::{Implementations, Insert, Table, Update};
 
 /// A transaction in progress, handed to [`Jazz::transaction`]'s closure.
 ///
-/// It is serializable: its reads see the data as of its start, and the
-/// server applies its writes only if nothing it read or wrote changed in
-/// the meantime. Staged writes are not visible to reads outside it until it
+/// Mergeable ([`Jazz::transaction`]) or serializable
+/// ([`Jazz::serializable_transaction`]). Staged writes are not visible to reads outside it until it
 /// commits. Clone it freely within the closure; it lives on the client's
 /// thread, so it is not `Send`.
 #[derive(Clone)]
@@ -75,11 +74,15 @@ impl Transaction {
         self.read_back(id).await
     }
 
-    /// Brings back a deleted row with `update`'s columns replaced.
-    pub async fn restore_with<U: Update>(&self, id: ObjectId, update: U) -> Result<U::Row> {
-        let cells = update.into_cells(&self.implementations)?;
-        self.client
-            .restore(<U::Row as Table>::NAME, id, Some(cells))?;
+    /// Brings back a deleted row with `new`'s values, as
+    /// [`Jazz::restore_with`].
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        let cells = new.into_cells(&self.implementations)?;
+        self.client.restore(
+            <N::Row as Table>::NAME,
+            id,
+            Some(cells.into_iter().collect()),
+        )?;
         self.wrote.set(true);
         self.read_back(id).await
     }
@@ -114,12 +117,15 @@ impl Transaction {
 }
 
 impl Jazz {
-    /// Runs `body` in a serializable transaction. It is committed if `body`
-    /// returns `Ok` (and wrote anything), rolled back if it returns `Err`.
-    /// On a [`Jazz::durable`] handle the call returns once the commit
-    /// reached that tier. A body that panics rolls back and fails with
-    /// [`crate::Error::Panicked`]. Dropping the returned future doesn't
-    /// cancel the transaction: it runs to its end on the client's thread.
+    /// Runs `body` in a mergeable transaction, as TS's `transaction` does:
+    /// its writes commit together, each merging with concurrent writes as a
+    /// plain write does; its reads see local data with its own staged
+    /// writes. It is committed if `body` returns `Ok` (and wrote anything),
+    /// rolled back if it returns `Err`. On a [`Jazz::durable`] handle the
+    /// call returns once the commit reached that tier. A body that panics
+    /// rolls back and fails with [`crate::Error::Panicked`]. Dropping the
+    /// returned future doesn't cancel the transaction: it runs to its end on
+    /// the client's thread.
     ///
     /// ```ignore
     /// let moved = jazz.transaction(move |tx| async move {
@@ -134,10 +140,37 @@ impl Jazz {
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
+        self.run_transaction(true, body).await
+    }
+
+    /// Runs `body` in a serializable transaction, as TS's
+    /// `serializableTransaction` does: its reads see the data as of its
+    /// start, and the server applies its writes only if nothing it read or
+    /// wrote changed in the meantime, refusing the commit otherwise.
+    /// Otherwise as [`Jazz::transaction`].
+    pub async fn serializable_transaction<F, Fut, R>(&self, body: F) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
+        self.run_transaction(false, body).await
+    }
+
+    async fn run_transaction<F, Fut, R>(&self, mergeable: bool, body: F) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let open = client.begin_transaction()?;
+            let open = if mergeable {
+                client.begin_mergeable_transaction()?
+            } else {
+                client.begin_transaction()?
+            };
             let transaction = Transaction {
                 client: open.client().clone(),
                 id: open.transaction_id(),

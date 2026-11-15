@@ -2,7 +2,7 @@
 //! hand-written lexer and parser with byte spans, the compile to the
 //! engine's [`PolicyExpr`], and the printer back to canonical text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::query::{
     OrderDirection, RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr,
@@ -1826,7 +1826,13 @@ pub struct Context<'a> {
     pub schema: &'a Schema,
     pub relations: &'a BTreeMap<String, BTreeMap<String, CodegenRelation>>,
     pub defs: &'a Defs,
+    /// Each table's computed fields: not stored, so no policy reads them;
+    /// named only to say so when one does.
+    pub computed: &'a ComputedNames,
 }
+
+/// Table → the names of its computed fields.
+pub type ComputedNames = BTreeMap<String, BTreeSet<String>>;
 
 /// Parsed `defs`: name → (parameters, body).
 pub type Defs = BTreeMap<String, Def>;
@@ -2011,6 +2017,20 @@ fn column_type<'a>(
     let columns = columns_of(context, table).unwrap_or_default();
     if let Some((_, ty)) = columns.iter().find(|(name, _)| *name == column) {
         return Ok(Some(ty));
+    }
+    if context
+        .computed
+        .get(table)
+        .is_some_and(|fields| fields.contains(column))
+    {
+        return Err(ExprError::new(
+            span,
+            format!(
+                "unknown column `{column}` in {table}: `{column}` is a computed field, which isn't \
+                 stored, so a permission can't read it; write the policy over the columns it's \
+                 computed from"
+            ),
+        ));
     }
     let names: Vec<&str> = columns
         .iter()
