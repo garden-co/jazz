@@ -12,6 +12,9 @@ repositories { mavenCentral() }
 dependencies {
     implementation("tools.jazz:jazz-kotlin")
     testImplementation(kotlin("test"))
+    // Serves the backend's Jazz endpoint (KtorEndpoint.kt).
+    implementation("io.ktor:ktor-server-cio:3.2.3")
+    implementation("io.ktor:ktor-server-websockets:3.2.3")
 }
 
 java {

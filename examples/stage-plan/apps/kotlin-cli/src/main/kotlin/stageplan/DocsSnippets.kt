@@ -13,6 +13,7 @@ import tools.jazz.Jazz
 import tools.jazz.JazzAuth
 import tools.jazz.HistoryRow
 import tools.jazz.JazzColumns
+import tools.jazz.EndpointUser
 import tools.jazz.JazzConfig
 import tools.jazz.hopTo
 import tools.jazz.history
@@ -427,4 +428,24 @@ object DocsSnippets {
         // #endregion reading-include-deleted-kotlin
         return withDeleted
     }
+
+    suspend fun serveEndpoint(backend: Jazz, port: Int): io.ktor.server.engine.EmbeddedServer<*, *> {
+        // #region backend-endpoint-setup-kotlin
+        // The backend serves end users' apps: your sign-in says who a request's user
+        // is (here a bearer token "token-<user>"); device accounts prove themselves.
+        val endpoint = backend.endpoint { request ->
+            when (val bearer = request.header("Authorization")?.removePrefix("Bearer ")) {
+                null -> EndpointUser.DeviceAccount
+                else -> verifyToken(bearer)?.let { user ->
+                    EndpointUser.User(userId = user, expiresAt = System.currentTimeMillis() / 1000 + 3600)
+                }
+            }
+        }
+        val server = serveJazz(endpoint, port).start(wait = false)
+        // #endregion backend-endpoint-setup-kotlin
+        return server
+    }
+
+    /** Your own sign-in's check; here, the test's `token-<user>` tokens. */
+    private fun verifyToken(token: String): String? = token.removePrefix("token-").takeIf { it != token }
 }
