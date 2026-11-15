@@ -241,6 +241,8 @@ async fn serve(stream: TcpStream, endpoint: Endpoint, admitted: Arc<Mutex<Vec<Ad
                 .filter_map(|message| {
                     std::future::ready(match message {
                         Ok(Message::Binary(data)) => Some(data.to_vec()),
+                        // TS clients send their prelude as text.
+                        Ok(Message::Text(text)) => Some(text.as_bytes().to_vec()),
                         _ => None,
                     })
                 })
@@ -766,11 +768,9 @@ async fn a_missing_expired_or_foreign_jwt_is_refused() {
     app.stop().await;
 }
 
-/// What reaches the core is built by the endpoint: the backend secret and
-/// exactly one identity, read from `auth` only. A credential stated
-/// anywhere else (a top-level `jwt_token` beside the secret the endpoint
-/// adds would have read as the backend's own trusted link) refuses the
-/// socket.
+/// Only the credential the endpoint vouched for, inside `auth`, is
+/// forwarded to the core, beside the backend secret; other prelude fields
+/// are refused or dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_the_vouched_credential_reaches_the_core() {
     let app = App::start().await;
@@ -845,8 +845,7 @@ async fn only_the_vouched_credential_reaches_the_core() {
     assert_eq!(keys(&ts_shaped), ["auth", "bundle", "peer_identity"]);
     assert_eq!(keys(&ts_shaped["auth"]), ["backend_secret", "jwt_token"]);
 
-    // Credentials outside `auth` that differ from it, secrets, or requests
-    // only a backend makes.
+    // Refused shapes.
     let refused = [
         json!({ "jwt_token": device_token, "auth": {} }),
         json!({ "jwt_token": device_token }),
@@ -1165,5 +1164,103 @@ async fn an_expired_or_mismatched_challenge_links_nothing() {
     let fresh = signed(now() + 60);
     let response = link_as(&app, &app.endpoint, "pia", &seed, &fresh, &fresh).await;
     assert_eq!(response.status, 200);
+    app.stop().await;
+}
+
+/// A TS client's socket: its prelude as a text frame, shaped as TS's
+/// `encodeWebSocketPrelude` writes it (auth repeated beside `auth`, with
+/// `sub`), its bearer on the upgrade. It is admitted.
+async fn a_ts_shaped_socket_is_admitted(app: &App, ws: &str) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    let token = jwt("tess", JWT_ISSUER, now() + 3600, JWT_KEY);
+    let sign_in = app
+        .endpoint
+        .handle(
+            Request::new("POST", app.path("accounts/backend-sign-in"))
+                .header("authorization", format!("Bearer {token}")),
+        )
+        .await;
+    assert_eq!(sign_in.status, 200);
+    let account = serde_json::from_slice::<Value>(&sign_in.body).unwrap()["account"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = json!({
+        "account_id": account,
+        "issuer": "jazz:backend",
+        "user_id": "tess",
+        "claims": {},
+        "authMode": "external",
+    });
+    let auth = json!({ "jwt_token": null, "backend_session": session });
+    let peer = serde_json::to_string(&(account.as_str(), "jazz:backend", "tess")).unwrap();
+    let prelude = json!({
+        "peer_identity": peer,
+        "jwt_token": null,
+        "backend_session": session,
+        "auth": { "jwt_token": null, "backend_session": auth["backend_session"], "sub": "tess" },
+        "sub": "tess",
+    });
+    let mut request = ws.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(Message::Text(prelude.to_string().into()))
+        .await
+        .unwrap();
+    // Then a binary frame. Had the text prelude been dropped, this frame
+    // would be read as the prelude and refused (1008, `session missing`);
+    // admitted, it reaches the core, which ends the socket its own way.
+    socket
+        .send(Message::Binary(b"not a wire frame".to_vec().into()))
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(message)) = socket.next().await {
+            if let Message::Close(frame) = message {
+                return frame;
+            }
+        }
+        None
+    })
+    .await
+    .expect("the socket ends");
+    assert!(
+        !matches!(&closed, Some(frame) if u16::from(frame.code) == 1008),
+        "a TS client's text prelude is admitted: {closed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ts_clients_text_prelude_is_admitted() {
+    let app = App::start().await;
+    let ws = app.url.replacen("http", "ws", 1) + &format!("/apps/{}/ws", app.app_id);
+    a_ts_shaped_socket_is_admitted(&app, &ws).await;
+    assert!(
+        app.admitted
+            .lock()
+            .unwrap()
+            .contains(&Admitted::User("tess".into()))
+    );
+    app.stop().await;
+}
+
+/// The same through the Axum adapter.
+#[cfg(feature = "axum")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_axum_router_admits_a_ts_clients_text_prelude() {
+    let app = App::start().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws = format!(
+        "ws://{}/jazz/apps/{}/ws",
+        listener.local_addr().unwrap(),
+        app.app_id
+    );
+    let router = app.endpoint.router();
+    let served = tokio::spawn(async move { axum::serve(listener, router).await });
+    a_ts_shaped_socket_is_admitted(&app, &ws).await;
+    served.abort();
     app.stop().await;
 }
