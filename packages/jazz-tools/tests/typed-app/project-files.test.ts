@@ -89,27 +89,32 @@ describe("createJazz's bindings check", () => {
       /bindings out of date/,
     );
     const empty = await mkdtemp(join(tmpdir(), "jazz-none-"));
-    await expect(checkRunningBindings("sha256:" + "0".repeat(64), empty)).resolves.toBeUndefined();
+    const warnings: string[] = [];
+    await expect(
+      checkRunningBindings("sha256:" + "0".repeat(64), empty, (message) => warnings.push(message)),
+    ).resolves.toBeUndefined();
+    expect(warnings).toEqual([expect.stringMatching(/Set JAZZ_APP_DIR/)]);
   });
 });
 
 describe("generate in a Rust crate", () => {
-  it("also writes src/jazz_app.rs when a Cargo.toml sits beside jazz.app.json", async () => {
+  it("writes src/jazz_app.rs beside the TS bindings of a crate that has them", async () => {
+    const dir = await project();
+    await generateApp({ cwd: dir });
+    await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
+    const result = await generateApp({ cwd: dir });
+    expect(result.bindings).toEqual(["jazz.generated.ts", join("src", "jazz_app.rs")]);
+    expect(await readFile(join(dir, "src", "jazz_app.rs"), "utf8")).toContain("jazz_app.rs");
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
+  });
+
+  it("gives a Rust-only crate only its Rust bindings, and --check passes on them", async () => {
     const dir = await project();
     await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
-    let rust: boolean;
-    try {
-      await generateApp({ cwd: dir });
-      rust = true;
-    } catch (error) {
-      // Until the Rust back end (#rust) lands in this jazz-napi.
-      expect(String(error)).toMatch(/rust/i);
-      rust = false;
-    }
-    if (rust) {
-      expect(await readFile(join(dir, "src", "jazz_app.rs"), "utf8")).toContain("jazz");
-      await expect(generateApp({ cwd: dir, check: true })).resolves.toBeDefined();
-    }
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/src.jazz_app\.rs/);
+    expect((await generateApp({ cwd: dir })).bindings).toEqual([join("src", "jazz_app.rs")]);
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
+    await expect(readFile(join(dir, "jazz.generated.ts"), "utf8")).rejects.toThrow();
   });
 });
 
