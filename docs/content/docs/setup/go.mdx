@@ -75,7 +75,8 @@ command-line app.
 - transactions;
 - durability tiers (reads and writes use the defaults);
 - subscription deltas carry no positions: re-sort an `OrderBy` subscription's rows yourself;
-- non-finite doubles (`NaN`, `±Inf`) read back as `null`: a nullable `float` column reads them as
-  `nil`, and a non-nullable one as `0`;
+- non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
+  reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
+  column;
 - connecting as an end user with a JWT;
 - a published, tagged Go module, and Windows builds.
