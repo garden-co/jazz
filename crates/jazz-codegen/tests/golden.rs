@@ -172,3 +172,71 @@ fn a_backend_with_only_the_bindings_loads_what_the_files_load() {
         from_files.deployment_body(false)
     );
 }
+
+/// Go bindings for each app Go can bind, committed as
+/// `jazzapp/jazz_app.go` beside its `jazz.app.json`; the others are
+/// refused as unsupported (computed fields, transforms, payload enums).
+#[test]
+fn every_go_app_generates_its_committed_go_byte_for_byte() {
+    let mut generated_any = 0;
+    for dir in apps() {
+        let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+        let path = dir.join(jazz_codegen::go::FILE);
+        let generated = match generate(Lang::Go, &app_json) {
+            Ok(generated) => generated,
+            Err(error) => {
+                assert!(error.is_unsupported(), "{}: {error}", dir.display());
+                assert!(!path.exists(), "{}: refused, yet committed", dir.display());
+                continue;
+            }
+        };
+        generated_any += 1;
+        assert_eq!(generated, generate(Lang::Go, &app_json).unwrap());
+        let app = App::load(&app_json).unwrap();
+        let recorded = bindings::read(Lang::Go, &generated).unwrap();
+        assert_eq!(recorded.source, app.source);
+        assert_eq!(recorded.current, app.compiled.current);
+        assert_eq!(
+            bindings::staleness(&app, Lang::Go, Some(&generated)).unwrap(),
+            None
+        );
+        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &generated).unwrap();
+            continue;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing; run with JAZZ_UPDATE_FIXTURES=1",
+                path.display()
+            )
+        });
+        assert_eq!(generated, committed, "{} differs", path.display());
+    }
+    assert!(generated_any >= 2);
+}
+
+#[test]
+fn go_bindings_refuse_computed_fields_and_read_back_backquotes() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
+    let error = generate(Lang::Go, &std::fs::read(dir.join("jazz.app.json")).unwrap()).unwrap_err();
+    assert!(error.is_unsupported(), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("not supported in Go bindings yet"),
+        "{error}"
+    );
+    // A backquote in the file survives the raw string it is embedded in.
+    let app_json = "{ \"format\": 1, \"tables\": { \"notes\": { \"columns\": { \"body\": { \"enum\": [\"a`b\", \"c\"] } } } } }\n";
+    let generated = generate(Lang::Go, app_json.as_bytes()).unwrap();
+    let app = App::load(app_json.as_bytes()).unwrap();
+    assert_eq!(
+        bindings::read(Lang::Go, &generated).unwrap().source,
+        app.source
+    );
+    assert!(generated.contains("NoteBodyAB"), "{generated}");
+    // An edited `App` is caught.
+    let edited = generated.replace("\"c\"", "\"d\"");
+    assert!(bindings::read(Lang::Go, &edited).is_err());
+}
