@@ -52,6 +52,8 @@ mod sql_trace;
 pub mod values;
 
 #[cfg(feature = "testing")]
+pub use db::sync::pruned_txs_lookups_for_test;
+#[cfg(feature = "testing")]
 pub use large::full_materializations_for_test;
 
 /// Structured read results.

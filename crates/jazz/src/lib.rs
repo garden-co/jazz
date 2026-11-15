@@ -32,6 +32,8 @@ pub use jazz_db::format;
 pub use jazz_db::full_materializations_for_test;
 pub use jazz_db::host;
 pub use jazz_db::link;
+#[cfg(feature = "testing")]
+pub use jazz_db::pruned_txs_lookups_for_test;
 pub use jazz_db::result_tree;
 pub use jazz_db::slow;
 pub use jazz_model::model;
