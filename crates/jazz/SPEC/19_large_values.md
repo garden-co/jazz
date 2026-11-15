@@ -326,8 +326,11 @@ each. Values up to the threshold, the common case, have none of these limits.
 These are limits, not a design commitment. A column flag that consolidates
 every write to a tail-free tree (making equality on that column exact, at the
 cost of cheap edits) is the planned escape hatch; content `contains` would
-need a write-time index (SQLite FTS5 with the trigram tokenizer runs on every
-target, Durable Objects included).
+need a write-time index. SQLite FTS5 with the trigram tokenizer is available
+on the native builds (server, NAPI, React Native) and on Durable Objects, but
+not in the browser: its WASM SQLite is built without FTS5 (#5516). An FTS5
+index therefore can't be the browser's answer; that target needs FTS5 back in
+its build or an index made of ordinary tables.
 
 The only Rust-side query work on chunked values is reading them: whole
 projections, partial selections (19.12), splices and deltas. Every query,
@@ -710,6 +713,7 @@ not expose epochs, cells, node hashes, tree nodes, leases or retry state.
 - Store-local leaf patches (a new leaf kept as its base leaf plus edits until
   it is offloaded), as a storage optimization outside the format.
 - Exact equality, ranges and `contains` on values over 64 KiB (19.5): a
-  consolidating column flag, and a write-time FTS5 trigram index.
+  consolidating column flag, and a write-time trigram index (FTS5 where
+  the target's SQLite has it; not the browser WASM, see 19.5).
 - Retention and history thinning: removal of old versions must be ordinary
   refcounted row deletions, never direct node deletion.
