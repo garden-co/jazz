@@ -185,15 +185,21 @@ describe("vercel() namespace", () => {
     } catch (error) {
       message = String(error);
     }
-    expect(message).toContain("vercel({ namespace: ({ environment }) => environment })");
     expect(message).toContain(
-      'vercel({ namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch) })',
+      'vercel({ namespace: ({ environment }) => environment, region: "iad1" })',
+    );
+    expect(message).toContain(
+      'vercel({ namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch), region: "iad1" })',
     );
   });
 
   it("refuses `name`, saying how to migrate", () => {
     expect(() => vercel({ name: "jazz-prj-1-production" } as never)).toThrow(
       /`name` is now `namespace`.*namespace: "<rest>".*perBranch/,
+    );
+    // The recipe to copy is complete: it doesn't lead to the region error next.
+    expect(() => vercel({ name: "jazz-prj-1-production" } as never)).toThrow(
+      'perBranch(branch), region: "iad1" }) with perBranch',
     );
     expect(() => vercel({ namespace: "production", name: "x" } as never)).toThrow(
       /`name` is now `namespace`/,

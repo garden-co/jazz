@@ -671,8 +671,8 @@ const PER_BRANCH_RECIPE =
 export function missingNamespaceError(): Error {
   return new Error(
     "vercel(): pass `namespace`, which names this deployment's core (its Sandbox is jazz-<project>-<namespace>). The usual choices:\n" +
-      "  vercel({ namespace: ({ environment }) => environment }) // one core per Vercel environment\n" +
-      `  vercel({ ${PER_BRANCH_RECIPE} }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+      '  vercel({ namespace: ({ environment }) => environment, region: "iad1" }) // one core per Vercel environment\n' +
+      `  vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
   );
 }
 
@@ -748,7 +748,7 @@ export function refuseVercelName(options: {
   if (!("name" in options)) return;
   const defaults =
     "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
-    `vercel({ ${PER_BRANCH_RECIPE} }) with perBranch from jazz-tools/backend.`;
+    `vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) with perBranch from jazz-tools/backend.`;
   const project = options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
   const name = options.name;
   // The Sandbox a namespace names: "jazz-", the project id lowercased with
