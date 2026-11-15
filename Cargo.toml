@@ -24,9 +24,8 @@ members = [
   "crates/jazz-napi",
   # Opens its app through jazz-app's Send + Clone handle.
   "examples/todo-server-rs",
-  # The docs copy still holds a JazzClient in Axum state through its own
-  # worker thread, so it stays outside the workspace.
-  # "examples/docs/todo-server-rs",
+  # The docs copy, whose snippets the docs include by region.
+  "examples/docs/todo-server-rs",
   "examples/stage-plan/benchmarks",
   "examples/band-book/benchmarks",
   "examples/permissioned-resources/benchmarks",
@@ -42,7 +41,6 @@ members = [
   "examples/wequencer/benchmarks",
 ]
 exclude = [
-  "examples/docs/todo-server-rs",
   "vendor/ruzstd",
   "vendor/sqlite-wasm-rs",
   # The alpha59-alpha60 exporter and its test fixture, built inside an alpha.59

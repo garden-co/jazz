@@ -4806,6 +4806,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "todo-server-docs"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "futures-util",
+ "http-body-util",
+ "jazz-app",
+ "jazz-server",
+ "reqwest",
+ "reqwest-eventsource",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "tokio"
 version = "1.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
