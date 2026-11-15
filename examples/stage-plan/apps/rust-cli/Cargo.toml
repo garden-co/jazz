@@ -1,0 +1,22 @@
+[package]
+name = "stage-plan-rust-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "StagePlan from Rust: a CLI over the app's generated jazz-app bindings"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "stage-plan"
+path = "src/main.rs"
+
+[dependencies]
+jazz-app = { path = "../../../../crates/jazz-app" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+uuid = "1"
+
+[dev-dependencies]
+jazz-server = { path = "../../../../crates/jazz-server", features = ["test"] }
+tempfile = "3"

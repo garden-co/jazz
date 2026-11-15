@@ -31,6 +31,7 @@ mod config;
 mod edit;
 mod error;
 mod handle;
+mod large;
 mod query;
 mod session;
 mod subscription;
@@ -46,6 +47,7 @@ pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
+pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
 pub use session::{
     AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,

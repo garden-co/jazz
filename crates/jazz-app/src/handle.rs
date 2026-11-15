@@ -121,6 +121,16 @@ impl Jazz {
                     .into(),
             ));
         }
+        if config.user.is_some()
+            && !config.allow_insecure_http
+            && config.sends_credentials_in_plain_text()
+        {
+            return Err(Error::Config(
+                "an end user's credentials would cross the network in plain text: use \
+                 https://, or Config::allow_insecure_http for a dev server"
+                    .into(),
+            ));
+        }
         if config.server_url.is_some() && config.backend.is_none() && config.user.is_none() {
             return Err(Error::Config(
                 "a server needs someone to connect as: the app's backend (Config::backend) \
@@ -133,7 +143,12 @@ impl Jazz {
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
             .name("jazz-client".into())
-            .spawn(move || run(files, config, receiver, ready))
+            .spawn({
+                // The session stops the client through this, without keeping
+                // it alive: it stops with its last handle all the same.
+                let stopper = commands.downgrade();
+                move || run(files, config, receiver, ready, stopper)
+            })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let Opened {
             bundle,
@@ -192,6 +207,17 @@ impl Jazz {
             .send(Command::Run(job))
             .map_err(|_| Error::Stopped)?;
         answer.await.map_err(|_| Error::Stopped)?
+    }
+
+    /// Sends `job` to the client's thread without waiting for it: for
+    /// cleanups that must run even when nobody awaits them (from `Drop`).
+    pub(crate) fn fire<F, Fut>(&self, job: F)
+    where
+        F: FnOnce(JazzClient) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        let job: Job = Box::new(move |client| Box::pin(job(client)));
+        let _ = self.commands.send(Command::Run(job));
     }
 
     /// Every row `query` matches, reading local data first.
@@ -342,6 +368,7 @@ fn run(
     config: Config,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
+    stopper: mpsc::WeakUnboundedSender<Command>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -357,7 +384,7 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let (client, opened) = match connect(files, config).await {
+        let (client, opened) = match connect(files, config, stopper).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
@@ -447,7 +474,11 @@ struct Opened {
     sync: watch::Receiver<SyncStatus>,
 }
 
-async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)> {
+async fn connect(
+    files: AppFiles,
+    config: Config,
+    stopper: mpsc::WeakUnboundedSender<Command>,
+) -> Result<(JazzClient, Opened)> {
     let loaded = files.load()?;
     let (storage, data_dir) = match config.storage {
         Storage::Memory => (ClientStorage::Memory, std::env::temp_dir()),
@@ -500,13 +531,13 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)
     };
     let sync = user_session::watch_sync(client.clone());
     let session = user.map(|(user, credential)| {
-        user_session::start(
-            client.clone(),
-            user,
-            credential,
-            config.server_url.as_deref().unwrap_or_default(),
-            sync.clone(),
-        )
+        let stop = Box::new(move || {
+            if let Some(commands) = stopper.upgrade() {
+                let (reply, _) = oneshot::channel();
+                let _ = commands.send(Command::Shutdown(reply));
+            }
+        });
+        user_session::start(client.clone(), user, credential, sync.clone(), stop)
     });
     Ok((
         client,
