@@ -236,6 +236,27 @@ final class StagePlanTests: XCTestCase {
         try await app.jazz.close()
     }
 
+    /// An edit merged with someone else's change comes back as the merged
+    /// text, never equal to what the handle wrote: it must become current.
+    func testAMergedEchoBecomesCurrent() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Echo")
+        let task = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "Hello world", rank: 1))
+        let notes = try await app.jazz.text(task, JazzApp.tasks.notes)
+        // Someone else's change is in the store before the handle edits.
+        try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "Hello world", to: "Hello world!")
+        try await notes.insert("brave ", at: 6)
+        for try await text in notes.changes where text == "Hello brave world!" { break }
+        XCTAssertEqual(notes.current, "Hello brave world!")
+        // An append at the delivered end works.
+        try await notes.insert("?", at: notes.current.utf16.count)
+        let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+        XCTAssertEqual(stored?.notes, "Hello brave world!?")
+        try await app.jazz.close()
+    }
+
     func testPermissionAdvice() async throws {
         let server = try await TestServer()
         let chief = try await StagePlanApp.open(user: user, server: server.server)
