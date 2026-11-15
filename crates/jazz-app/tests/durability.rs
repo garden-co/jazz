@@ -72,6 +72,39 @@ async fn durable_writes_wait_for_the_servers_verdict() {
 }
 
 /// A transaction body that panics rolls back and reports it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_sync_reports_a_refusal_that_settled_before_it() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let durable = jazz.durable(DurabilityTier::GlobalServer);
+
+    // Refused, never waited for; then a write the server accepts, settled
+    // before the wait (jazz#5728).
+    jazz.insert(NewNote::new(ObjectId::new(), "refused, unwaited"))
+        .await
+        .unwrap();
+    durable
+        .insert(NewNote::new(me, "accepted after"))
+        .await
+        .unwrap();
+    let synced = jazz.wait_for_sync().await;
+    assert!(
+        synced.is_err(),
+        "the earlier refusal is reported: {synced:?}"
+    );
+    // Reported once.
+    jazz.wait_for_sync().await.unwrap();
+
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_panicking_transaction_rolls_back() {
     let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
@@ -114,6 +147,69 @@ async fn an_unreachable_tier_writes_nothing() {
         "{refused:?}"
     );
     assert!(jazz.all(notes::query()).await.unwrap().is_empty());
+}
+
+/// Permission advice asks the server, without writing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permission_advice() {
+    use jazz_app::Advice;
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let someone_else = ObjectId::new();
+
+    assert_eq!(
+        jazz.can_insert(NewNote::new(me, "mine")).await.unwrap(),
+        Advice::Allowed
+    );
+    assert_eq!(
+        jazz.can_insert(NewNote::new(someone_else, "theirs"))
+            .await
+            .unwrap(),
+        Advice::Denied
+    );
+    let mine = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewNote::new(me, "mine"))
+        .await
+        .unwrap();
+    assert_eq!(
+        jazz.can_read::<bindings::Note>(mine.id).await.unwrap(),
+        Advice::Allowed
+    );
+    assert_eq!(
+        jazz.can_delete::<bindings::Note>(mine.id).await.unwrap(),
+        Advice::Allowed
+    );
+    assert_eq!(
+        jazz.can_update(
+            mine.id,
+            bindings::NoteUpdate {
+                owner: Some(someone_else),
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap(),
+        Advice::Denied
+    );
+    // Nothing was written by asking.
+    assert_eq!(jazz.all(notes::query()).await.unwrap(), vec![mine]);
+
+    // Without a server, nothing can advise.
+    let local = bindings::open(Config::new(AppId::random())).await.unwrap();
+    assert_eq!(
+        local.can_insert(NewNote::new(me, "x")).await.unwrap(),
+        Advice::Unknown
+    );
+
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
 }
 
 fn open_dir(server: &JazzServer, app_id: AppId, dir: &Path) -> Config {

@@ -42,7 +42,9 @@ pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;
 
 #[cfg(feature = "runtime")]
-pub use client::{JazzClient, JazzTransaction, MutationError, StreamingUpload};
+pub use client::{
+    JazzClient, JazzTransaction, MutationError, PermissionAdviceRequest, StreamingUpload,
+};
 
 pub use crate::object::{BranchName, ObjectId, ResultKey};
 #[cfg(feature = "runtime")]

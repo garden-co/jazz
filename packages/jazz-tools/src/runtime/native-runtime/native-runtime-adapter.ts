@@ -256,6 +256,17 @@ type NativeDb = {
   waitForPendingWrites?(
     tier: string,
     cancelled?: Promise<void>,
+    /** WASM: wait as `waitForSync` (see `waitForSync` below). */
+    forSync?: boolean,
+  ): NativeReadResult | Promise<NativeReadResult | void>;
+  /**
+   * NAPI: `waitForSync` for `writer`'s writes (a trusted session's author,
+   * or none for the database's own), failing also with a rejection of
+   * theirs that settled before and no wait reported.
+   */
+  waitForSync?(
+    tier: string,
+    writer?: Uint8Array | null,
   ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -3361,10 +3372,19 @@ export class NativeRuntimeAdapter implements Runtime {
    * reported outage fails the wait; `throughOutage` keeps it pending until a
    * terminal failure, as a write's own Global wait does (#3923). `signal`
    * ends the wait with its reason; the writes are unaffected.
+   *
+   * `sync` makes it `waitForSync`: it waits for the writes of the session
+   * `sync.writeContext` names (none: this runtime's own) and also fails with a rejection of theirs
+   * that settled before the call and nothing reported yet. Without it, as
+   * graceful shutdown waits, such earlier rejections are not this wait's.
    */
   async waitForPendingWrites(
     tier = "global",
-    options: { throughOutage?: boolean; signal?: AbortSignal } = {},
+    options: {
+      throughOutage?: boolean;
+      signal?: AbortSignal;
+      sync?: { writeContext?: string | null };
+    } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier, options);
     if (!this.db.waitForPendingWrites)
@@ -3388,10 +3408,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const forwardAbort = () => stop.abort(signal?.reason);
     signal?.addEventListener("abort", forwardAbort, { once: true });
     try {
+      const { sync } = options;
+      const native = !sync
+        ? this.db.waitForPendingWrites(tier, cancelled)
+        : this.db.waitForSync
+          ? this.db.waitForSync(
+              tier,
+              this.trustedWriteIdentity(sessionFromWriteContext(sync.writeContext)) ?? null,
+            )
+          : this.db.waitForPendingWrites(tier, cancelled, true);
       const wait = this.awaitNativeRead(
-        Promise.resolve(this.db.waitForPendingWrites(tier, cancelled)).then(
-          (result) => result ?? new Uint8Array(),
-        ),
+        Promise.resolve(native).then((result) => result ?? new Uint8Array()),
         undefined,
         stop.signal,
       );
