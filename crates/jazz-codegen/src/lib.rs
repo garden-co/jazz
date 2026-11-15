@@ -14,6 +14,7 @@ mod json_schema;
 pub mod migrations;
 pub mod model;
 pub mod names;
+pub mod rust;
 pub mod ts;
 
 use jazz::tools::deployment::artifact::{ArtifactError, json};
@@ -73,6 +74,7 @@ impl CodegenError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     TypeScript,
+    Rust,
 }
 
 impl Lang {
@@ -80,20 +82,36 @@ impl Lang {
     pub fn parse(name: &str) -> Result<Lang, CodegenError> {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
+            "rust" | "rs" => Ok(Lang::Rust),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
             ))),
         }
     }
 
     /// Every language, in the order `jazz-tools generate` handles them.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript];
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
     pub fn marker(self) -> &'static str {
         match self {
             Lang::TypeScript => "package.json",
+            Lang::Rust => "Cargo.toml",
+        }
+    }
+
+    /// Whether the app in `dir` (the directory of its `jazz.app.json`) is
+    /// written in this language: a TS app has a `package.json`; a Rust app
+    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app` (a
+    /// workspace root or another crate beside a TS app's files is not
+    /// one). Committed bindings say so too; the caller checks those.
+    pub fn detected_in(self, dir: &std::path::Path) -> bool {
+        let marker = dir.join(self.marker());
+        match self {
+            Lang::TypeScript => marker.exists(),
+            Lang::Rust => std::fs::read_to_string(marker)
+                .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
         }
     }
 
@@ -101,6 +119,7 @@ impl Lang {
     pub fn format(self) -> u32 {
         match self {
             Lang::TypeScript => ts::FORMAT,
+            Lang::Rust => rust::FORMAT,
         }
     }
 
@@ -108,6 +127,7 @@ impl Lang {
     pub fn file(self) -> &'static str {
         match self {
             Lang::TypeScript => ts::FILE,
+            Lang::Rust => rust::FILE,
         }
     }
 }
@@ -123,6 +143,7 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
     refuse_stranded(app)?;
     match lang {
         Lang::TypeScript => ts::generate(app),
+        Lang::Rust => rust::generate(app),
     }
 }
 
