@@ -280,13 +280,8 @@ enum WireRelationPredicate {
         #[serde(deserialize_with = "deserialize_node")]
         right: WireRelationValueRef,
     },
-    EnumMatch {
-        column: WireRelationColumnRef,
-        #[serde(deserialize_with = "deserialize_bounded_string")]
-        case: String,
-        #[serde(deserialize_with = "deserialize_nested_box")]
-        payload: Box<WireRelationPredicate>,
-    },
+    /// The slot of a removed variant (see [`RemovedVariant`]).
+    Removed(RemovedVariant),
     And(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<WireRelationPredicate>),
     Or(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<WireRelationPredicate>),
     Not(#[serde(deserialize_with = "deserialize_nested_box")] Box<WireRelationPredicate>),
@@ -660,15 +655,7 @@ fn wire_predicate(value: &RelationPredicate) -> WireResult<WireRelationPredicate
             left: wire_column(left),
             right: wire_value(right)?,
         },
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => WireRelationPredicate::EnumMatch {
-            column: wire_column(column),
-            case: case.clone(),
-            payload: Box::new(wire_predicate(payload)?),
-        },
+        RelationPredicate::Removed(removed) => match *removed {},
         RelationPredicate::And(values) => WireRelationPredicate::And(
             values
                 .iter()
@@ -719,15 +706,7 @@ fn relation_predicate(value: WireRelationPredicate) -> WireResult<RelationPredic
             left: relation_column(left),
             right: relation_value(right)?,
         },
-        WireRelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => RelationPredicate::EnumMatch {
-            column: relation_column(column),
-            case,
-            payload: Box::new(relation_predicate(*payload)?),
-        },
+        WireRelationPredicate::Removed(removed) => match removed {},
         WireRelationPredicate::And(values) => RelationPredicate::And(
             values
                 .into_iter()
@@ -1113,15 +1092,7 @@ fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
                     self.column(left)?;
                     self.value(right, depth + 1)
                 }
-                WireRelationPredicate::EnumMatch {
-                    column,
-                    case,
-                    payload,
-                } => {
-                    self.column(column)?;
-                    self.text(case)?;
-                    self.predicate(payload, depth + 1)
-                }
+                WireRelationPredicate::Removed(removed) => match *removed {},
                 WireRelationPredicate::And(values) | WireRelationPredicate::Or(values) => {
                     self.collection(values.len())?;
                     for value in values {

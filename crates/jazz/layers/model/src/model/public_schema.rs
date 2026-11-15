@@ -3,10 +3,10 @@
 pub use crate::model::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 pub use crate::model::public_api::session::{AuthMode, Session, WriteContext};
 pub use crate::model::public_api::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
-    HistoryRetention, OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row,
-    RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
-    TableSchema, TableSchemaBuilder, Value, permissions, policy_expr,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, HistoryRetention,
+    OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor,
+    Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
+    Value, permissions, policy_expr,
 };
 pub use crate::model::transaction::{OpenTransactionId, TransactionId};
 /// Relation-backed policies (`PolicyExpr::ExistsRel`) use the query relation IR.
@@ -43,25 +43,6 @@ pub fn validate_json_value(
             values.iter().enumerate().try_for_each(|(index, value)| {
                 validate_json_value(value, element, &format!("{path}[{index}]"))
             })
-        }
-        (
-            Value::Enum { case, values },
-            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
-        ) => {
-            let Some(selected) = cases.iter().find(|entry| entry.name == *case) else {
-                return Ok(());
-            };
-            selected
-                .fields
-                .iter()
-                .zip(values)
-                .try_for_each(|(field, value)| {
-                    validate_json_value(
-                        value,
-                        &field.column_type,
-                        &format!("{path}.{case}.{}", field.name_str()),
-                    )
-                })
         }
         _ => Ok(()),
     }
@@ -103,16 +84,6 @@ pub fn validate_json_schemas(column_type: &ColumnType, path: &str) -> Result<(),
         ColumnType::Row { columns } => columns.columns.iter().try_for_each(|field| {
             validate_json_schemas(&field.column_type, &format!("{path}.{}", field.name_str()))
         }),
-        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
-            cases.iter().try_for_each(|case| {
-                case.fields.iter().try_for_each(|field| {
-                    validate_json_schemas(
-                        &field.column_type,
-                        &format!("{path}.{}.{}", case.name, field.name_str()),
-                    )
-                })
-            })
-        }
         _ => Ok(()),
     }
 }
