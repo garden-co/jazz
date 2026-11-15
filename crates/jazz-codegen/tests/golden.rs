@@ -172,3 +172,64 @@ fn a_backend_with_only_the_bindings_loads_what_the_files_load() {
         from_files.deployment_body(false)
     );
 }
+
+#[test]
+fn every_app_generates_its_committed_kotlin_byte_for_byte() {
+    for dir in apps() {
+        let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+        let app = App::load(&app_json).unwrap();
+        let path = dir.join("JazzApp.kt");
+        let generated = match generate(Lang::Kotlin, &app_json) {
+            Ok(generated) => generated,
+            Err(error) => {
+                // Computed fields and transforms aren't supported in Kotlin yet.
+                assert!(error.is_unsupported(), "{}: {error}", dir.display());
+                assert!(!path.exists(), "{} should not exist", path.display());
+                continue;
+            }
+        };
+        assert_eq!(generated, generate(Lang::Kotlin, &app_json).unwrap());
+        let recorded = bindings::read(Lang::Kotlin, &generated).unwrap();
+        assert_eq!(recorded.source, app.source);
+        assert_eq!(recorded.format, Lang::Kotlin.format());
+        assert_eq!(
+            bindings::staleness(&app, Lang::Kotlin, Some(&generated)).unwrap(),
+            None
+        );
+        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+            std::fs::write(&path, &generated).unwrap();
+            continue;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing; run with JAZZ_UPDATE_FIXTURES=1",
+                path.display()
+            )
+        });
+        assert_eq!(generated, committed, "{} differs", path.display());
+    }
+}
+
+#[test]
+fn kotlin_refuses_computed_fields_and_edited_bindings() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
+    let error = generate(
+        Lang::Kotlin,
+        &std::fs::read(dir.join("jazz.app.json")).unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("not supported yet"), "{error}");
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/notes");
+    let generated = generate(
+        Lang::Kotlin,
+        &std::fs::read(dir.join("jazz.app.json")).unwrap(),
+    )
+    .unwrap();
+    // CRLF, as an editor on Windows leaves it, still reads.
+    assert!(bindings::read(Lang::Kotlin, &generated.replace('\n', "\r\n")).is_ok());
+    let edited = generated.replacen("\\\"notes\\\"", "\\\"memos\\\"", 1);
+    let error = bindings::read(Lang::Kotlin, &edited).unwrap_err();
+    assert!(error.to_string().contains("was edited"), "{error}");
+    assert!(bindings::read(Lang::Kotlin, "// something else\n").is_err());
+}

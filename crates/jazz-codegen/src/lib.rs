@@ -11,6 +11,7 @@
 
 pub mod bindings;
 mod json_schema;
+pub mod kotlin;
 pub mod migrations;
 pub mod model;
 pub mod names;
@@ -75,6 +76,7 @@ impl CodegenError {
 pub enum Lang {
     TypeScript,
     Rust,
+    Kotlin,
 }
 
 impl Lang {
@@ -83,14 +85,15 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
+            "kotlin" | "kt" => Ok(Lang::Kotlin),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, kotlin"
             ))),
         }
     }
 
     /// Every language, in the order `jazz-tools generate` handles them.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Kotlin];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -98,6 +101,7 @@ impl Lang {
         match self {
             Lang::TypeScript => "package.json",
             Lang::Rust => "Cargo.toml",
+            Lang::Kotlin => kotlin::MARKER,
         }
     }
 
@@ -109,7 +113,7 @@ impl Lang {
     pub fn detected_in(self, dir: &std::path::Path) -> bool {
         let marker = dir.join(self.marker());
         match self {
-            Lang::TypeScript => marker.exists(),
+            Lang::TypeScript | Lang::Kotlin => marker.exists(),
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
         }
@@ -120,6 +124,7 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FORMAT,
             Lang::Rust => rust::FORMAT,
+            Lang::Kotlin => kotlin::FORMAT,
         }
     }
 
@@ -128,6 +133,7 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FILE,
             Lang::Rust => rust::FILE,
+            Lang::Kotlin => kotlin::FILE,
         }
     }
 }
@@ -144,6 +150,7 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
     match lang {
         Lang::TypeScript => ts::generate(app),
         Lang::Rust => rust::generate(app),
+        Lang::Kotlin => kotlin::generate(app),
     }
 }
 
