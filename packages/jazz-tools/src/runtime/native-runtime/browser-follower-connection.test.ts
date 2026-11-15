@@ -785,3 +785,57 @@ describe("MessagePortBrowserFollowerConnection", () => {
     request.port.close();
   });
 });
+
+describe("MessagePortBrowserFollowerConnection.leaveForPageCache", () => {
+  it("detaches an idle follower at once: a close that wants no reply, no failure", async () => {
+    const { connection, port, onFailure } = await createWatchdogFollower();
+    port.sent.length = 0;
+    expect(connection.leaveForPageCache()).toBe(true);
+    expect(port.sent).toEqual([{ type: "close", releaseContext: true }]);
+    expect(port.close).toHaveBeenCalledOnce();
+    expect(onFailure).not.toHaveBeenCalled();
+    await expect(connection.flushLocal()).rejects.toThrow("Browser follower connection is closed");
+    expect(connection.leaveForPageCache()).toBe(false);
+  });
+
+  it("declines while an operation waits on the worker, and keeps it", async () => {
+    const { connection, port } = await createWatchdogFollower();
+    port.sent.length = 0;
+    const waiting = connection.waitForServerConnection();
+    await vi.waitFor(() =>
+      expect(port.sent.map((message) => message.type)).toContain("wait-server"),
+    );
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.sent.map((message) => message.type)).not.toContain("close");
+    expect(port.close).not.toHaveBeenCalled();
+    const request = port.sent.find((message) => message.type === "wait-server");
+    port.emit({ type: "result", id: (request as { id: number }).id });
+    await waiting;
+    expect(connection.leaveForPageCache()).toBe(true);
+  });
+
+  it("declines while a write waits for the worker to settle it, and keeps it", async () => {
+    const { connection, port, setLocalSettlementsPending } = await createWatchdogFollower();
+    port.sent.length = 0;
+    setLocalSettlementsPending(true);
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.close).not.toHaveBeenCalled();
+    setLocalSettlementsPending(false);
+    expect(connection.leaveForPageCache()).toBe(true);
+  });
+
+  it("declines before the worker admitted it", () => {
+    const port = new TestPort();
+    const connection = new MessagePortBrowserFollowerConnection(
+      {
+        onLocalSettlementChange: () => () => undefined,
+      } as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      { onAuthFailure: vi.fn(), onAuthRestored: vi.fn(), onFailure: vi.fn() },
+    );
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.close).not.toHaveBeenCalled();
+  });
+});

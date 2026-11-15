@@ -7,6 +7,7 @@ import {
   type ReplicaEntry,
   type ReplicaLifecycle,
 } from "./replica-ledger.js";
+import { holdAcrossPageCache, pageCacheForTest } from "../runtime/page-cache.js";
 
 // The #5250 model test: several tabs of one browser, one per-account store,
 // a backend and the device's account store, all simulated; random
@@ -559,6 +560,200 @@ describe("the lifecycle, scenario by scenario", () => {
       kind: "backend",
       identity: alice.identity,
     });
+  });
+});
+
+// One window for the file: the page cache listens on the first one it sees.
+const page = new EventTarget();
+const fire = (type: string, persisted = false) =>
+  page.dispatchEvent(Object.assign(new Event(type), { persisted }));
+const aliceLock = `jazz-replica-v1:${REGISTRY}:${alice.id}`;
+
+describe("the back/forward cache", () => {
+  let reload: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    vi.stubGlobal("window", page);
+    reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+  });
+  afterEach(() => pageCacheForTest.reset());
+
+  it("a cached page lets go of its store, and holds it again when it comes back", async () => {
+    const b = browser();
+    const one = b.tab("A");
+    await b.open(one, alice);
+    expect(b.locks.sharedHolders(aliceLock)).toBe(1);
+    fire("pagehide", true);
+    await vi.waitFor(() => expect(b.locks.sharedHolders(aliceLock)).toBe(0));
+    fire("pageshow", true);
+    await pageCacheForTest.returned();
+    expect(b.locks.sharedHolders(aliceLock)).toBe(1);
+    expect(b.ledger.get(alice.id)).toBeDefined();
+    expect(reload).not.toHaveBeenCalled();
+    await b.close(one);
+    expect(b.locks.sharedHolders(aliceLock)).toBe(0);
+  });
+
+  it("while it is cached, the last other tab out wipes the store, and the page reloads when it comes back", async () => {
+    const b = browser();
+    const [cached, other] = [b.tab("A"), b.tab("B")];
+    await b.open(cached, alice);
+    fire("pagehide", true);
+    await b.open(other, alice);
+    b.write(other);
+    await b.signOut(other);
+    expect(b.stores.get(alice.id)).toBeUndefined();
+    expect(b.ledger.get(alice.id)).toBeUndefined();
+    fire("pageshow", true);
+    await pageCacheForTest.returned();
+    expect(reload).toHaveBeenCalledOnce();
+    // It doesn't record the store again for the page it reloads into to keep.
+    expect(b.ledger.get(alice.id)).toBeUndefined();
+    expect(b.violations).toEqual([]);
+  });
+
+  it("a page whose store was wiped while away doesn't reconnect, even when the reload guard refuses", async () => {
+    // The reload guard refuses: the page reloaded for an invalidation moments ago.
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => String(Date.now()),
+      setItem: () => {},
+    });
+    const b = browser();
+    const [cached, other] = [b.tab("A"), b.tab("B")];
+    await b.open(cached, alice);
+    fire("pagehide", true);
+    await b.open(other, alice);
+    await b.signOut(other);
+    expect(b.ledger.get(alice.id)).toBeUndefined();
+    const after: string[] = [];
+    holdAcrossPageCache({ leave: () => {}, return: () => void after.push("connection") });
+    fire("pageshow", true);
+    await pageCacheForTest.returned();
+    expect(reload).not.toHaveBeenCalled();
+    expect(after).toEqual([]);
+    expect(b.ledger.get(alice.id)).toBeUndefined();
+  });
+
+  it("a page whose store another tab only opened and closed meanwhile keeps it", async () => {
+    const b = browser();
+    const [cached, other] = [b.tab("A"), b.tab("B")];
+    await b.open(cached, alice);
+    fire("pagehide", true);
+    await b.open(other, alice);
+    await b.close(other);
+    fire("pageshow", true);
+    await pageCacheForTest.returned();
+    expect(reload).not.toHaveBeenCalled();
+    expect(b.locks.sharedHolders(aliceLock)).toBe(1);
+  });
+
+  it("a page that closed its client while away holds nothing when it comes back", async () => {
+    const b = browser();
+    const one = b.tab("A");
+    await b.open(one, alice);
+    fire("pagehide", true);
+    await b.close(one);
+    fire("pageshow", true);
+    await pageCacheForTest.returned();
+    expect(b.locks.sharedHolders(aliceLock)).toBe(0);
+  });
+
+  it("a page whose store lock stays taken reconnects after its patience, and checks the store once it holds it", async () => {
+    vi.useFakeTimers();
+    try {
+      const b = browser();
+      const cached = b.tab("A");
+      await b.open(cached, alice);
+      fire("pagehide", true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(b.locks.sharedHolders(aliceLock)).toBe(0);
+      let endCheck!: () => void;
+      const checking = b.locks
+        .view("B")
+        .request(
+          aliceLock,
+          { mode: "exclusive", ifAvailable: true },
+          () => new Promise<void>((resolve) => (endCheck = resolve)),
+        );
+      const after: string[] = [];
+      // A holder after the store's: the client's worker connection.
+      holdAcrossPageCache({ leave: () => {}, return: () => void after.push("connection") });
+      fire("pageshow", true);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(after).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await pageCacheForTest.returned();
+      expect(after).toEqual(["connection"]);
+      expect(b.locks.sharedHolders(aliceLock)).toBe(0);
+      endCheck();
+      await checking;
+      await vi.waitFor(() => expect(b.locks.sharedHolders(aliceLock)).toBe(1));
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a page whose store a wipe still holds past the patience reloads instead of reconnecting", async () => {
+    vi.useFakeTimers();
+    try {
+      const b = browser();
+      const cached = b.tab("A");
+      await b.open(cached, alice);
+      fire("pagehide", true);
+      await vi.advanceTimersByTimeAsync(0);
+      // Another page's wipe: marked, under the exclusive lock, its delete blocked.
+      let endWipe!: () => void;
+      const wiping = b.locks.view("B").request(
+        aliceLock,
+        { mode: "exclusive", ifAvailable: true },
+        () =>
+          new Promise<void>((resolve) => {
+            b.ledger.markWiping(alice.id, true);
+            endWipe = resolve;
+          }),
+      );
+      const after: string[] = [];
+      holdAcrossPageCache({ leave: () => {}, return: () => void after.push("connection") });
+      expect(b.locks.isExclusive(aliceLock)).toBe(true);
+      expect(b.ledger.get(alice.id)?.wiping).toBe(true);
+      fire("pageshow", true);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await pageCacheForTest.returned();
+      expect(reload).toHaveBeenCalledOnce();
+      expect(after).toEqual([]);
+      endWipe();
+      await wiping;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a page that left again before it held the store again lets go of it", async () => {
+    const b = browser();
+    const [cached, wiper] = [b.tab("A"), b.tab("B")];
+    await b.open(cached, alice);
+    fire("pagehide", true);
+    // Another page's wipe check holds the lock exclusively while this one comes back.
+    let endCheck!: () => void;
+    const checking = b.locks
+      .view("B")
+      .request(
+        aliceLock,
+        { mode: "exclusive", ifAvailable: true },
+        () => new Promise<void>((resolve) => (endCheck = resolve)),
+      );
+    fire("pageshow", true);
+    fire("pagehide", true);
+    endCheck();
+    await checking;
+    await pageCacheForTest.returned();
+    await vi.waitFor(() => expect(b.locks.sharedHolders(aliceLock)).toBe(0));
+    expect(b.ledger.get(alice.id)).toBeDefined();
+    fire("pageshow", true);
+    await pageCacheForTest.returned();
+    expect(b.locks.sharedHolders(aliceLock)).toBe(1);
+    void wiper;
   });
 });
 

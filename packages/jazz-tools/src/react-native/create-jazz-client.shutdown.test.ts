@@ -43,6 +43,8 @@ it("continues React Native database teardown after orchestrator shutdown fails",
   const db = {
     getAuthState: vi.fn(() => ({ status: "unauthenticated", session: null })),
     onAuthChanged: vi.fn(() => () => undefined),
+    getSyncStatus: vi.fn(() => ({ link: { state: "local-only" } })),
+    onSyncStatusChange: vi.fn(() => () => {}),
     shutdown: vi.fn(async () => {
       throw dbError;
     }),

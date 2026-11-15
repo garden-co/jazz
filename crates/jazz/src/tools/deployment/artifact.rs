@@ -26,7 +26,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalogue::{BundleId, Permissions, bundle_id, permissions_of};
 use crate::schema::JazzSchema;
-use crate::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies, TableSchema};
+use crate::tools::public_schema::{
+    ColumnType, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
+};
 
 use super::published::{
     ClientMigrations, PublishMigrationRequest, PublishedSchema, check_decoded_client_migrations,
@@ -118,22 +120,26 @@ impl ArtifactError {
     }
 }
 
-const REGENERATE: &str = "regenerate it with `jazz-tools validate`";
+const REGENERATE: &str = "regenerate it with `jazz-tools generate`";
 
 // ============================================================================
 // Codegen metadata
 // ============================================================================
 
 /// What typed code in each language needs beyond the engine's schema: the
-/// relations, the columns only TypeScript computes, the exported slices.
+/// relations, the computed fields and the transforms the app declares.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Codegen {
     /// For tables of `current`.
     #[serde(default)]
     pub tables: BTreeMap<String, CodegenTable>,
-    /// Slices `schema.ts` exports, by export name.
+    /// The file's `transforms`, by name: what every language implements.
     #[serde(default)]
+    pub transforms: BTreeMap<String, TransformDecl>,
+    /// Slices a .63 `schema.ts` exported. Slicing is gone in alpha.65:
+    /// accepted from the .63 writer's input and ignored, never written.
+    #[serde(default, skip_serializing)]
     pub slices: BTreeMap<String, Vec<String>>,
 }
 
@@ -142,11 +148,49 @@ pub struct Codegen {
 pub struct CodegenTable {
     #[serde(default)]
     pub relations: BTreeMap<String, CodegenRelation>,
-    /// Columns whose values only TypeScript computes. Other languages see
-    /// the stored column of a `Transform` and nothing of a `Computed`, and
-    /// warn about both.
+    /// Computed fields, in declared order: not stored, implemented in every
+    /// language's code.
+    #[serde(default)]
+    pub computed: Vec<ComputedField>,
+    /// Column → the name of the transform (in [`Codegen::transforms`]) its
+    /// stored value goes through.
+    #[serde(default)]
+    pub transforms: BTreeMap<String, String>,
+    /// .63's `tsOnly` (the TS DSL's `s.computed` and `.transform` fields).
+    /// The .63 writer still emits it and loaders accept it with a warning,
+    /// so `jazz-tools upgrade` can turn it into `computed` and `transforms`.
     #[serde(default)]
     pub ts_only: Vec<TsOnlyColumn>,
+}
+
+/// A type with its nullability, as a computed field or transform has it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldType {
+    pub column_type: ColumnType,
+    #[serde(default)]
+    pub nullable: bool,
+}
+
+/// `"computed": { "<name>": { "type": …, "from": [columns] } }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputedField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: FieldType,
+    /// Stored columns of the same table the value is computed from, in order.
+    pub from: Vec<String>,
+}
+
+/// `"transforms": { "<name>": { "stored": <type>, "view": <type> } }`: a
+/// column stored as `stored` that code reads and writes as `view`. The
+/// column's nullability carries over to both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformDecl {
+    pub stored: ColumnType,
+    pub view: ColumnType,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,6 +231,7 @@ pub struct LoadedApp {
     bundle: BundleId,
     permissions: Permissions,
     codegen: Codegen,
+    warnings: Vec<String>,
 }
 
 impl LoadedApp {
@@ -212,6 +257,11 @@ impl LoadedApp {
         &self.codegen
     }
 
+    /// What loaded but is ignored, as `jazz.app.json: <path>: <why>` lines.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     /// Every version the file ships, oldest first, policy-free.
     pub fn schemas(&self) -> &[(SchemaHash, Schema)] {
         &self.history.schemas
@@ -226,6 +276,23 @@ impl LoadedApp {
     /// [`load_client`] gives for the same file.
     pub fn client_migrations(&self) -> crate::db::Migrations {
         self.history.client_migrations()
+    }
+
+    /// The body a backend `POST`s to `/apps/<id>/admin/bundles` at startup
+    /// (the server's `DeployRequest`, camelCase): the same deployment as
+    /// [`LoadedApp::deployment_request`], with migrations in their published
+    /// form.
+    pub fn deployment_body(&self, allow_dropping_history: bool) -> serde_json::Value {
+        serde_json::json!({
+            "targetSchemaHash": self.history.current.to_string(),
+            "schemas": self.history.schemas.iter().map(|(hash, schema)| PublishedSchema {
+                hash: hash.to_string(),
+                schema: schema.clone(),
+            }).collect::<Vec<_>>(),
+            "migrations": self.history.migrations,
+            "permissions": self.permissions,
+            "allowDroppingHistory": allow_dropping_history,
+        })
     }
 
     /// What a backend publishes at startup.
@@ -278,12 +345,234 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
         permissions_file::read(&permissions_json, history.current_schema(), &relations)
             .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
     let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    let stranded = history.stranded.clone();
     Ok(LoadedApp {
         history,
         bundle,
         permissions,
         codegen: app_file.codegen,
+        warnings: app_file
+            .warnings
+            .into_iter()
+            .map(|w| format!("{APP_FILE}: {w}"))
+            .chain(stranded)
+            .collect(),
     })
+}
+
+/// The compiled app generated bindings embed (`{ schema, relations }`, the
+/// options they pass to `bindApp`), as a deployed backend has it when
+/// `jazz.app.json` isn't on disk.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundApp {
+    /// The bindings' `source`; the backend's own check, not this one's.
+    #[serde(default)]
+    #[allow(dead_code)]
+    source: Option<String>,
+    schema: BoundSchema,
+    relations: BTreeMap<String, BTreeMap<String, BoundRelation>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundSchema {
+    current: String,
+    schemas: Vec<PublishedSchema>,
+    migrations: Vec<PublishMigrationRequest>,
+    // The runtime's: which columns computed callbacks and transforms take.
+    #[serde(default)]
+    #[allow(dead_code)]
+    computed: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    transforms: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum BoundRelation {
+    One { one: String, column: String },
+    Many { many: String, relation: String },
+}
+
+/// Read and check a backend's permissions against the compiled app its
+/// generated bindings embed (JSON of `{ schema, relations }`), with every
+/// check [`load`] runs: each schema matches its hash, the lenses pass a
+/// deployment's checks, the relations resolve and every policy compiles.
+pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> {
+    let refuse = |message: String| {
+        ArtifactError::new(format!(
+            "the bindings' compiled app: {message}; regenerate them with `jazz-tools generate`"
+        ))
+    };
+    let bound: BoundApp =
+        serde_json::from_slice(bound).map_err(|error| refuse(error.to_string()))?;
+    let current = parse_schema_hash(&bound.schema.current).map_err(refuse)?;
+    let mut schemas = Vec::new();
+    for entry in bound.schema.schemas {
+        let hash = parse_schema_hash(&entry.hash).map_err(refuse)?;
+        let schema = structural(entry.schema);
+        if SchemaHash::compute(&schema) != hash {
+            return Err(refuse(format!("schema {hash} doesn't match its content")));
+        }
+        schemas.push((hash, schema));
+    }
+    if !schemas.iter().any(|(hash, _)| *hash == current) {
+        return Err(refuse(format!("no schema {current}, the current one")));
+    }
+    let history = History {
+        current,
+        schemas,
+        migrations: bound.schema.migrations,
+        stranded: Vec::new(),
+    };
+    check_decoded_client_migrations(history.bundle(), history.current)
+        .map_err(|error| refuse(format!("migrations: {error}")))?;
+    let mut codegen = Codegen::default();
+    for (table, relations) in bound.relations {
+        let entry = codegen.tables.entry(table).or_default();
+        for (name, relation) in relations {
+            entry.relations.insert(
+                name,
+                match relation {
+                    BoundRelation::One { one, column } => {
+                        CodegenRelation::Forward { table: one, column }
+                    }
+                    BoundRelation::Many { many, relation } => CodegenRelation::Reverse {
+                        table: many,
+                        relation,
+                    },
+                },
+            );
+        }
+    }
+    codegen.tables.retain(|_, t| !t.relations.is_empty());
+    check_codegen(&codegen, history.current_schema())
+        .map_err(|e| refuse(e.message().to_string()))?;
+    let relations = codegen.relations();
+    let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
+    let permissions =
+        permissions_file::read(&permissions_json, history.current_schema(), &relations)
+            .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
+    let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    Ok(LoadedApp {
+        history,
+        bundle,
+        permissions,
+        codegen,
+        warnings: Vec::new(),
+    })
+}
+
+/// `jazz.app.json` checked as [`load`] checks it, without permissions: what
+/// code generators and `jazz validate` read.
+#[derive(Debug, Clone)]
+pub struct AppDefinition {
+    history: History,
+    codegen: Codegen,
+    warnings: Vec<String>,
+}
+
+impl AppDefinition {
+    pub fn current_hash(&self) -> SchemaHash {
+        self.history.current
+    }
+
+    /// The current schema, without permissions.
+    pub fn current_schema(&self) -> &Schema {
+        self.history.current_schema()
+    }
+
+    /// Every version the file ships, oldest first, the current one last.
+    pub fn schemas(&self) -> &[(SchemaHash, Schema)] {
+        &self.history.schemas
+    }
+
+    /// The migrations, in the form a deployment publishes them.
+    pub fn migrations(&self) -> &[PublishMigrationRequest] {
+        &self.history.migrations
+    }
+
+    pub fn codegen(&self) -> &Codegen {
+        &self.codegen
+    }
+
+    /// What loaded but is ignored, as `jazz.app.json: <path>: <why>` lines.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// History versions no chain of migrations connects to the current one
+    /// (and whose rows would need transforming), as refusals: also among
+    /// [`AppDefinition::warnings`]. `generate` refuses a file with any, since
+    /// bindings must not ship a version clients couldn't open;
+    /// `migrations create` writes what connects them.
+    pub fn stranded(&self) -> &[String] {
+        &self.history.stranded
+    }
+
+    /// The bundle a client ships (JSON: `{schemas, migrations}`, what
+    /// [`published::client_migrations`](super::published::client_migrations)
+    /// lowers), exactly as [`load_client`] lowers it from the file.
+    pub fn client_bundle(&self) -> ClientMigrations {
+        self.history.bundle()
+    }
+
+    /// The schema versions and lenses a client opens along.
+    pub fn client_migrations(&self) -> crate::db::Migrations {
+        self.history.client_migrations()
+    }
+}
+
+/// Read and check `jazz.app.json` alone: references, lenses as a deployment
+/// checks them, relations, computed fields and transforms.
+pub fn load_app(json: &[u8]) -> Result<AppDefinition, ArtifactError> {
+    let app_file = read_app(json)?;
+    let history = check_history(&app_file)?;
+    check_decoded_client_migrations(history.bundle(), history.current)
+        .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
+    check_codegen(&app_file.codegen, history.current_schema())?;
+    // Lowering for a client must succeed too.
+    lower_client_migrations(history.bundle())
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    let stranded = history.stranded.clone();
+    Ok(AppDefinition {
+        history,
+        codegen: app_file.codegen,
+        warnings: app_file
+            .warnings
+            .into_iter()
+            .map(|w| format!("{APP_FILE}: {w}"))
+            .chain(stranded)
+            .collect(),
+    })
+}
+
+/// The `source` generated bindings record: `sha256:` and the hex SHA-256 of
+/// the file's canonical text ([`json::print`] of the parsed file), so
+/// reformatting it (indentation, line ends, a BOM) leaves its source alone
+/// and only a change of content counts. A file that isn't JSON is hashed as
+/// it is.
+pub fn source_hash(file: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let file = file.strip_prefix("\u{feff}".as_bytes()).unwrap_or(file);
+    let canonical = json::parse(file).map(|root| json::print(&root));
+    let bytes = match &canonical {
+        Ok(text) => text.as_bytes(),
+        Err(_) => file,
+    };
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+/// The engine's hash of a schema in its own JSON form (`{ "tables": … }`,
+/// what generated bindings embed per version), its policies dropped as a
+/// deployment drops them: the one schema-hash implementation every
+/// language uses.
+pub fn schema_hash(schema_json: &[u8]) -> Result<SchemaHash, ArtifactError> {
+    let schema: Schema = serde_json::from_slice(schema_json)
+        .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))?;
+    Ok(SchemaHash::compute(&structural(schema)))
 }
 
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
@@ -299,18 +588,123 @@ pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> 
     Ok(crate::db::Migrations { schemas, lenses })
 }
 
-/// What a binding's open configuration ships (a `jazz.app.json`, see
-/// [`load_client`]), lowered for a store; none ships nothing.
-pub fn client_migrations(app: Option<&[u8]>) -> Result<crate::db::Migrations, String> {
-    match app {
-        None => Ok(crate::db::Migrations::default()),
-        Some(json) => load_client(json).map_err(|error| error.to_string()),
-    }
+/// [`load_client`], with the current schema: what a client that has no
+/// other copy of the schema opens with.
+pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations), ArtifactError> {
+    let app_file = read_app(json)?;
+    let history = check_history(&app_file)?;
+    let (schemas, lenses) = lower_client_migrations(history.bundle())
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    Ok((
+        history.current_schema().clone(),
+        crate::db::Migrations { schemas, lenses },
+    ))
 }
 
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
     let root = read_format(APP_FILE, json)?;
+    refuse_todos(&root)?;
     app_file::read(&root).map_err(|refusal| ArtifactError::at(APP_FILE, refusal))
+}
+
+/// A string value starting with this is a decision `jazz-tools migrations
+/// create` (or `upgrade`) left to the author.
+pub const TODO_PREFIX: &str = "TODO:";
+
+/// The JSON paths of every unresolved `"TODO: …"` in `root`, with its
+/// text, in file order: in `migrations` (which `jazz-tools migrations create`
+/// writes), computed fields' types and transforms' types (which `jazz-tools
+/// upgrade` writes). A column default, an enum variant or a JSON Schema may
+/// say `TODO:` freely, as may a `$comment`.
+pub fn todos(root: &Json) -> Vec<(String, String)> {
+    fn walk(value: &Json, path: String, out: &mut Vec<(String, String)>) {
+        match value {
+            Json::String(text) if text.starts_with(TODO_PREFIX) => {
+                out.push((path, text.clone()));
+            }
+            Json::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    walk(item, format!("{path}[{i}]"), out);
+                }
+            }
+            Json::Object(entries) => {
+                for (key, item) in entries {
+                    if key != "$comment" {
+                        walk(item, format!("{path}.{key}"), out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // A type is a placeholder itself, or a `json` type whose schema is one
+    // (`{ "json": "TODO: …" }`, as upgrade writes it); a JSON Schema's own
+    // text is the author's.
+    fn type_todo(value: &Json, path: String, out: &mut Vec<(String, String)>) {
+        match value {
+            Json::String(text) if text.starts_with(TODO_PREFIX) => out.push((path, text.clone())),
+            Json::Object(entries) => {
+                for (key, item) in entries {
+                    match (key.as_str(), item) {
+                        ("json" | "type", Json::String(text)) if text.starts_with(TODO_PREFIX) => {
+                            out.push((format!("{path}.{key}"), text.clone()))
+                        }
+                        ("array", element) => type_todo(element, format!("{path}.array"), out),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(migrations) = root.get("migrations") {
+        walk(migrations, "migrations".into(), &mut out);
+    }
+    if let Some(Json::Object(tables)) = root.get("tables") {
+        for (table, spec) in tables {
+            if let Some(Json::Object(fields)) = spec.get("computed") {
+                for (field, computed) in fields {
+                    if let Some(ty) = computed.get("type") {
+                        type_todo(
+                            ty,
+                            format!("tables.{table}.computed.{field}.type"),
+                            &mut out,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if let Some(Json::Object(transforms)) = root.get("transforms") {
+        for (name, transform) in transforms {
+            for side in ["stored", "view"] {
+                if let Some(ty) = transform.get(side) {
+                    type_todo(ty, format!("transforms.{name}.{side}"), &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Refuse a file with unresolved TODOs, naming each.
+fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
+    let todos = todos(root);
+    if todos.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = todos
+        .iter()
+        .map(|(path, text)| format!("  {path}: {text}"))
+        .collect();
+    Err(ArtifactError::new(format!(
+        "{} unresolved TODO{} left by `jazz-tools migrations create` or `upgrade`; replace each with \
+         the value it asks for, then run `jazz-tools generate` again:\n{}",
+        todos.len(),
+        if todos.len() == 1 { "" } else { "s" },
+        list.join("\n")
+    )))
 }
 
 /// The file as JSON, once its `format` is one this version reads. The
@@ -348,6 +742,11 @@ struct History {
     /// Oldest first, policy-free, the current one last.
     schemas: Vec<(SchemaHash, Schema)>,
     migrations: Vec<PublishMigrationRequest>,
+    /// Versions no chain of migrations connects to the current one, and
+    /// whose rows would need transforming: why, for each. Loaders warn
+    /// (`jazz-tools validate` in .64 wrote such files while a migration was
+    /// still to be written); `generate` refuses them.
+    stranded: Vec<String>,
 }
 
 impl History {
@@ -410,12 +809,217 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             to_hash: to.as_ref().map_or(current, |to| by_name[to]).to_string(),
             forward: forward.clone(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let schema_of = |hash: &str| {
+        let hash = parse_schema_hash(hash).expect("written above");
+        &schemas
+            .iter()
+            .find(|(h, _)| *h == hash)
+            .expect("named above")
+            .1
+    };
+    for (index, migration) in migrations.iter().enumerate() {
+        if let Some(refusal) = retargeted_reference(
+            schema_of(&migration.from_hash),
+            schema_of(&migration.to_hash),
+            &migration.forward,
+        ) {
+            return Err(ArtifactError::new(format!(
+                "migrations[{index}]: {refusal}"
+            )));
+        }
+    }
+    // Every version a client may open must lead to the current one: lenses
+    // run both ways, so any chain of migrations connects them. Before
+    // alpha.65, `migrations create` wrote no migration when no row needed
+    // transforming (an index, merge strategy or column order changed), so a
+    // version such files hold may stand alone: it is joined to the next
+    // version its rows pass to unchanged by the identity step it implies.
+    let mut migrations = migrations;
+    let reached_from = |migrations: &[PublishMigrationRequest]| {
+        let mut reached = vec![current];
+        loop {
+            let before = reached.len();
+            for migration in migrations {
+                let (from, to) = (
+                    parse_schema_hash(&migration.from_hash).expect("written above"),
+                    parse_schema_hash(&migration.to_hash).expect("written above"),
+                );
+                if reached.contains(&from) != reached.contains(&to) {
+                    reached.push(if reached.contains(&from) { to } else { from });
+                }
+            }
+            if reached.len() == before {
+                return reached;
+            }
+        }
+    };
+    let mut stranded = Vec::new();
+    let mut stranded_hashes = Vec::new();
+    loop {
+        let reached = reached_from(&migrations);
+        let Some(index) = schemas
+            .iter()
+            .position(|(hash, _)| !reached.contains(hash) && !stranded_hashes.contains(hash))
+        else {
+            break;
+        };
+        let (hash, schema) = &schemas[index];
+        // The next version, in file order (history, then the current one),
+        // that this one's rows pass to unchanged.
+        let bridge = schemas[index + 1..]
+            .iter()
+            .find(|(later, other)| reached.contains(later) && rows_pass_unchanged(schema, other));
+        let Some((later, other)) = bridge else {
+            let name = by_name
+                .iter()
+                .find(|(_, h)| *h == hash)
+                .map(|(n, _)| n.clone())
+                .expect("a history version");
+            stranded.push(format!(
+                "{APP_FILE}: history.{name}: no migration leads from it to the current `tables`, \
+                 directly or through other versions, so clients holding its rows couldn't open; \
+                 add one (`jazz-tools migrations create` writes it) or remove the version"
+            ));
+            stranded_hashes.push(*hash);
+            continue;
+        };
+        migrations.push(PublishMigrationRequest {
+            from_hash: hash.to_string(),
+            to_hash: later.to_string(),
+            forward: identity_lenses(schema, other),
+        });
+    }
     Ok(History {
         current,
         schemas,
         migrations,
+        stranded,
     })
+}
+
+/// Whether every row of `from` is a row of `to` as it is: the same tables,
+/// each with the same columns (by name) of the same type and optionality,
+/// an enum perhaps gaining variants at the end. What may differ (indexes,
+/// history retention, merge strategies, defaults, references, column order)
+/// needs no step.
+fn rows_pass_unchanged(from: &Schema, to: &Schema) -> bool {
+    fn same_type(a: &ColumnType, b: &ColumnType) -> bool {
+        match (a, b) {
+            (ColumnType::Enum { variants: x }, ColumnType::Enum { variants: y }) => {
+                y.starts_with(x)
+            }
+            (ColumnType::Array { element: x }, ColumnType::Array { element: y }) => same_type(x, y),
+            _ => a == b,
+        }
+    }
+    from.len() == to.len()
+        && from.iter().all(|(name, table)| {
+            let Some(other) = to.get(name) else {
+                return false;
+            };
+            table.columns.columns.len() == other.columns.columns.len()
+                && table.columns.columns.iter().all(|column| {
+                    other.columns.columns.iter().any(|c| {
+                        c.name == column.name
+                            && c.nullable == column.nullable
+                            && same_type(&column.column_type, &c.column_type)
+                            && !retargets(column, c)
+                    })
+                })
+        })
+}
+
+/// Whether a kept column's reference moves from one table to another: its
+/// values would name rows of the old table. Gaining a reference is fine.
+fn retargets(
+    from: &crate::tools::public_schema::ColumnDescriptor,
+    to: &crate::tools::public_schema::ColumnDescriptor,
+) -> bool {
+    matches!((&from.references, &to.references), (Some(a), Some(b)) if a != b)
+}
+
+/// The written migration's first kept column whose reference it moves to
+/// another table, as a refusal.
+fn retargeted_reference(
+    from: &Schema,
+    to: &Schema,
+    forward: &[super::published::PublishTableLens],
+) -> Option<String> {
+    for (name, table) in to.iter() {
+        let lens = forward.iter().find(|l| l.table == name.as_str());
+        if lens.is_some_and(|l| l.added) {
+            continue;
+        }
+        let old_name = lens
+            .and_then(|l| l.renamed_from.clone())
+            .unwrap_or_else(|| name.as_str().to_string());
+        let Some(old) = from.get(&TableName::from(old_name.as_str())) else {
+            continue;
+        };
+        for column in &table.columns.columns {
+            let old_column = lens
+                .and_then(|l| {
+                    l.operations.iter().find_map(|op| match op {
+                        super::published::PublishLensOp::Rename { column: was, value }
+                            if value == column.name_str() =>
+                        {
+                            Some(was.clone())
+                        }
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| column.name_str().to_string());
+            // A reference to a table the migration renames follows it.
+            let followed = |table: &TableName| -> TableName {
+                forward
+                    .iter()
+                    .find(|l| l.renamed_from.as_deref() == Some(table.as_str()))
+                    .map_or(*table, |l| TableName::from(l.table.as_str()))
+            };
+            if let Some(source) = old
+                .columns
+                .columns
+                .iter()
+                .find(|c| c.name_str() == old_column)
+                && matches!(
+                    (&source.references, &column.references),
+                    (Some(a), Some(b)) if followed(a) != *b
+                )
+            {
+                return Some(format!(
+                    "column {name}.{} moves its reference from {} to {}, which is not supported \
+                     yet: its values name rows of {}. Add a new column referencing {} and drop \
+                     this one in a later release",
+                    column.name_str(),
+                    source.references.expect("retargets").as_str(),
+                    column.references.expect("retargets").as_str(),
+                    source.references.expect("retargets").as_str(),
+                    column.references.expect("retargets").as_str(),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The identity step between two versions [`rows_pass_unchanged`] relates:
+/// an empty lens for each table that differs.
+fn identity_lenses(from: &Schema, to: &Schema) -> Vec<super::published::PublishTableLens> {
+    to.iter()
+        .filter(|(name, table)| {
+            from.get(name).is_some_and(|old| {
+                serde_json::to_value(old).ok() != serde_json::to_value(table).ok()
+            })
+        })
+        .map(|(name, _)| super::published::PublishTableLens {
+            table: name.as_str().to_string(),
+            added: false,
+            removed: false,
+            renamed_from: None,
+            operations: Vec::new(),
+        })
+        .collect()
 }
 
 /// The bundle id the server computes when this backend publishes: the
@@ -442,20 +1046,25 @@ fn compute_bundle(current: &Schema, permissions: &Permissions) -> Result<BundleI
 fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactError> {
     let table = |path: &str, name: &str| {
         current.get(&TableName::from(name)).ok_or_else(|| {
-            ArtifactError::new(format!("{path}: the current schema has no table {name}"))
+            ArtifactError::new(format!(
+                "{path}: the current schema has no table {name}{}",
+                expr::did_you_mean(name, current.keys().map(|t| t.as_str()))
+            ))
         })
     };
-    let has_column = |schema: &TableSchema, column: &str| {
+    let column_of = |schema: &TableSchema, column: &str| {
         schema
             .columns
             .columns
             .iter()
-            .any(|c| c.name_str() == column)
+            .find(|c| c.name_str() == column)
+            .cloned()
     };
+    let has_column = |schema: &TableSchema, column: &str| column_of(schema, column).is_some();
     for (name, entry) in &codegen.tables {
-        let schema = table(&format!("codegen.tables.{name}"), name)?;
+        let schema = table(&format!("tables.{name}"), name)?;
         for (relation, target) in &entry.relations {
-            let path = format!("codegen.tables.{name}.relations.{relation}");
+            let path = format!("tables.{name}.relations.{relation}");
             match target {
                 CodegenRelation::Forward {
                     table: other,
@@ -488,27 +1097,105 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
                 }
             }
         }
-        for (index, column) in entry.ts_only.iter().enumerate() {
-            if let TsOnlyColumn::Transform { column } = column
-                && !has_column(schema, column)
-            {
+        for relation in entry.relations.keys() {
+            if relation == "id" || has_column(schema, relation) {
                 return Err(ArtifactError::new(format!(
-                    "codegen.tables.{name}.ts_only[{index}]: table {name} has no column {column}"
+                    "tables.{name}.relations.{relation}: table {name} already has a column \
+                     {relation}; a relation needs its own name, e.g. `{relation}Row`"
+                )));
+            }
+        }
+        let columns = || schema.columns.columns.iter().map(|c| c.name_str());
+        for (index, field) in entry.computed.iter().enumerate() {
+            let path = format!("tables.{name}.computed.{}", field.name);
+            if field.name == "id" || has_column(schema, &field.name) {
+                return Err(ArtifactError::new(format!(
+                    "{path}: table {name} already has a column {}; a computed field needs its own name",
+                    field.name
+                )));
+            }
+            if entry.relations.contains_key(&field.name) {
+                return Err(ArtifactError::new(format!(
+                    "{path}: table {name} already has a relation {}; a computed field needs its own name",
+                    field.name
+                )));
+            }
+            if entry.computed[..index].iter().any(|f| f.name == field.name) {
+                return Err(ArtifactError::new(format!("{path} repeats")));
+            }
+            for (i, from) in field.from.iter().enumerate() {
+                if from != "id" && !has_column(schema, from) {
+                    let other_computed = entry.computed.iter().any(|f| &f.name == from);
+                    return Err(ArtifactError::new(format!(
+                        "{path}.from[{i}]: {}",
+                        if other_computed {
+                            format!(
+                                "`{from}` is a computed field; a computed field is computed from stored columns only"
+                            )
+                        } else {
+                            format!(
+                                "table {name} has no column {from}{}",
+                                expr::did_you_mean(from, columns())
+                            )
+                        }
+                    )));
+                }
+                if field.from[..i].contains(from) {
+                    return Err(ArtifactError::new(format!(
+                        "{path}.from[{i}]: `{from}` is listed twice"
+                    )));
+                }
+            }
+        }
+        for (column, transform) in &entry.transforms {
+            let path = format!("tables.{name}.columns.{column}.transform");
+            let descriptor = column_of(schema, column).ok_or_else(|| {
+                ArtifactError::new(format!("{path}: table {name} has no column {column}"))
+            })?;
+            let Some(decl) = codegen.transforms.get(transform) else {
+                return Err(ArtifactError::new(format!(
+                    "{path}: no transform `{transform}` in the top-level `transforms`{}",
+                    expr::did_you_mean(transform, codegen.transforms.keys().map(String::as_str))
+                )));
+            };
+            if decl.stored != descriptor.column_type {
+                return Err(ArtifactError::new(format!(
+                    "{path}: transform `{transform}` stores {}, but column {column} is {}",
+                    type_name(&decl.stored),
+                    type_name(&descriptor.column_type)
                 )));
             }
         }
     }
-    for (slice, tables) in &codegen.slices {
-        if tables.is_empty() {
-            return Err(ArtifactError::new(format!(
-                "codegen.slices.{slice} has no tables"
-            )));
-        }
-        for name in tables {
-            table(&format!("codegen.slices.{slice}"), name)?;
-        }
-    }
     Ok(())
+}
+
+/// A schema in the readable form of a `history` version's `tables` (no
+/// relations, computed fields or transforms), as the writer prints it.
+pub fn version_tables(schema: &Schema) -> Result<Json, ArtifactError> {
+    app_file::write_version_tables(schema)
+        .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// A column type in the file's form (`"string"`, `{ "enum": […] }`).
+pub fn column_type_spec(ty: &ColumnType) -> Result<Json, ArtifactError> {
+    app_file::type_spec(ty).map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// A value of `ty` in the file's form (a column `default`).
+pub fn value_spec(
+    value: &crate::tools::public_schema::Value,
+    ty: &ColumnType,
+) -> Result<Json, ArtifactError> {
+    app_file::value_spec(value, ty).map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// A column type as the file writes it, for messages.
+fn type_name(ty: &ColumnType) -> String {
+    app_file::type_spec(ty).map_or_else(
+        |_| format!("{ty:?}"),
+        |json| json::print(&json).trim_end().to_string(),
+    )
 }
 
 // ============================================================================
