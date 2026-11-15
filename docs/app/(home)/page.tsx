@@ -59,7 +59,8 @@ export const metadata: Metadata = {
 };
 
 const serverCode = `import { createJazz, vercel } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -73,11 +74,11 @@ export const jazz = createJazz({
 });`;
 
 const routeCode = `import { jazz } from "@/jazz.server";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 export async function GET(request: Request) {
   // Runs as the signed-in user: only their todos
-  // according to permissions defined in schema.ts
+  // according to the policies in jazz.permissions.json
   const db = await jazz.forReqUser(request);
   const todos = await db.all(app.todos.where({ done: false }));
   return Response.json(todos);
@@ -88,37 +89,35 @@ const mountCode = `import { jazz } from "@/jazz.server";
 // Sync for browsers, apps and agents, on your own origin
 export const { GET, POST, DELETE } = jazz.next();`;
 
-const schemaCode = `import { schema as s } from "jazz-tools";
+const appCode = `{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "owner_id": "uuid"
+      }
+    }
+  }
+}`;
 
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      owner_id: s.uuid(),
-    },
-    {},
-  ),
-};
-
-export const app = s.defineApp(schema);
-
-export const permissions = s.definePermissions(
-  app,
-  ({ policy, session }) => {
-    const mine = { owner_id: session.user };
-
-    policy.todos.allowRead.where(mine);
-    policy.todos.allowInsert.where(mine);
-    policy.todos.allowUpdate
-      .whereOld(mine)
-      .whereNew(mine);
-    policy.todos.allowDelete.where(mine);
-  },
-);`;
+const permissionsCode = `{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "todos": {
+      "read": "owner_id = session.user",
+      "insert": "owner_id = session.user",
+      "update": "owner_id = session.user",
+      "delete": "owner_id = session.user"
+    }
+  }
+}`;
 
 const componentCode = `import { useAll } from "jazz-tools/react";
-import { app } from "./schema";
+import { app } from "./jazz.generated";
 
 export function OpenTodos() {
   // As an alternative to traditional querying via api/todos you can query
@@ -165,7 +164,7 @@ const features: {
       <>
         <p>
           Declarative permissions are policies over your data and the user your backend signed in,
-          defined in code and testable like the rest of your app.
+          kept in a file in your repo and testable like the rest of your app.
         </p>
         <p>
           Jazz optimizes each query together with the policies that apply to it, so the same rules
@@ -449,7 +448,12 @@ export default function HomePage() {
                 files={[{ name: "jazz/[...path]/route.ts", language: "ts", code: mountCode }]}
               />
             </div>
-            <CodeWindow files={[{ name: "schema.ts", language: "ts", code: schemaCode }]} />
+            <CodeWindow
+              files={[
+                { name: "jazz.app.json", language: "json", code: appCode },
+                { name: "jazz.permissions.json", language: "json", code: permissionsCode },
+              ]}
+            />
           </div>
         </div>
       </section>

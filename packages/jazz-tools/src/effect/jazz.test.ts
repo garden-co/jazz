@@ -1,16 +1,13 @@
 import { Cause, Data, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { Jazz, JazzError } from "./index.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean" } } },
+});
 
 class Oops extends Data.TaggedError("Oops")<{}> {}
 
@@ -76,7 +73,9 @@ async function trackedJazzLayer(name: string) {
   return { layer, openSubscriptions: () => open };
 }
 
-const titles = (rows: ReadonlyArray<{ title: string }>) => rows.map((row) => row.title).sort();
+// Rows of an inline app are loosely typed.
+const titles = (rows: ReadonlyArray<{ readonly [column: string]: unknown }>) =>
+  rows.map((row) => row.title as string).sort();
 
 // The first test pays for loading the native runtime, which can exceed
 // vitest's default 5 s when other suites load theirs concurrently.

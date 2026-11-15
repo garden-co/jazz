@@ -25,18 +25,6 @@ fn note_input(title: &str) -> HashMap<String, Value> {
     jazz::row_input!("title" => title)
 }
 
-fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Value> {
-    vec![
-        title.into(),
-        canonical_user_principal(created_by),
-        canonical_user_principal(updated_by),
-    ]
-}
-
-fn canonical_user_principal(user_id: &str) -> Value {
-    structured_author(user_id, None)
-}
-
 fn structured_author(user_id: &str, account: Option<jazz::account_registry::AccountId>) -> Value {
     Value::Row {
         id: None,

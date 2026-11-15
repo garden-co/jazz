@@ -13,7 +13,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
-import { app, type Layer, type Shape } from "@/schema";
+import { app, type Layer, type Shape } from "@/jazz.generated";
 import { CursorLayer, useCursorPublisher } from "@/src/components/CollaboratorCursors";
 import {
   clamp,

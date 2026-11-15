@@ -1,23 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { schema, type Db, type RowOf } from "../../src/index.js";
+import { type Db } from "../../src/index.js";
 import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
-import { deploy } from "../../src/dev/catalogue.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { app, type Todo } from "./apps/transaction-reads/jazz.generated.js";
+import permissions from "./apps/transaction-reads/jazz.permissions.json";
 
-const app = schema.defineApp(
-  {
-    todos: schema.table(
-      {
-        title: schema.string(),
-        done: schema.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
-
-type Todo = RowOf<typeof app.todos>;
+// apps/transaction-reads: todos { title, done }; its permissions (used by the remote
+// cases) allow reading, inserting and updating them.
 
 let db: Db;
 
@@ -437,13 +426,8 @@ describe("db serializable transaction reads browser integration", () => {
 
   it("reads a cold remote row", async () => {
     const core = await getJazzServerInfo(uniqueDbName("serializable-cold-read"));
-    const permissions = schema.definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.always(),
-      policy.todos.allowInsert.always(),
-      policy.todos.allowUpdate.always(),
-    ]);
-    await deploy({ ...core, schema: app.wasmSchema, permissions });
-    const { appId, serverUrl } = await startJazzApp(core, { schema: app.wasmSchema, permissions });
+    await deploy({ ...core, app, permissions: permissions });
+    const { appId, serverUrl } = await startJazzApp(core, { schema: app, permissions });
 
     const writer = await createDb({
       appId,
@@ -615,19 +599,20 @@ describe("db mergeable transaction reads browser integration", () => {
   });
 
   describe("db.transaction(cb)", () => {
-    it("rejects an async mergeable transaction that only reads because it has no commit", async () => {
+    it("resolves an async mergeable transaction that only reads, as there is nothing to commit", async () => {
       const { value: existingTodo } = db.insert(app.todos, {
         title: "Alice reviewed the plan",
         done: false,
       });
 
-      await expect(
-        db.transaction(async (tx) => {
-          const rows = await tx.all(app.todos);
-          expect(rows).toEqual([existingTodo]);
-          return "no writes needed";
-        }),
-      ).rejects.toThrow("empty mergeable transaction has no committed unit; roll it back instead");
+      const result = await db.transaction(async (tx) => {
+        const rows = await tx.all(app.todos);
+        expect(rows).toEqual([existingTodo]);
+        return "no writes needed";
+      });
+      expect(result.value).toBe("no writes needed");
+      await expect(result.wait({ tier: "global" })).resolves.toBe("no writes needed");
+      await expect(db.all(app.todos)).resolves.toEqual([existingTodo]);
     });
 
     it("rolls back cleanly when an async mergeable transaction reads then throws before writing", async () => {

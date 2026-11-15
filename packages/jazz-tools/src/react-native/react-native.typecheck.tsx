@@ -5,7 +5,6 @@ import {
   Db,
   JazzProvider,
   createJazzClient,
-  schema,
   useAll,
   useAllSuspense,
   useDb,
@@ -15,21 +14,9 @@ import {
 } from "./index.js";
 import type { OpenJazzClientConfig } from "./create-jazz-client.js";
 import type { AccountStore } from "../accounts/persistence.js";
+import { app } from "../../tests/react-native/apps/optional-todos/jazz.generated.js";
 
 declare const store: AccountStore;
-
-const app = schema.defineApp(
-  {
-    todos: schema.table(
-      {
-        title: schema.string(),
-        done: schema.boolean().optional(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
 
 declare const account: AccountHandle;
 

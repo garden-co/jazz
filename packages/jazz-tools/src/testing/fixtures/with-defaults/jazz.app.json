@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "tables": {
+    "counters": { "columns": { "count": { "type": "int", "merge": "counter" } } },
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": { "type": "boolean", "default": false },
+        "tags": { "array": "string", "default": ["work", "home"] },
+        "metadata": { "json": true, "default": { "createdBy": "alice" } },
+        "avatar": { "type": "bytes", "default": "AAH/" }
+      }
+    }
+  }
+}

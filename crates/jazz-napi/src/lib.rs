@@ -205,6 +205,9 @@ pub struct CreatedMigration {
     pub changed: bool,
     /// JSON paths of the `"TODO: …"` strings left for the author.
     pub todos: Vec<String>,
+    /// Why nothing was written, when it isn't simply that nothing changed
+    /// (an index-only edit).
+    pub note: Option<String>,
 }
 
 /// Write the migration from the version the committed bindings
@@ -227,6 +230,7 @@ pub fn migrations_create(
         app: created.app,
         changed: created.changed,
         todos: created.todos,
+        note: created.note,
     })
 }
 

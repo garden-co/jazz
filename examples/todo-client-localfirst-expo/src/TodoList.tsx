@@ -10,7 +10,7 @@ import {
   type ListRenderItem,
 } from "react-native";
 import { useAll, useSession } from "jazz-tools/react-native";
-import { app, type Todo } from "../schema";
+import { app, type Todo } from "../jazz.generated";
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value : "";

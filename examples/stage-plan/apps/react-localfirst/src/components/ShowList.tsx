@@ -8,7 +8,7 @@ import { Grid } from "@astryxdesign/core/Grid";
 import { ProgressBar } from "@astryxdesign/core/ProgressBar";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { createShow } from "../model/actions.js";
 import { useMe } from "../model/me.js";
 import { href, navigate } from "../router.js";

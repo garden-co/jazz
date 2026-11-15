@@ -1,4 +1,4 @@
-import type { Art, Hue } from "@/schema";
+import type { Art, Hue } from "@/app-extras";
 
 /**
  * The deterministic, synthetic Jamazon catalogue. Jamazon Warehouse stocks the

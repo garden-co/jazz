@@ -13,7 +13,7 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { app, type JoinRequest, type RoomMember } from "../../schema";
+import { app, type JoinRequest, type RoomMember } from "../../jazz.generated";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { roomLink } from "../lib/url-state";
 

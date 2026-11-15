@@ -1,0 +1,32 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "todosViaProject": { "reverse": "todos", "relation": "projectRelation" } }
+    },
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": { "type": "boolean", "default": false },
+        "tags": { "array": "string", "default": [] },
+        "projectId": "uuid",
+        "ownerId": { "type": "uuid", "optional": true, "default": null },
+        "assigneesIds": { "array": "uuid", "default": [] }
+      },
+      "relations": {
+        "assignees": { "rel": "users", "column": "assigneesIds" },
+        "ownerRelation": { "rel": "users", "column": "ownerId" },
+        "projectRelation": { "rel": "projects", "column": "projectId" }
+      }
+    },
+    "users": {
+      "columns": { "name": "string" },
+      "relations": {
+        "todosViaAssignees": { "reverse": "todos", "relation": "assignees" },
+        "todosViaOwner": { "reverse": "todos", "relation": "ownerRelation" }
+      }
+    }
+  }
+}
