@@ -134,9 +134,11 @@ See [Relationships](/docs/schemas/relationships) for more.
 
 ## Indexes
 
-By default every column gets a single-column index. List `indexes` to choose: a name is a
-single-column index, an array of names a composite index, which may end in `$createdAt` or
-`$updatedAt`. Once any single names are listed, only those columns get single-column indexes.
+A table has the indexes you list in its `indexes`, plus one on each relation column, which Jazz
+always indexes. A column name in the list declares a single-column index on that column, and an
+array of names a composite index, which may end in `$createdAt` or `$updatedAt`. Queries can filter
+and sort by any column; an index on the columns they use lets them read only the matching rows
+instead of the whole table.
 
 ```json title="jazz.app.json"
 {
