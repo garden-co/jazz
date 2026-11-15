@@ -729,6 +729,32 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             forward: forward.clone(),
         })
         .collect();
+    // Every version a client may open must lead to the current one: lenses
+    // run both ways, so any chain of migrations connects them.
+    let mut reached = vec![current];
+    loop {
+        let before = reached.len();
+        for migration in &migrations {
+            let migration: &PublishMigrationRequest = migration;
+            let (from, to) = (
+                parse_schema_hash(&migration.from_hash).expect("written above"),
+                parse_schema_hash(&migration.to_hash).expect("written above"),
+            );
+            if reached.contains(&from) != reached.contains(&to) {
+                reached.push(if reached.contains(&from) { to } else { from });
+            }
+        }
+        if reached.len() == before {
+            break;
+        }
+    }
+    if let Some((name, _)) = by_name.iter().find(|(_, hash)| !reached.contains(hash)) {
+        return Err(ArtifactError::new(format!(
+            "history.{name}: no migration leads from it to the current `tables`, directly or \
+             through other versions, so clients holding its rows couldn't open; add one (`jazz-tools \
+             migrations create` writes it) or remove the version"
+        )));
+    }
     Ok(History {
         current,
         schemas,
@@ -809,6 +835,14 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
                         )));
                     }
                 }
+            }
+        }
+        for relation in entry.relations.keys() {
+            if relation == "id" || has_column(schema, relation) {
+                return Err(ArtifactError::new(format!(
+                    "tables.{name}.relations.{relation}: table {name} already has a column \
+                     {relation}; a relation needs its own name, e.g. `{relation}Row`"
+                )));
             }
         }
         let columns = || schema.columns.columns.iter().map(|c| c.name_str());

@@ -102,3 +102,26 @@ fn a_loaded_app_keeps_its_file_text_as_its_source_hashes_it() {
     assert_eq!(a.file, b.file);
     assert_eq!(a.source, b.source);
 }
+
+#[test]
+fn type_names_may_shadow_globals_the_module_never_uses() {
+    let app = |table: &str| {
+        format!(
+            r#"{{ "format": 1, "tables": {{ "{table}": {{ "columns": {{ "at": "timestamp" }} }} }} }}"#
+        )
+    };
+    let generated = generate(Lang::TypeScript, app("records").as_bytes()).unwrap();
+    assert!(generated.contains("export type Record = {"), "{generated}");
+    assert!(
+        !generated.contains("Record<"),
+        "the module must not use the global Record"
+    );
+    // `Date` is a type the module uses itself.
+    let error = generate(Lang::TypeScript, app("dates").as_bytes()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("table `dates` would be the TypeScript type `Date`"),
+        "{error}"
+    );
+}

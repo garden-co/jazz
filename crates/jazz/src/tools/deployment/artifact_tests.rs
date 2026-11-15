@@ -274,7 +274,7 @@ fn shared_todos() -> ArtifactInput {
             (
                 "todos".into(),
                 CodegenTable {
-                    relations: BTreeMap::from([("shares".into(), reverse("shares", "todo"))]),
+                    relations: BTreeMap::from([("shares".into(), reverse("shares", "todoRow"))]),
                     computed: vec![ComputedField {
                         name: "shareCount".into(),
                         field_type: FieldType {
@@ -290,7 +290,7 @@ fn shared_todos() -> ArtifactInput {
             (
                 "shares".into(),
                 CodegenTable {
-                    relations: BTreeMap::from([("todo".into(), forward("todos", "todo"))]),
+                    relations: BTreeMap::from([("todoRow".into(), forward("todos", "todo"))]),
                     ts_only: vec![],
                     ..Default::default()
                 },
@@ -436,8 +436,8 @@ fn the_files_read_like_the_dsl() {
     for present in [
         "\"owner\": \"uuid?\"",
         "\"tags\": { \"array\": \"string\" }",
-        "\"todo\": { \"rel\": \"todos\", \"column\": \"todo\" }",
-        "\"shares\": { \"reverse\": \"shares\", \"relation\": \"todo\" }",
+        "\"todoRow\": { \"rel\": \"todos\", \"column\": \"todo\" }",
+        "\"shares\": { \"reverse\": \"shares\", \"relation\": \"todoRow\" }",
         "\"history\": \"latest\"",
         "\"renameFrom\": \"title\"",
     ] {
@@ -449,7 +449,7 @@ fn the_files_read_like_the_dsl() {
     }
     for present in [
         "\"anyOf\": [\"owner = session.user\", \"exists shares(todo = this.id, user = session.user)\"]",
-        "\"read\": \"allowedTo.read(todo)\"",
+        "\"read\": \"allowedTo.read(todoRow)\"",
         "\"delete\": { \"allOf\": [\"owner = session.user\", \"not owner = null\"] }",
     ] {
         assert!(
@@ -520,8 +520,8 @@ fn every_construct_reads_and_prints_back() {
         ),
         ("todos", "exists shares()"),
         ("todos", "allowedTo.read(shares)"),
-        ("shares", "allowedTo.read(todo)"),
-        ("shares", "allowedTo.update(todo, maxDepth: 3)"),
+        ("shares", "allowedTo.read(todoRow)"),
+        ("shares", "allowedTo.update(todoRow, maxDepth: 3)"),
         ("todos", "not owner = session.user"),
         ("todos", "owner = session.user or name = 'x'"),
         (
@@ -633,8 +633,8 @@ fn expression_errors_point_at_the_spot_and_suggest() {
             "two columns of the same row can't be compared",
         ),
         (
-            "exists shares(todo = this.id).todoo(name = 'x')",
-            "unknown relation `todoo` on shares; did you mean `todo`?",
+            "exists shares(todo = this.id).todoRw(name = 'x')",
+            "unknown relation `todoRw` on shares; did you mean `todoRow`?",
         ),
         (
             "outer.owner = session.user",
@@ -706,7 +706,7 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
     app["tables"]["todos"]["$comment"] = "A to-do".into();
     let mut permissions: serde_json::Value = serde_json::from_str(&written.permissions).unwrap();
     permissions["tables"]["shares"]["read"] =
-        serde_json::json!({"$comment": "Inherited", "where": "allowedTo.read(todo)"});
+        serde_json::json!({"$comment": "Inherited", "where": "allowedTo.read(todoRow)"});
     load(
         app.to_string().as_bytes(),
         permissions.to_string().as_bytes(),
@@ -745,7 +745,7 @@ fn migrations_must_name_versions_and_pass_their_lens_checks() {
 #[test]
 fn relations_must_name_real_columns() {
     let error =
-        edited_app(|v| v["tables"]["shares"]["relations"]["todo"]["column"] = "nope".into());
+        edited_app(|v| v["tables"]["shares"]["relations"]["todoRow"]["column"] = "nope".into());
     assert!(
         error.contains("names column `nope`, which shares doesn't have"),
         "{error}"
@@ -1419,13 +1419,13 @@ fn relation_hops_and_nested_exists_round_trip() {
     let text = printed("todos", &hop);
     assert_eq!(
         text,
-        "exists shares(todo = this.id).todo(owner = session.user)"
+        "exists shares(todo = this.id).todoRow(owner = session.user)"
     );
     // The hop sugar compiles to the same relation.
     assert_eq!(
         read_policy(
             "todos",
-            "exists shares(todo = this.id).todo(owner = session.user)",
+            "exists shares(todo = this.id).todoRow(owner = session.user)",
             serde_json::json!({})
         )
         .unwrap(),
@@ -2018,4 +2018,86 @@ fn version_names_javascript_would_reorder_are_refused() {
             v["migrations"][0]["from"] = name.into();
         });
     }
+}
+
+#[test]
+fn the_exact_login_is_session_identity() {
+    let expr = read_policy(
+        "todos",
+        "$createdBy.identity = session.identity",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(
+        printed("todos", &expr),
+        "$createdBy.identity = session.identity"
+    );
+    let account = read_policy("todos", "$createdBy = session.user", serde_json::json!({})).unwrap();
+    assert_ne!(expr, account);
+    let error = read_policy(
+        "todos",
+        "$createdBy.identity = session.identty",
+        serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(error.contains("`session.identity`"), "{error}");
+}
+
+#[test]
+fn every_history_version_must_lead_to_the_current_one() {
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("migrations");
+    });
+    assert!(
+        error.contains("history.00304e9bce65: no migration leads from it to the current `tables`"),
+        "{error}"
+    );
+    let written = write(shared_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value.as_object_mut().unwrap().remove("migrations");
+    assert!(load_client(value.to_string().as_bytes()).is_err());
+}
+
+/// `policy.<t>.gather(…)` policies from the TS DSL: a query inside
+/// `recursive(…)` ends at the next `, <field>:`, so a `select` or `order by`
+/// list doesn't run on into it. The writer prints them and reads them back.
+#[test]
+fn recursive_relations_end_their_queries_at_the_next_field() {
+    // permissions.repro.test.ts's "explicit gather seeds through a
+    // same-table double-ref edge".
+    let app = r#"{ "format": 1, "tables": {
+        "teams": { "columns": { "name": "string" }, "relations": {
+            "team_entryViaTeam": { "reverse": "team_entry", "relation": "teamRelation" },
+            "team_entryViaTarget": { "reverse": "team_entry", "relation": "target" },
+            "dropdowns_access_edgesViaTeam": { "reverse": "dropdowns_access_edges", "relation": "teamRelation" } } },
+        "team_entry": { "columns": { "team_id": "uuid", "target_id": "uuid", "user_id": "uuid", "administrator": "boolean" },
+            "relations": { "teamRelation": { "rel": "teams", "column": "team_id" }, "target": { "rel": "teams", "column": "target_id" } } },
+        "dropdowns": { "columns": { "name": "string" }, "relations": {
+            "dropdowns_access_edgesViaResource": { "reverse": "dropdowns_access_edges", "relation": "resource" } } },
+        "dropdowns_access_edges": { "columns": { "resource_id": "uuid", "team_id": "uuid", "grant_role": "string", "administrator": "boolean" },
+            "relations": { "resource": { "rel": "dropdowns", "column": "resource_id" }, "teamRelation": { "rel": "teams", "column": "team_id" } } }
+    } }"#;
+    let dropdowns = "exists (from recursive(seed: from team_entry join teams as __hop_0 on team_entry.target_id = __hop_0.id where team_entry.user_id = session.user select __hop_0.id as id, step: from team_entry where team_entry.administrator = bool(false) and team_entry.team_id = id(frontier) select team_entry.target_id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 8) join dropdowns_access_edges as __recursive_join_0 on teams.id = __recursive_join_0.team_id where __recursive_join_0.resource_id = outer.id and __recursive_join_0.grant_role in [text('viewer')] and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)";
+    let ordered = "exists (from recursive(seed: from teams select teams.id as id, teams.name as name, step: from teams where teams.id = id(frontier) order by teams.name, teams.id select teams.id as id, teams.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: fixpoint) where teams.id = outer.id)";
+    for text in [dropdowns, ordered] {
+        expr::parse(text).unwrap_or_else(|e| panic!("{}", e.render(text)));
+    }
+    let permissions = serde_json::json!({
+        "format": 1,
+        "tables": { "dropdowns": { "read": dropdowns }, "teams": { "read": "true" } },
+    });
+    let loaded =
+        load(app.as_bytes(), permissions.to_string().as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let codegen = load_app(app.as_bytes()).unwrap().codegen().clone();
+    let written = write(ArtifactInput {
+        current: loaded.current_hash().to_string(),
+        schemas: vec![loaded.current_schema().clone()],
+        migrations: vec![],
+        permissions: loaded.permissions().clone(),
+        codegen,
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let reloaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(reloaded.permissions(), loaded.permissions());
+    assert_eq!(reloaded.bundle(), loaded.bundle());
 }
