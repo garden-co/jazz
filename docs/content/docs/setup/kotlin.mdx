@@ -110,6 +110,23 @@ stages.
 Writes are local-first. A write that the server's permissions refuse doesn't fail the call: it
 stays local and never syncs.
 
+## Serve end users from your backend
+
+A Kotlin backend can be the Jazz endpoint end users' apps sign in and sync through, as
+`createJazz`'s handler is in TypeScript. Say who a request's user is from your own sign-in:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#backend-endpoint-setup-kotlin
+</include>
+
+and serve it from your HTTP server. With Ktor:
+
+<include cwd lang="kotlin" meta='title="KtorEndpoint.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/KtorEndpoint.kt#backend-endpoint-kotlin
+</include>
+
+`endpoint.forUser(request)` gives your own routes a handle acting as the request's user.
+
 ## Open the app as an end user
 
 An app on a user's device (a desktop app, or Android) syncs through your backend's Jazz endpoint
