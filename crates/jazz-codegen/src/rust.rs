@@ -871,6 +871,19 @@ pub fn is_app_manifest(manifest: &str) -> bool {
                 .is_some_and(is_runtime_dependencies);
             continue;
         }
+        // A renamed dependency: `app = { package = "jazz-app", … }` in a
+        // dependencies table, or `package = "jazz-app"` in its own table.
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        let renamed =
+            compact.contains("package=\"jazz-app\"") || compact.contains("package='jazz-app'");
+        if renamed
+            && (is_runtime_dependencies(&section)
+                || section
+                    .rsplit_once('.')
+                    .is_some_and(|(table, _)| is_runtime_dependencies(table)))
+        {
+            depends = true;
+        }
         if is_runtime_dependencies(&section) {
             let key = line
                 .split(['=', '.'])
@@ -1034,6 +1047,16 @@ mod tests {
         let app =
             "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app = { path = \"../jazz-app\" }\n";
         assert!(is_app_manifest(app));
+        // Under another name.
+        assert!(is_app_manifest(
+            "[package]\nname = \"a\"\n[dependencies]\njazz = { package = \"jazz-app\", version = \"0.1\" }\n"
+        ));
+        assert!(is_app_manifest(
+            "[package]\nname = \"a\"\n[dependencies.jazz]\npackage = \"jazz-app\"\nversion = \"0.1\"\n"
+        ));
+        assert!(!is_app_manifest(
+            "[package]\nname = \"a\"\n[dev-dependencies]\njazz = { package = \"jazz-app\" }\n"
+        ));
         assert!(is_app_manifest(
             "[package]\nname = \"x\"\n[dependencies]\njazz-app.workspace = true\n"
         ));

@@ -28,14 +28,28 @@ pub struct Outcome {
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))
+    std::fs::read(path).map_err(|error| format!("{}: {error}", shown(&path)))
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{}: {error}", path.display())),
+        Err(error) => Err(format!("{}: {error}", shown(&path))),
+    }
+}
+
+/// `path` as a message shows it: relative to the current directory when
+/// it's below it, as both CLIs print paths.
+fn shown<P: AsRef<Path> + ?Sized>(path: &P) -> String {
+    let path = path.as_ref();
+    let relative = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf));
+    match relative {
+        Some(relative) if relative.as_os_str().is_empty() => ".".into(),
+        Some(relative) => relative.display().to_string(),
+        None => path.display().to_string(),
     }
 }
 
@@ -123,7 +137,7 @@ pub fn languages_or(
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
              (a package.json, or the Cargo.toml of a crate depending on jazz-app); pass --lang",
-            dir.display(),
+            shown(&dir),
         ));
     }
     Ok(found)
@@ -155,12 +169,12 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
                 outcome.current.push(lang.file().to_string());
                 outcome
                     .notes
-                    .push(format!("{} is up to date", path.display()));
+                    .push(format!("{} is up to date", shown(&path)));
             }
             Some(Staleness::SchemaChanged) => {
                 return Err(format!(
                     "{}: {}",
-                    path.display(),
+                    shown(&path),
                     Staleness::SchemaChanged.message(lang)
                 ));
             }
@@ -181,15 +195,15 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
             Ok(text) => text,
             // Found only by its marker: not this app's language yet.
             Err(error) if selected.detected && error.is_unsupported() => {
-                skipped.push(format!("{}: {error}", path.display()));
+                skipped.push(format!("{}: {error}", shown(&path)));
                 continue;
             }
-            Err(error) => return Err(format!("{}: {error}", path.display())),
+            Err(error) => return Err(format!("{}: {error}", shown(&path))),
         };
         if check {
             return Err(format!(
                 "{}: {}",
-                path.display(),
+                shown(&path),
                 staleness.message(selected.lang)
             ));
         }
@@ -209,11 +223,11 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
     for (lang, path, text) in generated {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| format!("{}: {error}", parent.display()))?;
+                .map_err(|error| format!("{}: {error}", shown(&parent)))?;
         }
-        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
+        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", shown(&path)))?;
         outcome.written.push(lang.file().to_string());
-        outcome.notes.push(format!("wrote {}", path.display()));
+        outcome.notes.push(format!("wrote {}", shown(&path)));
     }
     Ok(outcome)
 }
@@ -252,13 +266,12 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
         return Ok(outcome);
     }
     std::fs::write(&app_path, &created.app)
-        .map_err(|error| format!("{}: {error}", app_path.display()))?;
+        .map_err(|error| format!("{}: {error}", shown(&app_path)))?;
     outcome.changed = true;
     outcome.todos = created.todos.clone();
-    outcome.notes.push(format!(
-        "wrote migration `{name}` in {}",
-        app_path.display()
-    ));
+    outcome
+        .notes
+        .push(format!("wrote migration `{name}` in {}", shown(&app_path)));
     if created.todos.is_empty() {
         let generated = generate(dir, langs, false)?;
         outcome.notes.extend(generated.notes);

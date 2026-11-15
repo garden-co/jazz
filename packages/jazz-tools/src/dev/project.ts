@@ -23,6 +23,8 @@ export interface GenerateOptions {
   cwd: string;
   /** Write nothing; fail if the bindings aren't what generate would write. */
   check?: boolean;
+  /** The bindings' languages (`--lang`); by default each the app's files name. */
+  lang?: string[];
 }
 
 export interface GenerateResult {
@@ -69,6 +71,7 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
   const outcome = await generateForDir(project.dir, {
     check: options.check ?? false,
     fallback: "ts",
+    ...(options.lang?.length ? { lang: options.lang } : {}),
   });
   return {
     dir: project.dir,
@@ -82,6 +85,8 @@ export interface CreateMigrationOptions {
   cwd: string;
   /** The migration's name, recorded in its entry. */
   name: string;
+  /** The bindings' languages (`--lang`); by default each the app's files name. */
+  lang?: string[];
 }
 
 export interface CreateMigrationResult {
@@ -90,6 +95,8 @@ export interface CreateMigrationResult {
   changed: boolean;
   /** JSON paths of the `"TODO: …"` entries left to resolve. */
   todos: string[];
+  /** Why nothing changed, when nothing did: e.g. only indexes changed. */
+  note?: string;
 }
 
 /**
@@ -108,8 +115,20 @@ export async function createAppMigration(
     );
   }
   const project = await readAppProject(options.cwd);
-  const outcome = await migrationsCreateForDir(project.dir, options.name, { fallback: "ts" });
-  return { dir: project.dir, changed: outcome.changed, todos: outcome.todos };
+  const outcome = await migrationsCreateForDir(project.dir, options.name, {
+    fallback: "ts",
+    ...(options.lang?.length ? { lang: options.lang } : {}),
+  });
+  // The shared code's own reason, unless it's the plain "no change".
+  const note = outcome.changed
+    ? undefined
+    : outcome.notes.find((line) => line !== "no schema change to migrate");
+  return {
+    dir: project.dir,
+    changed: outcome.changed,
+    todos: outcome.todos,
+    ...(note ? { note } : {}),
+  };
 }
 
 /** The versions and migrations `jazz.app.json` ships, for `migrations graph`. */
