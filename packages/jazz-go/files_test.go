@@ -41,6 +41,16 @@ func TestStreamingFiles(t *testing.T) {
 	if err := UpdateStreaming(ctx, db, "files", row.ID, "content", bytes.NewReader([]byte("small"))); err != nil {
 		t.Fatal(err)
 	}
+	// A reader that fails part-way writes nothing.
+	before, _ := NewQuery[fileRow]("files").All(ctx, db)
+	_, err = InsertStreaming[map[string]any, fileRow](ctx, db, "files", map[string]any{"name": "broken"}, "content",
+		io.MultiReader(bytes.NewReader(content[:StreamChunk+1]), errReader{}))
+	if err == nil {
+		t.Fatal("a failing reader inserted")
+	}
+	if after, _ := NewQuery[fileRow]("files").All(ctx, db); len(after) != len(before) {
+		t.Fatalf("rows: %d before, %d after a failed upload", len(before), len(after))
+	}
 	r, _ = ReadBytes(ctx, db, "files", row.ID, "content")
 	if got, _ := io.ReadAll(r); string(got) != "small" {
 		t.Fatalf("after update: %q", got)
@@ -69,3 +79,7 @@ func TestFilesReadAPageAtATime(t *testing.T) {
 		t.Fatalf("paged read: %d of %d bytes, %v", len(got), len(content), err)
 	}
 }
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, io.ErrClosedPipe }

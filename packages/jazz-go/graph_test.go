@@ -35,7 +35,7 @@ func TestGraphQueriesJSON(t *testing.T) {
 		}
 	}
 	var v Version[incTask]
-	if err := json.Unmarshal([]byte(`{"id":"t","title":"T","rank":2,"$history":{"version":3,"at":5,"deleted":false}}`), &v); err != nil || v.Row.Title != "T" || v.At != 5 || v.Version != 3 || v.By != nil {
+	if err := json.Unmarshal([]byte(`{"id":"t","title":"T","rank":2,"$history":{"transactionId":"x","acceptedAt":5}}`), &v); err != nil || v.Row.Title != "T" || v.AcceptedAt != 5 || v.TransactionID != "x" {
 		t.Fatalf("%+v %v", v, err)
 	}
 }
