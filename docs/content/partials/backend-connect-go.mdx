@@ -3,34 +3,13 @@ its path ends in `/v2`:
 
 ```bash
 go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65
+go build ./...
 ```
 
-Building needs cgo (a C compiler) and Jazz's core as a static library, `libjazz_ffi.a`, for your
-platform. Download it from the same release (`linux-x86_64`, `linux-aarch64` or `darwin-aarch64`),
-check it, and point `CGO_LDFLAGS` at it:
-
-```bash
-release=https://github.com/garden-co/jazz/releases/download/v2.0.0-alpha.65
-archive=libjazz_ffi-linux-x86_64.tar.gz
-mkdir -p ~/.local/lib/jazz && cd ~/.local/lib/jazz
-curl -fsSLO "$release/$archive" && curl -fsSL "$release/SHA256SUMS" | grep " $archive\$" | sha256sum -c -
-tar -xzf "$archive" libjazz_ffi.a LINK_FLAGS   # only the static library: the linker prefers a shared one
-export CGO_LDFLAGS="-L$HOME/.local/lib/jazz $(cat ~/.local/lib/jazz/LINK_FLAGS)"
-cd - && go build ./...
-```
-
-(On macOS, `shasum -a 256 -c -` checks the sum.)
-
-Or build it from source, with Rust:
-
-```bash
-git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
-cargo build --release -p jazz-ffi --manifest-path jazz/Cargo.toml
-export CGO_LDFLAGS="-L$PWD/jazz/target/release"
-```
-
-Use the library of the same release as the module. Linux is tested in CI; macOS (Apple silicon)
-builds but is not tested yet; Intel Macs and Windows have no library.
+jazz-go needs no cgo and no C compiler: it loads Jazz's core, which the module ships for Linux
+(x86-64, arm64) and macOS (Apple silicon), on first use, from your user cache directory. On another
+platform, or to use your own build, set `JAZZ_FFI_LIBRARY` to a `libjazz_ffi.so` / `.dylib` (e.g.
+from `cargo build --release -p jazz-ffi`). Windows is not supported yet.
 
 **Generate the bindings.**
 With a `go.mod` that requires `jazz-go/v2` beside `jazz.app.json`, `jazz-tools generate` writes the
