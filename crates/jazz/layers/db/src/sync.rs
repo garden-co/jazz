@@ -2292,7 +2292,7 @@ impl LiveRead {
 
 enum ReadLifetime {
     Once { historical: bool },
-    Live(LiveRead),
+    Live(Box<LiveRead>),
 }
 
 /// Query identity and settlement metadata shared by every active upstream read.
@@ -8683,7 +8683,7 @@ impl Inner {
             binding.clone(),
             include_deleted,
             view,
-            ReadLifetime::Live(live),
+            ReadLifetime::Live(Box::new(live)),
         );
         let client = self.client.as_mut().expect("client");
         client.outbox.push(SyncMessage::Read {
