@@ -1037,26 +1037,37 @@ fn an_explicit_updated_at_does_not_move_accepted_at() {
         },
     ))
     .unwrap();
+    // A later ordinary write, in the same millisecond or not.
+    update(&synced.server, note, "after");
     let versions = read(&synced.server, &history_of(note), ReadOpts::default());
-    assert_eq!(titles(&versions), ["first", "backfilled"], "in accept order");
+    assert_eq!(
+        titles(&versions),
+        ["first", "backfilled", "after"],
+        "in accept order"
+    );
     let times: Vec<u64> = versions.iter().map(accepted_at).collect();
-    assert!(times[0] < times[1], "{times:?}");
+    assert!(
+        times.windows(2).all(|pair| pair[0] < pair[1]),
+        "strictly increasing in accept order: {times:?}"
+    );
     let ms = |accepted: u64| accepted >> 18;
     assert!(
         ms(times[1]) > backfilled_at,
         "accepted now, not at the backfilled time: {}",
         ms(times[1])
     );
-    let current = read(
+    // The backfilled version keeps the writer's time.
+    let backfilled = read(
         &synced.server,
-        &Query::from("notes")
+        &Query::from("history.notes")
             .filter(eq(col("id"), lit(Value::Uuid(note.0))))
-            .select(["title", "$updatedAt"]),
+            .select(["title", "$updatedAt"])
+            .order_by("$acceptedAt", OrderDirection::Asc),
         ReadOpts::default(),
     );
     assert!(
-        format!("{:?}", cell(&current[0], "$updatedAt")).contains(&backfilled_at.to_string()),
+        format!("{:?}", cell(&backfilled[1], "$updatedAt")).contains(&backfilled_at.to_string()),
         "$updatedAt keeps the writer's time: {:?}",
-        cell(&current[0], "$updatedAt")
+        cell(&backfilled[1], "$updatedAt")
     );
 }

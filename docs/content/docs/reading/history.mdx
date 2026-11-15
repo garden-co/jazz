@@ -51,6 +51,8 @@ made, and ordering by `$acceptedAt` lists versions in the order the server appli
 is the current row. That holds for a write that sets `updatedAt` explicitly (a backfill or import)
 too: its `$acceptedAt` is still when the server accepted it, while its `$updatedAt` keeps the time
 you set.
+History imported from alpha.59 shows when the import wrote each version as `$acceptedAt`; the
+original times are in `$updatedAt`.
 
 The usual attribution columns (`$createdAt`, `$createdBy`, `$updatedAt`, and
 `$updatedBy`) are also available. Anyone who can read a row's history sees the author of every
