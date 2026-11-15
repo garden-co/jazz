@@ -156,35 +156,3 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
   );
   await deploy({ ...server, app: target, permissions });
 });
-
-// QUESTION: this app (a migration old -> middle, none from middle to the
-// current tables) is now refused when it loads: "history.middle: no
-// migration leads from it to the current `tables`". A deployment can't hold
-// a migration disconnected from its head any more, so this looks obsolete:
-// delete it?
-it.skip("keeps a single historical migration separate from the deployment head", async () => {
-  const old = { notes: { columns: { title: "string" } } };
-  const middle = { notes: { columns: { title: "string", a: "string" } } };
-  const target = testApp({
-    tables: { notes: { columns: { title: "string", a: "string", b: "string" } } },
-    history: { old: { tables: old }, middle: { tables: middle } },
-    migrations: [
-      { from: "old", to: "middle", migrate: { notes: { a: { add: "string", default: "" } } } },
-    ],
-  });
-  const hashes = [testApp({ tables: old }), testApp({ tables: middle }), target].map(hashOf);
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/migrations/graph"))
-        return reply({ latestBundleSchemaHash: hashes[2], schemas: hashes, migrations: [] });
-      expect(input.endsWith("/admin/bundles")).toBe(true);
-      const body = JSON.parse(String(init?.body)) as DeploymentBody;
-      expect(body.migrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
-        [hashes[0], hashes[1]],
-      ]);
-      return reply({ changed: true, published: { schemas: [], migrations: body.migrations } });
-    }),
-  );
-  await deploy({ ...server, app: target, permissions });
-});
