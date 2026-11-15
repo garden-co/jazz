@@ -49,9 +49,8 @@ impl Jazz {
     /// permission refused, say).
     pub fn durable(&self, tier: DurabilityTier) -> Jazz {
         Jazz {
-            commands: self.commands.clone(),
-            info: self.info.clone(),
             durability: Some(tier),
+            ..self.clone()
         }
     }
 
