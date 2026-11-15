@@ -8,19 +8,30 @@ const root = path.resolve(import.meta.dirname, "../../..");
 const CONVENTIONAL_PROVENANCE = new Set(["createdAt", "createdBy", "updatedAt", "updatedBy"]);
 
 /**
- * Tables whose columns mirror an outside system's own model, which names its
- * own timestamps: Better Auth's (`better_auth_*`, written by its adapter).
+ * The exact `table.column`s that mirror an outside system's own model, which
+ * names its own timestamps: Better Auth's tables, written by its adapter.
+ * Every other conventional-provenance column, Better Auth tables included,
+ * must use Jazz's `$` provenance instead.
  */
-const EXTERNAL_MODEL_TABLE = /^better_auth_/;
+const EXTERNAL_PROVENANCE_COLUMNS = new Set([
+  "better_auth_user.createdAt",
+  "better_auth_user.updatedAt",
+  "better_auth_session.createdAt",
+  "better_auth_session.updatedAt",
+  "better_auth_account.createdAt",
+  "better_auth_account.updatedAt",
+  "better_auth_verification.createdAt",
+  "better_auth_verification.updatedAt",
+  "better_auth_jwks.createdAt",
+]);
 
 /** The `table.column`s of `app` (a parsed jazz.app.json) that duplicate Jazz provenance. */
 function conventionalProvenanceColumns(app) {
   return Object.entries(app.tables ?? {}).flatMap(([table, definition]) =>
-    EXTERNAL_MODEL_TABLE.test(table)
-      ? []
-      : Object.keys(definition.columns ?? {})
-          .filter((column) => CONVENTIONAL_PROVENANCE.has(column))
-          .map((column) => `${table}.${column}`),
+    Object.keys(definition.columns ?? {})
+      .filter((column) => CONVENTIONAL_PROVENANCE.has(column))
+      .map((column) => `${table}.${column}`)
+      .filter((column) => !EXTERNAL_PROVENANCE_COLUMNS.has(column)),
   );
 }
 
@@ -33,6 +44,19 @@ test("provenance gate targets only app tables' Jazz provenance aliases", () => {
       },
     }),
     ["posts.createdAt"],
+  );
+});
+
+test("provenance gate exempts only the listed Better Auth columns", () => {
+  assert.deepEqual(
+    conventionalProvenanceColumns({
+      tables: {
+        better_auth_user: { columns: { createdAt: "timestamp", updatedBy: "string" } },
+        better_auth_jwks: { columns: { createdAt: "timestamp", updatedAt: "timestamp" } },
+        better_auth_passkey: { columns: { createdAt: "timestamp" } },
+      },
+    }),
+    ["better_auth_user.updatedBy", "better_auth_jwks.updatedAt", "better_auth_passkey.createdAt"],
   );
 });
 
