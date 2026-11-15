@@ -1077,12 +1077,10 @@ fn compute_bundle(
         let mut message = format!("permissions: {error}");
         // The engine checks a relation's `outer.` columns, which the loader
         // can't place; say so when the one it misses is a computed field.
-        let named = computed.iter().find_map(|(table, fields)| {
-            fields
-                .iter()
-                .find(|field| message.ends_with(&format!("unknown column {table}.{field}")))
-        });
-        if let Some(field) = named {
+        if let Some((_, field)) = error
+            .unknown_column()
+            .filter(|(table, field)| computed.get(*table).is_some_and(|f| f.contains(*field)))
+        {
             message.push_str(&format!(
                 ": `{field}` is a computed field, which isn't stored, so a permission can't \
                  read it; write the policy over the columns it's computed from"
