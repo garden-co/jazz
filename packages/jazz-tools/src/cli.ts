@@ -395,6 +395,10 @@ function printHelp(): void {
   console.log("  validate              Validate root schema.ts and permissions.ts");
   console.log("                        (--check: move nothing, fail if legacy migrations remain)");
   console.log("  schema compile        Print the compiled schema as JSON");
+  console.log(
+    "  upgrade               Convert an alpha.64 app (schema.ts, permissions.ts, migrations/)",
+  );
+  console.log("                        to app files and generated bindings (alpha.65)");
   console.log("  migrations create     Generate a migration stub between two schema versions");
   console.log("  migrations graph      Visualize the full migration graph");
   console.log("  login | logout | whoami");
@@ -406,6 +410,10 @@ function printHelp(): void {
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
+  console.log("\nUpgrade options:");
+  console.log("  --dir <path>          The app's directory (default: .)");
+  console.log("  --dry-run             Report what would change, write nothing");
+  console.log("  --skip-typecheck      Don't typecheck the converted project");
   console.log("\nSchema compile options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
@@ -483,6 +491,20 @@ if (isMainModule()) {
       stderr: (text) => process.stderr.write(text),
       env: process.env,
     }).then((code) => process.exit(code));
+  } else if (command === "upgrade") {
+    const commandArgs = args.slice(1);
+    const dryRun = commandArgs.includes("--dry-run");
+    exitOnError(
+      import("./upgrade/index.js").then(async ({ upgradeProject, formatReport }) => {
+        const report = await upgradeProject({
+          dir: resolve(process.cwd(), getFlagValue(commandArgs, "--dir") ?? "."),
+          dryRun,
+          skipTypecheck: commandArgs.includes("--skip-typecheck"),
+        });
+        console.log(formatReport(report, dryRun));
+        if (report.typeErrors.length > 0 || report.todos > 0) process.exitCode = 1;
+      }),
+    );
   } else if (command === "validate") {
     const { options } = parseArgs(args);
     exitOnError(validate(options));
