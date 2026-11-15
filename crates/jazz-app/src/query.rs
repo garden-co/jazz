@@ -87,7 +87,7 @@ impl<T: Row> Query<T> {
     /// let head = jazz.one(tasks::query().id(id).part(tasks::attachment(), ValuePart::Bytes { from: 0, to: 1024 })).await?;
     /// ```
     pub fn part<V: ColumnValue>(
-        mut self,
+        self,
         column: Column<<T as Row>::Table, V>,
         part: ValuePart,
     ) -> Self {
@@ -96,8 +96,7 @@ impl<T: Row> Query<T> {
         if <<T as Row>::Table as Table>::COMPUTED_FROM.contains(&column.name()) {
             return self;
         }
-        self.query = self.query.select_part(column.name(), part);
-        self
+        Query::wrap(self.inner.select_part(column.name(), part))
     }
 
     /// Includes the rows of a relation of the table with each row, after
