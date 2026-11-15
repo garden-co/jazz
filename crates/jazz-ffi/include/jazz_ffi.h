@@ -10,6 +10,9 @@
  * and every error it stores in *err, belongs to the caller: free it with
  * jazz_string_free. On failure a function returns NULL and, when err is not
  * NULL, stores {"kind":"refused"|"io"|"closed","message":"..."} in *err
+ * (with "contract": 2 in the open config, also "permission" (the app's
+ * permissions refuse it), "notSupported" (not supported yet) and "conflict"
+ * (a serializable transaction lost to another write; retry it))
  * (*err is set to NULL on success). Functions block until done. Calls on
  * one handle may come from any threads at once, except jazz_close: no call
  * on that handle may run concurrently with it or follow it. Likewise no

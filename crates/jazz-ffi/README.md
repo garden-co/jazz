@@ -115,6 +115,12 @@ columns (`merge: "text"`) take plain string writes.
   `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
   `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
+  With 2, errors have three more kinds: `permission` (the app's permissions
+  refuse it, e.g. a write waiting for global durability), `notSupported`
+  (anything "not supported yet") and `conflict` (a serializable transaction
+  lost to another write; retry it). UniFFI: `JazzError.Permission`,
+  `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
+  these as `refused`, as before.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",

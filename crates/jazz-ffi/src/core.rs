@@ -31,7 +31,6 @@ pub(crate) struct Core {
     next_tx: AtomicU64,
     /// The contract version the host speaks (`"contract"` in the config):
     /// 1 unless it says 2.
-    #[allow(dead_code)]
     pub(crate) contract: u64,
 }
 
@@ -181,6 +180,11 @@ impl Core {
             next_tx: AtomicU64::new(1),
             contract,
         })
+    }
+
+    /// An error as this host's contract version names it.
+    pub(crate) fn surface<T>(&self, result: Result<T>) -> std::result::Result<T, JazzError> {
+        result.map_err(|error| JazzError::from(error).for_contract(self.contract))
     }
 
     fn open_jazz(&self) -> Result<&Jazz> {
