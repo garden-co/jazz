@@ -107,6 +107,31 @@ columns (`merge: "text"`) take plain string writes.
   readable. Stricter than TS: `required` on reverse relations or optional
   references, an `offset` other than 0 in an include, and a relation named
   like a column of its table are refused by name.
+- **Transactions:** UniFFI `JazzHandle.begin() -> Transaction` (`all`,
+  `one`, `insert`, `update`, `delete`, `commit(tier?)`, `rollback`; dropped
+  uncommitted, it rolls back). C ABI: `jazz_call` methods `txBegin`
+  `{serializable?}` → `{tx}`, `"tx"` in the args of any read or write, then
+  `txCommit {tx, tier?}` or `txRollback {tx}`. Transactions are
+  serializable: reads see a snapshot plus their own writes; writes commit
+  together or not at all. A transaction that only read just ends. Closing
+  the app rolls back open transactions.
+- **Tiers:** reads and subscriptions take `"local"`, `"localFirst"`
+  (default) or `"remote"`; writes and commits take `"local"` or `"global"`,
+  the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
+  `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
+  `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
+- **waitForSync:** UniFFI `wait_for_sync(tier)`, C ABI `waitForSync {tier}`:
+  returns once every write committed so far reaches `tier` (`local` returns
+  at once), and fails if the server refused one. It checks up to the last
+  4096 writes individually; older ones rely on the core wait, which can miss
+  a refusal that is no longer pending until jazz#5728 is fixed.
+- **Contract version:** `"contract": 1 | 2` in the open config (default 1).
+  With 2, errors have three more kinds: `permission` (the app's permissions
+  refuse it, e.g. a write waiting for global durability), `notSupported`
+  (anything "not supported yet") and `conflict` (a serializable transaction
+  lost to another write; retry it). UniFFI: `JazzError.Permission`,
+  `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
+  these as `refused`, as before.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",

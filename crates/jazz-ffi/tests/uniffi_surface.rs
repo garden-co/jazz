@@ -15,8 +15,8 @@ impl SubscriptionListener for Collect {
     fn on_delta(&self, delta_json: String) {
         let _ = self.0.send(Ok(parse(&delta_json)));
     }
-    fn on_error(&self, message: String) {
-        let _ = self.0.send(Err(message));
+    fn on_error(&self, kind: String, message: String) {
+        let _ = self.0.send(Err(format!("{kind}: {message}")));
     }
 }
 
@@ -291,7 +291,7 @@ fn subscriptions_deliver_deltas_until_cancelled() {
             let rows = parse(&self.0.all(json!({ "table": "tasks" }).to_string()).unwrap());
             let _ = self.1.send(rows.as_array().unwrap().len());
         }
-        fn on_error(&self, _: String) {}
+        fn on_error(&self, _: String, _: String) {}
     }
     let (sender, counts) = mpsc::channel();
     let _reentrant = jazz
@@ -478,6 +478,6 @@ fn shutdown_ends_live_subscriptions_with_on_error() {
     let end = events
         .recv_timeout(Duration::from_secs(5))
         .expect("a last event");
-    assert_eq!(end, Err("the app is closed".to_owned()));
+    assert_eq!(end, Err("closed: the app is closed".to_owned()));
     assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
 }

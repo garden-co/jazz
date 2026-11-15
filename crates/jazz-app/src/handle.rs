@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use futures_util::FutureExt as _;
 use jazz::account_registry::AccountId;
+use jazz::db::ReadOpts;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
     Session, TableName, TransactionId,
@@ -168,6 +169,17 @@ impl Jazz {
         answer.await.map_err(|_| Error::Stopped)?
     }
 
+    /// Sends `job` to the client's thread without waiting for it: for
+    /// cleanups that must run even when nobody awaits them (from `Drop`).
+    pub(crate) fn fire<F, Fut>(&self, job: F)
+    where
+        F: FnOnce(JazzClient) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        let job: Job = Box::new(move |client| Box::pin(job(client)));
+        let _ = self.commands.send(Command::Run(job));
+    }
+
     /// Every row `query` matches, reading local data first.
     pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
         self.all_with(query, ReadTier::LocalFirst).await
@@ -175,10 +187,11 @@ impl Jazz {
 
     /// Every row `query` matches, read at `tier`.
     pub async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
-        let query = query.into_untyped();
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
-            let rows = client.query(query, tier).await?;
+            let rows = client.query_with_opts(query, opts).await?;
             rows.into_iter()
                 .map(|row| decode_result::<T>(row, &implementations))
                 .collect()
@@ -246,11 +259,17 @@ impl Jazz {
         query: Query<T>,
         tier: ReadTier,
     ) -> Result<Subscription<T>> {
-        let query = query.into_untyped();
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
+        if jazz::schema::history::is_history_table(&query.table) {
+            return Err(Error::Unsupported(
+                "subscribing to history; read it with Jazz::all".into(),
+            ));
+        }
         let (sender, receiver) = mpsc::unbounded_channel();
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
-            let stream = client.subscribe_with_read_tier(query, tier).await?;
+            let stream = client.subscribe_with_opts(query, opts).await?;
             tokio::task::spawn_local(subscription::forward::<T>(stream, sender, implementations));
             Ok(())
         })
@@ -272,6 +291,13 @@ impl Jazz {
         }
         done.await.unwrap_or(Ok(()))
     }
+}
+
+/// The read options of `query` at `tier`.
+pub(crate) fn read_opts<T: Row>(query: &Query<T>, tier: ReadTier) -> ReadOpts {
+    let mut opts = ReadOpts::for_read_tier(tier);
+    opts.read_view.include_deleted = query.reads_deleted();
+    opts
 }
 
 /// Inserts `new`, returning it as stored and its write (none when staged in

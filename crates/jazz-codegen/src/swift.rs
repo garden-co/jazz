@@ -48,10 +48,11 @@ const SOURCE_PREFIX: &str = "    public static let source = ";
 const RT: &str = "Jazz";
 
 /// What `JazzApp` declares itself, besides the generated types.
-const MEMBERS: &[&str] = &["source", "app", "open"];
+const MEMBERS: &[&str] = &["source", "app", "open", "computed"];
 
 /// Type names the bindings or their imports declare.
 const RESERVED: &[&str] = &[
+    "Computed",
     "Jazz",
     "JazzApp",
     "Swift",
@@ -92,30 +93,19 @@ struct Writer<'a> {
     enums: BTreeMap<String, (Vec<(String, String)>, String)>,
     /// Every type name taken, with what took it.
     types: BTreeMap<String, String>,
+    /// Whether the app declares computed fields or transforms: then
+    /// `JazzApp.Computed` declares them and `open` takes an implementation.
+    has_computed: bool,
 }
 
 impl<'a> Writer<'a> {
     fn new(app: &'a App) -> Result<Self, CodegenError> {
-        if let Some(transform) = app.transforms.first() {
-            return Err(CodegenError::unsupported(format!(
-                "transform `{}`: transforms in Swift bindings are not supported yet",
-                transform.name
-            )));
-        }
-        if let Some((table, computed)) = app
-            .tables
-            .iter()
-            .find_map(|t| t.computed.first().map(|c| (t, c)))
-        {
-            return Err(CodegenError::unsupported(format!(
-                "computed field `{}.{}`: computed fields in Swift bindings are not supported yet",
-                table.name, computed.name
-            )));
-        }
         let mut writer = Self {
             app,
             tables: BTreeMap::new(),
             enums: BTreeMap::new(),
+            has_computed: !app.transforms.is_empty()
+                || app.tables.iter().any(|table| !table.computed.is_empty()),
             types: RESERVED
                 .iter()
                 .map(|name| (name.to_string(), "a name the bindings use".to_string()))
@@ -171,6 +161,7 @@ impl<'a> Writer<'a> {
         for table in &self.app.tables {
             items.push_str(&self.table(table)?);
         }
+        items.push_str(&self.computed_protocol()?);
 
         let mut out = String::new();
         let _ = writeln!(out, "{HEADER}");
@@ -275,6 +266,128 @@ impl<'a> Writer<'a> {
         })
     }
 
+    /// A column as the bindings type it: through its transform, if any.
+    fn field<'c>(
+        &mut self,
+        row: &str,
+        column: &'c Column,
+        ident: String,
+        what: &str,
+    ) -> Result<Field<'c>, CodegenError> {
+        let wrap = |ty: String| {
+            if column.ty.nullable {
+                format!("{ty}?")
+            } else {
+                ty
+            }
+        };
+        let (ty, stored, transform) = match &column.transform {
+            Some(name) => {
+                let (stored, view) = self.transform_types(name)?;
+                (
+                    wrap(view),
+                    wrap(stored),
+                    Some(value_ident(name)?.trim_matches('`').to_owned()),
+                )
+            }
+            None => {
+                let ty =
+                    self.field_type(&column.ty, &format!("{row}{}", pascal(&column.name)), what)?;
+                (ty.clone(), ty, None)
+            }
+        };
+        Ok(Field {
+            column,
+            ident,
+            ty,
+            stored,
+            transform,
+        })
+    }
+
+    /// The stored and view types of transform `name`.
+    fn transform_types(&mut self, name: &str) -> Result<(String, String), CodegenError> {
+        let transform = self
+            .app
+            .transform(name)
+            .ok_or_else(|| CodegenError::new(format!("transform `{name}` is not declared")))?;
+        let what = format!("transform `{name}`");
+        let base = type_ident(&pascal(&words(name).join("_")), name)?;
+        let stored = self.swift_type(&transform.stored, &format!("{base}Stored"), &what)?;
+        let view = self.swift_type(&transform.view, &format!("{base}View"), &what)?;
+        Ok((stored, view))
+    }
+
+    /// `JazzApp.Computed`: each computed field and each transform both ways.
+    fn computed_protocol(&mut self) -> Result<String, CodegenError> {
+        if !self.has_computed {
+            return Ok(String::new());
+        }
+        let mut out = String::new();
+        out.push_str(
+            "/// What the app's code computes: each computed field `jazz.app.json`\n\
+             /// declares, and each transform both ways. `JazzApp.open(_:computed:)` takes an\n\
+             /// implementation; a missing method is a compile error.\n",
+        );
+        out.push_str("public protocol Computed: Swift.Sendable {\n");
+        let mut methods = BTreeSet::new();
+        for table in &self.app.tables {
+            let row = self.tables[table.name.as_str()].row.clone();
+            for c in &table.computed {
+                let what = format!("computed field `{}.{}`", table.name, c.name);
+                let ret = self.field_type(&c.ty, &format!("{row}{}", pascal(&c.name)), &what)?;
+                let mut args = Vec::new();
+                for from in &c.from {
+                    if from == "id" {
+                        args.push(format!("id: {RT}.ID"));
+                        continue;
+                    }
+                    let column = table.column(from).ok_or_else(|| {
+                        CodegenError::new(format!(
+                            "{what} is computed from `{from}`, which is not a column"
+                        ))
+                    })?;
+                    let ident = value_ident(from)?;
+                    let what = format!("column `{}.{}`", table.name, column.name);
+                    let field = self.field(&row, column, ident, &what)?;
+                    args.push(format!("{}: {}", field.ident.trim_matches('`'), field.ty));
+                }
+                let method = computed_method(table, c)?;
+                if !methods.insert(method.clone()) {
+                    return Err(CodegenError::unsupported(format!(
+                        "two `JazzApp.Computed` methods are named `{method}`"
+                    )));
+                }
+                let _ = writeln!(
+                    out,
+                    "    /// `{}.{}`.\n    func {method}({}) -> {ret}\n",
+                    table.name,
+                    c.name,
+                    args.join(", ")
+                );
+            }
+        }
+        for transform in &self.app.transforms {
+            let (stored, view) = self.transform_types(&transform.name)?;
+            let stem = value_ident(&transform.name)?.trim_matches('`').to_owned();
+            for method in [format!("{stem}View"), format!("{stem}Stored")] {
+                if !methods.insert(method.clone()) {
+                    return Err(CodegenError::unsupported(format!(
+                        "two `JazzApp.Computed` methods are named `{method}`"
+                    )));
+                }
+            }
+            let _ = writeln!(
+                out,
+                "    /// Transform `{0}`: a stored value, as the app reads it.\n    func {stem}View(_ stored: {stored}) -> {view}\n\n    /// Transform `{0}`: a value the app writes, as stored.\n    func {stem}Stored(_ view: {view}) -> {stored}\n",
+                transform.name
+            );
+        }
+        let mut out = out.trim_end().to_owned();
+        out.push_str("\n}\n\n");
+        Ok(out)
+    }
+
     fn table(&mut self, table: &'a Table) -> Result<String, CodegenError> {
         let names = &self.tables[table.name.as_str()];
         let (row, new, patch, namespace) = (
@@ -295,10 +408,45 @@ impl<'a> Writer<'a> {
                 )));
             }
             let what = format!("column `{}.{}`", table.name, column.name);
-            let ty =
-                self.field_type(&column.ty, &format!("{row}{}", pascal(&column.name)), &what)?;
-            fields.push(Field { column, ident, ty });
+            fields.push(self.field(&row, column, ident, &what)?);
         }
+        let mut computed = Vec::new();
+        for c in &table.computed {
+            let ident = value_ident(&c.name)?;
+            if !idents.insert(ident.trim_matches('`').to_owned()) {
+                return Err(CodegenError::unsupported(format!(
+                    "computed field `{}.{}` is the Swift name `{ident}`, which a column, `id`, `query` or `self` already is",
+                    table.name, c.name
+                )));
+            }
+            let what = format!("computed field `{}.{}`", table.name, c.name);
+            let ty = self.field_type(&c.ty, &format!("{row}{}", pascal(&c.name)), &what)?;
+            let method = computed_method(table, c)?;
+            let mut args = Vec::new();
+            for from in &c.from {
+                if from == "id" {
+                    args.push(("id".to_owned(), format!("{RT}.ID")));
+                    continue;
+                }
+                let field = fields
+                    .iter()
+                    .find(|f| f.column.name == *from)
+                    .ok_or_else(|| {
+                        CodegenError::new(format!(
+                            "{what} is computed from `{from}`, which is not a column"
+                        ))
+                    })?;
+                args.push((field.ident.clone(), field.ty.clone()));
+            }
+            computed.push(ComputedField {
+                name: c.name.clone(),
+                ident,
+                ty,
+                method,
+                args,
+            });
+        }
+        let custom = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
         let table_lit = swift_string(&table.name);
 
         let mut out = String::new();
@@ -311,18 +459,76 @@ impl<'a> Writer<'a> {
             f.doc(&mut out);
             let _ = writeln!(out, "    public var {}: {}", f.ident, f.ty);
         }
+        for c in &computed {
+            let from = c
+                .args
+                .iter()
+                .map(|(a, _)| format!("`{}`", a.trim_matches('`')))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "    /// Computed from {from} by `JazzApp.Computed.{}`.",
+                c.method
+            );
+            let _ = writeln!(out, "    public var {}: {}", c.ident, c.ty);
+        }
         out.push('\n');
+        let computed_params: String = computed
+            .iter()
+            .map(|c| format!(", {}: {}", c.ident, c.ty))
+            .collect();
         let _ = writeln!(
             out,
-            "    public init(id: {RT}.ID{}) {{",
+            "    public init(id: {RT}.ID{}{computed_params}) {{",
             params(&fields, false)
         );
         out.push_str("        self.id = id\n");
         for f in &fields {
             let _ = writeln!(out, "        self.{0} = {0}", f.ident);
         }
+        for c in &computed {
+            let _ = writeln!(out, "        self.{0} = {0}", c.ident);
+        }
         out.push_str("    }\n\n");
         coding_keys(&mut out, &fields, true);
+        if custom {
+            out.push_str("\n    public init(from decoder: any Swift.Decoder) throws {\n");
+            out.push_str(
+                "        let container = try decoder.container(keyedBy: CodingKeys.self)\n",
+            );
+            out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: decoder.userInfo)\n");
+            out.push_str("        self.id = try container.decode(Jazz.ID.self, forKey: .id)\n");
+            for f in &fields {
+                let _ = writeln!(out, "        self.{} = {}", f.ident, f.decode());
+            }
+            for c in &computed {
+                let args = c
+                    .args
+                    .iter()
+                    .map(|(a, _)| {
+                        let bare = a.trim_matches('`');
+                        format!("{bare}: self.{a}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    out,
+                    "        self.{} = computed.{}({args})",
+                    c.ident, c.method
+                );
+            }
+            out.push_str("    }\n\n");
+            out.push_str("    public func encode(to encoder: any Swift.Encoder) throws {\n");
+            out.push_str("        var container = encoder.container(keyedBy: CodingKeys.self)\n");
+            out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)\n");
+            out.push_str("        try container.encode(self.id, forKey: .id)\n");
+            for f in &fields {
+                let _ = writeln!(out, "        {}", f.encode(false));
+            }
+            out.push_str("        _ = computed\n");
+            out.push_str("    }\n");
+        }
         out.push_str("}\n\n");
 
         // New rows.
@@ -345,6 +551,16 @@ impl<'a> Writer<'a> {
         }
         out.push_str("    }\n\n");
         coding_keys(&mut out, &fields, false);
+        if fields.iter().any(|f| f.transform.is_some()) {
+            out.push_str("\n    public func encode(to encoder: any Swift.Encoder) throws {\n");
+            out.push_str("        var container = encoder.container(keyedBy: CodingKeys.self)\n");
+            out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)\n");
+            for f in &fields {
+                let _ = writeln!(out, "        {}", f.encode(true));
+            }
+            out.push_str("        _ = computed\n");
+            out.push_str("    }\n");
+        }
         out.push_str("}\n\n");
 
         // Patches.
@@ -374,10 +590,21 @@ impl<'a> Writer<'a> {
         out.push('\n');
         out.push_str("    public func encode(to encoder: any Swift.Encoder) throws {\n");
         out.push_str("        var container = encoder.container(keyedBy: CodingKeys.self)\n");
+        if fields.iter().any(|f| f.transform.is_some()) {
+            out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)\n");
+        }
         for f in &fields {
+            let value = match &f.transform {
+                None => format!("self.{}", f.ident),
+                Some(t) if f.column.ty.nullable => format!(
+                    "self.{}.map {{ $0.map {{ computed.{t}Stored($0) }} }}",
+                    f.ident
+                ),
+                Some(t) => format!("self.{}.map {{ computed.{t}Stored($0) }}", f.ident),
+            };
             let _ = writeln!(
                 out,
-                "        try container.encodeChange(self.{0}, forKey: .{0})",
+                "        try container.encodeChange({value}, forKey: .{})",
                 f.ident
             );
         }
@@ -407,12 +634,20 @@ impl<'a> Writer<'a> {
             "    public static let id = {RT}.Column<{row}, {RT}.ID>(\"id\")"
         );
         for f in &fields {
-            let _ = writeln!(out, "    /// Column `{}`.", f.column.name);
+            if f.transform.is_some() {
+                let _ = writeln!(
+                    out,
+                    "    /// Column `{}`, as stored: filters compare stored values.",
+                    f.column.name
+                );
+            } else {
+                let _ = writeln!(out, "    /// Column `{}`.", f.column.name);
+            }
             let _ = writeln!(
                 out,
                 "    public static let {} = {RT}.Column<{row}, {}>({})",
                 f.ident,
-                f.ty,
+                f.stored,
                 swift_string(&f.column.name)
             );
         }
@@ -441,10 +676,17 @@ impl<'a> Writer<'a> {
         out.push_str(
             "    /// Opens the app. A backend (`config.permissions` set to its\n    /// `jazz.permissions.json`) first publishes the app's permissions bundle\n    /// and pins the session it acts in to it.\n",
         );
-        let _ = writeln!(
-            out,
-            "    public static func open(_ config: {RT}.Config) async throws -> {RT}.Client {{\n        try await {RT}.Client.open(app: app, config: config)\n    }}\n"
-        );
+        if self.has_computed {
+            let _ = writeln!(
+                out,
+                "    public static func open(_ config: {RT}.Config, computed: some Computed) async throws -> {RT}.Client {{\n        try await {RT}.Client.open(app: app, config: config, implementations: computed)\n    }}\n"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "    public static func open(_ config: {RT}.Config) async throws -> {RT}.Client {{\n        try await {RT}.Client.open(app: app, config: config)\n    }}\n"
+            );
+        }
         out
     }
 }
@@ -452,10 +694,65 @@ impl<'a> Writer<'a> {
 struct Field<'a> {
     column: &'a Column,
     ident: String,
+    /// What the row holds: the transform's view type, if it has one.
     ty: String,
+    /// What the engine stores.
+    stored: String,
+    /// The transform's method stem (`isoDate` for `isoDateView`/`isoDateStored`).
+    transform: Option<String>,
+}
+
+struct ComputedField {
+    #[allow(dead_code)]
+    name: String,
+    ident: String,
+    ty: String,
+    /// Its `JazzApp.Computed` method.
+    method: String,
+    /// The method's arguments: (label, type).
+    args: Vec<(String, String)>,
 }
 
 impl Field<'_> {
+    /// The stored type without `?`.
+    fn stored_inner(&self) -> &str {
+        self.stored.strip_suffix('?').unwrap_or(&self.stored)
+    }
+
+    /// Decoding the field from a row's container, through its transform.
+    fn decode(&self) -> String {
+        let key = format!("forKey: .{}", self.ident);
+        let inner = self.stored_inner();
+        let stored = if self.column.ty.nullable {
+            format!("try container.decodeIfPresent({inner}.self, {key})")
+        } else {
+            format!("try container.decode({inner}.self, {key})")
+        };
+        match &self.transform {
+            None => stored,
+            Some(t) if self.column.ty.nullable => {
+                format!("({stored}).map {{ computed.{t}View($0) }}")
+            }
+            Some(t) => format!("computed.{t}View({stored})"),
+        }
+    }
+
+    /// Encoding the field (of a row, or an insert) into a container.
+    fn encode(&self, insert: bool) -> String {
+        let key = format!("forKey: .{}", self.ident);
+        let optional = self.column.ty.nullable || (insert && self.optional_on_insert());
+        let value = match &self.transform {
+            None => format!("self.{}", self.ident),
+            Some(t) if optional => format!("self.{}.map {{ computed.{t}Stored($0) }}", self.ident),
+            Some(t) => format!("computed.{t}Stored(self.{})", self.ident),
+        };
+        if optional {
+            format!("try container.encodeIfPresent({value}, {key})")
+        } else {
+            format!("try container.encode({value}, {key})")
+        }
+    }
+
     fn optional_on_insert(&self) -> bool {
         self.column.optional_on_insert()
     }
@@ -509,6 +806,19 @@ fn coding_keys(out: &mut String, fields: &[Field<'_>], with_id: bool) {
         );
     }
     out.push_str("    }\n");
+}
+
+/// The `JazzApp.Computed` method of a computed field: `tasksPriority`.
+fn computed_method(
+    table: &Table,
+    computed: &crate::model::Computed,
+) -> Result<String, CodegenError> {
+    let ident = value_ident(&format!(
+        "{}_{}",
+        words(&table.name).join("_"),
+        words(&computed.name).join("_")
+    ))?;
+    Ok(ident.trim_matches('`').to_owned())
 }
 
 /// A Swift string literal of `text`.
