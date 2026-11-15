@@ -1,28 +1,14 @@
 // JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Regenerate it after changing jazz.app.json.
-@file:Suppress("unused", "RedundantVisibilityModifier")
+@file:kotlin.Suppress("unused", "RedundantVisibilityModifier")
 
 package jazzapp
 
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.builtins.nullable
-import kotlinx.serialization.builtins.serializer
-import kotlinx.serialization.json.JsonElement
-import tools.jazz.Column
-import tools.jazz.Jazz
-import tools.jazz.JazzBigInt
-import tools.jazz.JazzBytes
-import tools.jazz.JazzConfig
-import tools.jazz.Patch
-import tools.jazz.Table
-
 /** `sha256:…` of the `jazz.app.json` these bindings were generated from. */
-public const val SOURCE: String = "sha256:1adfb9c805c18f17655799f7003dd9ac6f75950914995d9c25b0fbcaad7a545f";
+public const val SOURCE: kotlin.String = "sha256:1adfb9c805c18f17655799f7003dd9ac6f75950914995d9c25b0fbcaad7a545f";
 
 /** The app's `jazz.app.json`: its schema, every earlier version and the migrations between them. */
-public val APP: String = arrayOf(
+public val APP: kotlin.String = kotlin.arrayOf(
     "{\n",
     "  \"\$schema\": \"https://jazz.tools/schemas/jazz.app.schema.json\",\n",
     "  \"format\": 1,\n",
@@ -115,385 +101,465 @@ public val APP: String = arrayOf(
  * `jazz.permissions.json`) first publishes the app's permissions bundle
  * and pins the session it acts in to it.
  */
-public suspend fun open(config: JazzConfig): Jazz = Jazz.open(APP, config)
+public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =
+    tools.jazz.Jazz.open(APP, config)
 
 /** The values of column `activity.kind`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public enum class ActivityKind {
-    @SerialName("created") Created,
-    @SerialName("moved") Moved,
-    @SerialName("assigned") Assigned,
-    @SerialName("renamed") Renamed,
-    @SerialName("commented") Commented,
-    @SerialName("deleted") Deleted,
+    @kotlinx.serialization.SerialName("created") Created,
+    @kotlinx.serialization.SerialName("moved") Moved,
+    @kotlinx.serialization.SerialName("assigned") Assigned,
+    @kotlinx.serialization.SerialName("renamed") Renamed,
+    @kotlinx.serialization.SerialName("commented") Commented,
+    @kotlinx.serialization.SerialName("deleted") Deleted,
 }
 
 /** The values of column `showCrew.role`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public enum class ShowCrewRole {
-    @SerialName("chief") Chief,
-    @SerialName("crew") Crew,
+    @kotlinx.serialization.SerialName("chief") Chief,
+    @kotlinx.serialization.SerialName("crew") Crew,
 }
 
 /** The values of column `tasks.status`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public enum class TaskStatus {
-    @SerialName("todo") Todo,
-    @SerialName("doing") Doing,
-    @SerialName("done") Done,
-    @SerialName("blocked") Blocked,
+    @kotlinx.serialization.SerialName("todo") Todo,
+    @kotlinx.serialization.SerialName("doing") Doing,
+    @kotlinx.serialization.SerialName("done") Done,
+    @kotlinx.serialization.SerialName("blocked") Blocked,
 }
 
 /** A row of `activity`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class Activity(
-    val id: String,
-    val showId: String,
-    val taskId: String,
-    val actorId: String,
+    val id: kotlin.String,
+    val showId: kotlin.String,
+    val taskId: kotlin.String,
+    val actorId: kotlin.String,
     val kind: ActivityKind,
-    val detail: String? = null,
+    val detail: kotlin.String? = null,
 )
 
 /** A new row of `activity`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class ActivityInsert(
-    val showId: String,
-    val taskId: String,
-    val actorId: String,
+@kotlinx.serialization.Serializable
+public data class NewActivity(
+    val showId: kotlin.String,
+    val taskId: kotlin.String,
+    val actorId: kotlin.String,
     val kind: ActivityKind,
-    val detail: String? = null,
+    val detail: kotlin.String? = null,
 )
 
 /** Changes to a row of `activity`: columns not set are left as they are. */
-public class ActivityPatch : Patch() {
+public class ActivityPatch : tools.jazz.Patch() {
     /** Sets `showId`. */
-    public fun showId(value: String): ActivityPatch = apply { set("showId", value, String.serializer()) }
+    public fun showId(value: kotlin.String): ActivityPatch = apply { set("showId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `taskId`. */
-    public fun taskId(value: String): ActivityPatch = apply { set("taskId", value, String.serializer()) }
+    public fun taskId(value: kotlin.String): ActivityPatch = apply { set("taskId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `actorId`. */
-    public fun actorId(value: String): ActivityPatch = apply { set("actorId", value, String.serializer()) }
+    public fun actorId(value: kotlin.String): ActivityPatch = apply { set("actorId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `kind`. */
     public fun kind(value: ActivityKind): ActivityPatch = apply { set("kind", value, ActivityKind.serializer()) }
     /** Sets `detail`. */
-    public fun detail(value: String?): ActivityPatch = apply { set("detail", value, String.serializer().nullable) }
+    public fun detail(value: kotlin.String?): ActivityPatch = apply { set("detail", value, tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>())) }
 }
 
 /** Table `activity`: its columns, and queries with `query()`. */
-public object ActivityTable : Table<Activity, ActivityInsert, ActivityPatch>("activity", Activity.serializer(), ActivityInsert.serializer(), ::ActivityPatch) {
+public object ActivityTable : tools.jazz.Table<Activity, NewActivity, ActivityPatch>(
+    "activity",
+    Activity.serializer(),
+    NewActivity.serializer(),
+    ::ActivityPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `showId`. */
-    public val showId: Column<String> = Column("showId", String.serializer())
+    public val showId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("showId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `taskId`. */
-    public val taskId: Column<String> = Column("taskId", String.serializer())
+    public val taskId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("taskId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `actorId`. */
-    public val actorId: Column<String> = Column("actorId", String.serializer())
+    public val actorId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("actorId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `kind`. */
-    public val kind: Column<ActivityKind> = Column("kind", ActivityKind.serializer())
+    public val kind: tools.jazz.Column<ActivityKind> =
+        tools.jazz.Column("kind", ActivityKind.serializer())
     /** Column `detail`. */
-    public val detail: Column<String?> = Column("detail", String.serializer().nullable)
+    public val detail: tools.jazz.Column<kotlin.String?> =
+        tools.jazz.Column("detail", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
 }
 
 /** A row of `checklistItems`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class ChecklistItem(
-    val id: String,
-    val title: String,
-    val done: Boolean,
-    val ownerAccount: String,
+    val id: kotlin.String,
+    val title: kotlin.String,
+    val done: kotlin.Boolean,
+    val ownerAccount: kotlin.String,
 )
 
 /** A new row of `checklistItems`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class ChecklistItemInsert(
-    val title: String,
-    val done: Boolean,
-    val ownerAccount: String,
+@kotlinx.serialization.Serializable
+public data class NewChecklistItem(
+    val title: kotlin.String,
+    val done: kotlin.Boolean,
+    val ownerAccount: kotlin.String,
 )
 
 /** Changes to a row of `checklistItems`: columns not set are left as they are. */
-public class ChecklistItemPatch : Patch() {
+public class ChecklistItemPatch : tools.jazz.Patch() {
     /** Sets `title`. */
-    public fun title(value: String): ChecklistItemPatch = apply { set("title", value, String.serializer()) }
+    public fun title(value: kotlin.String): ChecklistItemPatch = apply { set("title", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `done`. */
-    public fun done(value: Boolean): ChecklistItemPatch = apply { set("done", value, Boolean.serializer()) }
+    public fun done(value: kotlin.Boolean): ChecklistItemPatch = apply { set("done", value, kotlinx.serialization.serializer<kotlin.Boolean>()) }
     /** Sets `ownerAccount`. */
-    public fun ownerAccount(value: String): ChecklistItemPatch = apply { set("ownerAccount", value, String.serializer()) }
+    public fun ownerAccount(value: kotlin.String): ChecklistItemPatch = apply { set("ownerAccount", value, kotlinx.serialization.serializer<kotlin.String>()) }
 }
 
 /** Table `checklistItems`: its columns, and queries with `query()`. */
-public object ChecklistItems : Table<ChecklistItem, ChecklistItemInsert, ChecklistItemPatch>("checklistItems", ChecklistItem.serializer(), ChecklistItemInsert.serializer(), ::ChecklistItemPatch) {
+public object ChecklistItems : tools.jazz.Table<ChecklistItem, NewChecklistItem, ChecklistItemPatch>(
+    "checklistItems",
+    ChecklistItem.serializer(),
+    NewChecklistItem.serializer(),
+    ::ChecklistItemPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `title`. */
-    public val title: Column<String> = Column("title", String.serializer())
+    public val title: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("title", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `done`. */
-    public val done: Column<Boolean> = Column("done", Boolean.serializer())
+    public val done: tools.jazz.Column<kotlin.Boolean> =
+        tools.jazz.Column("done", kotlinx.serialization.serializer<kotlin.Boolean>())
     /** Column `ownerAccount`. */
-    public val ownerAccount: Column<String> = Column("ownerAccount", String.serializer())
+    public val ownerAccount: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("ownerAccount", kotlinx.serialization.serializer<kotlin.String>())
 }
 
 /** A row of `comments`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class Comment(
-    val id: String,
-    val taskId: String,
-    val authorId: String,
-    val body: String,
+    val id: kotlin.String,
+    val taskId: kotlin.String,
+    val authorId: kotlin.String,
+    val body: kotlin.String,
 )
 
 /** A new row of `comments`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class CommentInsert(
-    val taskId: String,
-    val authorId: String,
-    val body: String,
+@kotlinx.serialization.Serializable
+public data class NewComment(
+    val taskId: kotlin.String,
+    val authorId: kotlin.String,
+    val body: kotlin.String,
 )
 
 /** Changes to a row of `comments`: columns not set are left as they are. */
-public class CommentPatch : Patch() {
+public class CommentPatch : tools.jazz.Patch() {
     /** Sets `taskId`. */
-    public fun taskId(value: String): CommentPatch = apply { set("taskId", value, String.serializer()) }
+    public fun taskId(value: kotlin.String): CommentPatch = apply { set("taskId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `authorId`. */
-    public fun authorId(value: String): CommentPatch = apply { set("authorId", value, String.serializer()) }
+    public fun authorId(value: kotlin.String): CommentPatch = apply { set("authorId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `body`. */
-    public fun body(value: String): CommentPatch = apply { set("body", value, String.serializer()) }
+    public fun body(value: kotlin.String): CommentPatch = apply { set("body", value, kotlinx.serialization.serializer<kotlin.String>()) }
 }
 
 /** Table `comments`: its columns, and queries with `query()`. */
-public object Comments : Table<Comment, CommentInsert, CommentPatch>("comments", Comment.serializer(), CommentInsert.serializer(), ::CommentPatch) {
+public object Comments : tools.jazz.Table<Comment, NewComment, CommentPatch>(
+    "comments",
+    Comment.serializer(),
+    NewComment.serializer(),
+    ::CommentPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `taskId`. */
-    public val taskId: Column<String> = Column("taskId", String.serializer())
+    public val taskId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("taskId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `authorId`. */
-    public val authorId: Column<String> = Column("authorId", String.serializer())
+    public val authorId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("authorId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `body`. */
-    public val body: Column<String> = Column("body", String.serializer())
+    public val body: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("body", kotlinx.serialization.serializer<kotlin.String>())
 }
 
 /** A row of `crew`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class Crew(
-    val id: String,
-    val account: String,
-    val name: String,
+    val id: kotlin.String,
+    val account: kotlin.String,
+    val name: kotlin.String,
 )
 
 /** A new row of `crew`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class CrewInsert(
-    val account: String,
-    val name: String,
+@kotlinx.serialization.Serializable
+public data class NewCrew(
+    val account: kotlin.String,
+    val name: kotlin.String,
 )
 
 /** Changes to a row of `crew`: columns not set are left as they are. */
-public class CrewPatch : Patch() {
+public class CrewPatch : tools.jazz.Patch() {
     /** Sets `account`. */
-    public fun account(value: String): CrewPatch = apply { set("account", value, String.serializer()) }
+    public fun account(value: kotlin.String): CrewPatch = apply { set("account", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `name`. */
-    public fun name(value: String): CrewPatch = apply { set("name", value, String.serializer()) }
+    public fun name(value: kotlin.String): CrewPatch = apply { set("name", value, kotlinx.serialization.serializer<kotlin.String>()) }
 }
 
 /** Table `crew`: its columns, and queries with `query()`. */
-public object CrewTable : Table<Crew, CrewInsert, CrewPatch>("crew", Crew.serializer(), CrewInsert.serializer(), ::CrewPatch) {
+public object CrewTable : tools.jazz.Table<Crew, NewCrew, CrewPatch>(
+    "crew",
+    Crew.serializer(),
+    NewCrew.serializer(),
+    ::CrewPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `account`. */
-    public val account: Column<String> = Column("account", String.serializer())
+    public val account: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("account", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `name`. */
-    public val name: Column<String> = Column("name", String.serializer())
+    public val name: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("name", kotlinx.serialization.serializer<kotlin.String>())
 }
 
 /** A row of `showCrew`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class ShowCrew(
-    val id: String,
-    val showId: String,
-    val crewId: String,
-    val account: String,
+    val id: kotlin.String,
+    val showId: kotlin.String,
+    val crewId: kotlin.String,
+    val account: kotlin.String,
     val role: ShowCrewRole,
-    val inviteCode: String? = null,
+    val inviteCode: kotlin.String? = null,
 )
 
 /** A new row of `showCrew`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class ShowCrewInsert(
-    val showId: String,
-    val crewId: String,
-    val account: String,
+@kotlinx.serialization.Serializable
+public data class NewShowCrew(
+    val showId: kotlin.String,
+    val crewId: kotlin.String,
+    val account: kotlin.String,
     val role: ShowCrewRole,
-    val inviteCode: String? = null,
+    val inviteCode: kotlin.String? = null,
 )
 
 /** Changes to a row of `showCrew`: columns not set are left as they are. */
-public class ShowCrewPatch : Patch() {
+public class ShowCrewPatch : tools.jazz.Patch() {
     /** Sets `showId`. */
-    public fun showId(value: String): ShowCrewPatch = apply { set("showId", value, String.serializer()) }
+    public fun showId(value: kotlin.String): ShowCrewPatch = apply { set("showId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `crewId`. */
-    public fun crewId(value: String): ShowCrewPatch = apply { set("crewId", value, String.serializer()) }
+    public fun crewId(value: kotlin.String): ShowCrewPatch = apply { set("crewId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `account`. */
-    public fun account(value: String): ShowCrewPatch = apply { set("account", value, String.serializer()) }
+    public fun account(value: kotlin.String): ShowCrewPatch = apply { set("account", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `role`. */
     public fun role(value: ShowCrewRole): ShowCrewPatch = apply { set("role", value, ShowCrewRole.serializer()) }
     /** Sets `inviteCode`. */
-    public fun inviteCode(value: String?): ShowCrewPatch = apply { set("inviteCode", value, String.serializer().nullable) }
+    public fun inviteCode(value: kotlin.String?): ShowCrewPatch = apply { set("inviteCode", value, tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>())) }
 }
 
 /** Table `showCrew`: its columns, and queries with `query()`. */
-public object ShowCrewTable : Table<ShowCrew, ShowCrewInsert, ShowCrewPatch>("showCrew", ShowCrew.serializer(), ShowCrewInsert.serializer(), ::ShowCrewPatch) {
+public object ShowCrewTable : tools.jazz.Table<ShowCrew, NewShowCrew, ShowCrewPatch>(
+    "showCrew",
+    ShowCrew.serializer(),
+    NewShowCrew.serializer(),
+    ::ShowCrewPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `showId`. */
-    public val showId: Column<String> = Column("showId", String.serializer())
+    public val showId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("showId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `crewId`. */
-    public val crewId: Column<String> = Column("crewId", String.serializer())
+    public val crewId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("crewId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `account`. */
-    public val account: Column<String> = Column("account", String.serializer())
+    public val account: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("account", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `role`. */
-    public val role: Column<ShowCrewRole> = Column("role", ShowCrewRole.serializer())
+    public val role: tools.jazz.Column<ShowCrewRole> =
+        tools.jazz.Column("role", ShowCrewRole.serializer())
     /** Column `inviteCode`. */
-    public val inviteCode: Column<String?> = Column("inviteCode", String.serializer().nullable)
+    public val inviteCode: tools.jazz.Column<kotlin.String?> =
+        tools.jazz.Column("inviteCode", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
 }
 
 /** A row of `showInvites`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class ShowInvite(
-    val id: String,
-    val showId: String,
-    val code: String,
+    val id: kotlin.String,
+    val showId: kotlin.String,
+    val code: kotlin.String,
 )
 
 /** A new row of `showInvites`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class ShowInviteInsert(
-    val showId: String,
-    val code: String,
+@kotlinx.serialization.Serializable
+public data class NewShowInvite(
+    val showId: kotlin.String,
+    val code: kotlin.String,
 )
 
 /** Changes to a row of `showInvites`: columns not set are left as they are. */
-public class ShowInvitePatch : Patch() {
+public class ShowInvitePatch : tools.jazz.Patch() {
     /** Sets `showId`. */
-    public fun showId(value: String): ShowInvitePatch = apply { set("showId", value, String.serializer()) }
+    public fun showId(value: kotlin.String): ShowInvitePatch = apply { set("showId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `code`. */
-    public fun code(value: String): ShowInvitePatch = apply { set("code", value, String.serializer()) }
+    public fun code(value: kotlin.String): ShowInvitePatch = apply { set("code", value, kotlinx.serialization.serializer<kotlin.String>()) }
 }
 
 /** Table `showInvites`: its columns, and queries with `query()`. */
-public object ShowInvites : Table<ShowInvite, ShowInviteInsert, ShowInvitePatch>("showInvites", ShowInvite.serializer(), ShowInviteInsert.serializer(), ::ShowInvitePatch) {
+public object ShowInvites : tools.jazz.Table<ShowInvite, NewShowInvite, ShowInvitePatch>(
+    "showInvites",
+    ShowInvite.serializer(),
+    NewShowInvite.serializer(),
+    ::ShowInvitePatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `showId`. */
-    public val showId: Column<String> = Column("showId", String.serializer())
+    public val showId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("showId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `code`. */
-    public val code: Column<String> = Column("code", String.serializer())
+    public val code: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("code", kotlinx.serialization.serializer<kotlin.String>())
 }
 
 /** A row of `shows`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class Show(
-    val id: String,
-    val name: String,
-    val venue: String,
-    val date: String,
-    val doors: String,
-    val chiefAccount: String,
+    val id: kotlin.String,
+    val name: kotlin.String,
+    val venue: kotlin.String,
+    val date: kotlin.String,
+    val doors: kotlin.String,
+    val chiefAccount: kotlin.String,
 )
 
 /** A new row of `shows`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class ShowInsert(
-    val name: String,
-    val venue: String,
-    val date: String,
-    val doors: String,
-    val chiefAccount: String,
+@kotlinx.serialization.Serializable
+public data class NewShow(
+    val name: kotlin.String,
+    val venue: kotlin.String,
+    val date: kotlin.String,
+    val doors: kotlin.String,
+    val chiefAccount: kotlin.String,
 )
 
 /** Changes to a row of `shows`: columns not set are left as they are. */
-public class ShowPatch : Patch() {
+public class ShowPatch : tools.jazz.Patch() {
     /** Sets `name`. */
-    public fun name(value: String): ShowPatch = apply { set("name", value, String.serializer()) }
+    public fun name(value: kotlin.String): ShowPatch = apply { set("name", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `venue`. */
-    public fun venue(value: String): ShowPatch = apply { set("venue", value, String.serializer()) }
+    public fun venue(value: kotlin.String): ShowPatch = apply { set("venue", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `date`. */
-    public fun date(value: String): ShowPatch = apply { set("date", value, String.serializer()) }
+    public fun date(value: kotlin.String): ShowPatch = apply { set("date", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `doors`. */
-    public fun doors(value: String): ShowPatch = apply { set("doors", value, String.serializer()) }
+    public fun doors(value: kotlin.String): ShowPatch = apply { set("doors", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `chiefAccount`. */
-    public fun chiefAccount(value: String): ShowPatch = apply { set("chiefAccount", value, String.serializer()) }
+    public fun chiefAccount(value: kotlin.String): ShowPatch = apply { set("chiefAccount", value, kotlinx.serialization.serializer<kotlin.String>()) }
 }
 
 /** Table `shows`: its columns, and queries with `query()`. */
-public object Shows : Table<Show, ShowInsert, ShowPatch>("shows", Show.serializer(), ShowInsert.serializer(), ::ShowPatch) {
+public object Shows : tools.jazz.Table<Show, NewShow, ShowPatch>(
+    "shows",
+    Show.serializer(),
+    NewShow.serializer(),
+    ::ShowPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `name`. */
-    public val name: Column<String> = Column("name", String.serializer())
+    public val name: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("name", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `venue`. */
-    public val venue: Column<String> = Column("venue", String.serializer())
+    public val venue: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("venue", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `date`. */
-    public val date: Column<String> = Column("date", String.serializer())
+    public val date: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("date", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `doors`. */
-    public val doors: Column<String> = Column("doors", String.serializer())
+    public val doors: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("doors", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `chiefAccount`. */
-    public val chiefAccount: Column<String> = Column("chiefAccount", String.serializer())
+    public val chiefAccount: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("chiefAccount", kotlinx.serialization.serializer<kotlin.String>())
 }
 
 /** A row of `tasks`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class Task(
-    val id: String,
-    val showId: String,
-    val title: String,
+    val id: kotlin.String,
+    val showId: kotlin.String,
+    val title: kotlin.String,
     val status: TaskStatus,
-    val assigneeId: String? = null,
-    val notes: String? = null,
-    val rank: Double,
+    val assigneeId: kotlin.String? = null,
+    val notes: kotlin.String? = null,
+    val rank: kotlin.Double,
 )
 
 /** A new row of `tasks`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class TaskInsert(
-    val showId: String,
-    val title: String,
+@kotlinx.serialization.Serializable
+public data class NewTask(
+    val showId: kotlin.String,
+    val title: kotlin.String,
     val status: TaskStatus,
-    val assigneeId: String? = null,
-    val notes: String? = null,
-    val rank: Double,
+    val assigneeId: kotlin.String? = null,
+    val notes: kotlin.String? = null,
+    val rank: kotlin.Double,
 )
 
 /** Changes to a row of `tasks`: columns not set are left as they are. */
-public class TaskPatch : Patch() {
+public class TaskPatch : tools.jazz.Patch() {
     /** Sets `showId`. */
-    public fun showId(value: String): TaskPatch = apply { set("showId", value, String.serializer()) }
+    public fun showId(value: kotlin.String): TaskPatch = apply { set("showId", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `title`. */
-    public fun title(value: String): TaskPatch = apply { set("title", value, String.serializer()) }
+    public fun title(value: kotlin.String): TaskPatch = apply { set("title", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `status`. */
     public fun status(value: TaskStatus): TaskPatch = apply { set("status", value, TaskStatus.serializer()) }
     /** Sets `assigneeId`. */
-    public fun assigneeId(value: String?): TaskPatch = apply { set("assigneeId", value, String.serializer().nullable) }
+    public fun assigneeId(value: kotlin.String?): TaskPatch = apply { set("assigneeId", value, tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>())) }
     /** Sets `notes`. */
-    public fun notes(value: String?): TaskPatch = apply { set("notes", value, String.serializer().nullable) }
+    public fun notes(value: kotlin.String?): TaskPatch = apply { set("notes", value, tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>())) }
     /** Sets `rank`. */
-    public fun rank(value: Double): TaskPatch = apply { set("rank", value, Double.serializer()) }
+    public fun rank(value: kotlin.Double): TaskPatch = apply { set("rank", value, kotlinx.serialization.serializer<kotlin.Double>()) }
 }
 
 /** Table `tasks`: its columns, and queries with `query()`. */
-public object Tasks : Table<Task, TaskInsert, TaskPatch>("tasks", Task.serializer(), TaskInsert.serializer(), ::TaskPatch) {
+public object Tasks : tools.jazz.Table<Task, NewTask, TaskPatch>(
+    "tasks",
+    Task.serializer(),
+    NewTask.serializer(),
+    ::TaskPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `showId`. */
-    public val showId: Column<String> = Column("showId", String.serializer())
+    public val showId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("showId", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `title`. */
-    public val title: Column<String> = Column("title", String.serializer())
+    public val title: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("title", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `status`. */
-    public val status: Column<TaskStatus> = Column("status", TaskStatus.serializer())
+    public val status: tools.jazz.Column<TaskStatus> =
+        tools.jazz.Column("status", TaskStatus.serializer())
     /** Column `assigneeId`. */
-    public val assigneeId: Column<String?> = Column("assigneeId", String.serializer().nullable)
+    public val assigneeId: tools.jazz.Column<kotlin.String?> =
+        tools.jazz.Column("assigneeId", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
     /** Column `notes`. */
-    public val notes: Column<String?> = Column("notes", String.serializer().nullable)
+    public val notes: tools.jazz.Column<kotlin.String?> =
+        tools.jazz.Column("notes", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
     /** Column `rank`. */
-    public val rank: Column<Double> = Column("rank", Double.serializer())
+    public val rank: tools.jazz.Column<kotlin.Double> =
+        tools.jazz.Column("rank", kotlinx.serialization.serializer<kotlin.Double>())
 }
