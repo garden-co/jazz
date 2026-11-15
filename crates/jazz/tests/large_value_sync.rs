@@ -3565,3 +3565,60 @@ fn last_seq(server: &Db) -> u64 {
         .expect("an accepted version")
         .seq
 }
+
+/// A subscriber that joins a shared result while it waits for large-value
+/// chunks waits with it: it is not opened on the rows from before the
+/// change (nor told they are settled), and opens on the current rows once
+/// the chunks arrive.
+#[test]
+fn a_subscriber_joining_a_result_that_awaits_chunks_opens_on_current_rows() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let local = || ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let subscribe_local = || {
+        block_on(alice.subscribe(&alice.prepare_query(&Query::from("docs")).unwrap(), local()))
+            .unwrap()
+    };
+    // A remote subscription brings the rows; the local ones share a result.
+    let _remote = subscribe(&alice, Query::from("docs"));
+    let mut first = subscribe_local();
+    pump(&server, &[&alice]);
+    while first.try_next_event().is_some() {}
+
+    let body = text(7, LARGE);
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(vec![1, 2, 3])),
+        ],
+    );
+    // The row reaches Alice, its chunks not yet.
+    block_on(server.tick()).unwrap();
+    block_on(alice.tick()).unwrap();
+    let mut joiner = subscribe_local();
+    let early: Vec<String> = std::iter::from_fn(|| joiner.try_next_event())
+        .map(|event| format!("{event:?}"))
+        .collect();
+    assert!(
+        early.is_empty(),
+        "nothing before the chunks arrive: {early:?}"
+    );
+
+    pump(&server, &[&alice]);
+    let later: Vec<String> = std::iter::from_fn(|| joiner.try_next_event())
+        .map(|event| format!("{event:?}"))
+        .collect();
+    assert!(
+        later
+            .first()
+            .is_some_and(|event| event.contains("reset: true") && event.contains(&body[..64])),
+        "the joiner opens on the current row: {later:?}"
+    );
+}
