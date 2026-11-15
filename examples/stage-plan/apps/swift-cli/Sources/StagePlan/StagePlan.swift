@@ -1,5 +1,5 @@
 import Foundation
-import Jazz
+@_spi(Backend) import Jazz
 
 /// StagePlan's slice the Swift CLI covers: as the signed-in user, make sure
 /// a show exists (they're its chief), list its tasks by `rank`, add tasks

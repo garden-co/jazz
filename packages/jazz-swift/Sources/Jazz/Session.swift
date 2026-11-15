@@ -7,8 +7,10 @@ public enum Auth: Sendable {
     /// as a password in the platform's keychain.
     case deviceKey(String)
     /// The app's own sign-in: `tokens` gives the current bearer token, or
-    /// `nil` when the user is signed out. It's asked again on renewal,
-    /// expiry and `refresh()`.
+    /// `nil` when the user is signed out (which stops the app). Throwing
+    /// (or taking over 30 s) is a failed fetch instead: the session stays
+    /// signed in and is retried. It's asked again on renewal, expiry and
+    /// `refresh()`.
     case bearer(tokens: @Sendable (TokenReason) async throws -> String?)
 }
 
@@ -121,23 +123,44 @@ public struct SyncError: Decodable, Hashable, Sendable {
 
 final class Tokens: TokenProvider, @unchecked Sendable {
     let provide: @Sendable (TokenReason) async throws -> String?
+    /// How long a fetch may take before it counts as failed (not signed out).
+    static let timeout: TimeInterval = 30
     init(_ provide: @escaping @Sendable (TokenReason) async throws -> String?) { self.provide = provide }
 
-    // Called by jazz-ffi on a thread of its own, which may block.
-    func token(reason: String) -> String? {
+    // Called by jazz-ffi on a thread of its own, which may block. Returning
+    // nil signs the user out; throwing is a failed fetch: the session stays
+    // signed in and jazz-app retries on its own backoff.
+    func token(reason: String) throws -> String? {
         let reason = TokenReason(rawValue: reason) ?? .connect
         let result = Box()
         let done = DispatchSemaphore(value: 0)
         let provide = provide
-        _Concurrency.Task {
-            result.value = try? await provide(reason)
+        let task = _Concurrency.Task {
+            do {
+                result.set(.success(try await provide(reason)))
+            } catch {
+                result.set(.failure(error))
+            }
             done.signal()
         }
-        done.wait()
-        return result.value
+        if done.wait(timeout: .now() + Self.timeout) == .timedOut {
+            task.cancel()
+            throw JazzFFI.JazzError.Io(reason: "the token provider took longer than \(Int(Self.timeout)) s")
+        }
+        switch result.get() {
+        case .success(let token)?: return token
+        case .failure(let error)?:
+            throw JazzFFI.JazzError.Io(reason: "the token provider failed: \(error)")
+        case nil: throw JazzFFI.JazzError.Io(reason: "the token provider gave no answer")
+        }
     }
 
-    final class Box: @unchecked Sendable { var value: String? }
+    final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Result<String?, any Error>?
+        func set(_ value: Result<String?, any Error>) { lock.withLock { self.value = value } }
+        func get() -> Result<String?, any Error>? { lock.withLock { value } }
+    }
 }
 
 final class States: StateListener, @unchecked Sendable {
@@ -203,6 +226,10 @@ extension Client {
         decode: @escaping @Sendable (String) throws -> T
     ) -> AsyncThrowingStream<T, any Error> {
         AsyncThrowingStream { continuation in
+            // Set before starting: a state delivered during `start` may end
+            // the stream, and the watch must still be cancelled then.
+            let holder = WatchHolder()
+            continuation.onTermination = { _ in holder.cancel() }
             let listener = States { json in
                 do {
                     continuation.yield(try decode(json))
@@ -211,8 +238,7 @@ extension Client {
                 }
             }
             do {
-                let watch = try start(listener)
-                continuation.onTermination = { _ in watch.cancel() }
+                holder.set(try start(listener))
             } catch {
                 continuation.finish(throwing: JazzError.wrap(error))
             }
@@ -268,4 +294,40 @@ extension Transaction {
             return try Coding.decode(R.self, stored, userInfo)
         }
     }
+}
+
+/// A `Watch` cancelled once, whether the stream ended before or after it started.
+final class WatchHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var watch: Watch?
+    private var cancelled = false
+
+    func set(_ watch: Watch) {
+        let cancelNow = lock.withLock { () -> Bool in
+            if cancelled { return true }
+            self.watch = watch
+            return false
+        }
+        if cancelNow { watch.cancel() }
+    }
+
+    func cancel() {
+        let watch = lock.withLock { () -> Watch? in
+            cancelled = true
+            defer { self.watch = nil }
+            return self.watch
+        }
+        watch?.cancel()
+    }
+}
+
+extension Auth: CustomStringConvertible, CustomDebugStringConvertible {
+    /// Never the key: logs and crash reports mustn't carry it.
+    public var description: String {
+        switch self {
+        case .deviceKey: return "Auth.deviceKey(<redacted>)"
+        case .bearer: return "Auth.bearer(<token provider>)"
+        }
+    }
+    public var debugDescription: String { description }
 }
