@@ -2,7 +2,7 @@
 // tests. The docs include each `#region` by name.
 package stageplan
 
-import jazzapp.TaskInsert
+import jazzapp.NewTask
 import jazzapp.TaskStatus
 import jazzapp.Tasks
 import kotlinx.coroutines.flow.Flow
@@ -98,7 +98,7 @@ object DocsSnippets {
         // #region writing-crud-kotlin
         val task = jazz.insert(
             Tasks,
-            TaskInsert(showId = showId, title = "Load in", status = TaskStatus.Todo, rank = 1.0),
+            NewTask(showId = showId, title = "Load in", status = TaskStatus.Todo, rank = 1.0),
         )
         jazz.update(Tasks, task.id) {
             title("Load in the set")

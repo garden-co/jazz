@@ -1,10 +1,10 @@
 package stageplan
 
 import jazzapp.Show
-import jazzapp.ShowInsert
+import jazzapp.NewShow
 import jazzapp.Shows
 import jazzapp.Task
-import jazzapp.TaskInsert
+import jazzapp.NewTask
 import jazzapp.TaskStatus
 import jazzapp.Tasks
 import tools.jazz.Jazz
@@ -36,7 +36,7 @@ suspend fun showNamed(jazz: Jazz, name: String): Show {
     jazz.one(Shows.where(Shows.name eq name, Shows.chiefAccount eq me))?.let { return it }
     return jazz.insert(
         Shows,
-        ShowInsert(name = name, venue = "TBA", date = "TBA", doors = "TBA", chiefAccount = me),
+        NewShow(name = name, venue = "TBA", date = "TBA", doors = "TBA", chiefAccount = me),
     )
 }
 
@@ -49,7 +49,7 @@ suspend fun addTask(jazz: Jazz, show: Show, title: String): Task {
     val last = jazz.one(Tasks.where(Tasks.showId eq show.id).orderBy(Tasks.rank.desc()))
     return jazz.insert(
         Tasks,
-        TaskInsert(showId = show.id, title = title, status = TaskStatus.Todo, rank = (last?.rank ?: 0.0) + 1.0),
+        NewTask(showId = show.id, title = title, status = TaskStatus.Todo, rank = (last?.rank ?: 0.0) + 1.0),
     )
 }
 

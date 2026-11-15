@@ -45,11 +45,22 @@ npx jazz-tools generate --check    # in CI: fails if JazzApp.kt is stale
 Commit `JazzApp.kt`. Per table it gives you:
 
 - a `@Serializable` row data class (`Task`), with the authored column names;
-- an insert data class (`TaskInsert`), whose optional columns default to `null`;
+- a new-row data class (`NewTask`), whose optional columns default to `null`;
 - a patch builder (`TaskPatch`), used as `jazz.update(Tasks, id) { status(TaskStatus.Done) }`;
 - a table object (`Tasks`) with typed columns, for queries:
   `Tasks.where(Tasks.showId eq id).orderBy(Tasks.rank.asc())`;
 - an `enum class` per enum column (`TaskStatus`).
+
+Import the generated declarations by name (`import jazzapp.Tasks`, `import jazzapp.NewTask`), or
+write them qualified (`jazzapp.Result`), rather than `import jazzapp.*`: a star import outranks
+Kotlin's default imports, so a table such as `results` would hide `kotlin.Result` in your code.
+
+Names are the ones `jazz.app.json` uses: a `showId` column is `showId`, and a `due_at` column stays
+`due_at` (only names that aren't Kotlin identifiers are camel-cased). Values are plain Kotlin types:
+`uuid` is a `String`, `int` an `Int`, `bigint` a `Long`, `float` a `Double`, `timestamp` a `Long`
+(milliseconds since the epoch), `bytea` a `ByteArray`, `json` a `JsonElement`, an array a
+`List<T>`, an enum its generated `enum class`, and an optional column is nullable. The file names
+these fully qualified (`kotlin.String`), so a table may be called `Result` or `Unit`.
 
 ## Open the app
 
@@ -87,7 +98,12 @@ In Kotlin, Jazz doesn't support these yet:
 - transactions;
 - choosing a durability tier for reads or writes;
 - payload enums, nested rows and catalogue enums in bindings;
-- text merge for `merge: "text"` columns (like StagePlan's `tasks.notes`): a write sets the whole
-  string;
+- text merge for `merge: "text"` columns (like StagePlan's `tasks.notes`): a write replaces the
+  whole string;
 - files and blobs;
-- publishing `jazz-kotlin` to Maven Central: build it from the repository.
+- publishing `jazz-kotlin` to Maven Central: build it from the repository;
+- platforms other than Linux x86-64 for the bundled native library (elsewhere, build `jazz-ffi`
+  yourself and point `jna.library.path` at it);
+- non-finite doubles (`NaN`, infinities): writing or comparing one throws, as JSON has none;
+- `limit` and `offset` with `watch`: they apply to the server's result before `watch` re-sorts it
+  locally, so a page can be off after changes. Use them with `all`.
