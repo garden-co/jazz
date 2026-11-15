@@ -40,7 +40,7 @@ impl Jazz {
         text: impl Into<String>,
     ) -> Result<()> {
         let edit = text_edit(column, edited_from.into(), text.into());
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let written = client.update_with_edits(T::NAME, id, Vec::new(), vec![edit])?;
             settle.settle(&client, written).await
