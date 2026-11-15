@@ -706,12 +706,23 @@ impl LinkKeeper {
     /// Hand the machine's view to the read gate and the status accessor.
     fn publish(&mut self, shared: &Shared) {
         shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        let mut changed = false;
         for event in self.link.drain_events() {
             match event {
-                LinkEvent::Status(status) => shared.state().link_status = Some(status),
-                LinkEvent::AuthFailed { .. } => shared.state().auth_refusals += 1,
+                LinkEvent::Status(status) => {
+                    shared.state().link_status = Some(status);
+                    changed = true;
+                }
+                LinkEvent::AuthFailed { .. } => {
+                    shared.state().auth_refusals += 1;
+                    changed = true;
+                }
                 LinkEvent::AuthRestored => {}
             }
+        }
+        // Status readers (`JazzClient::status_changes`) re-read it.
+        if changed {
+            shared.progress.send_modify(|generation| *generation += 1);
         }
     }
 }
@@ -1991,6 +2002,14 @@ impl JazzClient {
     /// off). Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
     pub fn set_slow_query_threshold(&self, threshold: Option<Duration>) {
         self.shared.db.set_slow_query_threshold(threshold);
+    }
+
+    /// Changes when [`Self::upstream_status`] or [`Self::upload_status`] may
+    /// have: after each tick of the client and each change of the link's
+    /// status. A counter, for readers to re-read the status on, instead of
+    /// polling it. It closes when the client shuts down.
+    pub fn status_changes(&self) -> watch::Receiver<u64> {
+        self.shared.progress.subscribe()
     }
 
     /// This client's uploads: commits awaiting the server's verdict (since
