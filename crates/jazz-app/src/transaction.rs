@@ -210,8 +210,32 @@ impl Jazz {
 // Transactions opened with `begin_transaction`, parked on the client's
 // thread between the calls made on them.
 thread_local! {
-    static OPEN: std::cell::RefCell<(u64, std::collections::HashMap<u64, Transaction>)> =
-        Default::default();
+    static OPEN: std::cell::RefCell<Parked> = Default::default();
+}
+
+/// The parked transactions, by key. The client's run loop rolls them back
+/// before it closes the client ([`roll_back_parked`]); any still here when
+/// the thread exits are forgotten, not dropped: the client they belong to
+/// is gone by then, and dropping one touches thread-locals already torn
+/// down, which aborts the process.
+#[derive(Default)]
+struct Parked(u64, std::collections::HashMap<u64, Transaction>);
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        for transaction in std::mem::take(&mut self.1).into_values() {
+            std::mem::forget(transaction);
+        }
+    }
+}
+
+/// Rolls back every parked transaction: run on the client's thread once no
+/// job is left, before the client closes.
+pub(crate) fn roll_back_parked() {
+    let parked = OPEN.with(|open| std::mem::take(&mut open.borrow_mut().1));
+    for (_, tx) in parked {
+        let _ = tx.client.rollback_transaction(tx.id);
+    }
 }
 
 /// A transaction opened with [`Jazz::begin_transaction`] (TS's
@@ -272,6 +296,16 @@ impl Jazz {
     }
 }
 
+impl Jazz {
+    /// Transactions opened with [`Jazz::begin_transaction`] and not yet
+    /// committed or rolled back (for tests).
+    #[doc(hidden)]
+    pub async fn open_transactions(&self) -> Result<usize> {
+        self.with_client(|_| async { Ok(OPEN.with(|open| open.borrow().1.len())) })
+            .await
+    }
+}
+
 fn parked(key: u64) -> Result<Transaction> {
     OPEN.with(|open| open.borrow().1.get(&key).cloned())
         .ok_or_else(|| {
@@ -312,6 +346,48 @@ impl OpenTransaction {
 
     pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
         self.on(move |tx| async move { tx.restore::<T>(id).await })
+            .await
+    }
+
+    pub async fn restore_with<U: Update>(&self, id: ObjectId, update: U) -> Result<U::Row> {
+        self.on(move |tx| async move { tx.restore_with(id, update).await })
+            .await
+    }
+
+    /// [`Jazz::edit_text`] staged in the transaction.
+    pub async fn edit_text<T: Table, V: crate::TextColumn>(
+        &self,
+        id: ObjectId,
+        column: crate::Column<T, V>,
+        edited_from: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<()> {
+        let (edited_from, text) = (edited_from.into(), text.into());
+        self.on(move |tx| async move { tx.edit_text(id, column, edited_from, text) })
+            .await
+    }
+
+    /// [`Jazz::splice`] staged in the transaction.
+    pub async fn splice<T: Table, V: crate::LargeColumn>(
+        &self,
+        id: ObjectId,
+        column: crate::Column<T, V>,
+        within: crate::Page,
+        splices: Vec<crate::Splice>,
+    ) -> Result<()> {
+        self.on(move |tx| async move { tx.splice(id, column, within, splices) })
+            .await
+    }
+
+    /// [`Jazz::json_set`] staged in the transaction.
+    pub async fn json_set<T: Table, V: crate::JsonColumn>(
+        &self,
+        id: ObjectId,
+        column: crate::Column<T, V>,
+        edits: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) -> Result<()> {
+        let edits: Vec<_> = edits.into_iter().collect();
+        self.on(move |tx| async move { tx.json_set(id, column, edits) })
             .await
     }
 
