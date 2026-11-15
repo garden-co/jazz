@@ -27,7 +27,11 @@ import {
   type LocalFirstLoader,
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
-import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
+import {
+  createJazzSessionOwner,
+  DiscardedDeviceAccountError,
+  replaceJazzSessionClient,
+} from "./state.js";
 import { coreInitial, createStartedJazzSession, type JazzSession } from "./jazz-session.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
@@ -40,7 +44,10 @@ import {
 } from "./follow-user.js";
 import {
   holdReplicaStore,
+  pendingDiscardLedger,
+  releaseHoldOnShutdown,
   replicaLedger,
+  wipeAccountStoreNow,
   replicaLifecycle,
   type ReplicaLifecycle,
 } from "./replica-ledger.js";
@@ -306,14 +313,7 @@ export async function openBrowserSessionCore(
         await release();
         throw error;
       }
-      const shutdown = client.shutdown.bind(client);
-      client.shutdown = async (options) => {
-        try {
-          await shutdown(options);
-        } finally {
-          await release();
-        }
-      };
+      releaseHoldOnShutdown(client, release);
       return client;
     } finally {
       opening.delete(account.id);
@@ -407,6 +407,16 @@ export async function openBrowserSessionCore(
     initial: coreInitial(initial),
     // A memory-only client has no storage to wipe.
     clearOnSignOut: wipesOnSignOut,
+    // `signOut({ discardUnsynced })` wipes by account, under the store's lock.
+    ...(loadLocalFirst
+      ? {
+          deleteSignedOutStore: (
+            account: string,
+            finishing?: { wanted(): boolean; forget(): Promise<void> },
+          ) => wipeAccountStoreNow(registry, account, deleteStore, undefined, finishing),
+          pendingDiscards: pendingDiscardLedger(registry),
+        }
+      : {}),
     ...(replicas
       ? {
           wipeSignedOut,
@@ -600,6 +610,15 @@ function upgradeInBackground(session: BrowserJazzSession, loader: LocalFirstLoad
     void afterPageLoad().then(() => {
       if (session.getSnapshot().client !== client) return;
       return client.db.upgradeToLocalFirst(loader).catch((error: unknown) => {
+        // Another tab discarded this device account as it upgraded: the
+        // session signed out (its snapshot says why), nothing stays thin.
+        if (error instanceof DiscardedDeviceAccountError) {
+          console.warn(
+            "Jazz signed out: another tab discarded this device account (signOut({ discardUnsynced })) while it upgraded to local-first.",
+            error,
+          );
+          return;
+        }
         if (session.getSnapshot().client !== client) return;
         console.warn("Jazz could not upgrade to the local-first client; staying thin.", error);
       });

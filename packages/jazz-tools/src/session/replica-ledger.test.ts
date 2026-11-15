@@ -2,12 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   holdReplicaStore,
   replicaLedger,
+  pendingDiscardLedger,
+  releaseHoldOnShutdown,
   replicaLifecycle,
+  wipeAccountStoreNow,
   type Locks,
   type ReplicaEntry,
   type ReplicaLifecycle,
 } from "./replica-ledger.js";
 import { holdAcrossPageCache, pageCacheForTest } from "../runtime/page-cache.js";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 
 // The #5250 model test: several tabs of one browser, one per-account store,
 // a backend and the device's account store, all simulated; random
@@ -836,4 +840,114 @@ describe("the lifecycle, under random interleavings", () => {
       expect([...b.stores.keys()].filter((account) => !kept(account))).toEqual([]);
     },
   );
+});
+
+describe("wipeAccountStoreNow (signOut({ discardUnsynced }))", () => {
+  it("deletes a store no tab holds, and leaves one another tab holds", async () => {
+    const locks = new LockManager();
+    const deleteStore = vi.fn(async () => "deleted" as const);
+    // Another tab holds alice's store: nothing is deleted.
+    let releaseOther!: () => void;
+    const otherHolds = locks
+      .view("other")
+      .request(
+        aliceLock,
+        { mode: "shared" },
+        () => new Promise<void>((resolve) => (releaseOther = resolve)),
+      );
+    await Promise.resolve();
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me")),
+    ).resolves.toBe("held");
+    expect(deleteStore).not.toHaveBeenCalled();
+    releaseOther();
+    await otherHolds;
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me")),
+    ).resolves.toBe("deleted");
+    expect(deleteStore).toHaveBeenCalledWith(alice.id);
+  });
+});
+
+describe("releaseHoldOnShutdown", () => {
+  it("keeps the store held past a failed drain, until a shutdown ends the client", async () => {
+    const release = vi.fn(async () => {});
+    let offline = true;
+    const client = {
+      shutdown: vi.fn(async (options?: { waitForSync?: boolean }) => {
+        if (options?.waitForSync && offline)
+          throw new GracefulShutdownSyncError(new Error("offline"));
+      }),
+    };
+    releaseHoldOnShutdown(client, release);
+    // The upload failed: the client is still open (signing-out), and holds.
+    await expect(client.shutdown({ waitForSync: true })).rejects.toBeInstanceOf(
+      GracefulShutdownSyncError,
+    );
+    expect(release).not.toHaveBeenCalled();
+    offline = false;
+    await client.shutdown({ waitForSync: true });
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+  it("lets go when teardown itself fails", async () => {
+    const release = vi.fn(async () => {});
+    const client = {
+      shutdown: vi.fn(async () => {
+        throw new Error("teardown failed");
+      }),
+    };
+    releaseHoldOnShutdown(client, release);
+    await expect(client.shutdown()).rejects.toThrow("teardown failed");
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pendingDiscardLedger", () => {
+  it("keeps each pending discard in its own key, readable by any page", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      get length() {
+        return values.size;
+      },
+      key: (i: number) => [...values.keys()][i] ?? null,
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => void values.set(key, value),
+      removeItem: (key: string) => void values.delete(key),
+    };
+    vi.stubGlobal("localStorage", storage);
+    try {
+      pendingDiscardLedger(REGISTRY).record(alice.id);
+      pendingDiscardLedger(REGISTRY).record(guest.id);
+      expect(pendingDiscardLedger(REGISTRY).list().sort()).toEqual([alice.id, guest.id].sort());
+      expect(pendingDiscardLedger("https://other.example/accounts").list()).toEqual([]);
+      pendingDiscardLedger(REGISTRY).clear(alice.id);
+      expect(pendingDiscardLedger(REGISTRY).list()).toEqual([guest.id]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("wipeAccountStoreNow finishing a pending discard", () => {
+  it("re-checks it and forgets the key inside the store's lock", async () => {
+    const locks = new LockManager();
+    const deleteStore = vi.fn(async () => "deleted" as const);
+    let lockedWhileForgetting = false;
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me"), {
+        wanted: () => false,
+        forget: async () => {},
+      }),
+    ).resolves.toBe("cancelled");
+    expect(deleteStore).not.toHaveBeenCalled();
+    await expect(
+      wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me"), {
+        wanted: () => true,
+        forget: async () => {
+          lockedWhileForgetting = locks.isExclusive(aliceLock);
+        },
+      }),
+    ).resolves.toBe("deleted");
+    expect(lockedWhileForgetting).toBe(true);
+  });
 });

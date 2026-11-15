@@ -1,10 +1,15 @@
 import { it, expect, vi } from "vitest";
-import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
+import {
+  forgetDeviceAccount,
+  prepareAccountManager,
+  type AccountStore,
+} from "../accounts/persistence.js";
 import { accountToken } from "../accounts/enrollment.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { mintLocalFirstTokenInJs } from "../thin/index.js";
 import { followUser } from "./follow-user.js";
-import { createJazzSessionOwner } from "./state.js";
+import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 
 const settle = async (ms = 0) => {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -345,4 +350,282 @@ it("logout forgets the remembered user", async () => {
   const next = await pageLoad(store, { online: false, user: null }, "signed-out");
   expect(next.statuses).toEqual(["signed-out:-"]);
   await next.session.close();
+});
+
+it("forgets a device account's key when its sign-out discards unsynced writes", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const accounts = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store: {
+      read: async () => value,
+      update: async (transform) => {
+        value = transform(value);
+      },
+    },
+    mintToken: () =>
+      `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+  });
+  const openClient = vi.fn(async () => ({ shutdown: async () => {} }));
+  const session = await createJazzSessionOwner({ accounts, openClient });
+  // A plain sign-out keeps the key: the device account can be reopened.
+  await session.createLocalFirst();
+  await session.logout();
+  expect(session.keptLocalFirstKey()).toBeDefined();
+  await session.reopenLocalFirst();
+  // Discarding forgets it: the next person can't reopen that guest.
+  await session.logout({ discardUnsynced: true });
+  await settle();
+  expect(session.keptLocalFirstKey()).toBeUndefined();
+  await expect(session.reopenLocalFirst()).rejects.toThrow("keeps no device account");
+  await session.close();
+});
+
+it("finishes a discard another tab held off on the next page load, forgetting the key", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  // localStorage's view, shared by every page of this browser.
+  const pending = new Set<string>();
+  const pendingDiscards = {
+    record: (account: string) => void pending.add(account),
+    clear: (account: string) => void pending.delete(account),
+    list: () => [...pending],
+  };
+  let otherTabOpen = true;
+  // As the browser host's wipe does, inside the store's lock.
+  const deleteSignedOutStore = vi.fn(
+    async (_account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+      if (otherTabOpen) return "held" as const;
+      if (finishing && !finishing.wanted()) return "cancelled" as const;
+      await finishing?.forget();
+      return "deleted" as const;
+    },
+  );
+  const openClient = vi.fn(async () => ({ shutdown: async () => {} }));
+  const first = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient,
+    deleteSignedOutStore,
+    pendingDiscards,
+  });
+  await first.createLocalFirst();
+  const account = first.getSnapshot().account!.id;
+  await first.logout({ discardUnsynced: true });
+  await settle();
+  // Another tab still has it: the data and the key stay, for now.
+  expect(first.getSnapshot().error?.message).toContain("another tab still has this account open");
+  expect(first.keptLocalFirstKey()).toBeDefined();
+  // A reload, after that tab closed: the next page finishes it.
+  await first.close();
+  otherTabOpen = false;
+  const next = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient,
+    deleteSignedOutStore,
+    pendingDiscards,
+  });
+  await settle();
+  expect(deleteSignedOutStore).toHaveBeenLastCalledWith(account, expect.anything());
+  expect(pending.size).toBe(0);
+  expect(next.keptLocalFirstKey()).toBeUndefined();
+  await expect(next.reopenLocalFirst()).rejects.toThrow("keeps no device account");
+  await next.close();
+});
+
+it("refuses a sign-in as a device account another tab's discard forgot while it opened", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  const pending = new Set<string>();
+  const pendingDiscards = {
+    record: (account: string) => void pending.add(account),
+    clear: (account: string) => void pending.delete(account),
+    list: () => [...pending],
+  };
+  // The store's exclusive lock, as tab X's wipe holds it.
+  let releaseLock!: () => void;
+  let lockFree: Promise<void> = Promise.resolve();
+  let inDelete!: () => void;
+  const deleting = new Promise<void>((resolve) => (inDelete = resolve));
+  let otherTabOpen = true;
+  const deleteSignedOutStore = vi.fn(
+    async (_account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+      if (otherTabOpen) return "held" as const;
+      if (finishing && !finishing.wanted()) return "cancelled" as const;
+      lockFree = new Promise<void>((resolve) => (releaseLock = resolve));
+      inDelete();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await finishing?.forget();
+      releaseLock();
+      return "deleted" as const;
+    },
+  );
+  const tabX = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient: vi.fn(async () => ({ shutdown: async () => {} })),
+    deleteSignedOutStore,
+    pendingDiscards,
+  });
+  await tabX.createLocalFirst();
+  const account = tabX.getSnapshot().account!.id;
+  await tabX.logout({ discardUnsynced: true });
+  await settle();
+  expect(pending.has(account)).toBe(true);
+  // Tab X finishes the discard; tab Y reopens the account just then.
+  otherTabOpen = false;
+  const finishing = tabX.retry();
+  await deleting;
+  const tabY = await createJazzSessionOwner({
+    accounts: await manager(),
+    // Its client waits for the store's lock, as a browser open does.
+    openClient: vi.fn(async () => {
+      await lockFree;
+      return { shutdown: async () => {} };
+    }),
+    pendingDiscards,
+  });
+  const reopening = tabY.reopenLocalFirst();
+  await finishing;
+  await expect(reopening).rejects.toThrow("discarded on this device");
+  expect(tabY.getSnapshot()).toMatchObject({ status: "signed-out", recovery: "action" });
+  expect(tabY.getSnapshot().account).toBeUndefined();
+  await tabX.close();
+  await tabY.close();
+});
+
+it("refuses the local-first upgrade of a device account another tab's discard forgot meanwhile", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  const pending = new Set<string>();
+  const pendingDiscards = {
+    record: (account: string) => void pending.add(account),
+    clear: (account: string) => void pending.delete(account),
+    list: () => [...pending],
+  };
+  const deleteSignedOutStore = vi.fn(async (_account: string) => "deleted" as const);
+  // A thin sign-in: no hold on the store, so its check passes.
+  const thin = { shutdown: vi.fn(async (_options?: { waitForSync?: boolean }) => {}) };
+  const session = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient: vi.fn(async () => thin),
+    pendingDiscards,
+    deleteSignedOutStore,
+  });
+  await session.createLocalFirst();
+  const account = session.getSnapshot().account!.id;
+  expect(session.getSnapshot().status).toBe("ready");
+  // Another tab's discard finishes: the account's data and key are gone.
+  await forgetDeviceAccount(await manager(), account);
+  // The upgrade opens the store, now empty: refused, and signed out.
+  const replica = { shutdown: vi.fn(async () => {}) };
+  await expect(replaceJazzSessionClient(session, async () => replica)).rejects.toThrow(
+    "discarded on this device",
+  );
+  expect(replica.shutdown).toHaveBeenCalled();
+  // The refused store is wiped, and the thin client signed out.
+  expect(deleteSignedOutStore).toHaveBeenCalledWith(account);
+  expect(pending.size).toBe(0);
+  expect(thin.shutdown).toHaveBeenCalledWith({ waitForSync: true });
+  expect(session.getSnapshot()).toMatchObject({
+    status: "signed-out",
+    recovery: "action",
+    error: { name: "DiscardedDeviceAccountError" },
+  });
+  expect(session.getSnapshot().client).toBeUndefined();
+  await session.close();
+});
+
+it("says why while a refused upgrade's sign-out waits offline, and once it ends", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  const pendingDiscards = { record() {}, clear() {}, list: () => [] as string[] };
+  let offline = true;
+  const thin = {
+    db: { getAuthState: () => ({}) },
+    shutdown: vi.fn(async (options?: { waitForSync?: boolean }) => {
+      if (options?.waitForSync && offline)
+        throw new GracefulShutdownSyncError(new Error("websocket transport error"));
+    }),
+  };
+  const session = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient: vi.fn(async () => thin),
+    pendingDiscards,
+    deleteSignedOutStore: async () => "deleted" as const,
+  });
+  await session.createLocalFirst();
+  await forgetDeviceAccount(await manager(), session.getSnapshot().account!.id);
+  await expect(
+    replaceJazzSessionClient(session, async () => ({ shutdown: async () => {} })),
+  ).rejects.toThrow("discarded on this device");
+  // Offline: signing out, its thin writes waiting to upload, and the app told why.
+  expect(session.getSnapshot()).toMatchObject({
+    status: "signing-out",
+    error: { name: "DiscardedDeviceAccountError" },
+  });
+  offline = false;
+  await session.retry();
+  expect(thin.shutdown).toHaveBeenLastCalledWith({ waitForSync: true });
+  expect(session.getSnapshot()).toMatchObject({
+    status: "signed-out",
+    recovery: "action",
+    error: { name: "DiscardedDeviceAccountError" },
+  });
+  await session.close();
 });

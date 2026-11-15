@@ -83,7 +83,7 @@
       <p role="alert">{$snapshotStore.error.message}</p>
       <button onclick={() => void retry()}>Retry</button>
     {/if}
-  {:else if $snapshotStore.status === "signed-out"}
+  {:else if $snapshotStore.status === "signed-out" || $snapshotStore.status === "signing-out"}
     {@render signedOut?.()}
   {:else if $snapshotStore.status === "closed"}
     {@render closed?.()}

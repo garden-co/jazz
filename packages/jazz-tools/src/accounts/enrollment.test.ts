@@ -318,3 +318,17 @@ it("says what to do when the backend refuses to link a guest, and keeps the gues
   expect((refusal as Error).message).toMatch(/already have an account.*refresh\(\)/);
   expect(manager.getLoggedIn()).toBe(signedIn);
 });
+
+it("keeps one handle valid past logout until its release", () => {
+  const manager = setup();
+  const kept = manager.createLocalFirst();
+  const invalidated = vi.fn();
+  onAccountInvalidated(kept, invalidated);
+  const release = manager.logout({ keep: kept });
+  expect(manager.getLoggedIn()).toBeUndefined();
+  expect(invalidated).not.toHaveBeenCalled();
+  release();
+  expect(invalidated).toHaveBeenCalledTimes(1);
+  release();
+  expect(invalidated).toHaveBeenCalledTimes(1);
+});

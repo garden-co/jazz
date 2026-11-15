@@ -1,3 +1,4 @@
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import { reloadAfterStorageInvalidation } from "../runtime/browser-storage-invalidation.js";
 import { holdAcrossPageCache } from "../runtime/page-cache.js";
 
@@ -352,6 +353,114 @@ async function whileNoTabHolds<T>(
     },
   );
   return result;
+}
+
+/**
+ * @internal The accounts whose `signOut({ discardUnsynced })` wipe another
+ * tab held off, one localStorage key each (so tabs never overwrite each
+ * other's): any page finishes it once no tab holds the store, and signing
+ * in as the account clears it. Without storage, nothing is kept.
+ */
+export function pendingDiscardLedger(registry: string) {
+  const prefix = `jazz-discard-pending-v1:${encodeURIComponent(registry)}:`;
+  const storage = (): Storage | undefined => {
+    try {
+      return globalThis.localStorage;
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    record(account: string) {
+      try {
+        storage()?.setItem(prefix + account, "1");
+      } catch {
+        // Unwritable storage: only this page can finish it (on retry()).
+      }
+    },
+    clear(account: string) {
+      try {
+        storage()?.removeItem(prefix + account);
+      } catch {
+        // Nothing recorded.
+      }
+    },
+    list(): string[] {
+      const accounts: string[] = [];
+      try {
+        const store = storage();
+        for (let i = 0; i < (store?.length ?? 0); i++) {
+          const key = store!.key(i);
+          if (key?.startsWith(prefix)) accounts.push(key.slice(prefix.length));
+        }
+      } catch {
+        // Unreadable storage: nothing pending.
+      }
+      return accounts;
+    },
+  };
+}
+
+/**
+ * @internal Let go of a client's store hold (`release`) once the client has
+ * shut down, however that ended, except for a graceful shutdown whose sync
+ * failed: the client is still open then (a `signing-out` session keeps it
+ * to upload later), so it still holds the store against other tabs'
+ * opens and wipes until a later shutdown ends it.
+ */
+export function releaseHoldOnShutdown(
+  client: { shutdown(options?: { waitForSync?: boolean }): Promise<void> },
+  release: () => Promise<void>,
+): void {
+  const shutdown = client.shutdown.bind(client);
+  client.shutdown = async (options) => {
+    try {
+      await shutdown(options);
+    } catch (error) {
+      if (!(error instanceof GracefulShutdownSyncError)) await release();
+      throw error;
+    }
+    await release();
+  };
+}
+
+/**
+ * @internal Delete `account`'s store now, as `signOut({ discardUnsynced })`
+ * asks, under the store's exclusive lock: `"held"`, deleting nothing, while
+ * a tab still has it open. Its ledger entry (if any) goes with it; a mark
+ * left by a crash mid-delete lets a later page finish.
+ */
+export async function wipeAccountStoreNow(
+  registry: string,
+  account: string,
+  deleteStore: (account: string) => Promise<"deleted" | "held">,
+  locks: Locks | undefined = webLocks(),
+  /**
+   * A pending discard being finished, decided inside the lock: `wanted()`
+   * false (someone signed in as the account since) cancels it, and
+   * `forget()` runs once the store is gone, before any tab can open it.
+   */
+  finishing?: { wanted(): boolean; forget(): Promise<void> },
+): Promise<"deleted" | "held" | "cancelled"> {
+  const ledger = replicaLedger(registry);
+  const outcome = await whileNoTabHolds(
+    locks,
+    registry,
+    account,
+    async (): Promise<"deleted" | "held" | "cancelled"> => {
+      if (finishing && !finishing.wanted()) return "cancelled";
+      ledger.markWiping(account, true);
+      const deleted = await deleteStore(account);
+      if (deleted !== "deleted") {
+        ledger.markWiping(account, false);
+        return deleted;
+      }
+      ledger.forget(account);
+      await finishing?.forget();
+      return deleted;
+    },
+  );
+  return outcome ?? "held";
 }
 
 /** As the backend watch confirms a signed-out answer before it signs anyone out. */
