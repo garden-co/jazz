@@ -423,7 +423,7 @@ function scanImports(project: Project): ImportScan {
   let plain = 0;
   for (const file of project.sources) {
     const text = readFileSync(file, "utf8");
-    const code = /\.(svelte|vue)$/.test(file)
+    const code = /\.(svelte|vue|html)$/.test(file)
       ? [...text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n")
       : text;
     const targets = new Set<string>();

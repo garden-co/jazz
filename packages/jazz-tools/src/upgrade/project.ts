@@ -32,6 +32,8 @@ const SOURCE_EXTENSIONS = new Set([
   ".cjs",
   ".svelte",
   ".vue",
+  // Inline `<script type="module">` blocks.
+  ".html",
 ]);
 /** Directories that hold build output, dependencies or tooling, never sources. */
 const SKIPPED_DIRS = new Set([

@@ -2,6 +2,7 @@ Wrote:
   jazz.app.json
   app-extras.ts
   jazz.generated.ts
+  app/demo.html
   app/page.tsx
   lib/backend.ts
   tsconfig.json
@@ -10,6 +11,7 @@ Deleted:
   permissions.ts
   schema.ts
 Rewrote:
+  app/demo.html:5: ../schema.js → ../jazz.generated.js
   app/page.tsx:1: @/schema → @/jazz.generated + @/app-extras
   app/page.tsx:3: full.slice("cards") → full (schema slicing is gone)
   lib/backend.ts:3: @/schema → @/jazz.generated
