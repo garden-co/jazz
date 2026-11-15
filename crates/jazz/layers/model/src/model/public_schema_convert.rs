@@ -483,7 +483,7 @@ fn coerce_predicate_typed_literals(
                 *predicate = Predicate::Any(Vec::new());
             }
         }
-        Predicate::IsNull(_) => {}
+        Predicate::IsNull(_) | Predicate::Search(_) => {}
         Predicate::EnumMatch { payload, .. } => {
             coerce_predicate_typed_literals(table, payload, column_types);
         }

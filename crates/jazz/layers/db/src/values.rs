@@ -81,6 +81,7 @@ fn undo_key(conn: &rusqlite::Connection) -> usize {
 /// it, and a later connection may get its handle's address.
 pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
+    crate::ix::forget(conn);
     ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
 }
 
@@ -173,6 +174,15 @@ pub(crate) fn end_savepoint(
     name: &str,
     keep: bool,
 ) -> Result<(), Error> {
+    // The outermost savepoint commits: the specialised indexes take in
+    // every row it changed first (SPEC 20.3, `INV-IX-2`). If they cannot,
+    // nothing commits.
+    if keep && is_outermost(conn) {
+        if let Err(error) = crate::ix::drain(conn) {
+            end_savepoint(conn, name, false)?;
+            return Err(error);
+        }
+    }
     let sql = if keep {
         format!("RELEASE {name}")
     } else {
@@ -205,6 +215,16 @@ pub(crate) fn end_savepoint(
             }
         }
     }
+}
+
+/// Whether `conn`'s innermost open savepoint (opened by
+/// [`begin_savepoint`]) is its outermost: releasing it commits.
+fn is_outermost(conn: &rusqlite::Connection) -> bool {
+    TAG_UNDO.with(|undo| {
+        undo.borrow()
+            .get(&undo_key(conn))
+            .is_some_and(|frames| frames.len() == 1)
+    }) && !conn.is_autocommit()
 }
 
 /// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.

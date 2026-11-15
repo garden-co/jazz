@@ -41,6 +41,7 @@ pub mod db;
 mod durable_object_limits;
 pub mod format;
 pub mod host;
+pub(crate) mod ix;
 pub(crate) mod large;
 pub mod link;
 pub(crate) mod merge;
@@ -51,6 +52,10 @@ pub mod slow;
 mod sql_trace;
 pub mod values;
 
+/// Implement text and vector indexes with tiny test kinds on this thread
+/// (see `ix::test_kind`).
+#[cfg(any(test, feature = "testing"))]
+pub use ix::test_kind::use_test_kinds;
 #[cfg(feature = "testing")]
 pub use large::full_materializations_for_test;
 

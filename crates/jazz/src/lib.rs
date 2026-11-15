@@ -34,6 +34,8 @@ pub use jazz_db::host;
 pub use jazz_db::link;
 pub use jazz_db::result_tree;
 pub use jazz_db::slow;
+#[cfg(feature = "testing")]
+pub use jazz_db::use_test_kinds;
 pub use jazz_model::model;
 pub use jazz_model::query;
 pub use jazz_model::row_input;

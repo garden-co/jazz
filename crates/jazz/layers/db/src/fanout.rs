@@ -722,8 +722,15 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let planned = match crate::ix::search_of(&prepared.query) {
+            None => None,
+            Some(search) => {
+                Some(self.plan_search(prepared, policy.as_ref(), &claims, read, search)?)
+            }
+        };
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .with_search(planned)
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
@@ -2164,7 +2171,10 @@ impl Group {
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
-    !is_history_table(&query.table)
+    // A search re-runs whole for now: a changed row's score is spliced in
+    // only once the recheck reads it (SPEC 20.8).
+    crate::ix::search_of(query).is_none()
+        && !is_history_table(&query.table)
         && query.relation.is_none()
         && query.offset == 0
         && query.aggregate.is_none()

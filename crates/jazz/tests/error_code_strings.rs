@@ -75,6 +75,11 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::PredecessorRejected => "predecessor_rejected",
         Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
         Reason::IdentityMismatch => "identity_mismatch",
+        Reason::IndexServerOnly => "index_server_only",
+        Reason::IndexSearchUnsupportedUpstream => "index_search_unsupported_upstream",
+        Reason::IndexBuilding => "index_building",
+        Reason::VectorSearchUnbounded => "vector_search_unbounded",
+        Reason::VectorCandidatesOverCap => "vector_candidates_over_cap",
     }
 }
 

@@ -623,7 +623,84 @@ pub enum Predicate {
     },
     /// Nullable value is null.
     IsNull(Operand),
+    /// A specialised index search (SPEC 20.4). Appended last, so every
+    /// other predicate keeps its encoding. Valid only as a top-level
+    /// filter of a query, at most once, and never in a policy, a join, an
+    /// include or under `Any`/`Not`.
+    Search(IndexSearch),
 }
+
+/// A search through one of the root table's specialised indexes.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct IndexSearch {
+    /// The index's name, unique within the table.
+    pub index: String,
+    /// What it asks the index.
+    pub op: IndexOp,
+}
+
+/// What a search asks its index.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum IndexOp {
+    /// Rows whose analyzed fields contain every query term.
+    Match {
+        /// The query text, analyzed like the indexed fields.
+        text: String,
+    },
+    /// The `k` rows nearest to a vector, by the index metric.
+    Nearest {
+        /// The query vector, of the index's dimension.
+        vector: Vec<f32>,
+        /// How many rows (1–1000).
+        k: u32,
+    },
+    /// Rows within a radius of a point.
+    WithinRadius {
+        /// Latitude, degrees.
+        lat: f64,
+        /// Longitude, degrees.
+        lng: f64,
+        /// Radius, meters (at most 1000 km).
+        meters: f64,
+    },
+    /// Rows inside a lat/lng rectangle (may cross the antimeridian when
+    /// `west > east`).
+    WithinBox {
+        /// Southern edge, degrees.
+        south: f64,
+        /// Western edge, degrees.
+        west: f64,
+        /// Northern edge, degrees.
+        north: f64,
+        /// Eastern edge, degrees.
+        east: f64,
+    },
+}
+
+impl IndexOp {
+    /// The index kind this op searches.
+    pub fn kind(&self) -> crate::model::public_schema::SpecialisedIndexKindName {
+        use crate::model::public_schema::SpecialisedIndexKindName as Kind;
+        match self {
+            Self::Match { .. } => Kind::Text,
+            Self::Nearest { .. } => Kind::Vector,
+            Self::WithinRadius { .. } | Self::WithinBox { .. } => Kind::Geo,
+        }
+    }
+
+    /// The op's name in errors.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Match { .. } => "match",
+            Self::Nearest { .. } => "nearest",
+            Self::WithinRadius { .. } => "withinRadius",
+            Self::WithinBox { .. } => "withinBox",
+        }
+    }
+}
+
+/// The reserved order column of a search's score (SPEC 20.4), best first.
+pub const SCORE_COLUMN: &str = "$score";
 
 impl Predicate {
     /// Calls `f` on every operand of this predicate, descending through
@@ -653,6 +730,7 @@ impl Predicate {
                 values.iter_mut().for_each(f);
             }
             Self::IsNull(operand) => f(operand),
+            Self::Search(_) => {}
         }
     }
 
@@ -675,6 +753,7 @@ impl Predicate {
             | Self::Contains(left, right) => f(left) || f(right),
             Self::In(left, values) => f(left) || values.iter().any(f),
             Self::IsNull(operand) => f(operand),
+            Self::Search(_) => false,
         }
     }
 }

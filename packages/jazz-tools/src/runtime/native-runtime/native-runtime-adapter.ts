@@ -5866,6 +5866,12 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   schema_version_not_deployed: "write_rejected",
   // A refused subscriber, never a write's fate.
   identity_mismatch: "write_rejected",
+  // Search refusals (SPEC 20.11), never a write's fate.
+  index_server_only: "write_rejected",
+  index_search_unsupported_upstream: "write_rejected",
+  index_building: "write_rejected",
+  vector_search_unbounded: "write_rejected",
+  vector_candidates_over_cap: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */

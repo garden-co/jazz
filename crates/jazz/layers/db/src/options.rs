@@ -504,11 +504,21 @@ pub enum Reason {
     /// A store configured as one user was asked to serve a session of
     /// another identity (code `Protocol`): relays serve one identity.
     IdentityMismatch,
+    /// A search through a server-only index on a client, offline or below `Remote` tier (code `Query`, SPEC 20.9).
+    IndexServerOnly,
+    /// A `Remote` search whose upstream did not offer `FEATURE_INDEX_SEARCH` (code `Query`, SPEC 20.4).
+    IndexSearchUnsupportedUpstream,
+    /// A search through an index the authority is still building; retry later (code `Backpressure`, SPEC 20.3).
+    IndexBuilding,
+    /// A vector search on the authority whose other clauses do not narrow the table through an index (code `Query`, SPEC 20.5).
+    VectorSearchUnbounded,
+    /// A Rust-scored search with more than `VECTOR_EXACT_MAX` candidate rows (code `Query`, SPEC 20.5).
+    VectorCandidatesOverCap,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 17] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -521,6 +531,11 @@ impl Reason {
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
+        Reason::IndexServerOnly,
+        Reason::IndexSearchUnsupportedUpstream,
+        Reason::IndexBuilding,
+        Reason::VectorSearchUnbounded,
+        Reason::VectorCandidatesOverCap,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -543,6 +558,11 @@ impl Reason {
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
+            Reason::IndexServerOnly => "index_server_only",
+            Reason::IndexSearchUnsupportedUpstream => "index_search_unsupported_upstream",
+            Reason::IndexBuilding => "index_building",
+            Reason::VectorSearchUnbounded => "vector_search_unbounded",
+            Reason::VectorCandidatesOverCap => "vector_candidates_over_cap",
         }
     }
 

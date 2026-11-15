@@ -364,6 +364,41 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
             put_str(&mut bytes, case);
             put_bytes(&mut bytes, &canonical_predicate_key(payload));
         }
+        Predicate::Search(search) => {
+            bytes.push(b's');
+            put_str(&mut bytes, &search.index);
+            match &search.op {
+                IndexOp::Match { text } => {
+                    bytes.push(0);
+                    put_str(&mut bytes, text);
+                }
+                IndexOp::Nearest { vector, k } => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&(vector.len() as u64).to_be_bytes());
+                    for x in vector {
+                        bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                    }
+                    bytes.extend_from_slice(&k.to_be_bytes());
+                }
+                IndexOp::WithinRadius { lat, lng, meters } => {
+                    bytes.push(2);
+                    for x in [lat, lng, meters] {
+                        bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                    }
+                }
+                IndexOp::WithinBox {
+                    south,
+                    west,
+                    north,
+                    east,
+                } => {
+                    bytes.push(3);
+                    for x in [south, west, north, east] {
+                        bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                    }
+                }
+            }
+        }
     }
     bytes
 }

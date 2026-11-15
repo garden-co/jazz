@@ -1889,6 +1889,7 @@ impl Db {
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::PENDING_DDL).map_err(storage)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        conn.execute_batch(crate::ix::DDL).map_err(storage)?;
         let withheld: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_withheld'",
@@ -2039,6 +2040,7 @@ impl Db {
             inner.seq = seq;
             inner.load_client()?;
             inner.load_shard()?;
+            inner.ensure_indexes()?;
         }
         Ok(db)
     }
@@ -2335,6 +2337,8 @@ impl Db {
             let mut inner = self.inner();
             inner.fan.collect();
             inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+            // One bounded batch of any index still building (SPEC 20.3).
+            inner.build_indexes_step()?;
         }
         self.pump_chunk_store().await
     }
@@ -5010,11 +5014,137 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let planned = match crate::ix::search_of(&prepared.query) {
+            None => None,
+            Some(search) => {
+                Some(self.plan_search(prepared, policy.as_ref(), &claims, read, search)?)
+            }
+        };
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .with_search(planned)
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         Ok(compiled)
+    }
+
+    /// Bring the store's specialised indexes in line with the current
+    /// schema and replica-ness, once per change of either (SPEC 20.1): a
+    /// new or changed index is created building, a removed one dropped.
+    pub(crate) fn ensure_indexes(&self) -> Result<(), Error> {
+        let registry = crate::ix::registry(&self.conn);
+        let want = (self.owner.jazz.version_id(), self.client.is_some());
+        {
+            let mut registry = registry.borrow_mut();
+            if registry.reconciled == Some(want) {
+                return Ok(());
+            }
+            registry.chunks = Some(self.chunks.clone());
+        }
+        let owner = self.owner.clone();
+        crate::values::in_savepoint(&self.conn, "jazz_ix", || {
+            crate::ix::reconcile(&self.conn, &owner, want.1)
+        })?;
+        registry.borrow_mut().reconciled = Some(want);
+        Ok(())
+    }
+
+    /// Build one batch of an index still building, in its own savepoint
+    /// (a transaction of its own outside any other). Returns whether one
+    /// is still building.
+    pub(crate) fn build_indexes_step(&self) -> Result<bool, Error> {
+        self.ensure_indexes()?;
+        crate::values::in_savepoint(&self.conn, "jazz_ix_build", || {
+            crate::ix::build_step(&self.conn)
+        })
+    }
+
+    /// Plan `search` for a read of `prepared` (SPEC 20.4-20.5): the index
+    /// it reads must be maintained here and built (a client builds it now;
+    /// the authority refuses, retryably), its queue drained, and a
+    /// Rust-scored kind's candidates scored.
+    pub(crate) fn plan_search(
+        &self,
+        prepared: &PreparedQuery,
+        policy: Option<&Session>,
+        claims: &Session,
+        read: &ReadSpec,
+        search: &crate::query::IndexSearch,
+    ) -> Result<crate::ix::Planned, Error> {
+        self.ensure_indexes()?;
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let table = schema.table(&prepared.query.table)?;
+        let index = crate::ix::index_for(&self.conn, table, search)?;
+        if crate::ix::has_queued(&self.conn)? {
+            crate::values::in_savepoint(&self.conn, "jazz_ix_drain", || {
+                crate::ix::drain(&self.conn)
+            })?;
+        }
+        let authority = self.authority;
+        while !crate::ix::is_ready(&self.conn, &index.stored, &index.decl.name)? {
+            if authority {
+                return Err(crate::ix::building(&table.name, &index.decl.name));
+            }
+            if !self.build_indexes_step()? {
+                break;
+            }
+        }
+        if !crate::ix::is_scored(&index.decl.kind) {
+            return Ok(crate::ix::Planned::Sql {
+                index,
+                op: search.op.clone(),
+            });
+        }
+        let scorer = match index.kind.plan(&index.prefix, &search.op, &mut |_| {
+            unreachable!("a Rust-scored kind binds nothing")
+        })? {
+            crate::ix::Candidates::Scored(scorer) => scorer,
+            crate::ix::Candidates::Sql(_) => {
+                return Err(crate::values::query_error(
+                    "a vector kind planned SQL candidates",
+                ));
+            }
+        };
+        let (part, column) = scorer.payload();
+        let shadow = crate::ix::shadow(&index.prefix, part);
+        let cap = crate::ix::VECTOR_EXACT_MAX;
+        let (sql, plain, params) = self
+            .read_ctx(prepared, policy, claims, read)
+            .compile_candidates(&prepared.query, &shadow, column, cap + 1)?;
+        // Filter-first: on the authority the other clauses must narrow
+        // the table through a B-tree index, or the search would score
+        // rows in proportion to the table (`INV-IX-4`).
+        if authority {
+            let plan = self.query_plan(&plain, &params[..params.len() - 1])?;
+            let scans_root = plan.lines().any(|step| {
+                let step = step.trim();
+                step == "SCAN t" || step.starts_with("SCAN t ")
+            });
+            if scans_root {
+                return Err(crate::ix::vector_unbounded(&table.name, &index.decl.name));
+            }
+        }
+        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+        let mut rows = statement
+            .query(params_from_iter(params.iter()))
+            .map_err(storage)?;
+        let mut scored = Vec::new();
+        while let Some(row) = rows.next().map_err(storage)? {
+            if scored.len() == cap {
+                return Err(crate::ix::candidates_over_cap(
+                    &table.name,
+                    &index.decl.name,
+                ));
+            }
+            let rid: i64 = row.get(0).map_err(storage)?;
+            let id: Vec<u8> = row.get(1).map_err(storage)?;
+            let score = scorer.score(row.get_ref(2).map_err(storage)?)?;
+            scored.push((score, id, rid));
+        }
+        Ok(crate::ix::Planned::Bound(crate::ix::top_k(
+            scored,
+            scorer.k(),
+        )))
     }
 
     /// A read at a past cut (a serializable snapshot, a snapshot reference,
