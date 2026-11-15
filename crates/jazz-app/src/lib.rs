@@ -17,6 +17,7 @@
 //! JWT), includes (nested related rows in one result), reads inside
 //! transactions.
 
+mod advice;
 mod app;
 mod backend;
 mod config;
@@ -30,6 +31,7 @@ mod transaction;
 mod value;
 mod writes;
 
+pub use advice::Advice;
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
