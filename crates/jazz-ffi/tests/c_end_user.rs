@@ -265,6 +265,50 @@ async fn c_hosts_sign_in_and_follow_their_session() {
     result.unwrap();
 }
 
+/// After `signOut` (which ends the app) the token callback is never called
+/// again either, though a fetch was in progress and close follows later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_token_callback_runs_after_sign_out() {
+    let app = app().await;
+    let bearer = (app.config)(json!({ "bearer": true }));
+    let result = tokio::task::spawn_blocking(move || unsafe {
+        let host = Host::new(Some("offline"), Duration::from_millis(800));
+        let mut err = ptr::null_mut();
+        let alice = jazz_open_user(
+            c(&bearer).as_ptr(),
+            Some(token_cb),
+            &*host as *const Host as *mut c_void,
+            &mut err,
+        );
+        assert!(!alice.is_null());
+        // A failed refresh: the session retries on its own, with a slow
+        // fetch; sign out and close while that retry is in flight.
+        let _ = call(alice, "refresh", json!({}));
+        let asked = host.calls.load(Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(host.calls.load(Ordering::SeqCst) > asked && host.running.load(Ordering::SeqCst)) {
+            assert!(std::time::Instant::now() < deadline, "no retry came");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = call(alice, "signOut", json!({}));
+        jazz_close(alice);
+        assert!(
+            !host.running.load(Ordering::SeqCst),
+            "close returned while the callback ran"
+        );
+        host.closed.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !host.after_close.load(Ordering::SeqCst),
+            "the callback ran after close"
+        );
+        drop(host);
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
 /// When `jazz_close` returns, the token callback is not running and is never
 /// called again: a host may free its ctx (Go: delete its cgo.Handle) then.
 /// Here a slow fetch is in progress when close is called.
