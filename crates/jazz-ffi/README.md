@@ -56,6 +56,12 @@ user, and `account()` returns that user's account id (`session.user`). The
 backend needs `serverUrl`, `appId`, `backendSecret`, `adminSecret` and
 `session.subject`.
 
+Backend mode is for server-side processes only. It keeps the sync server's
+`backendSecret` and `adminSecret` in the process, so those secrets must never
+ship inside a mobile or desktop app. In .65, apps on users' devices open
+local-only clients (no `serverUrl`), because connecting as an end user with a
+JWT is not supported yet.
+
 Without `permissions`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
@@ -75,7 +81,8 @@ Values are plain JSON, typed by the schema:
 | array              | JSON array                                     |
 | optional           | `null`                                         |
 
-Enums with payloads read as `{ "case": …, "fields": { … } }`. Text-merge
+A float that isn't finite (NaN, ±infinity) reads as `null`; JSON can't
+write one. Enums with payloads read as `{ "case": …, "fields": { … } }`. Text-merge
 columns (`merge: "text"`) take plain string writes.
 
 - **Query:** `{ "table", "where": [{ "column", "op", "value"? }], "orderBy":
@@ -91,6 +98,13 @@ columns (`merge: "text"`) take plain string writes.
   ([jazz#5635](https://github.com/garden-co/jazz/pull/5635)). Deltas carry no
   positions, so an ordered subscription re-sorts locally. A row that only
   moved is left out.
+
+After the app closes, each open subscription gets one last error, `Closed`
+(kind `"closed"` on the C ABI). `jazz_unsubscribe` returns only once no
+callback is running, so the host may free `ctx` right after. Called from
+inside the callback, it doesn't wait. A subscription may be freed before or
+after `jazz_close`. No call on a handle may run concurrently with, or follow,
+its `jazz_close`.
 
 Listeners run on a thread owned by the subscription, so they may call back
 into the handle. Every method blocks and is safe to call from any thread.

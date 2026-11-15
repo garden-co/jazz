@@ -52,8 +52,8 @@ ignore file) to keep the two in step.
   table's `chatId` to a row of `chats`; `{ "reverse": "chatMembers", "relation": "chat" }` is
   the rows of `chatMembers` whose `chat` relation points here. See
   [Relationships](/docs/schemas/relationships).
-- **Table options**: `indexes` (a name is a single-column index, an array a composite one; once
-  any single names are listed, only those columns get one), `branchBy` (column names), and
+- **Table options**: `indexes` (a column name declares a single-column index, an array of names a
+  composite one; relation columns are always indexed), `branchBy` (column names), and
   `"history": "latest"`.
 - **Computed fields**: a table's `computed`, `{ "<field>": { "type": <type>, "from": [<columns>] } }`,
   implemented in code. See [Computed Columns](/docs/schemas/column-types#computed-columns).
