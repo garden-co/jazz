@@ -5,9 +5,9 @@ import { disabledSetupPages, filterLanguageTabs, type Language, LANGUAGES } from
 import { expandBindingsExcerpts, extractSymbol, extractSymbols } from "./excerpt";
 
 const langs: Language[] = [
-  { label: "TypeScript", enabled: true },
-  { label: "Rust", setupPage: "setup/rust", enabled: true },
-  { label: "Swift", setupPage: "setup/swift", enabled: false },
+  { label: "TypeScript", backend: true, enabled: true },
+  { label: "Rust", setupPage: "setup/rust", backend: true, enabled: true },
+  { label: "Swift", setupPage: "setup/swift", backend: false, enabled: false },
 ];
 
 const page = `Intro
@@ -65,6 +65,14 @@ describe("filterLanguageTabs", () => {
     expect(() => filterLanguageTabs(tabs(["TypeScript"], ["TypeScript", "Rust"]), langs)).toThrow(
       /don't match/,
     );
+  });
+
+  it("refuses client-only languages on backend pages", () => {
+    const backend = `---\ntitle: X\nlanguageTabs: backend\n---\n\n<Tabs groupId="jazz-environment" items={["TypeScript", "Swift"]}>\n  <Tab value="TypeScript">t</Tab>\n  <Tab value="Swift">s</Tab>\n</Tabs>\n`;
+    expect(() => filterLanguageTabs(backend, langs)).toThrow(/client-only Swift/);
+    expect(() =>
+      filterLanguageTabs(backend.replace("languageTabs: backend\n", ""), langs),
+    ).not.toThrow();
   });
 
   it("lists switched-off setup pages", () => {

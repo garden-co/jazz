@@ -104,6 +104,14 @@ describe("the schema DSL alpha.65 removed", () => {
     );
   });
 
+  it("refuses enum cases with fields by name, at definition time", () => {
+    const enumStub = root.schema.enum as unknown as (...args: unknown[]) => unknown;
+    expect(() => enumStub({ bug: { severity: {} }, feature: { area: {} } })).toThrow(
+      'enum cases with fields are not supported; use s.enum("a", "b") plus a nullable column per field, or s.json() (see https://github.com/garden-co/jazz/issues/5758)',
+    );
+    expect(thrownBy(() => enumStub("a", "b"))).toMatchObject({ code: "JAZZ_API_REMOVED" });
+  });
+
   it("names the files that replaced it", () => {
     expect(() => (root.definePermissions as unknown as () => unknown)()).toThrow(
       /jazz\.app\.json and jazz\.permissions\.json are now the app's schema, migrations and permissions/,

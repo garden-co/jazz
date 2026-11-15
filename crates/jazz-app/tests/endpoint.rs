@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bindings::{NewProject, NewTodo, Todo, projects, todos};
 use futures::{SinkExt, StreamExt};
-use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, Request};
+use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, GuestKeyAfterLink, Request};
 use jazz_app::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, DurabilityTier, Error, Jazz, ReadTier,
     SessionState, TokenReason,
@@ -241,6 +241,8 @@ async fn serve(stream: TcpStream, endpoint: Endpoint, admitted: Arc<Mutex<Vec<Ad
                 .filter_map(|message| {
                     std::future::ready(match message {
                         Ok(Message::Binary(data)) => Some(data.to_vec()),
+                        // TS clients send their prelude as text.
+                        Ok(Message::Text(text)) => Some(text.as_bytes().to_vec()),
                         _ => None,
                     })
                 })
@@ -519,7 +521,7 @@ async fn the_endpoint_refuses_what_it_should() {
     let app = App::start().await;
     let sign_in = app.path("accounts/backend-sign-in");
 
-    // HTTP: no one signed in, wrong methods, other apps, not yet supported.
+    // HTTP: no one signed in (also for linking), wrong methods, other apps.
     let response = app.endpoint.handle(Request::new("POST", &sign_in)).await;
     assert_eq!(
         (response.status, response.text_body().as_str()),
@@ -557,7 +559,7 @@ async fn the_endpoint_refuses_what_it_should() {
     let link = app.path("accounts/backend-link");
     assert_eq!(
         app.endpoint.handle(Request::new("POST", link)).await.status,
-        501
+        401
     );
     assert_eq!(
         app.endpoint
@@ -604,6 +606,90 @@ async fn the_endpoint_refuses_what_it_should() {
     );
     let forged = serde_json::to_vec(&json!({ "auth": { "jwt_token": "a.b.c" } })).unwrap();
     assert_eq!(app.endpoint.admits(&as_carol, &forged).await.unwrap(), None);
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_account_links_to_the_user_who_signs_up() {
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let device = Jazz::open(client_files(), app.user(Auth::Device(key.clone())))
+        .await
+        .unwrap();
+    let written = device
+        .insert(NewTodo::new("Before signing up", false))
+        .await
+        .unwrap();
+    let session = device.session().unwrap().clone();
+
+    // Dana signs up with the app's own auth, and keeps her device's data.
+    let dana = session
+        .link("token-dana")
+        .await
+        .expect("link the device account");
+    assert_eq!(dana.account, key.account(app.app_id));
+    assert_eq!(dana.subject, "dana");
+    assert!(matches!(
+        session.link("not-a-token").await,
+        Err(Error::SignedOut)
+    ));
+
+    // Signed in with her bearer elsewhere, she reaches the same account.
+    let laptop = Jazz::open(client_files(), app.user(bearer("token-dana")))
+        .await
+        .unwrap();
+    assert_eq!(laptop.account(), Some(dana.account));
+    let seen = eventually(async || {
+        let rows = laptop
+            .all_with(todos::query(), ReadTier::Remote)
+            .await
+            .unwrap();
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert_eq!(seen, vec![written]);
+
+    // A challenge links only its own user, and only with a proof of it.
+    let as_erin = |route: &str| {
+        Request::new("POST", app.path(route)).header("authorization", "Bearer token-erin")
+    };
+    let issued = app
+        .endpoint
+        .handle(as_erin("accounts/backend-link/challenge"))
+        .await;
+    assert_eq!(issued.status, 200);
+    let challenge = serde_json::from_slice::<Value>(&issued.body).unwrap()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let with = |body: Value| {
+        let mut request = as_erin("accounts/backend-link");
+        request.body = serde_json::to_vec(&body).unwrap();
+        request
+    };
+    let forged = app
+        .endpoint
+        .handle(with(json!({ "challenge": challenge, "proof": "a.b" })))
+        .await;
+    assert_eq!(forged.status, 401);
+    let as_frank = Request {
+        headers: vec![("authorization".into(), "Bearer token-frank".into())],
+        ..with(json!({ "challenge": challenge, "proof": "a.b" }))
+    };
+    let foreign = app.endpoint.handle(as_frank).await;
+    assert_eq!(
+        (foreign.status, foreign.text_body().as_str()),
+        (400, "invalid_link_challenge")
+    );
+    let tampered = format!("{challenge}x");
+    let tampered = app
+        .endpoint
+        .handle(with(json!({ "challenge": tampered, "proof": "a.b" })))
+        .await;
+    assert_eq!(tampered.status, 400);
+
+    laptop.shutdown().await.unwrap();
+    device.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -682,11 +768,9 @@ async fn a_missing_expired_or_foreign_jwt_is_refused() {
     app.stop().await;
 }
 
-/// What reaches the core is built by the endpoint: the backend secret and
-/// exactly one identity, read from `auth` only. A credential stated
-/// anywhere else (a top-level `jwt_token` beside the secret the endpoint
-/// adds would have read as the backend's own trusted link) refuses the
-/// socket.
+/// Only the credential the endpoint vouched for, inside `auth`, is
+/// forwarded to the core, beside the backend secret; other prelude fields
+/// are refused or dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_the_vouched_credential_reaches_the_core() {
     let app = App::start().await;
@@ -761,8 +845,7 @@ async fn only_the_vouched_credential_reaches_the_core() {
     assert_eq!(keys(&ts_shaped), ["auth", "bundle", "peer_identity"]);
     assert_eq!(keys(&ts_shaped["auth"]), ["backend_secret", "jwt_token"]);
 
-    // Credentials outside `auth` that differ from it, secrets, or requests
-    // only a backend makes.
+    // Refused shapes.
     let refused = [
         json!({ "jwt_token": device_token, "auth": {} }),
         json!({ "jwt_token": device_token }),
@@ -915,5 +998,269 @@ async fn malformed_and_oversized_input_is_refused_and_the_endpoint_serves_on() {
         .await
         .unwrap();
     kim.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// A device key's seed, from its `jazz-auth-v1:` form.
+fn seed_of(key: &DeviceKey) -> [u8; 32] {
+    use base64::Engine as _;
+    let text = key.to_string();
+    let encoded = text
+        .strip_prefix("jazz-auth-v1:")
+        .unwrap()
+        .trim_end_matches('=');
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+fn sign(seed: &[u8; 32], challenge: &str) -> String {
+    jazz_app::jazz::tools::identity::sign_local_first_challenge(seed, challenge).unwrap()
+}
+
+/// A link challenge `endpoint` issues for `user`.
+async fn challenge_for(app: &App, endpoint: &Endpoint, user: &str) -> String {
+    let issued = endpoint
+        .handle(
+            Request::new("POST", app.path("accounts/backend-link/challenge"))
+                .header("authorization", format!("Bearer token-{user}")),
+        )
+        .await;
+    assert_eq!(issued.status, 200);
+    assert!(
+        issued
+            .headers
+            .contains(&("cache-control".into(), "no-store".into())),
+        "a challenge is never cached"
+    );
+    serde_json::from_slice::<Value>(&issued.body).unwrap()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Links the device with `seed` to `user`, proving it on `proven` and
+/// presenting `presented`.
+async fn link_as(
+    app: &App,
+    endpoint: &Endpoint,
+    user: &str,
+    seed: &[u8; 32],
+    proven: &str,
+    presented: &str,
+) -> jazz_app::endpoint::Response {
+    let mut request = Request::new("POST", app.path("accounts/backend-link"))
+        .header("authorization", format!("Bearer token-{user}"));
+    request.body = serde_json::to_vec(&json!({
+        "challenge": presented,
+        "proof": sign(seed, proven),
+    }))
+    .unwrap();
+    endpoint.handle(request).await
+}
+
+async fn link(app: &App, endpoint: &Endpoint, user: &str, seed: &[u8; 32]) -> (u16, Value) {
+    let challenge = challenge_for(app, endpoint, user).await;
+    let response = link_as(app, endpoint, user, seed, &challenge, &challenge).await;
+    let body = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    (response.status, body)
+}
+
+/// By default (TS's `keep`), a key that linked can link a second user into
+/// its account; with `Revoke` it is retired once it linked, so it can't,
+/// and the first link still answers on a retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_key_links_a_second_user_unless_the_endpoint_revokes_it() {
+    let app = App::start().await;
+
+    // Keep: the second user joins the device's account.
+    let key = DeviceKey::generate().unwrap();
+    let seed = seed_of(&key);
+    let (status, first) = link(&app, &app.endpoint, "lena", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        first["account"],
+        json!(key.account(app.app_id).0.to_string())
+    );
+    let (status, second) = link(&app, &app.endpoint, "max", &seed).await;
+    assert_eq!(status, 200, "keep lets a linked key link again");
+    assert_eq!(second["account"], first["account"]);
+
+    // Revoke: the key links once.
+    let revoking = app
+        .endpoint
+        .clone()
+        .guest_key_after_link(GuestKeyAfterLink::Revoke);
+    let key = DeviceKey::generate().unwrap();
+    let seed = seed_of(&key);
+    let (status, first) = link(&app, &revoking, "nia", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        first["account"],
+        json!(key.account(app.app_id).0.to_string())
+    );
+    let (status, _) = link(&app, &revoking, "otto", &seed).await;
+    assert_eq!(status, 409, "a revoked key links no second user");
+    let other = Request::new("POST", app.path("accounts/backend-user"))
+        .header("authorization", "Bearer token-otto");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&revoking.handle(other).await.body).unwrap()["account"],
+        Value::Null,
+        "otto has no account"
+    );
+    // A retry of nia's link (its answer lost) still answers.
+    let (status, again) = link(&app, &revoking, "nia", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(again["account"], first["account"]);
+    app.stop().await;
+}
+
+/// An expired challenge, and a proof made over another challenge, link
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_or_mismatched_challenge_links_nothing() {
+    use base64::Engine as _;
+    use hmac::Mac as _;
+    let app = App::start().await;
+    let seed = seed_of(&DeviceKey::generate().unwrap());
+
+    // A proof over challenge A, presented with challenge B.
+    let a = challenge_for(&app, &app.endpoint, "pia").await;
+    let b = challenge_for(&app, &app.endpoint, "pia").await;
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &a, &b).await;
+    assert_eq!(
+        (response.status, response.text_body().as_str()),
+        (401, "invalid_local_first_proof")
+    );
+
+    // A challenge signed with the endpoint's own key, but expired.
+    let key = {
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(app.server.admin_secret().as_bytes())
+                .unwrap();
+        mac.update(format!("jazz-link-challenge-v1\0{}", app.app_id).as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    };
+    let signed = |exp: u64| {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({ "v": 1, "sub": "pia", "nonce": jazz_app::ObjectId::new().to_string(), "exp": exp })
+                .to_string(),
+        );
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).unwrap();
+        mac.update(payload.as_bytes());
+        let mac =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        format!("{payload}.{mac}")
+    };
+    let expired = signed(now() - 1);
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &expired, &expired).await;
+    assert_eq!(
+        (response.status, response.text_body().as_str()),
+        (400, "invalid_link_challenge")
+    );
+    // Its fresh twin links: only the expiry refused it.
+    let fresh = signed(now() + 60);
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &fresh, &fresh).await;
+    assert_eq!(response.status, 200);
+    app.stop().await;
+}
+
+/// A TS client's socket: its prelude as a text frame, shaped as TS's
+/// `encodeWebSocketPrelude` writes it (auth repeated beside `auth`, with
+/// `sub`), its bearer on the upgrade. It is admitted.
+async fn a_ts_shaped_socket_is_admitted(app: &App, ws: &str) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    let token = jwt("tess", JWT_ISSUER, now() + 3600, JWT_KEY);
+    let sign_in = app
+        .endpoint
+        .handle(
+            Request::new("POST", app.path("accounts/backend-sign-in"))
+                .header("authorization", format!("Bearer {token}")),
+        )
+        .await;
+    assert_eq!(sign_in.status, 200);
+    let account = serde_json::from_slice::<Value>(&sign_in.body).unwrap()["account"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = json!({
+        "account_id": account,
+        "issuer": "jazz:backend",
+        "user_id": "tess",
+        "claims": {},
+        "authMode": "external",
+    });
+    let auth = json!({ "jwt_token": null, "backend_session": session });
+    let peer = serde_json::to_string(&(account.as_str(), "jazz:backend", "tess")).unwrap();
+    let prelude = json!({
+        "peer_identity": peer,
+        "jwt_token": null,
+        "backend_session": session,
+        "auth": { "jwt_token": null, "backend_session": auth["backend_session"], "sub": "tess" },
+        "sub": "tess",
+    });
+    let mut request = ws.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(Message::Text(prelude.to_string().into()))
+        .await
+        .unwrap();
+    // Then a binary frame. Had the text prelude been dropped, this frame
+    // would be read as the prelude and refused (1008, `session missing`);
+    // admitted, it reaches the core, which ends the socket its own way.
+    socket
+        .send(Message::Binary(b"not a wire frame".to_vec().into()))
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(message)) = socket.next().await {
+            if let Message::Close(frame) = message {
+                return frame;
+            }
+        }
+        None
+    })
+    .await
+    .expect("the socket ends");
+    assert!(
+        !matches!(&closed, Some(frame) if u16::from(frame.code) == 1008),
+        "a TS client's text prelude is admitted: {closed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ts_clients_text_prelude_is_admitted() {
+    let app = App::start().await;
+    let ws = app.url.replacen("http", "ws", 1) + &format!("/apps/{}/ws", app.app_id);
+    a_ts_shaped_socket_is_admitted(&app, &ws).await;
+    assert!(
+        app.admitted
+            .lock()
+            .unwrap()
+            .contains(&Admitted::User("tess".into()))
+    );
+    app.stop().await;
+}
+
+/// The same through the Axum adapter.
+#[cfg(feature = "axum")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_axum_router_admits_a_ts_clients_text_prelude() {
+    let app = App::start().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws = format!(
+        "ws://{}/jazz/apps/{}/ws",
+        listener.local_addr().unwrap(),
+        app.app_id
+    );
+    let router = app.endpoint.router();
+    let served = tokio::spawn(async move { axum::serve(listener, router).await });
+    a_ts_shaped_socket_is_admitted(&app, &ws).await;
+    served.abort();
     app.stop().await;
 }

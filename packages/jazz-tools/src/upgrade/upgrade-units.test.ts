@@ -14,6 +14,7 @@ import { editAppJson, entriesOf, parseAppJson, printAppJson } from "./app-json.j
 import { isRustApp, renameValidate } from "./index.js";
 import { dslAlpha } from "./legacy.js";
 import { checkMigrations } from "./migrations.js";
+import { payloadEnumColumns } from "./payload-enums.js";
 import { readGeneratedNames, rowTypeName } from "./names.js";
 import { FIXTURES } from "./upgrade-test-helpers.js";
 
@@ -178,5 +179,32 @@ describe("Rust apps", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("enum columns with cases", () => {
+  it("are found in the current tables, in history and as array elements, optional or not", () => {
+    const cases = { bug: { severity: "int" }, feature: { area: "string" } };
+    const app = parseAppJson(
+      JSON.stringify({
+        format: 1,
+        tables: {
+          tickets: {
+            columns: {
+              title: "string",
+              kind: { enum: cases, optional: true },
+              status: { enum: ["a", "b"] },
+            },
+          },
+          notes: { columns: { kinds: { array: { enum: cases } } } },
+        },
+        history: { "0123456789ab": { tables: { old: { columns: { kind: { enum: cases } } } } } },
+      }),
+    );
+    expect(payloadEnumColumns(app)).toEqual([
+      "tickets.kind",
+      "notes.kinds",
+      "history.0123456789ab: old.kind",
+    ]);
   });
 });

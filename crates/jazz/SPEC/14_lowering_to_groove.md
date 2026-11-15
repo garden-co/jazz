@@ -192,10 +192,11 @@ lens remapping, and durable reopen. These paths MUST accept authored and physica
 case ordinal 256 (including recursively nested payload values); no intermediate
 representation may narrow it to the scalar enum's `u8` width.
 
-The public payload-enum v1 boundary MUST continue to admit only scalar payload
-fields; arrays, rows, and nested enums remain unsupported. Recursive ordinal
-translation is an internal physical/catalogue invariant and does not expand the
-public schema surface.
+Payload enums are internal record types only: the public schema has no column
+type for them (enums whose cases carry fields were removed in 2.0.0-alpha.65,
+before any store could hold them; see jazz#5758). Recursive ordinal translation
+is an internal physical/catalogue invariant and does not expand the public
+schema surface.
 
 Projection from a physical case back into an authored schema is non-total. If a
 query does not read, filter, join, order, group, authorize, or otherwise require
