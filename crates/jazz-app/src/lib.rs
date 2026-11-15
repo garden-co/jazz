@@ -17,8 +17,8 @@
 //! ([`EndUser`]), with the app's bearer.
 //!
 //! Not supported yet: connecting to a core directly as an end user (with a
-//! JWT the core verifies), local-first (device) accounts, includes (nested related rows in one result), reads inside
-//! transactions.
+//! JWT the core verifies), local-first (device) accounts, includes (nested
+//! related rows in one result), reads inside transactions.
 
 mod app;
 mod backend;

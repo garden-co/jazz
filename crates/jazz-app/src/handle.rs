@@ -10,11 +10,12 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::FutureExt as _;
 use jazz::account_registry::AccountId;
 use jazz::tools::{
-    AppContext, AppId, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
+    AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
     Session, TableName, TransactionId,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -22,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::app::AppFiles;
 use crate::backend;
 use crate::config::{Config, Storage};
-use crate::end_user::{self, EndUser, SignedIn};
+use crate::end_user::Renewal;
 use crate::error::{Error, Result};
 use crate::query::Query;
 use crate::subscription::{self, Subscription};
@@ -59,6 +60,8 @@ pub struct Jazz {
 pub(crate) struct Info {
     bundle: Option<String>,
     account: Option<AccountId>,
+    /// Set when an end user's renewed bearer names another user.
+    signed_out: Arc<AtomicBool>,
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
@@ -127,12 +130,13 @@ impl Jazz {
             .name("jazz-client".into())
             .spawn(move || run(files, config, receiver, ready))
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
-        let (bundle, account) = opened.await.map_err(|_| Error::Stopped)??;
+        let (bundle, account, signed_out) = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
             info: Arc::new(Info {
                 bundle,
                 account,
+                signed_out,
                 implementations,
                 serverless,
             }),
@@ -149,6 +153,13 @@ impl Jazz {
     /// the signed-in end user.
     pub fn account(&self) -> Option<AccountId> {
         self.info.account
+    }
+
+    /// True once an end user's renewed bearer names another user: the client
+    /// has stopped syncing (local reads and writes go on). Open another store
+    /// for the new user.
+    pub fn signed_out(&self) -> bool {
+        self.info.signed_out.load(Ordering::SeqCst)
     }
 
     /// Runs `job` with the untyped client on its thread: for what the typed
@@ -439,30 +450,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "a panic without a message".to_owned())
 }
 
-type Opened = (Option<String>, Option<AccountId>);
-
-/// An end user's sign-in, kept fresh while the client runs.
-struct Renewal {
-    end_user: EndUser,
-    server: String,
-    app_id: AppId,
-    token: String,
-    signed: SignedIn,
-}
-
-impl Renewal {
-    async fn keep(self, client: JazzClient) {
-        end_user::keep_signed_in(
-            client,
-            self.end_user,
-            self.server,
-            self.app_id,
-            self.token,
-            self.signed,
-        )
-        .await
-    }
-}
+type Opened = (Option<String>, Option<AccountId>, Arc<AtomicBool>);
 
 async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened, Option<Renewal>)> {
     let loaded = files.load()?;
@@ -501,23 +489,17 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened,
         context.bundle = Some(published.clone());
         bundle = Some(published);
     }
+    let signed_out = Arc::new(AtomicBool::new(false));
     let mut renewal = None;
     if let (Some(end_user), Some(server)) = (&config.end_user, &config.server_url) {
-        let token = end_user.token().await?;
-        let signed = end_user::sign_in(server, config.app_id, &token).await?;
-        context.account_id = Some(signed.account);
-        admitted = Some(signed.account);
+        let signed = Renewal::start(end_user, server, config.app_id, signed_out.clone()).await?;
+        context.account_id = signed.account();
+        admitted = signed.account();
         // The backend vouches for this session to the core; the client
         // presents the app's bearer on the upgrade (see AppContext).
-        context.backend_session = Some(signed.session.clone());
-        context.jwt_token = Some(token.clone());
-        renewal = Some(Renewal {
-            end_user: end_user.clone(),
-            server: server.clone(),
-            app_id: config.app_id,
-            token,
-            signed,
-        });
+        context.backend_session = Some(signed.signed.session.clone());
+        context.jwt_token = Some(signed.token.clone());
+        renewal = Some(signed);
     }
     let client = if context.server_url.is_empty() {
         JazzClient::connect(context).await?
@@ -528,7 +510,7 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened,
         )
         .await?
     };
-    Ok((client, (bundle, admitted), renewal))
+    Ok((client, (bundle, admitted, signed_out), renewal))
 }
 
 #[allow(dead_code)]

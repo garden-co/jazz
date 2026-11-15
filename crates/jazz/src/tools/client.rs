@@ -118,6 +118,11 @@ struct Shared {
     upstream_paused: watch::Sender<bool>,
     /// The credential the next connection attempt presents.
     credentials: watch::Sender<Credentials>,
+    /// The app's own backend relays this client's session: its bearer goes
+    /// on the socket upgrade, never in the prelude to a core.
+    relayed: bool,
+    /// The upstream link's last published status; `None` without a server.
+    link_status: watch::Sender<Option<LinkStatus>>,
     /// No server is configured, so nothing can confirm a write past Local.
     serverless: bool,
     /// The upstream link is a trusted backend or admin link, which may
@@ -155,8 +160,6 @@ struct State {
     connect_started: u64,
     /// The last upstream connect attempt that failed, and its error.
     connect_failed: Option<(u64, String)>,
-    /// The upstream link's last published status; `None` without a server.
-    link_status: Option<LinkStatus>,
     /// Consecutive recoverable tick failures.
     tick_failures: u32,
     /// The failure that stopped the tick driver. Every later call reports
@@ -703,7 +706,7 @@ impl LinkKeeper {
         shared.db.set_remote_link_hint(self.link.remote_link_hint());
         for event in self.link.drain_events() {
             if let LinkEvent::Status(status) = event {
-                shared.state().link_status = Some(status);
+                shared.link_status.send_replace(Some(status));
             }
         }
     }
@@ -854,6 +857,8 @@ impl JazzClient {
                     .flatten(),
             })
             .0,
+            relayed,
+            link_status: watch::channel(None).0,
             serverless: connector.is_none(),
             trusted: context.admin_secret.is_some()
                 || (context.backend_secret.is_some()
@@ -1842,10 +1847,11 @@ impl JazzClient {
                 "only a client with a bearer-authenticated server can update its token".to_owned(),
             ));
         }
+        let relayed = self.shared.relayed;
         self.shared.credentials.send_modify(|credentials| {
             // Relayed by the app's backend, the token is the app's bearer on
             // the upgrade; otherwise the core checks it in the prelude.
-            if credentials.authorization.is_some() {
+            if relayed {
                 credentials.authorization = Some(format!("Bearer {jwt_token}"));
             } else {
                 credentials.auth.jwt_token = Some(jwt_token);
@@ -1857,7 +1863,41 @@ impl JazzClient {
     /// The upstream link's status, including why it is not live and whether
     /// it waits for a new token. `None` for a client without a server.
     pub fn upstream_status(&self) -> Option<LinkStatus> {
-        self.shared.state.borrow().link_status.clone()
+        self.shared.link_status.borrow().clone()
+    }
+
+    /// The upstream link's status as it changes, to wait on instead of
+    /// polling [`JazzClient::upstream_status`].
+    pub fn upstream_status_changes(&self) -> watch::Receiver<Option<LinkStatus>> {
+        self.shared.link_status.subscribe()
+    }
+
+    /// For a client the app's backend relays: state the session that
+    /// backend's latest sign-in returned, with the bearer it accepted. A
+    /// live link reconnects with them.
+    pub fn update_relayed_sign_in(&self, session: Session, jwt_token: String) -> Result<()> {
+        self.shared.ensure_open()?;
+        if !self.shared.relayed {
+            return Err(JazzError::Connection(
+                "only a client the app's backend relays states a signed-in session".to_owned(),
+            ));
+        }
+        let stated = serde_json::to_value(&session)
+            .map_err(|error| JazzError::Connection(error.to_string()))?;
+        self.shared.credentials.send_modify(|credentials| {
+            credentials.auth.backend_session = Some(stated);
+            credentials.authorization = Some(format!("Bearer {jwt_token}"));
+        });
+        Ok(())
+    }
+
+    /// Detach the upstream link and keep it down: local reads and writes go
+    /// on, and nothing syncs until the client is reopened.
+    pub fn stop_upstream(&self) -> bool {
+        self.shared.upstream_paused.send_replace(true);
+        let detached = detach(&self.shared);
+        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        detached
     }
 
     /// Log query shapes whose runs take at least `threshold` as `tracing`
@@ -1947,10 +1987,7 @@ impl JazzClient {
     }
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
-        self.shared.upstream_paused.send_replace(true);
-        let detached = detach(&self.shared);
-        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-        detached
+        self.stop_upstream()
     }
 
     /// Wait for a durability tier using an exact timeout rather than the
@@ -2162,7 +2199,9 @@ fn stated_session(context: &AppContext) -> Result<Option<serde_json::Value>> {
         || context.admin_secret.is_some()
     {
         return Err(JazzError::Connection(
-            "a backend_session is stated with the backend secret alone".to_owned(),
+            "a backend_session is stated with the backend secret alone, or relayed by \
+             the app's backend with its bearer (`jwt_token`) and no secret"
+                .to_owned(),
         ));
     }
     serde_json::to_value(session)

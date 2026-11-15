@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -85,8 +86,8 @@ impl std::fmt::Debug for EndUser {
 /// The backend's answer to a sign-in.
 #[derive(Debug, Clone)]
 pub(crate) struct SignedIn {
+    /// The user's session; its `account_id` is always set.
     pub session: Session,
-    pub account: AccountId,
     /// Unix seconds: until when the backend's answer holds.
     pub expires_at: u64,
 }
@@ -94,8 +95,13 @@ pub(crate) struct SignedIn {
 /// `POST <backend>/apps/<id>/accounts/backend-sign-in` with the app's bearer:
 /// the backend's `authenticate` names the user and the core resolves (or
 /// creates) their account.
-pub(crate) async fn sign_in(server: &str, app_id: AppId, token: &str) -> Result<SignedIn> {
-    let response = http()?
+pub(crate) async fn sign_in(
+    http: &reqwest::Client,
+    server: &str,
+    app_id: AppId,
+    token: &str,
+) -> Result<SignedIn> {
+    let response = http
         .post(app_url(server, app_id, "accounts/backend-sign-in"))
         .bearer_auth(token)
         .send()
@@ -143,73 +149,129 @@ pub(crate) async fn sign_in(server: &str, app_id: AppId, token: &str) -> Result<
     session.account_id = Some(account);
     Ok(SignedIn {
         session,
-        account,
         expires_at: answer.expires_at,
     })
 }
 
 /// How long before an expiry the bearer is renewed.
 const RENEW_EARLY: Duration = Duration::from_secs(60);
-/// How often the link is checked for a refused bearer.
-const CHECK_EVERY: Duration = Duration::from_secs(2);
 /// The longest wait between failed renewals.
 const MAX_RETRY: Duration = Duration::from_secs(60);
 
-/// Keeps the client's bearer fresh: renews it shortly before the sign-in or
-/// the bearer itself expires, and at once when the backend refuses it. Ends
-/// with the client, or if the bearer comes to name another user (a store
-/// holds one user's data; open another for them).
-pub(crate) async fn keep_signed_in(
-    client: JazzClient,
-    end_user: EndUser,
-    server: String,
-    app_id: AppId,
-    mut token: String,
-    mut signed: SignedIn,
-) {
-    let mut renew_at = renewal_due(&token, signed.expires_at);
-    let mut retry = Duration::from_secs(1);
-    let mut not_before = 0;
-    loop {
-        tokio::time::sleep(CHECK_EVERY).await;
-        let Some(status) = client.upstream_status() else {
-            return;
-        };
-        let refused = matches!(status.phase, LinkPhase::AwaitingCredential(_));
-        if (!refused && now() < renew_at) || now() < not_before {
-            continue;
-        }
-        let renewed = async {
-            let fresh = end_user.token().await?;
-            let again = sign_in(&server, app_id, &fresh).await?;
-            Ok::<_, Error>((fresh, again))
-        }
-        .await;
-        match renewed {
-            Ok((fresh, again)) => {
-                if again.session.issuer != signed.session.issuer
-                    || again.session.user_id != signed.session.user_id
-                    || again.account != signed.account
-                {
-                    tracing::error!(
-                        "jazz-app: the end user's bearer now names another user; \
-                         this client stays signed out (open another store for them)"
-                    );
-                    return;
+/// An end user's sign-in, kept fresh while the client runs.
+pub(crate) struct Renewal {
+    pub end_user: EndUser,
+    pub http: reqwest::Client,
+    pub server: String,
+    pub app_id: AppId,
+    pub token: String,
+    pub signed: SignedIn,
+    /// Set once the bearer names another user and the client stops syncing.
+    pub signed_out: Arc<AtomicBool>,
+}
+
+impl Renewal {
+    /// Signs in at open: `connect` states this session and bearer.
+    pub(crate) async fn start(
+        end_user: &EndUser,
+        server: &str,
+        app_id: AppId,
+        signed_out: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        let http = http()?;
+        let token = end_user.token().await?;
+        let signed = sign_in(&http, server, app_id, &token).await?;
+        Ok(Self {
+            end_user: end_user.clone(),
+            http,
+            server: server.to_owned(),
+            app_id,
+            token,
+            signed,
+            signed_out,
+        })
+    }
+
+    /// The account the user signed in as.
+    pub(crate) fn account(&self) -> Option<AccountId> {
+        self.signed.session.account_id
+    }
+
+    /// Keeps the client's bearer fresh: renews it shortly before the sign-in
+    /// or the bearer itself expires, and when the backend refuses it. Ends
+    /// with the client, or if the bearer comes to name another user (a store
+    /// holds one user's data; open another for them): the client then stops
+    /// syncing and [`Jazz::signed_out`](crate::Jazz::signed_out) turns true.
+    pub(crate) async fn keep(mut self, client: JazzClient) {
+        let mut status = client.upstream_status_changes();
+        let mut renew_at = renewal_due(&self.token, self.signed.expires_at);
+        let mut retry = Duration::from_secs(1);
+        let mut not_before = 0;
+        loop {
+            let refused = matches!(
+                status.borrow_and_update().as_ref().map(|s| &s.phase),
+                Some(LinkPhase::AwaitingCredential(_))
+            );
+            let due = if refused {
+                not_before
+            } else {
+                renew_at.max(not_before)
+            };
+            if now() < due {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(due - now())) => {}
+                    changed = status.changed() => if changed.is_err() {
+                        return; // the client closed
+                    },
                 }
-                if (fresh != token || refused) && client.update_auth_token(fresh.clone()).is_err() {
-                    return; // the client closed
-                }
-                renew_at = renewal_due(&fresh, again.expires_at);
-                token = fresh;
-                signed = again;
-                retry = Duration::from_secs(1);
-                not_before = 0;
+                continue;
             }
-            Err(error) => {
-                tracing::warn!(%error, "jazz-app: renewing the end user's sign-in failed");
-                not_before = now() + retry.as_secs();
-                retry = (retry * 2).min(MAX_RETRY);
+            let renewed = async {
+                let fresh = self.end_user.token().await?;
+                let again = sign_in(&self.http, &self.server, self.app_id, &fresh).await?;
+                Ok::<_, Error>((fresh, again))
+            }
+            .await;
+            match renewed {
+                Ok((fresh, again)) => {
+                    if again.session.issuer != self.signed.session.issuer
+                        || again.session.user_id != self.signed.session.user_id
+                        || again.session.account_id != self.signed.session.account_id
+                    {
+                        tracing::error!(
+                            "jazz-app: the end user's bearer now names another user; \
+                             this client stops syncing (open another store for them)"
+                        );
+                        self.signed_out.store(true, Ordering::SeqCst);
+                        client.stop_upstream();
+                        return;
+                    }
+                    let changed = fresh != self.token || again.session != self.signed.session;
+                    if (changed || refused)
+                        && client
+                            .update_relayed_sign_in(again.session.clone(), fresh.clone())
+                            .is_err()
+                    {
+                        return; // the client closed
+                    }
+                    renew_at = renewal_due(&fresh, again.expires_at);
+                    self.token = fresh;
+                    self.signed = again;
+                    if refused {
+                        // The sign-in took the bearer but the socket refused
+                        // it: back off, or it would sign in again at once.
+                        not_before = now() + retry.as_secs();
+                        retry = (retry * 2).min(MAX_RETRY);
+                    } else {
+                        retry = Duration::from_secs(1);
+                        not_before = 0;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "jazz-app: renewing the end user's sign-in failed");
+                    not_before = now() + retry.as_secs();
+                    retry = (retry * 2).min(MAX_RETRY);
+                }
             }
         }
     }
