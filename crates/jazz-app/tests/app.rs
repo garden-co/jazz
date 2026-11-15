@@ -555,7 +555,7 @@ async fn open_transactions() {
     })
     .await
     .unwrap();
-    assert_eq!(tx.get::<Todo>(a.id).await.unwrap().unwrap().done, true);
+    assert!(tx.get::<Todo>(a.id).await.unwrap().unwrap().done);
     tx.commit().await.unwrap();
     assert!(jazz.get::<Todo>(a.id).await.unwrap().unwrap().done);
 
