@@ -34,8 +34,10 @@ func Gather[R any](start *Query[R], rel Relation[R, R], maxDepth int) *Query[R] 
 	return g
 }
 
-// Union is the rows any of qs keeps (queries of one table), each once.
-// Orders and limits added to it apply to the union.
+// Union is the rows each of qs keeps (queries of one table), as TS's
+// union: UNION ALL, so a row two of them keep comes back twice, and
+// limits count every occurrence. Orders and limits added to it apply to
+// the union. (A live union whose queries overlap can mis-apply removals.)
 func Union[R any](qs ...*Query[R]) *Query[R] {
 	u := &Query[R]{raw: &queryJSON{}}
 	for _, q := range qs {
