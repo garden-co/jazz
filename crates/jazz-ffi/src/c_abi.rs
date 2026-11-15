@@ -179,6 +179,36 @@ pub unsafe extern "C" fn jazz_call(
                 core.delete(&string("table")?, &string("id")?, &opts(false)?)?;
                 "null".into()
             }
+            "edit" => {
+                let patch = args
+                    .get("patch")
+                    .filter(|p| !p.is_null())
+                    .map(Json::to_string);
+                core.edit(
+                    &string("table")?,
+                    &string("id")?,
+                    patch.as_deref(),
+                    &field("edits")?.to_string(),
+                    &opts(false)?,
+                )?;
+                "null".into()
+            }
+            "editText" => {
+                let edits = json!([{
+                    "kind": "text",
+                    "column": string("column")?,
+                    "text": string("text")?,
+                    "editedFrom": string("editedFrom")?,
+                }]);
+                core.edit(
+                    &string("table")?,
+                    &string("id")?,
+                    None,
+                    &edits.to_string(),
+                    &opts(false)?,
+                )?;
+                "null".into()
+            }
             "txBegin" => {
                 let serializable = match args.get("serializable") {
                     None | Some(Json::Null) => true,

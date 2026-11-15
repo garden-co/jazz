@@ -143,6 +143,43 @@ impl JazzHandle {
             .surface(core::write_tier(&tier).and_then(|tier| self.core.wait_for_sync(tier)))
     }
 
+    /// Sets the text-merge column `column` to `text`, an edit of
+    /// `edited_from` (the value its writer last saw): changes made since by
+    /// others are kept, as the server merges them.
+    pub fn edit_text(
+        &self,
+        table: String,
+        id: String,
+        column: String,
+        edited_from: String,
+        text: String,
+    ) -> Result<()> {
+        let edits = text_edit(column, edited_from, text);
+        self.core.surface(
+            self.core
+                .edit(&table, &id, None, &edits, &Default::default()),
+        )
+    }
+
+    /// Partial edits of a row's text, bytes and JSON values (`edits_json`:
+    /// `text`, `splice` and `jsonSet` edits), with an optional whole-column
+    /// `patch_json`, in one write.
+    pub fn edit(
+        &self,
+        table: String,
+        id: String,
+        patch_json: Option<String>,
+        edits_json: String,
+    ) -> Result<()> {
+        self.core.surface(self.core.edit(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &edits_json,
+            &Default::default(),
+        ))
+    }
+
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
@@ -205,6 +242,16 @@ impl JazzHandle {
         ))?;
         Ok(Arc::new(Subscription { inner }))
     }
+}
+
+fn text_edit(column: String, edited_from: String, text: String) -> String {
+    serde_json::json!([{
+        "kind": "text",
+        "column": column,
+        "text": text,
+        "editedFrom": edited_from,
+    }])
+    .to_string()
 }
 
 fn read_opts(tier: &str) -> error::Result<core::Opts> {
@@ -281,6 +328,38 @@ impl Transaction {
         self.handle
             .core
             .surface(self.handle.core.delete(&table, &id, &self.opts()))
+    }
+
+    pub fn edit_text(
+        &self,
+        table: String,
+        id: String,
+        column: String,
+        edited_from: String,
+        text: String,
+    ) -> Result<()> {
+        let edits = text_edit(column, edited_from, text);
+        self.handle.core.surface(
+            self.handle
+                .core
+                .edit(&table, &id, None, &edits, &self.opts()),
+        )
+    }
+
+    pub fn edit(
+        &self,
+        table: String,
+        id: String,
+        patch_json: Option<String>,
+        edits_json: String,
+    ) -> Result<()> {
+        self.handle.core.surface(self.handle.core.edit(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &edits_json,
+            &self.opts(),
+        ))
     }
 
     /// Commits its writes together, returning once they reach `tier`
