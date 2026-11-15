@@ -66,7 +66,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "go",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: true,
+    enabled: false,
   },
 ];
 
