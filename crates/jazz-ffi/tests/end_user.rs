@@ -75,6 +75,7 @@ async fn end_users_sign_in_and_sync_through_the_app() {
         &server.base_url(),
         app_id,
         server.backend_secret(),
+        server.admin_secret(),
         backend.bundle().unwrap(),
     )
     .await;
