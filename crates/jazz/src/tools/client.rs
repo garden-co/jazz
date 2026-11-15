@@ -1462,6 +1462,52 @@ impl JazzClient {
         Ok(Some(self.committed(write.mergeable_tx_id())))
     }
 
+    /// The authority's advice on whether this client may do `action` (read,
+    /// insert, update or delete a row), without doing it. Without a server
+    /// nothing can advise: the answer is
+    /// [`PermissionAdvice::Unknown`](crate::protocol::PermissionAdvice).
+    pub async fn permission_advice(
+        &self,
+        action: PermissionAdviceRequest,
+    ) -> Result<crate::protocol::PermissionAdvice> {
+        if self.session_identity()?.is_some() || self.transaction_id().is_some() {
+            return Err(JazzError::Query(
+                "permission advice for an explicit session or in a transaction is not supported"
+                    .into(),
+            ));
+        }
+        let action = match action {
+            PermissionAdviceRequest::Read { table, row } => {
+                crate::protocol::PermissionAdviceAction::Read {
+                    table,
+                    row: RowUuid(*row.uuid()),
+                }
+            }
+            PermissionAdviceRequest::Insert { table, values } => {
+                let cells = self.core_cells(&table, values)?;
+                crate::protocol::PermissionAdviceAction::Insert { table, cells }
+            }
+            PermissionAdviceRequest::Update { table, row, values } => {
+                let patch = self.core_cells(&table, values.into_iter().collect())?;
+                crate::protocol::PermissionAdviceAction::Update {
+                    table,
+                    row: RowUuid(*row.uuid()),
+                    patch,
+                }
+            }
+            PermissionAdviceRequest::Delete { table, row } => {
+                crate::protocol::PermissionAdviceAction::Delete {
+                    table,
+                    row: RowUuid(*row.uuid()),
+                }
+            }
+        };
+        let db = self.db()?;
+        let id = db.request_permission_advice(action, None);
+        self.shared.tick_soon();
+        self.shared.settle(db.permission_advice(id)).await
+    }
+
     /// Delete a row in the named table.
     ///
     /// The row need not have appeared in a previous query result. The table and
@@ -1857,6 +1903,28 @@ impl JazzClient {
             })
             .await?
     }
+}
+
+/// What [`JazzClient::permission_advice`] asks about.
+#[derive(Debug, Clone)]
+pub enum PermissionAdviceRequest {
+    Read {
+        table: String,
+        row: ObjectId,
+    },
+    Insert {
+        table: String,
+        values: HashMap<String, Value>,
+    },
+    Update {
+        table: String,
+        row: ObjectId,
+        values: Vec<(String, Value)>,
+    },
+    Delete {
+        table: String,
+        row: ObjectId,
+    },
 }
 
 /// A transaction-scoped client handle.
