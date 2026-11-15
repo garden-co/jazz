@@ -191,10 +191,21 @@ type SessionState struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// SyncStatus is the state of the app's link to its server, as Jazz
-// reports it (e.g. {"status": "connected"}).
+// SyncStatus is how the app's sync is going, as the TS client's
+// SyncStatus.
 type SyncStatus struct {
+	// Link is the connection's state, e.g. {"status": "connected"} or
+	// {"status": "offline", "reason": "network"|"auth"|…, "auth": …}.
 	Link json.RawMessage `json:"link"`
+	// PendingUploads is how many writes the server hasn't accepted yet.
+	PendingUploads int `json:"pendingUploads"`
+	// OldestPendingAt is when the oldest of them was made.
+	OldestPendingAt *Timestamp `json:"oldestPendingAt"`
+	// Rejected and LastError describe writes the server refused.
+	Rejected  json.RawMessage `json:"rejected"`
+	LastError json.RawMessage `json:"lastError"`
+	// Synced: nothing is pending.
+	Synced bool `json:"synced"`
 }
 
 // Session is the end user's session, or nil for a local app or a
@@ -210,6 +221,24 @@ func (db *DB) SyncStatus(ctx context.Context) (SyncStatus, error) {
 	var s SyncStatus
 	err := db.call(ctx, "syncStatus", map[string]any{}, &s)
 	return s, err
+}
+
+// Link links the signed-in device account to the user bearer (a token
+// from your auth provider) signs in as, and returns that user.
+func (db *DB) Link(ctx context.Context, bearer string) (*User, error) {
+	var u *User
+	err := db.call(ctx, "link", map[string]any{"bearer": bearer}, &u)
+	return u, err
+}
+
+// Bundle is the permissions bundle a backend published ("" for a client):
+// what an app endpoint serving end users hands their sockets.
+func (db *DB) Bundle(ctx context.Context) (string, error) {
+	var b *string
+	if err := db.call(ctx, "bundle", map[string]any{}, &b); err != nil || b == nil {
+		return "", err
+	}
+	return *b, nil
 }
 
 // Refresh asks the TokenProvider for a fresh token now.
