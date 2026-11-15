@@ -80,6 +80,15 @@ fn hops_unions_and_deleted_rows() {
         ], "orderBy": [{ "column": "title" }] }),
     );
     assert_eq!(names(&union, "title"), ["Rig", "Tent"]);
+    // A row two arms match comes once.
+    let overlapping = rows(
+        &jazz,
+        json!({ "union": [
+            { "table": "tasks", "where": [{ "column": "showId", "op": "eq", "value": gala }] },
+            { "table": "tasks", "where": [{ "column": "id", "op": "eq", "value": rig }] },
+        ] }),
+    );
+    assert_eq!(names(&overlapping, "title"), ["Doors", "Rig"]);
 
     jazz.delete("tasks".into(), rig.clone()).unwrap();
     assert!(
@@ -195,4 +204,31 @@ async fn history_reads_accepted_versions() {
     .await;
     server.shutdown().await;
     result.unwrap();
+}
+
+const TEAMS_APP: &str = include_str!("fixtures/relations/jazz.app.json");
+
+/// A hop over a `uuid[]` reference reaches every row it names.
+#[test]
+fn hops_over_uuid_arrays_reach_every_named_row() {
+    let jazz = JazzHandle::open(json!({ "app": TEAMS_APP }).to_string()).unwrap();
+    let person = |name: &str| {
+        parse(
+            &jazz
+                .insert("people".into(), json!({ "name": name }).to_string())
+                .unwrap(),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (ada, bo, cy) = (person("Ada"), person("Bo"), person("Cy"));
+    jazz.insert(
+        "teams".into(),
+        json!({ "name": "Crew", "members": [ada, bo], "lead": ada }).to_string(),
+    )
+    .unwrap();
+    let _ = cy;
+    let members = rows(&jazz, json!({ "table": "teams", "hopTo": "memberRows" }));
+    assert_eq!(names(&members, "name"), ["Ada", "Bo"]);
 }

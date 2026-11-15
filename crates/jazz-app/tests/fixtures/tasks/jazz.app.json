@@ -13,9 +13,13 @@
     "steps": {
       "columns": {
         "label": "string",
-        "task": { "type": "uuid", "references": "tasks" }
+        "task": { "type": "uuid", "references": "tasks" },
+        "blockers": { "array": "uuid" }
       },
-      "relations": { "taskRelation": { "rel": "tasks", "column": "task" } }
+      "relations": {
+        "taskRelation": { "rel": "tasks", "column": "task" },
+        "blockerRows": { "rel": "tasks", "column": "blockers" }
+      }
     },
     "tasks": {
       "columns": {
