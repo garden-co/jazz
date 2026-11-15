@@ -62,7 +62,28 @@ ship inside a mobile or desktop app. In .65, apps on users' devices open
 local-only clients (no `serverUrl`), because connecting as an end user with a
 JWT is not supported yet.
 
-Without `permissions`, it opens as a local client. `appId` is required for
+**End users** (contract v2): `"serverUrl"` is the app's Jazz endpoint (its
+backend's `createJazz` handler, never the core) and `"auth"` says who signs
+in: `{"deviceKey": "jazz-auth-v1:…"}` (a local-first device account; make one
+with `generate_device_key()` / `jazz_generate_device_key`, and keep it as a
+password in the platform's keychain) or `{"bearer": true}`, the app's own
+sign-in, whose tokens a host callback gives (UniFFI
+`JazzHandle.open_with_tokens(config, TokenProvider)`, C
+`jazz_open_user(config, token_cb, ctx, err)`): it is called on a thread of
+its own with `connect`, `renew`, `expired` or `refresh` and returns the token
+or none (signed out). `session_state()` / `"session"` gives
+`{"status": "signedIn"|"expired"|"signedOut", "user"?: {account, issuer,
+subject, claims, kind}}`; `sync_status()` / `"syncStatus"` gives `{"link":
+…}`; `watch_session` / `watch_sync` (C `jazz_watch(h, "session"|"sync", …)`,
+`jazz_unwatch`) call back with each state, the current one first;
+`refresh()` asks for a fresh token; `link(bearer)` / `"link"` links a
+device account to the app's own sign-in (the session becomes that user's, on
+the device's account); `sign_out()` signs out and closes the app. The sync
+status is TS's `SyncStatus` (`{link, pendingUploads, oldestPendingAt,
+rejected, lastError, synced}`). A backend's `bundle()` / `"bundle"` is the
+permissions bundle it published. Anonymous users are not supported (as in TS).
+
+Without `permissions` or `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
 ## Values, queries, rows, deltas
@@ -101,7 +122,11 @@ columns (`merge: "text"`) take plain string writes.
   an `updated` row when its related rows change.
 - **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
   always) instead of all of them, at the root or in an include. `"*"` selects
-  every column.
+  every column. An entry may read part of a large value instead of all of
+  it: `{"column", "from", "to", "units": "utf8"|"utf16"|"bytes"}` (half-open;
+  UTF-8 on code point boundaries; bytes come back base64) or `{"column",
+"at": "<JSON pointer>"}` for a json column. Parts are for the root query,
+  not inside includes.
 - A forward relation through a `uuid[]` column reads as an array of the
   referenced rows; `required` on it keeps only rows whose every reference is
   readable. Stricter than TS: `required` on reverse relations or optional
@@ -147,6 +172,12 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
   take `id`; `update` takes `id` and an optional `row` patch. `null` (no
   server, or no decision) means unknown. Not inside a transaction.
+- **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
+  `upsert {table, id, row}` write the row with this id: an insert if there is
+  none, else its columns replaced; `row` is a whole row, as for an insert.
+  `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
+  deleted row as it was, or with `patch` (a whole row) as its content. Both
+  return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`

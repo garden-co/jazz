@@ -68,6 +68,16 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              (edits: text / splice / jsonSet, see the README)
  *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
  *               "id"?, "row"?}                               -> true|false|null
+ *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
+ *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
+ *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
+ *                     | null (a local app or a backend)
+ *   "syncStatus" {} -> {"link": ...}
+ *   "refresh"  {}  -> null (asks the token callback for a fresh token)
+ *   "link"     {"bearer"} -> the user (links a device account to the app's
+ *                            own sign-in; the session becomes that user's)
+ *   "signOut"  {}  -> null (signs out and closes the app)
+ *   "bundle"   {}  -> "<published permissions bundle>" | null (a backend's)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
@@ -107,6 +117,37 @@ void jazz_unsubscribe(JazzSubscription *subscription);
  * jazz_unsubscribe, before or after this call.
  */
 void jazz_close(JazzHandle *handle);
+
+/*
+ * An end user's token callback: called on a thread of its own (it may
+ * block) with reason "connect" | "renew" | "expired" | "refresh"; returns
+ * the token as a malloc'ed string (Go: C.CString), which jazz frees, or
+ * NULL when no one is signed in.
+ */
+typedef char *(*JazzTokenCallback)(void *ctx, const char *reason);
+
+/*
+ * Opens an app as an end user signing in with the app's bearer
+ * ("auth": {"bearer": true}); cb and ctx stay valid, from any thread, until
+ * jazz_close returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
+ */
+JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
+                           char **err);
+
+typedef struct JazzWatch JazzWatch;
+
+/*
+ * Calls cb with kind "session" or "sync" and each state's JSON, the
+ * current one first, on a thread of its own, until jazz_unwatch.
+ */
+JazzWatch *jazz_watch(JazzHandle *handle, const char *what, JazzCallback cb, void *ctx,
+                      char **err);
+
+/* Ends and frees a watch: when it returns no callback is running. */
+void jazz_unwatch(JazzWatch *watch);
+
+/* A new device account's key ("jazz-auth-v1:..."); keep it as a password. */
+char *jazz_generate_device_key(char **err);
 
 /* Frees a string returned by, or stored in *err by, this API. */
 void jazz_string_free(char *text);

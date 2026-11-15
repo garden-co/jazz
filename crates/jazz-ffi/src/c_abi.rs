@@ -240,6 +240,36 @@ pub unsafe extern "C" fn jazz_call(
                 Json::from(core.can(&string("table")?, &string("op")?, id, row.as_deref())?)
                     .to_string()
             }
+            "session" => core.session_state()?.unwrap_or_else(|| "null".into()),
+            "syncStatus" => core.sync_status()?,
+            "refresh" => {
+                core.refresh()?;
+                "null".into()
+            }
+            "link" => core.link(&string("bearer")?)?,
+            "bundle" => Json::from(core.bundle()?).to_string(),
+            "signOut" => {
+                core.sign_out()?;
+                "null".into()
+            }
+            "upsert" => core.upsert(
+                &string("table")?,
+                &string("id")?,
+                &field("row")?.to_string(),
+                &opts(false)?,
+            )?,
+            "restore" => {
+                let patch = args
+                    .get("patch")
+                    .filter(|p| !p.is_null())
+                    .map(Json::to_string);
+                core.restore(
+                    &string("table")?,
+                    &string("id")?,
+                    patch.as_deref(),
+                    &opts(false)?,
+                )?
+            }
             "txBegin" => {
                 let serializable = match args.get("serializable") {
                     None | Some(Json::Null) => true,
@@ -381,4 +411,134 @@ pub unsafe extern "C" fn jazz_string_free(text: *mut c_char) {
         // SAFETY: per the function's contract.
         drop(unsafe { CString::from_raw(text) });
     }
+}
+
+/// A host's token callback: called on a thread of its own (it may block)
+/// with `reason` (`"connect"`, `"renew"`, `"expired"`, `"refresh"`); returns
+/// the token as a string allocated with `malloc` (Go's `C.CString`), which
+/// jazz frees, or NULL when no one is signed in.
+pub type JazzTokenCallback =
+    Option<unsafe extern "C" fn(ctx: *mut c_void, reason: *const c_char) -> *mut c_char>;
+
+unsafe extern "C" {
+    fn free(pointer: *mut c_void);
+}
+
+struct TokenContext(*mut c_void);
+// SAFETY: the caller of `jazz_open_user` promises `ctx` may be used from
+// any thread (the header says so).
+unsafe impl Send for TokenContext {}
+unsafe impl Sync for TokenContext {}
+
+/// Opens an app as an end user who signs in with the app's bearer
+/// (`"auth": {"bearer": true}`): `token_cb` gives it.
+///
+/// # Safety
+/// `config_json` is NUL-terminated; `token_cb` and `ctx` stay valid, from
+/// any thread, until `jazz_close` returns; `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_open_user(
+    config_json: *const c_char,
+    token_cb: JazzTokenCallback,
+    ctx: *mut c_void,
+    err: *mut *mut c_char,
+) -> *mut JazzHandle {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let config = unsafe { text(config_json, "config_json") }?;
+        if let Some(version) = serde_json::from_str::<Json>(config)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(Json::as_u64))
+        {
+            contract.set(version);
+        }
+        let cb = token_cb.ok_or_else(|| refused("the token callback is NULL"))?;
+        let ctx = std::sync::Arc::new(TokenContext(ctx));
+        let host = crate::core::HostTokens(std::sync::Arc::new(move |reason: &str| {
+            let ctx = &ctx;
+            let reason = CString::new(reason).unwrap_or_default();
+            // SAFETY: per `jazz_open_user`'s contract.
+            let token = unsafe { cb(ctx.0, reason.as_ptr()) };
+            if token.is_null() {
+                return None;
+            }
+            // SAFETY: the callback returns a NUL-terminated `malloc`ed string.
+            let text = unsafe { CStr::from_ptr(token) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { free(token.cast()) };
+            Some(text)
+        }));
+        Ok(Box::into_raw(Box::new(JazzHandle(Core::open_with_tokens(
+            config,
+            Some(std::sync::Arc::new(host)),
+        )?))))
+    })
+}
+
+/// A watch of session or sync states (opaque to C).
+pub struct JazzWatch(crate::core::Watch);
+
+/// Calls `cb` with kind `"session"` or `"sync"` and each state's JSON, the
+/// current one first, on a thread of its own, until `jazz_unwatch`.
+///
+/// # Safety
+/// `handle` comes from `jazz_open`/`jazz_open_user` and is not closed;
+/// `what` is NUL-terminated; `cb` and `ctx` stay valid, from any thread,
+/// until `jazz_unwatch` returns; `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_watch(
+    handle_ptr: *const JazzHandle,
+    what: *const c_char,
+    cb: JazzCallback,
+    ctx: *mut c_void,
+    err: *mut *mut c_char,
+) -> *mut JazzWatch {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let (core, what) = unsafe { (handle(handle_ptr)?, text(what, "what")?) };
+        contract.set(core.contract);
+        let cb = cb.ok_or_else(|| refused("the callback is NULL"))?;
+        let ctx = Context(ctx);
+        let kind = CString::new(what).unwrap_or_default();
+        let watch = core.watch(
+            what,
+            Box::new(move |state| {
+                let ctx = &ctx;
+                let json = CString::new(state).unwrap_or_default();
+                // SAFETY: per `jazz_watch`'s contract.
+                unsafe { cb(ctx.0, kind.as_ptr(), json.as_ptr()) };
+            }),
+        )?;
+        Ok(Box::into_raw(Box::new(JazzWatch(watch))))
+    })
+}
+
+/// Ends and frees a watch: when it returns no callback is running (unless
+/// called from one).
+///
+/// # Safety
+/// `watch` is NULL or from `jazz_watch`, and not yet freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_unwatch(watch: *mut JazzWatch) {
+    if watch.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: per the function's contract.
+        let watch = unsafe { Box::from_raw(watch) };
+        watch.0.cancel();
+    }));
+}
+
+/// A new device account's key as `jazz-auth-v1:…` text, for `"auth":
+/// {"deviceKey": …}`; free it with `jazz_string_free`.
+///
+/// # Safety
+/// `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_generate_device_key(err: *mut *mut c_char) -> *mut c_char {
+    guarded(err, ptr::null_mut(), |_| {
+        Ok(into_c(crate::core::generate_device_key()?))
+    })
 }

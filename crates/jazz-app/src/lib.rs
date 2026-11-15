@@ -13,18 +13,26 @@
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
 //! ```
 //!
-//! Not supported yet: connecting to a sync server as an end user (with a
-//! JWT), includes (nested related rows in one result), reads inside
-//! transactions.
+//! An end user's client ([`Config::user`]) signs in with a device account
+//! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
+//! [`Jazz::session`] follows it; [`Session::link`] carries a device account
+//! over to the user's provider sign-in.
+//!
+//! Not supported yet: includes (nested related rows in one result), reads
+//! inside transactions. A bearer session is renewed by reconnecting with a
+//! fresh bearer, as TypeScript's bearer clients do (in-place renewal is for
+//! cookie sessions).
 
 mod advice;
 mod app;
+mod auth;
 mod backend;
 mod config;
 mod edit;
 mod error;
 mod handle;
 mod query;
+mod session;
 mod subscription;
 mod table;
 mod transaction;
@@ -33,11 +41,15 @@ mod writes;
 
 pub use advice::Advice;
 pub use app::AppFiles;
+pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
+pub use session::{
+    AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
+};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::Transaction;

@@ -73,10 +73,43 @@ func (q *Query[R]) RequireIncludes() *Query[R] {
 	return c
 }
 
-// Named is a column of rows of R, whatever its values: what Select takes.
-type Named[R any] interface{ columnName() string }
+// Named is a column of rows of R, whatever its values, or a part of one
+// (Range, JSONAt): what Select takes.
+type Named[R any] interface {
+	columnName() string
+	selectItem() any
+}
 
 func (c Column[R, V]) columnName() string { return c.name }
+func (c Column[R, V]) selectItem() any    { return c.name }
+
+// Part is a part of a large value to select: a range of a bytes or text
+// column, or a JSON column's subtree. The row holds it under the column's
+// name.
+type Part[R any] struct {
+	column string
+	item   map[string]any
+}
+
+func (p Part[R]) columnName() string { return p.column }
+func (p Part[R]) selectItem() any    { return p.item }
+
+// Range is bytes [from, to) of a bytes column, or of a text column's UTF-8
+// text (an end inside a character is refused); past the end is clamped.
+func Range[R, V any](c Column[R, V], from, to int) Part[R] {
+	var zero V
+	units := "utf8"
+	if _, ok := any(zero).([]byte); ok {
+		units = "bytes"
+	}
+	return Part[R]{column: c.name, item: map[string]any{"column": c.name, "from": from, "to": to, "units": units}}
+}
+
+// JSONAt is the subtree at pointer (RFC 6901, e.g. "/chapters/0") of a
+// JSON column.
+func JSONAt[R, V any](c Column[R, V], pointer string) Part[R] {
+	return Part[R]{column: c.name, item: map[string]any{"column": c.name, "at": pointer}}
+}
 
 // Select is q reading only cols (and id), into rows of P: a struct you
 // define whose json tags name the selected columns. A field of P that is
@@ -84,8 +117,10 @@ func (c Column[R, V]) columnName() string { return c.name }
 func Select[P, R any](q *Query[R], cols ...Named[R]) *Query[P] {
 	p := &Query[P]{table: q.table, raw: q.toJSON().cloneParts(), afterHop: q.afterHop}
 	p.selected = []string{}
+	p.selectItems = []any{}
 	for _, c := range cols {
 		p.selected = append(p.selected, c.columnName())
+		p.selectItems = append(p.selectItems, c.selectItem())
 	}
 	return p
 }
@@ -127,7 +162,7 @@ type queryJSON struct {
 	OrderBy []orderJSON   `json:"orderBy,omitempty"`
 	Limit   *int          `json:"limit,omitempty"`
 	Offset  *int          `json:"offset,omitempty"`
-	Select  []string      `json:"select,omitempty"`
+	Select  []any         `json:"select,omitempty"`
 	Include []includeJSON `json:"include,omitempty"`
 	History bool          `json:"history,omitempty"`
 	Gather  *gatherJSON   `json:"gather,omitempty"`

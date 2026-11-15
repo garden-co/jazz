@@ -61,6 +61,8 @@ const TABLE_METHODS: &[&str] = &[
     "Insert",
     "Update",
     "Delete",
+    "Upsert",
+    "Restore",
     "CanRead",
     "CanInsert",
     "CanUpdate",
@@ -984,6 +986,24 @@ impl<'a> Writer<'a> {
                 go_string(column)
             );
         }
+        let _ = writeln!(
+            out,
+            "// Upsert writes row as the row of `{}` with id: inserted, or updated if it exists.",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "func ({ty}) Upsert(ctx context.Context, db jazz.Querier, id string, row {new}, opts ...jazz.WriteOption) ({row}, error) {{\n\treturn jazz.Upsert[{new}, {row}](ctx, db, {table_name}, id, row, opts...)\n}}\n"
+        );
+        let _ = writeln!(
+            out,
+            "// Restore brings back the deleted row of `{}` with id.",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "func ({ty}) Restore(ctx context.Context, db jazz.Querier, id string) ({row}, error) {{\n\treturn jazz.Restore[{row}](ctx, db, {table_name}, id, nil)\n}}\n"
+        );
         let _ = writeln!(
             out,
             "// History starts a query of `{}`'s history: every accepted version of its rows.",

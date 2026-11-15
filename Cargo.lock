@@ -2107,9 +2107,11 @@ dependencies = [
 name = "jazz-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "futures-core",
  "futures-util",
+ "getrandom 0.3.4",
  "jazz",
  "jazz-codegen",
  "jazz-native-transport",
@@ -2120,6 +2122,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -2348,12 +2351,16 @@ name = "jazz-ffi"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "futures",
  "futures-executor",
+ "futures-util",
  "jazz-app",
  "jazz-server",
+ "reqwest",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "uniffi",
  "uuid",
 ]
@@ -4680,6 +4687,17 @@ dependencies = [
  "libc",
  "psm",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "stage-plan-rust-cli"
+version = "0.1.0"
+dependencies = [
+ "jazz-app",
+ "jazz-server",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

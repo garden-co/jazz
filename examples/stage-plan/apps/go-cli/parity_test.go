@@ -265,3 +265,41 @@ func TestPermissionAdvice(t *testing.T) {
 		}
 	}
 }
+
+func TestUpsertAndRestore(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Upsert Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := randomUUID(t)
+	row := jazzapp.NewTask{ShowID: show.ID, Title: "Load-in", Status: jazzapp.TaskStatusTodo, Rank: 1}
+	inserted, err := jazzapp.Tasks.Upsert(ctx, db, id, row)
+	if err != nil || inserted.ID != id {
+		t.Fatalf("upsert (insert): %+v %v", inserted, err)
+	}
+	row.Title = "Load-in early"
+	updated, err := jazzapp.Tasks.Upsert(ctx, db, id, row)
+	if err != nil || updated.Title != "Load-in early" {
+		t.Fatalf("upsert (update): %+v %v", updated, err)
+	}
+	if err := jazzapp.Tasks.Delete(ctx, db, id); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := jazzapp.Tasks.Restore(ctx, db, id)
+	if err != nil || restored.ID != id || restored.Title != "Load-in early" {
+		t.Fatalf("restore: %+v %v", restored, err)
+	}
+	// Selecting part of a text: the first four bytes of the title.
+	type head struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	heads, err := jazz.Select[head](jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(id)), jazz.Range(jazzapp.Tasks.Title, 0, 4)).All(ctx, db)
+	if err != nil || len(heads) != 1 || heads[0].Title != "Load" {
+		t.Fatalf("partial title: %+v %v", heads, err)
+	}
+}

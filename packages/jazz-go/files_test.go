@@ -46,3 +46,26 @@ func TestStreamingFiles(t *testing.T) {
 		t.Fatalf("after update: %q", got)
 	}
 }
+
+func TestFilesReadAPageAtATime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := Open(ctx, Config{App: filesApp, Storage: StorageMemory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	content := bytes.Repeat([]byte("abcdefghij"), (2*StreamChunk+7)/10)
+	row, err := InsertStreaming[map[string]any, fileRow](ctx, db, "files", map[string]any{"name": "f"}, "content", bytes.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := ReadBytesRange(ctx, db, "files", row.ID, "content", 10, 20)
+	if err != nil || string(page) != "abcdefghij" {
+		t.Fatalf("page: %q %v", page, err)
+	}
+	got, err := io.ReadAll(OpenBytes(ctx, db, "files", row.ID, "content"))
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("paged read: %d of %d bytes, %v", len(got), len(content), err)
+	}
+}

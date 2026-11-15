@@ -77,14 +77,15 @@ func (c Column[R, V]) Desc() Order[R] { return Order[R]{column: c.name, directio
 // Query is a query of rows of R. Its methods return a new query and leave
 // the receiver as it is, so a query can be shared and extended.
 type Query[R any] struct {
-	table    string
-	where    []Cond[R]
-	order    []Order[R]
-	limit    *int
-	offset   *int
-	include  []Include[R]
-	selected []string
-	tier     ReadTier
+	table       string
+	where       []Cond[R]
+	order       []Order[R]
+	limit       *int
+	offset      *int
+	include     []Include[R]
+	selected    []string
+	selectItems []any
+	tier        ReadTier
 	// afterHop: the typed parts apply to the rows a hop (raw.HopTo)
 	// reached, so they go under "after".
 	afterHop bool
@@ -101,6 +102,7 @@ func (q *Query[R]) clone() *Query[R] {
 	c.where = append([]Cond[R](nil), q.where...)
 	c.order = append([]Order[R](nil), q.order...)
 	c.include = append([]Include[R](nil), q.include...)
+	c.selectItems = append([]any(nil), q.selectItems...)
 	return &c
 }
 
@@ -133,7 +135,7 @@ func (q *Query[R]) Offset(n int) *Query[R] {
 }
 
 func (q *Query[R]) toJSON() queryJSON {
-	typed := queryJSON{Limit: q.limit, Offset: q.offset, Select: q.selected}
+	typed := queryJSON{Limit: q.limit, Offset: q.offset, Select: q.selectItems}
 	for _, w := range q.where {
 		c := condJSON{Column: w.column, Op: w.op}
 		if w.hasVal {
