@@ -196,4 +196,48 @@ public enum DocsSnippets {
         // #endregion reading-select-swift
         return titles
     }
+
+    public static func transaction(_ jazz: Jazz.Client, show: JazzApp.Show) async throws
+        -> JazzApp.Task
+    {
+        // #region writing-transaction-swift
+        // Commits when the closure returns, rolls back when it throws.
+        let task = try await jazz.transaction(commit: .global) { tx in
+            let task = try await tx.insert(
+                JazzApp.NewTask(showId: show.id, title: "Rig lights", status: .todo, rank: 10))
+            // Reads inside see the transaction's own writes.
+            let open = try await tx.all(
+                JazzApp.tasks.query().where(JazzApp.tasks.status.eq(.todo)))
+            try await tx.update(task.id, JazzApp.TaskPatch(rank: .set(Double(open.count))))
+            return task
+        }
+        // #endregion writing-transaction-swift
+        return task
+    }
+
+    public static func readTier(_ jazz: Jazz.Client, show: JazzApp.Show) async throws
+        -> [JazzApp.Task]
+    {
+        // #region reading-durability-tier-swift
+        // `.local` (this store), `.localFirst` (the default) or `.remote` (the server).
+        let fromServer = try await jazz.all(
+            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)), tier: .remote)
+        // #endregion reading-durability-tier-swift
+        return fromServer
+    }
+
+    public static func writeTier(_ jazz: Jazz.Client, show: JazzApp.Show) async throws
+        -> JazzApp.Task
+    {
+        // #region writing-durability-tier-swift
+        // Waits until the server accepted the write (and its permissions did).
+        let task = try await jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Doors", status: .todo, rank: 20),
+            tier: .global)
+        // Or write locally and wait for everything so far to reach the server.
+        try await jazz.update(task.id, JazzApp.TaskPatch(status: .set(.doing)))
+        try await jazz.waitForSync(.global)
+        // #endregion writing-durability-tier-swift
+        return task
+    }
 }
