@@ -215,14 +215,14 @@ describe("vercel() namespace", () => {
   });
 
   it("refuses an empty or oversized namespace", () => {
-    expect(() => vercel({ namespace: "" })).toThrow(/namespace is empty/);
-    expect(() => vercel({ namespace: "--" })).toThrow(/no letters or digits/);
-    expect(() => vercel({ namespace: 3 as never })).toThrow(/must be a string/);
+    expect(() => vercel({ namespace: "", region: "iad1" })).toThrow(/namespace is empty/);
+    expect(() => vercel({ namespace: "--", region: "iad1" })).toThrow(/no letters or digits/);
+    expect(() => vercel({ namespace: 3 as never, region: "iad1" })).toThrow(/must be a string/);
     // With a typical project id (32 characters) the prefix takes 38.
     expect(() =>
       vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 38), region: "iad1" }),
     ).not.toThrow();
-    expect(() => vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 37) })).toThrow(
+    expect(() => vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 37), region: "iad1" })).toThrow(
       /is 91 characters; with this project's prefix jazz-prj-x+- it may have at most 90/,
     );
     expect(() => coreName("prj_1", () => "a".repeat(200), {})).toThrow(/at most 117/);
