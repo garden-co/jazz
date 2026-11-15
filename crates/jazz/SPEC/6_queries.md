@@ -208,17 +208,18 @@ the core predicate vocabulary without re-implementing match rules.
 
 Supported matrix:
 
-| Column type       | `in`                                                                                                      | `contains`                                                                                                                                   |
-| ----------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Text/String       | Membership in a list of text values. UUID literals may be coerced to their string form for compatibility. | Substring containment with a text needle.                                                                                                    |
-| Integer / BigInt  | Membership in a list of same-type scalar values after the checked literal normalization below.            | Rejected.                                                                                                                                    |
-| Float / Timestamp | Membership in a list of same-type scalar values.                                                          | Rejected.                                                                                                                                    |
-| Boolean           | Membership in a list of boolean values.                                                                   | Rejected.                                                                                                                                    |
-| UUID/reference    | Membership in a list of UUID values. String UUID literals may be coerced to UUIDs at lowering boundaries. | Rejected.                                                                                                                                    |
-| Enum              | Membership in a list of enum-compatible values. String literals may be coerced to discriminants.          | Rejected.                                                                                                                                    |
-| Bytea             | Membership in a list of whole byte-array values.                                                          | Rejected.                                                                                                                                    |
-| Json              | Whole-value equality membership only where the binding layer can represent the literal.                   | Rejected.                                                                                                                                    |
-| Array<T>          | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
+| Column type       | `in`                                                                                                                                                             | `contains`                                                                                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Text/String       | Membership in a list of text values. UUID literals may be coerced to their string form for compatibility.                                                        | Substring containment with a text needle.                                                                                                    |
+| Integer / BigInt  | Membership in a list of same-type scalar values after the checked literal normalization below.                                                                   | Rejected.                                                                                                                                    |
+| Float / Timestamp | Membership in a list of same-type scalar values.                                                                                                                 | Rejected.                                                                                                                                    |
+| Boolean           | Membership in a list of boolean values.                                                                                                                          | Rejected.                                                                                                                                    |
+| UUID/reference    | Membership in a list of UUID values. String UUID literals may be coerced to UUIDs at lowering boundaries.                                                        | Rejected.                                                                                                                                    |
+| Enum              | Membership in a list of enum-compatible values. String literals may be coerced to discriminants.                                                                 | Rejected.                                                                                                                                    |
+| Bytea             | Membership in a list of whole byte-array values.                                                                                                                 | Rejected.                                                                                                                                    |
+| Vector            | Membership in a list of whole vectors, compared bit for bit as their `f32le/1` bytes (`-0.0` ≠ `0.0`). Nearness is a vector index search (20.4), never a filter. | Rejected.                                                                                                                                    |
+| Json              | Whole-value equality membership only where the binding layer can represent the literal.                                                                          | Rejected.                                                                                                                                    |
+| Array<T>          | Membership in a list of whole-array values.                                                                                                                      | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
 
 Invalid operator/type combinations must be rejected before execution with a
 clear type error. For a supported text or array `contains` haystack and a known
@@ -1052,7 +1053,7 @@ surface. The test plan below records additional intended coverage.
   compare the maintained stream's reduced result to the one-shot result at each
   checkpoint.
 - Extend the TS query API coverage in
-  `packages/jazz-tools/tests/ts-dsl/query-api.test.ts` so result arrays that
+  `packages/jazz-tools/tests/typed-app/query-api.test.ts` so result arrays that
   currently sort ids before comparison become ordered-equality assertions. Add
   explicit cases for
   default root ordering, reverse relation include arrays ordered by

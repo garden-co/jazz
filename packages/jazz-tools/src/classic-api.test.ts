@@ -32,7 +32,7 @@ it("names the Jazz 2 replacement for a Classic name that has one", () => {
   // A namespace member is named by its namespace.
   const map = thrown(() => (co as unknown as { map: unknown }).map);
   expect(map.message).toMatch(/^\[JAZZ_CLASSIC_API_REMOVED\] co\.map belongs to Jazz Classic/);
-  expect(map.message).toContain("In Jazz 2, start from tables:");
+  expect(map.message).toContain("In Jazz 2, start from tables, declared in `jazz.app.json`");
   // A Classic provider prop by the prop.
   expect(
     thrown(() => assertNoClassicProviderProps("JazzProvider", { sync: { peer: "wss://x" } }))
@@ -47,6 +47,6 @@ it("says only that it's Classic where Jazz 2 has nothing in its place", () => {
   expect(feed.message).toContain("This is not a rename-only migration.");
   // An inherited property name isn't taken for a replacement.
   expect(thrown(() => (co as unknown as { constructor: unknown }).constructor).message).toContain(
-    "In Jazz 2, start from tables:",
+    "In Jazz 2, start from tables, declared in `jazz.app.json`",
   );
 });

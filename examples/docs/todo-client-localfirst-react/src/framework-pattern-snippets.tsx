@@ -6,7 +6,7 @@ import {
   useSession,
   type JazzClientConfig,
 } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 function YourApp() {
   return null;

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Db } from 'jazz-tools';
   import { getDb, getJazzSession, getSession } from 'jazz-tools/svelte';
-  import { app } from '../schema.js';
+  import { app } from '../jazz.generated.js';
 
   // #region db-access-svelte
   // During component setup: getDb() reads Svelte context.

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "projectMembers": {
+      "read": {
+        "anyOf": [
+          "exists projects(id = this.projectId, $createdBy = session.user)",
+          "user_id = session.user"
+        ]
+      },
+      "insert": "exists projects(id = this.projectId, $createdBy = session.user)"
+    },
+    "projects": {
+      "read": {
+        "anyOf": [
+          "$createdBy = session.user",
+          "exists projectMembers(projectId = this.id, user_id = session.user)"
+        ]
+      },
+      "insert": "true",
+      "update": "$createdBy = session.user"
+    },
+    "tasks": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)",
+      "update": "allowedTo.read(project)"
+    }
+  }
+}

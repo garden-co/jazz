@@ -60,8 +60,6 @@ async function listenForDeployRequest(): Promise<{ server: Server; url: string }
   return { server, url: `http://127.0.0.1:${address.port}` };
 }
 
-const schemaImportPath = join(packageRoot, "dist", "index.js");
-
 describe("jazz-tools wrapper", () => {
   it.each(["--help", "-h"])("shows migrations help before required arguments (%s)", (flag) => {
     const help = execFileSync(process.execPath, [wrapper, "migrations", flag], {
@@ -84,7 +82,7 @@ describe("jazz-tools wrapper", () => {
   it("does not advertise the removed documentation MCP server", () => {
     const help = execFileSync(process.execPath, [wrapper, "--help"], { encoding: "utf8" });
 
-    expect(help).toContain("validate");
+    expect(help).toContain("generate");
     expect(help).not.toMatch(/\bmcp\b/i);
   });
 
@@ -125,31 +123,12 @@ describe("jazz-tools wrapper", () => {
 
       try {
         await writeFile(
-          join(root, "schema.ts"),
-          `
-import { schema as s } from ${JSON.stringify(schemaImportPath)};
-
-const schema = {
-  todos: s.table({
-    title: s.string(),
-  }, {  }),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
-`,
+          join(root, "jazz.app.json"),
+          JSON.stringify({ format: 1, tables: { todos: { columns: { title: "string" } } } }),
         );
         await writeFile(
-          join(root, "permissions.ts"),
-          `
-import { schema as s } from ${JSON.stringify(schemaImportPath)};
-import { app } from "./schema.js";
-
-export default s.definePermissions(app, ({ policy }) => {
-  policy.todos.allowRead.always();
-  policy.todos.allowInsert.always();
-});
-`,
+          join(root, "jazz.permissions.json"),
+          JSON.stringify({ format: 1, tables: { todos: { read: "true", insert: "true" } } }),
         );
         await writeFile(
           join(root, ".env.staging"),

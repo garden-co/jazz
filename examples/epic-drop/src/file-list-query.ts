@@ -1,4 +1,4 @@
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 /**
  * The file table's columns. A folder listing is metadata-only: it must not

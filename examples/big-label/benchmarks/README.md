@@ -69,5 +69,5 @@ cargo bench -p jazz-example-big-label-benchmark --bench contention
 [dev/benchmarks/memory-ceiling](../../../dev/benchmarks/memory-ceiling/README.md):
 the most labels (or, in the `flagship` scenario, releases in one label) the
 shipped sync server and a client hold before crossing their memory budgets.
-Unlike the Rust variant above, it uses the app's own `schema.ts` and
-`permissions.ts`, so it measures the policies the app deploys.
+Unlike the Rust variant above, it uses the app's own `jazz.app.json` and
+`jazz.permissions.json`, so it measures the policies the app deploys.

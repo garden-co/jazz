@@ -11,7 +11,7 @@ import {
 } from "jazz-napi";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { CompiledPermissions } from "../permissions/index.js";
+import type { CompiledPermissionsMap as CompiledPermissions } from "../schema-permissions.js";
 import { JazzClient, type MutationErrorEvent, type Runtime, type TxId } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";

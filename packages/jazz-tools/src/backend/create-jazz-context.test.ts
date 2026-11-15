@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
-import type { CompiledPermissions } from "../permissions/index.js";
+import type { CompiledPermissionsMap as CompiledPermissions } from "../schema-permissions.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
 import { setFlagsFromString } from "node:v8";
@@ -166,52 +166,6 @@ const TODO_PERMISSIONS: CompiledPermissions = {
     select: { using: { type: "True" } },
   },
 };
-const RELATION_LITERAL_PERMISSIONS: CompiledPermissions = {
-  resources: {
-    select: {
-      using: {
-        type: "ExistsRel",
-        rel: {
-          Filter: {
-            input: {
-              TableScan: {
-                table: "resource_access_edges",
-              },
-            },
-            predicate: {
-              And: [
-                {
-                  Cmp: {
-                    left: {
-                      scope: "resource_access_edges",
-                      column: "kind",
-                    },
-                    op: "Eq",
-                    right: {
-                      Literal: "individual",
-                    },
-                  },
-                },
-                {
-                  Cmp: {
-                    left: {
-                      scope: "resource_access_edges",
-                      column: "grant_role",
-                    },
-                    op: "Eq",
-                    right: {
-                      Literal: "viewer",
-                    },
-                  },
-                },
-              ],
-            },
-          },
-        },
-      },
-    },
-  },
-};
 
 describe("backend/create-jazz-context", () => {
   beforeEach(() => {
@@ -351,79 +305,6 @@ describe("backend/create-jazz-context", () => {
       todos: {
         columns: [],
         policies: TODO_PERMISSIONS.todos as any,
-      },
-    });
-  });
-
-  it("BC-U04b: normalizes relation literals before serializing runtime schema JSON", () => {
-    const context = createJazzContext({
-      appId: "server-app",
-      app: {
-        wasmSchema: {
-          resources: {
-            columns: [],
-          },
-        },
-      },
-      permissions: RELATION_LITERAL_PERMISSIONS,
-      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-    });
-
-    context.db();
-
-    expect(mocks.nativeRuntimeCtor.mock.calls[0]![1]).toEqual({
-      resources: {
-        columns: [],
-        policies: {
-          select: {
-            using: {
-              type: "ExistsRel",
-              rel: {
-                Filter: {
-                  input: {
-                    TableScan: {
-                      table: "resource_access_edges",
-                    },
-                  },
-                  predicate: {
-                    And: [
-                      {
-                        Cmp: {
-                          left: {
-                            scope: "resource_access_edges",
-                            column: "kind",
-                          },
-                          op: "Eq",
-                          right: {
-                            Literal: {
-                              type: "Text",
-                              value: "individual",
-                            },
-                          },
-                        },
-                      },
-                      {
-                        Cmp: {
-                          left: {
-                            scope: "resource_access_edges",
-                            column: "grant_role",
-                          },
-                          op: "Eq",
-                          right: {
-                            Literal: {
-                              type: "Text",
-                              value: "viewer",
-                            },
-                          },
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        },
       },
     });
   });

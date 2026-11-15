@@ -1107,11 +1107,13 @@ fn every_policy_variant() -> PolicyExpr {
             via_column: "todo".into(),
             max_depth: None,
         },
+        // No `max_depth`: the engine drops one on reverse inheritance, so the
+        // file refuses it (`policies_the_dsl_and_the_engine_refused_are_refused`).
         PolicyExpr::InheritsReferencing {
             operation: Operation::Select,
             source_table: "shares".into(),
             via_column: "user".into(),
-            max_depth: Some(1),
+            max_depth: None,
         },
         PolicyExpr::And(vec![PolicyExpr::Not(Box::new(PolicyExpr::False))]),
         PolicyExpr::Or(vec![]),
@@ -2215,7 +2217,16 @@ fn every_committed_app_file_fits_its_json_schema() {
         (PERMISSIONS_FILE, "jazz.permissions.schema.json"),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
-        let files = committed(file);
+        // `jazz-tools upgrade`'s input fixtures are alpha.64 apps on purpose:
+        // their files carry alpha.63's `tsOnly`, which upgrade converts. What
+        // upgrade writes from them (`expected/`) is checked like any app.
+        let legacy = repo_root().join("packages/jazz-tools/tests/upgrade/fixtures");
+        let files: Vec<_> = committed(file)
+            .into_iter()
+            .filter(|path| {
+                !path.starts_with(&legacy) || path.components().any(|c| c.as_os_str() == "expected")
+            })
+            .collect();
         assert!(files.len() > 10, "{file}: {files:?}");
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
@@ -2677,4 +2688,259 @@ fn malformed_specialised_indexes_are_refused_by_path() {
         error.contains("tables.todos.indexes[1].name: two specialised indexes are named `g`"),
         "{error}"
     );
+}
+
+fn with_vector_columns() -> ArtifactInput {
+    let mut input = todo_server();
+    let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+    let mut embedding = ColumnDescriptor::new("embedding", ColumnType::Vector { dimensions: 3 });
+    embedding.default = Some(Value::Bytea(
+        [0.1f32, -2.0, 3e-5]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
+    ));
+    todos.columns.columns.push(embedding);
+    todos
+        .columns
+        .columns
+        .push(nullable("draft", ColumnType::Vector { dimensions: 1 }));
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+    input
+}
+
+/// A vector column is written `{ "vector": n }`, its default as `n` numbers
+/// that read back to the same `f32` bits, and the file reads back to the
+/// same schema (SPEC 20.1).
+#[test]
+fn vector_columns_round_trip_through_the_file() {
+    let input = with_vector_columns();
+    let expected = structural(input.schemas[0].clone());
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let columns = &app["tables"]["todos"]["columns"];
+    assert_eq!(
+        columns["embedding"],
+        serde_json::json!({ "vector": 3, "default": [0.1, -2, 0.00003] }),
+        "{}",
+        written.app
+    );
+    assert_eq!(
+        columns["draft"],
+        serde_json::json!({ "vector": 1, "optional": true })
+    );
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(
+        loaded.current_hash(),
+        SchemaHash::compute(&expected),
+        "the file reads back to the schema it was written from"
+    );
+}
+
+/// The dimensions are part of the schema's identity: `vector(3)`,
+/// `vector(4)` and `bytes` are three different schemas.
+#[test]
+fn vector_dimensions_are_schema_identity() {
+    let hash = |ty: ColumnType| {
+        let mut input = todo_server();
+        input.schemas[0]
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .columns
+            .columns
+            .push(ColumnDescriptor::new("embedding", ty));
+        SchemaHash::compute(&structural(input.schemas[0].clone()))
+    };
+    let three = hash(ColumnType::Vector { dimensions: 3 });
+    assert_ne!(three, hash(ColumnType::Vector { dimensions: 4 }));
+    assert_ne!(three, hash(ColumnType::Bytea));
+    assert_eq!(three, hash(ColumnType::Vector { dimensions: 3 }));
+}
+
+#[test]
+fn malformed_vector_columns_are_refused_by_name() {
+    let column = |spec: serde_json::Value| {
+        edited_app(move |v| v["tables"]["todos"]["columns"]["embedding"] = spec)
+    };
+    for spec in [
+        serde_json::json!({ "vector": 0 }),
+        serde_json::json!({ "vector": 4097 }),
+        serde_json::json!({ "vector": 3.5 }),
+        serde_json::json!({ "vector": "3" }),
+        serde_json::json!({ "vector": -1 }),
+    ] {
+        let error = column(spec.clone());
+        assert!(
+            error.contains("a vector's dimensions are an integer from 1 to 4096"),
+            "{spec}: {error}"
+        );
+    }
+    let error = column(serde_json::json!({ "array": { "vector": 3 } }));
+    assert!(
+        error.contains("an array of vectors is not supported"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 3, "array": "int" }));
+    assert!(error.contains("exactly one of"), "{error}");
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, 2, 3] }));
+    assert!(
+        error.contains("a vector default has 2 numbers, not 3"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, "x"] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 1, "default": [1e39] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+}
+
+/// What the TS permissions compiler (and the engine behind it) refused, the
+/// loader refuses too, naming the spot.
+#[test]
+fn policies_the_dsl_and_the_engine_refused_are_refused() {
+    let refused = |table: &str, source: &str, expected: &str| {
+        let error = read_policy(table, source, serde_json::json!({}))
+            .expect_err(source)
+            .to_string();
+        assert!(error.contains(expected), "{source}:\n{error}");
+        error
+    };
+    // `maxDepth` on a reverse relation was dropped by the engine; the TS
+    // DSL refused it. Both spellings, pointing at the bound.
+    for source in [
+        "allowedTo.read(shares, maxDepth: 3)",
+        "allowedTo.read(via shares.todo, maxDepth: 3)",
+    ] {
+        let error = refused(
+            "todos",
+            source,
+            "`allowedTo` along a reverse relation takes no `maxDepth`; omit it",
+        );
+        let caret = error
+            .lines()
+            .find(|l| l.trim_start().starts_with('^'))
+            .unwrap();
+        assert_eq!(caret.trim(), "^", "{error}");
+        assert_eq!(
+            caret.find('^'),
+            error
+                .lines()
+                .find(|l| l.contains(source))
+                .unwrap()
+                .find('3')
+        );
+    }
+    read_policy("todos", "allowedTo.read(shares)", serde_json::json!({})).unwrap();
+    read_policy(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: 3)",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    // A bad `maxDepth`.
+    refused(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: -1)",
+        "`maxDepth` takes a whole number",
+    );
+    refused(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: 1.5)",
+        "`maxDepth` takes a whole number",
+    );
+    refused(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: x)",
+        "expected `maxDepth: <number>`",
+    );
+    refused(
+        "todos",
+        "exists (from recursive(seed: from todos where todos.owner = session.user, step: from todos where todos.id = id(frontier) select todos.id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 65) where todos.id = outer.id)",
+        "`maxDepth` 65 exceeds the cap of 64 for a recursive relation",
+    );
+    // Inheriting through a column that references no table.
+    refused(
+        "shares",
+        "allowedTo.read(via user)",
+        "INHERITS via_column 'user' has no FK reference",
+    );
+    // Session values compare for equality only.
+    for op in [">", "<", ">=", "<="] {
+        refused(
+            "todos",
+            &format!("session.claims.level {op} 3"),
+            "core schema policies only support Eq/Ne SessionCmp operators yet",
+        );
+    }
+    // Inheritance inside `exists`.
+    refused(
+        "todos",
+        "exists shares(todo = this.id, allowedTo.read(todoRow))",
+        "core schema policies do not support Inherits",
+    );
+    // Non-finite floats.
+    for literal in ["'NaN'", "'inf'", "'-inf'"] {
+        refused(
+            "todos",
+            &format!("session.claims.x = double({literal})"),
+            "floating-point literals must be finite numbers",
+        );
+    }
+    // The writer refuses an engine policy the file can't say rather than
+    // drop its bound.
+    let mut input = shared_todos();
+    input.permissions.insert(
+        TableName::from("todos"),
+        TablePolicies {
+            select: OperationPolicy::using(PolicyExpr::InheritsReferencing {
+                operation: Operation::Select,
+                source_table: "shares".into(),
+                via_column: "todo".into(),
+                max_depth: Some(3),
+            }),
+            ..Default::default()
+        },
+    );
+    let error = write(input).unwrap_err();
+    assert!(error.is_unsupported(), "{error}");
+    assert!(error.to_string().contains("takes no `maxDepth`"), "{error}");
+}
+
+/// The relation checks `load` runs on the current tables.
+#[test]
+fn relations_must_lead_where_they_say() {
+    let error =
+        edited_app(|v| v["tables"]["todos"]["relations"]["shares"]["reverse"] = "sharez".into());
+    assert!(
+        error.contains("tables.todos.relations.shares: the current schema has no table sharez; did you mean `shares`?"),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["todos"]["relations"]["shares"]["relation"] = "todoRw".into());
+    assert!(
+        error.contains(
+            "tables.todos.relations.shares: shares has no forward relation todoRw to todos"
+        ),
+        "{error}"
+    );
+    // A reverse relation whose forward one leads to another table.
+    let error = edited_app(|v| {
+        v["tables"]["shares"]["relations"]["owner"] =
+            serde_json::json!({ "rel": "shares", "column": "user" });
+        v["tables"]["todos"]["relations"]["shares"]["relation"] = "owner".into();
+    });
+    assert!(
+        error.contains(
+            "tables.todos.relations.shares: shares has no forward relation owner to todos"
+        ),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["shares"]["relations"]["todoRow"]["rel"] = "todoz".into());
+    assert!(error.contains("todoz"), "{error}");
 }

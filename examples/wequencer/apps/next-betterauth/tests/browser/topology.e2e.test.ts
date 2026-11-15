@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { AccountHandle } from "../../../../../../packages/jazz-tools/src/accounts/state.js";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import { createDb } from "../../../../../../packages/jazz-tools/src/runtime/default-create-db.js";
 import { PersistedWriteRejectedError } from "../../../../../../packages/jazz-tools/src/runtime/client.js";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
@@ -23,9 +22,10 @@ import {
   jazzAppUserUrl,
   loginAtJazzAppUser,
   startJazzApp,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import permissions from "../../permissions.js";
-import { app, type Step } from "../../schema.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app, type Step } from "../../jazz.generated.js";
 
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());

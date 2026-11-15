@@ -1,5 +1,5 @@
 import { useDb, useJazzSession, useSession } from "jazz-tools/solid";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function DbSessionExamples() {
   const db = useDb();

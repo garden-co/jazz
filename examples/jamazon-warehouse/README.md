@@ -84,7 +84,7 @@ key is lost. Dashboard counts ignore drafts and cancelled orders.
 
 ## Permissions
 
-`permissions.ts` answers two questions for every operational row:
+`jazz.permissions.json` answers two questions for every operational row:
 
 - **Who may write it** ([#1899](https://github.com/garden-co/jazz/issues/1899)): the manager of
   the row's own warehouse (`warehouses.operator_id`) or an operator staffed on that warehouse

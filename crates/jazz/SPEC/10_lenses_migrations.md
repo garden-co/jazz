@@ -871,7 +871,11 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   - `{"enum": ["todo", "done"]}`, or with payloads
     `{"enum": {"open": {}, "closed": {"at": "timestamp"}}}`;
   - `{"json": <JSON Schema>}` or `{"json": true}` for any JSON;
-  - `{"array": <Column type>}`.
+  - `{"array": <Column type>}` (not of vectors);
+  - `{"vector": n}`, `1 ≤ n ≤ 4096`: `n` IEEE-754 binary32 values (20.1),
+    stored as `f32le/1` bytes; not an array element, payload field, index
+    column or query literal, and no migration changes a column to, from or
+    between vector types.
   - Options: `"optional": true`, `"default": <Value>`,
     `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`, and
     `"references": "<table>"` for a column that references a table no
@@ -884,7 +888,9 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
   engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
   8601 form is not supported yet),
-  base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
+  base64 for `bytes`, any JSON for `json`, arrays for `array`, an array of
+  `n` finite numbers for `vector` (each rounded to binary32; the writer
+  prints each in its shortest form that reads back to the same bits), objects
   `{"<case>": {...}}` for payload enums, and `null`.
 
 **Transform** `{stored, view}`: two column types without `?` or options.
@@ -1137,7 +1143,12 @@ case(p)` an enum case whose payload satisfies `p` (`EnumMatch`), and
 - **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
   leads to allows `op`. `allowedTo.op(via col)` names the forward column
   itself and `allowedTo.op(via t.col)` the rows of `t` pointing here, for a
-  link no relation names. `maxDepth` bounds recursive chains.
+  link no relation names. `maxDepth` bounds recursive chains of forward
+  relations; a reverse relation (or `via t.col`) takes none, as the TS DSL
+  refused one: the engine checks every row pointing here and refuses
+  reverse inheritance cycles when it compiles the schema, so a bound would
+  be dropped rather than applied. A recursive relation's `maxDepth` is at
+  most 64.
 - `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
   number of items; the writer uses them only for fewer than two.
 - Nesting deeper than 64 levels is refused.

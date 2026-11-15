@@ -109,6 +109,10 @@ pub fn check_finite(v: &[f32]) -> Result<(), VectorError> {
 /// each element is divided in `f64` and rounded once to `f32`. A vector
 /// whose norm underflows `f64` cannot occur: the smallest nonzero `f32`
 /// squared is `≈ 2e-90`, well inside `f64`'s normal range.
+///
+/// An error never fails a write: index maintenance is total (`INV-IX-7`),
+/// so the drain leaves a stored vector `prepare` refuses unindexed (it never
+/// matches). For a query vector the error is a typed validation error.
 pub fn prepare(metric: Metric, v: &[f32]) -> Result<Vec<f32>, VectorError> {
     check_finite(v)?;
     match metric {

@@ -3,6 +3,7 @@ import { bytesToHex, formatUuidAt } from "../hex.js";
 import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { concatBytes, isValidUtf8 } from "../util.js";
+import { VECTOR_MAX_DIMENSIONS, assertVectorBytes } from "../vector.js";
 
 const textDecoder = new Utf8Decoder({ fatal: true });
 
@@ -13,6 +14,8 @@ export type ValueType = {
   members?: ValueType[];
   record?: DescriptorField[];
   enumSchema?: EnumSchema;
+  /** `ValueType::Vector(dimensions)`, tag 19. */
+  dimensions?: number;
 };
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type EnumSchema = {
@@ -298,6 +301,12 @@ export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
 
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
   writer.enumUnit(valueType.tag);
+  if (valueType.tag === 19) {
+    // `ValueType::Vector(u32)`: postcard writes the u32 as a varint, the same
+    // bytes as a u64 of that value.
+    writer.u64(checkedVectorDimensions(valueType.dimensions));
+    return;
+  }
   if (valueType.tag === 10) {
     if (!valueType.internal) throw new Error("missing physical type for ValueType::Internal");
     writer.enumUnit(valueType.internal.tag);
@@ -350,6 +359,9 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
 
 export function readValueType(reader: PostcardReaderLike): ValueType {
   const tag = reader.u64();
+  if (tag === 19) {
+    return { tag, dimensions: checkedVectorDimensions(reader.u64()) };
+  }
   if (tag === 10) {
     const internalTag = reader.u64();
     return {
@@ -391,6 +403,18 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
     };
   }
   return { tag };
+}
+
+function checkedVectorDimensions(dimensions: number | undefined): number {
+  if (
+    dimensions == null ||
+    !Number.isInteger(dimensions) ||
+    dimensions < 1 ||
+    dimensions > VECTOR_MAX_DIMENSIONS
+  ) {
+    throw new Error(`vector dimensions ${dimensions} are outside 1..=${VECTOR_MAX_DIMENSIONS}`);
+  }
+  return dimensions;
 }
 
 export function createRecord(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
@@ -658,6 +682,10 @@ function valueTypeName(tag: number): string {
       return "Record";
     case 17:
       return "Enum";
+    case 18:
+      return "U48";
+    case 19:
+      return "Vector";
     default:
       return `unknown(${tag})`;
   }
@@ -777,6 +805,11 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Bytea":
       if (value.type !== "Bytea") throw new Error("expected Bytea value");
       return concatBytes([Uint8Array.of(0), value.value]);
+    case "Vector":
+      // The payload is the `f32le/1` bytes themselves: no stored-scalar arm.
+      if (value.type !== "Bytea") throw new Error("expected Vector value as f32le bytes");
+      assertVectorBytes(value.value, type.dimensions);
+      return value.value;
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
       return encodeNativeArrayValue(type.element, value.value);
@@ -901,6 +934,8 @@ export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"
       };
     case "Bytea":
       return { tag: 9 };
+    case "Vector":
+      return { tag: 19, dimensions: type.dimensions };
     case "Uuid":
       return { tag: 11 };
     case "Array":
@@ -946,6 +981,9 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
       return { type: "Bytea", value: decodeInlineScalar(bytes).slice() };
+    case "Vector":
+      assertVectorBytes(bytes, type.dimensions);
+      return { type: "Bytea", value: bytes.slice() };
     case "Array":
       return { type: "Array", value: decodeArray(type.element, bytes) };
     case "Row":

@@ -14,12 +14,8 @@ import {
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
-import {
-  columnTransformDependencies,
-  dependencyContext,
-  storedDependencyValues,
-  type ColumnTransform,
-} from "./column-transforms.js";
+import type { ColumnTransform } from "./column-transforms.js";
+import { bytesToVector } from "./vector.js";
 
 export type { WasmValue };
 
@@ -140,23 +136,17 @@ function buildIncludePlans(
 }
 
 type ReadColumnTransformRegistry = Readonly<
-  Record<
-    string,
-    Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>> | undefined
-  >
+  Record<string, Readonly<Record<string, Pick<ColumnTransform, "from" | "computed">>> | undefined>
 >;
 
 export function applyColumnTransforms(
   row: Record<string, unknown>,
-  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>>,
+  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "computed">>>,
   excludedColumns: readonly string[] = [],
-  stored?: Readonly<Record<string, unknown>>,
   appValues?: ReadonlyMap<string, unknown>,
   partialColumns?: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   if (!transforms) return row;
-  const source =
-    stored ?? storedDependencyValues(columnTransformDependencies(transforms).columns, row);
   for (const column in transforms) {
     if (
       !Object.hasOwn(transforms, column) ||
@@ -170,7 +160,7 @@ export function applyColumnTransforms(
       row[column] =
         appValues?.has(column) && (!partialColumns || !Object.hasOwn(partialColumns, column))
           ? appValues.get(column)
-          : transform.from(row[column], dependencyContext(transform, source));
+          : transform.from(row[column]);
   }
   return row;
 }
@@ -295,6 +285,9 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
     case "Timestamp":
       return timestampToDate(v.value, columnName);
     case "Bytea":
+      if (columnType?.type === "Vector") {
+        return bytesToVector(toByteArray((v as { value: unknown }).value));
+      }
       return toByteArray((v as { value: unknown }).value);
     case "Null":
       return null;

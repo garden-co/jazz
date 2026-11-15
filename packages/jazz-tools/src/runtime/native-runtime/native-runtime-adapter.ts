@@ -140,6 +140,7 @@ import {
   writeDescriptor,
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
+import { assertVectorBytes } from "../vector.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -941,14 +942,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime;
   }
 
-  readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
-    if (this.closed || this.ownerRuntime.closed) return false;
-    const context = this.nativeReadContext(
-      readSession(sessionJson),
-      transaction ? this.pendingTxs.get(transaction) : undefined,
-    );
-    return context.kind !== "session-authority";
-  }
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
   /** Pooled native subscriptions, by pool id: one native call reads them all. */
@@ -2475,6 +2468,12 @@ export class NativeRuntimeAdapter implements Runtime {
       hasStagedMutations: false,
     });
     return id;
+  }
+
+  hasStagedTransactionWrites(openTransactionId: OpenTransactionId): boolean | undefined {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.hasStagedTransactionWrites(openTransactionId);
+    return this.pendingTxs.get(openTransactionId)?.hasStagedMutations;
   }
 
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
@@ -7242,6 +7241,10 @@ function decodeBytes(
     case "Bytea":
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Bytea", value: bytes.subarray(1).slice() };
+    case "Vector":
+      // The payload is the `f32le/1` bytes themselves, carried as Bytea.
+      assertVectorBytes(bytes, type.dimensions, fieldName);
+      return { type: "Bytea", value: bytes.slice() };
     case "Array":
       return {
         type: "Array",
