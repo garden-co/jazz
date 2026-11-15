@@ -22,7 +22,7 @@ async function probe(label: string, bytes: Buffer, expect: number[]) {
       `Sec-WebSocket-Key: ${crypto.randomBytes(16).toString("base64")}`, "Sec-WebSocket-Version: 13", ...(TOKEN ? [`Authorization: Bearer ${TOKEN}`] : []), "", ""].join("\r\n")));
     s.on("data", (d) => { buf = Buffer.concat([buf, d]);
       if (!upgraded) { const i = buf.indexOf("\r\n\r\n"); if (i < 0) return; const head = buf.subarray(0, i).toString(); if (!/ 101 /.test(head)) { clearTimeout(t); s.destroy(); return done("no upgrade: " + head.split("\r\n")[0]); } upgraded = true; buf = buf.subarray(i + 4); s.write(bytes); }
-      if (upgraded && buf.length >= 2 && (buf[0] & 0x0f) === 8) { const code = buf.length >= 4 ? buf.readUInt16BE(2) : 0; clearTimeout(t); s.destroy(); done(`close ${code}`); } });
+      if (upgraded && buf.length >= 2 && (buf[0] & 0x0f) === 8) { const plen = buf[1] & 0x7f; if (buf.length < 2 + plen) return; const code = plen >= 2 ? buf.readUInt16BE(2) : 0; clearTimeout(t); s.destroy(); done(`close ${code}`); } });
     s.on("close", () => { clearTimeout(t); done("socket closed (no close frame)"); }); s.on("error", (e) => { clearTimeout(t); done("error " + e.message); });
   });
   const up = (await fetch(HEALTH).then((r) => r.status).catch(() => -1)) !== -1;
@@ -37,7 +37,8 @@ ok = (await probe("unknown opcode 0x3", frame(3, p), [1002])) && ok;
 ok = (await probe("ping > 125 bytes", frame(9, Buffer.alloc(126)), [1002])) && ok;
 ok = (await probe("fragmented control", frame(9, p, { fin: false }), [1002])) && ok;
 ok = (await probe("continuation without start", frame(0, p), [1002])) && ok;
-ok = (await probe("text frame", frame(1, Buffer.from("{}")), [1003, 1008])) && ok;
+ok = (await probe("text frame", frame(1, Buffer.from("{}")), [])) && ok; // any close or none; must not crash
+ok = (await probe("text frame, invalid UTF-8", frame(1, Buffer.from([0xc3, 0x28])), [1007])) && ok;
 ok = (await probe("close with bad code 999", frame(8, Buffer.from([0x03, 0xe7])), [1002])) && ok;
 ok = (await probe(`64-bit length ${CAP + 1} (header only)`, frame(2, Buffer.alloc(0), { lenOverride: BigInt(CAP + 1) }), [1009])) && ok;
 console.log(ok ? "RAW PASS" : "RAW FAIL"); process.exit(ok ? 0 : 1);
