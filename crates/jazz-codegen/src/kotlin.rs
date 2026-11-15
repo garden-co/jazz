@@ -45,13 +45,17 @@ pub const MARKER: &str = "build.gradle.kts";
 pub const RUNTIME: &str = "jazz-kotlin";
 
 /// Whether `build` (a `build.gradle.kts`) is a Kotlin Jazz app's: it depends
-/// on the `jazz-kotlin` runtime.
+/// on the `jazz-kotlin` runtime, by coordinate or as a release's jar or AAR.
 pub fn is_app_build(build: &str) -> bool {
     build
         .lines()
         .map(|line| line.split("//").next().unwrap_or(""))
         .any(|line| {
-            line.contains(&format!(":{RUNTIME}\"")) || line.contains(&format!(":{RUNTIME}:"))
+            line.contains(&format!(":{RUNTIME}\""))
+                || line.contains(&format!(":{RUNTIME}:"))
+                // The jar or AAR from a GitHub release: `files("libs/jazz-kotlin-<version>.jar")`.
+                || (line.contains(&format!("{RUNTIME}-"))
+                    && (line.contains(".jar") || line.contains(".aar")))
         })
 }
 
@@ -1063,6 +1067,12 @@ mod tests {
             "// implementation(\"tools.jazz:jazz-kotlin\")\nplugins { kotlin(\"jvm\") }"
         ));
         assert!(!is_app_build("rootProject.name = \"jazz-kotlin\""));
+        assert!(is_app_build(
+            "implementation(files(\"libs/jazz-kotlin-2.0.0-alpha.65.jar\"))"
+        ));
+        assert!(is_app_build(
+            "implementation(files(\"libs/jazz-kotlin-android-2.0.0-alpha.65.aar\"))"
+        ));
     }
 
     #[test]
