@@ -117,25 +117,58 @@ On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live resu
 ```
 
 Every call `throws(JazzError)`. The cases are `refused` (validation, permissions or not supported
-yet), `io`, `closed`, `decoding` and `cancelled` (the calling task was cancelled).
+yet), `io`, `closed`, `decoding`, `cancelled` (the calling task was cancelled),
+`permissionDenied` (the app's permissions refused it, seen when waiting for the `global` tier),
+`notSupported` and `conflict` (a serializable transaction lost to another write: retry it).
+
+## Relations, transactions and tiers
+
+Each relation is a row property, filled when the query includes it and `nil` otherwise:
+`JazzApp.tasks.query().include(JazzApp.tasks.show)` fills `task.show`. A relation narrows like a
+query: `JazzApp.shows.tasks.orderBy(JazzApp.tasks.rank).limit(3)`, plus a nested `.include(…)` or
+`.required()`. `query.select(columns…)` reads only some columns into a `Decodable` type of yours,
+with `jazz.all(selection, as: MyType.self)`.
+
+`jazz.transaction(commit:) { tx in … }` runs a serializable transaction. It commits when the
+closure returns, rolls back when the closure throws, and rethrows that error. Reads take a
+`tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
+`jazz.waitForSync(.global)` waits until everything written so far has reached the server.
+
+## Mergeable text and permission advice
+
+A text-merge column (`"merge": "text"`, like StagePlan's `tasks.notes`) reads as a plain `String`.
+To edit it so that concurrent edits merge instead of overwriting each other, use a `JazzText`
+handle:
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-mergeable-text-swift
+</include>
+
+`notes.changes` yields the merged text each time the row changes. Lower level, `jazz.edit(id,
+patch, edits: [.text(…), .splice(…), .jsonSet(…)])` makes several partial edits as one write.
+
+`jazz.canInsert(newRow)`, `canRead`, `canUpdate` and `canDelete` ask the app's permissions before
+you try. They return `true`, `false`, or `nil` when there's nothing to ask, such as no server.
 
 ## Not supported yet
+
+These are refused with `JazzError.notSupported` (or when generating):
 
 - iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
   or tested for them yet, and there are no prebuilt XCFrameworks.
 - Installing the package from a URL: depend on a local checkout by path.
-- Includes and relations: the bindings leave relations out. Query the related table by its id
-  column instead.
-- Mergeable text (`"merge": "text"`, like StagePlan's `tasks.notes`). It reads and writes as a
-  plain `String?`, and a write replaces the whole value.
+- A SwiftUI `Binding` for `JazzText`.
+- Connecting as an end user (JWT, device accounts) and session state: open the app as a backend.
+- Files and streams.
+- `hopTo`, `gather`, `union` and history queries.
+- `offset` in an include, and `required` on reverse relations or optional references.
 - Payload enums, nested rows and other column types the bindings can't type: they're refused when
   generating.
-- Transactions, and choosing a durability tier for reads or writes.
-- Connecting as an end user with a JWT.
 - Non-finite floats (`NaN`, infinities) read back as `null`. In a `Double` column that fails to
   decode. In a nullable `Double?` column, it silently reads as `nil`.
 - Positions in subscription deltas: `subscribe` deltas carry none, and `watch` re-sorts its rows
   locally by the query's `orderBy`.
 
-A backend's write that the server's permissions refuse doesn't throw. Writes are local-first, so it
-stays in the local store and never syncs. Check permissions before you write.
+A write that the server's permissions refuse doesn't throw by default. Writes are local-first, so
+it stays in the local store and never syncs. Write with `tier: .global` (or call
+`waitForSync(.global)`) to get `JazzError.permissionDenied` instead.
