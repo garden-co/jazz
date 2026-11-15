@@ -84,8 +84,36 @@ export async function publishLoadedDeployment(
         ? "published"
         : "already-stored",
     },
-    warnings: loaded.warnings,
+    warnings: [...loaded.warnings, ...permissionCoverageWarnings(deployment)],
   };
+}
+
+/**
+ * A warning per table of the target schema that the deployment's
+ * permissions give no policy at all: users can't read, insert, update or
+ * delete its rows. That is fine for a table only the backend uses, which an
+ * explicit `"false"` policy says, silencing the warning.
+ */
+export function permissionCoverageWarnings(deployment: DeploymentBody): string[] {
+  const target = deployment.schemas.find(({ hash }) => hash === deployment.targetSchemaHash);
+  const tables = (target?.schema as { tables?: Record<string, unknown> } | undefined)?.tables;
+  if (!tables) return [];
+  const permissions = (deployment.permissions ?? {}) as Record<
+    string,
+    Record<string, { using?: unknown; with_check?: unknown } | null> | undefined
+  >;
+  return Object.keys(tables)
+    .filter((table) => {
+      const operations = Object.values(permissions[table] ?? {});
+      return !operations.some((policy) => policy?.using != null || policy?.with_check != null);
+    })
+    .map(
+      (table) =>
+        `table "${table}" has no policies in jazz.permissions.json, so users can't read, insert, update or delete its rows. ` +
+        "Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: " +
+        `write \`"${table}": { "read": "false" }\` to say so and silence this warning. ` +
+        "Don't add allow rules just to silence it.",
+    );
 }
 
 /**
