@@ -1,0 +1,107 @@
+---
+title: Swift
+description: "Open a Jazz app from Swift with the Jazz Swift package and typed bindings generated from jazz.app.json."
+---
+
+A Swift program can open your app from the same `jazz.app.json` and `jazz.permissions.json` as every
+other language, with typed bindings generated from them. As a backend, it publishes the app's
+permissions bundle when it starts and then acts as one user of the app. As a client, it syncs with
+your server. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
+`async`, and subscriptions are `AsyncSequence`s.
+
+This release builds and tests Swift on Linux and macOS: command-line tools and servers. iOS and
+macOS UI apps aren't built or tested yet (see [Not supported yet](#not-supported-yet)).
+
+## Install
+
+The package isn't published yet. Build it from the Jazz repository, which needs Rust and Swift 5.9
+or newer:
+
+```bash
+git clone https://github.com/garden-co/jazz
+jazz/packages/jazz-swift/scripts/build-ffi.sh   # builds libjazz_ffi and its Swift sources
+```
+
+Then depend on it by path:
+
+```swift title="Package.swift"
+dependencies: [
+    .package(name: "jazz-swift", path: "../jazz/packages/jazz-swift")
+],
+targets: [
+    .target(
+        name: "MyApp",
+        dependencies: [.product(name: "Jazz", package: "jazz-swift")],
+        path: ".",
+        sources: ["JazzApp.swift", "Sources/MyApp"]
+    ),
+]
+```
+
+## Generate the bindings
+
+With a `Package.swift` that names `jazz-swift` beside `jazz.app.json`, `jazz-tools generate` writes
+`JazzApp.swift` next to them:
+
+```bash
+npx jazz-tools generate            # checks the files, writes JazzApp.swift
+npx jazz-tools generate --check    # in CI: fails if JazzApp.swift is stale
+```
+
+Commit `JazzApp.swift` and add it to your target's sources. Everything in it sits inside
+`public enum JazzApp`, so a table's names never hide Swift's own types: StagePlan's `tasks` table
+gives `JazzApp.Task`, not `Task`. For each table, it gives you:
+
+- a `Codable` row struct (`JazzApp.Task`), with lowerCamelCase properties;
+- `JazzApp.NewTask`, for inserts. Columns that may be left out are optional and default to `nil`;
+- `JazzApp.TaskPatch`, for updates. Each column is `.unchanged` or `.set(value)`;
+- a namespace (`JazzApp.tasks`) with `query()` and typed columns, for filters and `orderBy`;
+- a Swift enum for each enum column (`JazzApp.TaskStatus`).
+
+`JazzApp.open(_:)` opens the app from the `jazz.app.json` the file embeds.
+
+## Open the app
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-backend
+</include>
+
+`StagePlanApp.permissions()` reads `jazz.permissions.json`, which the example ships as a SwiftPM
+resource. The backend needs the sync server's admin secret (`adminSecret:`) to publish the bundle,
+and its backend secret (`backendSecret:`) to vouch for the user it acts as. Without `serverUrl` and
+`appId`, it runs on its own local store. `try await jazz.account()` gives the account id of the
+user it acts as.
+
+To connect to your server as a client instead:
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-client
+</include>
+
+Before the process exits, call `try await jazz.close()`.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Swift
+tab for each example. `examples/stage-plan/apps/swift-cli` in the repository is a complete
+command-line tool over StagePlan's files.
+
+## Not supported yet
+
+- iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
+  or tested for them yet, and there are no prebuilt XCFrameworks.
+- Installing the package from a URL: depend on a local checkout by path.
+- Computed fields and transforms. `jazz-tools generate` refuses an app that declares them, so
+  there's no `JazzComputed` protocol yet.
+- Includes and relations: the bindings leave relations out. Query the related table by its id
+  column instead.
+- Mergeable text (`"merge": "text"`, like StagePlan's `tasks.notes`). It reads and writes as a
+  plain `String?`, and a write replaces the whole value.
+- Payload enums, nested rows and other column types the bindings can't type: they're refused when
+  generating.
+- Transactions, and choosing a durability tier for reads or writes.
+- Connecting as an end user with a JWT.
+- Non-finite floats (`NaN`, infinities) read back as `null`, so they fail to decode into a `Double`.
+- Positions in subscription deltas: `subscribe` deltas carry none, and `watch` re-sorts its rows
+  locally by the query's `orderBy`.
+
+A backend's write that the server's permissions refuse doesn't throw. Writes are local-first, so it
+stays in the local store and never syncs. Check permissions before you write.

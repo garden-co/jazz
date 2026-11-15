@@ -12,7 +12,7 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
 <WhereOperatorsTable />
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
@@ -55,6 +55,28 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
     </include>
 
   </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-filters-swift
+    </include>
+
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-eq-ne-swift
+    </include>
+
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-numeric-swift
+    </include>
+
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-contains-swift
+    </include>
+
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-null-swift
+    </include>
+
+  </Tab>
 </Tabs>
 
 ## Sorting
@@ -66,7 +88,7 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   queries.
 </Callout>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
@@ -80,6 +102,12 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-sorting-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-sorting-swift
     </include>
 
   </Tab>
@@ -98,7 +126,7 @@ declaration order. `min`, `max` and range filters such as `gt` follow the same o
 deterministic order. If the first sort column is not unique, add `orderBy("id")` as the final
 tie-breaker so page boundaries are stable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
@@ -112,6 +140,12 @@ tie-breaker so page boundaries are stable.
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-pagination-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-pagination-swift
     </include>
 
   </Tab>
