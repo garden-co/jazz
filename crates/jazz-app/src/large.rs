@@ -70,7 +70,9 @@ impl Jazz {
     async fn apply_edit<T: Table>(&self, id: ObjectId, edit: LargeValueUpdate) -> Result<()> {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let written = client.update_with_edits(T::NAME, id, Vec::new(), vec![edit])?;
+            let written = client
+                .update_with_edits(T::NAME, id, Vec::new(), vec![edit])
+                .map_err(|error| crate::edit::not_found::<T>(error, id))?;
             settle.settle(&client, written).await
         })
         .await
@@ -191,37 +193,39 @@ impl Jazz {
                 Ok(park(upload))
             })
             .await?;
+        // Dropping this future mid-stream (a timeout, a disconnect) must
+        // not leave the upload parked: the guard aborts it then.
+        let mut guard = UploadGuard {
+            jazz: self.clone(),
+            key: upload,
+            armed: true,
+        };
         let mut chunks = std::pin::pin!(chunks);
         while let Some(chunk) = chunks.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    let message = error.to_string();
-                    // Releases what the upload stored.
-                    let _ = self
-                        .with_client(move |client| async move {
-                            if let Some(upload) = unpark(upload) {
-                                client.abort_streaming_upload(upload).await?;
-                            }
-                            Ok(())
-                        })
-                        .await;
-                    return Err(Error::Upload(message));
+                    // The guard releases what the upload stored.
+                    return Err(Error::Upload(error.to_string()));
                 }
             };
-            // One job per chunk: the client's other calls run in between.
-            self.with_client(move |client| async move {
-                let mut parked = unpark(upload).ok_or(Error::Stopped)?;
-                let pushed = client
-                    .push_streaming_upload(&mut parked, chunk.as_ref())
-                    .await;
-                // A failed push closed the upload; it is dropped here.
-                pushed?;
-                repark(upload, parked);
-                Ok(())
-            })
-            .await?;
+            // One job per piece, and pieces of at most PUSH_BYTES: the
+            // client's other calls run in between, however large a chunk.
+            let bytes = chunk.as_ref();
+            let pieces: Vec<Vec<u8>> = if bytes.len() > PUSH_BYTES {
+                bytes.chunks(PUSH_BYTES).map(<[u8]>::to_vec).collect()
+            } else {
+                Vec::new()
+            };
+            if pieces.is_empty() {
+                self.push(upload, chunk).await?;
+            } else {
+                for piece in pieces {
+                    self.push(upload, piece).await?;
+                }
+            }
         }
+        guard.armed = false;
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
             let parked = unpark(upload).ok_or(Error::Stopped)?;
@@ -250,7 +254,8 @@ impl crate::transaction::Transaction {
             splices,
         };
         self.client()
-            .update_with_edits(T::NAME, id, Vec::new(), vec![edit])?;
+            .update_with_edits(T::NAME, id, Vec::new(), vec![edit])
+            .map_err(|error| crate::edit::not_found::<T>(error, id))?;
         self.wrote();
         Ok(())
     }
@@ -270,9 +275,59 @@ impl crate::transaction::Transaction {
                 .collect(),
         };
         self.client()
-            .update_with_edits(T::NAME, id, Vec::new(), vec![edit])?;
+            .update_with_edits(T::NAME, id, Vec::new(), vec![edit])
+            .map_err(|error| crate::edit::not_found::<T>(error, id))?;
         self.wrote();
         Ok(())
+    }
+}
+
+/// The most bytes one job pushes, so a large chunk doesn't hold the client
+/// for long.
+const PUSH_BYTES: usize = 64 * 1024;
+
+impl Jazz {
+    async fn push<B: AsRef<[u8]> + Send + 'static>(&self, upload: u64, bytes: B) -> Result<()> {
+        self.with_client(move |client| async move {
+            let mut parked = unpark(upload).ok_or(Error::Stopped)?;
+            let pushed = client
+                .push_streaming_upload(&mut parked, bytes.as_ref())
+                .await;
+            // A failed push closed the upload; it is dropped here.
+            pushed?;
+            repark(upload, parked);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Uploads in progress on the client's thread (for tests).
+    #[doc(hidden)]
+    pub async fn uploads_in_progress(&self) -> Result<usize> {
+        self.with_client(|_| async { Ok(UPLOADS.with(|uploads| uploads.borrow().1.len())) })
+            .await
+    }
+}
+
+/// Aborts a parked upload when the call streaming it ends early.
+struct UploadGuard {
+    jazz: Jazz,
+    key: u64,
+    armed: bool,
+}
+
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let key = self.key;
+        // Fire and forget: the abort runs on the client's thread.
+        self.jazz.fire(move |client| async move {
+            if let Some(upload) = unpark(key) {
+                let _ = client.abort_streaming_upload(upload).await;
+            }
+        });
     }
 }
 

@@ -369,6 +369,17 @@ async fn large_value_errors() {
         )
         .await;
     assert!(page.is_err(), "{page:?}");
+    let missing = jazz
+        .json_set(
+            jazz_app::ObjectId::new(),
+            tasks::meta(),
+            [("/owner".to_owned(), serde_json::json!(1))],
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(Error::NotFound { .. })),
+        "{missing:?}"
+    );
     let unchanged = jazz.get::<Task>(task.id).await.unwrap().unwrap();
     // In a transaction, with everything it staged.
     let id = task.id;
@@ -422,4 +433,41 @@ async fn large_value_errors() {
         .await
         .unwrap();
     assert_eq!((upserted.id, upserted.attachment), (id, Some(vec![3; 3])));
+}
+
+/// A streaming call dropped mid-stream aborts its upload, and a chunk larger
+/// than a push is split.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_upload_is_aborted() {
+    use futures::StreamExt;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let endless = futures::stream::iter(0..).then(|_| async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        Ok::<_, std::convert::Infallible>(vec![1u8; 100])
+    });
+    let upload = jazz.insert_streaming(
+        NewTask::new("Endless", 0, Vec::new()),
+        tasks::attachment(),
+        endless,
+    );
+    let timed_out = tokio::time::timeout(std::time::Duration::from_millis(100), upload).await;
+    assert!(timed_out.is_err());
+    // The abort was sent when the call was dropped; it runs before this.
+    assert_eq!(jazz.uploads_in_progress().await.unwrap(), 0);
+    assert!(jazz.all(tasks::query()).await.unwrap().is_empty());
+
+    // One 1 MiB chunk, pushed in pieces.
+    let big = vec![5u8; 1024 * 1024];
+    let task = jazz
+        .insert_streaming(
+            NewTask::new("Big", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&big, big.len()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(task.attachment.unwrap().len(), big.len());
+    assert_eq!(jazz.uploads_in_progress().await.unwrap(), 0);
 }
