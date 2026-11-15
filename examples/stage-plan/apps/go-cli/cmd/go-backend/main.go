@@ -20,6 +20,11 @@
 //
 // A JWT's sub is the user's id. It prints the endpoint's URL once it
 // listens.
+//
+// The app id: a TypeScript client (createJazzClient) is scoped by its
+// serverUrl unless it passes scope, so it derives an app id from the URL it
+// uses (scheme, host, port, path). Run the core and go-backend with that id,
+// or give the client scope: "<JAZZ_APP_ID>".
 package main
 
 import (

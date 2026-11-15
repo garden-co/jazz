@@ -1,16 +1,19 @@
 // A stock TS client (jazz-tools in Node) signing in through a backend's
 // /jazz with a bearer, writing a show at tier global and reading it back.
-// Usage: tsx client.ts <serverUrl> <bearer>  → prints JSON on success.
+// Usage: tsx client.ts <serverUrl> <bearer> <appId>  → prints JSON on success.
+// A client is scoped by its serverUrl unless given a scope: the backend's
+// app id, so it reaches <serverUrl>/apps/<appId>.
 // Run it from apps/react-localfirst (copy it there), where jazz-tools and
 // StagePlan's jazz.generated.ts resolve; go-cli's
 // TestATypeScriptClientSyncsThroughTheGoEndpoint drives it.
 import { createJazzClient } from "jazz-tools/client";
 import { app } from "./jazz.generated.ts";
 
-const [serverUrl, bearer] = process.argv.slice(2);
+const [serverUrl, bearer, appId] = process.argv.slice(2);
 let stored: string | null = null;
 const session = await createJazzClient({
   serverUrl,
+  scope: appId,
   driver: { type: "memory" },
   store: { async read() { return stored; }, async update(t: (s: string | null) => string | null) { stored = t(stored); } },
   bearer: () => bearer,

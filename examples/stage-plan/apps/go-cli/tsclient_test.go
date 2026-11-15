@@ -29,7 +29,7 @@ func TestATypeScriptClientSyncsThroughTheGoEndpoint(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	srv, app := goBackend(t)
-	cmd := exec.CommandContext(ctx, tsx, filepath.Base(script), app.URL+"/jazz", "token-carol")
+	cmd := exec.CommandContext(ctx, tsx, filepath.Base(script), app.URL+"/jazz", "token-carol", srv.appID)
 	cmd.Dir = filepath.Dir(script)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
