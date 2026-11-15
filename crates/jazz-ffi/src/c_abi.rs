@@ -799,14 +799,19 @@ pub unsafe extern "C" fn jazz_socket_free(socket: *mut JazzSocket) {
     }));
 }
 
-/// Frees an endpoint (its sockets end on their own).
+/// Frees an endpoint: stops the client it acts as users with (its sockets
+/// end on their own).
 ///
 /// # Safety
 /// `endpoint` is NULL or from `jazz_endpoint_new`, not yet freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jazz_endpoint_free(endpoint: *mut JazzEndpoint) {
-    if !endpoint.is_null() {
-        // SAFETY: per the function's contract.
-        drop(unsafe { Box::from_raw(endpoint) });
+    if endpoint.is_null() {
+        return;
     }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: per the function's contract.
+        let endpoint = unsafe { Box::from_raw(endpoint) };
+        let _ = endpoint.0.shutdown();
+    }));
 }

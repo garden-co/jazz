@@ -306,6 +306,9 @@ pub struct Endpoint {
 
 struct Inner {
     jazz: Jazz,
+    /// The client the endpoint acts for users with, opened on first use:
+    /// trusted by the core to act for the sessions its calls name.
+    users: Arc<tokio::sync::OnceCell<Jazz>>,
     core: BackendLink,
     bundle: String,
     authenticate: Arc<dyn Authenticate>,
@@ -372,6 +375,7 @@ impl Endpoint {
         Ok(Self {
             inner: Arc::new(Inner {
                 jazz: jazz.clone(),
+                users: Arc::default(),
                 core,
                 bundle: bundle.to_owned(),
                 authenticate: Arc::new(authenticate),
@@ -401,6 +405,7 @@ impl Endpoint {
             Ok(inner) => inner,
             Err(shared) => Inner {
                 jazz: shared.jazz.clone(),
+                users: shared.users.clone(),
                 core: shared.core.clone(),
                 bundle: shared.bundle.clone(),
                 authenticate: shared.authenticate.clone(),
@@ -634,9 +639,31 @@ impl Endpoint {
 
     /// The backend's handle acting as `user` (TS `forSession`), on the
     /// account they already have.
+    ///
+    /// Users' handles share one client of the endpoint's, opened on first
+    /// use beside the backend's own: its link to the core is trusted to act
+    /// for the sessions its calls name, as `createJazz`'s backend session
+    /// is, and it keeps its data in memory. Byte-range reads, streaming
+    /// inserts and permission advice are not supported on a user's handle
+    /// yet (`jazz` refuses them for an explicit session).
     pub async fn for_auth_user(&self, user: &AuthUser) -> Result<Jazz> {
         let session = self.session_for(user).await?;
-        Ok(self.inner.jazz.scoped(session))
+        let users = self
+            .inner
+            .users
+            .get_or_try_init(|| self.inner.jazz.open_for_users())
+            .await?;
+        Ok(users.scoped(session))
+    }
+
+    /// Stops the client users' handles share, if it was opened; the
+    /// backend's own handle runs on. Users' handles fail with
+    /// [`Error::Stopped`] afterwards.
+    pub async fn shutdown(&self) -> Result<()> {
+        match self.inner.users.get() {
+            Some(users) => users.shutdown().await,
+            None => Ok(()),
+        }
     }
 
     async fn session_for(&self, user: &AuthUser) -> Result<Session> {
