@@ -97,11 +97,14 @@ describe("createJazz's bindings check", () => {
   });
 });
 
+/** A crate using `jazz-app`: what makes a Cargo.toml a Rust app's, for the npm CLI as for the binary. */
+const JAZZ_APP_CRATE = '[package]\nname = "app"\n\n[dependencies]\njazz-app = "0.1"\n';
+
 describe("generate in a Rust crate", () => {
   it("writes src/jazz_app.rs beside the TS bindings of a crate that has them", async () => {
     const dir = await project();
     await generateApp({ cwd: dir });
-    await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
+    await writeFile(join(dir, "Cargo.toml"), JAZZ_APP_CRATE);
     const result = await generateApp({ cwd: dir });
     expect(result.bindings).toEqual(["jazz.generated.ts", join("src", "jazz_app.rs")]);
     expect(await readFile(join(dir, "src", "jazz_app.rs"), "utf8")).toContain("jazz_app.rs");
@@ -110,11 +113,22 @@ describe("generate in a Rust crate", () => {
 
   it("gives a Rust-only crate only its Rust bindings, and --check passes on them", async () => {
     const dir = await project();
-    await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
+    await writeFile(join(dir, "Cargo.toml"), JAZZ_APP_CRATE);
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/src.jazz_app\.rs/);
     expect((await generateApp({ cwd: dir })).bindings).toEqual([join("src", "jazz_app.rs")]);
     await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
     await expect(readFile(join(dir, "jazz.generated.ts"), "utf8")).rejects.toThrow();
+  });
+});
+
+describe("generate beside a Cargo.toml that isn't a jazz-app crate", () => {
+  it("writes only the TS bindings, as the binary does", async () => {
+    const dir = await project();
+    await generateApp({ cwd: dir });
+    await writeFile(join(dir, "Cargo.toml"), '[workspace]\nmembers = ["crates/*"]\n');
+    const result = await generateApp({ cwd: dir });
+    expect(result.bindings).toEqual(["jazz.generated.ts"]);
+    await expect(readFile(join(dir, "src", "jazz_app.rs"), "utf8")).rejects.toThrow();
   });
 });
 
