@@ -49,11 +49,11 @@ describe("createJazz checks its bindings against the project's jazz.app.json", (
     await expect(start()).resolves.toBeTruthy();
   });
 
-  it("refuses, naming jazz.generated.ts, when jazz.app.json changed since validate ran", async () => {
+  it("refuses, naming jazz.generated.ts, when jazz.app.json changed since the bindings were generated", async () => {
     // The project's file is another schema: jazz.app.json was edited.
     await inProject(notesWithDone);
     await expect(start()).rejects.toThrow(
-      /bindings out of date: jazz\.generated\.ts was generated from another jazz\.app\.json\. Run `npx jazz-tools validate`/,
+      /bindings out of date: jazz\.generated\.ts was generated from another jazz\.app\.json\. Run `npx jazz-tools (generate|validate)`/,
     );
   });
 });

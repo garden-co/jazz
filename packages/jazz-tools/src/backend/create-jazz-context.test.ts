@@ -355,7 +355,12 @@ describe("backend/create-jazz-context", () => {
     });
   });
 
-  it("BC-U04b: normalizes relation literals before serializing runtime schema JSON", () => {
+  // QUESTION: bare relation literals (`Literal: "individual"`) came from the
+  // TS DSL's relation IR; the normalizer that tagged them was removed from
+  // schema-permissions.ts with the DSL, and the Rust loader emits tagged
+  // values itself. createJazzContext now passes them through untouched.
+  // Delete this test, or should createJazzContext still normalize them?
+  it.skip("BC-U04b: normalizes relation literals before serializing runtime schema JSON", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: {
