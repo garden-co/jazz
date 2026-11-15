@@ -132,6 +132,8 @@ struct State {
     upstream: Option<Upstream>,
     /// Open transactions and whether they staged a write.
     transactions: HashMap<OpenTransactionId, bool>,
+    /// Open transactions begun mergeable; the others are serializable.
+    mergeable_transactions: std::collections::HashSet<OpenTransactionId>,
     closed_transactions: HashMap<OpenTransactionId, ClosedTransaction>,
     /// Engine seqs of this client's commits, by public transaction id.
     writes: HashMap<TransactionId, u64>,
@@ -1587,43 +1589,6 @@ impl JazzClient {
         Ok(Some(self.committed(write.mergeable_tx_id())))
     }
 
-    /// [`JazzClient::update`] with edits of large-capable columns: a text
-    /// column's [`LargeValueUpdate::TextEdit`] (merged over what this
-    /// store has, as the authority merges), splices within a page, JSON
-    /// replacements by pointer. The patch and the edits apply as one row
-    /// update; a failing edit leaves the row unchanged.
-    pub fn update_with_edits(
-        &self,
-        table: &str,
-        object_id: ObjectId,
-        updates: Vec<(String, Value)>,
-        edits: Vec<crate::db::LargeValueUpdate>,
-    ) -> Result<Option<TransactionId>> {
-        let cells = self.core_cells(table, updates.into_iter().collect())?;
-        let updated_at_ms = self.write_updated_at()?;
-        let row = RowUuid(*object_id.uuid());
-        let db = self.db()?;
-        let options = UpdateOptions {
-            identity: self.write_identity()?,
-            updated_at_ms,
-            ..Default::default()
-        };
-        if let Some(transaction_id) = self.open_transaction()? {
-            crate::db::block_on(
-                db.tx_ref(transaction_id)
-                    .update_with_large_value_mutations(table, row, cells, edits, options),
-            )
-            .map_err(write_error)?;
-            self.staged(transaction_id);
-            return Ok(None);
-        }
-        let write = crate::db::block_on(
-            db.update_with_large_value_mutations(table, row, cells, edits, options),
-        )
-        .map_err(write_error)?;
-        Ok(Some(self.committed(write.mergeable_tx_id())))
-    }
-
     /// The authority's advice on whether this client may do `action` (read,
     /// insert, update or delete a row), without doing it. Without a server
     /// nothing can advise: the answer is
@@ -1668,6 +1633,43 @@ impl JazzClient {
         let id = db.request_permission_advice(action, None);
         self.shared.tick_soon();
         self.shared.settle(db.permission_advice(id)).await
+    }
+
+    /// [`JazzClient::update`] with edits of large-capable columns: a text
+    /// column's [`LargeValueUpdate::TextEdit`] (merged over what this
+    /// store has, as the authority merges), splices within a page, JSON
+    /// replacements by pointer. The patch and the edits apply as one row
+    /// update; a failing edit leaves the row unchanged.
+    pub fn update_with_edits(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        edits: Vec<crate::db::LargeValueUpdate>,
+    ) -> Result<Option<TransactionId>> {
+        let cells = self.core_cells(table, updates.into_iter().collect())?;
+        let updated_at_ms = self.write_updated_at()?;
+        let row = RowUuid(*object_id.uuid());
+        let db = self.db()?;
+        let options = UpdateOptions {
+            identity: self.write_identity()?,
+            updated_at_ms,
+            ..Default::default()
+        };
+        if let Some(transaction_id) = self.open_transaction()? {
+            crate::db::block_on(
+                db.tx_ref(transaction_id)
+                    .update_with_large_value_mutations(table, row, cells, edits, options),
+            )
+            .map_err(write_error)?;
+            self.staged(transaction_id);
+            return Ok(None);
+        }
+        let write = crate::db::block_on(
+            db.update_with_large_value_mutations(table, row, cells, edits, options),
+        )
+        .map_err(write_error)?;
+        Ok(Some(self.committed(write.mergeable_tx_id())))
     }
 
     /// Delete a row in the named table.
@@ -1755,6 +1757,17 @@ impl JazzClient {
     /// if every read and written row is unchanged since then. Staged writes
     /// are not visible to ordinary reads until the transaction commits.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
+        self.begin(false)
+    }
+
+    /// Begin a mergeable transaction: its writes commit together, each
+    /// merging with concurrent ones as a plain write does (TS's default
+    /// `transaction`). Its reads see local data with its own staged writes.
+    pub fn begin_mergeable_transaction(&self) -> Result<JazzTransaction> {
+        self.begin(true)
+    }
+
+    fn begin(&self, mergeable: bool) -> Result<JazzTransaction> {
         // Each staged write carries this handle's identity (checked when
         // staged, and named on the commit for the authority).
         self.write_identity()?;
@@ -1768,11 +1781,18 @@ impl JazzClient {
                 transaction_id = OpenTransactionId::new();
             }
         }
-        crate::db::block_on(db.begin_serializable(transaction_id)).map_err(write_error)?;
-        self.shared
-            .state()
-            .transactions
-            .insert(transaction_id, false);
+        if mergeable {
+            crate::db::block_on(db.begin_mergeable(transaction_id)).map_err(write_error)?;
+        } else {
+            crate::db::block_on(db.begin_serializable(transaction_id)).map_err(write_error)?;
+        }
+        {
+            let mut state = self.shared.state();
+            state.transactions.insert(transaction_id, false);
+            if mergeable {
+                state.mergeable_transactions.insert(transaction_id);
+            }
+        }
         let write_context = self
             .write_context
             .clone()
@@ -1792,10 +1812,22 @@ impl JazzClient {
                 "transaction cannot commit without writes".to_string(),
             ));
         }
-        let receipt = crate::db::block_on(self.db()?.commit_serializable_handle(transaction_id));
+        let mergeable = self
+            .shared
+            .state
+            .borrow()
+            .mergeable_transactions
+            .contains(&transaction_id);
+        let db = self.db()?;
+        let receipt = if mergeable {
+            crate::db::block_on(db.commit_mergeable_handle(transaction_id))
+        } else {
+            crate::db::block_on(db.commit_serializable_handle(transaction_id))
+        };
         {
             let mut state = self.shared.state();
             state.transactions.remove(&transaction_id);
+            state.mergeable_transactions.remove(&transaction_id);
             state
                 .closed_transactions
                 .insert(transaction_id, ClosedTransaction::Committed);
@@ -1813,6 +1845,7 @@ impl JazzClient {
             .map_err(write_error)?;
         let mut state = self.shared.state();
         state.transactions.remove(&transaction_id);
+        state.mergeable_transactions.remove(&transaction_id);
         state
             .closed_transactions
             .insert(transaction_id, ClosedTransaction::RolledBack);
@@ -1827,8 +1860,14 @@ impl JazzClient {
             return Ok(());
         }
         let db = self.db()?;
+        // This handle's writes only: its session's, or the database's own.
+        // A refusal that settled before the call counts (jazz#5728).
+        let writer = match self.write_identity()? {
+            WriteIdentity::Session(author) => Some(author),
+            _ => None,
+        };
         self.shared
-            .settle(db.wait_for_pending_writes(CoreDurabilityTier::Global))
+            .settle(db.wait_for_sync(CoreDurabilityTier::Global, writer))
             .await?
             .map_err(|error| {
                 if error.is_authorization_denied() {

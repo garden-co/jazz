@@ -61,6 +61,17 @@ async fn typed_snippets_run() {
 
     let created = snippets::group_todo_writes(&jazz, parent.id).await.unwrap();
     assert!(jazz.get::<jazz_app::Todo>(created).await.unwrap().is_some());
+    // The serializable snippet finishes an open todo once.
+    assert!(
+        snippets::finish_todo_serializably(&jazz, created)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !snippets::finish_todo_serializably(&jazz, created)
+            .await
+            .unwrap()
+    );
     let parent_now = jazz
         .get::<jazz_app::Todo>(parent.id)
         .await
