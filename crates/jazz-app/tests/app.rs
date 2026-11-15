@@ -1,4 +1,4 @@
-#[path = "support/todos.rs"]
+#[path = "bindings/todos.rs"]
 mod bindings;
 
 use std::time::Duration;
@@ -9,11 +9,11 @@ use jazz_app::{AppFiles, AppId, Backend, Config, Error, Jazz, Order, ReadTier, R
 use jazz_server::JazzServer;
 
 fn files() -> AppFiles {
-    AppFiles::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")).unwrap()
+    AppFiles::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/todos")).unwrap()
 }
 
 fn client_files() -> AppFiles {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/todos");
     AppFiles::new(std::fs::read(format!("{dir}/jazz.app.json")).unwrap(), None)
 }
 
@@ -28,7 +28,8 @@ fn new_todo(title: &str) -> NewTodo {
 /// runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typed_reads_and_writes_locally() {
-    let jazz = Jazz::open(client_files(), Config::new(AppId::random()))
+    // The generated `open`, with the schema it embeds.
+    let jazz = bindings::open(Config::new(AppId::random()))
         .await
         .expect("open locally");
 
@@ -213,7 +214,15 @@ async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
             ))
     };
 
-    let writer = Jazz::open(files(), config("alice"))
+    // The generated `open`, with the permissions the backend states.
+    let permissions = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/todos/jazz.permissions.json"
+    ))
+    .unwrap();
+    let mut backend = config("alice");
+    backend.backend = backend.backend.map(|b| b.permissions(permissions));
+    let writer = bindings::open(backend)
         .await
         .expect("open as the app's backend");
     let bundle = writer.bundle().expect("a published bundle").to_owned();

@@ -1949,6 +1949,7 @@ dependencies = [
  "futures",
  "futures-core",
  "jazz",
+ "jazz-codegen",
  "jazz-native-transport",
  "jazz-server",
  "reqwest",

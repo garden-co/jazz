@@ -47,13 +47,13 @@ pub struct Fields<'a> {
     implementations: &'a Implementations,
 }
 
-impl Fields<'_> {
+impl<'a> Fields<'a> {
     pub fn id(&self) -> ObjectId {
         self.id
     }
 
     /// The app's implementations of its computed columns and transforms.
-    pub fn implementations(&self) -> &Implementations {
+    pub fn implementations(&self) -> &'a Implementations {
         self.implementations
     }
 

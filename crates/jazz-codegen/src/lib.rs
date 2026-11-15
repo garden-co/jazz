@@ -14,6 +14,7 @@ mod json_schema;
 pub mod migrations;
 pub mod model;
 pub mod names;
+pub mod rust;
 pub mod ts;
 
 use jazz::tools::deployment::artifact::{ArtifactError, json};
@@ -73,6 +74,7 @@ impl CodegenError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     TypeScript,
+    Rust,
 }
 
 impl Lang {
@@ -80,8 +82,9 @@ impl Lang {
     pub fn parse(name: &str) -> Result<Lang, CodegenError> {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
+            "rust" | "rs" => Ok(Lang::Rust),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
             ))),
         }
     }
@@ -90,6 +93,7 @@ impl Lang {
     pub fn file(self) -> &'static str {
         match self {
             Lang::TypeScript => ts::FILE,
+            Lang::Rust => rust::FILE,
         }
     }
 }
@@ -104,6 +108,7 @@ pub fn generate(lang: Lang, app_json: &[u8]) -> Result<String, CodegenError> {
 pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
     match lang {
         Lang::TypeScript => ts::generate(app),
+        Lang::Rust => rust::generate(app),
     }
 }
 
