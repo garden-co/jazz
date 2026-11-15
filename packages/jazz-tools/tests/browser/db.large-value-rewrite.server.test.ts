@@ -1,12 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
-import { deploy } from "../../src/dev/catalogue.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   largeValueRewriteApp as app,
   largeValueRewritePermissions,
 } from "./large-value-rewrite-schema.js";
-import { getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -53,13 +52,13 @@ describe("browser subscriptions while the backend rewrites a row", () => {
       const info = await getJazzServerInfo(uniqueDbName("large-value-rewrite"));
       await deploy({
         ...info,
-        schema: app.wasmSchema,
+        app,
         permissions: largeValueRewritePermissions,
       });
       backendAppId = info.appId;
       await withTimeout(backend.largeValueRewriteBackendOpen(info), 20_000, "backend open");
       const front = await startJazzApp(info, {
-        schema: app.wasmSchema,
+        schema: app,
         permissions: largeValueRewritePermissions,
       });
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { QuerySubscription } from "jazz-tools/svelte";
-  import { app, TASK_STATUSES, type Show, type Task, type TaskStatus } from "../../../schema";
+  import { app, type Show, type Task } from "../../../jazz.generated";
+import { TASK_STATUSES, type TaskStatus } from "../../../app-extras";
   import { addTask, moveTask, rankAfter, STATUS_LABELS, type Me } from "$lib/model/actions";
 
   let { show, me }: { show: Show; me: Me } = $props();

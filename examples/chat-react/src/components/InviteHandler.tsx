@@ -3,7 +3,7 @@ import { useDb, useSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { waitForWrite } from "@/lib/db-write";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { type DurabilityTier } from "jazz-tools";
 
 interface InviteHandlerProps {

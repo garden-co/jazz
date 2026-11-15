@@ -1,6 +1,6 @@
 import { Data, Effect, Option } from "effect";
 import { Jazz } from "jazz-tools/effect";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import { addChecklist } from "../src/model";
 import { jazz } from "./jazz";
 

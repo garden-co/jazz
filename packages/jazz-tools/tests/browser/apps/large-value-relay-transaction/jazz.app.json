@@ -1,0 +1,15 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "documents": {
+      "columns": { "branch": "string", "title": "string", "projectId": "uuid", "body": "string" },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } },
+      "branchBy": ["branch"]
+    },
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "documentsViaProject": { "reverse": "documents", "relation": "project" } }
+    }
+  }
+}

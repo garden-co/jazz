@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getSession, QuerySubscription } from 'jazz-tools/svelte';
-	import { app } from '../session-app.js';
+	import { app } from '../session-app/jazz.generated.js';
 
 
   // #region auth-session-svelte-hook

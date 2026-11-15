@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NapiDb } from "jazz-napi";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { openConfig } from "./native-runtime/native-codec.js";
 import { nativeCoreErrorCode } from "./native-runtime/native-error-code.js";
@@ -22,7 +22,7 @@ import { encodeSchema } from "./native-runtime/schema-codec.js";
 import { translateQuery } from "./query-adapter.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
 const node = new Uint8Array(16).fill(41);
 const author = testAuthorBytes("native-storage-admission");
 const config = openConfig(node, author, 1, true);

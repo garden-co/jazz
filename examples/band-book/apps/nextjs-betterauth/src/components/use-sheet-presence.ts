@@ -10,7 +10,7 @@ import {
   type SelectionPresence,
 } from "jazz-tools/prosemirror";
 import type { EditorState } from "prosemirror-state";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { memberName, useWorkspace } from "./workspace-context";
 
 /** How often a write follows the cursor, and how long a quiet editor counts as present. */

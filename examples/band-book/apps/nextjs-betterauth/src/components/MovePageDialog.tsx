@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useDb } from "jazz-tools/react";
 import { Button, Dialog, Heading, HStack, Selector, Text, VStack } from "@astryxdesign/core";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
 import { moveTargets } from "@/src/lib/page-actions";
 import { useWorkspace } from "./workspace-context";

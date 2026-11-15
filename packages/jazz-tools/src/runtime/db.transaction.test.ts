@@ -1,60 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { SerializableWriteHandle } from "./client.js";
 import { createDb as createAccountDb } from "./default-create-db.js";
 import { type Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { createDb } from "./testing/create-internal-db.js";
 
-const todoSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
-type TodoSchema = s.Schema<typeof todoSchema>;
-const app: s.App<TodoSchema> = s.defineApp(todoSchema, { migrations: "none" });
+const app = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean" } } },
+});
 
-const otherTodoSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      note: s.string().default(""),
+const otherApp = testApp({
+  tables: {
+    todos: {
+      columns: { title: "string", done: "boolean", note: { type: "string", default: "" } },
     },
-    {},
-  ),
-};
-type OtherTodoSchema = s.Schema<typeof otherTodoSchema>;
-const otherApp: s.App<OtherTodoSchema> = s.defineApp(otherTodoSchema, { migrations: "none" });
+  },
+});
 
-const taggedTodoSchema = {
-  tagged_todos: s.table(
-    {
-      title: s.string(),
-      tags: s.array(s.string()).default([]),
-    },
-    {},
-  ),
-};
-type TaggedTodoSchema = s.Schema<typeof taggedTodoSchema>;
-const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema, { migrations: "none" });
+const taggedApp = testApp({
+  tables: {
+    tagged_todos: { columns: { title: "string", tags: { array: "string", default: [] } } },
+  },
+});
 
-const defaultsTodoSchema = {
-  defaults_todos: s.table(
-    {
-      title: s.string().default("default title"),
-      done: s.boolean().default(false),
+const defaultsApp = testApp({
+  tables: {
+    defaults_todos: {
+      columns: {
+        title: { type: "string", default: "default title" },
+        done: { type: "boolean", default: false },
+      },
     },
-    {},
-  ),
-};
-type DefaultsTodoSchema = s.Schema<typeof defaultsTodoSchema>;
-const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema, {
-  migrations: "none",
+  },
 });
 
 let db: Db;

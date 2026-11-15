@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useAll } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { AvatarGroup, AvatarGroupOverflow } from "@astryxdesign/core/AvatarGroup";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { PRESENCE_HEARTBEAT_INTERVAL_MS } from "@/components/presence-heartbeat";
 
 /** Three missed heartbeats and a bandmate no longer counts as here. */

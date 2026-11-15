@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 /** What a tool may read: the workspace's own seeded booking data. */
 export type ToolContext = {

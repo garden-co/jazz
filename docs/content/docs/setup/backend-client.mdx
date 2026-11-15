@@ -26,8 +26,8 @@ audience and the claims only that machine has:
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite, trustWorkload } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -69,8 +69,8 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
 
 ```ts title="import-job.ts"
 import { createJazzClient } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 const session = await createJazzClient({
   app,

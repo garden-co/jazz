@@ -16,7 +16,7 @@ import {
   VStack,
   type DropdownMenuOption,
 } from "@astryxdesign/core";
-import { app, type Block, type BlockKind } from "@/schema";
+import { app, type Block, type BlockKind } from "@/jazz.generated";
 import { comparePositioned, positionBetween } from "@/src/lib/positions";
 import { textSplice } from "@/src/lib/text-splice";
 import { AttachmentBlock } from "./AttachmentBlock";

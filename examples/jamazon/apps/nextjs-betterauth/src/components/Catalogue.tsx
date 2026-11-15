@@ -9,7 +9,7 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useAll } from "jazz-tools/react";
 import { useState } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { ProductCard } from "./ProductCard";
 import { Page } from "./Page";
 

@@ -54,7 +54,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useAll } from "jazz-tools/vue";
-import { app, type StopWithVenue } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
+import { type StopWithVenue } from "../../app-extras.js";
 import { buildMonthGrid } from "../lib/calendar-grid.js";
 import { statusLabels, toDateInput } from "../lib/format.js";
 import Button from "./ui/Button.vue";

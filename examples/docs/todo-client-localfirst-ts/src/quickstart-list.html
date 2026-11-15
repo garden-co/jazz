@@ -8,7 +8,7 @@
     </form>
     <script type="module">
       import { createJazzClient } from "jazz-tools/client";
-      import { app } from "./schema.js";
+      import { app } from "../jazz.generated.js";
 
       const session = await createJazzClient({ env: "dev", initial: "device" });
       const db = session.db;

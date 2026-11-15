@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { app } from "./schema.js";
+import { app } from "./jazz.generated.js";
 import { seedRows } from "./src/seed.js";
 import { belowReorderLevel, consoleQueries, warehouseQueries } from "./src/warehouse.js";
 

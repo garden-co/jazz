@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { jazz } from "./jazz.server";
 import { planPersonalBootstrap } from "./bootstrap-state";
 import { normalizeEmail } from "./emails";

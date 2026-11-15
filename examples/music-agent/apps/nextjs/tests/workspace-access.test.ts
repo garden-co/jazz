@@ -3,8 +3,8 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Db } from "jazz-tools";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
-import { app } from "../schema";
-import permissions from "../permissions";
+import { app } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 // The browser's side of the app: a user signed in with Better Auth, syncing
 // through the app's own `/jazz` route (as the browser does), and reading under

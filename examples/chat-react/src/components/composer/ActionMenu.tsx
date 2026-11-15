@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { waitForWrite } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { DurabilityTier } from "jazz-tools";
 
 interface ActionMenuProps {

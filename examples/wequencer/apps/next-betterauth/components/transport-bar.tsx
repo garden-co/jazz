@@ -6,7 +6,7 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { NumberInput } from "@astryxdesign/core/NumberInput";
 import { Text } from "@astryxdesign/core/Text";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { MAX_TEMPO, MIN_TEMPO } from "@/lib/instruments";
 import type { ReportWrite } from "@/lib/report-write";
 import {

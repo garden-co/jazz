@@ -1,7 +1,7 @@
 <!-- #region reading-loading-state-svelte -->
 <script lang="ts">
   import { QuerySubscription } from 'jazz-tools/svelte';
-  import { app } from '../schema.js';
+  import { app } from '../jazz.generated.js';
 
   const todos = new QuerySubscription(app.todos);
   // .current: undefined = not yet connected; [] = connected, no rows; [...] = rows present

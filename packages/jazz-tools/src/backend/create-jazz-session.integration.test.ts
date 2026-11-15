@@ -3,9 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { resolveSchemaSource } from "../schema-source.js";
+import { deploy, startLocalJazzServer, testApp, testPermissions } from "../testing/index.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createJazzClient } from "./index.js";
 import {
@@ -16,23 +14,21 @@ import {
 import { accountRegistryUrl } from "../accounts/context.js";
 import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
-const app = s.defineApp(
-  {
-    notes: s.table({ text: s.string() }, {}),
-    posts: s.table({ text: s.string() }, {}),
+const app = testApp({
+  tables: {
+    notes: { columns: { text: "string" } },
+    posts: { columns: { text: "string" } },
   },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.posts.allowRead.always();
-  policy.posts.allowInsert.always();
-  policy.posts.allowUpdate.always();
-  policy.posts.allowDelete.always();
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.never();
-  policy.notes.allowUpdate.never();
-  policy.notes.allowDelete.never();
 });
+// Notes are read-only: their insert, update and delete are denied.
+const permissionsFile = {
+  format: 1,
+  tables: {
+    posts: { read: "true", insert: "true", update: "true", delete: "true" },
+    notes: { read: "true" },
+  },
+};
+const permissions = testPermissions(app, permissionsFile);
 
 /** A user the app's backend signed in, and the session it acts as them with. */
 async function appUser(
@@ -171,8 +167,8 @@ describe("Node shared backend session", () => {
       serverUrl: server.url,
       appId,
       adminSecret,
-      schema: resolveSchemaSource(app),
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
     const session = await openJazzSession({
       appId,
@@ -251,8 +247,8 @@ describe("Node shared backend session", () => {
         serverUrl: server.url,
         appId,
         adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
+        app,
+        permissions: permissionsFile,
       });
       session = await openJazzSession({
         appId,
@@ -332,8 +328,8 @@ describe("Node shared backend session", () => {
         serverUrl: server.url,
         appId,
         adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
+        app,
+        permissions: permissionsFile,
       });
       const db = writer.getSnapshot().client!.db;
       await db.insert(app.posts, { text: "before outage" }).wait({ tier: "global" });

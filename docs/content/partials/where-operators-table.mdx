@@ -1,17 +1,17 @@
 Operator support by column type (TypeScript):
 
-| Column kind                   | Operators / shape                          |
-| ----------------------------- | ------------------------------------------ |
-| `id`                          | `eq`, `ne`, `in`                           |
-| `s.string()`                  | `eq`, `ne`, `contains`, `in`               |
-| `s.boolean()`                 | `eq`, `ne`, `in`                           |
-| `s.int()` / `s.float()`       | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in` |
-| `s.timestamp()`               | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in` |
-| `s.bytes()`                   | `eq`, `ne`, `in`                           |
-| `s.uuid()` (required)         | `eq`, `ne`, `in`                           |
-| `s.uuid().optional()`         | `eq`, `ne`, `in`, `isNull`                 |
-| `s.enum(...)`                 | `eq`, `ne`, `in`                           |
-| `s.array(...)`                | `eq`, `contains`, `in`                     |
-| `s.json()` / `s.json(schema)` | `eq`, `ne`, `in`                           |
+| Column kind       | Operators / shape                          |
+| ----------------- | ------------------------------------------ |
+| `id`              | `eq`, `ne`, `in`                           |
+| `string`          | `eq`, `ne`, `contains`, `in`               |
+| `boolean`         | `eq`, `ne`, `in`                           |
+| `int` / `float`   | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in` |
+| `timestamp`       | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in` |
+| `bytes`           | `eq`, `ne`, `in`                           |
+| `uuid` (required) | `eq`, `ne`, `in`                           |
+| `uuid?`           | `eq`, `ne`, `in`, `isNull`                 |
+| `enum`            | `eq`, `ne`, `in`                           |
+| `array`           | `eq`, `contains`, `in`                     |
+| `json`            | `eq`, `ne`, `in`                           |
 
 Nullable columns with ordinary filter operators also support `isNull`. Required columns, `id`, and payload enums do not expose it.
