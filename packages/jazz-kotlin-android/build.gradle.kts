@@ -66,6 +66,8 @@ val cargoNdkFfi by tasks.registering(Exec::class) {
     workingDir = repo
     outputs.dir(jniLibsOut)
     outputs.upToDateWhen { false } // cargo decides what to rebuild
+    // cargo-ndk only adds files: drop ABIs (or profiles) a previous run left.
+    doFirst { delete(jniLibsOut) }
     commandLine(
         listOf("cargo", "ndk", "--platform", minSdkVersion.toString()) +
             abis.flatMap { listOf("-t", it) } +
