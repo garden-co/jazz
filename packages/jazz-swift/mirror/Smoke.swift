@@ -18,9 +18,16 @@ let app = #"""
     { "format": 1, "tables": { "notes": { "columns": { "text": "string" } } } }
     """#
 
-let jazz = try await Jazz.Client.open(app: app, config: .local())
-let note = try await jazz.insert(NewNote(text: "hello from the prebuilt Jazz core"))
-let read = try await jazz.all(Query<Note>())
-precondition(read.map(\.id) == [note.id], "read back \(read)")
-print("ok:", read[0].text)
-try await jazz.close()
+// Not top-level code: Swift 6.1 (Xcode 16) crashes compiling top-level
+// async code that calls Jazz's typed-throws methods.
+@main
+struct Smoke {
+    static func main() async throws {
+        let jazz = try await Jazz.Client.open(app: app, config: .local())
+        let note = try await jazz.insert(NewNote(text: "hello from the prebuilt Jazz core"))
+        let read = try await jazz.all(Query<Note>())
+        precondition(read.map(\.id) == [note.id], "read back \(read)")
+        print("ok:", read[0].text)
+        try await jazz.close()
+    }
+}

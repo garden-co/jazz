@@ -118,7 +118,7 @@ jobs:
               targets: [.executableTarget(name: "Smoke", dependencies: [.product(name: "Jazz", package: "verify")])]
           )
           SWIFT
-          cp packages/jazz-swift/mirror/Smoke.swift "$consumer/Sources/Smoke/main.swift"
+          cp packages/jazz-swift/mirror/Smoke.swift "$consumer/Sources/Smoke/Smoke.swift"
           (cd "$consumer" && swift run Smoke)
           (cd "$consumer" && xcodebuild build -scheme Smoke -destination 'generic/platform=iOS Simulator' -quiet)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
