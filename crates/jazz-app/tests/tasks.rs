@@ -203,6 +203,126 @@ async fn text_edits_merge() {
     assert_eq!(notes().await, "well, bye now, friend");
 }
 
+/// A text edit together with other column sets, in one update: TS's
+/// `update(table, id, data, { editedFrom })`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_edit_with_other_columns() {
+    use jazz_app::EditedFrom;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            notes: Some("hello world".into()),
+            ..NewTask::new("Notes", 1, Vec::new())
+        })
+        .await
+        .unwrap();
+    // Someone else changes the notes while an editor still shows
+    // "hello world".
+    jazz.update(
+        task.id,
+        TaskUpdate {
+            notes: Some(Some("hello brave world".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    jazz.update_edited(
+        task.id,
+        TaskUpdate {
+            notes: Some(Some("hello world!".into())),
+            title: Some("Renamed".into()),
+            score: Some(7),
+            ..Default::default()
+        },
+        EditedFrom::new().column(tasks::notes(), "hello world"),
+    )
+    .await
+    .unwrap();
+    let task = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(task.notes.as_deref(), Some("hello brave world!"));
+    assert_eq!((task.title.as_str(), task.score), ("Renamed", 7));
+
+    // In a transaction, closure and open forms.
+    let id = task.id;
+    jazz.transaction(move |tx| async move {
+        tx.update_edited(
+            id,
+            TaskUpdate {
+                notes: Some(Some("bye".into())),
+                score: Some(8),
+                ..Default::default()
+            },
+            EditedFrom::new().column(tasks::notes(), "hello brave world!"),
+        )
+    })
+    .await
+    .unwrap();
+    let open = jazz.begin_transaction().await.unwrap();
+    open.update_edited(
+        id,
+        TaskUpdate {
+            notes: Some(Some("bye now".into())),
+            title: Some("Done".into()),
+            ..Default::default()
+        },
+        EditedFrom::new().column(tasks::notes(), "bye"),
+    )
+    .await
+    .unwrap();
+    open.commit().await.unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!(
+        (task.notes.as_deref(), task.title.as_str(), task.score),
+        (Some("bye now"), "Done", 8)
+    );
+
+    // The edited column must be set to a string by the update.
+    let unset = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                score: Some(1),
+                ..Default::default()
+            },
+            EditedFrom::new().column(tasks::notes(), "bye now"),
+        )
+        .await;
+    assert!(matches!(unset, Err(Error::Config(_))), "{unset:?}");
+    // A failing edit (a column without "merge": "text") writes nothing:
+    // not even the update's other sets.
+    let plain = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                title: Some("Other".into()),
+                score: Some(2),
+                ..Default::default()
+            },
+            EditedFrom::new().column(tasks::title(), "Done"),
+        )
+        .await;
+    assert!(plain.is_err(), "{plain:?}");
+    let missing = jazz
+        .update_edited(
+            jazz_app::ObjectId::new(),
+            TaskUpdate {
+                notes: Some(Some("x".into())),
+                ..Default::default()
+            },
+            EditedFrom::new().column(tasks::notes(), ""),
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(Error::NotFound { .. })),
+        "{missing:?}"
+    );
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Done", 8));
+}
+
 /// Large values: a bytes cell inserted from a stream, spliced in place, and a json cell edited by pointer.
 #[tokio::test]
 async fn large_values() {

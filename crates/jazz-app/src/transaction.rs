@@ -34,6 +34,10 @@ impl Transaction {
         &self.client
     }
 
+    pub(crate) fn implementations(&self) -> &Implementations {
+        &self.implementations
+    }
+
     /// Marks the transaction as having written, so it commits.
     pub(crate) fn wrote(&self) {
         self.wrote.set(true);
@@ -320,7 +324,7 @@ fn parked(key: u64) -> Result<Transaction> {
 }
 
 impl OpenTransaction {
-    async fn on<F, Fut, R>(&self, call: F) -> Result<R>
+    pub(crate) async fn on<F, Fut, R>(&self, call: F) -> Result<R>
     where
         F: FnOnce(Transaction) -> Fut + Send + 'static,
         Fut: Future<Output = Result<R>> + 'static,
