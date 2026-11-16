@@ -1504,6 +1504,344 @@ public func FfiConverterTypeJazzHandle_lower(_ value: JazzHandle) -> UInt64 {
 
 
 /**
+ * A user-following session (TS's `JazzSession`): who is signed in (the
+ * app's bearer, a device account, or no one) and a client for that user,
+ * replaced when the user changes. Config: the app's, with `"initial"`:
+ * `"backend"` (follow the bearer, the default; needs `"auth": {"bearer":
+ * true}` and a token provider), `"device"` or `"signed-out"`.
+ */
+public protocol SessionProtocol: AnyObject, Sendable {
+    
+    func createDeviceAccount() throws 
+    
+    /**
+     * The device account's key (`jazz-auth-v1:…`): keep it as a password.
+     */
+    func exportDeviceKey() throws  -> String
+    
+    /**
+     * A handle acting for the user signed in now: `NoUser` (with the
+     * status) while there is none. Fetch it again when `clientEpoch`
+     * changes: one from before fails with `Replaced`. Its `shutdown`
+     * leaves the session open.
+     */
+    func jazz() throws  -> JazzHandle
+    
+    /**
+     * Links the signed-in device account to the bearer's user.
+     */
+    func linkDeviceAccount() throws 
+    
+    /**
+     * The app's auth changed: asks the bearer and the backend who is
+     * signed in now, and follows.
+     */
+    func refresh() throws 
+    
+    /**
+     * Signs in again as the device account this device keeps.
+     */
+    func reopenDeviceAccount() throws 
+    
+    /**
+     * Signs in as the device account `device_key` (`jazz-auth-v1:…`).
+     */
+    func restoreDeviceAccount(deviceKey: String) throws 
+    
+    /**
+     * Repeats what failed, as the snapshot's `recovery` says.
+     */
+    func retry() throws 
+    
+    /**
+     * Closes the session and its client: handles it gave fail with
+     * `Closed`, watches end.
+     */
+    func shutdown() throws 
+    
+    /**
+     * Signs out; the session stays, `signed-out`.
+     */
+    func signOut() throws 
+    
+    /**
+     * `{"status": "starting"|"ready"|"signed-out"|"transitioning"|"error"|
+     * "closed", "user"?, "clientEpoch", "error"?: {"kind", "message"},
+     * "recovery"?: "action"|"session"}`.
+     */
+    func snapshot() throws  -> String
+    
+    /**
+     * Calls `listener` with each snapshot, the current one first; when the
+     * session closes, a last `{"kind": "closed", "message"}`.
+     */
+    func watch(listener: StateListener) throws  -> Watch
+    
+}
+/**
+ * A user-following session (TS's `JazzSession`): who is signed in (the
+ * app's bearer, a device account, or no one) and a client for that user,
+ * replaced when the user changes. Config: the app's, with `"initial"`:
+ * `"backend"` (follow the bearer, the default; needs `"auth": {"bearer":
+ * true}` and a token provider), `"device"` or `"signed-out"`.
+ */
+open class Session: SessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_jazz_ffi_fn_clone_session(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_jazz_ffi_fn_free_session(handle, $0) }
+    }
+
+    
+public static func `open`(configJson: String, tokens: TokenProvider?)throws  -> Session  {
+    return try  FfiConverterTypeSession_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_constructor_session_open(
+        FfiConverterString.lower(configJson),
+        FfiConverterOptionTypeTokenProvider.lower(tokens),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+open func createDeviceAccount()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_create_device_account(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The device account's key (`jazz-auth-v1:…`): keep it as a password.
+     */
+open func exportDeviceKey()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_export_device_key(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A handle acting for the user signed in now: `NoUser` (with the
+     * status) while there is none. Fetch it again when `clientEpoch`
+     * changes: one from before fails with `Replaced`. Its `shutdown`
+     * leaves the session open.
+     */
+open func jazz()throws  -> JazzHandle  {
+    return try  FfiConverterTypeJazzHandle_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_jazz(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Links the signed-in device account to the bearer's user.
+     */
+open func linkDeviceAccount()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_link_device_account(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The app's auth changed: asks the bearer and the backend who is
+     * signed in now, and follows.
+     */
+open func refresh()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_refresh(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Signs in again as the device account this device keeps.
+     */
+open func reopenDeviceAccount()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_reopen_device_account(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Signs in as the device account `device_key` (`jazz-auth-v1:…`).
+     */
+open func restoreDeviceAccount(deviceKey: String)throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_restore_device_account(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(deviceKey),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Repeats what failed, as the snapshot's `recovery` says.
+     */
+open func retry()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_retry(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Closes the session and its client: handles it gave fail with
+     * `Closed`, watches end.
+     */
+open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_shutdown(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Signs out; the session stays, `signed-out`.
+     */
+open func signOut()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_sign_out(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * `{"status": "starting"|"ready"|"signed-out"|"transitioning"|"error"|
+     * "closed", "user"?, "clientEpoch", "error"?: {"kind", "message"},
+     * "recovery"?: "action"|"session"}`.
+     */
+open func snapshot()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_snapshot(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Calls `listener` with each snapshot, the current one first; when the
+     * session closes, a last `{"kind": "closed", "message"}`.
+     */
+open func watch(listener: StateListener)throws  -> Watch  {
+    return try  FfiConverterTypeWatch_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_watch(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeStateListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = Session
+
+    public static func lift(_ handle: UInt64) throws -> Session {
+        return Session(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: Session) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Session {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: Session, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSession_lift(_ handle: UInt64) throws -> Session {
+    return try FfiConverterTypeSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSession_lower(_ value: Session) -> UInt64 {
+    return FfiConverterTypeSession.lower(value)
+}
+
+
+
+
+
+
+/**
  * What a watch calls with each state (JSON); when the app closes, a last
  * `{"kind": "closed", "message"}`, after which no call comes.
  */
@@ -2901,6 +3239,19 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Unsynced(pending: UInt64, reason: String
     )
     /**
+     * Contract 2: this handle's client was replaced, as its session's user
+     * signed out or changed (TS's `DbReplacedError`): fetch the current
+     * one from the session.
+     */
+    case Replaced(reason: String
+    )
+    /**
+     * Contract 2: the session has no usable client now; `status` is the
+     * session's (`signedOut`, `transitioning`, …).
+     */
+    case NoUser(status: String, reason: String
+    )
+    /**
      * Contract 2: a trusted backend client's `for_user` refused because
      * the client's permissions bundle (`own`) isn't the one the main
      * backend serves (`served`): reopen it with the app's published
@@ -2961,7 +3312,14 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             pending: try FfiConverterUInt64.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 9: return .BundleMismatch(
+        case 9: return .Replaced(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 10: return .NoUser(
+            status: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 11: return .BundleMismatch(
             own: try FfiConverterString.read(from: &buf), 
             served: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
@@ -3019,8 +3377,19 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .BundleMismatch(own,served,reason):
+        case let .Replaced(reason):
             writeInt(&buf, Int32(9))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .NoUser(status,reason):
+            writeInt(&buf, Int32(10))
+            FfiConverterString.write(status, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .BundleMismatch(own,served,reason):
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(own, into: &buf)
             FfiConverterString.write(served, into: &buf)
             FfiConverterString.write(reason, into: &buf)
@@ -3087,6 +3456,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTokenProvider: FfiConverterRustBuffer {
+    typealias SwiftType = TokenProvider?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTokenProvider.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTokenProvider.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3235,6 +3628,42 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_watch_sync() != 26183) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_jazz_ffi_checksum_method_session_create_device_account() != 32378) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_export_device_key() != 15002) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_jazz() != 9310) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_link_device_account() != 7010) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_refresh() != 15532) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_reopen_device_account() != 3065) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_restore_device_account() != 48266) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_retry() != 39570) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_shutdown() != 44387) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_sign_out() != 30311) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_snapshot() != 13076) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_watch() != 6190) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_jazz_ffi_checksum_method_statelistener_on_change() != 17177) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3299,6 +3728,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open_with_tokens() != 11789) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_constructor_session_open() != 7330) {
         return InitializationResult.apiChecksumMismatch
     }
 
