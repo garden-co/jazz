@@ -219,9 +219,12 @@ guarantee its history is complete.
 type and an insert type per table, and an enum type per enum column. For StagePlan's `tasks` table
 (the [StagePlan example](https://github.com/garden-co/jazz/tree/main/examples/stage-plan)):
 
-<Tabs groupId="jazz-environment" items={["TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <BindingsExcerpt language="TypeScript" />
+  </Tab>
+  <Tab value="Rust">
+    <BindingsExcerpt language="Rust" />
   </Tab>
 </Tabs>
 
@@ -270,9 +273,3 @@ import { app } from "./jazz.generated";
 
 type TodoFilter = WhereOf<typeof app.todos>;
 ```
-
-## Large schemas
-
-The generated module declares every table's types directly, so TypeScript doesn't infer them from
-the schema: an app with hundreds of tables typechecks one table handle at a time, and every part
-of the app uses the same `app`.

@@ -74,15 +74,35 @@ public enum JazzApp {
         public static let table = "canvases"
         public let id: Jazz.ID
         public var chatId: Jazz.ID
+        /// Relation `chat`: the `Chat` row, when the query includes it (and it exists).
+        public var chat: Chat? {
+            get { _chat?.value }
+            set { _chat = newValue.map { Jazz.Included($0) } }
+        }
+        private var _chat: Jazz.Included<Chat>? = nil
+        /// Relation `strokesViaCanvas`: the `Stroke` rows, when the query includes them.
+        public var strokesViaCanvas: [Stroke]? = nil
 
         public init(id: Jazz.ID, chatId: Jazz.ID) {
             self.id = id
             self.chatId = chatId
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.chatId == b.chatId
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(chatId)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case chatId = "chatId"
+            case _chat = "chat"
+            case strokesViaCanvas = "strokesViaCanvas"
         }
     }
 
@@ -120,7 +140,6 @@ public enum JazzApp {
     }
 
     /// Queries of `canvases` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum canvases {
         /// Every row of `canvases`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Canvas> { Jazz.Query() }
@@ -129,6 +148,10 @@ public enum JazzApp {
         public static let id = Jazz.Column<Canvas, Jazz.ID>("id")
         /// Column `chatId`.
         public static let chatId = Jazz.Column<Canvas, Jazz.ID>("chatId")
+        /// Relation `chat`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let chat = Jazz.Relation<Canvas, Chat>("chat")
+        /// Relation `strokesViaCanvas`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let strokesViaCanvas = Jazz.Relation<Canvas, Stroke>("strokesViaCanvas")
     }
 
     /// A row of `chatMembers`.
@@ -138,6 +161,12 @@ public enum JazzApp {
         public var chatId: Jazz.ID
         public var userId: Jazz.ID
         public var joinCode: Swift.String?
+        /// Relation `chat`: the `Chat` row, when the query includes it (and it exists).
+        public var chat: Chat? {
+            get { _chat?.value }
+            set { _chat = newValue.map { Jazz.Included($0) } }
+        }
+        private var _chat: Jazz.Included<Chat>? = nil
 
         public init(id: Jazz.ID, chatId: Jazz.ID, userId: Jazz.ID, joinCode: Swift.String?) {
             self.id = id
@@ -146,11 +175,24 @@ public enum JazzApp {
             self.joinCode = joinCode
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.chatId == b.chatId && a.userId == b.userId && a.joinCode == b.joinCode
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(chatId)
+            hasher.combine(userId)
+            hasher.combine(joinCode)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case chatId = "chatId"
             case userId = "userId"
             case joinCode = "joinCode"
+            case _chat = "chat"
         }
     }
 
@@ -202,7 +244,6 @@ public enum JazzApp {
     }
 
     /// Queries of `chatMembers` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum chatMembers {
         /// Every row of `chatMembers`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<ChatMember> { Jazz.Query() }
@@ -215,6 +256,8 @@ public enum JazzApp {
         public static let userId = Jazz.Column<ChatMember, Jazz.ID>("userId")
         /// Column `joinCode`.
         public static let joinCode = Jazz.Column<ChatMember, Swift.String?>("joinCode")
+        /// Relation `chat`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let chat = Jazz.Relation<ChatMember, Chat>("chat")
     }
 
     /// A row of `chats`.
@@ -224,6 +267,12 @@ public enum JazzApp {
         public var name: Swift.String?
         public var isPublic: Swift.Bool
         public var joinCode: Swift.String?
+        /// Relation `canvasesViaChat`: the `Canvas` rows, when the query includes them.
+        public var canvasesViaChat: [Canvas]? = nil
+        /// Relation `chatMembersViaChat`: the `ChatMember` rows, when the query includes them.
+        public var chatMembersViaChat: [ChatMember]? = nil
+        /// Relation `messagesViaChat`: the `Message` rows, when the query includes them.
+        public var messagesViaChat: [Message]? = nil
 
         public init(id: Jazz.ID, name: Swift.String?, isPublic: Swift.Bool, joinCode: Swift.String?) {
             self.id = id
@@ -232,11 +281,26 @@ public enum JazzApp {
             self.joinCode = joinCode
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.name == b.name && a.isPublic == b.isPublic && a.joinCode == b.joinCode
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(name)
+            hasher.combine(isPublic)
+            hasher.combine(joinCode)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case name = "name"
             case isPublic = "isPublic"
             case joinCode = "joinCode"
+            case canvasesViaChat = "canvasesViaChat"
+            case chatMembersViaChat = "chatMembersViaChat"
+            case messagesViaChat = "messagesViaChat"
         }
     }
 
@@ -288,7 +352,6 @@ public enum JazzApp {
     }
 
     /// Queries of `chats` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum chats {
         /// Every row of `chats`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Chat> { Jazz.Query() }
@@ -301,6 +364,12 @@ public enum JazzApp {
         public static let isPublic = Jazz.Column<Chat, Swift.Bool>("isPublic")
         /// Column `joinCode`.
         public static let joinCode = Jazz.Column<Chat, Swift.String?>("joinCode")
+        /// Relation `canvasesViaChat`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let canvasesViaChat = Jazz.Relation<Chat, Canvas>("canvasesViaChat")
+        /// Relation `chatMembersViaChat`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let chatMembersViaChat = Jazz.Relation<Chat, ChatMember>("chatMembersViaChat")
+        /// Relation `messagesViaChat`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let messagesViaChat = Jazz.Relation<Chat, Message>("messagesViaChat")
     }
 
     /// A row of `messages`.
@@ -310,6 +379,20 @@ public enum JazzApp {
         public var chatId: Jazz.ID
         public var text: Swift.String
         public var senderId: Jazz.ID
+        /// Relation `chat`: the `Chat` row, when the query includes it (and it exists).
+        public var chat: Chat? {
+            get { _chat?.value }
+            set { _chat = newValue.map { Jazz.Included($0) } }
+        }
+        private var _chat: Jazz.Included<Chat>? = nil
+        /// Relation `reactionsViaMessage`: the `Reaction` rows, when the query includes them.
+        public var reactionsViaMessage: [Reaction]? = nil
+        /// Relation `sender`: the `Profile` row, when the query includes it (and it exists).
+        public var sender: Profile? {
+            get { _sender?.value }
+            set { _sender = newValue.map { Jazz.Included($0) } }
+        }
+        private var _sender: Jazz.Included<Profile>? = nil
 
         public init(id: Jazz.ID, chatId: Jazz.ID, text: Swift.String, senderId: Jazz.ID) {
             self.id = id
@@ -318,11 +401,26 @@ public enum JazzApp {
             self.senderId = senderId
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.chatId == b.chatId && a.text == b.text && a.senderId == b.senderId
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(chatId)
+            hasher.combine(text)
+            hasher.combine(senderId)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case chatId = "chatId"
             case text = "text"
             case senderId = "senderId"
+            case _chat = "chat"
+            case reactionsViaMessage = "reactionsViaMessage"
+            case _sender = "sender"
         }
     }
 
@@ -374,7 +472,6 @@ public enum JazzApp {
     }
 
     /// Queries of `messages` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum messages {
         /// Every row of `messages`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Message> { Jazz.Query() }
@@ -387,6 +484,12 @@ public enum JazzApp {
         public static let text = Jazz.Column<Message, Swift.String>("text")
         /// Column `senderId`.
         public static let senderId = Jazz.Column<Message, Jazz.ID>("senderId")
+        /// Relation `chat`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let chat = Jazz.Relation<Message, Chat>("chat")
+        /// Relation `reactionsViaMessage`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let reactionsViaMessage = Jazz.Relation<Message, Reaction>("reactionsViaMessage")
+        /// Relation `sender`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let sender = Jazz.Relation<Message, Profile>("sender")
     }
 
     /// A row of `profiles`.
@@ -396,6 +499,8 @@ public enum JazzApp {
         public var userId: Jazz.ID
         public var name: Swift.String
         public var avatar: Swift.String?
+        /// Relation `messagesViaSender`: the `Message` rows, when the query includes them.
+        public var messagesViaSender: [Message]? = nil
 
         public init(id: Jazz.ID, userId: Jazz.ID, name: Swift.String, avatar: Swift.String?) {
             self.id = id
@@ -404,11 +509,24 @@ public enum JazzApp {
             self.avatar = avatar
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.userId == b.userId && a.name == b.name && a.avatar == b.avatar
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(userId)
+            hasher.combine(name)
+            hasher.combine(avatar)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case userId = "userId"
             case name = "name"
             case avatar = "avatar"
+            case messagesViaSender = "messagesViaSender"
         }
     }
 
@@ -460,7 +578,6 @@ public enum JazzApp {
     }
 
     /// Queries of `profiles` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum profiles {
         /// Every row of `profiles`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Profile> { Jazz.Query() }
@@ -473,6 +590,8 @@ public enum JazzApp {
         public static let name = Jazz.Column<Profile, Swift.String>("name")
         /// Column `avatar`.
         public static let avatar = Jazz.Column<Profile, Swift.String?>("avatar")
+        /// Relation `messagesViaSender`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let messagesViaSender = Jazz.Relation<Profile, Message>("messagesViaSender")
     }
 
     /// A row of `reactions`.
@@ -482,6 +601,12 @@ public enum JazzApp {
         public var messageId: Jazz.ID
         public var userId: Jazz.ID
         public var emoji: Swift.String
+        /// Relation `message`: the `Message` row, when the query includes it (and it exists).
+        public var message: Message? {
+            get { _message?.value }
+            set { _message = newValue.map { Jazz.Included($0) } }
+        }
+        private var _message: Jazz.Included<Message>? = nil
 
         public init(id: Jazz.ID, messageId: Jazz.ID, userId: Jazz.ID, emoji: Swift.String) {
             self.id = id
@@ -490,11 +615,24 @@ public enum JazzApp {
             self.emoji = emoji
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.messageId == b.messageId && a.userId == b.userId && a.emoji == b.emoji
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(messageId)
+            hasher.combine(userId)
+            hasher.combine(emoji)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case messageId = "messageId"
             case userId = "userId"
             case emoji = "emoji"
+            case _message = "message"
         }
     }
 
@@ -546,7 +684,6 @@ public enum JazzApp {
     }
 
     /// Queries of `reactions` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum reactions {
         /// Every row of `reactions`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Reaction> { Jazz.Query() }
@@ -559,6 +696,8 @@ public enum JazzApp {
         public static let userId = Jazz.Column<Reaction, Jazz.ID>("userId")
         /// Column `emoji`.
         public static let emoji = Jazz.Column<Reaction, Swift.String>("emoji")
+        /// Relation `message`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let message = Jazz.Relation<Reaction, Message>("message")
     }
 
     /// A row of `strokes`.
@@ -569,6 +708,12 @@ public enum JazzApp {
         public var color: Swift.String
         public var width: Swift.Int
         public var pointsJson: Swift.String
+        /// Relation `canvas`: the `Canvas` row, when the query includes it (and it exists).
+        public var canvas: Canvas? {
+            get { _canvas?.value }
+            set { _canvas = newValue.map { Jazz.Included($0) } }
+        }
+        private var _canvas: Jazz.Included<Canvas>? = nil
 
         public init(id: Jazz.ID, canvasId: Jazz.ID, color: Swift.String, width: Swift.Int, pointsJson: Swift.String) {
             self.id = id
@@ -578,12 +723,26 @@ public enum JazzApp {
             self.pointsJson = pointsJson
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.canvasId == b.canvasId && a.color == b.color && a.width == b.width && a.pointsJson == b.pointsJson
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(canvasId)
+            hasher.combine(color)
+            hasher.combine(width)
+            hasher.combine(pointsJson)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case canvasId = "canvasId"
             case color = "color"
             case width = "width"
             case pointsJson = "pointsJson"
+            case _canvas = "canvas"
         }
     }
 
@@ -642,7 +801,6 @@ public enum JazzApp {
     }
 
     /// Queries of `strokes` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum strokes {
         /// Every row of `strokes`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Stroke> { Jazz.Query() }
@@ -657,5 +815,7 @@ public enum JazzApp {
         public static let width = Jazz.Column<Stroke, Swift.Int>("width")
         /// Column `pointsJson`.
         public static let pointsJson = Jazz.Column<Stroke, Swift.String>("pointsJson")
+        /// Relation `canvas`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let canvas = Jazz.Relation<Stroke, Canvas>("canvas")
     }
 }

@@ -1,12 +1,16 @@
 //! The dynamic handle both surfaces wrap: blocking, JSON in and out.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread::{JoinHandle, ThreadId};
 
 use futures_executor::block_on;
-use jazz_app::jazz::tools::{ReadTier, Schema, SubscriptionStreamItem, TableSchema, Value};
+use jazz_app::jazz::tools::{
+    DurabilityTier, JazzClient, JazzTransaction, ReadTier, Schema, SubscriptionStreamItem,
+    TableSchema, Value,
+};
 use jazz_app::{AppFiles, AppId, Backend, Config, Jazz, Storage};
 use serde_json::Value as Json;
 
@@ -20,9 +24,133 @@ const BACKEND_ISSUER: &str = "jazz:backend";
 pub(crate) struct Core {
     jazz: Jazz,
     schema: Arc<Schema>,
+    relations: convert::Relations,
     closed: AtomicBool,
     /// The open subscriptions, told when the app closes.
     subscriptions: Mutex<Vec<Weak<Delivery>>>,
+    next_tx: AtomicU64,
+    /// Whether the app syncs with a server: global durability needs one.
+    has_server: bool,
+    /// The contract version the host speaks (`"contract"` in the config):
+    /// 1 unless it says 2.
+    pub(crate) contract: u64,
+}
+
+/// How a call runs: inside a transaction, and/or at a durability or read
+/// tier.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Opts {
+    pub tx: Option<u64>,
+    pub write_tier: Option<DurabilityTier>,
+    pub read_tier: Option<ReadTier>,
+}
+
+impl Opts {
+    /// From the optional `"tx"` and `"tier"` of a call's arguments; `read`
+    /// says whether the call reads or writes.
+    pub(crate) fn parse(tx: Option<&Json>, tier: Option<&Json>, read: bool) -> Result<Self> {
+        let mut opts = Self::default();
+        if let Some(tx) = tx.filter(|t| !t.is_null()) {
+            opts.tx = Some(parse_tx(tx.as_str().unwrap_or_default())?);
+        }
+        if let Some(tier) = tier.filter(|t| !t.is_null()) {
+            let tier = tier
+                .as_str()
+                .ok_or_else(|| refused("\"tier\" must be a string"))?;
+            if read {
+                opts.read_tier = Some(read_tier(tier)?);
+            } else {
+                opts.write_tier = Some(write_tier(tier)?);
+            }
+        }
+        if opts.tx.is_some() && opts.write_tier.is_some() {
+            return Err(refused(
+                "a write inside a transaction has no tier of its own: give it to txCommit",
+            ));
+        }
+        Ok(opts)
+    }
+}
+
+pub(crate) fn parse_tx(text: &str) -> Result<u64> {
+    text.parse().map_err(|_| {
+        refused(format!(
+            "\"tx\" must be a transaction from txBegin, not {text:?}"
+        ))
+    })
+}
+
+/// Durability a write (or commit) waits for.
+pub(crate) fn write_tier(tier: &str) -> Result<DurabilityTier> {
+    match tier {
+        "local" => Ok(DurabilityTier::Local),
+        "global" => Ok(DurabilityTier::GlobalServer),
+        "edge" => Err(unsupported(
+            "waiting for edge durability: this client knows local and global",
+        )),
+        other => Err(refused(format!(
+            "a write tier is \"local\" or \"global\", not {other:?}"
+        ))),
+    }
+}
+
+/// What a read (or subscription) reads.
+pub(crate) fn read_tier(tier: &str) -> Result<ReadTier> {
+    match tier {
+        "local" => Ok(ReadTier::LocalOnly),
+        // TS spells it "local-first".
+        "localFirst" | "local-first" => Ok(ReadTier::LocalFirst),
+        "remote" => Ok(ReadTier::Remote),
+        other => Err(refused(format!(
+            "a read tier is \"local\", \"localFirst\" or \"remote\", not {other:?}"
+        ))),
+    }
+}
+
+thread_local! {
+    /// The open transactions of the client running on this thread (each
+    /// app runs its client on a thread of its own), and whether each wrote.
+    static TRANSACTIONS: RefCell<Transactions> = RefCell::new(Transactions::default());
+}
+
+/// The open transactions. Close rolls them back; any left when the client's
+/// thread exits are forgotten, not dropped: the client they belong to is
+/// already gone, and dropping them then would abort the process.
+#[derive(Default)]
+struct Transactions(HashMap<u64, (JazzTransaction, bool)>);
+
+impl Drop for Transactions {
+    fn drop(&mut self) {
+        for entry in std::mem::take(&mut self.0).into_values() {
+            std::mem::forget(entry);
+        }
+    }
+}
+
+/// The client a call runs with: the transaction's, or the app's.
+fn client_for(client: JazzClient, tx: Option<u64>) -> jazz_app::Result<JazzClient> {
+    let Some(tx) = tx else {
+        return Ok(client);
+    };
+    TRANSACTIONS.with(|transactions| {
+        let transactions = transactions.borrow();
+        let (transaction, _) = transactions
+            .0
+            .get(&tx)
+            .ok_or_else(|| jazz_app::Error::Config(format!("transaction {tx} is not open")))?;
+        Ok(transaction.client().clone())
+    })
+}
+
+/// Records that a write inside `tx` succeeded, so its commit commits.
+fn mark_wrote(tx: Option<u64>) {
+    if let Some(tx) = tx {
+        TRANSACTIONS.with(|transactions| {
+            if let Some((_, wrote)) = transactions.borrow_mut().0.get_mut(&tx) {
+                *wrote = true;
+            }
+        });
+    }
 }
 
 /// What a subscription tells its listener. An error is the last event.
@@ -49,15 +177,32 @@ impl Delivery {
 
 impl Core {
     pub fn open(config_json: &str) -> Result<Self> {
-        let (files, config) = config(config_json)?;
+        let (files, config, app_text) = config(config_json)?;
+        let contract = convert::parse(config_json, "the config")?
+            .get("contract")
+            .and_then(Json::as_u64)
+            .unwrap_or(1);
+        let has_server = config.server_url.is_some();
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
         Ok(Self {
             jazz,
             schema: Arc::new(schema),
+            relations: convert::Relations::read(&app_text),
             closed: AtomicBool::new(false),
             subscriptions: Mutex::new(Vec::new()),
+            // Ids start at a random point, so a stale id from another
+            // handle (or an earlier run) fails cleanly instead of naming
+            // another transaction.
+            next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
+            has_server,
+            contract,
         })
+    }
+
+    /// An error as this host's contract version names it.
+    pub(crate) fn surface<T>(&self, result: Result<T>) -> std::result::Result<T, JazzError> {
+        result.map_err(|error| JazzError::from(error).for_contract(self.contract))
     }
 
     fn open_jazz(&self) -> Result<&Jazz> {
@@ -80,38 +225,43 @@ impl Core {
             .map(|account| account.0.to_string()))
     }
 
-    pub fn all(&self, query_json: &str) -> Result<String> {
-        let rows = self.rows(&convert::parse(query_json, "the query")?)?;
+    pub fn all(&self, query_json: &str, opts: &Opts) -> Result<String> {
+        let rows = self.rows(&convert::parse(query_json, "the query")?, opts)?;
         Ok(Json::Array(rows).to_string())
     }
 
-    pub fn one(&self, query_json: &str) -> Result<Option<String>> {
+    pub fn one(&self, query_json: &str, opts: &Opts) -> Result<Option<String>> {
         // Validated as given (a bad `limit` is refused), then limited to 1.
-        let (table_name, mut query) =
-            convert::query(&self.schema, &convert::parse(query_json, "the query")?)?;
+        let (_, mut query, shape) = convert::query(
+            &self.schema,
+            &self.relations,
+            &convert::parse(query_json, "the query")?,
+        )?;
         query.limit = Some(query.limit.map_or(1, |limit| limit.min(1)));
         Ok(self
-            .run_query(table_name, query)?
+            .run_query(shape, query, opts)?
             .into_iter()
             .next()
             .map(|row| row.to_string()))
     }
 
-    fn rows(&self, query: &Json) -> Result<Vec<Json>> {
-        let (table_name, query) = convert::query(&self.schema, query)?;
-        self.run_query(table_name, query)
+    fn rows(&self, query: &Json, opts: &Opts) -> Result<Vec<Json>> {
+        let (_, query, shape) = convert::query(&self.schema, &self.relations, query)?;
+        self.run_query(shape, query, opts)
     }
 
     fn run_query(
         &self,
-        table_name: String,
+        shape: convert::Shape,
         query: jazz_app::jazz::query::Query,
+        opts: &Opts,
     ) -> Result<Vec<Json>> {
         let jazz = self.open_jazz()?;
+        let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
         let results = block_on(jazz.with_client(move |client| async move {
-            Ok(client.query(query, ReadTier::LocalFirst).await?)
+            let client = client_for(client, tx)?;
+            Ok(client.query(query, tier).await?)
         }))?;
-        let table = self.table(&table_name)?;
         results
             .into_iter()
             .map(|row| {
@@ -119,19 +269,35 @@ impl Core {
                     .key
                     .row_id()
                     .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))?;
-                Ok(convert::row_json(table, id, row.fields))
+                Ok(convert::row_json(&shape, id, row.fields))
             })
             .collect()
     }
 
-    pub fn insert(&self, table_name: &str, row_json: &str) -> Result<String> {
+    /// Global durability needs a server: refused before anything is written.
+    fn reachable(&self, tier: Option<DurabilityTier>) -> Result<()> {
+        if tier == Some(DurabilityTier::GlobalServer) && !self.has_server {
+            return Err(refused(
+                "global durability is unreachable: this app has no server (\"serverUrl\")",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn insert(&self, table_name: &str, row_json: &str, opts: &Opts) -> Result<String> {
+        self.reachable(opts.write_tier)?;
         let table = self.table(table_name)?.clone();
         let (id, cells) = convert::cells(&table, table_name, row_json, "the row")?;
         let cells: HashMap<String, Value> = cells.into_iter().collect();
         let name = table_name.to_owned();
         let jazz = self.open_jazz()?;
+        let (tx, tier) = (opts.tx, opts.write_tier);
         let row = block_on(jazz.with_client(move |client| async move {
-            let (id, values, _) = client.insert_with_id(&name, id.map(|id| *id.uuid()), cells)?;
+            let client = client_for(client, tx)?;
+            let (id, values, committed) =
+                client.insert_with_id(&name, id.map(|id| *id.uuid()), cells)?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await?;
             let fields = table
                 .columns
                 .columns
@@ -142,12 +308,13 @@ impl Core {
                     value,
                 })
                 .collect();
-            Ok(convert::row_json(&table, id, fields))
+            Ok(convert::row_json(&convert::Shape::of(table), id, fields))
         }))?;
         Ok(row.to_string())
     }
 
-    pub fn update(&self, table_name: &str, id: &str, patch_json: &str) -> Result<()> {
+    pub fn update(&self, table_name: &str, id: &str, patch_json: &str, opts: &Opts) -> Result<()> {
+        self.reachable(opts.write_tier)?;
         let id = convert::parse_id(id, "the id")?;
         let table = self.table(table_name)?;
         let (patched_id, cells) = convert::cells(table, table_name, patch_json, "the patch")?;
@@ -158,20 +325,75 @@ impl Core {
             return Ok(());
         }
         let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
-            client.update(&name, id, cells)?;
-            Ok(())
+            let client = client_for(client, tx)?;
+            let committed = client.update(&name, id, cells)?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await
         }))?;
         Ok(())
     }
 
-    pub fn delete(&self, table_name: &str, id: &str) -> Result<()> {
+    /// Updates a row in place: `patch_json` sets whole columns (may be
+    /// `None`), `edits_json` edits text, bytes and JSON values partially
+    /// (see [`convert::edits`]); all in one write.
+    pub fn edit(
+        &self,
+        table_name: &str,
+        id: &str,
+        patch_json: Option<&str>,
+        edits_json: &str,
+        opts: &Opts,
+    ) -> Result<()> {
+        self.reachable(opts.write_tier)?;
+        let id = convert::parse_id(id, "the id")?;
+        let table = self.table(table_name)?;
+        let cells = match patch_json {
+            Some(patch) => {
+                let (patched_id, cells) = convert::cells(table, table_name, patch, "the patch")?;
+                if patched_id.is_some_and(|patched| patched != id) {
+                    return Err(refused("a patch cannot change a row's id"));
+                }
+                cells
+            }
+            None => Vec::new(),
+        };
+        let edits = convert::edits(table, table_name, &convert::parse(edits_json, "the edits")?)?;
+        let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let edits = whole_pages(&client, &name, id, edits).await?;
+            let committed = client
+                .update_with_edits(&name, id, cells, edits)
+                .map_err(|error| match error {
+                    // As jazz-app reports an edit of a row this client
+                    // cannot see.
+                    jazz_app::jazz::tools::JazzError::Write(message)
+                        if message.contains("NotObserved") =>
+                    {
+                        jazz_app::Error::Config(format!("no {name} row {id}"))
+                    }
+                    other => other.into(),
+                })?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await
+        }))?;
+        Ok(())
+    }
+
+    pub fn delete(&self, table_name: &str, id: &str, opts: &Opts) -> Result<()> {
+        self.reachable(opts.write_tier)?;
         let id = convert::parse_id(id, "the id")?;
         self.table(table_name)?;
         let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
-            client.delete(&name, id)?;
-            Ok(())
+            let client = client_for(client, tx)?;
+            let committed = client.delete(&name, id)?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await
         }))?;
         Ok(())
     }
@@ -181,18 +403,23 @@ impl Core {
     pub fn subscribe(
         &self,
         query_json: &str,
+        opts: &Opts,
         listener: Box<dyn Fn(Event) + Send>,
     ) -> Result<SubscriptionCore> {
-        let (table_name, query) =
-            convert::query(&self.schema, &convert::parse(query_json, "the query")?)?;
-        let table = self.table(&table_name)?.clone();
+        if opts.tx.is_some() {
+            return Err(unsupported("subscribing inside a transaction"));
+        }
+        let tier = opts.read_tier.unwrap_or(ReadTier::LocalFirst);
+        let (_, query, table) = convert::query(
+            &self.schema,
+            &self.relations,
+            &convert::parse(query_json, "the query")?,
+        )?;
         let (events, received) = mpsc::channel::<Option<Event>>();
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         let forward = events.clone();
         block_on(self.open_jazz()?.with_client(move |client| async move {
-            let mut stream = client
-                .subscribe_with_read_tier(query, ReadTier::LocalFirst)
-                .await?;
+            let mut stream = client.subscribe_with_read_tier(query, tier).await?;
             // Forwards on the client's thread until cancelled, the stream
             // ends, or the delivery thread is gone.
             tokio::task::spawn_local(async move {
@@ -221,9 +448,11 @@ impl Core {
                             }
                         }
                         Some(SubscriptionStreamItem::Rejected { reason }) => {
-                            Event::Error(JazzError::Refused {
-                                reason: format!("subscription rejected: {reason:?}"),
-                            })
+                            let reason = format!("{reason:?}");
+                            Event::Error(JazzError::from(crate::error::rejection(
+                                &reason,
+                                format!("subscription rejected: {reason}"),
+                            )))
                         }
                     };
                     first = false;
@@ -277,12 +506,176 @@ impl Core {
         })
     }
 
+    /// The server's advice on whether this user may do `op` (`read`,
+    /// `insert`, `update`, `delete`) without doing it: `Some(true)`,
+    /// `Some(false)`, or `None` when no server can say (TS's `canRead` …).
+    /// Advisory: `true` doesn't promise the write will succeed (the data or
+    /// the permissions may change before it runs). Not in a transaction.
+    /// `insert` takes `row_json`; `read` and `delete` take `id`; `update`
+    /// takes `id` and an optional `row_json` patch.
+    pub fn can(
+        &self,
+        table_name: &str,
+        op: &str,
+        id: Option<&str>,
+        row_json: Option<&str>,
+    ) -> Result<Option<bool>> {
+        use jazz_app::jazz::tools::PermissionAdviceRequest as Request;
+        let table = self.table(table_name)?;
+        let id = || -> Result<jazz_app::ObjectId> {
+            convert::parse_id(
+                id.ok_or_else(|| refused(format!("can {op} needs an \"id\"")))?,
+                "the id",
+            )
+        };
+        let cells = |what: &str| -> Result<Vec<(String, Value)>> {
+            match row_json {
+                Some(row) => {
+                    let (given, cells) = convert::cells(table, table_name, row, what)?;
+                    if given.is_some() {
+                        return Err(refused(format!(
+                            "can {op}: {what} takes no \"id\" (advice is about the row's columns)"
+                        )));
+                    }
+                    Ok(cells)
+                }
+                None => Ok(Vec::new()),
+            }
+        };
+        let table = table_name.to_owned();
+        let request = match op {
+            "read" => Request::Read { table, row: id()? },
+            "delete" => Request::Delete { table, row: id()? },
+            "insert" => {
+                if row_json.is_none() {
+                    return Err(refused("can insert needs a \"row\""));
+                }
+                Request::Insert {
+                    table,
+                    values: cells("the row")?.into_iter().collect(),
+                }
+            }
+            "update" => Request::Update {
+                table,
+                row: id()?,
+                values: cells("the patch")?,
+            },
+            other => {
+                return Err(refused(format!(
+                    "op must be \"read\", \"insert\", \"update\" or \"delete\", not {other:?}"
+                )));
+            }
+        };
+        let advice = block_on(self.open_jazz()?.with_client(move |client| async move {
+            Ok(client.permission_advice(request).await?)
+        }))?;
+        use jazz_app::jazz::protocol::PermissionAdvice as Advice;
+        Ok(match advice {
+            Advice::Allowed => Some(true),
+            Advice::Denied => Some(false),
+            Advice::Unknown => None,
+        })
+    }
+
+    /// Begins a serializable transaction: its reads see a snapshot and its
+    /// own writes, and its writes commit together or not at all.
+    pub fn tx_begin(&self, serializable: bool) -> Result<String> {
+        if !serializable {
+            return Err(unsupported(
+                "non-serializable transactions; every transaction is serializable",
+            ));
+        }
+        let tx = self.next_tx.fetch_add(1, Ordering::Relaxed);
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let transaction = client.begin_transaction()?;
+            TRANSACTIONS.with(|t| t.borrow_mut().0.insert(tx, (transaction, false)));
+            Ok(())
+        }))?;
+        Ok(tx.to_string())
+    }
+
+    /// Commits a transaction, waiting for `tier` if given. A transaction
+    /// that wrote nothing just ends.
+    pub fn tx_commit(&self, tx: u64, tier: Option<DurabilityTier>) -> Result<()> {
+        if let Err(error) = self.reachable(tier) {
+            // Refused before committing: the transaction ends, as on any
+            // failed commit.
+            let _ = self.tx_rollback(tx);
+            return Err(error);
+        }
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let (transaction, wrote) = take_tx(tx)?;
+            if !wrote {
+                transaction.rollback()?;
+                return Ok(());
+            }
+            let id = transaction.transaction_id();
+            let committed = match transaction.commit() {
+                Ok(committed) => committed,
+                Err(error) => {
+                    // A failed commit must not leave the core transaction
+                    // open where nothing can reach it.
+                    let _ = client.rollback_transaction(id);
+                    return Err(error.into());
+                }
+            };
+            settle(&client, Some(committed), tier).await
+        }))?;
+        Ok(())
+    }
+
+    /// Waits until every write committed so far reaches `tier`. Local
+    /// writes are durable locally once they return, so `Local` has nothing
+    /// to wait for; `GlobalServer` waits for the server to have them all
+    /// and fails if it rejected one (the core's `wait_for_sync`, as TS's
+    /// `waitForSync`). Without a server there is nothing to wait for. It
+    /// checks up to the last 4096 writes individually; older ones rely on
+    /// the core wait, which (until jazz#5728) can miss a refusal that is
+    /// not among the writes still pending.
+    pub fn wait_for_sync(&self, tier: DurabilityTier) -> Result<()> {
+        if tier == DurabilityTier::Local {
+            self.open_jazz()?;
+            return Ok(());
+        }
+        block_on(self.open_jazz()?.with_client(|client| async move {
+            // Taken first, so a refusal is reported by one call only.
+            let writes = UNSYNCED.with(|unsynced| std::mem::take(&mut *unsynced.borrow_mut()));
+            // Every pending write reaches the server (or is refused)...
+            client.wait_for_sync().await?;
+            // ...and each write since the last sync is checked on its own:
+            // a refusal followed by an accepted write still fails here.
+            for write in writes {
+                client
+                    .wait_for_transaction(write, DurabilityTier::GlobalServer)
+                    .await?;
+            }
+            Ok(())
+        }))?;
+        Ok(())
+    }
+
+    pub fn tx_rollback(&self, tx: u64) -> Result<()> {
+        block_on(self.open_jazz()?.with_client(move |_| async move {
+            take_tx(tx)?.0.rollback()?;
+            Ok(())
+        }))?;
+        Ok(())
+    }
+
     /// Closes the app: the calls already made finish, subscriptions end,
     /// and every later call fails with `Closed`. Closing again does nothing.
     pub fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        // Open transactions roll back while their client still runs.
+        let _ = block_on(self.jazz.with_client(|_| async {
+            let open = TRANSACTIONS.with(|t| std::mem::take(&mut t.borrow_mut().0));
+            for (transaction, _) in open.into_values() {
+                let _ = transaction.rollback();
+            }
+            Ok(())
+        }));
         let result = block_on(self.jazz.shutdown());
         // Each open subscription's last event: the app closed.
         let subscriptions =
@@ -314,6 +707,130 @@ impl Drop for EndGuard {
             let _ = sender.send(Some(Event::Error(JazzError::Closed)));
         }
     }
+}
+
+/// Resolves splice pages given as the whole value to the value's current
+/// length, read as the edit's writer sees it.
+async fn whole_pages(
+    client: &JazzClient,
+    table: &str,
+    id: jazz_app::ObjectId,
+    edits: Vec<jazz_app::jazz::db::LargeValueUpdate>,
+) -> jazz_app::Result<Vec<jazz_app::jazz::db::LargeValueUpdate>> {
+    use jazz_app::jazz::db::{LargeValueUpdate, LargeValueUpdatePage as Page};
+    use jazz_app::jazz::query as q;
+    let mut resolved = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let LargeValueUpdate::Splice {
+            column,
+            within,
+            splices,
+        } = edit
+        else {
+            resolved.push(edit);
+            continue;
+        };
+        let to = match &within {
+            Page::Bytes { to, .. } | Page::TextUtf8 { to, .. } | Page::TextUtf16 { to, .. } => *to,
+        };
+        if to != convert::WHOLE_VALUE {
+            resolved.push(LargeValueUpdate::Splice {
+                column,
+                within,
+                splices,
+            });
+            continue;
+        }
+        let mut query = q::Query::from(table);
+        query.filters.push(q::eq(
+            q::col("id"),
+            q::lit(jazz_app::jazz::records::Value::Uuid(*id.uuid())),
+        ));
+        query.select = Some(vec![column.clone()]);
+        let rows = client.query(query, ReadTier::LocalOnly).await?;
+        let value = rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.fields.into_iter().find(|f| f.name == column))
+            .map(|field| field.value)
+            .ok_or_else(|| jazz_app::Error::Config(format!("no {table} row {id}")))?;
+        let len = |page: &Page| -> u64 {
+            match (&value, page) {
+                (Value::Text(text), Page::TextUtf16 { .. }) => text.encode_utf16().count() as u64,
+                (Value::Text(text), _) => text.len() as u64,
+                (Value::Bytea(bytes), _) => bytes.len() as u64,
+                _ => 0,
+            }
+        };
+        let within = match within {
+            page @ Page::Bytes { .. } => Page::Bytes {
+                from: 0,
+                to: len(&page),
+            },
+            page @ Page::TextUtf8 { .. } => Page::TextUtf8 {
+                from: 0,
+                to: len(&page),
+            },
+            page @ Page::TextUtf16 { .. } => Page::TextUtf16 {
+                from: 0,
+                to: len(&page),
+            },
+        };
+        resolved.push(LargeValueUpdate::Splice {
+            column,
+            within,
+            splices,
+        });
+    }
+    Ok(resolved)
+}
+
+fn take_tx(tx: u64) -> jazz_app::Result<(JazzTransaction, bool)> {
+    TRANSACTIONS
+        .with(|t| t.borrow_mut().0.remove(&tx))
+        .ok_or_else(|| jazz_app::Error::Config(format!("transaction {tx} is not open")))
+}
+
+/// Waits for a committed write to reach `tier`, when asked to.
+async fn settle(
+    client: &JazzClient,
+    committed: Option<jazz_app::jazz::tools::TransactionId>,
+    tier: Option<DurabilityTier>,
+) -> jazz_app::Result<()> {
+    if let Some(committed) = committed {
+        match tier {
+            // Confirmed by the server: nothing for waitForSync to check.
+            Some(DurabilityTier::GlobalServer) => {
+                client
+                    .wait_for_transaction(committed, DurabilityTier::GlobalServer)
+                    .await?;
+            }
+            tier => {
+                UNSYNCED.with(|unsynced| {
+                    let mut unsynced = unsynced.borrow_mut();
+                    // Bounded for hosts that never call waitForSync: the
+                    // oldest unchecked writes are left to the core's wait.
+                    if unsynced.len() >= MAX_UNSYNCED {
+                        unsynced.pop_front();
+                    }
+                    unsynced.push_back(committed);
+                });
+                if let Some(tier) = tier {
+                    client.wait_for_transaction(committed, tier).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How many unchecked writes waitForSync remembers.
+const MAX_UNSYNCED: usize = 4096;
+
+thread_local! {
+    /// The writes this app's client committed since its last waitForSync.
+    static UNSYNCED: RefCell<std::collections::VecDeque<jazz_app::jazz::tools::TransactionId>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
 }
 
 pub(crate) struct SubscriptionCore {
@@ -356,7 +873,7 @@ impl Drop for SubscriptionCore {
     }
 }
 
-fn config(config_json: &str) -> Result<(AppFiles, Config)> {
+fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));
     };
@@ -389,6 +906,15 @@ fn config(config_json: &str) -> Result<(AppFiles, Config)> {
             "backendSecret" => backend_secret = Some(text()?),
             "adminSecret" => admin_secret = Some(text()?),
             "session" => session = Some(value.clone()),
+            // Read by `Core::open`; checked here.
+            "contract" => match value.as_u64() {
+                Some(1 | 2) => {}
+                _ => {
+                    return Err(refused(format!(
+                        "config.contract must be 1 or 2, not {value}"
+                    )));
+                }
+            },
             "jwt" | "jwtToken" | "token" => {
                 return Err(unsupported(
                     "connecting to a sync server as an end user with a JWT; open the app as a backend (permissions + backendSecret + session) or locally",
@@ -464,6 +990,9 @@ fn config(config_json: &str) -> Result<(AppFiles, Config)> {
             "backendSecret, adminSecret and session are for a backend, which needs \"permissions\"",
         ));
     }
-    let files = AppFiles::new(app.into_bytes(), permissions.map(String::into_bytes));
-    Ok((files, result))
+    let files = AppFiles::new(
+        app.clone().into_bytes(),
+        permissions.map(String::into_bytes),
+    );
+    Ok((files, result, app))
 }
