@@ -344,7 +344,8 @@ describe("cli generate", () => {
 
       await expect(generate({ schemaDir: root })).rejects.toThrow(/edited by hand/);
       await generate({ schemaDir: root, force: true });
-      expect(JSON.parse(await readFile(file, "utf8")).tables.projects).toEqual({});
+      // The hand edit is gone: a table that allows nothing has no entry.
+      expect(JSON.parse(await readFile(file, "utf8")).tables.projects).toBeUndefined();
     },
   );
 

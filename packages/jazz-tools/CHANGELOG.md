@@ -1,5 +1,21 @@
 # jazz-tools
 
+## 2.0.0-alpha.65
+
+### Patch Changes
+
+- dc52930: Jazz Cloud is deprecated for new apps: use your own backend (Vercel or self-hosted). Existing Jazz Cloud apps keep running.
+- 6c85d5c: `db.transaction(callback)` whose callback writes nothing, such as a cleanup that finds nothing to clean up, no longer throws "empty mergeable transaction has no committed unit". The transaction is rolled back, as there's nothing to commit, and the result resolves with the callback's value; its `wait()` resolves at once. Committing an empty mergeable transaction by hand (`beginTransaction()` … `commit()`) still refuses, as before.
+- dded95e: A component that returns to a cached query whose resubscription fails right away now gets its error callback once instead of twice.
+- 5811cee: Harden backend socket admission in `createJazz`.
+- d9bc3bf: A subscription that joins a shared live result while it waits for large-value chunks now waits with it and opens on the current rows, instead of opening on the rows from before the change.
+- c3ef03b: Server: a Backend or Admin websocket no longer busy-loops if the account registry stops, and an account websocket then closes with a retryable `NotReady` error.
+- 44cbed0: A framework subscription (`useAll` and friends) that was rejected now subscribes again when the sync link connects again, for example after `db.reconnect()`, instead of keeping the error for as long as the component stays mounted.
+- 6b1f304: A partial selection (`select({ body: { from, to } })`, and `{ fromUtf8, toUtf8 }` or a bytes range) now clamps its range to the value's current length instead of failing with "value range is out of bounds": a range that starts past the end reads as an empty string or empty bytes, one that runs past it reads what the value still covers. A subscription over a range therefore survives the value shrinking below it and follows the value as it grows again; one-shot reads of the same query clamp alike. Inverted ranges, ranges that split a code point or surrogate pair, the native `Db::read_value_range`, and `applyDiffs` pages still fail explicitly.
+- 212ee17: `vercel()`: a core that ran a release candidate now moves to the final release. Core versions compared release candidates wrongly: `2.0.0-alpha.64` didn't count as newer than `2.0.0-alpha.64-rc.1`, and `alpha.100-rc.1` didn't count as newer than `alpha.99-rc.1`. So a Drive that once ran an rc kept running it after the release was deployed. The backend and the core's start script now agree that a `-rc.N` sorts before the release it is a candidate for.
+  - jazz-wasm@2.0.0-alpha.65
+  - jazz-rn@2.0.0-alpha.65
+
 ## 2.0.0-alpha.64
 
 ### Patch Changes
