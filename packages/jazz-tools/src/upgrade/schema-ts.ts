@@ -53,10 +53,56 @@ export interface SchemaCodemod {
   spreads: SpreadModule[];
   /** Whether schema.ts declared permissions itself (`s.definePermissions(app, …)`). */
   inlinePermissions: boolean;
+  /** The name schema.ts has jazz-tools' `schema` namespace under (`s`). */
+  dsl: string;
   changes: string[];
 }
 
 export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
+  // `import { schema } from "jazz-tools"`: the new export needs the name, so the
+  // namespace becomes `s` (`schema.table(…)` → `s.table(…)`) first.
+  const bare = bareSchemaImport(input.ts, input.file, input.text);
+  if (bare) {
+    const result = codemodSchema({ ...input, text: bare.text });
+    result.changes.unshift(
+      `${relative(input.root, input.file) || input.file}:${bare.line}: \`import { schema }\` from jazz-tools → \`import { schema as s }\`, the namespace renamed \`s\``,
+    );
+    return result;
+  }
+  return codemodSchemaText(input);
+}
+
+/** The text with a bare `schema` import from jazz-tools renamed `s`, or undefined when there's none (or `s` is taken). */
+function bareSchemaImport(
+  ts: Ts,
+  file: string,
+  text: string,
+): { text: string; line: number } | undefined {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let element: TS.ImportSpecifier | undefined;
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier))
+      continue;
+    if (statement.moduleSpecifier.text !== "jazz-tools") continue;
+    const named = statement.importClause?.namedBindings;
+    if (!named || !ts.isNamedImports(named)) continue;
+    element ??= named.elements.find((e) => !e.propertyName && e.name.text === "schema");
+  }
+  if (!element) return undefined;
+  let taken = false;
+  const visit = (node: TS.Node) => {
+    if (ts.isIdentifier(node) && node.text === "s") taken = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (taken) return undefined;
+  const line = source.getLineAndCharacterOfPosition(element.getStart(source)).line + 1;
+  const withAlias =
+    text.slice(0, element.getStart(source)) + "schema as s" + text.slice(element.getEnd());
+  return { text: renameIdentifier(ts, file, withAlias, "schema", "s"), line };
+}
+
+function codemodSchemaText(input: SchemaCodemodInput): SchemaCodemod {
   const { ts, file, text } = input;
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const where = (node: TS.Node) =>
@@ -366,6 +412,7 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
   if (tablesName && tablesName !== "schema")
     out = renameIdentifier(ts, file, out, tablesName, "schema");
   return {
+    dsl: dsl!,
     text: out.replace(/\n{3,}/g, "\n\n").replace(/\s*$/, "\n"),
     spreads,
     inlinePermissions,
