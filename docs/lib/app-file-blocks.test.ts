@@ -33,3 +33,19 @@ describe("app-file examples", () => {
     },
   );
 });
+
+// Schema examples in TypeScript put each column of an `s.table({ … })` on its
+// own line.
+describe("schema.ts examples", () => {
+  it.each(files.map((f) => [path.relative(root, f), f]))(
+    "%s spreads table columns over lines",
+    (_, f) => {
+      const blocks = readFileSync(f, "utf8").match(/```tsx?[^\n]*\n[\s\S]*?```/g) ?? [];
+      for (const block of blocks) {
+        for (const line of block.split("\n")) {
+          expect(/s\.table\(\{\s*\S/.test(line), line.trim()).toBe(false);
+        }
+      }
+    },
+  );
+});
