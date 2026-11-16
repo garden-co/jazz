@@ -450,7 +450,7 @@ impl Store {
             tables,
             applied,
         }));
-        self.read_keys(&mut handle.borrow_mut()).await;
+        self.read_keys(&handle).await;
         let weak = Rc::downgrade(&handle);
         self.fan.borrow_mut().groups.insert(gid, handle);
         Ok((queue, weak))
@@ -705,8 +705,9 @@ impl Store {
         let mut woken: BTreeMap<u64, Option<BTreeSet<RowUuid>>> = BTreeMap::new();
         // Per woken group: include targets that changed, as (root column, id).
         let mut targets: BTreeMap<u64, BTreeSet<(String, RowUuid)>> = BTreeMap::new();
-        let groups = &self.fan.borrow().groups;
         let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid, key: &[u8]| {
+            let fan = self.fan.borrow();
+            let groups = &fan.groups;
             for gid in gids {
                 let Some(group) = groups.get(gid) else {
                     continue;
@@ -744,11 +745,11 @@ impl Store {
             if let Some(groups) = self.fan.borrow().tables.get(table) {
                 wake(groups, table, *row, key);
             }
-            let fan_state = self.fan.borrow();
-            let Some(columns) = fan_state.key_columns.get(table) else {
+            let columns = self.fan.borrow().key_columns.get(table).cloned();
+            let Some(columns) = columns else {
                 continue;
             };
-            for image in self.images(table, *row, key, columns).await {
+            for image in self.images(table, *row, key, &columns).await {
                 for (column, value) in image {
                     if let Some(groups) =
                         self.fan.borrow().keys.get(&(table.clone(), column, value))
@@ -787,17 +788,16 @@ impl Store {
             .filter_map(|(gid, ids)| Some((gid, self.fan.borrow().groups.get(&gid).cloned()?, ids)))
             .collect();
         for (gid, group, ids) in groups {
-            let mut group = group.borrow_mut();
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
-                if self.refresh_group(&mut group, ids.as_ref()).await {
+                if self.refresh_group(&group, ids.as_ref()).await {
                     self.fan.borrow().stats.borrow_mut().reran += 1;
                 } else {
                     self.fan.borrow().stats.borrow_mut().rechecked += 1;
                 }
             }
             if let Some(changed) = targets.remove(&gid) {
-                refresh_includes(&mut group, &changed);
+                refresh_includes(&mut group.borrow_mut(), &changed);
             }
         }
     }
@@ -837,31 +837,33 @@ impl Store {
             .map(|(id, g)| (*id, g.clone()))
             .collect();
         for (gid, group) in groups {
-            let mut group = group.borrow_mut();
-            // A sync session's schema is renamed for the new version and
-            // keeps whoever governs it: its bundle's policies when it is
-            // pinned to one, else whichever schema is current now.
-            if reset
-                && let Some(pinned) = &group.prepared.schema
-                && let Some(policies) = &pinned.policies_from
-                && let Some(governed) = self.regoverned(pinned.jazz.version_id(), policies)
             {
-                group.prepared.schema = Some(governed);
+                let mut group = group.borrow_mut();
+                // A sync session's schema is renamed for the new version and
+                // keeps whoever governs it: its bundle's policies when it is
+                // pinned to one, else whichever schema is current now.
+                if reset
+                    && let Some(pinned) = &group.prepared.schema
+                    && let Some(policies) = &pinned.policies_from
+                    && let Some(governed) = self.regoverned(pinned.jazz.version_id(), policies)
+                {
+                    group.prepared.schema = Some(governed);
+                }
+                let old = std::mem::take(&mut group.watches);
+                self.fan.borrow_mut().unindex(gid, &old);
+                let watches = self
+                    .compile(&group.prepared, group.identity, &group.read)
+                    .and_then(|compiled| {
+                        self.watches(&group.prepared, group.identity, &group.read, &compiled)
+                    })
+                    .unwrap_or(old);
+                self.fan.borrow_mut().index(gid, &watches);
+                group.watches = watches;
             }
-            let old = std::mem::take(&mut group.watches);
-            self.fan.borrow_mut().unindex(gid, &old);
-            let watches = self
-                .compile(&group.prepared, group.identity, &group.read)
-                .and_then(|compiled| {
-                    self.watches(&group.prepared, group.identity, &group.read, &compiled)
-                })
-                .unwrap_or(old);
-            self.fan.borrow_mut().index(gid, &watches);
-            group.watches = watches;
             if reset {
-                self.reset_group(&mut group).await;
+                self.reset_group(&group).await;
             } else {
-                self.refresh_group(&mut group, None).await;
+                self.refresh_group(&group, None).await;
             }
         }
     }
@@ -958,54 +960,62 @@ impl Store {
     /// rows (then the caller re-runs).
     async fn recheck_rows(
         &self,
-        group: &mut Group,
+        handle: &RefCell<Group>,
         ids: &BTreeSet<RowUuid>,
     ) -> Option<Result<Option<SubscriptionEvent>, Error>> {
-        let order = group.prepared.query.order_by.clone();
-        let projected = group.projected;
-        if group.keys.len() != group.rows.len() {
-            if !projected {
+        let (order, projected, prepared, narrowed) = {
+            let mut group = handle.borrow_mut();
+            let order = group.prepared.query.order_by.clone();
+            let projected = group.projected;
+            if group.keys.len() != group.rows.len() {
+                if !projected {
+                    return None;
+                }
+                group.keys = match self.projected_keys(&group.prepared, &order, &group.rows)? {
+                    Ok(keys) => keys,
+                    Err(error) => return Some(Err(error)),
+                };
+            }
+            // The same query narrowed to the changed ids, as a root filter, so
+            // SQLite seeks them by primary key instead of sorting the view.
+            let mut prepared = group.prepared.clone();
+            prepared.query.filters.push(crate::query::Predicate::In(
+                crate::query::Operand::Column("id".to_owned()),
+                ids.iter()
+                    .map(|id| crate::query::Operand::Literal(Value::Uuid(id.0)))
+                    .collect(),
+            ));
+            prepared.query.order_by.clear();
+            prepared.query.limit = None;
+            // Under a cut, a row changed past it still reads as it was. The
+            // other rows were read through the cut the last run applied: under
+            // another, only a full run (which records it) keeps them one state.
+            let read = self.visible_read(&group.read, &group.tables);
+            if cut_of(&read) != group.applied {
                 return None;
             }
-            group.keys = match self
-                .sort_keys(group, &order, projected, &group.rows)
-                .await?
-            {
-                Ok(keys) => keys,
+            let narrowed = match self.compile(&prepared, group.identity, &read) {
+                Ok(compiled) => compiled,
                 Err(error) => return Some(Err(error)),
             };
-        }
-        // The same query narrowed to the changed ids, as a root filter, so
-        // SQLite seeks them by primary key instead of sorting the view.
-        let mut prepared = group.prepared.clone();
-        prepared.query.filters.push(crate::query::Predicate::In(
-            crate::query::Operand::Column("id".to_owned()),
-            ids.iter()
-                .map(|id| crate::query::Operand::Literal(Value::Uuid(id.0)))
-                .collect(),
-        ));
-        prepared.query.order_by.clear();
-        prepared.query.limit = None;
-        // Under a cut, a row changed past it still reads as it was. The
-        // other rows were read through the cut the last run applied: under
-        // another, only a full run (which records it) keeps them one state.
-        let read = self.visible_read(&group.read, &group.tables);
-        if cut_of(&read) != group.applied {
-            return None;
-        }
-        let narrowed = match self.compile(&prepared, group.identity, &read) {
-            Ok(compiled) => compiled,
-            Err(error) => return Some(Err(error)),
+            (order, projected, group.prepared.clone(), narrowed)
         };
-        let fresh = match self.execute(&narrowed, &group.prepared.query.table).await {
+        let fresh = match self.execute(&narrowed, &prepared.query.table).await {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
-        let fresh_keys = match self.sort_keys(group, &order, projected, &fresh).await? {
+        let keys = if projected {
+            self.projected_keys(&prepared, &order, &fresh)
+        } else {
+            let ids: Vec<_> = fresh.iter().map(|row| row.id).collect();
+            self.sort_keys(&prepared, &order, &ids).await
+        };
+        let fresh_keys = match keys? {
             Ok(keys) => keys,
             Err(error) => return Some(Err(error)),
         };
         let fresh: Vec<(SortKey, CurrentRow)> = fresh_keys.into_iter().zip(fresh).collect();
+        let mut group = handle.borrow_mut();
         // Before: where each changed id sat, and what it showed.
         let before: HashMap<RowUuid, (usize, CurrentRow, SortKey)> = group
             .rows
@@ -1144,11 +1154,10 @@ impl Store {
     /// The sort keys of `rows` in the query's order (ties broken by id):
     /// from their cells when every order column is projected, else read
     /// back by id. `None` when a value cannot be compared from SQL.
-    async fn sort_keys(
+    fn projected_keys(
         &self,
-        group: &Group,
+        prepared: &PreparedQuery,
         order: &[crate::query::OrderBy],
-        projected: bool,
         rows: &[CurrentRow],
     ) -> Option<Result<Vec<SortKey>, Error>> {
         // Same tie-break as the compiled ORDER BY: id in the last key's
@@ -1159,61 +1168,76 @@ impl Store {
         );
         let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
         let owner_state = self.owner.borrow();
-        let schema = group.prepared.source_schema(&owner_state);
-        if projected {
-            // Cells sort as the compiled ORDER BY sorts them: an enum
-            // variant by its tag, or its rank in a schema whose declaration
-            // order is not tag order.
-            let root = schema.tables.get(&group.prepared.query.table)?;
-            let mut keys = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut key = Vec::with_capacity(order.len() + 1);
-                for by in order {
-                    let value = if by.column == "id" {
-                        Sql::Blob(row.id.0.as_bytes().to_vec())
-                    } else {
-                        match row
-                            .cells
-                            .iter()
-                            .find(|(name, _)| *name == by.column)?
-                            .1
-                            .as_ref()
+        let schema = prepared.source_schema(&owner_state);
+        // Cells sort as the compiled ORDER BY sorts them: an enum
+        // variant by its tag, or its rank in a schema whose declaration
+        // order is not tag order.
+        let root = schema.tables.get(&prepared.query.table)?;
+        let mut keys = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut key = Vec::with_capacity(order.len() + 1);
+            for by in order {
+                let value = if by.column == "id" {
+                    Sql::Blob(row.id.0.as_bytes().to_vec())
+                } else {
+                    match row
+                        .cells
+                        .iter()
+                        .find(|(name, _)| *name == by.column)?
+                        .1
+                        .as_ref()
+                    {
+                        None => Sql::Null,
+                        // A value over the inline threshold sorts by its
+                        // chunked cell, which the row does not carry.
+                        Some(value) => match root
+                            .column(&by.column)
+                            .map_or_else(|| to_sql(value), |column| column.order_cell(value))
+                            .ok()??
                         {
-                            None => Sql::Null,
-                            // A value over the inline threshold sorts by its
-                            // chunked cell, which the row does not carry.
-                            Some(value) => match root
-                                .column(&by.column)
-                                .map_or_else(|| to_sql(value), |column| column.order_cell(value))
-                                .ok()??
+                            Sql::Text(bytes) | Sql::Blob(bytes)
+                                if bytes.len()
+                                    > root.column(&by.column).map_or(
+                                        jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
+                                        crate::large::inline_max,
+                                    ) =>
                             {
-                                Sql::Text(bytes) | Sql::Blob(bytes)
-                                    if bytes.len()
-                                        > root.column(&by.column).map_or(
-                                            jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
-                                            crate::large::inline_max,
-                                        ) =>
-                                {
-                                    return None;
-                                }
-                                value => value,
-                            },
-                        }
-                    };
-                    key.push((
-                        value,
-                        matches!(by.direction, crate::query::OrderDirection::Desc),
-                    ));
-                }
-                key.push(id_key(row));
-                keys.push(key);
+                                return None;
+                            }
+                            value => value,
+                        },
+                    }
+                };
+                key.push((
+                    value,
+                    matches!(by.direction, crate::query::OrderDirection::Desc),
+                ));
             }
-            return Some(Ok(keys));
+            key.push(id_key(row));
+            keys.push(key);
         }
+        Some(Ok(keys))
+    }
+
+    async fn sort_keys(
+        &self,
+        prepared: &PreparedQuery,
+        order: &[crate::query::OrderBy],
+        rows: &[RowUuid],
+    ) -> Option<Result<Vec<SortKey>, Error>> {
+        // Same tie-break as the compiled ORDER BY: id in the last key's
+        // direction.
+        let tie_desc = matches!(
+            order.last().map(|by| by.direction),
+            Some(crate::query::OrderDirection::Desc)
+        );
+        let id_key = |row: &RowUuid| (Sql::Blob(row.0.as_bytes().to_vec()), tie_desc);
+        let owner_state = self.owner.borrow().clone();
+        let schema = prepared.source_schema(&owner_state);
         if rows.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let table = schema.tables.get(&group.prepared.query.table)?;
+        let table = schema.tables.get(&prepared.query.table)?;
         // By id alone a branched table's row is ambiguous.
         if !table.branch_by.is_empty() {
             return None;
@@ -1235,7 +1259,7 @@ impl Store {
             "SELECT t.id{columns} FROM {} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each(?1))",
             quote(&table.stored)
         );
-        let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
+        let ids = crate::compile::json_ids(rows.iter().map(|row| row.0.as_bytes().as_slice()));
         let found = self
             .conn
             .sql()
@@ -1253,7 +1277,7 @@ impl Store {
         };
         let mut keys = Vec::with_capacity(rows.len());
         for row in rows {
-            let values = found.remove(row.id.0.as_bytes().as_slice())?;
+            let values = found.remove(row.0.as_bytes().as_slice())?;
             // Stored cells order as the compiled ORDER BY orders them: a
             // chunked cell by itself (SPEC 19.5).
             let mut key: SortKey = values
@@ -1274,26 +1298,33 @@ impl Store {
 
     /// Re-run every result that waited for large-value chunks.
     pub(super) async fn retry_awaiting(&self) {
-        for handle in self.fan.borrow().groups.values() {
-            let mut group = handle.borrow_mut();
-            if !group.awaiting {
-                continue;
-            }
-            if group.opened {
-                self.refresh_group(&mut group, None).await;
+        let groups: Vec<_> = self.fan.borrow().groups.values().cloned().collect();
+        for group in groups {
+            let opened = {
+                let group = group.borrow();
+                if !group.awaiting {
+                    continue;
+                }
+                group.opened
+            };
+            if opened {
+                self.refresh_group(&group, None).await;
             } else {
-                self.reset_group(&mut group).await;
+                self.reset_group(&group).await;
             }
         }
     }
 
     /// A group's rows, with array relations nested in their cells.
-    async fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
-        let read = self.visible_read(&group.read, &group.tables);
-        group.applied = cut_of(&read);
-        let rows = self.run(&group.prepared, group.identity, &read).await?;
-        self.nest_relations(&group.prepared, group.identity, &read, rows)
-            .await
+    async fn group_rows(&self, group: &RefCell<Group>) -> Result<Vec<CurrentRow>, Error> {
+        let (prepared, identity, read) = {
+            let mut group = group.borrow_mut();
+            let read = self.visible_read(&group.read, &group.tables).into_owned();
+            group.applied = cut_of(&read);
+            (group.prepared.clone(), group.identity, read)
+        };
+        let rows = self.run(&prepared, identity, &read).await?;
+        self.nest_relations(&prepared, identity, &read, rows).await
     }
 
     /// Re-run the live results whose cut moved: their read's settle rose,
@@ -1302,53 +1333,58 @@ impl Store {
     pub(super) async fn refresh_visibility(&self) -> Result<(), Error> {
         let groups: Vec<Rc<RefCell<Group>>> = self.fan.borrow().groups.values().cloned().collect();
         for group in groups {
-            let mut group = group.borrow_mut();
-            if group.read.position == Position::Current
-                || cut_of(&self.visible_read(&group.read, &group.tables)) == group.applied
             {
-                continue;
+                let group = group.borrow();
+                if group.read.position == Position::Current
+                    || cut_of(&self.visible_read(&group.read, &group.tables)) == group.applied
+                {
+                    continue;
+                }
             }
-            self.refresh_group(&mut group, None).await;
+            self.refresh_group(&group, None).await;
         }
         Ok(())
     }
 
-    async fn reset_group(&self, group: &mut Group) {
-        match self.group_rows(group).await {
-            Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
+    async fn reset_group(&self, handle: &RefCell<Group>) {
+        match self.group_rows(handle).await {
+            Err(error) if crate::large::is_missing(&error) => handle.borrow_mut().awaiting = true,
             Ok(rows) => {
-                group.awaiting = false;
-                // Rows that left the result go out as removals before the
-                // re-opening: a reset tells local readers to replace their
-                // result, but a replica only drops rows it is told to (a
-                // tighter policy must evict what it can no longer read).
-                if group.opened {
-                    let kept: BTreeSet<RowKey> = rows.iter().map(row_key).collect();
-                    let removed: Vec<RemovedRow> = group
-                        .rows
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, row)| !kept.contains(&row_key(row)))
-                        .map(|(index, row)| RemovedRow {
-                            table: row.table.to_string(),
-                            row_uuid: row.id,
-                            joined: row.joined.to_vec(),
-                            version: row.version,
-                            union_arm: row.union_arm.clone(),
-                            index,
-                        })
-                        .collect();
-                    if !removed.is_empty() {
-                        group.push(delta(false, Vec::new(), Vec::new(), removed));
+                {
+                    let mut group = handle.borrow_mut();
+                    group.awaiting = false;
+                    // Rows that left the result go out as removals before the
+                    // re-opening: a reset tells local readers to replace their
+                    // result, but a replica only drops rows it is told to (a
+                    // tighter policy must evict what it can no longer read).
+                    if group.opened {
+                        let kept: BTreeSet<RowKey> = rows.iter().map(row_key).collect();
+                        let removed: Vec<RemovedRow> = group
+                            .rows
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, row)| !kept.contains(&row_key(row)))
+                            .map(|(index, row)| RemovedRow {
+                                table: row.table.to_string(),
+                                row_uuid: row.id,
+                                joined: row.joined.to_vec(),
+                                version: row.version,
+                                union_arm: row.union_arm.clone(),
+                                index,
+                            })
+                            .collect();
+                        if !removed.is_empty() {
+                            group.push(delta(false, Vec::new(), Vec::new(), removed));
+                        }
                     }
+                    group.opened = true;
+                    group.push(opening(&rows));
+                    group.rows = rows;
+                    group.keys.clear();
                 }
-                group.opened = true;
-                group.push(opening(&rows));
-                group.rows = rows;
-                group.keys.clear();
-                self.read_keys(group).await;
+                self.read_keys(handle).await;
             }
-            Err(error) => group.push(SubscriptionEvent::Rejected {
+            Err(error) => handle.borrow_mut().push(SubscriptionEvent::Rejected {
                 code: error.code,
                 message: error.message.clone(),
                 reason: error.to_string(),
@@ -1391,7 +1427,7 @@ impl Store {
     /// left out, and the reader takes the column whole.
     async fn add_splices(
         &self,
-        group: &Group,
+        group: &RefCell<Group>,
         prior: &HashMap<RowUuid, CurrentRow>,
         event: &mut SubscriptionEvent,
     ) {
@@ -1399,12 +1435,20 @@ impl Store {
         let SubscriptionEvent::Delta { updated, .. } = event else {
             return;
         };
-        if group.key.splices.is_empty() || updated.is_empty() {
+        let (splices, prepared, identity) = {
+            let group = group.borrow();
+            (
+                group.key.splices.clone(),
+                group.prepared.clone(),
+                group.identity,
+            )
+        };
+        if splices.is_empty() || updated.is_empty() {
             return;
         }
-        let owner_state = self.owner.borrow();
-        let schema = group.prepared.source_schema(&owner_state);
-        let Ok(table) = schema.table(&group.prepared.query.table) else {
+        let owner_state = self.owner.borrow().clone();
+        let schema = prepared.source_schema(&owner_state);
+        let Ok(table) = schema.table(&prepared.query.table) else {
             return;
         };
         let policies = schema.policy_schema();
@@ -1423,9 +1467,8 @@ impl Store {
             if from == to {
                 continue;
             }
-            for column in &group.key.splices {
-                let part = group
-                    .prepared
+            for column in &splices {
+                let part = prepared
                     .query
                     .partial
                     .iter()
@@ -1446,14 +1489,7 @@ impl Store {
                 // Read access is by the group's own policies: a pinned
                 // session's bundle, not the current schema.
                 if let Ok(splices) = self
-                    .value_delta(
-                        table,
-                        out.row.id,
-                        column,
-                        (from, to),
-                        group.identity,
-                        policies,
-                    )
+                    .value_delta(table, out.row.id, column, (from, to), identity, policies)
                     .await
                 {
                     out.splices.push((column.clone(), splices));
@@ -1463,25 +1499,28 @@ impl Store {
     }
 
     /// Bring a group's result up to date; true when it re-ran the query.
-    async fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+    async fn refresh_group(&self, group: &RefCell<Group>, ids: Option<&BTreeSet<RowUuid>>) -> bool {
         // The versions the result showed, which splices start from.
-        let prior: HashMap<RowUuid, CurrentRow> = if group.key.splices.is_empty() {
-            HashMap::new()
-        } else {
-            group.rows.iter().map(|row| (row.id, row.clone())).collect()
+        let prior: HashMap<RowUuid, CurrentRow> = {
+            let group = group.borrow();
+            if group.key.splices.is_empty() {
+                HashMap::new()
+            } else {
+                group.rows.iter().map(|row| (row.id, row.clone())).collect()
+            }
         };
-        if let Some(ids) = ids.filter(|_| group.recheck) {
+        if let Some(ids) = ids.filter(|_| group.borrow().recheck) {
             match self.recheck_rows(group, ids).await {
                 Some(Ok(Some(mut event))) => {
                     self.add_splices(group, &prior, &mut event).await;
-                    group.push(event);
+                    group.borrow_mut().push(event);
                     return false;
                 }
                 Some(Ok(None)) => return false,
                 // Missing chunks: the full run below decides to wait.
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
-                    group.push(SubscriptionEvent::Rejected {
+                    group.borrow_mut().push(SubscriptionEvent::Rejected {
                         code: error.code,
                         message: error.message.clone(),
                         reason: error.to_string(),
@@ -1494,7 +1533,7 @@ impl Store {
         let rows = match self.group_rows(group).await {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) => {
-                group.awaiting = true;
+                group.borrow_mut().awaiting = true;
                 return true;
             }
             Err(error) => {
@@ -1503,35 +1542,55 @@ impl Store {
                     message: error.message.clone(),
                     reason: error.to_string(),
                 };
-                group.push(event);
+                group.borrow_mut().push(event);
                 return true;
             }
         };
-        let was_awaiting = std::mem::take(&mut group.awaiting);
-        if let Some(mut event) = diff(&group.rows, &rows) {
+        let (was_awaiting, event) = {
+            let mut group = group.borrow_mut();
+            (
+                std::mem::take(&mut group.awaiting),
+                diff(&group.rows, &rows),
+            )
+        };
+        if let Some(mut event) = event {
             self.add_splices(group, &prior, &mut event).await;
-            group.push(event);
+            group.borrow_mut().push(event);
         } else if was_awaiting {
             // Settlement withheld while waiting is published now.
-            group.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
+            group
+                .borrow_mut()
+                .push(delta(false, Vec::new(), Vec::new(), Vec::new()));
         }
         // Order keys that are not shown may have moved even when no row
         // did: read them again with the rows.
-        group.rows = rows;
-        group.keys.clear();
+        {
+            let mut group = group.borrow_mut();
+            group.rows = rows;
+            group.keys.clear();
+        }
         self.read_keys(group).await;
         true
     }
 
     /// Reads the sort keys of a re-checkable group whose order is not
     /// shown, so they describe its rows as read (not after a later write).
-    async fn read_keys(&self, group: &mut Group) {
-        if !group.recheck || group.projected {
-            return;
-        }
-        let order = group.prepared.query.order_by.clone();
-        if let Some(Ok(keys)) = self.sort_keys(group, &order, false, &group.rows).await {
-            group.keys = keys;
+    async fn read_keys(&self, group: &RefCell<Group>) {
+        let (prepared, ids) = {
+            let group = group.borrow();
+            if !group.recheck || group.projected {
+                return;
+            }
+            (
+                group.prepared.clone(),
+                group.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            )
+        };
+        if let Some(Ok(keys)) = self
+            .sort_keys(&prepared, &prepared.query.order_by, &ids)
+            .await
+        {
+            group.borrow_mut().keys = keys;
         }
     }
 }

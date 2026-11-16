@@ -477,7 +477,7 @@ impl Names {
 
     /// Record lens cells (once each), in memory and in the file.
     pub(crate) async fn record_lens_cells(
-        &mut self,
+        names: &std::cell::RefCell<Self>,
         conn: &DbConnection,
         cells: Vec<LensCell>,
     ) -> Result<(), Error> {
@@ -487,7 +487,7 @@ impl Names {
         let insert = "INSERT OR IGNORE INTO _jazz_lens_cells (tbl, col, since, src, dflt) \
                  VALUES (?1, ?2, ?3, ?4, ?5)";
         for cell in cells {
-            if self.lens_cells.contains(&cell) {
+            if names.borrow().lens_cells.contains(&cell) {
                 continue;
             }
             let (source, default) = match &cell.rule {
@@ -507,7 +507,7 @@ impl Names {
                 )
                 .await
                 .map_err(storage)?;
-            self.lens_cells.push(cell);
+            names.borrow_mut().lens_cells.push(cell);
         }
         Ok(())
     }
@@ -591,9 +591,13 @@ impl Names {
 
     /// Do not adopt an unrelated SQLite object just because its name matches a
     /// newly admitted Jazz table. Check before minting metadata or issuing DDL.
-    async fn check_new_tables(&self, conn: &DbConnection, schema: &Schema) -> Result<(), Error> {
+    async fn check_new_tables(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
+        schema: &Schema,
+    ) -> Result<(), Error> {
         use jazz_sql::Row as _;
-        let owned = self.stored_tables();
+        let owned: std::collections::BTreeSet<String> = names.borrow().stored_tables();
         for table in schema
             .tables
             .values()
@@ -675,17 +679,21 @@ impl Names {
     /// differs only in defaults or indexes) adds no names; its definition
     /// is kept, so a bundle selecting it resolves.
     pub(crate) async fn admit(
-        &mut self,
+        names: &std::cell::RefCell<Self>,
         conn: &DbConnection,
         schema: &Schema,
     ) -> Result<(), Error> {
         let version = schema.jazz.version_id();
-        if self.versions.contains_key(&version) {
+        if names.borrow().versions.contains_key(&version) {
             return crate::catalogue::record_equivalent(&mut conn.sql(), &schema.jazz).await;
         }
-        let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
-        let names = schema.names();
-        let columns = self.new_stored_columns(schema)?;
+        let (n, stored_names, columns) = {
+            let state = names.borrow();
+            let n = state.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
+            let stored_names = schema.names();
+            let columns = state.new_stored_columns(schema)?;
+            (n, stored_names, columns)
+        };
         crate::values::in_savepoint_async(conn, "jazz_names", async || {
             conn.sql()
                 .execute(
@@ -694,21 +702,23 @@ impl Names {
                 )
                 .await
                 .map_err(storage)?;
-            write_names(conn, n, &names).await?;
+            write_names(conn, n, &stored_names).await?;
             write_stored_columns(conn, &columns).await?;
             crate::catalogue::record_admitted(&mut conn.sql(), n, &schema.jazz).await
         })
         .await?;
-        self.versions.insert(version, (n, names));
+        let mut state = names.borrow_mut();
+        state.versions.insert(version, (n, stored_names));
         for column in columns {
-            let branches = self.branches.entry(column.table.clone()).or_default();
+            let branches = state.branches.entry(column.table.clone()).or_default();
             let Some(ty) = column.ty else {
                 continue;
             };
             if let Some(default) = column.branch {
                 branches.insert(column.column.clone(), default);
             }
-            self.types
+            state
+                .types
                 .entry(column.table)
                 .or_default()
                 .insert(column.column, ty);
@@ -783,14 +793,17 @@ impl Names {
     /// tag for yet: each column's next tags, in declaration order. Every
     /// store does this as it admits a version; [`Self::align`] then puts
     /// the current schema's in its order.
-    pub(crate) async fn mint(&self, conn: &DbConnection, schema: &Schema) -> Result<(), Error> {
-        self.check_new_tables(conn, schema).await?;
+    pub(crate) async fn mint(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
+        schema: &Schema,
+    ) -> Result<(), Error> {
+        Self::check_new_tables(names, conn, schema).await?;
         for table in schema.tables.values() {
             for column in &table.columns {
                 if let Some(variants) = &column.variants {
                     let variants: Vec<&str> = variants.iter().map(String::as_str).collect();
-                    self.intern(conn, &table.stored, &column.stored, &variants)
-                        .await?;
+                    Self::intern(names, conn, &table.stored, &column.stored, &variants).await?;
                 }
             }
         }
@@ -802,18 +815,18 @@ impl Names {
     /// memory. A name no admitted version declares (a removed variant a row
     /// still holds, say) gets one too: every enum cell is a tag.
     pub(crate) async fn intern(
-        &self,
+        names: &std::cell::RefCell<Self>,
         conn: &DbConnection,
         table: &str,
         column: &str,
-        names: &[&str],
+        variants: &[&str],
     ) -> Result<(), Error> {
-        let tags = self.tags.column(table, column);
+        let tags = names.borrow().tags.column(table, column);
         let new: Vec<(i64, &str)> = {
             let tags = tags.borrow();
             let mut next = tags.next();
             let mut new: Vec<(i64, &str)> = Vec::new();
-            for name in names {
+            for name in variants {
                 if tags.tag(name).is_none() && !new.iter().any(|(_, n)| n == name) {
                     new.push((next, name));
                     next += 1;
@@ -852,13 +865,13 @@ impl Names {
     /// Returns each (old, new) tag that changed; the caller rewrites the
     /// cells.
     pub(crate) async fn align(
-        &self,
+        names: &std::cell::RefCell<Self>,
         conn: &DbConnection,
         table: &str,
         column: &str,
         declared: &[String],
     ) -> Result<Vec<(i64, i64)>, Error> {
-        let tags = self.tags.column(table, column);
+        let tags = names.borrow().tags.column(table, column);
         let (renumbered, changed) = {
             let tags = tags.borrow();
             if tags.in_order(declared) {
@@ -880,7 +893,7 @@ impl Names {
         // it now names another variant, inserts that leave the column out
         // take the default by name instead (`_jazz_enum_defaults`).
         let key = (table.to_owned(), column.to_owned());
-        let has_default = self.enum_defaults.borrow().contains_key(&key);
+        let has_default = names.borrow().enum_defaults.borrow().contains_key(&key);
         let stale_default = match has_default {
             true => None,
             false => ddl_default(conn, table, column)
@@ -920,7 +933,7 @@ impl Names {
         crate::values::tags_changing(conn, &tags);
         *tags.borrow_mut() = renumbered;
         if let Some(name) = stale_default {
-            self.enum_defaults.borrow_mut().insert(key, name);
+            names.borrow().enum_defaults.borrow_mut().insert(key, name);
         }
         Ok(changed)
     }
@@ -940,21 +953,22 @@ impl Names {
     /// starts with its source's tags, removed variants' too, so its cells
     /// are its source's and it sorts like its source.
     pub(crate) async fn copy_tags(
-        &self,
+        names: &std::cell::RefCell<Self>,
         conn: &DbConnection,
         table: &str,
         source: &str,
         copy: &str,
     ) -> Result<(), Error> {
-        let names: Vec<String> = self
+        let variants: Vec<String> = names
+            .borrow()
             .tags
             .column(table, source)
             .borrow()
             .iter()
             .map(|(_, name)| name.to_owned())
             .collect();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        self.intern(conn, table, copy, &names).await
+        let variants: Vec<&str> = variants.iter().map(String::as_str).collect();
+        Self::intern(names, conn, table, copy, &variants).await
     }
 
     /// Whether `version`'s names are the ones this replica's authority
@@ -978,7 +992,7 @@ impl Names {
     /// Record that the authority confirmed these (version, digest) pairs;
     /// whether any is new here.
     pub(crate) async fn confirm(
-        &mut self,
+        names: &std::cell::RefCell<Self>,
         conn: &DbConnection,
         confirmed: &[([u8; 16], [u8; 16])],
     ) -> Result<bool, Error> {
@@ -988,7 +1002,8 @@ impl Names {
             .iter()
             .map(|(version, digest)| (SchemaVersionId::from_bytes(*version), *digest))
             .filter(|(version, digest)| {
-                self.versions.contains_key(version) && self.confirmed.get(version) != Some(digest)
+                names.borrow().versions.contains_key(version)
+                    && names.borrow().confirmed.get(version) != Some(digest)
             })
             .collect();
         if new.is_empty() {
@@ -1008,7 +1023,7 @@ impl Names {
             Ok(())
         })
         .await?;
-        self.confirmed.extend(new);
+        names.borrow_mut().confirmed.extend(new);
         Ok(true)
     }
 
@@ -1561,7 +1576,9 @@ mod tests {
             begin_savepoint_inline as begin_savepoint, end_savepoint_inline as end_savepoint,
         };
         let conn = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
-        let names = crate::options::block_on(Names::load(&mut conn.sql())).unwrap();
+        let names = std::cell::RefCell::new(
+            crate::options::block_on(Names::load(&mut conn.sql())).unwrap(),
+        );
         let file = || -> Vec<(i64, String)> {
             if !crate::options::block_on(table_exists(&mut conn.sql(), "_jazz_enum_tags")).unwrap()
             {
@@ -1576,10 +1593,10 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        let tag = |name: &str| names.tags().column("t", "c").borrow().tag(name);
+        let tag = |name: &str| names.borrow().tags().column("t", "c").borrow().tag(name);
         begin_savepoint(&conn, "outer").unwrap();
         begin_savepoint(&conn, "inner").unwrap();
-        futures::executor::block_on(names.intern(&conn, "t", "c", &["lost"])).unwrap();
+        futures::executor::block_on(Names::intern(&names, &conn, "t", "c", &["lost"])).unwrap();
         end_savepoint(&conn, "inner", true).unwrap();
         assert_eq!(tag("lost"), Some(0));
         end_savepoint(&conn, "outer", false).unwrap();
@@ -1587,7 +1604,7 @@ mod tests {
         assert_eq!(file(), []);
 
         begin_savepoint(&conn, "outer").unwrap();
-        futures::executor::block_on(names.intern(&conn, "t", "c", &["kept"])).unwrap();
+        futures::executor::block_on(Names::intern(&names, &conn, "t", "c", &["kept"])).unwrap();
         end_savepoint(&conn, "outer", true).unwrap();
         assert_eq!(tag("kept"), Some(0));
         assert_eq!(file(), [(0, "kept".to_owned())]);
@@ -1602,18 +1619,22 @@ mod tests {
         use std::future::Future;
         let alice = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
         let bob = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
-        let alice_names = crate::options::block_on(Names::load(&mut alice.sql())).unwrap();
-        let bob_names = crate::options::block_on(Names::load(&mut bob.sql())).unwrap();
+        let alice_names = std::cell::RefCell::new(
+            crate::options::block_on(Names::load(&mut alice.sql())).unwrap(),
+        );
+        let bob_names =
+            std::cell::RefCell::new(crate::options::block_on(Names::load(&mut bob.sql())).unwrap());
         let mut write = Box::pin(in_savepoint_async(&alice, "alice_write", async || {
-            alice_names.intern(&alice, "t", "c", &["cancelled"]).await?;
+            Names::intern(&alice_names, &alice, "t", "c", &["cancelled"]).await?;
             std::future::pending::<()>().await;
             Ok(())
         }));
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(write.as_mut().poll(&mut cx).is_pending());
-        futures::executor::block_on(bob_names.intern(&bob, "t", "c", &["kept"])).unwrap();
+        futures::executor::block_on(Names::intern(&bob_names, &bob, "t", "c", &["kept"])).unwrap();
         assert_eq!(
             alice_names
+                .borrow()
                 .tags()
                 .column("t", "c")
                 .borrow()
@@ -1623,6 +1644,7 @@ mod tests {
         drop(write);
         assert_eq!(
             alice_names
+                .borrow()
                 .tags()
                 .column("t", "c")
                 .borrow()
@@ -1630,14 +1652,25 @@ mod tests {
             None
         );
         assert_eq!(
-            bob_names.tags().column("t", "c").borrow().tag("kept"),
+            bob_names
+                .borrow()
+                .tags()
+                .column("t", "c")
+                .borrow()
+                .tag("kept"),
             Some(0)
         );
         assert_eq!(rollbacks(&alice), 1);
         assert_eq!(rollbacks(&bob), 0);
-        futures::executor::block_on(alice_names.intern(&alice, "t", "c", &["retry"])).unwrap();
+        futures::executor::block_on(Names::intern(&alice_names, &alice, "t", "c", &["retry"]))
+            .unwrap();
         assert_eq!(
-            alice_names.tags().column("t", "c").borrow().tag("retry"),
+            alice_names
+                .borrow()
+                .tags()
+                .column("t", "c")
+                .borrow()
+                .tag("retry"),
             Some(0)
         );
         let name: String = alice

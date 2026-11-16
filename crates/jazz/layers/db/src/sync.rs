@@ -4384,16 +4384,16 @@ impl Store {
     /// Images carry chunked values by their descriptors: epochs are local
     /// to one database.
     async fn portable_large(&self, image: &mut Image) -> Result<(), Error> {
-        let physical_state = self.physical.borrow();
-        let Some(table) = physical_state.tables.get(&image.table) else {
-            return Ok(());
-        };
         for (name, cell) in &mut image.cells {
             let Cell::Int(chunked) = cell else {
                 continue;
             };
-            if !table
-                .by_stored_column(name)
+            if !self
+                .physical
+                .borrow()
+                .tables
+                .get(&image.table)
+                .and_then(|table| table.by_stored_column(name))
                 .is_some_and(crate::large::large_capable)
             {
                 continue;
@@ -5128,38 +5128,40 @@ impl Store {
             columns.push(column);
             values.push(value);
         }
-        let mut inserts = self.image_inserts.borrow_mut();
-        let (known, sql) = inserts
-            .entry((image.table.clone(), history))
-            .or_insert_with(|| (Vec::new(), String::new()));
-        if sql.is_empty() || *known != columns {
-            let name = if history {
-                format!("{}__h", image.table)
-            } else {
-                image.table.clone()
-            };
-            let meta = ["id", "_branch", "_clock", "_state", "_writer"];
-            let names: Vec<String> = meta
-                .iter()
-                .map(|name| (*name).to_owned())
-                .chain(columns.iter().map(|column| quote(column)))
-                .collect();
-            let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
-            let verb = if history {
-                "INSERT OR IGNORE"
-            } else {
-                "INSERT"
-            };
-            *sql = format!(
-                "{verb} INTO {} ({}) VALUES ({})",
-                quote(&name),
-                names.join(", "),
-                placeholders.join(", ")
-            );
-            *known = columns;
-        }
-        let sql = sql.clone();
-        drop(inserts);
+        let sql = {
+            let mut inserts = self.image_inserts.borrow_mut();
+            let (known, sql) = inserts
+                .entry((image.table.clone(), history))
+                .or_insert_with(|| (Vec::new(), String::new()));
+            if sql.is_empty() || *known != columns {
+                let name = if history {
+                    format!("{}__h", image.table)
+                } else {
+                    image.table.clone()
+                };
+                let meta = ["id", "_branch", "_clock", "_state", "_writer"];
+                let names: Vec<String> = meta
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .chain(columns.iter().map(|column| quote(column)))
+                    .collect();
+                let placeholders: Vec<String> =
+                    (1..=values.len()).map(|i| format!("?{i}")).collect();
+                let verb = if history {
+                    "INSERT OR IGNORE"
+                } else {
+                    "INSERT"
+                };
+                *sql = format!(
+                    "{verb} INTO {} ({}) VALUES ({})",
+                    quote(&name),
+                    names.join(", "),
+                    placeholders.join(", ")
+                );
+                *known = columns;
+            }
+            sql.clone()
+        };
         self.exec(&sql, &values.iter().map(Sql::as_param).collect::<Vec<_>>())
             .await
             .map_err(storage)?;
@@ -5386,60 +5388,74 @@ impl Store {
         accepted_at: Option<u64>,
         as_written: &[AsWritten],
     ) -> Result<(Vec<Image>, Vec<WholeRow>), Error> {
-        let client_state = self.client.borrow();
-        let client = client_state.as_ref().expect("client");
         let mut images = Vec::new();
         let mut whole = Vec::new();
-        let Some(pending) = client.pending.get(tx) else {
-            return Ok((images, whole));
-        };
         for written in as_written {
-            let row = pending
-                .ops
-                .get(written.op as usize)
-                .and_then(StagedOp::row)
-                .and_then(|row| {
-                    pending
-                        .rows
-                        .iter()
-                        .find(|(_, r, key)| *r == row && *key == written.key)
-                });
-            let Some((table, row, key)) = row else {
-                return Err(unsupported(format!(
-                    "fate of commit {tx} holds a row of op {} it did not write",
-                    written.op
-                )));
+            let (table, row, key, image, beneath) = {
+                let client_state = self.client.borrow();
+                let client = client_state.as_ref().expect("client");
+                let Some(pending) = client.pending.get(tx) else {
+                    return Ok((images, whole));
+                };
+                let row = pending
+                    .ops
+                    .get(written.op as usize)
+                    .and_then(StagedOp::row)
+                    .and_then(|row| {
+                        pending
+                            .rows
+                            .iter()
+                            .find(|(_, r, key)| *r == row && *key == written.key)
+                    });
+                let Some((table, row, key)) = row else {
+                    return Err(unsupported(format!(
+                        "fate of commit {tx} holds a row of op {} it did not write",
+                        written.op
+                    )));
+                };
+                let entry = match &pending.expected {
+                    Some(expected) => {
+                        let Some(entry) = expected
+                            .iter()
+                            .find(|e| e.op == written.op && e.key == written.key)
+                        else {
+                            return Err(unsupported(format!(
+                                "fate of commit {tx} holds a row of op {} it did not expect",
+                                written.op
+                            )));
+                        };
+                        let same = echo_digest(&entry.image) == written.digest;
+                        same.then_some(entry)
+                    }
+                    None => None,
+                };
+                let beneath = entry.is_some_and(|entry| entry.created == Created::Beneath);
+                let image = entry
+                    .zip(accepted_at)
+                    .map(|(entry, at)| entry.accepted(at, None));
+                (table.clone(), *row, key.clone(), image, beneath)
             };
-            let entry = match &pending.expected {
-                Some(expected) => {
-                    let Some(entry) = expected
-                        .iter()
-                        .find(|e| e.op == written.op && e.key == written.key)
-                    else {
-                        return Err(unsupported(format!(
-                            "fate of commit {tx} holds a row of op {} it did not expect",
-                            written.op
-                        )));
-                    };
-                    let same = echo_digest(&entry.image) == written.digest;
-                    same.then_some(entry)
+            let image = if beneath && image.is_some() {
+                match self.settled_created(&table, row, &key).await? {
+                    Some(created) => image.map(|mut image| {
+                        for (name, cell) in &mut image.cells {
+                            if name == STAMPS[0] {
+                                *cell = created.clone();
+                            }
+                        }
+                        image
+                    }),
+                    None => None,
                 }
-                None => None,
-            };
-            let image = match (entry, accepted_at) {
-                (Some(entry), Some(at)) if entry.created == Created::Beneath => self
-                    .settled_created(table, *row, key)
-                    .await?
-                    .map(|created| entry.accepted(at, Some(created))),
-                (Some(entry), Some(at)) => Some(entry.accepted(at, None)),
-                _ => None,
+            } else {
+                image
             };
             match image {
                 Some(mut image) => {
                     image.at = Pos::at(seq);
                     images.push(image);
                 }
-                None => whole.push((table.clone(), *row.0.as_bytes(), key.clone())),
+                None => whole.push((table, *row.0.as_bytes(), key)),
             }
         }
         Ok((images, whole))
@@ -6606,7 +6622,8 @@ impl Store {
     async fn own_high_water(&self) -> Result<(u64, u64), Error> {
         let me = self.identity.node.as_bytes().to_vec();
         let (mut tx, mut hlc) = (0u64, 0u64);
-        for table in self.physical.borrow().tables.keys() {
+        let tables: Vec<_> = self.physical.borrow().tables.keys().cloned().collect();
+        for table in &tables {
             let history = format!("{table}__h");
             let newest: Option<Vec<u8>> = self.conn.sql().query_one(&format!(
                         "SELECT MAX(_writer) FROM {} WHERE length(_writer) = 24 AND substr(_writer, 1, 16) = ?1",
@@ -7183,11 +7200,11 @@ impl Store {
         let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
         // The policies that govern the read: a pinned session's bundle's,
         // as `read_dependencies_in` takes them.
-        let owner_state = self.owner.borrow();
+        let owner_state = self.owner.borrow().clone();
         let policies = prepared
             .schema
             .as_ref()
-            .map_or(&**owner_state, |schema| schema.policy_schema());
+            .map_or(&*owner_state, |schema| schema.policy_schema());
         let mut tables = Vec::new();
         support_tables(support, &mut tables, &mut HashSet::new());
         for table in tables {
@@ -7511,7 +7528,8 @@ impl Store {
         if client.stranded {
             return Ok(());
         }
-        for table in self.physical.borrow().tables.keys() {
+        let tables: Vec<_> = self.physical.borrow().tables.keys().cloned().collect();
+        for table in &tables {
             let newest: Option<i64> = self
                 .conn
                 .sql()
@@ -7723,110 +7741,109 @@ impl Db {
     pub async fn connect_upstream(&self, transport: Box<dyn Transport>) -> Upstream {
         self.become_replica().await;
         let inner = self.inner.ready().await;
-        let mut client_state = inner.client.borrow_mut();
-        let client = client_state.as_mut().expect("client");
-        // Detaching already ended the one-shot requests sent on the last
-        // link; those queued since were never sent and go out on this one.
-        if client.transport.is_some() {
-            client.clear_once_requests();
-        }
-        client.transport = Some(transport);
-        client.forget_upstream = true;
-        let mut link = client.hint.get();
-        link.detached = false;
-        if !link.reported {
-            link.hint = RemoteLinkHint::Live;
-        }
-        client.hint.set(link);
-        // A new server session knows nothing: attach every remote query
-        // again and resend unsettled commits (the server dedupes by node
-        // and transaction).
-        // What the old session refused, the new one answers afresh, and
-        // what it said each read holds stands only until the new one says
-        // (a transport swapped without a detach included).
-        for remote in client.reads.values_mut().filter_map(ActiveRead::live_mut) {
-            remote.refused.borrow_mut().take();
-            remote.told = false;
-        }
-        let resubscribe: Vec<SyncMessage> = client
-            .reads
-            .iter()
-            .filter_map(|(&id, read)| {
-                let live = read.live()?;
-                Some(SyncMessage::Read {
-                    id,
-                    query: Box::new(read.query.clone()),
-                    binding: read.binding.clone(),
-                    include_deleted: read.include_deleted,
-                    tier: live.reach.tier,
-                    wait: live.reach.wait,
-                    view: Box::new(read.view.clone()),
-                    since: read.since(),
-                    span: ReadSpan::Live,
-                })
-            })
-            .collect();
-        // Commits, their chunk pushes and chunk requests a full queue held
-        // back are sent again below from what is still owed.
-        client.outbox.retain(|m| {
-            !matches!(
-                m,
-                SyncMessage::Read {
-                    span: ReadSpan::Live,
-                    ..
-                } | SyncMessage::Join { .. }
-                    | SyncMessage::ResendWhole { .. }
-                    | SyncMessage::Commit { .. }
-                    | SyncMessage::PushChunks { .. }
-                    | SyncMessage::ChunkRequests { .. }
-            )
-        });
-        let version = *inner.owner_version().as_bytes();
-        // The versions whose names this store keeps and whose schema it
-        // holds: the server sends those it stores otherwise, or it has and
-        // this store lacks. One only an earlier process admitted is sent
-        // again, so this one holds it and can serve its own sessions by it.
-        let known = inner
-            .names
-            .borrow()
-            .in_order()
-            .into_iter()
-            .filter(|(version, _)| inner.deployed(*version))
-            .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
-            .collect();
-        drop(client_state);
-        let mut client_state = inner.client.borrow_mut();
-        let client = client_state.as_mut().expect("client");
-        client
-            .outbox
-            .insert(0, SyncMessage::Join { version, known });
-        // What the old session could not answer, the new one may.
-        client.unavailable.clear();
-        client.outbox.extend(resubscribe);
-        // Rows still owed whole were asked of the old session.
-        if !client.whole.is_empty() {
-            let rows = client
-                .whole
+        let reask = {
+            let mut client_state = inner.client.borrow_mut();
+            let client = client_state.as_mut().expect("client");
+            // Detaching already ended the one-shot requests sent on the last
+            // link; those queued since were never sent and go out on this one.
+            if client.transport.is_some() {
+                client.clear_once_requests();
+            }
+            client.transport = Some(transport);
+            client.forget_upstream = true;
+            let mut link = client.hint.get();
+            link.detached = false;
+            if !link.reported {
+                link.hint = RemoteLinkHint::Live;
+            }
+            client.hint.set(link);
+            // A new server session knows nothing: attach every remote query
+            // again and resend unsettled commits (the server dedupes by node
+            // and transaction).
+            // What the old session refused, the new one answers afresh, and
+            // what it said each read holds stands only until the new one says
+            // (a transport swapped without a detach included).
+            for remote in client.reads.values_mut().filter_map(ActiveRead::live_mut) {
+                remote.refused.borrow_mut().take();
+                remote.told = false;
+            }
+            let resubscribe: Vec<SyncMessage> = client
+                .reads
                 .iter()
-                .map(|((table, id, key), seq)| (table.clone(), *id, key.clone(), *seq))
+                .filter_map(|(&id, read)| {
+                    let live = read.live()?;
+                    Some(SyncMessage::Read {
+                        id,
+                        query: Box::new(read.query.clone()),
+                        binding: read.binding.clone(),
+                        include_deleted: read.include_deleted,
+                        tier: live.reach.tier,
+                        wait: live.reach.wait,
+                        view: Box::new(read.view.clone()),
+                        since: read.since(),
+                        span: ReadSpan::Live,
+                    })
+                })
                 .collect();
-            client.outbox.push(SyncMessage::ResendWhole { rows });
-        }
-        // Relayed reads still waiting are asked again: the old session's
-        // answers are lost with it.
-        let reask: Vec<SyncMessage> = client
-            .relayed_fetches
-            .iter()
-            .filter(|fetch| matches!(client.answers.get(&fetch.upstream), Some(None)))
-            .map(|fetch| fetch.ask.clone())
-            .collect();
-        let relayed: HashSet<u64> = client.relayed_fetches.iter().map(|f| f.upstream).collect();
-        client
-            .outbox
-            .retain(|m| !matches!(m, SyncMessage::Read { id, .. } if relayed.contains(id)));
-        // Re-read checkpoints: cache eviction since the original request
-        // can invalidate a relayed request's previously chosen floor.
-        drop(client_state);
+            // Commits, their chunk pushes and chunk requests a full queue held
+            // back are sent again below from what is still owed.
+            client.outbox.retain(|m| {
+                !matches!(
+                    m,
+                    SyncMessage::Read {
+                        span: ReadSpan::Live,
+                        ..
+                    } | SyncMessage::Join { .. }
+                        | SyncMessage::ResendWhole { .. }
+                        | SyncMessage::Commit { .. }
+                        | SyncMessage::PushChunks { .. }
+                        | SyncMessage::ChunkRequests { .. }
+                )
+            });
+            let version = *inner.owner_version().as_bytes();
+            // The versions whose names this store keeps and whose schema it
+            // holds: the server sends those it stores otherwise, or it has and
+            // this store lacks. One only an earlier process admitted is sent
+            // again, so this one holds it and can serve its own sessions by it.
+            let known = inner
+                .names
+                .borrow()
+                .in_order()
+                .into_iter()
+                .filter(|(version, _)| inner.deployed(*version))
+                .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
+                .collect();
+            client
+                .outbox
+                .insert(0, SyncMessage::Join { version, known });
+            // What the old session could not answer, the new one may.
+            client.unavailable.clear();
+            client.outbox.extend(resubscribe);
+            // Rows still owed whole were asked of the old session.
+            if !client.whole.is_empty() {
+                let rows = client
+                    .whole
+                    .iter()
+                    .map(|((table, id, key), seq)| (table.clone(), *id, key.clone(), *seq))
+                    .collect();
+                client.outbox.push(SyncMessage::ResendWhole { rows });
+            }
+            // Relayed reads still waiting are asked again: the old session's
+            // answers are lost with it.
+            let reask: Vec<SyncMessage> = client
+                .relayed_fetches
+                .iter()
+                .filter(|fetch| matches!(client.answers.get(&fetch.upstream), Some(None)))
+                .map(|fetch| fetch.ask.clone())
+                .collect();
+            let relayed: HashSet<u64> = client.relayed_fetches.iter().map(|f| f.upstream).collect();
+            client
+                .outbox
+                .retain(|m| !matches!(m, SyncMessage::Read { id, .. } if relayed.contains(id)));
+            // Re-read checkpoints: cache eviction since the original request
+            // can invalidate a relayed request's previously chosen floor.
+            reask
+        };
         for mut ask in reask {
             if let SyncMessage::Read {
                 id,
@@ -8334,29 +8351,31 @@ impl Db {
                 // Persist before exposing this upload in the in-memory queues.
                 // The enclosing transaction still owns the commit boundary.
                 inner.persist_pending(seq, &commit, &rows).await?;
-                let mut client_state = inner.client.borrow_mut();
-                let client = client_state.as_mut().expect("client");
-                client.baselines.extend(baselines);
-                client.unsent.push(commit.clone());
-                client.pending.push(Pending {
-                    tx: seq,
-                    clock,
-                    id,
-                    serializable,
-                    ops,
-                    rows: rows.clone(),
-                    expected: Some(expected),
-                });
-                // A commit that orders before one already pending on a row
-                // it wrote (a session's, written earlier and delivered
-                // later) goes under it: the pending commits replay in
-                // order.
-                drop(client_state);
-                let client_state = inner.client.borrow();
-                let client = client_state.as_ref().expect("client");
-                let order = (clock, *id.node.as_bytes(), id.time.0);
-                let reorder = client.pending.later_on(&rows, seq, order);
-                drop(client_state);
+                {
+                    let mut client_state = inner.client.borrow_mut();
+                    let client = client_state.as_mut().expect("client");
+                    client.baselines.extend(baselines);
+                    client.unsent.push(commit.clone());
+                    client.pending.push(Pending {
+                        tx: seq,
+                        clock,
+                        id,
+                        serializable,
+                        ops,
+                        rows: rows.clone(),
+                        expected: Some(expected),
+                    });
+                    // A commit that orders before one already pending on a row
+                    // it wrote (a session's, written earlier and delivered
+                    // later) goes under it: the pending commits replay in
+                    // order.
+                }
+                let reorder = {
+                    let client_state = inner.client.borrow();
+                    let client = client_state.as_ref().expect("client");
+                    let order = (clock, *id.node.as_bytes(), id.time.0);
+                    client.pending.later_on(&rows, seq, order)
+                };
 
                 if reorder {
                     self.rebase(Some(rows.into_iter().collect()), retention)
@@ -8364,20 +8383,21 @@ impl Db {
                 }
             }
             Err(error) => {
-                let mut client_state = inner.client.borrow_mut();
-                let client = client_state.as_mut().expect("client");
-                client.baselines.extend(baselines);
-                client.fates.insert(seq, Err(error));
-                client.pending.push(Pending {
-                    tx: seq,
-                    clock,
-                    id,
-                    serializable,
-                    ops: Vec::new(),
-                    rows,
-                    expected: None,
-                });
-
+                {
+                    let mut client_state = inner.client.borrow_mut();
+                    let client = client_state.as_mut().expect("client");
+                    client.baselines.extend(baselines);
+                    client.fates.insert(seq, Err(error));
+                    client.pending.push(Pending {
+                        tx: seq,
+                        clock,
+                        id,
+                        serializable,
+                        ops: Vec::new(),
+                        rows,
+                        expected: None,
+                    });
+                }
                 let _ = self.settle_locally(seq, retention).await;
             }
         }
@@ -8512,33 +8532,35 @@ impl Store {
         ),
     ) {
         let key = remote_key(&query, binding, include_deleted, &view, reach);
-        let mut client_state = self.client.borrow_mut();
-        let client = client_state.as_mut().expect("client");
-        if let Some(id) = client.live_reads.get(&key) {
-            let remote = client
-                .reads
-                .get_mut(id)
-                .and_then(ActiveRead::live_mut)
-                .expect("live read");
-            remote.refs += 1;
-            let flags = (
-                remote.answered.clone(),
-                remote.refused.clone(),
-                remote.global.clone(),
-            );
-            return (key, flags);
-        }
-        let id = client.next_id;
-        client.next_id += 1;
-        let answered = Rc::new(StdCell::new(false));
-        let refused = Rc::new(RefCell::new(
-            client
-                .stranded
-                .then(stranded)
-                .or_else(|| client.uncatalogued.clone()),
-        ));
-        let global = Rc::new(StdCell::new(false));
-        drop(client_state);
+        let (id, answered, refused, global) = {
+            let mut client_state = self.client.borrow_mut();
+            let client = client_state.as_mut().expect("client");
+            if let Some(id) = client.live_reads.get(&key) {
+                let remote = client
+                    .reads
+                    .get_mut(id)
+                    .and_then(ActiveRead::live_mut)
+                    .expect("live read");
+                remote.refs += 1;
+                let flags = (
+                    remote.answered.clone(),
+                    remote.refused.clone(),
+                    remote.global.clone(),
+                );
+                return (key, flags);
+            }
+            let id = client.next_id;
+            client.next_id += 1;
+            let answered = Rc::new(StdCell::new(false));
+            let refused = Rc::new(RefCell::new(
+                client
+                    .stranded
+                    .then(stranded)
+                    .or_else(|| client.uncatalogued.clone()),
+            ));
+            let global = Rc::new(StdCell::new(false));
+            (id, answered, refused, global)
+        };
         let read = self
             .active_read(
                 query,
@@ -9243,28 +9265,31 @@ impl Db {
         let mut answered_remotes = Vec::new();
         {
             let inner = self.inner.ready().await;
-            let mut client_state = inner.client.borrow_mut();
-            let Some(client) = client_state.as_mut() else {
-                return Ok(());
+            let forget = {
+                let mut client_state = inner.client.borrow_mut();
+                let Some(client) = client_state.as_mut() else {
+                    return Ok(());
+                };
+                std::mem::take(&mut client.forget_upstream)
             };
-            let forget = std::mem::take(&mut client.forget_upstream);
-            drop(client_state);
             if forget {
                 inner.forget_upstream_band().await?;
             }
-            let mut client_state = inner.client.borrow_mut();
-            let client = client_state.as_mut().expect("client");
-            let mut inbound = Vec::new();
-            let mut failed = false;
-            if let Some(transport) = client.transport.as_mut() {
-                while let Some(message) = transport.try_recv() {
-                    log_message("upstream→client", &message);
-                    inbound.push(message);
+            let (inbound, failed) = {
+                let mut client_state = inner.client.borrow_mut();
+                let client = client_state.as_mut().expect("client");
+                let mut inbound = Vec::new();
+                let mut failed = false;
+                if let Some(transport) = client.transport.as_mut() {
+                    while let Some(message) = transport.try_recv() {
+                        log_message("upstream→client", &message);
+                        inbound.push(message);
+                    }
+                    failed = transport.take_failure().is_some();
                 }
-                failed = transport.take_failure().is_some();
-            }
-            inbound.append(&mut client.refused);
-            drop(client_state);
+                inbound.append(&mut client.refused);
+                (inbound, failed)
+            };
             // An upstream that sent what this client cannot decode is
             // dropped like a lost link; what arrived before it applies.
             if failed {
@@ -9305,24 +9330,25 @@ impl Db {
             loop {
                 // A deferred fate whose rows arrived whole applies next, in
                 // the order its fates came.
-                let mut client_state = inner.client.borrow_mut();
-                let client = client_state.as_mut().expect("client");
-                if client.releasing.is_none()
-                    && let Some(head) = client.deferred.front()
-                    && head
-                        .awaited
-                        .as_ref()
-                        .is_none_or(|rows| rows.iter().all(|row| !client.whole.contains_key(row)))
                 {
-                    let DeferredFate { fate, awaited } = client.deferred.pop_front().expect("head");
-                    if let SyncMessage::Fate { id, .. } = &fate
-                        && let Some(tx) = client.local_tx(id)
+                    let mut client_state = inner.client.borrow_mut();
+                    let client = client_state.as_mut().expect("client");
+                    if client.releasing.is_none()
+                        && let Some(head) = client.deferred.front()
+                        && head.awaited.as_ref().is_none_or(|rows| {
+                            rows.iter().all(|row| !client.whole.contains_key(row))
+                        })
                     {
-                        client.releasing = Some((tx, awaited.is_some()));
+                        let DeferredFate { fate, awaited } =
+                            client.deferred.pop_front().expect("head");
+                        if let SyncMessage::Fate { id, .. } = &fate
+                            && let Some(tx) = client.local_tx(id)
+                        {
+                            client.releasing = Some((tx, awaited.is_some()));
+                        }
+                        queue.push_front(fate);
                     }
-                    queue.push_front(fate);
                 }
-                drop(client_state);
                 let Some(message) = queue.pop_front() else {
                     break;
                 };
@@ -9524,74 +9550,80 @@ impl Db {
                     } => {
                         // A read's settle speaks for that read alone.
                         let at = Pos::at(through);
-                        let mut client_state = inner.client.borrow_mut();
-                        let client = client_state.as_mut().expect("client");
-                        let resumable = client.whole.is_empty();
-                        let mut live_watermark = None;
-                        let mut once = false;
-                        if let Some(read) = client.reads.get_mut(&id) {
-                            let (listed, save_after) = match &mut read.lifetime {
-                                ReadLifetime::Once { historical } => {
-                                    once = true;
-                                    (
-                                        (!*historical).then(|| members.clone().unwrap_or_default()),
-                                        global,
-                                    )
-                                }
-                                ReadLifetime::Live(live) => {
-                                    live.answered.set(true);
-                                    live.global.set(global);
-                                    // Answered, it is no longer refused: a
-                                    // read attached before the link's
-                                    // `Welcome` took the last link's
-                                    // refusal (`uncatalogued`), which no
-                                    // longer applies. A stream not yet
-                                    // polled is not told it.
-                                    live.refused.borrow_mut().take();
-                                    if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
-                                        live.visible = Some(at);
-                                        client.visibility_moved = true;
+                        let live_watermark = {
+                            let mut client_state = inner.client.borrow_mut();
+                            let client = client_state.as_mut().expect("client");
+                            let resumable = client.whole.is_empty();
+                            let mut live_watermark = None;
+                            let mut once = false;
+                            if let Some(read) = client.reads.get_mut(&id) {
+                                let (listed, save_after) = match &mut read.lifetime {
+                                    ReadLifetime::Once { historical } => {
+                                        once = true;
+                                        (
+                                            (!*historical)
+                                                .then(|| members.clone().unwrap_or_default()),
+                                            global,
+                                        )
                                     }
-                                    // Resumable only in the context it was
-                                    // read in, known once the `Welcome` said.
-                                    if resumable && let Some(context) = client.context {
-                                        // The new point counts what the
-                                        // read holds now, not what it
-                                        // released before.
-                                        live.released.clear();
-                                        live.settled_here = true;
-                                        read.through = Some(through);
-                                        read.context = context;
-                                        client.forgotten = false;
-                                        client.stored_points = None;
-                                        live_watermark = read.watermark;
+                                    ReadLifetime::Live(live) => {
+                                        live.answered.set(true);
+                                        live.global.set(global);
+                                        // Answered, it is no longer refused: a
+                                        // read attached before the link's
+                                        // `Welcome` took the last link's
+                                        // refusal (`uncatalogued`), which no
+                                        // longer applies. A stream not yet
+                                        // polled is not told it.
+                                        live.refused.borrow_mut().take();
+                                        if live
+                                            .visible
+                                            .is_none_or(|v| v.n != at.n || v.seq < at.seq)
+                                        {
+                                            live.visible = Some(at);
+                                            client.visibility_moved = true;
+                                        }
+                                        // Resumable only in the context it was
+                                        // read in, known once the `Welcome` said.
+                                        if resumable && let Some(context) = client.context {
+                                            // The new point counts what the
+                                            // read holds now, not what it
+                                            // released before.
+                                            live.released.clear();
+                                            live.settled_here = true;
+                                            read.through = Some(through);
+                                            read.context = context;
+                                            client.forgotten = false;
+                                            client.stored_points = None;
+                                            live_watermark = read.watermark;
+                                        }
+                                        (members.clone(), false)
                                     }
-                                    (members.clone(), false)
+                                };
+                                if let Some(listed) = listed {
+                                    answered_remotes.push((
+                                        read.query.clone(),
+                                        read.binding.clone(),
+                                        read.include_deleted,
+                                        read.view.clone(),
+                                        listed,
+                                        through,
+                                        if save_after { read.watermark } else { None },
+                                    ));
                                 }
-                            };
-                            if let Some(listed) = listed {
-                                answered_remotes.push((
-                                    read.query.clone(),
-                                    read.binding.clone(),
-                                    read.include_deleted,
-                                    read.view.clone(),
-                                    listed,
-                                    through,
-                                    if save_after { read.watermark } else { None },
-                                ));
                             }
-                        }
-                        if once {
-                            client.reads.remove(&id);
-                        }
-                        if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((at, members.unwrap_or_default())));
-                            client.relay_ready |=
-                                client.relayed_fetches.iter().any(|f| f.upstream == id);
-                        }
-                        // Live checkpoints retain their existing savepoint ordering:
-                        // a subsequent membership eviction can invalidate them.
-                        drop(client_state);
+                            if once {
+                                client.reads.remove(&id);
+                            }
+                            if let Some(slot) = client.answers.get_mut(&id) {
+                                *slot = Some(Ok((at, members.unwrap_or_default())));
+                                client.relay_ready |=
+                                    client.relayed_fetches.iter().any(|f| f.upstream == id);
+                            }
+                            // Live checkpoints retain their existing savepoint ordering:
+                            // a subsequent membership eviction can invalidate them.
+                            live_watermark
+                        };
                         if let Some(watermark) = live_watermark {
                             inner.store_watermark(&watermark, through).await?;
                         }
@@ -9648,27 +9680,29 @@ impl Db {
                         global,
                     } => {
                         let through = outcome.position();
-                        let mut client_state = inner.client.borrow_mut();
-                        let client = client_state.as_mut().expect("client");
-                        // Not a commit this store uploads: nothing to settle.
-                        let Some(tx) = client.local_tx(&id) else {
-                            continue;
+                        let (tx, releasing) = {
+                            let mut client_state = inner.client.borrow_mut();
+                            let client = client_state.as_mut().expect("client");
+                            // Not a commit this store uploads: nothing to settle.
+                            let Some(tx) = client.local_tx(&id) else {
+                                continue;
+                            };
+                            let releasing = client.releasing.take_if(|(at, _)| *at == tx);
+                            // Fates apply in the order they came: one after a
+                            // deferred fate waits behind it.
+                            if releasing.is_none() && !client.deferred.is_empty() {
+                                client.deferred.push_back(DeferredFate {
+                                    fate: SyncMessage::Fate {
+                                        id,
+                                        outcome,
+                                        global,
+                                    },
+                                    awaited: None,
+                                });
+                                continue;
+                            }
+                            (tx, releasing)
                         };
-                        let releasing = client.releasing.take_if(|(at, _)| *at == tx);
-                        // Fates apply in the order they came: one after a
-                        // deferred fate waits behind it.
-                        if releasing.is_none() && !client.deferred.is_empty() {
-                            client.deferred.push_back(DeferredFate {
-                                fate: SyncMessage::Fate {
-                                    id,
-                                    outcome,
-                                    global,
-                                },
-                                awaited: None,
-                            });
-                            continue;
-                        }
-                        drop(client_state);
                         let accepted_at = match &outcome {
                             Outcome::Accepted {
                                 accepted_at,
@@ -9698,12 +9732,13 @@ impl Db {
                                     });
                                     continue;
                                 }
-                                let mut client_state = inner.client.borrow_mut();
-                                let client = client_state.as_mut().expect("client");
-                                if let Some(pending) = client.pending.get_mut(tx) {
-                                    pending.expected = None;
+                                {
+                                    let mut client_state = inner.client.borrow_mut();
+                                    let client = client_state.as_mut().expect("client");
+                                    if let Some(pending) = client.pending.get_mut(tx) {
+                                        pending.expected = None;
+                                    }
                                 }
-                                drop(client_state);
                                 inner
                                     .begin_current_batch(images.iter().map(|image| {
                                         let row = RowUuid::from_bytes(image.id);
@@ -9749,24 +9784,26 @@ impl Db {
                                 client.visibility_moved = true;
                             }
                         }
-                        let mut client_state = inner.client.borrow_mut();
-                        let client = client_state.as_mut().expect("client");
-                        // From the pending commit, not what was sent: a
-                        // commit refused before sending was never sent.
-                        let settling = client.pending.get(tx);
-                        let serializable = settling.is_some_and(|p| p.serializable);
-                        if let (Some(changed), Some(settling)) = (changed.as_mut(), settling) {
-                            changed.extend(settling.rows.iter().cloned());
-                        }
-                        client.pending.remove(tx);
-                        client.stored.remove(&tx);
-                        client.sent.settle(&id);
-                        let result = result.map_err(from_wire_error);
-                        // A relayed session's refusal is that session's to
-                        // report, not this store's. One whose session is gone
-                        // is reported as the commit the session made.
-                        let relayed = client.relayed_fates.contains_key(&tx);
-                        drop(client_state);
+                        let (serializable, result, relayed) = {
+                            let mut client_state = inner.client.borrow_mut();
+                            let client = client_state.as_mut().expect("client");
+                            // From the pending commit, not what was sent: a
+                            // commit refused before sending was never sent.
+                            let settling = client.pending.get(tx);
+                            let serializable = settling.is_some_and(|p| p.serializable);
+                            if let (Some(changed), Some(settling)) = (changed.as_mut(), settling) {
+                                changed.extend(settling.rows.iter().cloned());
+                            }
+                            client.pending.remove(tx);
+                            client.stored.remove(&tx);
+                            client.sent.settle(&id);
+                            let result = result.map_err(from_wire_error);
+                            // A relayed session's refusal is that session's to
+                            // report, not this store's. One whose session is gone
+                            // is reported as the commit the session made.
+                            let relayed = client.relayed_fates.contains_key(&tx);
+                            (serializable, result, relayed)
+                        };
                         if let Err(error) = &result {
                             let origins = inner.relayed_origins(tx)?;
                             // The originating store keeps its own refused
@@ -9801,19 +9838,21 @@ impl Db {
                                 );
                             }
                         }
-                        let mut client_state = inner.client.borrow_mut();
-                        let client = client_state.as_mut().expect("client");
-                        if accepted && !global {
-                            client.local_fates.insert(tx);
-                        }
-                        client.fates.insert(tx, result);
-                        // A relayed commit is a session's, not this store's.
-                        if !relayed {
-                            client.settled_upstream += 1;
-                        }
-                        let node = client.node;
-                        let hashes = client.pushed.remove(&tx);
-                        drop(client_state);
+                        let (node, hashes) = {
+                            let mut client_state = inner.client.borrow_mut();
+                            let client = client_state.as_mut().expect("client");
+                            if accepted && !global {
+                                client.local_fates.insert(tx);
+                            }
+                            client.fates.insert(tx, result);
+                            // A relayed commit is a session's, not this store's.
+                            if !relayed {
+                                client.settled_upstream += 1;
+                            }
+                            let node = client.node;
+                            let hashes = client.pushed.remove(&tx);
+                            (node, hashes)
+                        };
                         if let Some(hashes) = hashes {
                             crate::large::mark_pushed(&mut inner.conn.sql(), &hashes).await?;
                         }
@@ -9961,41 +10000,46 @@ impl Db {
             }
         }
         let inner = self.inner.ready().await;
-        let mut client_state = inner.client.borrow_mut();
-        let client = client_state.as_mut().expect("client");
-        let known = client.known;
-        if known == client.persisted_known {
-            return Ok(());
-        }
-        client.persisted_known = known;
+        let known = {
+            let mut client_state = inner.client.borrow_mut();
+            let client = client_state.as_mut().expect("client");
+            let known = client.known;
+            if known == client.persisted_known {
+                return Ok(());
+            }
+            client.persisted_known = known;
+            known
+        };
         inner.persist_meta("known", known).await
     }
 
     async fn client_send(&self) -> Result<(), Error> {
         let inner = self.inner.ready().await;
         let demand = inner.chunks.take_demand();
-        let mut client_state = inner.client.borrow_mut();
-        let client = client_state.as_mut().expect("client");
-        client.wanted.extend(demand);
-        if client.transport.is_none() {
-            return Ok(());
-        }
-        let mut out = std::mem::take(&mut client.outbox);
-        // Commits staged since the last send go ahead of the reads asked
-        // since (and what was queued after them, in order). The server
-        // applies a session's messages in arrival order, so a read sees the
-        // writer's own earlier writes however its ticks are sliced.
-        let first_read = out
-            .iter()
-            .position(|m| matches!(m, SyncMessage::Read { .. }))
-            .unwrap_or(out.len());
-        let reads = out.split_off(first_read);
-        let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
-            .into_iter()
-            .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
-            .collect();
-        client.requested.extend(wanted.iter().cloned());
-        drop(client_state);
+        let (mut out, reads, wanted) = {
+            let mut client_state = inner.client.borrow_mut();
+            let client = client_state.as_mut().expect("client");
+            client.wanted.extend(demand);
+            if client.transport.is_none() {
+                return Ok(());
+            }
+            let mut out = std::mem::take(&mut client.outbox);
+            // Commits staged since the last send go ahead of the reads asked
+            // since (and what was queued after them, in order). The server
+            // applies a session's messages in arrival order, so a read sees the
+            // writer's own earlier writes however its ticks are sliced.
+            let first_read = out
+                .iter()
+                .position(|m| matches!(m, SyncMessage::Read { .. }))
+                .unwrap_or(out.len());
+            let reads = out.split_off(first_read);
+            let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
+                .into_iter()
+                .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
+                .collect();
+            client.requested.extend(wanted.iter().cloned());
+            (out, reads, wanted)
+        };
         let spans = inner.chunks.take_spans();
         let pulls = inner.pulls(wanted, &spans).await?;
         for batch in pulls.chunks(64) {
@@ -10014,19 +10058,21 @@ impl Db {
         // the `Welcome`, where before it sent them with its `Join`. A
         // replica with nothing unsent, or one that mirrored no authority
         // yet, sends as before.
-        let client_state = inner.client.borrow();
-        let client = client_state.as_ref().expect("client");
-        let needs_catalogue = !client.catalogued && !client.unsent.is_empty();
-        drop(client_state);
-        let hold = needs_catalogue && inner.namespace().await?.is_some();
-        let mut client_state = inner.client.borrow_mut();
-        let client = client_state.as_mut().expect("client");
-        let mut commits = if hold {
-            Vec::new()
-        } else {
-            std::mem::take(&mut client.unsent)
+        let needs_catalogue = {
+            let client_state = inner.client.borrow();
+            let client = client_state.as_ref().expect("client");
+            !client.catalogued && !client.unsent.is_empty()
         };
-        drop(client_state);
+        let hold = needs_catalogue && inner.namespace().await?.is_some();
+        let mut commits = {
+            let mut client_state = inner.client.borrow_mut();
+            let client = client_state.as_mut().expect("client");
+            if hold {
+                Vec::new()
+            } else {
+                std::mem::take(&mut client.unsent)
+            }
+        };
         // Each commit's large-value nodes go ahead of it. A commit whose
         // nodes must be fetched first waits, and so do those after it.
         let mut pushes = Vec::with_capacity(commits.len());
@@ -10147,31 +10193,33 @@ impl Db {
         retention: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
         let inner = self.inner.ready().await;
-        let mut client_state = inner.client.borrow_mut();
-        let Some(client) = client_state.as_mut() else {
-            return Ok(());
+        let (baseline, mut pending) = {
+            let mut client_state = inner.client.borrow_mut();
+            let Some(client) = client_state.as_mut() else {
+                return Ok(());
+            };
+            let scope = changed.map(|changed| client.pending.linked(changed));
+            let baseline: HashMap<RowKey, Option<Image>> = match &scope {
+                None => std::mem::take(&mut client.baselines),
+                Some(rows) => rows
+                    .iter()
+                    .filter_map(|row| Some((row.clone(), client.baselines.remove(row)?)))
+                    .collect(),
+            };
+            let replaying: Vec<&Pending> = match &scope {
+                None => client.pending.iter().collect(),
+                Some(rows) => client.pending.writing(rows).collect(),
+            };
+            // Unsettled versions order last-writer-wins by their commits'
+            // `Order` (SPEC 8 §8.13): the pending commits replay in it, and one
+            // replays on a row only over an upstream's unsettled version that
+            // orders before it. Later, that version is the one the row shows.
+            let pending: Vec<(Order, u64, Vec<StagedOp>, Vec<RowKey>)> = replaying
+                .into_iter()
+                .map(|p| (p.order(), p.tx, p.ops.clone(), p.rows.clone()))
+                .collect();
+            (baseline, pending)
         };
-        let scope = changed.map(|changed| client.pending.linked(changed));
-        let baseline: HashMap<RowKey, Option<Image>> = match &scope {
-            None => std::mem::take(&mut client.baselines),
-            Some(rows) => rows
-                .iter()
-                .filter_map(|row| Some((row.clone(), client.baselines.remove(row)?)))
-                .collect(),
-        };
-        let replaying: Vec<&Pending> = match &scope {
-            None => client.pending.iter().collect(),
-            Some(rows) => client.pending.writing(rows).collect(),
-        };
-        // Unsettled versions order last-writer-wins by their commits'
-        // `Order` (SPEC 8 §8.13): the pending commits replay in it, and one
-        // replays on a row only over an upstream's unsettled version that
-        // orders before it. Later, that version is the one the row shows.
-        let mut pending: Vec<(Order, u64, Vec<StagedOp>, Vec<RowKey>)> = replaying
-            .into_iter()
-            .map(|p| (p.order(), p.tx, p.ops.clone(), p.rows.clone()))
-            .collect();
-        drop(client_state);
         pending.sort_by_key(|(order, ..)| *order);
         // Each branch of a row an upstream's unsettled version is on, at
         // that version's order: a branch is ordered on its own.
@@ -10315,7 +10363,8 @@ impl Store {
     /// Whether any stored table holds a row or a version of one: on a
     /// store that is not a replica, only its own commits put them there.
     async fn holds_rows(&self) -> Result<bool, Error> {
-        for stored in self.physical.borrow().tables.keys() {
+        let tables: Vec<_> = self.physical.borrow().tables.keys().cloned().collect();
+        for stored in &tables {
             for table in [stored.clone(), format!("{stored}__h")] {
                 let sql = format!("SELECT EXISTS (SELECT 1 FROM {})", quote(&table));
                 let any: bool = self
@@ -10965,8 +11014,13 @@ impl Store {
         settled: &HashMap<RowKey, Image>,
     ) -> Result<(), Error> {
         for op in ops.iter_mut() {
-            let physical_state = self.physical.borrow();
-            let Some(table) = physical_state.tables.get(op.table()) else {
+            let stored_table = self
+                .physical
+                .borrow()
+                .tables
+                .get(op.table())
+                .map(|table| table.stored.clone());
+            let Some(stored_table) = stored_table else {
                 continue;
             };
             let (row, cells) = match &mut op.write {
@@ -10983,7 +11037,7 @@ impl Store {
             // An op over several branches (a view's) has no one base.
             let mut keys = rows
                 .iter()
-                .filter(|(stored, written, _)| *stored == table.stored && *written == row);
+                .filter(|(stored, written, _)| *stored == stored_table && *written == row);
             let (Some(row_key), None) = (keys.next(), keys.next()) else {
                 continue;
             };
@@ -10998,7 +11052,7 @@ impl Store {
                 };
                 let stored = column.as_str();
                 let old = match base.cells.iter().find(|(name, _)| name == stored) {
-                    Some((_, old)) => self.large_of(&table.stored, stored, old).await?,
+                    Some((_, old)) => self.large_of(&stored_table, stored, old).await?,
                     None => None,
                 };
                 let delta = old.and_then(|old| large_delta::extend(base.at.seq, &old, large));
@@ -11865,15 +11919,11 @@ impl Db {
                         let deps = inner.read_policy_tables(&policies, &table, identity)?;
                         policy_tables.insert(cached.clone(), deps);
                     }
-                    let sessions_state = inner.sessions.borrow();
-                    let Some(held) = sessions_state[index].held.of(&table) else {
-                        continue;
-                    };
                     let deps: Vec<&String> = policy_tables[&cached]
                         .iter()
                         .filter(|dep| written_tables.contains(dep.as_str()))
                         .collect();
-                    if !deps.is_empty()
+                    let touched = !deps.is_empty()
                         && inner
                             .policy_touched(
                                 &policies,
@@ -11883,8 +11933,12 @@ impl Db {
                                 &written_keys,
                                 &mut written_values,
                             )
-                            .await?
-                    {
+                            .await?;
+                    let sessions_state = inner.sessions.borrow();
+                    let Some(held) = sessions_state[index].held.of(&table) else {
+                        continue;
+                    };
+                    if touched {
                         recheck.extend(
                             held.keys()
                                 .map(|(row, key)| (table.clone(), *row, key.clone())),
@@ -12686,118 +12740,120 @@ impl Db {
             } else {
                 inner.tx_ids(&history_seqs).await?
             };
-            let mut outgoing_sessions = inner.sessions.borrow_mut();
-            let session = &mut outgoing_sessions[index];
-            session.watch = watch;
-            session.held = held_rows;
-            session.unreadable = unreadable;
-            let mut seen = HashSet::new();
-            images.retain(|image| {
-                seen.insert((image.table.clone(), image.id, image.key.clone(), image.at))
-            });
-            // The writer's own rows, still at the version its commit
-            // produced and exactly as it holds them, settle by its Fate.
-            let mut as_written: BTreeMap<TxId, Vec<AsWritten>> = BTreeMap::new();
-            let fated: HashSet<TxId> = session
-                .outbox
-                .iter()
-                .filter_map(|message| match message {
-                    SyncMessage::Fate {
-                        id,
-                        outcome: Outcome::Accepted { .. },
-                        ..
-                    } => Some(*id),
-                    _ => None,
-                })
-                .collect();
-            echoes.retain(|echo| fated.contains(&echo.id));
-            let mut echo_probes = 0;
-            if !echoes.is_empty() {
-                // By version, each in the order it was echoed: a tick that
-                // applied N commits of one writer matches its N images in
-                // one pass, not N scans of N echoes.
-                let mut by_version: HashMap<(&str, [u8; 16], &[u8], Pos), Vec<usize>> =
-                    HashMap::with_capacity(echoes.len());
-                for (i, echo) in echoes.iter().enumerate() {
-                    by_version
-                        .entry((
-                            echo.table.as_str(),
-                            *echo.row.0.as_bytes(),
-                            echo.key.as_slice(),
-                            echo.at,
-                        ))
-                        .or_default()
-                        .push(i);
-                }
-                let mut taken = vec![false; echoes.len()];
+            let echo_probes = {
+                let mut outgoing_sessions = inner.sessions.borrow_mut();
+                let session = &mut outgoing_sessions[index];
+                session.watch = watch;
+                session.held = held_rows;
+                session.unreadable = unreadable;
+                let mut seen = HashSet::new();
                 images.retain(|image| {
-                    if !image.at.accepted() {
-                        return true;
-                    }
-                    echo_probes += 1;
-                    let version = (
-                        image.table.as_str(),
-                        image.id,
-                        image.key.as_slice(),
-                        image.at,
-                    );
-                    let Some(&at) = by_version
-                        .get(&version)
-                        .and_then(|candidates| candidates.iter().find(|&&i| !taken[i]))
-                    else {
-                        return true;
-                    };
-                    taken[at] = true;
-                    let echo = &echoes[at];
-                    as_written
-                        .entry(echo.id)
-                        .or_default()
-                        .push(AsWritten::of(echo.op, image));
-                    hold_shipped(&mut session.shipped, image, echo.at);
-                    false
+                    seen.insert((image.table.clone(), image.id, image.key.clone(), image.at))
                 });
-                for message in &mut session.outbox {
-                    if let SyncMessage::Fate {
-                        id,
-                        outcome: Outcome::Accepted { as_written: h, .. },
-                        ..
-                    } = message
-                        && let Some(mut rows) = as_written.remove(id)
-                    {
-                        rows.sort_unstable_by(|a, b| (a.op, &a.key).cmp(&(b.op, &b.key)));
-                        *h = rows;
+                // The writer's own rows, still at the version its commit
+                // produced and exactly as it holds them, settle by its Fate.
+                let mut as_written: BTreeMap<TxId, Vec<AsWritten>> = BTreeMap::new();
+                let fated: HashSet<TxId> = session
+                    .outbox
+                    .iter()
+                    .filter_map(|message| match message {
+                        SyncMessage::Fate {
+                            id,
+                            outcome: Outcome::Accepted { .. },
+                            ..
+                        } => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                echoes.retain(|echo| fated.contains(&echo.id));
+                let mut echo_probes = 0;
+                if !echoes.is_empty() {
+                    // By version, each in the order it was echoed: a tick that
+                    // applied N commits of one writer matches its N images in
+                    // one pass, not N scans of N echoes.
+                    let mut by_version: HashMap<(&str, [u8; 16], &[u8], Pos), Vec<usize>> =
+                        HashMap::with_capacity(echoes.len());
+                    for (i, echo) in echoes.iter().enumerate() {
+                        by_version
+                            .entry((
+                                echo.table.as_str(),
+                                *echo.row.0.as_bytes(),
+                                echo.key.as_slice(),
+                                echo.at,
+                            ))
+                            .or_default()
+                            .push(i);
+                    }
+                    let mut taken = vec![false; echoes.len()];
+                    images.retain(|image| {
+                        if !image.at.accepted() {
+                            return true;
+                        }
+                        echo_probes += 1;
+                        let version = (
+                            image.table.as_str(),
+                            image.id,
+                            image.key.as_slice(),
+                            image.at,
+                        );
+                        let Some(&at) = by_version
+                            .get(&version)
+                            .and_then(|candidates| candidates.iter().find(|&&i| !taken[i]))
+                        else {
+                            return true;
+                        };
+                        taken[at] = true;
+                        let echo = &echoes[at];
+                        as_written
+                            .entry(echo.id)
+                            .or_default()
+                            .push(AsWritten::of(echo.op, image));
+                        hold_shipped(&mut session.shipped, image, echo.at);
+                        false
+                    });
+                    for message in &mut session.outbox {
+                        if let SyncMessage::Fate {
+                            id,
+                            outcome: Outcome::Accepted { as_written: h, .. },
+                            ..
+                        } = message
+                            && let Some(mut rows) = as_written.remove(id)
+                        {
+                            rows.sort_unstable_by(|a, b| (a.op, &a.key).cmp(&(b.op, &b.key)));
+                            *h = rows;
+                        }
                     }
                 }
-            }
-            out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
-            out.extend(evictions);
-            // What each read holds reaches the replica before any listing
-            // that would drop a row it holds.
-            out.extend(session.watch.take_holds());
-            out.extend(std::mem::take(&mut session.outbox));
-            out.extend(settled);
-            // The connection's position follows the tick's rows, settles
-            // and fates, when it moved: a read's settle no longer moves what
-            // the replica knows, and rows shipped past that position would
-            // otherwise wait for a later tick's to show.
-            let delivers = out.iter().any(|message| {
-                matches!(
-                    message,
-                    SyncMessage::Rows { .. }
-                        | SyncMessage::AccessLost { .. }
-                        | SyncMessage::Settled { .. }
-                        | SyncMessage::Fate { .. }
-                )
-            });
-            // A relay also passes on each move of its upstream's position
-            // to a session it has delivered to: that position arrives on
-            // its own, after rows the relay may already have served.
-            let forwards = relaying && session.connection_settled.is_some();
-            if (delivers || forwards) && session.connection_settled != Some(through) {
-                session.connection_settled = Some(through);
-                out.push(SyncMessage::ConnectionSettled { through });
-            }
-            drop(outgoing_sessions);
+                out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
+                out.extend(evictions);
+                // What each read holds reaches the replica before any listing
+                // that would drop a row it holds.
+                out.extend(session.watch.take_holds());
+                out.extend(std::mem::take(&mut session.outbox));
+                out.extend(settled);
+                // The connection's position follows the tick's rows, settles
+                // and fates, when it moved: a read's settle no longer moves what
+                // the replica knows, and rows shipped past that position would
+                // otherwise wait for a later tick's to show.
+                let delivers = out.iter().any(|message| {
+                    matches!(
+                        message,
+                        SyncMessage::Rows { .. }
+                            | SyncMessage::AccessLost { .. }
+                            | SyncMessage::Settled { .. }
+                            | SyncMessage::Fate { .. }
+                    )
+                });
+                // A relay also passes on each move of its upstream's position
+                // to a session it has delivered to: that position arrives on
+                // its own, after rows the relay may already have served.
+                let forwards = relaying && session.connection_settled.is_some();
+                if (delivers || forwards) && session.connection_settled != Some(through) {
+                    session.connection_settled = Some(through);
+                    out.push(SyncMessage::ConnectionSettled { through });
+                }
+                echo_probes
+            };
             inner.echo_probes.set(inner.echo_probes.get() + echo_probes);
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
@@ -13526,11 +13582,13 @@ impl Db {
                 if refresh {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
                     let inner = self.inner.ready().await;
-                    let mut client_state = inner.client.borrow_mut();
-                    let client = client_state.as_mut().expect("client");
-                    let upstream = client.next_id;
-                    client.next_id += 1;
-                    drop(client_state);
+                    let upstream = {
+                        let mut client_state = inner.client.borrow_mut();
+                        let client = client_state.as_mut().expect("client");
+                        let upstream = client.next_id;
+                        client.next_id += 1;
+                        upstream
+                    };
                     let upstream_since = inner
                         .register_once_read(
                             upstream,
@@ -13558,11 +13616,13 @@ impl Db {
                 if let Some(strict) = relay {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
                     let inner = self.inner.ready().await;
-                    let mut client_state = inner.client.borrow_mut();
-                    let client = client_state.as_mut().expect("client");
-                    let upstream = client.next_id;
-                    client.next_id += 1;
-                    drop(client_state);
+                    let upstream = {
+                        let mut client_state = inner.client.borrow_mut();
+                        let client = client_state.as_mut().expect("client");
+                        let upstream = client.next_id;
+                        client.next_id += 1;
+                        upstream
+                    };
                     let upstream_since = inner
                         .register_once_read(
                             upstream,
@@ -14804,7 +14864,7 @@ impl Db {
             // The unit was made over the sender's image (SPEC 4, INV-HIST-8);
             // text merges read what each row was built on.
             inner.merging.set(true);
-            inner.possession.replace(Some(possession));
+            inner.possession.replace(Some(Rc::new(possession)));
             inner.merge_bases.replace(std::mem::take(&mut built));
             inner.as_sent.borrow_mut().clear();
             let applied = (async {

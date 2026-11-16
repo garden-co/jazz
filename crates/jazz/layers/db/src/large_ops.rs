@@ -231,10 +231,13 @@ impl Store {
         if self.conn.sql().transaction_open() {
             return Ok(());
         }
-        let mut cleanup = self.upload_cleanup.borrow_mut();
-        while let Some(id) = cleanup.last() {
-            crate::large::end_upload(&mut self.conn.sql(), id).await?;
-            cleanup.pop();
+        while let Some(id) = { self.upload_cleanup.borrow().front().copied() } {
+            crate::large::end_upload(&mut self.conn.sql(), &id).await?;
+            // Keep the receipt on error/cancellation; drops may append while SQL waits.
+            let mut cleanup = self.upload_cleanup.borrow_mut();
+            if cleanup.front() == Some(&id) {
+                cleanup.pop_front();
+            }
         }
         Ok(())
     }
@@ -738,7 +741,7 @@ impl Store {
                 // A later edit of the same write reads the new tree before
                 // the row update stores it.
                 self.chunks.cache_pinned(&prepared);
-                self.pending_nodes.borrow_mut().push(prepared);
+                self.pending_nodes.borrow_mut().push(Rc::new(prepared));
                 next
             }
         };
@@ -1477,12 +1480,12 @@ pub struct StreamingValueUpload {
 /// database recursively. The existing persisted lease handles crash recovery.
 pub(crate) struct UploadLease {
     id: [u8; 32],
-    cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
+    cleanup: Rc<RefCell<VecDeque<[u8; 32]>>>,
 }
 
 impl Drop for UploadLease {
     fn drop(&mut self) {
-        self.cleanup.borrow_mut().push(self.id);
+        self.cleanup.borrow_mut().push_back(self.id);
     }
 }
 

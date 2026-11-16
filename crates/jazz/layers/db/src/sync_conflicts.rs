@@ -314,8 +314,6 @@ impl Store {
         bases: Vec<(usize, WireBase)>,
     ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
-        let client_state = self.client.borrow();
-        let pending = &client_state.as_ref().expect("a relay is a client").pending;
         {
             let mut out = Vec::new();
             for (op, base) in bases.into_iter() {
@@ -325,8 +323,18 @@ impl Store {
                         // commits it carries, by the writer's id, is its own here.
                         let on = match base.on {
                             BuiltOn::Commit { node, tx } if node != sender.0 && node != me => {
-                                match pending.iter().find(|p| p.id == super::tx_id(node, tx)) {
-                                    Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
+                                let local = {
+                                    let client = self.client.borrow();
+                                    client
+                                        .as_ref()
+                                        .expect("a relay is a client")
+                                        .pending
+                                        .iter()
+                                        .find(|p| p.id == super::tx_id(node, tx))
+                                        .map(|p| p.tx)
+                                };
+                                match local {
+                                    Some(tx) => BuiltOn::Commit { node: me, tx },
                                     None => match self.settled(node, tx).await? {
                                         Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
                                         // Another session's refusal: why it was refused
@@ -343,26 +351,28 @@ impl Store {
                             BuiltOn::Commit { node, tx } if node == me => {
                                 let (table, row) = self.based_row(ops, op)?;
                                 let row_key = (table.to_owned(), row, base.key.clone());
-                                let own_pending = pending
-                                    .by_row
-                                    .get(&row_key)
-                                    .is_some_and(|txs| txs.contains(&tx));
+                                let own_pending = {
+                                    let client = self.client.borrow();
+                                    let pending =
+                                        &client.as_ref().expect("a relay is a client").pending;
+                                    let own_pending = pending
+                                        .by_row
+                                        .get(&row_key)
+                                        .is_some_and(|txs| txs.contains(&tx));
+                                    own_pending
+                                        .then(|| pending.upload_id(tx).expect("a pending commit"))
+                                };
                                 match (own_pending, self.settled(me, tx).await?) {
-                                    (true, _) => {
-                                        let id = pending.upload_id(tx).expect("a pending commit");
-                                        BuiltOn::Commit {
-                                            node: *id.node.as_bytes(),
-                                            tx: id.time.0,
-                                        }
-                                    }
-                                    (false, Some(Some(at))) if at.accepted() => {
-                                        BuiltOn::Seq(at.seq)
-                                    }
-                                    (false, Some(Some(_))) => BuiltOn::Commit { node: me, tx },
+                                    (Some(id), _) => BuiltOn::Commit {
+                                        node: *id.node.as_bytes(),
+                                        tx: id.time.0,
+                                    },
+                                    (None, Some(Some(at))) if at.accepted() => BuiltOn::Seq(at.seq),
+                                    (None, Some(Some(_))) => BuiltOn::Commit { node: me, tx },
                                     // This relay's commit may carry another
                                     // session's write: name no cause.
-                                    (false, Some(None)) => return Err(predecessor_rejected()),
-                                    (false, None) => BuiltOn::Seq(
+                                    (None, Some(None)) => return Err(predecessor_rejected()),
+                                    (None, None) => BuiltOn::Seq(
                                         self.newest_accepted(table, row, &base.key)
                                             .await?
                                             .unwrap_or(0),

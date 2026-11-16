@@ -1,11 +1,5 @@
 //! The `Db` facade: Jazz's public database API over one SQLite connection.
 
-// Field-level borrowing removes the former whole-store RefCell. Some schema,
-// subscription and replication helpers still borrow their own fields across
-// SQL awaits; their callers must serialize execution until those scopes are
-// narrowed. Keep the existing exemption during that separate concurrency audit.
-#![allow(clippy::await_holding_refcell_ref)]
-
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
@@ -563,7 +557,7 @@ struct Store {
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
     /// is bound inside the write's transaction.
-    pending_nodes: RefCell<Vec<jazz_types::large_values::PreparedLargeValue>>,
+    pending_nodes: RefCell<Vec<Rc<jazz_types::large_values::PreparedLargeValue>>>,
     /// Applying writes made over an older image (an authority ingesting
     /// an upload, a replica replaying its pending writes): an edit or a
     /// delete of a row deleted since applies and leaves it deleted (SPEC 4,
@@ -588,12 +582,12 @@ struct Store {
     derived: RefCell<Vec<jazz_types::large_values::LargeValueRef>>,
     /// What the session whose commit is being applied holds (SPEC 19.4):
     /// set while a synced commit applies, `None` for local writes.
-    pub(crate) possession: RefCell<Option<crate::large::Possession>>,
+    pub(crate) possession: RefCell<Option<Rc<crate::large::Possession>>>,
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: Cell<LargeValueStagingPolicy>,
     /// Dropped uploads queue cleanup without recursively borrowing the owner.
-    upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
+    upload_cleanup: Rc<RefCell<VecDeque<[u8; 32]>>>,
     /// `conn.total_changes()` after the last large-value reclaim pass that
     /// committed and left nothing queued: until a row changes again (a
     /// trigger's change counts), a pass would find nothing. `None` runs the
@@ -1531,21 +1525,24 @@ impl Db {
         }
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
-        let mut names = crate::names::Names::load(&mut conn.sql()).await?;
+        let names = RefCell::new(crate::names::Names::load(&mut conn.sql()).await?);
         // The newest version (one new to this file, or the one it admitted
         // last) is current from now on; an older one (a server reopening
         // under its genesis schema, before it activates its current one)
         // leaves the tags as they are.
         let version = config.schema.version_id();
-        let newest = names.get(&version).is_none() || names.latest_version() == Some(version);
+        let newest = names.borrow().get(&version).is_none()
+            || names.borrow().latest_version() == Some(version);
         // Every version an earlier process admitted is admitted again, with
         // the names it was stored under.
         let mut admitted = crate::catalogue::admitted(&mut conn.sql()).await?;
-        let schema = names.resolve(&config.schema, &[], names.latest())?;
-        names.check_branches(&schema)?;
-        names.check_types(&schema)?;
+        let schema = names
+            .borrow()
+            .resolve(&config.schema, &[], names.borrow().latest())?;
+        names.borrow().check_branches(&schema)?;
+        names.borrow().check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
-        names.mint(&conn, &schema).await?;
+        crate::names::Names::mint(&names, &conn, &schema).await?;
         let chunks = crate::large::Chunks::new(
             path.is_some() || conn.single_connection(),
             config.chunk_store.clone(),
@@ -1560,7 +1557,7 @@ impl Db {
         })
         .await?;
         conn.observe_transactions(&chunks)?;
-        let owned_tables = names.stored_tables();
+        let owned_tables = names.borrow().stored_tables();
         let fresh = owned_tables.is_empty();
         // A reopened store keeps every column earlier schemas added; bring
         // it up to this schema without touching what is already there.
@@ -1590,11 +1587,11 @@ impl Db {
                 if *version == config.schema.version_id() {
                     continue;
                 }
-                if let Some(stored) = names.get(version) {
+                if let Some(stored) = names.borrow().get(version) {
                     ddl.push_str(&physical.union(&Schema::stored_as(
                         earlier,
                         stored,
-                        names.tags(),
+                        names.borrow().tags(),
                     ))?);
                 }
             }
@@ -1602,7 +1599,7 @@ impl Db {
             execute_script(&mut conn.sql(), &ddl).await?;
             physical
         };
-        names.admit(&conn, &schema).await?;
+        crate::names::Names::admit(&names, &conn, &schema).await?;
         execute_script(&mut conn.sql(), sync::PENDING_DDL).await?;
         execute_script(&mut conn.sql(), sync::SYNC_DDL).await?;
         let withheld: i64 = conn.sql()
@@ -1694,7 +1691,7 @@ impl Db {
                 }),
                 retention: RefCell::default(),
                 retention_by_version: RefCell::default(),
-                names: RefCell::new(names),
+                names,
                 views: RefCell::new(BTreeMap::new()),
                 bundles: RefCell::new(HashMap::new()),
                 bundle_views: RefCell::default(),
@@ -3794,7 +3791,7 @@ impl Store {
             self.persist_namespace(namespace).await?;
         }
         let conn = &self.conn;
-        let told = self.names.borrow_mut().confirm(conn, confirmed).await? || learned;
+        let told = crate::names::Names::confirm(&self.names, conn, confirmed).await? || learned;
         // This store's own sessions (a worker's tabs) are told what it now
         // knows of the authority's catalogue.
         if told && !mirrored {
@@ -4038,7 +4035,7 @@ impl Store {
             }
         }
         let conn = &self.conn;
-        self.names.borrow_mut().record_lens_cells(conn, cells).await
+        crate::names::Names::record_lens_cells(&self.names, conn, cells).await
     }
 
     /// An upstream image as this store keeps it: `None` for a table it
@@ -4088,13 +4085,17 @@ impl Store {
         // source's tags.
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                self.names
-                    .borrow_mut()
-                    .copy_tags(&self.conn, &cell.table, source, &cell.column)
-                    .await?;
+                crate::names::Names::copy_tags(
+                    &self.names,
+                    &self.conn,
+                    &cell.table,
+                    source,
+                    &cell.column,
+                )
+                .await?;
             }
         }
-        self.names.borrow_mut().mint(&self.conn, target).await?;
+        crate::names::Names::mint(&self.names, &self.conn, target).await?;
         // The current schema's declaration order is tag order, before any
         // DDL, so a column added with a default stores the default's tag.
         if current {
@@ -4108,11 +4109,8 @@ impl Store {
                 self.fill_copy(&cell.table, &cell.column, source).await?;
             }
         }
-        self.names.borrow_mut().admit(&self.conn, target).await?;
-        self.names
-            .borrow_mut()
-            .record_lens_cells(&self.conn, cells)
-            .await
+        crate::names::Names::admit(&self.names, &self.conn, target).await?;
+        crate::names::Names::record_lens_cells(&self.names, &self.conn, cells).await
     }
 
     /// Fill copy `column` of stored table `table`, in every row version,
@@ -4146,11 +4144,14 @@ impl Store {
                 let Some(variants) = &column.variants else {
                     continue;
                 };
-                let changed = self
-                    .names
-                    .borrow_mut()
-                    .align(&self.conn, &table.stored, &column.stored, variants)
-                    .await?;
+                let changed = crate::names::Names::align(
+                    &self.names,
+                    &self.conn,
+                    &table.stored,
+                    &column.stored,
+                    variants,
+                )
+                .await?;
                 // A column not stored yet has no cells.
                 let stored = self
                     .physical
@@ -4484,15 +4485,21 @@ impl Store {
         let version = write.version;
         let mut dropped = BTreeMap::new();
         if self.names.borrow().has_lens_cells() {
-            let physical_state = self.physical.borrow();
-            let physical = physical_state.tables.get(&table.stored);
-            for (column, default) in self.names.borrow().lens_cells(&version, table).1 {
-                let Some(stored) = physical.and_then(|physical| physical.column(&column)) else {
+            let defaults = self.names.borrow().lens_cells(&version, table).1;
+            for (column, default) in defaults {
+                let stored = self
+                    .physical
+                    .borrow()
+                    .tables
+                    .get(&table.stored)
+                    .and_then(|physical| physical.column(&column))
+                    .cloned();
+                let Some(stored) = stored else {
                     continue;
                 };
                 let value = crate::values::column_from_sql(
                     &mut self.conn.sql(),
-                    stored,
+                    &stored,
                     default.as_ref(),
                     &self.chunks,
                 )
@@ -6291,17 +6298,18 @@ impl Store {
         let Sql::Text(text) = &cell else {
             return Ok(cell);
         };
-        let names = self.names.borrow();
-        let Some(ty) = names
-            .stored_type(table, column)
-            .filter(|ty| crate::values::is_enum_type(ty))
-        else {
-            return Ok(cell);
+        let is_array = {
+            let names = self.names.borrow();
+            let Some(ty) = names
+                .stored_type(table, column)
+                .filter(|ty| crate::values::is_enum_type(ty))
+            else {
+                return Ok(cell);
+            };
+            // The cell is the value as plain SQL stores it: a name, or a JSON
+            // array of them.
+            crate::values::is_array_type(ty)
         };
-        // The cell is the value as plain SQL stores it: a name, or a JSON
-        // array of them.
-        let is_array = crate::values::is_array_type(ty);
-        drop(names);
         let value = if is_array {
             let json: serde_json::Value = serde_json::from_slice(text)
                 .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
@@ -6331,10 +6339,14 @@ impl Store {
         column: &str,
         value: &Value,
     ) -> Result<Sql, Error> {
-        self.names
-            .borrow_mut()
-            .intern(&self.conn, table, column, &crate::values::enum_names(value))
-            .await?;
+        crate::names::Names::intern(
+            &self.names,
+            &self.conn,
+            table,
+            column,
+            &crate::values::enum_names(value),
+        )
+        .await?;
         let tags = self.names.borrow().tags().column(table, column);
         let cell = crate::values::enum_cell(&tags.borrow(), value)?;
         Ok(cell.unwrap_or(Sql::Null))
@@ -6359,15 +6371,14 @@ impl Store {
             // Every variant a version declares has a tag; a write's are
             // checked against them, but a lens or merge may still carry a
             // removed one.
-            self.names
-                .borrow_mut()
-                .intern(
-                    &self.conn,
-                    &table.stored,
-                    &column.stored,
-                    &crate::values::enum_names(value),
-                )
-                .await?;
+            crate::names::Names::intern(
+                &self.names,
+                &self.conn,
+                &table.stored,
+                &column.stored,
+                &crate::values::enum_names(value),
+            )
+            .await?;
             return column
                 .cell_sql(value)?
                 .ok_or_else(|| unsupported("storing NaN"));
@@ -6392,13 +6403,8 @@ impl Store {
         self.refuse_latest_only_large(table)?;
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
-        crate::large::store(
-            &mut self.conn.sql(),
-            &self.chunks,
-            &prepared,
-            self.client.borrow().is_some(),
-        )
-        .await?;
+        let client = self.client.borrow().is_some();
+        crate::large::store(&mut self.conn.sql(), &self.chunks, &prepared, client).await?;
         Ok(Sql::Integer(
             crate::large::intern(&mut self.conn.sql(), &self.chunks, &prepared.value_ref).await?,
         ))
@@ -6436,23 +6442,20 @@ impl Store {
             )));
         }
         let mut complete = true;
-        if let Some(prepared) = self
+        let prepared = self
             .pending_nodes
             .borrow()
             .iter()
             .find(|prepared| prepared.value_ref.root == large.root)
-        {
-            crate::large::store(
-                &mut self.conn.sql(),
-                &self.chunks,
-                prepared,
-                self.client.borrow().is_some(),
-            )
-            .await?;
+            .cloned();
+        let possession = self.possession.borrow().clone();
+        let client = self.client.borrow().is_some();
+        if let Some(prepared) = prepared {
+            crate::large::store(&mut self.conn.sql(), &self.chunks, &prepared, client).await?;
         } else if self.derived.borrow().contains(large) {
             // Derived here from a stored tree by an append or splice.
             complete = self.client.borrow().is_none();
-        } else if let Some(possession) = &*self.possession.borrow()
+        } else if let Some(possession) = &possession
             && !crate::large::possessed(&mut self.conn.sql(), &self.chunks, large, possession)
                 .await?
         {
@@ -6502,7 +6505,7 @@ impl Store {
     /// Settle the receipts of the trees the applied commit's cells proved
     /// (SPEC 19.4): only after all its cells, which may share nodes.
     pub(crate) async fn settle_possession(&self) -> Result<(), Error> {
-        let Some(possession) = &*self.possession.borrow() else {
+        let Some(possession) = self.possession.borrow().clone() else {
             return Ok(());
         };
         for root in possession.settle.take() {
@@ -6657,7 +6660,7 @@ impl Store {
             let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
                 .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
             *value = Value::Large(Box::new(prepared.value_ref.clone()));
-            edits.pending_nodes.push(prepared);
+            edits.pending_nodes.push(Rc::new(prepared));
         }
         Ok(edits)
     }
@@ -6996,10 +6999,6 @@ impl Store {
         }
         let as_sent = std::mem::take(&mut *self.as_sent.borrow_mut());
         for ((stored, row, key), columns) in as_sent {
-            let physical_state = self.physical.borrow();
-            let Some(table) = physical_state.tables.get(&stored) else {
-                continue;
-            };
             let mut values = vec![
                 Sql::Blob(row.0.as_bytes().to_vec()),
                 Sql::Blob(key),
@@ -7016,21 +7015,28 @@ impl Store {
             if sent.is_empty() {
                 continue;
             }
-            let columns = self.columns_list(table);
-            let cells: String = table
-                .stored()
-                .map(|c| match sent.get(&c.stored) {
-                    Some(at) => format!(", ?{at}"),
-                    None => format!(", {}", quote(&c.stored)),
-                })
-                .collect();
-            let sql = format!(
-                "INSERT INTO {} (id, _branch, _clock, _writer, _state, _base, _touched{columns}) \
+            let sql = {
+                let physical_state = self.physical.borrow();
+                let Some(table) = physical_state.tables.get(&stored) else {
+                    continue;
+                };
+                let columns = self.columns_list(table);
+                let cells: String = table
+                    .stored()
+                    .map(|c| match sent.get(&c.stored) {
+                        Some(at) => format!(", ?{at}"),
+                        None => format!(", {}", quote(&c.stored)),
+                    })
+                    .collect();
+                let sql = format!(
+                    "INSERT INTO {} (id, _branch, _clock, _writer, _state, _base, _touched{columns}) \
                  SELECT id, _branch, -_clock, _writer, _state | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
                  WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
-                quote(&format!("{stored}__h")),
-                quote(&stored),
-            );
+                    quote(&format!("{stored}__h")),
+                    quote(&stored),
+                );
+                sql
+            };
             self.exec(&sql, &values.iter().map(Sql::as_param).collect::<Vec<_>>())
                 .await
                 .map_err(storage)?;
@@ -7042,7 +7048,8 @@ impl Store {
     #[cfg(feature = "testing")]
     pub(crate) async fn as_sent_versions(&self) -> Result<u64, Error> {
         let mut count = 0;
-        for stored in self.physical.borrow().tables.keys() {
+        let tables: Vec<_> = self.physical.borrow().tables.keys().cloned().collect();
+        for stored in &tables {
             let n: i64 = self
                 .conn
                 .sql()
@@ -9109,7 +9116,7 @@ struct Batch {
 #[derive(Default)]
 pub(crate) struct LargeEdits {
     pub(crate) derived: Vec<jazz_types::large_values::LargeValueRef>,
-    pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
+    pub(crate) pending_nodes: Vec<Rc<jazz_types::large_values::PreparedLargeValue>>,
 }
 
 /// An admitted read's boundary in the batch's append-only staging buffers.
@@ -10082,43 +10089,45 @@ impl Db {
         let inner = self.inner.as_ref();
         inner.conn.settle().await?;
         self.check_batch(id, &token)?;
-        let batches = self.inner.batches.borrow();
-        let batch = batches
-            .get(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
-        let staged = batch.ops.len();
-        // A row is never evidence for its own check.
-        let staged_rows = match extra.as_deref() {
-            Some(op) => {
-                let mut rows = batch.rows.clone();
-                if let Some(row) = op.op.row() {
-                    let stored = op.op.table();
-                    if rows
-                        .get(stored)
-                        .is_some_and(|set| set.contains(row.0.as_bytes()))
-                        && let Some(set) = Arc::make_mut(&mut rows).get_mut(stored)
-                    {
-                        set.remove(row.0.as_bytes());
+        let (staged, staged_rows, ops, edits, token, snapshot) = {
+            let batches = self.inner.batches.borrow();
+            let batch = batches
+                .get(&id)
+                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            let staged = batch.ops.len();
+            // A row is never evidence for its own check.
+            let staged_rows = match extra.as_deref() {
+                Some(op) => {
+                    let mut rows = batch.rows.clone();
+                    if let Some(row) = op.op.row() {
+                        let stored = op.op.table();
+                        if rows
+                            .get(stored)
+                            .is_some_and(|set| set.contains(row.0.as_bytes()))
+                            && let Some(set) = Arc::make_mut(&mut rows).get_mut(stored)
+                        {
+                            set.remove(row.0.as_bytes());
+                        }
                     }
+                    rows
                 }
-                rows
-            }
-            None => Arc::default(),
+                None => Arc::default(),
+            };
+            let live = inner.overlay.borrow().as_ref().is_some_and(|overlay| {
+                Rc::ptr_eq(&overlay.batch, &batch.token) && overlay.applied == staged
+            });
+            let ops = (!live).then(|| batch.ops.clone());
+            let edits = LargeEdits {
+                derived: batch.edits.derived.clone(),
+                pending_nodes: batch.edits.pending_nodes.clone(),
+            };
+            let token = batch.token.clone();
+            let snapshot = match &batch.kind {
+                BatchKind::Mergeable => None,
+                BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
+            };
+            (staged, staged_rows, ops, edits, token, snapshot)
         };
-        let live = inner.overlay.borrow().as_ref().is_some_and(|overlay| {
-            Rc::ptr_eq(&overlay.batch, &batch.token) && overlay.applied == staged
-        });
-        let ops = (!live).then(|| batch.ops.clone());
-        let edits = LargeEdits {
-            derived: batch.edits.derived.clone(),
-            pending_nodes: batch.edits.pending_nodes.clone(),
-        };
-        let token = batch.token.clone();
-        let snapshot = match &batch.kind {
-            BatchKind::Mergeable => None,
-            BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
-        };
-        drop(batches);
         let snapshot = match snapshot {
             Some((snapshot, own)) => Some(inner.serializable_cut(snapshot, &own).await?),
             None => None,
@@ -10239,41 +10248,43 @@ impl Db {
         }
         let inner = self.inner().await;
         self.check_batch(id, &token)?;
-        let batches = self.inner.batches.borrow();
-        let batch = batches
-            .get(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
-        let unavailable = || {
-            Error::new(
-                ErrorCode::NotObserved,
-                "transaction staged prefix is no longer available",
-            )
-        };
-        let ops = batch
-            .ops
-            .get(..prefix.ops)
-            .ok_or_else(unavailable)?
-            .to_vec();
-        let edits = LargeEdits {
-            derived: batch
-                .edits
-                .derived
-                .get(..prefix.derived)
+        let (ops, edits, token, snapshot) = {
+            let batches = self.inner.batches.borrow();
+            let batch = batches
+                .get(&id)
+                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            let unavailable = || {
+                Error::new(
+                    ErrorCode::NotObserved,
+                    "transaction staged prefix is no longer available",
+                )
+            };
+            let ops = batch
+                .ops
+                .get(..prefix.ops)
                 .ok_or_else(unavailable)?
-                .to_vec(),
-            pending_nodes: batch
-                .edits
-                .pending_nodes
-                .get(..prefix.pending_nodes)
-                .ok_or_else(unavailable)?
-                .to_vec(),
+                .to_vec();
+            let edits = LargeEdits {
+                derived: batch
+                    .edits
+                    .derived
+                    .get(..prefix.derived)
+                    .ok_or_else(unavailable)?
+                    .to_vec(),
+                pending_nodes: batch
+                    .edits
+                    .pending_nodes
+                    .get(..prefix.pending_nodes)
+                    .ok_or_else(unavailable)?
+                    .to_vec(),
+            };
+            let token = batch.token.clone();
+            let snapshot = match &batch.kind {
+                BatchKind::Mergeable => None,
+                BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
+            };
+            (ops, edits, token, snapshot)
         };
-        let token = batch.token.clone();
-        let snapshot = match &batch.kind {
-            BatchKind::Mergeable => None,
-            BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
-        };
-        drop(batches);
         let snapshot = match snapshot {
             Some((snapshot, own)) => Some(inner.serializable_cut(snapshot, &own).await?),
             None => None,
@@ -10969,6 +10980,123 @@ fn migration_path(
 
 #[cfg(all(test, feature = "sqlite"))]
 mod async_row_tests {
+    /// Alice polls her subscriptions while Bob's writes and claim refreshes
+    /// suspend in SQL. Both projected and hidden sort keys keep their results
+    /// readable, then deliver the completed update. This lower-level test uses
+    /// the suspending adapter and checks the group borrow needed by a gated
+    /// opening; native public constructors cannot pause at these SQL boundaries.
+    #[test]
+    fn subscriptions_remain_readable_at_each_sql_suspension() {
+        use crate::query::OrderDirection;
+        use crate::tools::{ColumnType, TablePolicies};
+        use jazz_model::model::public_schema::{SchemaBuilder, TableSchemaBuilder};
+        use std::future::Future;
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Context, Poll, Waker};
+
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("body", ColumnType::Text)
+                        .column("rank", ColumnType::Integer)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::True)
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+        .unwrap();
+        let mut conn: crate::host::OwnedConnection = Connection::open_in_memory().unwrap().into();
+        conn.sql_suspensions = Some(Arc::new(AtomicUsize::new(0)));
+        let db = block_on(async {
+            crate::format::admit(&mut conn.sql()).await.unwrap();
+            Db::open_on(
+                DbConfig::new(
+                    schema,
+                    DbIdentity {
+                        node: crate::ids::NodeUuid::from_bytes([73; 16]),
+                        author: AuthorSubject::SYSTEM,
+                    },
+                ),
+                conn.into(),
+                None,
+            )
+            .await
+            .unwrap()
+        });
+        let cells = |body: &str, rank| {
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(body.to_owned())),
+                ("rank".to_owned(), Value::I32(rank)),
+            ])
+        };
+        let row = block_on(db.insert("notes", cells("before", 1), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let mut streams = [true, false].map(|projected| {
+            let query = Query::from("notes").order_by("rank", OrderDirection::Asc);
+            let query = if projected {
+                query
+            } else {
+                query.select(["body"])
+            };
+            let prepared = db.prepare_query(&query).unwrap();
+            block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap()
+        });
+        for stream in &mut streams {
+            assert!(matches!(
+                stream.try_next_event(),
+                Some(SubscriptionEvent::Delta { reset: true, .. })
+            ));
+        }
+        let mut observed = [false; 2];
+        let mut pauses = 0;
+        let mut drive = |mut future: std::pin::Pin<&mut dyn Future<Output = ()>>| {
+            let mut cx = Context::from_waker(Waker::noop());
+            loop {
+                let result = future.as_mut().poll(&mut cx);
+                for (i, stream) in streams.iter_mut().enumerate() {
+                    let group = stream.group.upgrade().unwrap();
+                    assert!(
+                        group.try_borrow().is_ok(),
+                        "subscription borrowed during SQL"
+                    );
+                    while let Some(event) = stream.try_next_event() {
+                        match event {
+                            SubscriptionEvent::Delta { updated, .. } => {
+                                observed[i] |= updated.iter().any(|out| {
+                                    out.row.cell("body") == Some(Value::String("after".to_owned()))
+                                });
+                            }
+                            SubscriptionEvent::Rejected { message, .. } => panic!("{message}"),
+                            _ => {}
+                        }
+                    }
+                }
+                if result == Poll::Ready(()) {
+                    break;
+                }
+                pauses += 1;
+            }
+        };
+        drive(std::pin::pin!(async {
+            db.update("notes", row, cells("after", 2), Default::default())
+                .await
+                .unwrap();
+            db.tick().await.unwrap();
+            db.set_identity_claims(
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([("name".into(), Value::String("bob".into()))]),
+            )
+            .await;
+        }));
+        assert!(pauses > 0);
+        assert!(observed.into_iter().all(|updated| updated));
+    }
 
     /// Alice abandons a batch at each SQL suspension while staging a write and
     /// reuses its ID for Bob's empty batch. No resumed work may enter Bob's batch.
