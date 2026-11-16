@@ -26,8 +26,10 @@ function usesJazzSwift(manifest) {
  * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app-support`
  * crate's checks cover, Swift packages (a Package.swift naming jazz-swift),
  * whose bindings are `JazzApp.swift` and which dev/gates/jazz-swift.sh
- * covers, and Go modules (a go.mod beside it), whose bindings are
- * `jazzapp/jazz_app.go` and which jazz-codegen's golden tests cover.
+ * covers, Go modules (a go.mod beside it), whose bindings are
+ * `jazzapp/jazz_app.go` and which jazz-codegen's golden tests cover, and
+ * Kotlin apps (a build.gradle.kts), whose bindings are
+ * `src/main/kotlin/JazzApp.kt` and which the Kotlin partition covers.
  */
 function projects() {
   return execFileSync(
@@ -39,7 +41,8 @@ function projects() {
     .filter(Boolean)
     .map(dirname)
     .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")) && !isSwiftApp(dir))
-    .filter((dir) => !existsSync(join(root, dir, "go.mod")));
+    .filter((dir) => !existsSync(join(root, dir, "go.mod")))
+    .filter((dir) => !existsSync(join(root, dir, "build.gradle.kts")));
 }
 
 test("every example app commits its files and its bindings", () => {

@@ -135,6 +135,8 @@ export interface Ctx {
   readonly old: boolean;
   /** Inside a relation (`exists(from.t…)`): object keys are column refs. */
   readonly relation?: boolean;
+  /** Builds the row handle of a scope, for `exists.t((t) => …)` callbacks. */
+  readonly row: (meta: SchemaMeta, scope: Scope) => unknown;
 }
 
 let nextScope = 0;
@@ -588,21 +590,13 @@ function innerConditions(
   return out;
 }
 
-/** Set by `defineSchema`: builds a row handle for a scope. */
-export let rowFactory: (meta: SchemaMeta, scope: Scope) => unknown = () => {
-  throw new Error("jazz-tools: row handles are not available");
-};
-export function setRowFactory(factory: (meta: SchemaMeta, scope: Scope) => unknown): void {
-  rowFactory = factory;
-}
-
 function existsText(data: NodeData & { k: "exists" }, ctx: Ctx): string {
   if (ctx.relation) fail("exists.<table>(…) can't be used inside a relation's predicate");
   tableMeta(ctx.meta, data.table);
   const scope = newScope(data.table);
   const inner: Ctx = { ...ctx, table: data.table, scope, depth: ctx.depth + 1 };
   const parts = [
-    `exists ${name(data.table)}(${innerConditions(data.conditions, inner, (s) => rowFactory(ctx.meta, s)).join(", ")})`,
+    `exists ${name(data.table)}(${innerConditions(data.conditions, inner, (s) => ctx.row(ctx.meta, s)).join(", ")})`,
   ];
   let table = data.table;
   for (const hop of data.hops) {
@@ -612,7 +606,7 @@ function existsText(data: NodeData & { k: "exists" }, ctx: Ctx): string {
     const hopScope = newScope(table);
     const hopCtx: Ctx = { ...ctx, table, scope: hopScope, depth: ctx.depth + 1 };
     parts.push(
-      `.${name(hop.relation)}(${innerConditions(hop.conditions, hopCtx, (s) => rowFactory(ctx.meta, s)).join(", ")})`,
+      `.${name(hop.relation)}(${innerConditions(hop.conditions, hopCtx, (s) => ctx.row(ctx.meta, s)).join(", ")})`,
     );
   }
   return parts.join("");
@@ -670,7 +664,7 @@ function relWhereText(data: NodeData & { k: "relWhere" }, ctx: Ctx): string {
   const rest =
     data.conditions === undefined
       ? []
-      : innerConditions([data.conditions], inner, (s) => rowFactory(ctx.meta, s));
+      : innerConditions([data.conditions], inner, (s) => ctx.row(ctx.meta, s));
   return `exists ${name(target)}(${[link, ...rest].join(", ")})`;
 }
 

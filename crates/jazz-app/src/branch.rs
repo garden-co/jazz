@@ -267,9 +267,9 @@ impl Jazz {
 /// An app handle that reads and writes through a branch view
 /// ([`Jazz::on_branch`]). `Send + Clone`, like [`Jazz`].
 ///
-/// Not supported yet through a branch: reads inside a serializable
-/// transaction (see [`Transaction::on_branch`]), streaming inserts and updates, and
-/// byte-range reads; they fail. It has no `transaction` of its own: use
+/// Not supported yet through a branch: streaming inserts and updates, and
+/// byte-range reads; they fail. In a serializable transaction, writes that
+/// read the row back are refused (see [`Transaction::on_branch`]). It has no `transaction` of its own: use
 /// [`Jazz::transaction`] and [`Transaction::on_branch`]. [`Jazz::wait_for_sync`]
 /// covers its writes.
 ///
@@ -460,12 +460,13 @@ impl Transaction {
     /// with the rest of the transaction. Writes to several branches (and
     /// to shared tables) in one transaction keep one fate.
     ///
-    /// In a mergeable transaction ([`Jazz::transaction`]) its reads go
-    /// through the view too, staged writes included. A serializable one
-    /// ([`Jazz::serializable_transaction`]) can't read through a branch yet
-    /// (jazz#5806): its `get` and `all` fail, and its `upsert`, `restore`
-    /// and `restore_with`, which read the row back, fail before staging
-    /// anything.
+    /// Its reads go through the view too, staged writes included, in a
+    /// mergeable transaction ([`Jazz::transaction`]) and a serializable one
+    /// ([`Jazz::serializable_transaction`]) alike; a serializable one checks
+    /// at commit that the rows it read through the view did not change (on
+    /// a server, one that negotiated it: jazz#5806). In a serializable one,
+    /// `upsert`, `restore` and `restore_with`, which read the row back, are
+    /// still refused before staging anything.
     pub fn on_branch(&self, view: impl Into<BranchView>) -> Result<Transaction> {
         let client = view.into().resolve(self.client())?;
         Ok(self.with_client(client))
