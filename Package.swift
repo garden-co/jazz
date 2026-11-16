@@ -1,10 +1,12 @@
 // swift-tools-version:6.0
-// The Jazz Swift package, at the repository root so SwiftPM can take it by
-// URL at a release tag:
+// The Jazz Swift package built from source, for working on it. Apps depend
+// on the published package instead, with the Jazz core prebuilt on Apple
+// platforms:
 //
-//     .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65")
+//     .package(url: "https://github.com/garden-co/jazz-swift", exact: "2.0.0-alpha.66")
 //
-// Its sources live in packages/jazz-swift. The UniFFI sources over
+// (.github/workflows/swift-mirror.yml publishes it). Its sources live in
+// packages/jazz-swift. The UniFFI sources over
 // crates/jazz-ffi are committed (packages/jazz-swift/scripts/build-ffi.sh
 // --check keeps them current); libjazz_ffi itself is a system library found
 // through pkg-config (`jazz_ffi.pc`), which build-ffi.sh writes beside the
