@@ -873,3 +873,66 @@ async fn a_device_account_links_to_the_users_provider_account() {
     device.shutdown().await.unwrap();
     app.stop().await;
 }
+
+/// Reads that name no tier read as TypeScript's do: a backend client from
+/// the server, an end user's first load waiting for it, so neither shows an
+/// empty cache of what the server already has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_without_a_tier_see_what_the_server_has() {
+    let app = App::start().await;
+    let written = app
+        .backend
+        .insert(NewTodo::new("By the main backend", false))
+        .await
+        .unwrap();
+    app.backend.wait_for_sync().await.unwrap();
+
+    let agent = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(machine("token-agent")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        agent.all(todos::query()).await.unwrap(),
+        vec![written.clone()]
+    );
+    // Options that name no tier read the same way.
+    assert_eq!(
+        agent
+            .all_with_options(todos::query(), jazz_app::ReadOptions::default())
+            .await
+            .unwrap(),
+        vec![written.clone()]
+    );
+    let mut changes = agent.subscribe(todos::query()).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), changes.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let added: Vec<_> = first.added.into_iter().map(|added| added.row).collect();
+    assert_eq!(added, vec![written.clone()]);
+
+    let user = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(user.all(todos::query()).await.unwrap(), vec![written]);
+
+    // Without a server, reads stay local.
+    let local = Jazz::open(client_files(), Config::new(AppId::random()))
+        .await
+        .unwrap();
+    assert_eq!(local.all(todos::query()).await.unwrap(), vec![]);
+
+    drop(changes);
+    agent.shutdown().await.unwrap();
+    user.shutdown().await.unwrap();
+    local.shutdown().await.unwrap();
+    app.stop().await;
+}

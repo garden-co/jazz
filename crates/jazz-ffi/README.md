@@ -43,24 +43,41 @@ with small smoke programs ([`tests/kotlin`](tests/kotlin),
 ## Config
 
 ```json
-{ "app": "<jazz.app.json text>", "permissions": "<jazz.permissions.json text>",
-  "appId": "<uuid>", "serverUrl": "http://localhost:1625",
-  "storage": "memory" | "persistent", "dataDir": "./data",
-  "backendSecret": "…", "adminSecret": "…",
-  "session": { "issuer": "jazz:backend", "subject": "alice" } }
+{ "app": "<jazz.app.json text>", "appId": "<uuid>",
+  "serverUrl": "https://my-app.com/jazz",
+  "auth": { "deviceKey": "…" } | { "bearer": true } | { "credential": true },
+  "permissions": "<jazz.permissions.json text>",
+  "storage": "memory" | "persistent", "dataDir": "./data", "contract": 2 }
 ```
 
-With `permissions`, the handle opens as the app's backend. It publishes the
-permissions bundle (which takes `adminSecret`), then acts as the session's
-user, and `account()` returns that user's account id (`session.user`). The
-backend needs `serverUrl`, `appId`, `backendSecret`, `adminSecret` and
-`session.subject`.
+**Backend clients** (Go and Rust servers; TS's `createJazzClient` with a
+`credential`, see `docs/content/docs/setup/backend-client.mdx`): a trusted
+machine that syncs through the app's main backend, the TS `createJazz` that
+lists it in `backendClients`. `"serverUrl"` is that backend's `/jazz`,
+`"auth": {"credential": true}`, and `"permissions"` (required) the app's
+`jazz.permissions.json`, as `createJazzClient` takes it: not published, but
+how the client checks the users it acts for. The host's token callback gives the machine's own token (its
+workload's OIDC token), fresh for each request and socket (UniFFI
+`open_with_tokens(config, TokenProvider)`, C `jazz_open_user`). The main
+backend decides what the client is, reported by `backend_client()` /
+`"backendClient"`:
 
-Backend mode is for server-side processes only. It keeps the sync server's
-`backendSecret` and `adminSecret` in the process, so those secrets must never
-ship inside a mobile or desktop app. In .65, apps on users' devices open
-local-only clients (no `serverUrl`), because connecting as an end user with a
-JWT is not supported yet.
+- `"trusted"`: it acts as the system (its session's user has kind
+  `"system"`), and `for_user(user_id, claims_json)` / `jazz_for_user`
+  returns a handle acting as one of the app's users, under their
+  permissions. That never creates an account: `NoAccount` (kind
+  `"noAccount"`, with `userId`) when the user has none yet, `Permission`
+  when the main backend refuses the identity (its 403). Closing such a
+  handle leaves its parent open.
+- `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
+  kind `"refused"`), as on a `for_user` handle or any other app.
+
+A token trusted neither way fails the open with `Refused`.
+`shutdown_within(timeout_ms)` / `jazz_close_within` first waits for the
+writes the client holds (its `for_user` handles' too) to reach the backend,
+as TS's `close({ timeoutMs })` (10 000 there by default): with memory
+storage, writes still unsent fail it with `Unsynced { pending }` (kind
+`"unsynced"`), and the app closes all the same; `0` closes at once.
 
 **End users** (contract v2): `"serverUrl"` is the app's Jazz endpoint (its
 backend's `createJazz` handler, never the core) and `"auth"` says who signs
@@ -80,11 +97,29 @@ subject, claims, kind}}`; `sync_status()` / `"syncStatus"` gives `{"link":
 device account to the app's own sign-in (the session becomes that user's, on
 the device's account); `sign_out()` signs out and closes the app. The sync
 status is TS's `SyncStatus` (`{link, pendingUploads, oldestPendingAt,
-rejected, lastError, synced}`). A backend's `bundle()` / `"bundle"` is the
-permissions bundle it published. Anonymous users are not supported (as in TS).
+rejected, lastError, synced}`). Anonymous users are not supported (as in TS).
 
-Without `permissions` or `auth`, it opens as a local client. `appId` is required for
+Without `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
+
+## Lifecycle (as TS's)
+
+- `begin_mergeable()` / `txBegin {"serializable": false}`: a mergeable
+  transaction (TS's default `transaction`). Its writes commit together and
+  merge with concurrent ones, and its commit is never refused as a
+  conflict. `begin()` / `txBegin {}` stays serializable.
+- `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
+  the server, with local reads and writes going on, then resume sync.
+- `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
+  deletes its local store, so the next open starts empty. It is refused,
+  and the app left open, while another open app holds the same `dataDir`.
+  On the C ABI, free the handle with `jazz_close` afterwards, as after
+  `signOut`.
+- `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
+  each write the server refused that no durable wait (a `global` tier,
+  `wait_for_sync`) reported, as TS's `onMutationError`:
+  `{"transaction", "message", "denied", "serializable"}`. Refusals from
+  before the first watch come first.
 
 ## Values, queries, rows, deltas
 
@@ -242,7 +277,7 @@ its `jazz_close`.
 Listeners run on a thread owned by the subscription, so they may call back
 into the handle. Every method blocks and is safe to call from any thread.
 
-On the C ABI, `*err` is `{"kind":"refused"|"io"|"closed","message":…}`.
+On the C ABI, `*err` is `{"kind","message"}`, kind `"refused"`, `"io"` or `"closed"`; with `"contract": 2` also `"permission"`, `"notSupported"`, `"conflict"`, `"noAccount"` (with `"userId"`) and `"unsynced"` (with `"pending"`).
 Returned strings belong to the caller, who frees them with
 `jazz_string_free`. Strings passed to a callback are valid only during that
 call.
@@ -254,9 +289,6 @@ yet":
 
 - `offset` in an include, and `required` on reverse relations or on optional
   references;
-- connecting to a sync server as an end user (with a JWT);
-- a session issuer other than `jazz:backend`;
-- transactions, and with them reads inside transactions.
 
 Computed columns and transforms are the language bindings' job: this layer
 reads and writes the stored values.

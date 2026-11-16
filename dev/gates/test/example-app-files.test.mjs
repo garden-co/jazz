@@ -107,8 +107,19 @@ function jazzPackages() {
     .map(dirname);
 }
 
+/**
+ * Packages that depend on jazz-tools but are not apps, each with why. Keep
+ * this short: an example is an app and commits its jazz.app.json.
+ */
+const NOT_APPS = new Map([
+  [
+    "examples/rust-backend-clients",
+    "a test harness: it serves the Rust examples' own app files from a TS main backend",
+  ],
+]);
+
 test("every example package that depends on jazz-tools commits a jazz.app.json", () => {
-  const packages = jazzPackages();
+  const packages = jazzPackages().filter((dir) => !NOT_APPS.has(dir));
   assert.ok(packages.length > 30, `found only ${packages.length} jazz-tools packages`);
   const apps = tracked("examples/**/jazz.app.json", "dev/stress-tests/**/jazz.app.json");
   const without = packages.filter((dir) => !apps.some((file) => file.startsWith(`${dir}/`)));
