@@ -33,6 +33,7 @@ export const {
   migrationsCreate,
   migrationsCreateForDir,
   NapiDb,
+  NapiThinRouter,
   StreamingMutation,
   Subscription,
   Transport,

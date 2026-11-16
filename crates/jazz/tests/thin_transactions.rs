@@ -1174,3 +1174,32 @@ fn a_staged_write_refused_outright_fails_the_transaction() {
     assert!(matches!(body, ThinBody::Error { .. }), "{body:?}");
     assert!(titles(&session.core).is_empty());
 }
+
+#[test]
+fn a_trusted_sessions_writes_are_the_backends_own() {
+    // A trusted backend client's session: its client is the backend's,
+    // linked as it, and its writes are the database's own.
+    let core = authority();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xb1; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let db = block_on(Db::open(DbConfig::new(schema(), identity))).unwrap();
+    let client = Binding::new(db, identity, true);
+    let upstream = client.connect_upstream();
+    let subscriber = core
+        .accept_subscriber(AuthorSubject::SYSTEM, Default::default())
+        .unwrap();
+    let mut session = Session {
+        core,
+        client,
+        upstream,
+        subscriber,
+        transactions: ThinTransactions::trusted(),
+    };
+    let tx = session.begin("mergeable");
+    session.serve(2, insert(&tx, "the backend's"));
+    let body = session.serve(3, commit(&tx));
+    assert!(matches!(body, ThinBody::Written { .. }), "{body:?}");
+    assert_eq!(titles(&session.core), ["the backend's"]);
+}
