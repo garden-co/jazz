@@ -7,23 +7,23 @@ Every language works from your app's TypeScript schema and permissions: `npx jaz
 writes each language's typed bindings from them. Your app's main backend runs in TypeScript
 ([Vercel](/docs/setup/deployment/vercel) or [your own server](/docs/setup/deployment/own-server)).
 
-Rust, Swift, Kotlin and Go are **experimental**: they are clients of that TypeScript backend. Swift,
-Kotlin and Go are for apps, signed in as one of your users; Rust and Go also run as
+Rust, Swift, Kotlin and Go are **experimental**: they are clients of that TypeScript backend. All
+four can be apps, signed in as one of your users; Rust and Go also run as
 [backend clients](/docs/setup/backend-client), services that act with a machine credential. None of
 them runs a main backend yet. Each tab lists what that language supports and what it doesn't yet,
 compared with TypeScript.
 
 <Tabs groupId="jazz-environment" items={["Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="Rust">
-    **Experimental.** Rust is a backend client: a service that reads and writes your app's data
-    through your TypeScript main backend's `/jazz`, trusted or scoped, with `for_user` on a trusted
-    client. See [Backend Client](/docs/setup/backend-client).
+    **Experimental.** Rust is a client of your TypeScript main backend's `/jazz`, in two roles: an
+    app signed in as one of your users (`Config::user`, with device accounts or bearer sign-in, and
+    `JazzSession`), or a backend client, a service with a machine credential, trusted or scoped, with
+    `for_user` on a trusted client. See [Backend Client](/docs/setup/backend-client).
 
     It doesn't support yet:
 
     - running your app's main backend (serving its `/jazz` and publishing its permissions): run it
-      in TypeScript with `createJazz`;
-    - partial reads of large values (use `jazz.with_client(…)` for the low-level client).
+      in TypeScript with `createJazz`.
 
   </Tab>
   <Tab value="Swift">
@@ -37,9 +37,9 @@ compared with TypeScript.
 
     - running a backend in Swift (publishing permissions, acting for users) or serving the app's
       Jazz endpoint: run your backend in TypeScript;
-    - tested iOS, iPadOS and macOS UI apps (each release builds for the iOS simulator and runs a
-      macOS command-line app), and watchOS, tvOS and visionOS builds;
-    - a prebuilt core on Linux;
+    - iOS and macOS UI apps: CI builds and tests the package on Linux only, with command-line tools
+      and servers. It should work on macOS, but isn't tested there yet;
+    - a prebuilt core: build it from the release's source;
     - a SwiftUI `Binding` for `JazzText`, and an `@Observable` session model;
     - Keychain (or file) storage for device keys;
     - anonymous (guest) users;
@@ -78,6 +78,8 @@ compared with TypeScript.
 
     - running your main backend in Go (publishing permissions, serving `/jazz`): run it in
       TypeScript with `createJazz`;
+    - guest (anonymous) users;
+    - nested rows and catalogue enums in bindings;
     - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
       reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
       column.
