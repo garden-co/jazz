@@ -970,17 +970,19 @@ impl Core {
         Ok(())
     }
 
-    /// Begins a serializable transaction: its reads see a snapshot and its
-    /// own writes, and its writes commit together or not at all.
+    /// Begins a transaction: its reads see a snapshot and its own writes,
+    /// and its writes commit together or not at all. Serializable, its
+    /// commit is refused (`Conflict`) if what it read changed meanwhile;
+    /// mergeable (TS's default `transaction`), its writes merge with
+    /// concurrent ones and the commit is never refused as a conflict.
     pub fn tx_begin(&self, serializable: bool) -> Result<String> {
-        if !serializable {
-            return Err(unsupported(
-                "non-serializable transactions; every transaction is serializable",
-            ));
-        }
         let tx = self.next_tx.fetch_add(1, Ordering::Relaxed);
         block_on(self.open_jazz()?.with_client(move |client| async move {
-            let transaction = client.begin_transaction()?;
+            let transaction = if serializable {
+                client.begin_transaction()?
+            } else {
+                client.begin_mergeable_transaction()?
+            };
             TRANSACTIONS.with(|t| t.borrow_mut().0.insert(tx, (transaction, false)));
             Ok(())
         }))?;
@@ -1123,11 +1125,59 @@ impl Core {
     /// Calls `listener` with each state of the session (`session`) or the
     /// connection (`sync`) as JSON, the current one first, on a thread of
     /// its own, until cancelled.
+    /// Leaves the server; local reads and writes go on (TS's
+    /// `disconnect`).
+    pub fn disconnect(&self) -> Result<()> {
+        block_on(self.open_jazz()?.disconnect())?;
+        Ok(())
+    }
+
+    /// Resumes sync after [`Self::disconnect`] (TS's `reconnect`).
+    pub fn reconnect(&self) -> Result<()> {
+        block_on(self.open_jazz()?.reconnect())?;
+        Ok(())
+    }
+
+    /// Closes the app and deletes its local store (TS's
+    /// `deleteClientStorage`). Refused (the app left open) while another
+    /// open app holds the same store.
+    pub fn delete_client_storage(&self) -> Result<()> {
+        let jazz = self.open_jazz()?;
+        if self.derived {
+            return Err(refused(
+                "delete_client_storage on a for_user handle: it has no store of its own",
+            ));
+        }
+        // Open transactions roll back while their client still runs.
+        let _ = block_on(jazz.with_client(|_| async {
+            let open = TRANSACTIONS.with(|t| std::mem::take(&mut t.borrow_mut().0));
+            for (transaction, _) in open.into_values() {
+                let _ = transaction.rollback();
+            }
+            Ok(())
+        }));
+        let deleted = block_on(jazz.delete_client_storage());
+        // Refused as held by another process, the client has stopped all
+        // the same; by another app here, it runs on.
+        let stopped = || block_on(jazz.with_client(|_| async { Ok(()) })).is_err();
+        if !matches!(deleted, Err(jazz_app::Error::StoreHeld(..))) || stopped() {
+            self.closed.store(true, Ordering::Release);
+            self.run_close_hook();
+            self.end_subscriptions();
+        }
+        deleted?;
+        Ok(())
+    }
+
     pub fn watch(&self, what: &str, listener: Box<dyn Fn(String) + Send>) -> Result<Watch> {
         use futures_util::StreamExt as _;
         let jazz = self.open_jazz()?;
         let mut stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = String> + Send>> =
             match what {
+                "mutationErrors" => Box::pin(
+                    block_on(jazz.mutation_errors())?
+                        .map(|error| serde_json::to_string(&error).unwrap_or_default()),
+                ),
                 "session" => {
                     let session = jazz
                         .session()
