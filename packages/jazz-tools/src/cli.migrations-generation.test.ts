@@ -246,4 +246,39 @@ describe("migrations create", () => {
     await writeFile(created.file!, stub.replace(/"?notes"?: m\.add/, '"memo": m.add'));
     await expect(generateApp({ cwd: root })).rejects.toThrow(/notes/);
   });
+
+  it("offers a same-shape column as a rename, which keeps its values once chosen", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, { todos: "s.table({ name: s.string(), done: s.boolean() }, {})" });
+    const created = await createAppMigration({ cwd: root, name: "rename-title" });
+    expect(created.todos).toEqual([
+      expect.stringContaining('Added column "name" may be a rename of "title"'),
+    ]);
+    const stub = await stubText(root, created.file);
+    expect(stub).toContain('m.renameFrom("title")');
+    expect(stub).not.toMatch(/m\.(add|drop)\.string\(/);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(/may be a rename of "title"/);
+
+    await writeFile(
+      created.file!,
+      stub
+        .split("\n")
+        .map((line) =>
+          UNFILLED_STUB_TODO.test(line) ? '      "name": m.renameFrom("title"),' : line,
+        )
+        .join("\n"),
+    );
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations[0].migrate.todos).toEqual({ name: { renameFrom: "title" } });
+  });
+
+  it("doesn't offer a rename for a column of another shape", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, { todos: "s.table({ count: s.int(), done: s.boolean() }, {})" });
+    const created = await createAppMigration({ cwd: root, name: "count-not-title" });
+    const stub = await stubText(root, created.file);
+    expect(stub).not.toContain("renameFrom");
+    expect(created.todos.join("\n")).not.toContain("may be a rename");
+  });
 });
