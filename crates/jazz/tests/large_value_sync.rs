@@ -3623,6 +3623,293 @@ fn a_subscriber_joining_a_result_that_awaits_chunks_opens_on_current_rows() {
     );
 }
 
+// ---- session reads at the authority --------------------------------------------
+
+/// A one-shot session read pushed straight onto the wire up to the server.
+fn session_read(up: &Wire, id: u64, query: Query) {
+    up.borrow_mut().push_back(SyncMessage::Read {
+        id,
+        query: Box::new(query),
+        binding: BTreeMap::new(),
+        include_deleted: false,
+        tier: ReadTier::Remote,
+        wait: None,
+        view: Box::new(ReadViewSourceSpec::Current),
+        since: None,
+        span: ReadSpan::Once { at: None },
+    });
+}
+
+/// What the server sent down after `from`, up to and including its
+/// `Settled` for `id`; `None` if it did not settle.
+fn answer(down: &Wire, from: usize, id: u64) -> Option<Vec<String>> {
+    let messages = down.borrow();
+    let mut out = Vec::new();
+    for message in messages.iter().skip(from) {
+        out.push(format!("{message:?}"));
+        if matches!(message, SyncMessage::Settled { id: settled, .. } if *settled == id) {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// The authority answers a session's read with stored images: it never
+/// decodes the rows' cells, so a partial selection of a large value reads
+/// none of it there.
+#[test]
+fn an_authority_answers_a_session_read_without_reading_its_cells() {
+    use jazz::query::Part;
+    let core = open(0, AuthorSubject::SYSTEM);
+    let tab = open(6, user(5));
+    let (_, up, down) = connect_wires(&core, &tab, user(5));
+    pump(&core, &[&tab]);
+    let blob: Vec<u8> = (0..LARGE * 4).map(|n| (n * 5 % 251) as u8).collect();
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(3, LARGE))),
+            ("blob", Value::Bytes(blob)),
+        ],
+    );
+    let query = Query::from("docs")
+        .select(["body", "blob"])
+        .select_part(
+            "blob",
+            Part::Bytes {
+                from: 1000,
+                to: 1100,
+            },
+        )
+        .select_part("body", Part::TextUtf8 { from: 10, to: 20 });
+    let from = down.borrow().len();
+    session_read(&up, 77, query.clone());
+    let before = jazz::cell_ranges_for_test();
+    for _ in 0..3 {
+        block_on(core.tick()).unwrap();
+    }
+    let ranges = jazz::cell_ranges_for_test() - before;
+    let answer = answer(&down, from, 77).expect("the read settled");
+    assert!(
+        answer.iter().any(|message| message.starts_with("Rows")),
+        "{answer:?}"
+    );
+    assert_eq!(ranges, 0, "the authority read {ranges} cell ranges");
+
+    // A read of the whole columns rebuilds neither value.
+    let from = down.borrow().len();
+    session_read(&up, 78, Query::from("docs"));
+    let before = jazz::full_materializations_for_test();
+    for _ in 0..3 {
+        block_on(core.tick()).unwrap();
+    }
+    let rebuilt = jazz::full_materializations_for_test() - before;
+    assert!(self::answer(&down, from, 78).is_some());
+    assert_eq!(rebuilt, 0, "the authority rebuilt {rebuilt} values whole");
+
+    // Decoding them is what read them: the same two reads, decoded.
+    jazz::decode_session_read_cells_for_test(true);
+    let (ranges, rebuilt) = (
+        jazz::cell_ranges_for_test(),
+        jazz::full_materializations_for_test(),
+    );
+    session_read(&up, 79, query.clone());
+    session_read(&up, 80, Query::from("docs"));
+    for _ in 0..3 {
+        block_on(core.tick()).unwrap();
+    }
+    jazz::decode_session_read_cells_for_test(false);
+    assert_eq!(jazz::cell_ranges_for_test() - ranges, 2);
+    assert_eq!(jazz::full_materializations_for_test() - rebuilt, 2);
+}
+
+/// A session read's answer is the same whether or not the authority
+/// decodes the rows' cells: every part of it comes from row identities,
+/// versions, joined rows and stored images. Two sessions of one identity
+/// make the same reads in the same order, one with cells decoded and one
+/// without (an answer depends on what its session already holds).
+#[test]
+fn a_session_reads_answer_does_not_depend_on_its_cells() {
+    use jazz::query::{ArraySubquery, Part};
+    let core = open(0, AuthorSubject::SYSTEM);
+    let decoding = open(6, user(5));
+    let skipping = open(7, user(5));
+    let (_, up_decoding, down_decoding) = connect_wires(&core, &decoding, user(5));
+    let (_, up_skipping, down_skipping) = connect_wires(&core, &skipping, user(5));
+    pump(&core, &[&decoding, &skipping]);
+    let blob: Vec<u8> = (0..LARGE * 2).map(|n| (n * 3 % 251) as u8).collect();
+    for n in 1..=3u8 {
+        insert(
+            &core,
+            "docs",
+            n,
+            vec![
+                ("body", Value::String(text(u64::from(n), LARGE / 4))),
+                ("blob", Value::Bytes(blob.clone())),
+            ],
+        );
+        insert(&core, "links", 10 + n, vec![("doc", Value::Uuid(row(n).0))]);
+    }
+    insert(
+        &core,
+        "notes",
+        20,
+        vec![("text", Value::String("note".into()))],
+    );
+    insert(
+        &core,
+        "comments",
+        21,
+        vec![("note", Value::Uuid(row(20).0))],
+    );
+    insert(
+        &core,
+        "photos",
+        30,
+        vec![
+            ("caption", Value::String("seen".into())),
+            ("image", Value::Bytes(blob.clone())),
+        ],
+    );
+    insert(
+        &core,
+        "photos",
+        31,
+        vec![
+            ("caption", Value::String("unseen".into())),
+            ("image", Value::Bytes(Vec::new())),
+        ],
+    );
+    insert(
+        &core,
+        "grants",
+        32,
+        vec![
+            ("photo", Value::Uuid(row(30).0)),
+            ("reader", Value::String(user(5).principal_parts().1)),
+        ],
+    );
+    let queries = vec![
+        Query::from("docs"),
+        Query::from("docs")
+            .order_by("body", OrderDirection::Desc)
+            .limit(2),
+        Query::from("docs")
+            .select(["blob"])
+            .select_part("blob", Part::Bytes { from: 7, to: 77 }),
+        Query::from("docs")
+            .select(["body"])
+            .select_part("body", Part::TextUtf16 { from: 3, to: 9 }),
+        Query::from("links").array_subquery(
+            ArraySubquery::new("doc", "docs", "id", "doc")
+                .select(["blob"])
+                .select_part("blob", Part::Bytes { from: 0, to: 9 }),
+        ),
+        Query::from("comments"),
+        Query::from("photos"),
+        Query::from("photos").filter(eq(col("caption"), lit(Value::String("seen".into())))),
+        // Parts past the end of their values, chunked and inline: clamped
+        // to the value (#5502), decoded or not.
+        Query::from("docs").select(["blob"]).select_part(
+            "blob",
+            Part::Bytes {
+                from: 0,
+                to: (LARGE * 2 + 1) as u64,
+            },
+        ),
+        Query::from("docs").select(["body"]).select_part(
+            "body",
+            Part::TextUtf16 {
+                from: 10,
+                to: LARGE as u64,
+            },
+        ),
+        Query::from("photos")
+            .select(["caption"])
+            .select_part("caption", Part::TextUtf8 { from: 2, to: 99 }),
+    ];
+    let sent = |down: &Wire, from: usize| -> Vec<String> {
+        down.borrow()
+            .iter()
+            .skip(from)
+            .map(|message| format!("{message:?}"))
+            .collect()
+    };
+    for (n, query) in queries.into_iter().enumerate() {
+        let mut answers = Vec::new();
+        for (decode, up, down) in [
+            (true, &up_decoding, &down_decoding),
+            (false, &up_skipping, &down_skipping),
+        ] {
+            jazz::decode_session_read_cells_for_test(decode);
+            let from = down.borrow().len();
+            session_read(up, 500 + n as u64, query.clone());
+            for _ in 0..3 {
+                block_on(core.tick()).unwrap();
+            }
+            answers.push(sent(down, from));
+        }
+        jazz::decode_session_read_cells_for_test(false);
+        assert!(!answers[0].is_empty(), "query {n} was answered");
+        assert_eq!(answers[0], answers[1], "query {n}");
+        let refused = answers[0].iter().any(|m| m.starts_with("Refused"));
+        assert!(!refused, "query {n}: {:?}", answers[0]);
+    }
+}
+
+/// A relay decodes a session read's cells: the chunks it lacks are what
+/// make it fetch them upstream, so it holds the part's path by the time it
+/// answers.
+#[test]
+fn a_relay_holds_the_part_it_answers_a_session_read_with() {
+    use jazz::query::Part;
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(6, user(5));
+    connect(&core, &relay, user(5));
+    let (_, up, down) = connect_wires(&relay, &tab, user(5));
+    let blob: Vec<u8> = (0..LARGE * 4).map(|n| (n * 7 % 251) as u8).collect();
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob)),
+        ],
+    );
+    for _ in 0..6 {
+        block_on(relay.tick()).unwrap();
+        block_on(core.tick()).unwrap();
+    }
+    assert_eq!(relay.large_value_nodes_for_test().unwrap().0, 0);
+    let from = down.borrow().len();
+    session_read(
+        &up,
+        77,
+        Query::from("docs").select(["blob"]).select_part(
+            "blob",
+            Part::Bytes {
+                from: 500_000,
+                to: 500_100,
+            },
+        ),
+    );
+    let mut held = None;
+    for _ in 0..24 {
+        block_on(relay.tick()).unwrap();
+        if answer(&down, from, 77).is_some() {
+            held = Some(relay.large_value_nodes_for_test().unwrap().0);
+            break;
+        }
+        block_on(core.tick()).unwrap();
+    }
+    let held = held.expect("the relay answered the read");
+    assert!(held > 0, "the relay answered without the part's chunks");
+}
+
 // ---- ranges past the end (#5502) ---------------------------------------------
 
 /// The values `column` took in `stream`'s events since it was last read,
