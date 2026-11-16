@@ -24,6 +24,7 @@ func (db *DB) DeleteClientStorage(ctx context.Context) error {
 	if err := db.call(ctx, "deleteClientStorage", map[string]any{}, nil); err != nil {
 		return err
 	}
+	db.settleStreams()
 	return db.Close()
 }
 
