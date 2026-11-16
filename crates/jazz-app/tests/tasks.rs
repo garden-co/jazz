@@ -580,3 +580,67 @@ async fn restore_with_values() {
     assert_eq!(restored.title, "Third time");
     assert_eq!(restored.score, 1);
 }
+
+/// Selecting a transformed column reads its view value, through the app's
+/// transform, as a full row does; filtering on it compares the stored value.
+#[tokio::test]
+async fn select_reads_transformed_columns_as_viewed() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            due_at: Some("day-20000".into()),
+            ..NewTask::new("Ship it", 3, Vec::new())
+        })
+        .await
+        .unwrap();
+    jazz.insert(NewTask::new("Someday", 1, Vec::new()))
+        .await
+        .unwrap();
+
+    let rows = jazz
+        .all(
+            tasks::query()
+                .filter(tasks::due_at().eq(Timestamp(20_000 * DAY_MS)))
+                .select((tasks::title(), tasks::due_at())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, task.id);
+    let (title, due_at): &(String, Option<String>) = &rows[0].values;
+    assert_eq!(title, "Ship it");
+    assert_eq!(due_at.as_deref(), Some("day-20000"));
+
+    // One column alone.
+    let due: Vec<Option<String>> = jazz
+        .all(
+            tasks::query()
+                .order_by(tasks::title(), jazz_app::Order::Asc)
+                .select(tasks::due_at()),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect();
+    assert_eq!(due, [Some("day-20000".to_owned()), None]);
+
+    // Inside an included row's selection.
+    jazz.insert(bindings::NewBox {
+        task: Some(task.id),
+        ..bindings::NewBox::new("crate")
+    })
+    .await
+    .unwrap();
+    let boxed =
+        jazz.all(bindings::boxes::query().include(
+            bindings::boxes::task_relation().with(tasks::query().select(tasks::due_at())),
+        ))
+        .await
+        .unwrap();
+    let included = boxed[0].1.as_ref().expect("the box's task");
+    assert_eq!(included.id, task.id);
+    assert_eq!(included.values.as_deref(), Some("day-20000"));
+}

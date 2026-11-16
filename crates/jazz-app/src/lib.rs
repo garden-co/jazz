@@ -71,7 +71,7 @@ pub use error::{Error, Result};
 pub use handle::Jazz;
 pub use history::Version;
 pub use include::{
-    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+    Include, IntoInclude, Nullability, OneInclude, Partial, Pick, RefsInclude, Row, Selection, With,
 };
 pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};

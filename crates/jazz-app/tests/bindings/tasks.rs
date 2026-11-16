@@ -525,9 +525,22 @@ pub mod tasks {
         ::jazz_app::Column::new("type")
     }
 
-    /// Column `dueAt`. Compared as stored, before its transform.
-    pub fn due_at() -> ::jazz_app::Column<Task, ::std::option::Option<::jazz_app::Timestamp>> {
+    /// Column `dueAt`. Compared as stored, before its transform; selected as viewed, through it.
+    pub fn due_at() -> ::jazz_app::Column<Task, ::std::option::Option<::jazz_app::Timestamp>, DueAtView> {
         ::jazz_app::Column::new("dueAt")
+    }
+
+    /// How `select` reads column `dueAt`: as viewed, through its transform.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DueAtView;
+
+    impl ::jazz_app::Pick for DueAtView {
+        type Value = ::std::option::Option<::std::string::String>;
+
+        fn pick(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self::Value> {
+            let computed = &row.implementations().get::<Implementations>()?.0;
+            ::std::result::Result::Ok(row.take_next::<::std::option::Option<::jazz_app::Timestamp>>()?.map(|stored| computed.iso_date_view(stored)))
+        }
     }
 
     /// Column `tags`.
