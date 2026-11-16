@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useSession } from "jazz-tools/react";
+import { useJazzSession } from "jazz-tools/react";
 
 export type AuthCardProps = {
   loggedIn: boolean;
@@ -12,7 +12,7 @@ export type AuthCardProps = {
 type AuthMode = "signin" | "signup";
 
 export function AuthCard({ loggedIn, role, onSignIn, onSignUp, onSignOut }: AuthCardProps) {
-  const session = useSession();
+  const session = useJazzSession();
   const [mode, setMode] = React.useState<AuthMode>("signin");
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -65,7 +65,7 @@ export function AuthCard({ loggedIn, role, onSignIn, onSignUp, onSignOut }: Auth
     <aside className="auth-card">
       <div className="status-card" data-testid="auth-status">
         <div className="status-copy">
-          <span className="status-name">{loggedIn ? session?.user : "Anonymous"}</span>
+          <span className="status-name">{loggedIn ? session.user?.accountId : "Anonymous"}</span>
         </div>
         {role ? <span className="admin-badge">{role}</span> : null}
       </div>
