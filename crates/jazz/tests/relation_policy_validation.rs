@@ -1,7 +1,7 @@
 //! Relation policies (`PolicyExpr::ExistsRel`) a deployment would refuse are
 //! refused by `jazz-tools validate` and the dev server too, not first by a
-//! deploy: both run the schema compile and `check_deployable_policies`
-//! (#5931).
+//! deploy: all three run the schema compile and `check_deployable_policies`
+//! (#5931), and nothing else decides.
 
 use std::collections::BTreeMap;
 
@@ -81,11 +81,10 @@ fn union(labels: &[&str]) -> RelationExpr {
 ///
 /// ```text
 /// alice ──permissions──► validate ──✗ "relation policies … not supported"
-///                        (before: ✓, then deploy ──✗)
 /// ```
 #[test]
 fn relation_policies_a_deploy_refuses_fail_validation() {
-    let cases: [(&str, RelationExpr, &str); 5] = [
+    let cases: [(&str, RelationExpr, &str); 6] = [
         (
             "limit",
             RelationExpr::Limit {
@@ -99,16 +98,14 @@ fn relation_policies_a_deploy_refuses_fail_validation() {
             shares_where("role", RelationValueRef::Param("role".to_owned())),
             "query parameters",
         ),
-        (
-            "untyped literal",
-            shares_where(
-                "role",
-                RelationValueRef::Literal(serde_json::json!("editor")),
-            ),
-            "relation policy literals must be typed values",
-        ),
         ("duplicate union labels", union(&["a", "a"]), "union labels"),
         ("empty union label", union(&[""]), "union labels"),
+        ("NUL in a union label", union(&["a\0b"]), "union labels"),
+        (
+            "4097-byte union label",
+            union(&[&"x".repeat(4097)]),
+            "union labels",
+        ),
     ];
     let mut slipped = BTreeMap::new();
     for (name, rel, expected) in cases {
@@ -125,16 +122,19 @@ fn relation_policies_a_deploy_refuses_fail_validation() {
     );
 }
 
-/// A relation policy with a typed literal and a session reference still
-/// validates.
+/// A relation policy with a session reference, a typed literal or a plain
+/// one (`role = 'editor'`, as the policy compiler writes a hop condition)
+/// still validates: the compile reads a plain literal with the column's type.
 #[test]
-fn a_typed_relation_policy_still_validates() {
+fn supported_relation_policies_still_validate() {
     validate(&schema(PolicyExpr::ExistsRel { rel: my_shares() })).unwrap();
-    validate(&schema(PolicyExpr::ExistsRel {
-        rel: shares_where(
-            "role",
-            RelationValueRef::Literal(serde_json::json!({"type": "Text", "value": "editor"})),
-        ),
-    }))
-    .unwrap();
+    for literal in [
+        serde_json::json!({"type": "Text", "value": "editor"}),
+        serde_json::json!("editor"),
+    ] {
+        validate(&schema(PolicyExpr::ExistsRel {
+            rel: shares_where("role", RelationValueRef::Literal(literal)),
+        }))
+        .unwrap();
+    }
 }

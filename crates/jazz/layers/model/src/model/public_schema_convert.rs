@@ -125,11 +125,9 @@ pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConver
 /// and sync the row under check), so the form is not supported until that
 /// is settled.
 ///
-/// A relation policy (`ExistsRel`) literal must be a typed value (the
-/// `{"type", "value"}` envelope of [`Value`]), as the catalogue stores it; a
-/// bare JSON literal is refused. (Its other unsupported shapes, output steps,
-/// query parameters and malformed union labels, the schema compile already
-/// refuses.)
+/// A relation policy's unsupported shapes (output steps, query parameters,
+/// malformed union labels) are the schema compile's to refuse, which
+/// `jazz-tools validate`, the dev server and a deployment all run.
 pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversionError> {
     for (name, table) in schema {
         let slots = [
@@ -144,100 +142,18 @@ pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversion
                 table.policies.update.with_check.as_ref(),
             ),
             ("delete.using", table.policies.delete.using.as_ref()),
-            (
-                "delete.with_check",
-                table.policies.delete.with_check.as_ref(),
-            ),
         ];
         for (slot, expr) in slots {
             if let Some(expr) = expr {
-                let path = format!("$.{}.policies.{slot}", name.as_str());
-                if slot != "delete.with_check" {
-                    refuse_nested_outer_rows(expr, &path, false)?;
-                }
-                refuse_untyped_relation_literals(expr, &path)?;
+                refuse_nested_outer_rows(
+                    expr,
+                    &format!("$.{}.policies.{slot}", name.as_str()),
+                    false,
+                )?;
             }
         }
     }
     Ok(())
-}
-
-/// Refuse a relation policy literal that is not a typed [`Value`].
-fn refuse_untyped_relation_literals(
-    expr: &PolicyExpr,
-    path: &str,
-) -> Result<(), SchemaConversionError> {
-    match expr {
-        PolicyExpr::ExistsRel { rel } => refuse_untyped_rel_literals(rel, path),
-        PolicyExpr::Exists { condition, .. } | PolicyExpr::Not(condition) => {
-            refuse_untyped_relation_literals(condition, path)
-        }
-        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts
-            .iter()
-            .try_for_each(|part| refuse_untyped_relation_literals(part, path)),
-        _ => Ok(()),
-    }
-}
-
-fn refuse_untyped_rel_literals(
-    rel: &RelationExpr,
-    path: &str,
-) -> Result<(), SchemaConversionError> {
-    match rel {
-        RelationExpr::TableScan { .. } => Ok(()),
-        RelationExpr::Filter { input, predicate } => {
-            refuse_untyped_predicate_literals(predicate, path)?;
-            refuse_untyped_rel_literals(input, path)
-        }
-        RelationExpr::Project { input, .. }
-        | RelationExpr::Distinct { input, .. }
-        | RelationExpr::OrderBy { input, .. }
-        | RelationExpr::Offset { input, .. }
-        | RelationExpr::Limit { input, .. } => refuse_untyped_rel_literals(input, path),
-        RelationExpr::Union { inputs } => inputs
-            .iter()
-            .try_for_each(|arm| refuse_untyped_rel_literals(&arm.input, path)),
-        RelationExpr::Join { left, right, .. } => {
-            refuse_untyped_rel_literals(left, path)?;
-            refuse_untyped_rel_literals(right, path)
-        }
-        RelationExpr::Gather { seed, step, .. } => {
-            refuse_untyped_rel_literals(seed, path)?;
-            refuse_untyped_rel_literals(step, path)
-        }
-    }
-}
-
-fn refuse_untyped_predicate_literals(
-    predicate: &RelationPredicate,
-    path: &str,
-) -> Result<(), SchemaConversionError> {
-    let literal = |value: &RelationValueRef| match value {
-        RelationValueRef::Literal(literal) => serde_json::from_value::<Value>(literal.clone())
-            .map(|_| ())
-            .map_err(|error| {
-                err(
-                    path,
-                    format!("relation policy literals must be typed values: {error}"),
-                )
-            }),
-        _ => Ok(()),
-    };
-    match predicate {
-        RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
-            literal(right)
-        }
-        RelationPredicate::In { values, .. } => values.iter().try_for_each(literal),
-        RelationPredicate::Not(inner) => refuse_untyped_predicate_literals(inner, path),
-        RelationPredicate::And(parts) | RelationPredicate::Or(parts) => parts
-            .iter()
-            .try_for_each(|part| refuse_untyped_predicate_literals(part, path)),
-        RelationPredicate::Removed(removed) => match *removed {},
-        RelationPredicate::IsNull { .. }
-        | RelationPredicate::IsNotNull { .. }
-        | RelationPredicate::True
-        | RelationPredicate::False => Ok(()),
-    }
 }
 
 /// The outer-row column `expr` refers to, if any (inside nested `Exists`
