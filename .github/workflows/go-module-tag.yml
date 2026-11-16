@@ -18,9 +18,10 @@ name: Go module tag
 #   4. Unless dry-run: push packages/jazz-go/v<version> to that commit, in
 #      the publish environment (Anselm approves), refusing if it exists.
 #
-# A pull request changing this file runs it dry, on its own head, or on
-# feat/go-parity while main has no packages/jazz-go yet, with archives it
-# builds itself (linux-x86_64 only) instead of a release's.
+# A pull request changing this file runs it dry (read access only), on its
+# own head, or on feat/go-parity while main has no packages/jazz-go yet (a
+# fallback to remove once Go lands), with an archive it builds itself
+# (linux-x86_64 only) instead of a release's.
 on:
   pull_request:
     paths:
@@ -53,14 +54,49 @@ env:
   MODULE: github.com/garden-co/jazz/packages/jazz-go/v2
 
 jobs:
+  # The draft release's archives, checked against its SHA256SUMS. A draft's
+  # assets are visible only with write access, so this job has it, runs
+  # only on dispatch, and runs no code from the checkout.
+  assets:
+    name: Download the release's archives
+    if: github.event_name != 'pull_request'
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Validate inputs
+        run: |
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+            exit 1
+          fi
+      - name: Download and check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/art"
+          cd "${RUNNER_TEMP}/art"
+          gh release download "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --pattern 'libjazz_ffi-*.tar.gz' --pattern SHA256SUMS
+          for archive in libjazz_ffi-*.tar.gz; do
+            grep " ${archive}\$" SHA256SUMS > "${archive}.sum" || { echo "::error::${archive} is not in SHA256SUMS"; exit 1; }
+            sha256sum -c "${archive}.sum"
+          done
+          rm -f ./*.sum SHA256SUMS
+          ls -la
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: libjazz-ffi-archives
+          path: ${{ runner.temp }}/art/libjazz_ffi-*.tar.gz
+          if-no-files-found: error
+
   prepare:
     name: Embed the core and verify the module
     runs-on: blacksmith-4vcpu-ubuntu-2204
     timeout-minutes: 45
-    # A draft release's assets are visible only with write access; this job
-    # pushes nothing (the push job does, behind the publish environment).
-    permissions:
-      contents: write
+    needs: assets
+    # Runs the checkout's own code (the embed script): read access only.
+    if: ${{ !cancelled() && (needs.assets.result == 'success' || (github.event_name == 'pull_request' && needs.assets.result == 'skipped')) }}
     outputs:
       commit: ${{ steps.commit.outputs.sha }}
     steps:
@@ -102,19 +138,11 @@ jobs:
           tar -C "${RUNNER_TEMP}" -xzf "${RUNNER_TEMP}/go.tgz"
           echo "${RUNNER_TEMP}/go/bin" >> "${GITHUB_PATH}"
 
-      - name: Download the release's archives
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/art"
-          cd "${RUNNER_TEMP}/art"
-          gh release download "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --pattern 'libjazz_ffi-*.tar.gz' --pattern SHA256SUMS
-          for archive in libjazz_ffi-*.tar.gz; do
-            grep " ${archive}\$" SHA256SUMS > "${archive}.sum" || { echo "::error::${archive} is not in SHA256SUMS"; exit 1; }
-            sha256sum -c "${archive}.sum"
-          done
-          ls -la
+        with:
+          name: libjazz-ffi-archives
+          path: ${{ runner.temp }}/art
 
       # The PR proof: a linux-x86_64 archive shaped as the release's.
       - uses: ./.github/actions/setup-build
@@ -205,7 +233,7 @@ jobs:
           GO
           printf 'module example.com/app\n\ngo 1.22\n' > "${app}/go.mod"
           cd "${app}"
-          export GOPROXY="file://${proxy},https://proxy.golang.org" GOFLAGS=-mod=mod GONOSUMDB=github.com/garden-co GONOSUMCHECK=1 GOSUMDB=off
+          export GOPROXY="file://${proxy},https://proxy.golang.org" GOFLAGS=-mod=mod GONOSUMDB=github.com/garden-co GOSUMDB=off
           go get "${MODULE}@v${VERSION}"
           CGO_ENABLED=0 go build -o app .
           cd / && env -u JAZZ_FFI_LIBRARY "${app}/app"
@@ -241,6 +269,11 @@ jobs:
           git fetch -q "${RUNNER_TEMP}/jazz-go.bundle" "${COMMIT}"
           test "$(git rev-parse "${COMMIT}^")" = "$(git rev-parse "v${VERSION}^{commit}")" \
             || { echo "::error::the commit isn't a child of v${VERSION}"; exit 1; }
+          # It may only add the embedded libraries.
+          if git diff --name-only "${COMMIT}^" "${COMMIT}" | grep -Ev '^packages/jazz-go/(lib/.+|embed_[a-z0-9]+_[a-z0-9]+\.go)$'; then
+            echo "::error::the release commit touches more than packages/jazz-go/lib/ and embed_*.go"
+            exit 1
+          fi
           if git ls-remote --exit-code --tags origin "refs/tags/packages/jazz-go/v${VERSION}" >/dev/null; then
             echo "::error::packages/jazz-go/v${VERSION} already exists: tags are never moved"
             exit 1
