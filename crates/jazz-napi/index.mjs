@@ -49,6 +49,7 @@ export const {
   schemaSourceHash,
   validateBindings,
   validateSchema,
+  versionTables,
   writeAppArtifact,
   writeAppFiles,
 } = nativeBinding;

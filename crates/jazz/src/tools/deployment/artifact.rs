@@ -1470,6 +1470,14 @@ pub fn version_tables(schema: &Schema) -> Result<Json, ArtifactError> {
         .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
 }
 
+/// [`version_tables`] of a schema in the engine's JSON form, as
+/// [`schema_hash`] reads it, printed.
+pub fn version_tables_json(schema_json: &[u8]) -> Result<String, ArtifactError> {
+    let schema: Schema = serde_json::from_slice(schema_json)
+        .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))?;
+    Ok(json::print(&version_tables(&schema)?))
+}
+
 /// A column type in the file's form (`"string"`, `{ "enum": […] }`).
 pub fn column_type_spec(ty: &ColumnType) -> Result<Json, ArtifactError> {
     app_file::type_spec(ty).map_err(|error| ArtifactError::unsupported(APP_FILE, error))

@@ -15,6 +15,7 @@ async function jazzNapi(): Promise<{
   schemaHash(engineSchemaJson: string): string;
   schemasAreCompatible(leftJson: string, rightJson: string): boolean;
   migrationDiff(fromJson: string, toJson: string): string;
+  versionTables(engineSchemaJson: string): string;
 }> {
   // A specifier bundlers can't follow: this module is Node tooling only.
   const specifier = "jazz-napi";
@@ -558,111 +559,14 @@ export async function snapshotFromVersion(
   return { hash: current.hash, schema };
 }
 
-const ENGINE_TYPE_NAMES: Record<string, string> = {
-  Text: "string",
-  Integer: "int",
-  BigInt: "bigint",
-  Double: "float",
-  Boolean: "boolean",
-  Timestamp: "timestamp",
-  Uuid: "uuid",
-  Bytea: "bytes",
-};
-
-function engineType(type: WasmColumnType): ReadableJson {
-  const name = ENGINE_TYPE_NAMES[type.type];
-  if (name) return name;
-  switch (type.type) {
-    case "Enum":
-      return { enum: [...type.variants] };
-    case "Json":
-      return { json: (type.schema as ReadableJson | undefined) ?? true };
-    case "Array":
-      return { array: engineType(type.element) };
-    default:
-      throw new Error(`a ${type.type} column can't be written to jazz.app.json`);
-  }
-}
-
-function base64(bytes: ArrayLike<number>): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
-  return btoa(binary);
-}
-
-function engineValue(value: Value, type: WasmColumnType): ReadableJson {
-  switch (value.type) {
-    case "Null":
-      return null;
-    case "Integer":
-    case "Double":
-    case "Timestamp":
-      return Number(value.value);
-    case "BigInt":
-      return String(structuralBigInt(value.value));
-    case "Boolean":
-      return value.value;
-    case "Text":
-      return type.type === "Json" ? (JSON.parse(value.value) as ReadableJson) : value.value;
-    case "Uuid":
-      return value.value;
-    case "Bytea": {
-      const bytes = value.value as unknown;
-      if (typeof bytes === "string") return bytes;
-      return base64(bytes as ArrayLike<number>);
-    }
-    case "Array": {
-      const element = type.type === "Array" ? type.element : type;
-      return value.value.map((item) => engineValue(item, element));
-    }
-    default:
-      throw new Error(`a ${value.type} default can't be written to jazz.app.json`);
-  }
-}
-
-const MERGE_NAMES: Record<string, string> = {
-  Counter: "counter",
-  GSet: "g-set",
-  Text: "text",
-  Markdown: "markdown",
-  Html: "html",
-};
-
-function engineColumn(column: ColumnDescriptor): ReadableJson {
-  const type = engineType(column.column_type);
-  const plain =
-    column.default === undefined && column.merge_strategy === undefined && !column.references;
-  if (plain && typeof type === "string") return column.nullable ? `${type}?` : type;
-  return {
-    ...(typeof type === "string" ? { type } : (type as Record<string, ReadableJson>)),
-    ...(column.nullable ? { optional: true } : {}),
-    ...(column.default === undefined
-      ? {}
-      : { default: engineValue(column.default, column.column_type) }),
-    ...(column.merge_strategy ? { merge: MERGE_NAMES[column.merge_strategy]! } : {}),
-    ...(column.references ? { references: column.references } : {}),
-  };
-}
-
-/** A snapshot (engine schema) as a readable history version: columns with `references`, no relations. */
-export function snapshotToVersion(schema: WasmSchema): ReadableVersion {
-  const tables: Record<string, ReadableTable> = {};
-  for (const [name, table] of Object.entries(schema)) {
-    const entry: ReadableTable = {
-      columns: Object.fromEntries(
-        table.columns.map((column) => [column.name, engineColumn(column)]),
-      ),
-    };
-    const indexes: ReadableJson[] = [
-      ...(table.indexed_columns ?? []),
-      ...(table.composite_indexes ?? []).map((index) => [...index]),
-    ];
-    if (indexes.length > 0) entry.indexes = indexes;
-    if (table.branchBy?.length) entry.branchBy = [...table.branchBy];
-    if (table.history) entry.history = table.history;
-    tables[name] = entry;
-  }
-  return { tables };
+/**
+ * A snapshot (engine schema) as a readable history version: columns with
+ * `references`, no relations. Rust's `versionTables` (jazz-napi), the form
+ * `jazz.app.json`'s writer prints a `history` version in.
+ */
+export async function snapshotToVersion(schema: WasmSchema): Promise<ReadableVersion> {
+  const tables = (await jazzNapi()).versionTables(JSON.stringify({ tables: schema }));
+  return { tables: JSON.parse(tables) as Record<string, ReadableTable> };
 }
 
 /** A migration witness table as a readable version table (references, no relations). */
@@ -845,9 +749,9 @@ export async function loadMigrationHistory(options: {
   if (files.length === 0) return { history: {}, migrations: [], current: current.hash };
 
   const versions = new Map<string, Record<string, ReadableTable>>();
-  versions.set(currentShort, snapshotToVersion(current.schema).tables);
+  versions.set(currentShort, (await snapshotToVersion(current.schema)).tables);
   for (const snapshot of await listSnapshots(options.migrationsDir))
-    versions.set(shortSchemaHash(snapshot.hash), snapshotToVersion(snapshot.schema).tables);
+    versions.set(shortSchemaHash(snapshot.hash), (await snapshotToVersion(snapshot.schema)).tables);
 
   // Derive what no snapshot holds, walking migrations until nothing changes.
   const failures = new Map<string, string>();
