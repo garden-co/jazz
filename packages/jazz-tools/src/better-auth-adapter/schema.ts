@@ -199,7 +199,7 @@ export function buildJazzSchemaFromTables(args: {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_APP_FILE_PATH = "./jazz.app.json";
-const APP_FILE_SCHEMA_URL = "https://jazz.tools/schemas/jazz.app.schema.json";
+const APP_FILE_SCHEMA_URL = "https://jazz.tools/schemas/jazz.app.v1.json";
 const APP_FILE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_LINE = 100;
 
@@ -477,7 +477,7 @@ export function mergeBetterAuthTables(args: {
     const tables = Object.fromEntries(
       Object.entries(generated).map(([name, table]) => [name, formatTable(name, table)]),
     );
-    return `{\n  "$schema": ${JSON.stringify(APP_FILE_SCHEMA_URL)},\n  "format": 1,\n  "tables": ${formatTables(tables)}\n}\n`;
+    return `{\n  "$schema": ${JSON.stringify(APP_FILE_SCHEMA_URL)},\n  "tables": ${formatTables(tables)}\n}\n`;
   }
 
   const text = args.appFile.replace(/\r\n/g, "\n");

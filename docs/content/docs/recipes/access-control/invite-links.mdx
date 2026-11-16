@@ -26,8 +26,7 @@ you can audit or revoke individual memberships later.
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "chats": {
       "columns": {},
@@ -70,8 +69,7 @@ on their behalf after validating the join code.
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "defs": {
     "isChatCreator($chat)": "exists chats(id = $chat, $createdBy.account = session.user)"
   },

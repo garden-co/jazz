@@ -28,8 +28,7 @@ The smallest useful model adds a normal string column to the table and lists it 
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "documents": {
       "columns": {
@@ -74,8 +73,7 @@ branch needs queryable metadata, model it as an ordinary row and make the branch
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "branches": {
       "columns": {

@@ -1,6 +1,5 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "shares": { "read": "allowedTo.read(todoRow)" },
     "todos": {
