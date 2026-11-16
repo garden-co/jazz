@@ -867,9 +867,12 @@ generate` writes both files from it, and marks each with a top-level
   text, and `artifact::rewrite(app, permissions, by?)` checks two readable
   files as `load` does and re-renders them through the writer (keeping
   migration `name`s; dropping `$comment`s), with the marker when asked. The
-  standalone `jazz-tools` binary can't read TypeScript: its `generate` and
-  `migrations create` refuse an app with a `schema.ts` in its directory,
-  `src/` or `src/lib/`, pointing to `npx jazz-tools generate`.
+  standalone `jazz-tools` binary can't read TypeScript: for an app with a
+  `schema.ts` in its directory, `src/` or `src/lib/`, its `generate` and
+  `migrations create` refuse, pointing to `npx jazz-tools generate`, while
+  `generate --check` (for CI gates) checks the committed files, their
+  `$generated` digests and the bindings, and notes that freshness from the
+  TypeScript is `npx jazz-tools generate --check`'s to check.
 
 #### `jazz.app.json`
 
