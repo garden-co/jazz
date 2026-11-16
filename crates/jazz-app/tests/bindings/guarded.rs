@@ -1,7 +1,7 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
-#![allow(dead_code, clippy::all)]
+#![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
 pub const SOURCE: &str = "sha256:2585de3597efe8dff21e520492a7377766afd44796c9f71d84782cf16729a6ff";
@@ -41,6 +41,7 @@ pub struct NoteUpdate {
 
 impl ::jazz_app::Table for Note {
     const NAME: &'static str = "notes";
+    const COLUMNS: &'static [&'static str] = &["owner", "body"];
     type New = NewNote;
     type Update = NoteUpdate;
 
@@ -101,6 +102,11 @@ pub mod notes {
     /// Every row of `notes`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Note> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `notes`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Note>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)

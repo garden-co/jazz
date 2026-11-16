@@ -1,3 +1,6 @@
+//! **Unstable** (feature `unstable-endpoint`, off by default, not part of a
+//! release yet): run an app's main backend with TS `createJazz`.
+//!
 //! The app's Jazz endpoint, served by its backend: what `createJazz`'s
 //! handler at `/jazz` does for the app's users (`packages/jazz-tools/src/
 //! backend/create-jazz.ts`), so a Rust backend fronts its users' browser and
