@@ -14,6 +14,7 @@
     "setup/backend-client",
     "setup/swift",
     "setup/kotlin",
+    "setup/go",
     "---Working with Data---",
     "schemas",
     "reading",
