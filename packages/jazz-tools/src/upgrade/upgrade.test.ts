@@ -167,6 +167,38 @@ describe("jazz-tools upgrade: conversions", () => {
     expectGolden("rust", dir, report, { generated: false });
   });
 
+  it("expands a hand-written file's defs, one calling another, keeping the hashes and bundle id", async () => {
+    const dir = fixture("chat");
+    const file = join(dir, "jazz.permissions.json");
+    const inlined = readFileSync(file, "utf8");
+    const before = await identityOf(dir);
+    // As an author would have factored it by hand in alpha.63–65.
+    const withDefs = JSON.parse(
+      inlined
+        .replaceAll(
+          "exists chatMembers(chatId = this.chatId, userId = session.user)",
+          "member(this.chatId)",
+        )
+        .replaceAll(
+          "exists chatMembers(chatId = this.id, userId = session.user)",
+          "canManage(this.id)",
+        ),
+    );
+    withDefs.defs = {
+      "member($chat)": "exists chatMembers(chatId = $chat, userId = session.user)",
+      "canManage($chat)": "member($chat)",
+    };
+    writeFileSync(file, `${JSON.stringify(withDefs, null, 2)}\n`);
+    const report = await upgrade(dir, { skipFreshCheck: true });
+    expect(await identityOf(dir)).toEqual(before);
+    expect(report.notes.join("\n")).toContain(
+      "`defs` (member($chat), canManage($chat)) were expanded",
+    );
+    expect(readFileSync(join(dir, "schema.ts"), "utf8")).toContain(
+      "const isChatMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: session.user });",
+    );
+  });
+
   it("writes nothing on a dry run", async () => {
     const dir = fixture("chat");
     const before = projectFiles(dir);

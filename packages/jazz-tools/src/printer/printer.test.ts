@@ -6,6 +6,7 @@ import type { AppJson, PermissionsJson } from "./app-json.js";
 import { parseExpr } from "./expr.js";
 import { formatTs, layout, printPermissions, printSchemaTs } from "./index.js";
 import { printMigrations } from "./migrations.js";
+import { expandDefs } from "./defs.js";
 
 const REPO = join(__dirname, "..", "..", "..", "..");
 const read = (path: string) => JSON.parse(readFileSync(path, "utf8"));
@@ -199,6 +200,35 @@ describe("the permissions printer", () => {
     await expect(await formatTs(out.files["schema.ts"]!, { prettier })).toMatchFileSnapshot(
       "__snapshots__/big-label.schema.ts.snap",
     );
+  });
+});
+
+describe("defs", () => {
+  it("expand where they are called, recursively, without touching exists or hops", () => {
+    const out = expandDefs({
+      format: 1,
+      defs: {
+        "shared($todo, $user)": "exists shares(todo = $todo, user = $user)",
+        "mineOrShared($todo)": { anyOf: ["owner = session.user", "shared($todo, session.user)"] },
+      },
+      tables: {
+        todos: {
+          read: "mineOrShared(this.id)",
+          update: {
+            old: "true",
+            new: "exists todos(id = this.id).owner(name = 'x') and shared(this.id, session.user)",
+          },
+        },
+      },
+    });
+    expect(out.defs).toBeUndefined();
+    expect(out.tables.todos!.read).toBe(
+      "(anyOf(owner = session.user, (exists shares(todo = this.id, user = session.user))))",
+    );
+    expect(out.tables.todos!.update).toEqual({
+      old: "true",
+      new: "exists todos(id = this.id).owner(name = 'x') and (exists shares(todo = this.id, user = session.user))",
+    });
   });
 });
 
