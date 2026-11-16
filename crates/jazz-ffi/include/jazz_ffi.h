@@ -45,12 +45,12 @@ typedef struct JazzSubscription JazzSubscription;
 typedef void (*JazzCallback)(void *ctx, const char *kind, const char *json);
 
 /*
- * Opens an app. config_json: { "app": "<jazz.app.json text>",
- * "permissions"?: "<jazz.permissions.json text>", "appId"?, "serverUrl"?,
- * "dataDir"?, "storage"?: "memory"|"persistent", "backendSecret"?,
- * "adminSecret"?, "session"?: { "issuer"?: "jazz:backend", "subject" } }.
- * With permissions it opens as the app's backend acting as the session's
- * user; without, as a local client.
+ * Opens an app. config_json: { "app": "<jazz.app.json text>", "appId"?,
+ * "serverUrl"?, "auth"?: {"deviceKey": "jazz-auth-v1:..."}, "dataDir"?,
+ * "storage"?: "memory"|"persistent", "contract"?: 2 }. Without "auth" it
+ * opens as a local client; with a device key, as that end user syncing
+ * through the app's /jazz. Bearer users and backend clients open with
+ * jazz_open_user.
  */
 JazzHandle *jazz_open(const char *config_json, char **err);
 
@@ -84,13 +84,12 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "uploadFinish" {"upload", "tier"?}                        -> the row
  *   "uploadAbort"  {"upload"}                                 -> null
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
- *                     | null (a local app or a backend)
+ *                     | null (a local app)
  *   "syncStatus" {} -> {"link": ...}
  *   "refresh"  {}  -> null (asks the token callback for a fresh token)
  *   "link"     {"bearer"} -> the user (links a device account to the app's
  *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
- *   "bundle"   {}  -> "<published permissions bundle>" | null (a backend's)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run

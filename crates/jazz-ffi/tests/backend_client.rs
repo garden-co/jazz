@@ -160,7 +160,9 @@ async fn backend_clients_open_as_the_main_backend_trusts_them() {
         // Closing it leaves the job open.
         as_alice.shutdown().unwrap();
         assert!(matches!(as_alice.all(shows()), Err(JazzError::Closed)));
-        assert_eq!(job.backend_client().unwrap().as_deref(), Some("trusted"));
+        // The job's own client still runs: it reads and writes.
+        job.insert("shows".into(), show(nil_uuid())).unwrap();
+        assert!(!titles_of(&job.all(shows()).unwrap()).is_empty());
 
         job.shutdown_within(10_000).expect("drained");
         assert!(matches!(job.all(shows()), Err(JazzError::Closed)));
@@ -187,6 +189,19 @@ async fn backend_clients_open_as_the_main_backend_trusts_them() {
             "{:?}",
             untrusted.map(|_| ())
         );
+        // { "credential": true } stands alone.
+        let mut mixed = parse(&credential);
+        mixed["auth"]["bearer"] = json!(true);
+        assert!(matches!(
+            JazzHandle::open_with_tokens(mixed.to_string(), Arc::new(Machine("machine-trusted"))),
+            Err(JazzError::Refused { .. })
+        ));
+        let mut secret = parse(&credential);
+        secret["backendSecret"] = json!("s");
+        assert!(matches!(
+            JazzHandle::open_with_tokens(secret.to_string(), Arc::new(Machine("machine-trusted"))),
+            Err(JazzError::Refused { .. })
+        ));
         // A credential needs a provider.
         assert!(matches!(
             JazzHandle::open(credential),
@@ -196,6 +211,10 @@ async fn backend_clients_open_as_the_main_backend_trusts_them() {
     .await
     .unwrap();
     app.stop().await;
+}
+
+fn titles_of(rows: &str) -> Vec<Value> {
+    parse(rows).as_array().cloned().unwrap_or_default()
 }
 
 fn shows() -> String {
@@ -421,7 +440,17 @@ async fn a_c_host_opens_a_trusted_backend_client_and_acts_for_a_user() {
         let bob = jazz_for_user(as_alice, c("bob").as_ptr(), ptr::null(), &mut err);
         assert!(bob.is_null());
         assert_eq!(take(err)["kind"], "refused");
+        // The job's own transaction, open across her handle's close.
+        let job_open = call(job, "txBegin", json!({})).unwrap()["tx"].clone();
+        call(
+            job,
+            "insert",
+            json!({ "table": "shows", "row": parse(&show(nil_uuid())), "tx": job_open }),
+        )
+        .unwrap();
         jazz_close(as_alice);
+        // It survives: closing her handle ends only her handle's own.
+        call(job, "txCommit", json!({ "tx": job_open })).expect("the job's transaction");
         // Her handle's close rolled back her open transaction: the job can't
         // reach it either way.
         assert_eq!(
@@ -429,7 +458,13 @@ async fn a_c_host_opens_a_trusted_backend_client_and_acts_for_a_user() {
             "refused"
         );
         // The job goes on, then drains and is freed.
-        assert_eq!(call(job, "backendClient", json!({})), Ok(json!("trusted")));
+        assert!(
+            !call(job, "all", json!({ "query": { "table": "shows" } }))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let closed = jazz_close_within(job, 10_000, &mut err);
         assert!(err.is_null(), "{}", take(err));
         assert_eq!(closed, 0);
@@ -439,5 +474,83 @@ async fn a_c_host_opens_a_trusted_backend_client_and_acts_for_a_user() {
     })
     .await
     .unwrap();
+    app.stop().await;
+}
+
+/// Counts its calls; gives `machine-trusted`.
+unsafe extern "C" fn counting_cb(
+    ctx: *mut c_void,
+    reason: *const c_char,
+    token: *mut *mut c_char,
+) -> i32 {
+    let calls = unsafe { &*(ctx as *const std::sync::atomic::AtomicUsize) };
+    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let trusted = &TRUSTED as *const &str as *mut c_void;
+    unsafe { machine_cb(trusted, reason, token) }
+}
+
+/// While `jazz_close_within` drains, the client may reconnect, and the
+/// token callback still answers it; it stops once the call returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_token_callback_answers_while_closing_drains() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let app = App::start().await;
+    let credential = app.config(json!({ "credential": true }));
+    let calls: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+    struct Handle(*mut jazz_ffi::c_abi::JazzHandle);
+    unsafe impl Send for Handle {}
+    let job = tokio::task::spawn_blocking(move || unsafe {
+        let mut err = ptr::null_mut();
+        let job = jazz_open_user(
+            c(&credential).as_ptr(),
+            Some(counting_cb),
+            calls as *const AtomicUsize as *mut c_void,
+            &mut err,
+        );
+        assert!(!job.is_null());
+        Handle(job)
+    })
+    .await
+    .unwrap();
+    // The main backend stops admitting the machine: a write waits here.
+    app.relay.refuse(TRUSTED, "token expired");
+    app.relay.kick();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let job = tokio::task::spawn_blocking(move || {
+        let job = job;
+        call(
+            job.0,
+            "insert",
+            json!({ "table": "shows", "row": parse(&show(nil_uuid())) }),
+        )
+        .unwrap();
+        job
+    })
+    .await
+    .unwrap();
+    let before = calls.load(Ordering::SeqCst);
+    let closing = tokio::task::spawn_blocking(move || unsafe {
+        let job = job;
+        let mut err = ptr::null_mut();
+        let closed = jazz_close_within(job.0, 15_000, &mut err);
+        (closed, (!err.is_null()).then(|| take(err)))
+    });
+    // Admitted again while it drains: reconnecting asks for a token.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    app.relay.refusing.lock().unwrap().clear();
+    app.relay.kick();
+    let (closed, error) = closing.await.unwrap();
+    assert_eq!((closed, error), (0, None), "drained through a fresh token");
+    assert!(
+        calls.load(Ordering::SeqCst) > before,
+        "asked while draining"
+    );
+    let after = calls.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        after,
+        "never after it returns"
+    );
     app.stop().await;
 }

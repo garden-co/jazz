@@ -484,7 +484,8 @@ pub unsafe extern "C" fn jazz_close_within(
 /// once `handle` closes, its calls fail with kind `"closed"`. It never
 /// creates an account: kind `"noAccount"` (with `"userId"`, contract 2)
 /// when the user has none yet, `"permission"` when the main backend refuses
-/// the identity, `"refused"` on a scoped client.
+/// the identity, `"refused"` on a scoped client, a `jazz_for_user` handle
+/// or any other app.
 ///
 /// # Safety
 /// `handle` comes from `jazz_open_user` and is not closed; the strings are

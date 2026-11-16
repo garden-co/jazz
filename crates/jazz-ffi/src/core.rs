@@ -314,15 +314,8 @@ impl Core {
                 "for_user needs the user's id, as the main backend's authenticate names it",
             ));
         }
-        let jazz = match block_on(self.open_jazz()?.for_user(user_id, claims)) {
-            Ok(jazz) => jazz,
-            Err(jazz_app::Error::Refused(reason)) => {
-                return Err(FfiError::Permission(format!(
-                    "the main backend refused to act for {user_id}: {reason}"
-                )));
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let jazz = block_on(self.open_jazz()?.for_user(user_id, claims))
+            .map_err(|error| for_user_error(user_id, error))?;
         Ok(Self::with(
             jazz,
             self.schema.clone(),
@@ -1244,6 +1237,17 @@ impl Core {
     }
 }
 
+/// `for_user`'s errors: the main backend refusing the identity (its 403,
+/// `identity_not_authorized`) is a permission denial, not a malformed call.
+fn for_user_error(user_id: &str, error: jazz_app::Error) -> FfiError {
+    match error {
+        jazz_app::Error::Refused(reason) => FfiError::Permission(format!(
+            "the main backend refused to act for {user_id}: {reason}"
+        )),
+        error => error.into(),
+    }
+}
+
 /// A forwarder's sender that, dropped before the forwarder ended on its
 /// own, tells the delivery thread the subscription is over.
 struct EndGuard(Option<mpsc::Sender<Option<Event>>>);
@@ -1750,4 +1754,32 @@ fn config(
         permissions.map(String::into_bytes),
     );
     Ok((files, result, app))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The relay stand-in can't make the core answer 403, so the mapping is
+    /// checked here: a refused identity is `Permission`; `NoAccount` and a
+    /// scoped client's `Config` keep their kinds.
+    #[test]
+    fn for_user_errors_name_the_403_a_permission_denial() {
+        let refused = for_user_error(
+            "alice",
+            jazz_app::Error::Refused("identity_not_authorized".into()),
+        );
+        assert!(
+            matches!(&refused, FfiError::Permission(m) if m.contains("alice") && m.contains("identity_not_authorized")),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            for_user_error("alice", jazz_app::Error::NoAccount("alice".into())),
+            FfiError::NoAccount { user_id, .. } if user_id == "alice"
+        ));
+        assert!(matches!(
+            for_user_error("alice", jazz_app::Error::Config("scoped".into())),
+            FfiError::Refused(_)
+        ));
+    }
 }

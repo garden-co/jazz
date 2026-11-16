@@ -68,7 +68,8 @@ backend decides what the client is, reported by `backend_client()` /
   `"noAccount"`, with `userId`) when the user has none yet, `Permission`
   when the main backend refuses the identity (its 403). Closing such a
   handle leaves its parent open.
-- `"scoped"`: it acts as its one user, and has no `for_user`.
+- `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
+  kind `"refused"`), as on a `for_user` handle or any other app.
 
 A token trusted neither way fails the open with `Refused`.
 `shutdown_within(timeout_ms)` / `jazz_close_within` first waits for the
@@ -95,10 +96,9 @@ subject, claims, kind}}`; `sync_status()` / `"syncStatus"` gives `{"link":
 device account to the app's own sign-in (the session becomes that user's, on
 the device's account); `sign_out()` signs out and closes the app. The sync
 status is TS's `SyncStatus` (`{link, pendingUploads, oldestPendingAt,
-rejected, lastError, synced}`). A backend's `bundle()` / `"bundle"` is the
-permissions bundle it published. Anonymous users are not supported (as in TS).
+rejected, lastError, synced}`). Anonymous users are not supported (as in TS).
 
-Without `permissions` or `auth`, it opens as a local client. `appId` is required for
+Without `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
 ## Values, queries, rows, deltas
