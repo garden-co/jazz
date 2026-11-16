@@ -38,7 +38,8 @@ export type {
   App,
 } from "../typed-app.js";
 // Removed in alpha.65 (files as source): stubs that throw, pointing at `jazz-tools upgrade`.
-export { schema, migration } from "../removed-schema-api.js";
+export { schema } from "../schema-namespace.js";
+export { migration } from "../migration-namespace.js";
 export {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
