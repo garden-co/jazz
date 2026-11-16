@@ -422,6 +422,10 @@ pub(crate) fn from_sql(
         (ValueType::Bytes, ValueRef::Blob(_) | ValueRef::Integer(_)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
         }
+        // A vector cell is its `f32le/1` bytes inline, never a large value.
+        (ValueType::Vector(_), ValueRef::Blob(bytes)) => {
+            return Ok(Some(Value::Bytes(bytes.to_vec())));
+        }
         // An author record, read as a JSON array of its fields (see
         // `compile::column_sql`).
         (ValueType::Record(descriptor), ValueRef::Text(cell)) => {

@@ -180,6 +180,8 @@ fn persisted_descriptor_kind_payloads_preserve_types_and_reject_incomplete_trees
         ValueType::Bool,
         ValueType::String,
         ValueType::Bytes,
+        ValueType::Vector(3),
+        ValueType::Nullable(Box::new(ValueType::Vector(4096))),
         ValueType::raw_string(),
         ValueType::raw_bytes(),
         ValueType::Uuid,
@@ -3241,4 +3243,120 @@ fn u48_typed_fields_and_descriptor_codec_round_trip() {
         .collect::<Vec<_>>();
     assert_eq!(u64_descriptor.len(), u48_descriptor.len());
     assert_eq!(differing, [(&5u8, &25u8)]);
+}
+
+// A `vector(n)` (SPEC 20.1) is a variable-width field whose payload is its
+// `f32le/1` bytes and nothing else: no stored-scalar header, never a large
+// value. Nullable vectors use the variable-width nullable form (flag, then
+// payload). The literal bytes are the durable receipt.
+const VECTOR_RECORD_FIXTURE: &[u8] = &[
+    0x07, // id: U8 (fixed region)
+    0x11, 0x00, 0x00, 0x00, // end offset of `embedding` (17)
+    0x16, 0x00, 0x00, 0x00, // end offset of `maybe` (22)
+    0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0, // embedding: [1.0, -2.0] f32le
+    0x01, 0x00, 0x00, 0x00, 0x3f, // maybe: Some([0.5])
+    0x00, // none: null
+];
+
+// `groove.persisted_descriptor.v2` node 27 (`Vector`) carries `dimensions`
+// as a u32; every older node keeps its tag and payload.
+const VECTOR_DESCRIPTOR_FIXTURE: &[u8] = &[
+    0x03, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x01, 0x01, b'e', b'm', b'b', b'e', b'd', b'd', b'i', b'n', b'g', // field
+    0x1b, 0x80, 0x01, 0x00, 0x00, // Vector, dimensions 384
+];
+
+fn vector_record_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("id", ValueType::U8),
+        ("embedding", ValueType::Vector(2)),
+        ("maybe", ValueType::Nullable(Box::new(ValueType::Vector(1)))),
+        ("none", ValueType::Nullable(Box::new(ValueType::Vector(1)))),
+    ])
+}
+
+fn f32le(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// A vector field encodes as its exact `f32le/1` bytes and its descriptor
+/// node as tag 27 with the dimensions; both round-trip.
+#[test]
+fn vector_record_and_descriptor_fixtures_are_exact() {
+    let descriptor = vector_record_descriptor();
+    let values = vec![
+        Value::U8(7),
+        Value::Bytes(f32le(&[1.0, -2.0])),
+        Value::Nullable(Some(Box::new(Value::Bytes(f32le(&[0.5]))))),
+        Value::Nullable(None),
+    ];
+    assert_eq!(descriptor.create(&values).unwrap(), VECTOR_RECORD_FIXTURE);
+    let bound = descriptor.bind(VECTOR_RECORD_FIXTURE);
+    assert_eq!(bound.to_values().unwrap(), values);
+    bound.validate().unwrap();
+
+    let persisted = RecordDescriptor::new([("embedding", ValueType::Vector(384))]);
+    assert_eq!(
+        encode_persisted_record_descriptor(&persisted).unwrap(),
+        VECTOR_DESCRIPTOR_FIXTURE
+    );
+    let decoded = decode_persisted_record_descriptor(VECTOR_DESCRIPTOR_FIXTURE).unwrap();
+    assert_eq!(decoded.fields()[0].value_type, ValueType::Vector(384));
+}
+
+/// Encoders, decoders and validation refuse a vector of the wrong length or
+/// with a NaN or infinite element, and dimensions outside 1..=4096.
+#[test]
+fn vector_values_refuse_wrong_length_non_finite_and_bad_dimensions() {
+    let only = RecordDescriptor::new([("v", ValueType::Vector(2))]);
+    assert!(matches!(
+        only.create(&[Value::Bytes(f32le(&[1.0]))]),
+        Err(Error::VectorLength {
+            dimensions: 2,
+            bytes: 4
+        })
+    ));
+    assert!(matches!(
+        only.create(&[Value::Bytes(f32le(&[1.0, f32::NAN]))]),
+        Err(Error::VectorNonFinite { index: 1 })
+    ));
+    assert!(matches!(
+        only.create(&[Value::Bytes(f32le(&[f32::NEG_INFINITY, 1.0]))]),
+        Err(Error::VectorNonFinite { index: 0 })
+    ));
+    assert!(
+        Value::Bytes(f32le(&[1.0, 2.0, 3.0]))
+            .check_type(&ValueType::Vector(2))
+            .is_err()
+    );
+    assert!(
+        Value::Bytes(f32le(&[1.0, 2.0]))
+            .check_type(&ValueType::Vector(2))
+            .is_ok()
+    );
+    // Only bytes carry a vector.
+    assert!(only.create(&[Value::String("ab".into())]).is_err());
+
+    // Raw bytes from a peer are validated the same way.
+    let nan = [0x00, 0x00, 0xc0, 0x7f, 0x00, 0x00, 0x80, 0x3f];
+    assert!(only.bind(&nan).validate().is_err());
+    assert!(only.bind(&nan).to_values().is_err());
+    assert!(only.bind(&[0u8; 7]).to_values().is_err());
+
+    // A vector is not a fixed-width tuple member.
+    assert!(matches!(
+        validate_schema_value_type(&ValueType::Tuple(vec![ValueType::Vector(1)])),
+        Err(Error::InvalidTupleMember { .. })
+    ));
+    assert!(validate_schema_value_type(&ValueType::Vector(0)).is_err());
+    assert!(validate_schema_value_type(&ValueType::Array(Box::new(ValueType::Vector(2)))).is_ok());
+
+    // Dimensions outside 1..=4096 cannot be persisted or decoded.
+    // (`RecordDescriptor::new` refuses them as a programmer error.)
+    assert!(validate_schema_value_type(&ValueType::Vector(4097)).is_err());
+    assert!(validate_schema_value_type(&ValueType::Vector(4096)).is_ok());
+    let mut zero = VECTOR_DESCRIPTOR_FIXTURE.to_vec();
+    let len = zero.len();
+    zero[len - 4..].copy_from_slice(&0u32.to_le_bytes());
+    assert!(decode_persisted_record_descriptor(&zero).is_err());
 }

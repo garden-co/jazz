@@ -15,6 +15,7 @@ import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-bui
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
 import type { ColumnTransform } from "./column-transforms.js";
+import { bytesToVector } from "./vector.js";
 
 export type { WasmValue };
 
@@ -284,6 +285,9 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
     case "Timestamp":
       return timestampToDate(v.value, columnName);
     case "Bytea":
+      if (columnType?.type === "Vector") {
+        return bytesToVector(toByteArray((v as { value: unknown }).value));
+      }
       return toByteArray((v as { value: unknown }).value);
     case "Null":
       return null;

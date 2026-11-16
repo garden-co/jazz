@@ -755,6 +755,7 @@ fn convert_table(
                 matches!(
                     descriptor.column_type,
                     ColumnType::Bytea
+                        | ColumnType::Vector { .. }
                         | ColumnType::Array { .. }
                         | ColumnType::Row { .. }
                         | ColumnType::EnumPayload { .. }
@@ -979,6 +980,11 @@ fn convert_default_for_column_type(
         (ColumnType::Double, Value::Double(value)) => Ok(RecordValue::F64(*value)),
         (ColumnType::Uuid, Value::Uuid(value)) => Ok(RecordValue::Uuid(*value.uuid())),
         (ColumnType::Bytea, Value::Bytea(value)) => Ok(RecordValue::Bytes(value.clone())),
+        (ColumnType::Vector { dimensions }, Value::Bytea(value)) => {
+            jazz_types::records::validate_vector_f32le(value, *dimensions)
+                .map_err(|error| column_err(table, column, format!("vector default: {error}")))?;
+            Ok(RecordValue::Bytes(value.clone()))
+        }
         (ColumnType::Integer, Value::Integer(value)) => Ok(RecordValue::I32(*value)),
         (ColumnType::Integer, Value::BigInt(value)) => {
             i32::try_from(*value).map(RecordValue::I32).map_err(|_| {
@@ -1052,6 +1058,13 @@ fn convert_column_type(
                 .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::Array { element } => {
+            if matches!(element.as_ref(), ColumnType::Vector { .. }) {
+                return Err(column_err(
+                    table,
+                    column,
+                    "an array of vectors is not supported",
+                ));
+            }
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
         // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
@@ -1069,6 +1082,17 @@ fn convert_column_type(
             column,
             "nested Row columns are not supported by core schema conversion yet",
         )),
+        ColumnType::Vector { dimensions } => {
+            if (1..=jazz_types::records::VECTOR_MAX_DIMENSIONS).contains(dimensions) {
+                Ok(StorageColumnType::Vector(*dimensions))
+            } else {
+                Err(column_err(
+                    table,
+                    column,
+                    format!("vector dimensions must be 1 to 4096, got {dimensions}"),
+                ))
+            }
+        }
     }
 }
 
@@ -4515,6 +4539,9 @@ mod tests {
             jazz_types::records::ValueType::Bool => RecordValue::Bool(true),
             jazz_types::records::ValueType::String => RecordValue::String("value".to_owned()),
             jazz_types::records::ValueType::Bytes => RecordValue::Bytes(vec![8]),
+            jazz_types::records::ValueType::Vector(dimensions) => {
+                RecordValue::Bytes(vec![0; *dimensions as usize * 4])
+            }
             // Author columns hold dictionary codes.
             value_type if value_type.as_interned().is_some() => RecordValue::U32(0),
             jazz_types::records::ValueType::Internal(_) => {
