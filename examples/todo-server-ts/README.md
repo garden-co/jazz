@@ -26,7 +26,7 @@ pnpm dev
 
 `JAZZ_JWKS_URL` and `JAZZ_JWT_ISSUER` are required: the JWKS endpoint and issuer of the identity provider whose JWTs the API accepts. Set `JAZZ_JWT_AUDIENCE` too when the issuer signs tokens for other apps.
 
-Jazz runs in the server process and keeps its data in SQLite. To keep the data on a Jazz core elsewhere (Jazz Cloud, or a sync server you run) instead, set `JAZZ_SERVER_URL`, `JAZZ_APP_ID` and `JAZZ_ADMIN_SECRET`. `createJazz` publishes the app's schema and permissions on start, so there is no separate deploy step.
+Jazz runs in the server process and keeps its data in SQLite. To keep the data on a Jazz core elsewhere (Jazz Cloud (deprecated), or a sync server you run) instead, set `JAZZ_SERVER_URL`, `JAZZ_APP_ID` and `JAZZ_ADMIN_SECRET`. `createJazz` publishes the app's schema and permissions on start, so there is no separate deploy step.
 
 Storage is persistent by default. The CLI resolves its database path in this order:
 

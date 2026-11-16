@@ -19,12 +19,27 @@ export type Language = {
    * out by name; a test fails if one is missing.
    */
   bindings?: BindingsSource;
+  /**
+   * Whether the language runs on a backend, as a backend client of your main
+   * backend (`setup/backend-client`). Client-only languages (Swift, Kotlin in
+   * .65) get no tabs on pages whose frontmatter says `languageTabs: backend`.
+   */
+  backend: boolean;
+  /**
+   * Whether the language can run your app's main backend (createJazz, serving
+   * end users, publishing permissions). Only TypeScript in .65: pages whose
+   * frontmatter says `languageTabs: main-backend` get no other tabs. `backend`
+   * alone means a backend client (`languageTabs: backend` pages).
+   */
+  mainBackend?: boolean;
   enabled: boolean;
 };
 
 export const LANGUAGES: readonly Language[] = [
   {
     label: "TypeScript",
+    mainBackend: true,
+    backend: true,
     bindings: {
       file: "examples/stage-plan/apps/react-localfirst/jazz.generated.ts",
       lang: "ts",
@@ -32,9 +47,10 @@ export const LANGUAGES: readonly Language[] = [
     },
     enabled: true,
   },
-  { label: "Effect", enabled: true },
+  { label: "Effect", backend: true, mainBackend: true, enabled: true },
   {
     label: "Rust",
+    backend: true,
     bindings: {
       file: "examples/stage-plan/apps/rust-cli/src/jazz_app.rs",
       lang: "rust",
@@ -45,6 +61,7 @@ export const LANGUAGES: readonly Language[] = [
   },
   {
     label: "Swift",
+    backend: false,
     setupPage: "setup/swift",
     bindings: {
       file: "examples/stage-plan/apps/swift-cli/JazzApp.swift",
@@ -55,6 +72,7 @@ export const LANGUAGES: readonly Language[] = [
   },
   {
     label: "Kotlin",
+    backend: false,
     setupPage: "setup/kotlin",
     bindings: {
       file: "examples/stage-plan/apps/kotlin-cli/src/main/kotlin/JazzApp.kt",
@@ -65,6 +83,7 @@ export const LANGUAGES: readonly Language[] = [
   },
   {
     label: "Go",
+    backend: true,
     setupPage: "setup/go",
     bindings: {
       file: "examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go",
@@ -103,6 +122,12 @@ export function filterLanguageTabs(
 ): string {
   const order = new Map(languages.map((l, i) => [l.label, i]));
   const enabled = new Set(languages.filter((l) => l.enabled).map((l) => l.label));
+  const scope = /^---\n[\s\S]*?^languageTabs:\s*(backend|main-backend)\s*$[\s\S]*?^---$/m.exec(
+    source,
+  )?.[1];
+  const allowed = (l: Language) =>
+    scope === "main-backend" ? !!l.mainBackend : scope === "backend" ? l.backend : true;
+  const refused = new Set(languages.filter((l) => !allowed(l)).map((l) => l.label));
 
   type Block = {
     open: { start: number; end: number; attrs: string };
@@ -163,6 +188,13 @@ export function filterLanguageTabs(
       if (!order.has(label))
         throw new Error(
           `${file}: ${LANGUAGE_TABS_GROUP} tab "${label}" isn't in docs/lib/languages`,
+        );
+    }
+    if (scope) {
+      const wrong = labels.filter((l) => refused.has(l));
+      if (wrong.length)
+        throw new Error(
+          `${file}: a ${scope === "main-backend" ? "main-backend" : "backend-client"} page (languageTabs: ${scope}) has tabs for ${wrong.join(", ")}`,
         );
     }
     for (let i = 1; i < labels.length; i++) {
