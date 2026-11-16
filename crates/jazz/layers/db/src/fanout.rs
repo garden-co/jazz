@@ -328,17 +328,43 @@ fn canon_value(value: &Value) -> Option<String> {
     to_sql(value).ok().flatten().map(|sql| canon(&sql))
 }
 
-/// A value's canonical form ([`canon_value`]) as column `column` stores it:
-/// an enum variant's name as its tag where it has one, so it matches the
-/// cells of a changed row's image.
-fn stored_canon(column: Option<&crate::values::Column>, value: String) -> String {
+/// Enum variants a store keeps for an import (`Db::keep_variants_for_import`),
+/// by table and column as the importing schemas name them.
+type KeptVariants = BTreeMap<(String, String), BTreeSet<String>>;
+
+/// A value's canonical form ([`canon_value`]) as column `column` stores it,
+/// so it matches the cells of a changed row's image: an enum variant's name
+/// as its tag. `None` for a variant the store keeps for an import (`kept`)
+/// that has no tag yet: it gets its tag only when a row first stores it,
+/// after this key would have been made. A key on it could never match the
+/// rows it stands for, so the caller watches the table whole instead.
+///
+/// Any other name with no tag (a typo, a session claim outside the enum)
+/// keeps its name: no row can ever hold it, so a key that matches nothing
+/// is exact. `kept` is matched by the variant's name alone, in any table
+/// and column: the importing schemas may name the table and column other
+/// than the reader's schema does, and a wider watch is only extra wakes.
+fn stored_canon(
+    column: Option<&crate::values::Column>,
+    value: String,
+    kept: &KeptVariants,
+) -> Option<String> {
     let Some(tags) = column.and_then(|column| column.tags.as_ref()) else {
-        return value;
+        return Some(value);
     };
     let tags = tags.borrow();
-    tags.iter()
+    let tagged = tags
+        .iter()
         .find(|(_, name)| canon(&Sql::Text(name.as_bytes().to_vec())) == value)
-        .map_or(value, |(tag, _)| canon(&Sql::Integer(tag)))
+        .map(|(tag, _)| canon(&Sql::Integer(tag)));
+    if tagged.is_some() {
+        return tagged;
+    }
+    let kept = kept
+        .values()
+        .flatten()
+        .any(|name| canon(&Sql::Text(name.as_bytes().to_vec())) == value);
+    (!kept).then_some(value)
 }
 
 impl Fanout {
@@ -860,19 +886,21 @@ impl Inner {
                     let governing = policies.by_stored(&root.stored)?;
                     // As for a query key: only an application column is in
                     // a changed row's image (`$createdBy.account` is not).
-                    governing.columns.iter().any(|c| c.name == column).then(|| {
-                        let value = stored_canon(governing.column(&column), value);
-                        (governing.stored_name(&column).to_owned(), value)
-                    })
+                    if !governing.columns.iter().any(|c| c.name == column) {
+                        return None;
+                    }
+                    let value =
+                        stored_canon(governing.column(&column), value, &self.kept_variants)?;
+                    Some((governing.stored_name(&column).to_owned(), value))
                 });
             root_key(query, &prepared.binding)
                 // Only an application column is in a changed row's image;
                 // a key on anything else (`$createdBy.identity.subject`,
                 // `id`) would never be hit.
                 .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
-                .map(|(column, value)| {
-                    let value = stored_canon(root.column(&column), value);
-                    (root.stored_name(&column).to_owned(), value)
+                .and_then(|(column, value)| {
+                    let value = stored_canon(root.column(&column), value, &self.kept_variants)?;
+                    Some((root.stored_name(&column).to_owned(), value))
                 })
                 .or(policy_root_key)
         }
@@ -963,6 +991,7 @@ impl Inner {
             let mut walk = EvidenceWalk {
                 policies,
                 session: &session,
+                kept: &self.kept_variants,
                 out: Evidence::new(),
                 through: Vec::new(),
             };
@@ -2652,6 +2681,8 @@ fn conjuncts(condition: &PolicyExpr) -> Vec<&PolicyExpr> {
 struct EvidenceWalk<'a> {
     policies: &'a Schema,
     session: &'a Session,
+    /// The variants the store keeps for an import ([`stored_canon`]).
+    kept: &'a KeptVariants,
     out: Evidence,
     /// The tables (and operations) whose policies an `INHERITS` is being
     /// read through: a chain back to one is watched whole.
@@ -2738,7 +2769,7 @@ impl EvidenceWalk<'_> {
                 }
                 let pin = conjuncts(condition)
                     .into_iter()
-                    .find_map(|c| value_pin(target, c, self.session));
+                    .find_map(|c| value_pin(target, c, self.session, self.kept));
                 self.occurrence(target, pin, columns);
                 true
             }
@@ -2802,7 +2833,7 @@ impl EvidenceWalk<'_> {
         }
         let pin = conjuncts(policy)
             .into_iter()
-            .find_map(|c| value_pin(table, c, self.session));
+            .find_map(|c| value_pin(table, c, self.session, self.kept));
         self.occurrence(table, pin, columns);
         true
     }
@@ -2829,7 +2860,12 @@ type Pin = (String, String);
 /// against a UUID (or a claim spelling one, as the policy compares it),
 /// text against text, an integer against an integer, a boolean against a
 /// boolean, an enum against a variant name.
-fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<Pin> {
+fn value_pin(
+    table: &Table,
+    conjunct: &PolicyExpr,
+    session: &Session,
+    kept: &KeptVariants,
+) -> Option<Pin> {
     use crate::tools::PolicyValue;
     let PolicyExpr::Cmp {
         column,
@@ -2862,7 +2898,7 @@ fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<
         (ValueType::Bool, value @ Value::Bool(_)) => value,
         _ => return None,
     };
-    let value = stored_canon(Some(stored), canon_value(&value)?);
+    let value = stored_canon(Some(stored), canon_value(&value)?, kept)?;
     Some((stored.stored.clone(), value))
 }
 
@@ -2894,7 +2930,13 @@ pub(super) fn stored_pins(
         .filter_map(|(table, pin)| {
             let table = schema.table(&table).ok()?;
             let pin = pin.map(|(column, value)| {
-                let value = stored_canon(table.column(&column), value);
+                // These pins are made anew for each tick's writes, after
+                // their cells are stored: a variant with no tag yet is in
+                // none of them, and its name, which no cell holds, rightly
+                // matches none. So no variant counts as kept here.
+                let value =
+                    stored_canon(table.column(&column), value.clone(), &KeptVariants::new())
+                        .unwrap_or(value);
                 (table.stored_name(&column).to_owned(), value)
             });
             Some((table.stored.clone(), pin))
