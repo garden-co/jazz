@@ -1535,23 +1535,28 @@ lifted. The runtime never retries in a loop. The suppression is lifted:
   differ from those recorded with the suppression (a row added, or removed
   and added again), or the space row differs from the version recorded with
   it (members read it, R13). Each such change allows one new background
-  attempt, after a random delay. The failure of an unrelated operation, a
-  reconnection or a restart is no such change.
+  attempt, after a random delay. The failure of an unrelated operation or a
+  reconnection is no such change.
 
 Permission changes the device cannot see (for example a role kept in
 another table, or a newly deployed permissions bundle) lift nothing: an
-application that grants update rights that way calls `createSpace`. The
-suppression is per device and is kept in the private store (§6.1), so a
-restart does not retry; it is removed once a valid root of the space is
-known.
+application that grants update rights that way calls `createSpace`.
+
+The suppression, and the evidence it compares against, live only in the
+memory of the running client; nothing about it is stored. A restart loses
+it, so after a restart the next automatic path may try the space once more;
+if that attempt is refused, the suppression is recorded again. A restart
+therefore costs at most one refused attempt per space. The suppression is
+dropped once a valid root of the space is known.
 
 Required tests: after a creation refused, an encrypted write fails
 `space-pending` without staging a root, and an explicit `createSpace`
 attempts and, once the session may update the space row, creates the
 space; a member that was refused and is then given update permission
 through a change of the space row creates the space once by the background
-path; an unrelated failed operation, a reconnection and a restart cause no
-new attempt; a transaction that fails because another of its rows is
+path; an unrelated failed operation and a reconnection cause no new
+attempt; after a restart, at most one automatic attempt per space is made
+before the suppression applies again; a transaction that fails because another of its rows is
 refused, and a cancellation before submission, record no suppression; a
 `createSpace` while an earlier creation's outcome is unknown reconciles it
 and stages no second root.
@@ -2153,9 +2158,8 @@ source.
 ### 6.1 Store
 
 Private state is kept in a store separate from authentication storage. Per
-scope `Dₐ(account)` it holds one device document, one held-key document per
-**space root** the device holds keys for, and one creation-suppression
-document. Held keys are kept per root, not per address, so the key of a
+scope `Dₐ(account)` it holds one device document and one held-key document
+per **space root** the device holds keys for. Held keys are kept per root, not per address, so the key of a
 lost or refused root under repair (§3.2) and the keys of the address's real
 root are durable side by side. Storing a key rewrites only that root's
 document:
@@ -2171,21 +2175,10 @@ held-key document (one per space root):
 { "format": "jazz-e2ee-held-space-v1", "revision": n,
   "lineage": <lineage record>, "keys": [ held-key record … ] }
 
-creation-suppression document (one per scope):
-{ "format": "jazz-e2ee-create-suppressed-v1", "revision": n,
-  "spaces": [ { scopeId, identifier, memberRowIds: [..],
-                spaceRowVersion } … ] }
 ```
 
 `devices` holds at most one device, the one of the document's scope. An
-unknown format is refused and never overwritten. The creation-suppression
-document lists the spaces whose creation the authority refused to this
-device (§3.2), with the evidence the background creation compares against:
-the IDs of the account's own member rows for the space and the version of
-the space row (its `$updatedAt`) as the device read them at the refusal. It
-holds no secret and only gates automatic retries; an entry is removed once a
-valid root of its space is known, and the document is wiped with the held
-keys (§6.4).
+unknown format is refused and never overwritten.
 
 Device private keys are never stored in the clear:
 
