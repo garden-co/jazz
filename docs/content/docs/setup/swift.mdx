@@ -105,19 +105,51 @@ helper for that yet.
 
 ## Sessions
 
-`JazzSession` follows who is signed in, as TypeScript's `JazzSession`: it hands out a `Client` for
-the user signed in now and replaces it when the user changes. Start it as a device account (a guest
-who needs no sign-in), from your sign-in's bearer token, or signed out:
+A session follows who is signed in, as TypeScript's `JazzSession`, and hands out the client of the
+user signed in now. Start it as a device account (a guest who needs no sign-in), from your sign-in's
+bearer token, or signed out.
+
+In SwiftUI, `JazzRoot` does the rest, as `<JazzProvider>` does in React. It shows your views with the
+signed-in user's client, `signedOut` while no one is signed in, and rebuilds the views when the user
+changes; `@JazzAll` is a live query, like `useAll`:
+
+```swift
+@main
+struct MyApp: App {
+    let session = JazzApp.session(
+        appId: appId, serverUrl: "https://myapp.example/jazz",
+        bearer: { _ in try await MySignIn.currentToken() })  // nil while signed out
+
+    var body: some Scene {
+        WindowGroup {
+            JazzRoot(session) { TasksView() } signedOut: { SignInView() }
+        }
+    }
+}
+
+struct TasksView: View {
+    @JazzAll(JazzApp.tasks.query().orderBy(JazzApp.tasks.rank)) var tasks
+    @Environment(\.jazz) var jazz                // the signed-in user's client, like useDb
+    @Environment(\.jazzSession) var session      // user, status, signOut(), like useJazzSession
+
+    var body: some View {
+        List(tasks, id: \.id) { Text($0.title) }
+    }
+}
+```
+
+Outside SwiftUI, `try await session.client()` waits until someone is signed in and returns their
+client, and `session.clients` gives the next one each time the user changes (TypeScript's
+`followDb`):
 
 <include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-session
 </include>
 
-`session.snapshots` yields a `SessionSnapshot` (`status`: `.starting`, `.ready`, `.signedOut`,
-`.transitioning`, `.error` or `.closed`; `user`; `clientEpoch`; `error` and `recovery`) each time it
-changes, and ends with `JazzError.closed` when the session closes. `session.client()` gives the same
-client until `clientEpoch` changes; a client kept from before throws `JazzError.replaced`, and while
-no one is signed in `client()` throws `JazzError.noUser`.
+`client()` throws `JazzError.noUser` while no one is signed in, and a client kept past a change of
+user throws `JazzError.replaced`. `session.snapshots` yields each `SessionSnapshot` (`status`,
+`user`, `clientEpoch`, `error` and `recovery`), and ends with `JazzError.closed` when the session
+closes.
 
 When your sign-in changes, call `session.refresh()`: the session asks `bearer` again and follows
 the user it names (`nil`: signed out). With `linkGuest` (the default, as TypeScript), a user who has
@@ -149,8 +181,10 @@ the view form and write the stored one. Filters on a transformed column compare 
 
 ## SwiftUI and errors
 
-On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live result for a view, like
-`useAll` in TypeScript:
+On Apple platforms (macOS 14, iOS 17), `@JazzAll(query)` (see [Sessions](#sessions)) keeps a
+view's rows current, and `$tasks` is its `JazzQuery`, for `isLoading` and `error`. Without
+`JazzRoot`, put a client in the environment yourself with `.environment(\.jazz, client)`, or hold a
+`JazzQuery` directly:
 
 ```swift
 @State var tasks = JazzQuery(jazz, JazzApp.tasks.query().orderBy(JazzApp.tasks.rank))
@@ -224,8 +258,6 @@ Not supported yet:
   endpoint: run your backend in TypeScript.
 - Keychain (or file) storage for device keys: keep the key from `Jazz.generateDeviceKey()` with
   your own code.
-- An `@Observable` session model for SwiftUI: follow `jazz.session`. (`JazzQuery` exists for Apple
-  platforms only: each release's package check builds it, but nothing tests it yet.)
 - Anonymous (guest) users, as in TypeScript.
 - Subscribing to history queries.
 - Parts of large values inside includes: parts are for root queries.
