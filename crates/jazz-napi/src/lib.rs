@@ -2604,6 +2604,29 @@ impl NapiDb {
         }
     }
 
+    /// TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+    /// session's author bytes; none for this database's own) reached `tier`,
+    /// failing with a rejection of theirs, including one that settled
+    /// before and no wait reported.
+    #[napi(js_name = "waitForSync")]
+    pub fn wait_for_sync(
+        &self,
+        tier: String,
+        writer: Option<Uint8Array>,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let binding = self.binding()?;
+        let tier = jazz::binding_args::durability_tier(&tier).map_err(napi::Error::from_reason)?;
+        match tier {
+            DurabilityTier::None | DurabilityTier::Local => Ok(Either::A(Vec::new().into())),
+            DurabilityTier::Global => {
+                let wait = binding
+                    .wait_for_sync_global(writer.as_deref())
+                    .map_err(host_error)?;
+                read_or_pending(Box::pin(wait.map(|result| result.map(|()| Vec::new()))))
+            }
+        }
+    }
+
     /// Close the database (a schema view leaves its owner open). The
     /// package's `close()` wraps this pollable form.
     #[napi(js_name = "__closePollable", skip_typescript)]

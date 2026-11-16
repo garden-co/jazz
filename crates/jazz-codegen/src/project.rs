@@ -455,13 +455,14 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A payload enum, which Rust bindings can't express yet.
-    const PAYLOAD_ENUM: &str = r#"{ "format": 1, "tables": { "todos": { "columns": { "status": { "enum": { "open": {}, "done": { "at": "timestamp" } } } } } } }"#;
+    /// Two enum values Rust names alike, which TS bindings express and Rust
+    /// bindings refuse.
+    const RUST_UNSUPPORTED: &str = r#"{ "format": 1, "tables": { "todos": { "columns": { "status": { "enum": ["in-progress", "in_progress"] } } } } }"#;
 
     #[test]
     fn a_language_found_only_by_its_marker_is_skipped_where_unsupported() {
         let dir = dir();
-        std::fs::write(dir.join(APP_FILE), PAYLOAD_ENUM).unwrap();
+        std::fs::write(dir.join(APP_FILE), RUST_UNSUPPORTED).unwrap();
         std::fs::write(dir.join("package.json"), "{}").unwrap();
         std::fs::write(dir.join("Cargo.toml"), RUST_APP).unwrap();
         let langs = languages(&dir, &[]).unwrap();
@@ -471,7 +472,7 @@ mod tests {
             outcome
                 .warnings
                 .iter()
-                .any(|w| w.contains("skipped") && w.contains("enum-with-payload")),
+                .any(|w| w.contains("skipped") && w.contains("Rust variant")),
             "{outcome:?}"
         );
         assert!(dir.join(Lang::TypeScript.file()).exists());
@@ -481,12 +482,12 @@ mod tests {
         std::fs::remove_file(dir.join(Lang::TypeScript.file())).unwrap();
         let error =
             generate(&dir, &[Lang::TypeScript.into(), Lang::Rust.into()], false).unwrap_err();
-        assert!(error.contains("enum-with-payload"), "{error}");
+        assert!(error.contains("Rust variant"), "{error}");
         assert!(!dir.join(Lang::TypeScript.file()).exists());
         // The only language found can't be skipped.
         std::fs::remove_file(dir.join("package.json")).unwrap();
         let error = generate(&dir, &languages(&dir, &[]).unwrap(), false).unwrap_err();
-        assert!(error.contains("enum-with-payload"), "{error}");
+        assert!(error.contains("Rust variant"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

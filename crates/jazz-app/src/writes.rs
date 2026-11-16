@@ -14,13 +14,33 @@ pub(crate) struct Settler {
 }
 
 impl Settler {
+    /// A settler that only commits locally.
+    pub(crate) fn local() -> Settler {
+        Settler { durability: None }
+    }
+
     pub(crate) async fn settle(
         &self,
         client: &JazzClient,
         written: Option<TransactionId>,
     ) -> Result<()> {
         match (self.durability, written) {
-            (Some(tier), Some(written)) => Ok(client.wait_for_transaction(written, tier).await?),
+            (Some(tier), Some(written)) => {
+                // This wait handles the write's refusal: it isn't also a
+                // mutation error.
+                crate::lifecycle::claim(written);
+                let waited = client.wait_for_transaction(written, tier).await;
+                // Only a refusal is the reporter's to drop: a wait that
+                // ended otherwise (the driver stopped, the write unknown)
+                // handled nothing, so a later refusal is a mutation error.
+                if !waited
+                    .as_ref()
+                    .is_err_and(|error| error.is_transaction_rejection())
+                {
+                    crate::lifecycle::unclaim(written);
+                }
+                Ok(waited?)
+            }
             _ => Ok(()),
         }
     }
@@ -49,9 +69,8 @@ impl Jazz {
     /// permission refused, say).
     pub fn durable(&self, tier: DurabilityTier) -> Jazz {
         Jazz {
-            commands: self.commands.clone(),
-            info: self.info.clone(),
             durability: Some(tier),
+            ..self.clone()
         }
     }
 
@@ -83,15 +102,13 @@ impl Jazz {
         self.restore_cells::<T>(id, None).await
     }
 
-    /// Brings back the deleted row with this id, with `update`'s columns
-    /// replaced.
-    pub async fn restore_with<U: crate::table::Update>(
-        &self,
-        id: ObjectId,
-        update: U,
-    ) -> Result<U::Row> {
-        let cells = update.into_cells(&self.info.implementations)?;
-        self.restore_cells::<U::Row>(id, Some(cells)).await
+    /// Brings back the deleted row with this id, with `new`'s values. A
+    /// restore replaces the whole row, so it takes the full insert, as TS's
+    /// `restore(table, id, data)` does.
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        let cells = new.into_cells(&self.info.implementations)?;
+        self.restore_cells::<N::Row>(id, Some(cells.into_iter().collect()))
+            .await
     }
 
     async fn restore_cells<T: Table>(
