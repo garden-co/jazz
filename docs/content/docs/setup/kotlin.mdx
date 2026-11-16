@@ -1,12 +1,12 @@
 ---
 title: Kotlin
-description: "Build Jazz apps in Kotlin, for Android and the JVM, with the jazz-kotlin library and typed bindings generated from jazz.app.json."
+description: "Build Jazz apps in Kotlin, for Android and the JVM, with the jazz-kotlin library and typed bindings generated from your schema.ts."
 ---
 
 Kotlin is for apps: Android apps and JVM desktop or command-line clients. Your app's main backend
-runs in TypeScript. A Kotlin app opens the same `jazz.app.json` as every other language,
-with typed bindings generated from it, and syncs as an end user through your backend's Jazz
-endpoint (`createJazz`'s handler), or runs locally.
+runs in TypeScript. You describe your app once, in `schema.ts`, and a Kotlin app gets typed
+bindings generated from it, like every other language. It syncs as an end user through your
+backend's Jazz endpoint (`createJazz`'s handler), or runs locally.
 
 The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). Its calls are
 `suspend` functions, and subscriptions are `Flow`s. It runs on JDK 17 or later, and on Android
@@ -53,18 +53,31 @@ To build from source: in a Jazz checkout,
 
 ## Generate the bindings
 
-With a `build.gradle.kts` that depends on `jazz-kotlin` beside `jazz.app.json`, `jazz-tools generate` writes
-`src/main/kotlin/JazzApp.kt`, in the package `jazzapp`:
+Your app's tables and permissions live in `schema.ts`, written with the same `s.defineSchema` DSL
+as a TypeScript app's (see [Defining Tables](/docs/schemas/defining-tables) and
+[Permissions](/docs/schemas/policies)). Put it beside your `build.gradle.kts` and run `generate`
+there:
 
 ```bash
-jazz-tools generate            # checks the files, writes src/main/kotlin/JazzApp.kt
-jazz-tools generate --check    # in CI: fails if JazzApp.kt is stale
+npx jazz-tools generate            # writes jazz.app.json, jazz.permissions.json and src/main/kotlin/JazzApp.kt
+npx jazz-tools generate --check    # in CI: fails if any of them is stale
 ```
 
-(`npx jazz-tools generate` works the same; a `build.gradle.kts` naming the jar file counts if it
-mentions `jazz-kotlin`, as `files("libs/jazz-kotlin-….jar")` does.)
+`generate` picks Kotlin when the build script beside `schema.ts` (`build.gradle.kts` or Groovy
+`build.gradle`) depends on `jazz-kotlin` or `jazz-kotlin-android`, by coordinate or as the release's
+jar or AAR (`files("libs/jazz-kotlin-….jar")`). Otherwise pass `--lang kotlin`. The project needs
+no `package.json`.
 
-Commit `JazzApp.kt`. Per table it gives you:
+If your Kotlin app is a client of an app whose schema lives elsewhere (say, beside your web app),
+its `schema.ts` can re-export that one, as StagePlan's Kotlin CLI does:
+
+```ts title="schema.ts"
+export { schema, permissions } from "../web/schema";
+```
+
+Commit `schema.ts` and everything `generate` writes; change `schema.ts`, never the JSON or
+`JazzApp.kt`, and run `generate` again. `JazzApp.kt` is in the package `jazzapp`, and per table it
+gives you:
 
 - a `@Serializable` row data class (`Task`), with the authored column names;
 - a new-row data class (`NewTask`), whose optional columns default to `null`;
@@ -77,7 +90,7 @@ Import the generated declarations by name (`import jazzapp.Tasks`, `import jazza
 write them qualified (`jazzapp.Result`), rather than `import jazzapp.*`: a star import outranks
 Kotlin's default imports, so a table such as `results` would hide `kotlin.Result` in your code.
 
-Names are the ones `jazz.app.json` uses: a `showId` column is `showId`, and a `due_at` column stays
+Names are the ones `schema.ts` uses: a `showId` column is `showId`, and a `due_at` column stays
 `due_at` (only names that aren't Kotlin identifiers are camel-cased). Values are plain Kotlin types:
 `uuid` is a `String`, `int` an `Int`, `bigint` a `Long`, `float` a `Double`, `timestamp` a `Long`
 (milliseconds since the epoch), `bytea` a `ByteArray`, `json` a `JsonElement`, an array a
@@ -170,7 +183,7 @@ Stream a large text or `bytea` value in, and read back only the part you need:
 
 ## Computed fields and transforms
 
-If `jazz.app.json` declares computed fields or transforms, the bindings declare an
+If `schema.ts` declares computed fields or transforms, the bindings declare an
 `interface JazzComputed` (e.g. `tasksPriority(score: Int): TaskPriority`,
 `isoDateView(stored: Long): String` and `isoDateStored(view: String): Long`), and
 `jazzapp.open(config, computed)` takes your implementation, so a missing one doesn't compile. Rows
