@@ -135,7 +135,7 @@ func (db *DB) Close() error {
 // Calls block in Jazz; a cancelled ctx returns at once and the call's
 // result is dropped, but the call itself runs to its end: a write may
 // still apply.
-func (db *DB) call(ctx context.Context, method string, args any, out any) error {
+func (db *DB) call(ctx context.Context, method string, args map[string]any, out any) error {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return err
@@ -187,12 +187,12 @@ func (db *DB) call(ctx context.Context, method string, args any, out any) error 
 // that marshals to a JSON object of columns) sets on the row of table
 // with id.
 func (db *DB) Update(ctx context.Context, table, id string, patch any) error {
-	return db.call(ctx, "update", map[string]any{"table": table, "id": id, "patch": patch}, nil)
+	return update(ctx, db, table, id, patch)
 }
 
 // Delete deletes the row of table with id.
 func (db *DB) Delete(ctx context.Context, table, id string) error {
-	return db.call(ctx, "delete", map[string]any{"table": table, "id": id}, nil)
+	return remove(ctx, db, table, id)
 }
 
 // Account is the id of the account the app acts as (its session's user),
