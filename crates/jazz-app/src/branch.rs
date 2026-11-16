@@ -258,8 +258,8 @@ impl Jazz {
 /// An app handle that reads and writes through a branch view
 /// ([`Jazz::on_branch`]). `Send + Clone`, like [`Jazz`].
 ///
-/// Not supported yet through a branch: reads inside a transaction (see
-/// [`Transaction::on_branch`]), streaming inserts and updates, and
+/// Not supported yet through a branch: reads inside a serializable
+/// transaction (see [`Transaction::on_branch`]), streaming inserts and updates, and
 /// byte-range reads; they fail. It has no `transaction` of its own: use
 /// [`Jazz::transaction`] and [`Transaction::on_branch`]. [`Jazz::wait_for_sync`]
 /// covers its writes.
@@ -446,8 +446,10 @@ impl Transaction {
     /// with the rest of the transaction. Writes to several branches (and
     /// to shared tables) in one transaction keep one fate.
     ///
-    /// Reads through a branch inside a transaction are not supported yet
-    /// (TS has them): its `get` and `all` fail, and its `upsert`, `restore`
+    /// In a mergeable transaction ([`Jazz::transaction`]) its reads go
+    /// through the view too, staged writes included. A serializable one
+    /// ([`Jazz::serializable_transaction`]) can't read through a branch yet
+    /// (jazz#5806): its `get` and `all` fail, and its `upsert`, `restore`
     /// and `restore_with`, which read the row back, fail before staging
     /// anything.
     pub fn on_branch(&self, view: impl Into<BranchView>) -> Result<Transaction> {

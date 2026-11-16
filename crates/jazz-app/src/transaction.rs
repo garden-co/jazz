@@ -27,16 +27,19 @@ pub struct Transaction {
     id: OpenTransactionId,
     wrote: Rc<Cell<bool>>,
     implementations: Implementations,
+    /// Mergeable ([`Jazz::transaction`]): it can read through a branch.
+    mergeable: bool,
 }
 
 impl Transaction {
     /// `write`, which returns the row read back, needs a read through the
-    /// branch, which a transaction can't do yet: refuse it before staging
-    /// anything, so a caller that ignores the error doesn't commit it.
+    /// branch, which a serializable transaction can't do yet (jazz#5806):
+    /// refuse it before staging anything, so a caller that ignores the
+    /// error doesn't commit it.
     fn refuse_read_back_on_branch(&self, write: &str) -> Result<()> {
-        if self.client.is_on_branch() {
+        if self.client.is_on_branch() && !self.mergeable {
             return Err(crate::Error::Unsupported(format!(
-                "{write} through a branch inside a transaction (it reads the row back)"
+                "{write} through a branch inside a serializable transaction (it reads the row back)"
             )));
         }
         Ok(())
@@ -202,6 +205,7 @@ impl Jazz {
                 id: open.transaction_id(),
                 wrote: Rc::new(Cell::new(false)),
                 implementations,
+                mergeable,
             };
             let wrote = transaction.wrote.clone();
             let scoped = transaction.client.clone();
@@ -307,6 +311,7 @@ impl Jazz {
                     id: open.transaction_id(),
                     wrote: Rc::new(Cell::new(false)),
                     implementations,
+                    mergeable,
                 };
                 Ok(OPEN.with(|open| {
                     let mut open = open.borrow_mut();
