@@ -128,6 +128,15 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
       ../examples/docs/backend-client-rs/src/lib.rs#backend-client-connect-rust
     </include>
 
+    A backend client needs your app's `jazz.permissions.json`, as TypeScript's `createJazzClient`
+    takes `permissions`: it checks the users it acts for by them. The generated `jazz_app::open`
+    embeds only the schema, so open with
+    `Jazz::open(AppFiles::new(jazz_app::APP, None).with_permissions(…), config)`.
+
+    A read that names no tier waits for the main backend's answer (`ReadTier::Remote`), as in Node.
+    To read local data, pass `ReadTier::LocalFirst` to `all_with`. If your main backend can't upgrade
+    sockets, the client falls back to its HTTP stream, as TypeScript clients do.
+
     <include cwd lang="rust" meta='title="src/main.rs"'>
       ../examples/docs/backend-client-rs/src/lib.rs#backend-client-trusted-rust
     </include>
