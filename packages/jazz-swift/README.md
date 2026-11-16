@@ -17,7 +17,7 @@ Build `libjazz_ffi` from a checkout at the release tag (needs Rust), and
 point pkg-config at it:
 
 ```bash
-git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
+git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
 jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only
 export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
 ```
@@ -25,7 +25,7 @@ export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
 Then depend on the package by URL (or by path, `.package(path: "jazz")`):
 
 ```swift
-.package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65"),
+.package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.66"),
 // in your target:
 .product(name: "Jazz", package: "jazz"),
 ```

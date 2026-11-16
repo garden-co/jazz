@@ -22,7 +22,7 @@ it once from a checkout at the same release tag (this needs Rust and Swift 6.0 o
 pkg-config at it:
 
 ```bash
-git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
+git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
 jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only   # builds libjazz_ffi.a and jazz_ffi.pc
 export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
 ```
@@ -32,7 +32,7 @@ checkout), and build with `PKG_CONFIG_PATH` set:
 
 ```swift title="Package.swift"
 dependencies: [
-    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65")
+    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.66")
 ],
 targets: [
     .target(

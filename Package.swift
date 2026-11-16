@@ -2,7 +2,7 @@
 // The Jazz Swift package, at the repository root so SwiftPM can take it by
 // URL at a release tag:
 //
-//     .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65")
+//     .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.66")
 //
 // Its sources live in packages/jazz-swift. The UniFFI sources over
 // crates/jazz-ffi are committed (packages/jazz-swift/scripts/build-ffi.sh
