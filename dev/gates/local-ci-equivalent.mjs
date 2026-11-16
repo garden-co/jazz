@@ -337,8 +337,27 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   // The Go bindings and the StagePlan Go example (installs Go when the
-  // image has none).
-  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
+  // image has none). go-cli's suite also runs against StagePlan's main
+  // backend in TypeScript (createJazz), so it needs a jazz-tools build.
+  go: Object.freeze([
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
+    command("admitted Jazz Tools build for the Go e2e", "node", [
+      "dev/gates/run-correctness-consumer.mjs",
+      "--",
+      "pnpm",
+      "exec",
+      "turbo",
+      "run",
+      "build",
+      "--filter=jazz-tools",
+      "--only",
+    ]),
+    command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
+      env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
+    }),
+  ]),
 });
 
 export const focusedCommands = Object.freeze([

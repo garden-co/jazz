@@ -2417,6 +2417,7 @@ name = "jazz-native-transport"
 version = "2.0.0-alpha.64"
 dependencies = [
  "axum 0.8.9",
+ "bytes",
  "futures",
  "hex",
  "jazz-benchmark-guard",

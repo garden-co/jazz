@@ -22,12 +22,12 @@ export type Language = {
   /**
    * Whether the language runs on a backend, as a backend client of your main
    * backend (`setup/backend-client`). Client-only languages (Swift, Kotlin in
-   * .65) get no tabs on pages whose frontmatter says `languageTabs: backend`.
+   * .66) get no tabs on pages whose frontmatter says `languageTabs: backend`.
    */
   backend: boolean;
   /**
    * Whether the language can run your app's main backend (createJazz, serving
-   * end users, publishing permissions). Only TypeScript in .65: pages whose
+   * end users, publishing permissions). Only TypeScript in .66: pages whose
    * frontmatter says `languageTabs: main-backend` get no other tabs. `backend`
    * alone means a backend client (`languageTabs: backend` pages).
    */
@@ -68,7 +68,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "swift",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Kotlin",
@@ -90,7 +90,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "go",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: false,
+    enabled: true,
   },
 ];
 

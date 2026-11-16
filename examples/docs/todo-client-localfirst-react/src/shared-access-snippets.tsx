@@ -1,4 +1,4 @@
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useDb, useJazzSession } from "jazz-tools/react";
 import { app } from "./recipes/shared-access/jazz.generated.js";
 
 // #region shared-grant
@@ -17,14 +17,14 @@ export function shareTodo(
 
 // #region shared-query
 export function SharedWithMe() {
-  const session = useSession();
+  const session = useJazzSession();
   const {
     data: shares,
     isLoading,
     error,
   } = useAll(
-    session?.user
-      ? app.todoShares.where({ user_id: session.user }).include({ todo: true })
+    session.user?.accountId
+      ? app.todoShares.where({ user_id: session.user.accountId }).include({ todo: true })
       : undefined,
   );
 

@@ -22,6 +22,7 @@ type Live[R any] struct {
 	change chan struct{}
 	done   chan struct{}
 
+	app   any
 	mu    sync.Mutex
 	rows  map[string]liveRow[R]
 	seq   uint64 // arrival order, for queries without OrderBy
@@ -48,7 +49,8 @@ func (q *Query[R]) Live(ctx context.Context, db *DB) (*Live[R], error) {
 		rows:   map[string]liveRow[R]{},
 		bigint: bigintColumns(reflect.TypeOf((*R)(nil)).Elem()),
 	}
-	events, err := subscribe(ctx, db, q, func(e event) (event, bool) {
+	l.app = db.computed()
+	events, err := subscribe(ctx, db, q.subscription(), func(e event) (event, bool) {
 		return e, e.kind == "error"
 	})
 	if err != nil {
@@ -70,6 +72,10 @@ func (q *Query[R]) Live(ctx context.Context, db *DB) (*Live[R], error) {
 		if l.err == nil {
 			l.err = ctx.Err()
 		}
+		if l.err == nil {
+			// The stream ended with ctx live: the DB closed.
+			l.err = &Error{Kind: KindClosed, Message: "closed"}
+		}
 		l.mu.Unlock()
 	}()
 	return l, nil
@@ -87,10 +93,11 @@ func (l *Live[R]) apply(e event) error {
 		return parseError(e.json)
 	}
 	var raw struct {
-		Added   []json.RawMessage `json:"added"`
-		Updated []json.RawMessage `json:"updated"`
-		Removed []string          `json:"removed"`
-		Reset   bool              `json:"reset"`
+		Added       []json.RawMessage `json:"added"`
+		Updated     []json.RawMessage `json:"updated"`
+		Removed     []string          `json:"removed"`
+		RemovedKeys []string          `json:"removedKeys"`
+		Reset       bool              `json:"reset"`
 	}
 	if err := json.Unmarshal([]byte(e.json), &raw); err != nil {
 		return err
@@ -100,27 +107,27 @@ func (l *Live[R]) apply(e event) error {
 	if raw.Reset {
 		l.rows = map[string]liveRow[R]{}
 	}
-	for _, id := range raw.Removed {
-		delete(l.rows, id)
+	// By result key: one row can be several results (history, union).
+	for _, key := range removedKeys(raw.Removed, raw.RemovedKeys) {
+		delete(l.rows, key)
 	}
 	for _, rows := range [][]json.RawMessage{raw.Added, raw.Updated} {
 		for _, text := range rows {
 			var r liveRow[R]
-			if err := decodeRow(l.table, text, &r.row); err != nil {
+			if err := decodeRow(l.app, l.table, text, &r.row); err != nil {
 				return err
 			}
 			if err := json.Unmarshal(text, &r.fields); err != nil {
 				return err
 			}
-			var id string
-			_ = json.Unmarshal(r.fields["id"], &id)
-			if old, ok := l.rows[id]; ok {
+			key := resultKey(text)
+			if old, ok := l.rows[key]; ok {
 				r.seq = old.seq
 			} else {
 				l.seq++
 				r.seq = l.seq
 			}
-			l.rows[id] = r
+			l.rows[key] = r
 		}
 	}
 	if raw.Reset && !l.reset {
