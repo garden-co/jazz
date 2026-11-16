@@ -41,10 +41,10 @@ export function refusePayloadEnums(app: JsonObject): void {
   const named = columns.map((c) => `"${c}"`).join(", ");
   throw new UpgradeRefusal(
     `column${columns.length === 1 ? "" : "s"} ${named} declare${columns.length === 1 ? "s" : ""} an enum whose cases carry fields, ` +
-      "which Jazz no longer supports (see https://github.com/garden-co/jazz/issues/5758; no alpha.64 store could hold " +
+      "which Jazz no longer supports (see https://github.com/garden-co/jazz/issues/5758; no store could hold " +
       "one, as every write failed: jazz#5621). In schema.ts, change it to a string enum plus a nullable column per " +
       'field (`kind: s.enum("bug", "feature"), severity: s.int().optional(), area: s.string().optional()`), or a ' +
-      "`s.json()` column when the payloads are irregular. Then run `npx jazz-tools validate` with the app's alpha.64 " +
+      "`s.json()` column when the payloads are irregular. Then run `npx jazz-tools validate` with the app's alpha.65 " +
       "(`migrations create` first, if a store holds the table) and `jazz-tools upgrade` again.",
   );
 }
