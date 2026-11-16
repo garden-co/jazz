@@ -3400,7 +3400,7 @@ fn wk(key: (String, String, String)) -> u64 {
 }
 
 fn watch_key(cell: &Sql) -> String {
-    format!("{cell:?}")
+    cell.key()
 }
 
 fn image_cell(image: &Image, column: &str) -> Option<Sql> {
