@@ -22,8 +22,6 @@
 #ifndef JAZZ_FFI_H
 #define JAZZ_FFI_H
 
-#include <stddef.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -162,51 +160,6 @@ void jazz_unwatch(JazzWatch *watch);
 
 /* A new device account's key ("jazz-auth-v1:..."); keep it as a password. */
 char *jazz_generate_device_key(char **err);
-
-/*
- * A backend's /jazz endpoint (TS createJazz's handler), served by the
- * host's own HTTP server. Requests are {"method", "path", "headers":
- * [[name, value], ...], "body"?: base64}; responses {"status", "headers",
- * "body": base64}. The host's authenticate callback (on a thread of its
- * own) gets a request's JSON and returns, malloc'ed, {"kind": "user",
- * "userId", "claims"?, "expiresAt": unix seconds} or {"kind":
- * "deviceAccount"}, or NULL for no one.
- */
-typedef struct JazzEndpoint JazzEndpoint;
-typedef struct JazzSocket JazzSocket;
-typedef char *(*JazzAuthCallback)(void *ctx, const char *request_json);
-typedef void (*JazzSocketMessage)(void *ctx, const unsigned char *data, size_t len);
-typedef void (*JazzSocketClosed)(void *ctx, unsigned short code, const char *reason);
-
-/*
- * options_json: {"basePath"?: "/jazz", "sessionTtlSecs"?, "maxSockets"?
- * (default 10000; past it a socket closes 1013)} or NULL. A client message
- * over 2 MiB closes 1009; a refused prelude or sign-in closes 1008.
- */
-JazzEndpoint *jazz_endpoint_new(JazzHandle *backend, JazzAuthCallback cb, void *ctx,
-                                const char *options_json, char **err);
-/* Answers an HTTP request with a response's JSON. */
-char *jazz_endpoint_handle(JazzEndpoint *endpoint, const char *request_json, char **err);
-/* 1 if path is the socket path: upgrade it and serve it with jazz_endpoint_socket. */
-int jazz_endpoint_is_socket(JazzEndpoint *endpoint, const char *path);
-/* A handle acting as the request's user (TS forReqUser); jazz_close it. */
-JazzHandle *jazz_endpoint_for_user(JazzEndpoint *endpoint, const char *request_json, char **err);
-/*
- * Serves an upgraded socket (upgrade_json: the upgrade request). on_message
- * gets each binary message for the client, then on_close once the code and
- * reason to close it with, on a thread of their own.
- */
-JazzSocket *jazz_endpoint_socket(JazzEndpoint *endpoint, const char *upgrade_json,
-                                 JazzSocketMessage on_message, JazzSocketClosed on_close,
-                                 void *ctx, char **err);
-/*
- * A message from the client: pass every data message, binary or text (TS
- * sends its prelude as text), as its bytes. 0, or -1 once the socket closed.
- */
-int jazz_socket_push(JazzSocket *socket, const unsigned char *data, size_t len, char **err);
-/* The client's socket closed: ends it, waits for on_close, frees it. */
-void jazz_socket_free(JazzSocket *socket);
-void jazz_endpoint_free(JazzEndpoint *endpoint);
 
 /* Frees a string returned by, or stored in *err by, this API. */
 void jazz_string_free(char *text);
