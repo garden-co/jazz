@@ -78,8 +78,8 @@ pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, deleted_at,
-    id, updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, ValuePart, created_at,
+    deleted_at, id, updated_at,
 };
 pub use read::ReadOptions;
 pub use relation::{Hop, Step};
