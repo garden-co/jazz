@@ -26,6 +26,8 @@ interface JazzAdapterConfig {
   schema: BackendSchemaInput;
 }
 
+export { UnsupportedBetterAuthQueryError } from "./utils.js";
+
 export const jazzAdapter = (config: JazzAdapterConfig) => {
   const prefix = config.prefix ?? "better_auth_";
 
