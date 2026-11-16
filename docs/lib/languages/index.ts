@@ -19,12 +19,20 @@ export type Language = {
    * out by name; a test fails if one is missing.
    */
   bindings?: BindingsSource;
+  /**
+   * Whether the language can run your app's backend (createJazz or its
+   * equivalent, serving end users, publishing permissions). Client-only
+   * languages (Swift, Kotlin in .65) get no tabs on pages whose frontmatter
+   * says `languageTabs: backend`.
+   */
+  backend: boolean;
   enabled: boolean;
 };
 
 export const LANGUAGES: readonly Language[] = [
   {
     label: "TypeScript",
+    backend: true,
     bindings: {
       file: "examples/stage-plan/apps/react-localfirst/jazz.generated.ts",
       lang: "ts",
@@ -32,9 +40,10 @@ export const LANGUAGES: readonly Language[] = [
     },
     enabled: true,
   },
-  { label: "Effect", enabled: true },
+  { label: "Effect", backend: true, enabled: true },
   {
     label: "Rust",
+    backend: true,
     bindings: {
       file: "examples/stage-plan/apps/rust-cli/src/jazz_app.rs",
       lang: "rust",
@@ -45,6 +54,7 @@ export const LANGUAGES: readonly Language[] = [
   },
   {
     label: "Swift",
+    backend: false,
     setupPage: "setup/swift",
     bindings: {
       file: "examples/stage-plan/apps/swift-cli/JazzApp.swift",
@@ -55,6 +65,7 @@ export const LANGUAGES: readonly Language[] = [
   },
   {
     label: "Kotlin",
+    backend: false,
     setupPage: "setup/kotlin",
     bindings: {
       file: "examples/stage-plan/apps/kotlin-cli/src/main/kotlin/JazzApp.kt",
@@ -65,6 +76,7 @@ export const LANGUAGES: readonly Language[] = [
   },
   {
     label: "Go",
+    backend: true,
     setupPage: "setup/go",
     bindings: {
       file: "examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go",
@@ -103,6 +115,8 @@ export function filterLanguageTabs(
 ): string {
   const order = new Map(languages.map((l, i) => [l.label, i]));
   const enabled = new Set(languages.filter((l) => l.enabled).map((l) => l.label));
+  const backendPage = /^---\n[\s\S]*?^languageTabs:\s*backend\s*$[\s\S]*?^---$/m.test(source);
+  const clientOnly = new Set(languages.filter((l) => !l.backend).map((l) => l.label));
 
   type Block = {
     open: { start: number; end: number; attrs: string };
@@ -163,6 +177,13 @@ export function filterLanguageTabs(
       if (!order.has(label))
         throw new Error(
           `${file}: ${LANGUAGE_TABS_GROUP} tab "${label}" isn't in docs/lib/languages`,
+        );
+    }
+    if (backendPage) {
+      const client = labels.filter((l) => clientOnly.has(l));
+      if (client.length)
+        throw new Error(
+          `${file}: a backend page (languageTabs: backend) has tabs for client-only ${client.join(", ")}`,
         );
     }
     for (let i = 1; i < labels.length; i++) {

@@ -7,8 +7,8 @@ use base64::Engine as _;
 
 use crate::tools::ObjectId;
 use crate::tools::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, EnumCaseDescriptor, HistoryRetention,
-    RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, RowDescriptor, Schema,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
@@ -19,6 +19,11 @@ use super::{
 
 /// A refusal at a JSON path of the app file.
 pub type Refusal = (String, String);
+
+/// Why an `enum` given as an object of cases with fields is refused: Jazz
+/// had such columns declared but no store could hold them, and they were
+/// removed in 2.0.0-alpha.65.
+const PAYLOAD_ENUM_REFUSAL: &str = "enum cases with fields are not supported; use a string enum plus a nullable column per field, or a json column (see https://github.com/garden-co/jazz/issues/5758)";
 
 fn refuse(path: impl Into<String>, message: impl Into<String>) -> Refusal {
     (path.into(), message.into())
@@ -667,28 +672,9 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                         Json::Array(_) => ColumnType::Enum {
                             variants: names(value, &sub)?,
                         },
-                        Json::Object(cases) => ColumnType::EnumPayload {
-                            cases: cases
-                                .iter()
-                                .map(|(case, fields)| {
-                                    let case_path = format!("{sub}.{case}");
-                                    let fields = object(fields, &case_path)?
-                                        .iter()
-                                        .map(|(field, spec)| {
-                                            read_column(
-                                                field,
-                                                spec,
-                                                &format!("{case_path}.{field}"),
-                                            )
-                                        })
-                                        .collect::<Result<_, _>>()?;
-                                    Ok(EnumCaseDescriptor {
-                                        name: case.clone(),
-                                        fields,
-                                    })
-                                })
-                                .collect::<Result<_, Refusal>>()?,
-                        },
+                        Json::Object(_) => {
+                            return Err(refuse(sub, PAYLOAD_ENUM_REFUSAL));
+                        }
                         _ => {
                             return Err(refuse(
                                 sub,
@@ -755,29 +741,6 @@ fn read_value(value: &Json, ty: &ColumnType, path: &str) -> Result<Value, Refusa
                 .map(|(i, item)| read_value(item, element, &format!("{path}[{i}]")))
                 .collect::<Result<_, _>>()?,
         ),
-        (ColumnType::EnumPayload { cases }, Json::Object(entries)) if entries.len() == 1 => {
-            let (case, fields) = &entries[0];
-            let descriptor = cases
-                .iter()
-                .find(|c| &c.name == case)
-                .ok_or_else(|| refuse(path, format!("unknown case `{case}`")))?;
-            let values = descriptor
-                .fields
-                .iter()
-                .map(|field| {
-                    let value = fields.get(field.name_str()).unwrap_or(&Json::Null);
-                    read_value(
-                        value,
-                        &field.column_type,
-                        &format!("{path}.{case}.{}", field.name_str()),
-                    )
-                })
-                .collect::<Result<_, _>>()?;
-            Value::Enum {
-                case: case.clone(),
-                values,
-            }
-        }
         _ => return Err(wrong()),
     })
 }
@@ -1189,36 +1152,12 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
             "enum",
             Json::Array(variants.iter().map(Json::string).collect()),
         )]),
-        ColumnType::EnumPayload { cases } => Json::object(vec![(
-            "enum",
-            Json::Object(
-                cases
-                    .iter()
-                    .map(|case| {
-                        Ok((
-                            case.name.clone(),
-                            Json::Object(
-                                case.fields
-                                    .iter()
-                                    .map(|f| {
-                                        Ok((
-                                            f.name_str().to_string(),
-                                            write_column(f, f.references.as_ref())?,
-                                        ))
-                                    })
-                                    .collect::<Result<_, String>>()?,
-                            ),
-                        ))
-                    })
-                    .collect::<Result<_, String>>()?,
-            ),
-        )]),
         ColumnType::Json { schema } => Json::object(vec![(
             "json",
             schema.as_ref().map_or(Json::Bool(true), from_serde),
         )]),
         ColumnType::Array { element } => Json::object(vec![("array", write_type(element)?)]),
-        ColumnType::ScalarEnum { .. } | ColumnType::CatalogueEnumPayload { .. } => {
+        ColumnType::ScalarEnum { .. } => {
             return Err(super::expr::unsupported("a catalogue-native enum"));
         }
         ColumnType::TransactionId => {
@@ -1316,25 +1255,6 @@ fn write_value(value: &Value, ty: &ColumnType) -> Result<Json, String> {
                 .map(|v| write_value(v, element))
                 .collect::<Result<_, _>>()?,
         ),
-        (Value::Enum { case, values }, ColumnType::EnumPayload { cases }) => {
-            let descriptor = cases
-                .iter()
-                .find(|c| &c.name == case)
-                .ok_or_else(|| super::expr::unsupported("an enum default of an unknown case"))?;
-            Json::Object(vec![(
-                case.clone(),
-                Json::Object(
-                    descriptor
-                        .fields
-                        .iter()
-                        .zip(values)
-                        .map(|(f, v)| {
-                            Ok((f.name_str().to_string(), write_value(v, &f.column_type)?))
-                        })
-                        .collect::<Result<_, String>>()?,
-                ),
-            )])
-        }
         (other, _) => return Err(super::expr::unsupported(&format!("the default {other:?}"))),
     })
 }

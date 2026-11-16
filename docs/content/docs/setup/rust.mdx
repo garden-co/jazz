@@ -1,6 +1,7 @@
 ---
 title: Rust Backend
 description: "Open a Jazz app from Rust with the jazz-app crate and typed bindings generated from jazz.app.json."
+languageTabs: backend
 ---
 
 A Rust service can be your app's backend. It opens the app from the same `jazz.app.json` and
@@ -61,5 +62,4 @@ for each example. `examples/todo-server-rs` in the repository is a complete serv
 In Rust, Jazz doesn't support these yet:
 
 - connecting as an end user with a JWT;
-- subscribing to history reads, and partial reads of large values (use `jazz.with_client(…)` for the low-level client);
-- payload enums.
+- subscribing to history reads, and partial reads of large values (use `jazz.with_client(…)` for the low-level client).

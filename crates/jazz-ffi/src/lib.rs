@@ -8,7 +8,7 @@
 //! Rows, queries and deltas are plain JSON typed by the app's schema; see
 //! the crate's README for the shapes. Not supported yet (refused with
 //! `JazzError::Refused`): includes, connecting to a sync server as an end
-//! user with a JWT, writing enums with payloads, reads inside transactions
+//! user with a JWT, reads inside transactions
 //! (and transactions altogether), computed columns and transforms (the
 //! language's bindings implement them over the stored values).
 
@@ -180,6 +180,22 @@ impl JazzHandle {
         ))
     }
 
+    /// The server's advice on whether this user may do `op` (`"read"`,
+    /// `"insert"`, `"update"`, `"delete"`) without doing it: `true`,
+    /// `false`, or `None` when no server can say. `args_json`: `{"id"}` for
+    /// read and delete, `{"row"}` for insert, `{"id", "row"?}` for update.
+    pub fn can(&self, table: String, op: String, args_json: String) -> Result<Option<bool>> {
+        self.core.surface((|| {
+            let args = convert_args(&args_json)?;
+            let row = args
+                .get("row")
+                .filter(|r| !r.is_null())
+                .map(|r| r.to_string());
+            let id = args.get("id").and_then(serde_json::Value::as_str);
+            self.core.can(&table, &op, id, row.as_deref())
+        })())
+    }
+
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
@@ -242,6 +258,14 @@ impl JazzHandle {
         ))?;
         Ok(Arc::new(Subscription { inner }))
     }
+}
+
+fn convert_args(args_json: &str) -> error::Result<serde_json::Value> {
+    if args_json.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(args_json)
+        .map_err(|error| error::refused(format!("args_json is not valid JSON: {error}")))
 }
 
 fn text_edit(column: String, edited_from: String, text: String) -> String {
