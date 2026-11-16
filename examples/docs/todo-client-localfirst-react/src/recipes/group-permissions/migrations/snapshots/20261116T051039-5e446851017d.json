@@ -1,0 +1,92 @@
+{
+  "documents": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "title",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "content",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "workspaceId",
+        "nullable": false,
+        "references": "workspaces"
+      }
+    ],
+    "relations": {
+      "workspace": {
+        "kind": "forward",
+        "table": "workspaces",
+        "column": "workspaceId"
+      }
+    }
+  },
+  "workspaceMembers": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "workspaceId",
+        "nullable": false,
+        "references": "workspaces"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "user_id",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Enum",
+          "variants": ["reader", "writer", "contributor", "admin"]
+        },
+        "name": "role",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "workspace": {
+        "kind": "forward",
+        "table": "workspaces",
+        "column": "workspaceId"
+      }
+    }
+  },
+  "workspaces": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "documents": {
+        "kind": "reverse",
+        "table": "documents",
+        "relation": "workspace"
+      },
+      "members": {
+        "kind": "reverse",
+        "table": "workspaceMembers",
+        "relation": "workspace"
+      }
+    }
+  }
+}

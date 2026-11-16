@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "4f727b808865d0b5db46377472e1b9a777f823a4627c13e2cceade59c8fb73aa"
+  },
   "tables": {
     "documents": {
       "read": "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user)",

@@ -5,14 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-canonical=examples/stage-plan/apps/react-localfirst
 example=examples/stage-plan/apps/kotlin-cli
-for file in jazz.app.json jazz.permissions.json; do
-  if ! cmp -s "$canonical/$file" "$example/$file"; then
-    echo "$example/$file differs from $canonical/$file: copy it over (never edit StagePlan's files for Kotlin)" >&2
-    exit 1
-  fi
-done
+# Its jazz.app.json / jazz.permissions.json come from schema.ts (a re-export of
+# StagePlan's); dev/gates/example-bindings.mjs checks they're current.
 
 source dev/scripts/kotlin-toolchain.sh
 

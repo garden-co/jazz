@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# The Swift bindings on Linux: the StagePlan Swift example's app files are
-# byte-identical to StagePlan's, its committed JazzApp.swift is what the Swift
-# back end writes, and the Jazz Swift package and the example build and pass
-# their tests against libjazz_ffi built from this tree. The example's tests
-# start a jazz-tools server each; then the CLI demo runs against one.
+# The Swift bindings on Linux: the StagePlan Swift example's committed
+# JazzApp.swift is what the Swift back end writes from its jazz.app.json, and
+# the Jazz Swift package and the example build and pass their tests against
+# libjazz_ffi built from this tree. The example's tests start a jazz-tools
+# server each; then the CLI demo runs against one. Whether that JSON is current
+# with the example's schema.ts (a re-export of StagePlan's) is
+# dev/gates/example-bindings.mjs's `jazz-tools generate --check`.
 # Uses the swift on PATH if it is 6.0 or newer, else downloads a pinned one.
 set -euo pipefail
 
@@ -18,14 +20,6 @@ cleanup() {
 }
 trap cleanup EXIT
 example="$root/examples/stage-plan/apps/swift-cli"
-canonical="$root/examples/stage-plan/apps/react-localfirst"
-
-for file in jazz.app.json jazz.permissions.json; do
-  cmp "$canonical/$file" "$example/$file" || {
-    echo "examples/stage-plan/apps/swift-cli/$file differs from react-localfirst's: copy it, never edit it" >&2
-    exit 1
-  }
-done
 
 swift_major=$(swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9]*\)\..*/\1/p' | head -1 || true)
 if [[ -z "$swift_major" || "$swift_major" -lt 6 ]]; then
