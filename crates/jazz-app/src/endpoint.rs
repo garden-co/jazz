@@ -20,7 +20,7 @@
 //!
 //! The endpoint is framework-neutral: the host's HTTP server passes requests
 //! to [`Endpoint::handle`], and the sockets it upgrades to
-//! [`Endpoint::serve_socket`]. With the `axum` feature, [`Endpoint::router`]
+//! [`Endpoint::serve_socket`]. With the `axum` feature, `Endpoint::router`
 //! does both.
 //!
 //! Not supported yet, as explicit answers: trusted backend clients (`backendClients`,

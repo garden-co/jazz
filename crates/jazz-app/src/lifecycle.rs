@@ -108,9 +108,10 @@ impl Stream for MutationErrors {
 }
 
 impl Jazz {
-    /// A handle acting for a user ([`crate::Endpoint::for_user`]) shares the
-    /// backend's trusted client with every other user: its link, store and
-    /// refusals are the backend's, not this user's to manage or see.
+    /// A handle acting for a user ([`Jazz::for_user`] on a trusted backend
+    /// client, or `Endpoint::for_user` with the `unstable-endpoint` feature)
+    /// shares its trusted client with every other user: its link, store and
+    /// refusals are that client's, not this user's to manage or see.
     fn refuse_for_user(&self, what: &str) -> Result<()> {
         if self.for_user {
             return Err(Error::Unsupported(format!(
@@ -132,7 +133,7 @@ impl Jazz {
     /// are dropped for it, with a `tracing` warning. Read it, or drop it.
     ///
     /// Refused with [`Error::Unsupported`] on a handle acting for a user
-    /// ([`crate::Endpoint::for_user`]): the refusals are every user's.
+    /// ([`Jazz::for_user`]): the refusals are every user's.
     pub async fn mutation_errors(&self) -> Result<MutationErrors> {
         self.refuse_for_user("mutation_errors")?;
         let (sender, receiver) = mpsc::channel(LISTENER_MAX);
@@ -159,7 +160,7 @@ impl Jazz {
     /// does nothing.
     ///
     /// Refused with [`Error::Unsupported`] on a handle acting for a user
-    /// ([`crate::Endpoint::for_user`]), whose link every user shares.
+    /// ([`Jazz::for_user`]), whose link every user shares.
     pub async fn disconnect(&self) -> Result<()> {
         self.refuse_for_user("disconnect")?;
         self.with_client(|client| async move {
@@ -196,7 +197,7 @@ impl Jazz {
     /// so there the refusal comes with this client stopped.
     ///
     /// Refused with [`Error::Unsupported`] on a handle acting for a user
-    /// ([`crate::Endpoint::for_user`]): it has no store of its own.
+    /// ([`Jazz::for_user`]): it has no store of its own.
     pub async fn delete_client_storage(&self) -> Result<()> {
         self.refuse_for_user("delete_client_storage")?;
         let Some(dir) = &self.info.storage_dir else {
