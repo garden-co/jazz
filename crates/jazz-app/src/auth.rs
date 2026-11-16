@@ -164,6 +164,37 @@ impl DeviceKey {
         Ok(Self(seed))
     }
 
+    /// Writes the key to the file at `path` (readable by this user only),
+    /// replacing what it held: written whole beside it, then renamed into
+    /// place.
+    pub(crate) fn write_to(&self, path: &std::path::Path) -> Result<()> {
+        let io = |error: std::io::Error| {
+            Error::Config(format!("device key at {}: {error}", path.display()))
+        };
+        let dir = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir).map_err(io)?;
+        let temp = dir.join(format!(
+            ".device-key.{}.tmp",
+            identity::derive_user_id(&self.0)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let written = options.open(&temp).and_then(|mut file| {
+            std::io::Write::write_all(&mut file, self.to_string().as_bytes())?;
+            file.sync_all()
+        });
+        let renamed = written.and_then(|()| std::fs::rename(&temp, path));
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        renamed.map_err(io)
+    }
+
     /// The key kept in the file at `path`, or a new one written there
     /// (readable by this user only): for hosts without a keychain, such as a
     /// CLI or a server-side test. Apps with a platform keychain keep the

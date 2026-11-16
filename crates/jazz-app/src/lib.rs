@@ -49,6 +49,7 @@ mod error;
 mod handle;
 mod history;
 mod include;
+mod jazz_session;
 mod large;
 mod lifecycle;
 mod query;
@@ -78,6 +79,9 @@ pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, Pick, RefsInclude, Row, Selection, With,
 };
 pub use jazz::tools::MutationError;
+pub use jazz_session::{
+    Initial, JazzSession, Recovery, SessionConfig, SessionError, SessionSnapshot, SessionStatus,
+};
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 pub use query::{

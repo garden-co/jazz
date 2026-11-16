@@ -90,6 +90,9 @@ pub(crate) struct Info {
     pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
     /// The store keeps nothing past the process.
     pub(crate) memory: bool,
+    /// Its [`crate::JazzSession`] replaced it: calls fail with
+    /// [`Error::Replaced`], not [`Error::Stopped`].
+    pub(crate) replaced: std::sync::atomic::AtomicBool,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -263,6 +266,7 @@ impl Jazz {
                 opened_with,
                 backend_client,
                 memory,
+                replaced: std::sync::atomic::AtomicBool::new(false),
             }),
             scope: None,
             for_user: false,
@@ -331,8 +335,24 @@ impl Jazz {
         });
         self.commands
             .send(Command::Run(job))
-            .map_err(|_| Error::Stopped)?;
-        answer.await.map_err(|_| Error::Stopped)?
+            .map_err(|_| self.stopped())?;
+        answer.await.map_err(|_| self.stopped())?
+    }
+
+    /// Why calls fail now that the client stopped.
+    fn stopped(&self) -> Error {
+        if self.info.replaced.load(std::sync::atomic::Ordering::SeqCst) {
+            Error::Replaced
+        } else {
+            Error::Stopped
+        }
+    }
+
+    /// Its [`crate::JazzSession`] is replacing it.
+    pub(crate) fn mark_replaced(&self) {
+        self.info
+            .replaced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Sends `job` to the client's thread without waiting for it: for
