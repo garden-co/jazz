@@ -38,6 +38,32 @@ interface CodegenNapi {
   loadAppArtifact(app: string, permissions: string): unknown;
   loadBackendApp(schema: string, permissions: string): unknown;
   compileApp(appJson: string): string;
+  generateForDir?(dir: string, options?: DirOptions): DirOutcome;
+  migrationsCreateForDir?(dir: string, name: string, options?: DirOptions): DirOutcome;
+}
+
+/** How `generateForDir` / `migrationsCreateForDir` run. */
+export interface DirOptions {
+  /** Fail when the files or bindings are stale, and write nothing. */
+  check?: boolean;
+  /** The bindings' languages; by default each the directory's files say the app is written in. */
+  lang?: string[];
+  /** The language assumed when nothing in the directory names one and no other language's manifest is there. */
+  fallback?: string;
+}
+
+/** What `generateForDir` / `migrationsCreateForDir` did. */
+export interface DirOutcome {
+  notes: string[];
+  warnings: string[];
+  /** Bindings files written, relative to the directory. */
+  written: string[];
+  /** Bindings files already up to date, relative to the directory. */
+  current: string[];
+  /** `migrationsCreateForDir`: whether `jazz.app.json` changed. */
+  changed: boolean;
+  /** `migrationsCreateForDir`: JSON paths of the TODOs left to resolve. */
+  todos: string[];
 }
 
 let napi: Promise<CodegenNapi> | undefined;
@@ -132,6 +158,36 @@ export async function migrationsCreate(
   name: string,
 ): Promise<{ app: string; changed: boolean; todos: string[] }> {
   return (await codegen()).migrationsCreate(appJson, bindings, name);
+}
+
+/**
+ * `jazz-tools generate [--check]` in `dir` (the directory of `jazz.app.json`),
+ * as the `jazz-tools` binary runs it: the same language detection, checks and
+ * bytes.
+ */
+export async function generateForDir(dir: string, options: DirOptions = {}): Promise<DirOutcome> {
+  const loaded = await codegen();
+  if (!loaded.generateForDir) {
+    throw new Error(
+      "This jazz-napi build can't generate bindings for a directory: update jazz-napi.",
+    );
+  }
+  return loaded.generateForDir(dir, options);
+}
+
+/** `jazz-tools migrations create --name <name>` in `dir`, as the `jazz-tools` binary runs it. */
+export async function migrationsCreateForDir(
+  dir: string,
+  name: string,
+  options: DirOptions = {},
+): Promise<DirOutcome> {
+  const loaded = await codegen();
+  if (!loaded.migrationsCreateForDir) {
+    throw new Error(
+      "This jazz-napi build can't create migrations for a directory: update jazz-napi.",
+    );
+  }
+  return loaded.migrationsCreateForDir(dir, name, options);
 }
 
 /** Read and check both files as a backend does; throws what a backend would refuse. */

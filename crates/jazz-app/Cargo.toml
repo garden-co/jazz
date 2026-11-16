@@ -5,8 +5,22 @@ edition = "2024"
 description = "Typed, Send + Clone Rust handle for a Jazz app opened from its jazz.app.json"
 
 [features]
-# `Endpoint::router`: the app's Jazz endpoint as an Axum router.
-axum = ["dep:axum"]
+# Unstable, not part of a release yet: the app's Jazz endpoint (`endpoint`),
+# a native main server for an app's users. Run main backends with TS
+# `createJazz`.
+unstable-endpoint = ["dep:hmac", "dep:sha2", "dep:tokio-tungstenite"]
+# `Endpoint::router`: the endpoint as an Axum router.
+axum = ["unstable-endpoint", "dep:axum"]
+# A stand-in for an app's Jazz endpoint, for testing bindings' end users:
+# see src/bin/jazz-app-test-relay.rs.
+test-relay = [
+  "dep:futures",
+  "dep:tokio-tungstenite",
+  "tokio/net",
+  "tokio/io-util",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+]
 
 [dependencies]
 axum = { version = "0.8.9", optional = true, default-features = false, features = [
@@ -17,18 +31,34 @@ axum = { version = "0.8.9", optional = true, default-features = false, features 
 jazz = { workspace = true, features = ["runtime"] }
 jazz-native-transport.workspace = true
 base64 = "0.22"
+jazz-text.workspace = true
 futures-core = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 getrandom = "0.3"
+hmac = { version = "0.12", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = { version = "0.10", optional = true }
 thiserror = "2"
+tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = [
+tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = [
   "connect",
+  "handshake",
   "rustls-tls-native-roots",
 ] }
+# Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
+futures = { version = "0.3", optional = true }
+
+[[bin]]
+name = "jazz-app-test-relay"
+path = "src/bin/jazz-app-test-relay.rs"
+required-features = ["test-relay"]
+
+[[test]]
+name = "test_relay_bin"
+required-features = ["test-relay"]
 
 [dev-dependencies]
 hmac = "0.12"
@@ -36,6 +66,7 @@ sha2 = "0.10"
 jazz-codegen = { path = "../jazz-codegen" }
 jazz-server = { path = "../jazz-server", features = ["test"] }
 futures = "0.3"
+rusqlite = "0.40"
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
@@ -47,3 +78,7 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = [
 [[example]]
 name = "endpoint_server"
 required-features = ["axum"]
+
+[[test]]
+name = "endpoint"
+required-features = ["unstable-endpoint"]

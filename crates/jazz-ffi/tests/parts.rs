@@ -51,7 +51,31 @@ fn select_parts_read_only_what_they_name() {
     };
     assert!(refused(json!([{ "column": "label", "at": "/x" }])).contains("json column"));
     assert!(
+        refused(json!(["label", { "column": "label", "from": 0, "to": 1, "units": "utf8" }]))
+            .contains("both whole and in part")
+    );
+    // `*` beside other entries still checks them.
+    assert!(refused(json!(["*", "nope"])).contains("no column nope"));
+    assert!(
         refused(json!([{ "column": "label", "from": 0, "to": 1, "units": "words" }]))
             .contains("units")
     );
+}
+
+/// Parts are for the root query: inside an include they are refused, not
+/// silently read whole.
+#[test]
+fn parts_inside_includes_are_refused() {
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    let query = json!({ "table": "shows", "include": [{ "relation": "tasks", "query": {
+        "select": [{ "column": "title", "from": 0, "to": 1, "units": "utf8" }] } }] });
+    match jazz.all(query.to_string()) {
+        Err(JazzError::Refused { reason }) => {
+            assert!(
+                reason.starts_with("not supported yet: reading part of a value in an include"),
+                "{reason}"
+            )
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
 }

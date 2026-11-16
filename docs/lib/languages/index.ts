@@ -20,18 +20,25 @@ export type Language = {
    */
   bindings?: BindingsSource;
   /**
-   * Whether the language can run your app's backend (createJazz or its
-   * equivalent, serving end users, publishing permissions). Client-only
-   * languages (Swift, Kotlin in .65) get no tabs on pages whose frontmatter
-   * says `languageTabs: backend`.
+   * Whether the language runs on a backend, as a backend client of your main
+   * backend (`setup/backend-client`). Client-only languages (Swift, Kotlin in
+   * .65) get no tabs on pages whose frontmatter says `languageTabs: backend`.
    */
   backend: boolean;
+  /**
+   * Whether the language can run your app's main backend (createJazz, serving
+   * end users, publishing permissions). Only TypeScript in .65: pages whose
+   * frontmatter says `languageTabs: main-backend` get no other tabs. `backend`
+   * alone means a backend client (`languageTabs: backend` pages).
+   */
+  mainBackend?: boolean;
   enabled: boolean;
 };
 
 export const LANGUAGES: readonly Language[] = [
   {
     label: "TypeScript",
+    mainBackend: true,
     backend: true,
     bindings: {
       file: "examples/stage-plan/apps/react-localfirst/jazz.generated.ts",
@@ -40,7 +47,7 @@ export const LANGUAGES: readonly Language[] = [
     },
     enabled: true,
   },
-  { label: "Effect", backend: true, enabled: true },
+  { label: "Effect", backend: true, mainBackend: true, enabled: true },
   {
     label: "Rust",
     backend: true,
@@ -114,8 +121,12 @@ export function filterLanguageTabs(
 ): string {
   const order = new Map(languages.map((l, i) => [l.label, i]));
   const enabled = new Set(languages.filter((l) => l.enabled).map((l) => l.label));
-  const backendPage = /^---\n[\s\S]*?^languageTabs:\s*backend\s*$[\s\S]*?^---$/m.test(source);
-  const clientOnly = new Set(languages.filter((l) => !l.backend).map((l) => l.label));
+  const scope = /^---\n[\s\S]*?^languageTabs:\s*(backend|main-backend)\s*$[\s\S]*?^---$/m.exec(
+    source,
+  )?.[1];
+  const allowed = (l: Language) =>
+    scope === "main-backend" ? !!l.mainBackend : scope === "backend" ? l.backend : true;
+  const refused = new Set(languages.filter((l) => !allowed(l)).map((l) => l.label));
 
   type Block = {
     open: { start: number; end: number; attrs: string };
@@ -178,11 +189,11 @@ export function filterLanguageTabs(
           `${file}: ${LANGUAGE_TABS_GROUP} tab "${label}" isn't in docs/lib/languages`,
         );
     }
-    if (backendPage) {
-      const client = labels.filter((l) => clientOnly.has(l));
-      if (client.length)
+    if (scope) {
+      const wrong = labels.filter((l) => refused.has(l));
+      if (wrong.length)
         throw new Error(
-          `${file}: a backend page (languageTabs: backend) has tabs for client-only ${client.join(", ")}`,
+          `${file}: a ${scope === "main-backend" ? "main-backend" : "backend-client"} page (languageTabs: ${scope}) has tabs for ${wrong.join(", ")}`,
         );
     }
     for (let i = 1; i < labels.length; i++) {

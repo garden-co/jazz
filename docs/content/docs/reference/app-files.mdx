@@ -30,12 +30,23 @@ ignore file) to keep the two in step.
   "format": 1,
   "tables": {
     "chats": {
-      "columns": { "name": "string?", "isPublic": "boolean", "joinCode": "string?" },
-      "relations": { "chatMembersViaChat": { "reverse": "chatMembers", "relation": "chat" } }
+      "columns": {
+        "name": "string?",
+        "isPublic": "boolean",
+        "joinCode": "string?"
+      },
+      "relations": {
+        "chatMembersViaChat": { "reverse": "chatMembers", "relation": "chat" }
+      }
     },
     "chatMembers": {
-      "columns": { "chatId": "uuid", "userId": "uuid" },
-      "relations": { "chat": { "rel": "chats", "column": "chatId" } },
+      "columns": {
+        "chatId": "uuid",
+        "userId": "uuid"
+      },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" }
+      },
       "indexes": [["chatId", "$createdAt"]]
     }
   }
@@ -82,7 +93,9 @@ ignore file) to keep the two in step.
         "new": "exists chats(id = this.id, isPublic = this.isPublic)"
       }
     },
-    "reactions": { "read": "allowedTo.read(message)" }
+    "reactions": {
+      "read": "allowedTo.read(message)"
+    }
   }
 }
 ```

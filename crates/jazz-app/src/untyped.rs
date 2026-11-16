@@ -165,6 +165,22 @@ impl Query {
         matches!(self.source, Some(Source::Union(_)))
     }
 
+    /// Read only `part` of `column`'s value (TS `select` with a partial
+    /// selection). Not of a hop, gather, union or history read, where the
+    /// core cannot read part of a value.
+    pub fn select_part(mut self, column: &str, part: jazz::query::Part) -> Self {
+        if self.source.is_some() {
+            return self.refuse(
+                "part(...) on hop_to(...), gather(...) or union(...) is not supported yet",
+            );
+        }
+        if self.is_history() {
+            return self.refuse("part(...) on a history read is not supported");
+        }
+        self.query = self.query.select_part(column, part);
+        self
+    }
+
     fn is_history(&self) -> bool {
         jazz::schema::history::is_history_table(&self.query.table)
     }
@@ -512,6 +528,7 @@ impl Query {
         subquery.limit = query.limit;
         subquery.offset = query.offset;
         subquery.nested_arrays = query.array_subqueries;
+        subquery.partial = query.partial;
         Ok(subquery)
     }
 
@@ -520,6 +537,9 @@ impl Query {
     fn path(self, what: &str) -> std::result::Result<(RelationExpr, String, usize), String> {
         if let Some(reason) = self.refused {
             return Err(reason);
+        }
+        if !self.query.partial.is_empty() {
+            return Err(format!("{what} after part(...) is not supported yet"));
         }
         if self.is_history() {
             return Err(format!("{what} on a history read is not supported"));
@@ -573,9 +593,13 @@ impl Query {
         if self.is_history() {
             return Err("union(...) of history reads is not supported".to_owned());
         }
-        if self.query.select.is_some() || !self.query.array_subqueries.is_empty() {
+        if self.query.select.is_some()
+            || !self.query.array_subqueries.is_empty()
+            || !self.query.partial.is_empty()
+        {
             return Err(
-                "select(...) or include(...) on a union(...) arm is not supported".to_owned(),
+                "select(...), part(...) or include(...) on a union(...) arm is not supported"
+                    .to_owned(),
             );
         }
         let table = self.query.table.clone();
@@ -778,9 +802,7 @@ fn predicate(predicate: &Predicate, scope: &str) -> std::result::Result<Relation
         Predicate::IsNull(operand) => RelationPredicate::IsNull {
             column: column(operand)?,
         },
-        Predicate::EnumMatch { .. } => {
-            return Err("enum match conditions cannot follow a relation yet".to_owned());
-        }
+        Predicate::Removed(removed) => match *removed {},
     })
 }
 

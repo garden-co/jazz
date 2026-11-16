@@ -41,7 +41,7 @@ const App = `{
 }
 `
 
-// Open opens this app: a client, or a backend when cfg.Permissions is set.
+// Open opens this app: locally, or as a client of cfg.ServerURL.
 // computed is your Computed: what this app's computed fields and transforms run.
 func Open(ctx context.Context, cfg jazz.Config, computed Computed) (*jazz.DB, error) {
 	if computed == nil {

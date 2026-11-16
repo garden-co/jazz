@@ -246,9 +246,7 @@ impl<'a> Writer<'a> {
             "{APP_PREFIX}`{}`\n",
             self.app.file.replace('`', BACKQUOTE)
         );
-        out.push_str(
-            "// Open opens this app: a client, or a backend when cfg.Permissions is set.\n",
-        );
+        out.push_str("// Open opens this app: locally, or as a client of cfg.ServerURL.\n");
         if self.has_computed {
             out.push_str("// computed is your Computed: what this app's computed fields and transforms run.\n");
             out.push_str("func Open(ctx context.Context, cfg jazz.Config, computed Computed) (*jazz.DB, error) {\n");
@@ -975,9 +973,6 @@ fn type_label(ty: &ColumnType) -> &'static str {
     match ty {
         ColumnType::TransactionId => "transaction id",
         ColumnType::Row { .. } => "nested row",
-        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
-            "enum-with-payload"
-        }
         ColumnType::ScalarEnum { .. } => "catalogue enum",
         _ => "these",
     }

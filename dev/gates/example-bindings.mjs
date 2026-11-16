@@ -8,7 +8,7 @@
  * starts. Runs against the jazz-tools CLI the TypeScript partition built.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,8 +28,19 @@ export function exampleAppDirs(cwd = root) {
       .split("\n")
       .filter(Boolean)
       .map((file) => dirname(file))
+      .filter((dir) => !isSwiftPackage(resolve(cwd, dir)))
       .sort()
   );
+}
+
+/**
+ * A Swift package of the Jazz Swift runtime (a Package.swift naming
+ * jazz-swift): its bindings are JazzApp.swift, which jazz-codegen's golden
+ * test and dev/gates/jazz-swift.sh check while the npm CLI has Swift off.
+ */
+function isSwiftPackage(dir) {
+  const manifest = join(dir, "Package.swift");
+  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
 }
 
 /** `generate --check` in each app; the failures, as `dir: last line of output`. */

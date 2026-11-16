@@ -30,8 +30,13 @@ If we have the following schema:
   "format": 1,
   "tables": {
     "projects": {
-      "columns": { "name": "string", "owner_id": "uuid" },
-      "relations": { "todos": { "reverse": "todos", "relation": "project" } }
+      "columns": {
+        "name": "string",
+        "owner_id": "uuid"
+      },
+      "relations": {
+        "todos": { "reverse": "todos", "relation": "project" }
+      }
     },
     "todos": {
       "columns": {
@@ -49,8 +54,14 @@ If we have the following schema:
       }
     },
     "todoShares": {
-      "columns": { "todoId": "uuid", "user_id": "uuid", "can_read": "boolean" },
-      "relations": { "todo": { "rel": "todos", "column": "todoId" } }
+      "columns": {
+        "todoId": "uuid",
+        "user_id": "uuid",
+        "can_read": "boolean"
+      },
+      "relations": {
+        "todo": { "rel": "todos", "column": "todoId" }
+      }
     }
   }
 }
@@ -63,7 +74,10 @@ We can define permissions in `jazz.permissions.json`:
   "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
   "format": 1,
   "tables": {
-    "projects": { "read": "true", "insert": "true" },
+    "projects": {
+      "read": "true",
+      "insert": "true"
+    },
     "todos": {
       "read": "owner_id = session.user",
       "insert": "owner_id = session.user",
@@ -135,7 +149,12 @@ Use `"true"` when an operation should always be permitted.
 {
   "format": 1,
   "tables": {
-    "todos": { "read": "true", "insert": "true", "update": "true", "delete": "true" }
+    "todos": {
+      "read": "true",
+      "insert": "true",
+      "update": "true",
+      "delete": "true"
+    }
   }
 }
 ```
@@ -149,7 +168,12 @@ Use `"false"` when an operation should be impossible. Leaving the operation out 
 {
   "format": 1,
   "tables": {
-    "todos": { "read": "false", "insert": "false", "update": "false", "delete": "false" }
+    "todos": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    }
   }
 }
 ```
@@ -190,7 +214,9 @@ rules readable:
 {
   "format": 1,
   "tables": {
-    "projects": { "read": "owner_id = session.user" },
+    "projects": {
+      "read": "owner_id = session.user"
+    },
     "todos": {
       "read": {
         "$comment": "Users can read a todo if they own it, or if it's not done and they can read its project.",
@@ -216,7 +242,9 @@ like a function. Definitions may call each other, but never recursively:
     "isOwner($owner)": "$owner = session.user"
   },
   "tables": {
-    "projects": { "read": "isOwner(owner_id)" },
+    "projects": {
+      "read": "isOwner(owner_id)"
+    },
     "todos": {
       "read": "isOwner(owner_id)",
       "update": "isOwner(owner_id) and done = false",
@@ -274,7 +302,10 @@ target.
 {
   "format": 1,
   "tables": {
-    "projects": { "read": "owner_id = session.user", "update": "owner_id = session.user" },
+    "projects": {
+      "read": "owner_id = session.user",
+      "update": "owner_id = session.user"
+    },
     "todos": {
       "read": {
         "$comment": "Users can read a todo if it's not done, or if they can read its project.",
@@ -356,10 +387,23 @@ filter again. For example, a doctor may read the patients they have an appointme
 {
   "format": 1,
   "tables": {
-    "doctors": { "columns": { "userId": "string", "name": "string" } },
-    "patients": { "columns": { "name": "string" } },
+    "doctors": {
+      "columns": {
+        "userId": "string",
+        "name": "string"
+      }
+    },
+    "patients": {
+      "columns": {
+        "name": "string"
+      }
+    },
     "appointments": {
-      "columns": { "doctorId": "uuid", "patientId": "uuid", "at": "timestamp" },
+      "columns": {
+        "doctorId": "uuid",
+        "patientId": "uuid",
+        "at": "timestamp"
+      },
       "relations": {
         "doctor": { "rel": "doctors", "column": "doctorId" },
         "patient": { "rel": "patients", "column": "patientId" }
@@ -578,7 +622,9 @@ The creator condition is a plain comparison, so it composes inside larger rules:
 {
   "format": 1,
   "tables": {
-    "todos": { "read": "$createdBy.account = session.user or done = true" }
+    "todos": {
+      "read": "$createdBy.account = session.user or done = true"
+    }
   }
 }
 ```
@@ -606,7 +652,7 @@ thin client rejects with a `ThinRemoteError` whose `code` is `WriteRejected` and
 starts with the reason, such as `authorization_denied: …`. Use
 `db.onMutationError(...)` as a fallback for rejections without an active wait;
 see [Handling mutation errors](/docs/writing/writing-data#handling-mutation-errors).
-A backend connected to Jazz Cloud doesn't refuse a session's write up front either: the cloud
+A backend connected to Jazz Cloud (deprecated) doesn't refuse a session's write up front either: the cloud
 decides it, and a denial arrives through `wait(...)` with the same `permission_denied` code. A store
 with no authority above it, such as a client with `serverUrl: null` or a backend on its own
 storage, refuses some denied writes at once (the write call throws), and accepts others, such as a
