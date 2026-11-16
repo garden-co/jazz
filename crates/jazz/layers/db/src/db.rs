@@ -11456,7 +11456,16 @@ impl Default for CheckPlans {
 }
 
 impl CheckPlans {
-    const CAP: usize = 16_384;
+    /// Each kept key costs about 1.8 KB of resident memory with one claims
+    /// set (its key, the statement's text and parameters, the claims it
+    /// was compiled under, and the map entry), measured as the RSS growth
+    /// of 8 000 authors each kept once under a membership `EXISTS` read
+    /// policy; a key holding [`CheckPlans::PER_KEY`] claims sets costs up
+    /// to about twice that. At 16 384 keys the worst case was about 30 MB
+    /// per store, up to 60 MB with two claims sets per key. At 4 096 it is
+    /// about 7 MB, up to 15 MB, while still holding every author of a
+    /// deployment of a few hundred authors × tables × operations.
+    const CAP: usize = 4_096;
     const PER_KEY: usize = 2;
 
     fn key(
