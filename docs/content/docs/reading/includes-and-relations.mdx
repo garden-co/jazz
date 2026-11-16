@@ -30,7 +30,12 @@ export const schema = s.defineSchema({
       children: s.reverse("todos", "parent"),
     },
   ),
-  projects: s.table({ name: s.string() }, { todos: s.reverse("todos", "project") }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todos: s.reverse("todos", "project") },
+  ),
 });
 ```
 

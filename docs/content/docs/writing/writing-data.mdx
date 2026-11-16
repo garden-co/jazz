@@ -303,7 +303,12 @@ Store a file in a `bytes` column next to its metadata:
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  files: s.table({ name: s.string(), type: s.string(), size: s.int(), content: s.bytes() }),
+  files: s.table({
+    name: s.string(),
+    type: s.string(),
+    size: s.int(),
+    content: s.bytes(),
+  }),
 });
 ```
 

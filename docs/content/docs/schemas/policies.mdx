@@ -298,7 +298,10 @@ adding an allow rule to silence the warning:
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  auditLog: s.table({ ownerId: s.uuid(), action: s.string() }),
+  auditLog: s.table({
+    ownerId: s.uuid(),
+    action: s.string(),
+  }),
 });
 
 const { definePermissions, session } = schema;
@@ -504,7 +507,11 @@ Untyped claims accept any path. To have TypeScript check them, declare their sha
 ```ts title="schema.ts"
 export const schema = s.defineSchema(
   {
-    projects: s.table({ name: s.string(), orgId: s.string(), teamId: s.string() }),
+    projects: s.table({
+      name: s.string(),
+      orgId: s.string(),
+      teamId: s.string(),
+    }),
   },
   { claims: s.claims<{ role: "manager" | "member"; org: string; teams: string[] }>() },
 );
@@ -676,8 +683,13 @@ filter again. For example, a doctor may read the patients they have an appointme
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  doctors: s.table({ userId: s.string(), name: s.string() }),
-  patients: s.table({ name: s.string() }),
+  doctors: s.table({
+    userId: s.string(),
+    name: s.string(),
+  }),
+  patients: s.table({
+    name: s.string(),
+  }),
   appointments: s.table(
     { doctorId: s.uuid(), patientId: s.uuid(), at: s.timestamp() },
     {
@@ -893,7 +905,10 @@ them; `generate` does. For example, with folders and files:
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  folders: s.table({ name: s.string(), ownerId: s.uuid() }),
+  folders: s.table({
+    name: s.string(),
+    ownerId: s.uuid(),
+  }),
   files: s.table(
     { name: s.string(), folderId: s.uuid() },
     {
