@@ -119,10 +119,7 @@ it.skipIf(!CLIENT)(
       expect(requests.deletes).toBeLessThanOrEqual(1);
       expect(upgraded).toBeGreaterThan(0);
       const rows = await jazz.db.all(app.todos.select("title"));
-      expect(rows.map((row: { title: string }) => row.title).sort()).toEqual([
-        "after idle",
-        "before idle",
-      ]);
+      expect(rows.map((row) => row.title as string).sort()).toEqual(["after idle", "before idle"]);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
