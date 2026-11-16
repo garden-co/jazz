@@ -1,0 +1,406 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "a2f29e401bffee70a5a816e936b6613727b8619150b7c7d93b1c524054f90334"
+  },
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "cartLines": {
+      "columns": { "cartId": "uuid", "productId": "uuid", "quantity": "int" },
+      "relations": {
+        "cart": { "rel": "carts", "column": "cartId" },
+        "product": { "rel": "products", "column": "productId" }
+      },
+      "indexes": ["cartId"]
+    },
+    "carts": {
+      "columns": {
+        "shopper": "uuid",
+        "shippingMethod": { "enum": ["standard", "express"], "default": "standard" },
+        "shipName": "string?",
+        "shipLine1": "string?",
+        "shipLine2": "string?",
+        "shipCity": "string?",
+        "shipPostcode": "string?",
+        "shipCountry": "string?",
+        "checkoutKey": "string?"
+      },
+      "relations": { "cartLinesViaCart": { "reverse": "cartLines", "relation": "cart" } },
+      "indexes": ["shopper"]
+    },
+    "categories": {
+      "columns": { "slug": "string", "name": "string", "blurb": "string", "position": "int" },
+      "relations": { "productsViaCategory": { "reverse": "products", "relation": "category" } },
+      "indexes": ["slug", "position"]
+    },
+    "orderEvents": {
+      "columns": {
+        "orderId": "uuid",
+        "status": { "enum": ["placed", "paid", "payment_failed", "shipped"] },
+        "note": "string",
+        "at": "timestamp"
+      },
+      "relations": { "order": { "rel": "orders", "column": "orderId" } },
+      "indexes": ["orderId", "at"]
+    },
+    "orderLines": {
+      "columns": {
+        "orderId": "uuid",
+        "productId": "uuid",
+        "productName": "string",
+        "unitPriceCents": "int",
+        "quantity": "int"
+      },
+      "relations": {
+        "order": { "rel": "orders", "column": "orderId" },
+        "product": { "rel": "products", "column": "productId" }
+      },
+      "indexes": ["orderId"]
+    },
+    "orders": {
+      "columns": {
+        "shopper": "uuid",
+        "code": "string",
+        "status": { "enum": ["placed", "paid", "payment_failed", "shipped"] },
+        "idempotencyKey": "string",
+        "subtotalCents": "int",
+        "shippingCents": "int",
+        "totalCents": "int",
+        "shippingMethod": { "enum": ["standard", "express"] },
+        "shipName": "string",
+        "shipLine1": "string",
+        "shipLine2": "string?",
+        "shipCity": "string",
+        "shipPostcode": "string",
+        "shipCountry": "string",
+        "placedAt": "timestamp"
+      },
+      "relations": {
+        "orderEventsViaOrder": { "reverse": "orderEvents", "relation": "order" },
+        "orderLinesViaOrder": { "reverse": "orderLines", "relation": "order" },
+        "paymentsViaOrder": { "reverse": "payments", "relation": "order" }
+      },
+      "indexes": ["shopper", "status", "placedAt"]
+    },
+    "payments": {
+      "columns": {
+        "orderId": "uuid",
+        "provider": { "enum": ["sandbox", "stripe"] },
+        "providerRef": "string",
+        "clientSecret": "string?",
+        "status": { "enum": ["requires_payment", "succeeded", "failed"] },
+        "amountCents": "int",
+        "failureReason": "string?"
+      },
+      "relations": { "order": { "rel": "orders", "column": "orderId" } },
+      "indexes": ["orderId"]
+    },
+    "products": {
+      "columns": {
+        "sku": "string",
+        "slug": "string",
+        "name": "string",
+        "brand": "string",
+        "categoryId": "uuid",
+        "priceCents": "int",
+        "summary": "string",
+        "description": "string",
+        "specs": { "json": true },
+        "hue": {
+          "enum": [
+            "gray",
+            "blue",
+            "cyan",
+            "green",
+            "orange",
+            "pink",
+            "purple",
+            "red",
+            "teal",
+            "yellow"
+          ]
+        },
+        "art": {
+          "enum": [
+            "guitar",
+            "bass",
+            "keys",
+            "synth",
+            "drum",
+            "cymbal",
+            "mic",
+            "headphones",
+            "amp",
+            "pedal",
+            "cable",
+            "strings",
+            "picks"
+          ]
+        },
+        "searchText": "string",
+        "position": "int"
+      },
+      "relations": {
+        "cartLinesViaProduct": { "reverse": "cartLines", "relation": "product" },
+        "category": { "rel": "categories", "column": "categoryId" },
+        "orderLinesViaProduct": { "reverse": "orderLines", "relation": "product" },
+        "stockViaProduct": { "reverse": "stock", "relation": "product" }
+      },
+      "indexes": ["slug", "categoryId", "position"]
+    },
+    "stock": {
+      "columns": { "productId": "uuid", "onHand": "int" },
+      "relations": { "product": { "rel": "products", "column": "productId" } },
+      "indexes": ["productId"]
+    }
+  },
+  "history": {
+    "5806d5c6e98c": {
+      "tables": {
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "cartLines": {
+          "columns": {
+            "cartId": { "type": "uuid", "references": "carts" },
+            "productId": { "type": "uuid", "references": "products" },
+            "quantity": "int"
+          },
+          "indexes": ["cartId"]
+        },
+        "carts": {
+          "columns": {
+            "shopper": "uuid",
+            "shippingMethod": { "enum": ["standard", "express"], "default": "standard" },
+            "shipName": "string?",
+            "shipLine1": "string?",
+            "shipLine2": "string?",
+            "shipCity": "string?",
+            "shipPostcode": "string?",
+            "shipCountry": "string?",
+            "checkoutKey": "string?"
+          },
+          "indexes": ["shopper"]
+        },
+        "categories": {
+          "columns": { "slug": "string", "name": "string", "blurb": "string", "position": "int" },
+          "indexes": ["slug", "position"]
+        },
+        "orderEvents": {
+          "columns": {
+            "orderId": { "type": "uuid", "references": "orders" },
+            "status": { "enum": ["placed", "paid", "payment_failed", "shipped"] },
+            "note": "string",
+            "at": "timestamp"
+          },
+          "indexes": ["orderId", "at"]
+        },
+        "orderLines": {
+          "columns": {
+            "orderId": { "type": "uuid", "references": "orders" },
+            "productId": { "type": "uuid", "references": "products" },
+            "productName": "string",
+            "unitPriceCents": "int",
+            "quantity": "int"
+          },
+          "indexes": ["orderId"]
+        },
+        "orders": {
+          "columns": {
+            "shopper": "uuid",
+            "code": "string",
+            "status": { "enum": ["placed", "paid", "payment_failed", "shipped"] },
+            "idempotencyKey": "string",
+            "subtotalCents": "int",
+            "shippingCents": "int",
+            "totalCents": "int",
+            "shippingMethod": { "enum": ["standard", "express"] },
+            "shipName": "string",
+            "shipLine1": "string",
+            "shipLine2": "string?",
+            "shipCity": "string",
+            "shipPostcode": "string",
+            "shipCountry": "string",
+            "placedAt": "timestamp"
+          },
+          "indexes": ["shopper", "status", "placedAt"]
+        },
+        "payments": {
+          "columns": {
+            "orderId": { "type": "uuid", "references": "orders" },
+            "provider": { "enum": ["sandbox", "stripe"] },
+            "providerRef": "string",
+            "clientSecret": "string?",
+            "status": { "enum": ["requires_payment", "succeeded", "failed"] },
+            "amountCents": "int",
+            "failureReason": "string?"
+          },
+          "indexes": ["orderId"]
+        },
+        "products": {
+          "columns": {
+            "sku": "string",
+            "slug": "string",
+            "name": "string",
+            "brand": "string",
+            "categoryId": { "type": "uuid", "references": "categories" },
+            "priceCents": "int",
+            "summary": "string",
+            "description": "string",
+            "specs": { "json": true },
+            "hue": {
+              "enum": [
+                "gray",
+                "blue",
+                "cyan",
+                "green",
+                "orange",
+                "pink",
+                "purple",
+                "red",
+                "teal",
+                "yellow"
+              ]
+            },
+            "art": {
+              "enum": [
+                "guitar",
+                "bass",
+                "keys",
+                "synth",
+                "drum",
+                "cymbal",
+                "mic",
+                "headphones",
+                "amp",
+                "pedal",
+                "cable",
+                "strings",
+                "picks"
+              ]
+            },
+            "searchText": "string",
+            "position": "int"
+          },
+          "indexes": ["slug", "categoryId", "position"]
+        },
+        "stock": {
+          "columns": { "productId": { "type": "uuid", "references": "products" }, "onHand": "int" },
+          "indexes": ["productId"]
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "5806d5c6e98c",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

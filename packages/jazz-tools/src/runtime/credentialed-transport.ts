@@ -1,5 +1,6 @@
 import type { AppBearer } from "../accounts/enrollment.js";
 import type { BrowserWebSocket, WebSocketConstructor } from "./native-runtime/websocket.js";
+import { httpStreamFallbackWebSocket } from "./native-runtime/http-stream-socket.js";
 
 /** A backend client's credential: its workload's OIDC token, or how to get a fresh one. */
 export type BackendClientCredential = string | (() => string | Promise<string>);
@@ -8,12 +9,20 @@ export type BackendClientCredential = string | (() => string | Promise<string>);
  * `fetch` and `WebSocket` that send `credential` as `Authorization: Bearer`
  * to `serverUrl`'s origin (and nowhere else), fetching a fresh token for
  * every request and socket. For backend clients: Node processes that sync
- * through an app's main backend with their workload's token.
+ * through an app's main backend with their workload's token. Like a
+ * browser's same-origin socket, the `WebSocket` gives way to the main
+ * backend's HTTP stream where that backend can't upgrade sockets; a socket
+ * that fails otherwise says why with `describeFailedUpgrade`, when given.
  */
 export function credentialedTransport(
   serverUrl: string,
   credential: BackendClientCredential,
   base: { fetch: typeof fetch; WebSocket: unknown } = globalThis,
+  describeFailedUpgrade?: (
+    url: string,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ) => Promise<string | undefined>,
 ): { fetch: typeof fetch; WebSocket: WebSocketConstructor } {
   const origin = new URL(serverUrl.replace(/^ws/, "http")).origin;
   const token = async () => {
@@ -40,17 +49,34 @@ export function credentialedTransport(
     options?: { headers?: Record<string, string> },
   ) => BrowserWebSocket;
   if (typeof Base !== "function") throw new Error("Jazz: this platform has no WebSocket");
+  const socket = lazySocket(
+    Base,
+    (url) => (forOrigin(url) ? token() : null),
+    "the backend client's credential",
+  );
   return {
     fetch: credentialedFetch,
-    WebSocket: lazySocket(
-      Base,
-      (url) => (forOrigin(url) ? token() : null),
-      "the backend client's credential",
-    ),
+    WebSocket: httpStreamFallbackWebSocket(socket, {
+      fetch: credentialedFetch,
+      describeFailedUpgrade:
+        describeFailedUpgrade &&
+        (async (url, signal) =>
+          describeFailedUpgrade(
+            url,
+            forOrigin(url) ? { authorization: `Bearer ${await token()}` } : {},
+            signal,
+          )),
+    }),
   };
 }
 
-/** A `fetch` that sends the app's bearer as `Authorization: Bearer`, read afresh each time. */
+/**
+ * A `fetch` that sends the app's bearer as `Authorization: Bearer`, read
+ * afresh each time. It has no origin check of its own, unlike
+ * {@link bearerWebSocket}: hand it only to a caller whose URLs are fixed to
+ * the app's backend (the account registry, which also refuses redirects),
+ * never to one that fetches arbitrary URLs.
+ */
 export function bearerFetch(bearer: AppBearer, base?: typeof fetch): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
@@ -83,16 +109,7 @@ export function bearerWebSocket(
       }
       // A bearer that throws closes the socket like one that rejects, and one
       // that never settles gives up: a socket has no deadline of its own.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      return Promise.race([
-        Promise.resolve().then(() => bearer()),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("the app's bearer did not answer")),
-            BEARER_TIMEOUT_MS,
-          );
-        }),
-      ]).finally(() => clearTimeout(timer));
+      return askBearer(bearer);
     },
     "the app's bearer",
   );
@@ -100,6 +117,24 @@ export function bearerWebSocket(
 
 /** How long a socket waits for the app's bearer before it gives up (and reconnects later). */
 const BEARER_TIMEOUT_MS = 30_000;
+
+/**
+ * Ask the app for its bearer, giving up after {@link BEARER_TIMEOUT_MS}: a
+ * bearer that throws rejects, and one that never settles (a token refresh
+ * hanging offline, say) rejects rather than holding its caller forever.
+ */
+export function askBearer<T>(bearer: () => T | Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    Promise.resolve().then(() => bearer()),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("the app's bearer did not answer")),
+        BEARER_TIMEOUT_MS,
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 type Listener = (event?: unknown) => void;
 

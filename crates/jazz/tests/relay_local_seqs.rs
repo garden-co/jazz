@@ -867,6 +867,36 @@ fn a_refused_write_a_tab_only_read_once_leaves_that_tab_too() {
     assert!(one_shot_bodies(&net, net.tab(0)).is_empty());
 }
 
+/// A refusal counts for the store whose commit it was: the tab that wrote
+/// it, never the worker that relayed it nor the tab that only read it.
+///
+/// ```text
+/// tab1 ─insert(refused)─► worker ─► core ✗ refused
+/// upload_status: tab1 rejected 1 · worker 0 · tab0 0
+/// ```
+#[test]
+fn a_relayed_refusal_counts_for_the_tab_that_wrote_it() {
+    let net = Net::with_schema(2, refusing_schema, author(WORKER), author(WORKER));
+    net.pump();
+    net.insert(net.tab(1), "refused");
+    assert_eq!(net.tab(1).upload_status().pending, 1);
+    for _ in 0..4 {
+        net.pump();
+    }
+    assert!(net.bodies(&net.core).is_empty(), "the authority refused it");
+    let writer = net.tab(1).upload_status();
+    assert_eq!((writer.pending, writer.rejected), (0, 1));
+    assert_eq!(
+        writer.last_rejection.map(|refusal| refusal.code),
+        Some("permission_denied".to_owned())
+    );
+    for (name, db) in [("worker", &net.worker), ("reader", net.tab(0))] {
+        let status = db.upload_status();
+        assert_eq!((status.pending, status.rejected), (0, 0), "{name}");
+        assert!(status.last_rejection.is_none(), "{name}");
+    }
+}
+
 /// A tab holds its worker's unsettled versions only while that worker is
 /// its upstream: connected to another worker (a new identity) or to its
 /// worker wiped, it drops them, and shows only what the new upstream

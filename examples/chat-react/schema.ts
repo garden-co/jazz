@@ -1,7 +1,6 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   profiles: s.table(
     {
       userId: s.uuid(),
@@ -65,11 +64,61 @@ const schema = {
     },
     { canvas: s.rel("canvases", "canvasId") },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions, exists, allowedTo, session, anyOf, allOf, ne } = schema;
 
-export type Profile = s.RowOf<typeof app.profiles>;
-export type Chat = s.RowOf<typeof app.chats>;
-export type Message = s.RowOf<typeof app.messages> & { $createdAt: Date };
+const isChatMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: session.user });
+
+const mine = { userId: session.user };
+
+const createdByMe = { "$createdBy.account": session.user };
+
+export const permissions = definePermissions({
+  canvases: {
+    read: (canvas) => allowedTo.read(canvas.chat),
+    insert: (canvas) => isChatMember(canvas.chatId),
+  },
+  chatMembers: {
+    read: (chatMember) => anyOf(mine, isChatMember(chatMember.chatId)),
+    insert: (chatMember) =>
+      anyOf(
+        allOf(mine, chatMember.chat.where({ isPublic: true })),
+        allOf(mine, chatMember.chat.where(createdByMe)),
+        allOf(
+          mine,
+          { joinCode: ne(null) },
+          chatMember.chat.where({ joinCode: chatMember.joinCode }),
+        ),
+      ),
+    delete: mine,
+  },
+  chats: {
+    read: (chat) =>
+      anyOf({ isPublic: true }, isChatMember(chat.id), { joinCode: session.claims.join_code }),
+    insert: createdByMe,
+    updateIf: (chat) => isChatMember(chat.id),
+    // Members may update only non-protected fields: `isPublic` cannot change.
+    updateTo: (chat, old) => allOf(isChatMember(chat.id), { isPublic: old.isPublic }),
+  },
+  messages: {
+    read: (message) => anyOf(message.chat.where({ isPublic: true }), isChatMember(message.chatId)),
+    insert: (message) => allOf(isChatMember(message.chatId), message.sender.where(mine)),
+    delete: (message) => message.sender.where(mine),
+  },
+  profiles: {
+    read: true,
+    insert: mine,
+    update: mine,
+  },
+  reactions: {
+    read: (reaction) => allowedTo.read(reaction.message),
+    insert: mine,
+    delete: mine,
+  },
+  strokes: {
+    read: (stroke) => allowedTo.read(stroke.canvas),
+    insert: (stroke) => allowedTo.insert(stroke.canvas),
+    delete: createdByMe,
+  },
+});

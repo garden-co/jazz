@@ -1,22 +1,34 @@
 import { Cause, Data, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { Jazz, JazzError } from "./index.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean" } } },
+});
 
 class Oops extends Data.TaggedError("Oops")<{}> {}
 
+/** A device account of its own (a fresh store) for each session a test opens. */
+function memoryAccountStore() {
+  let stored: string | null = null;
+  return {
+    read: async () => stored,
+    update: async (transform: (current: string | null) => string | null) => {
+      stored = transform(stored);
+    },
+  };
+}
+
 async function jazzLayer(name: string): Promise<Layer.Layer<Jazz, JazzError>> {
+  // Jazz on this device only, as a device account.
   return Jazz.layer({
-    ...(await localAccountConfig(`effect-${name}`)),
+    scope: `effect-${name}`,
+    serverUrl: null,
+    client: async () => ({ createClient: createDb }),
+    store: memoryAccountStore(),
     driver: { type: "memory" },
   });
 }
@@ -61,7 +73,8 @@ async function trackedJazzLayer(name: string) {
   return { layer, openSubscriptions: () => open };
 }
 
-const titles = (rows: ReadonlyArray<{ title: string }>) => rows.map((row) => row.title).sort();
+const titles = (rows: ReadonlyArray<{ readonly title: string }>) =>
+  rows.map((row) => row.title).sort();
 
 // The first test pays for loading the native runtime, which can exceed
 // vitest's default 5 s when other suites load theirs concurrently.
@@ -129,8 +142,11 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
           Stream.tap((rows) =>
             // Write once the initial (empty) snapshot has arrived, so the stream
             // observes the change rather than a later initial result.
+            // Both branches are `Effect<void>`: with an inline app's loose
+            // rows, TS otherwise infers the callback's type from the insert
+            // branch alone, and a fresh build refuses `Effect.void` against it.
             rows.length === 0
-              ? jazz.insert(app.todos, { title: "milk", done: false })
+              ? jazz.insert(app.todos, { title: "milk", done: false }).pipe(Effect.asVoid)
               : Effect.void,
           ),
           Stream.map(titles),
@@ -310,7 +326,14 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
     );
 
     expect([...result]).toEqual([
-      { link: { state: "local-only" }, pendingUploads: 0, synced: true },
+      {
+        link: { state: "local-only" },
+        pendingUploads: 0,
+        oldestPendingAt: null,
+        rejected: 0,
+        lastError: null,
+        synced: true,
+      },
     ]);
   });
 });

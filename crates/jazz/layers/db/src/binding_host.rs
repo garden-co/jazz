@@ -452,9 +452,93 @@ pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
     Ok(jazz_model::model::public_schema_convert::decode_public_schema_json(schema)?)
 }
 
+/// [`decode_schema`], refusing too what a deployment may not introduce
+/// (`check_deployable_policies`): what `jazz-tools validate` checks.
+/// Opening a store decodes its schema with [`decode_schema`] alone.
+pub fn validate_deployable_schema(schema: &[u8]) -> HostResult<JazzSchema> {
+    use jazz_model::model::public_schema_convert::check_deployable_policies;
+    let decoded = decode_schema(schema)?;
+    check_deployable_policies(decoded.public_schema())
+        .map_err(|error| format!("compile public schema: {error}"))?;
+    Ok(decoded)
+}
+
 /// How long a Remote one-shot read waits for the server to cover it
-/// before failing with `NotObserved`.
+/// without progress before failing with `NotObserved` (see
+/// [`CoverageBudget`]).
 pub const REMOTE_READ_COVERAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A Remote read never waits for the server's coverage longer than this
+/// many budgets, however steadily the writes ahead of it settle.
+pub const REMOTE_READ_COVERAGE_CAP: u32 = 10;
+
+/// A Remote read's wait for the server's coverage, spent once `budget`
+/// passes with no progress toward its answer: from its first wait, and
+/// again from each fate the upstream gives one of the commits this
+/// replica had pending when the read began. It is spent regardless after
+/// [`REMOTE_READ_COVERAGE_CAP`] budgets.
+///
+/// The server answers a read after the commits staged before it (it
+/// applies a session's messages in order, so the read sees the writer's
+/// own writes): a read right after a burst of N writes waits for all N to
+/// be applied and settled, which takes time growing with N however healthy
+/// the link. Each of them settling shows the server working through what
+/// is ahead of the read, so the budget measures a stalled server, not a
+/// busy one. Commits staged after the read, and the sessions' commits a
+/// relay carries, are not ahead of it and do not count. With nothing
+/// settling (a silent server, a lost link, nothing ahead of the read) it
+/// is a plain wall-clock budget.
+pub struct CoverageBudget<N> {
+    db: Rc<Db>,
+    budget: std::time::Duration,
+    now: N,
+    /// From the first check: when the read began, the settled count then,
+    /// and how many commits were ahead of it.
+    began: std::cell::Cell<Option<(web_time::Instant, u64, u64)>>,
+    /// When the wait last made progress, and the settled count then.
+    since: std::cell::Cell<Option<(web_time::Instant, u64)>>,
+}
+
+impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
+    /// A budget for a read on `db`, with `now` as its clock.
+    pub fn new(db: Rc<Db>, budget: std::time::Duration, now: N) -> Self {
+        Self {
+            db,
+            budget,
+            now,
+            began: std::cell::Cell::new(None),
+            since: std::cell::Cell::new(None),
+        }
+    }
+
+    /// Whether the budget is spent; the first call starts it.
+    pub fn spent(&self) -> bool {
+        let now = (self.now)();
+        let (began, base, ahead) = match self.began.get() {
+            Some(began) => began,
+            None => {
+                let (settled, pending) = self.db.own_upload_progress();
+                let began = (now, settled, pending);
+                self.began.set(Some(began));
+                began
+            }
+        };
+        if now.saturating_duration_since(began) >= self.budget * REMOTE_READ_COVERAGE_CAP {
+            return true;
+        }
+        // Fates arrive in commit order: once as many have come as were
+        // ahead of the read, later ones are for commits behind it.
+        let settled = self.db.settled_upstream().min(base + ahead);
+        let since = match self.since.get() {
+            Some((since, seen)) if seen == settled => since,
+            _ => {
+                self.since.set(Some((now, settled)));
+                now
+            }
+        };
+        now.saturating_duration_since(since) >= self.budget
+    }
+}
 
 /// How a host opens: the caller-controlled author, the backend's SYSTEM
 /// author, or a verified self-signed author.
@@ -539,7 +623,10 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
     }
 }
 
-/// The [`DbConfig`] for `schema` under `config` and `identity`.
+/// The [`DbConfig`] for `schema` under `config` and `identity`. It has no
+/// chunk store: a binding's tick never fails for chunk-store I/O a later
+/// tick retries, and hosts treat every tick error (including local storage
+/// errors) as terminal.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
     let mut db_config = DbConfig::new(schema, identity);
     db_config.system_node = config.system_node;
@@ -1364,17 +1451,15 @@ impl Binding {
         };
         let db = self.db.clone();
         // A Remote read must be covered by the server; its budget runs
-        // from its first wait.
+        // from its first wait, and restarts as the commits ahead of it
+        // settle.
         let require_coverage = opts.tier == crate::db::ReadTier::Remote;
-        let started = std::cell::Cell::new(None::<web_time::Instant>);
-        let expired = move || {
-            let first = started.get().unwrap_or_else(|| {
-                let now = web_time::Instant::now();
-                started.set(Some(now));
-                now
-            });
-            first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
-        };
+        let budget = CoverageBudget::new(
+            db.clone(),
+            REMOTE_READ_COVERAGE_BUDGET,
+            web_time::Instant::now,
+        );
+        let expired = move || budget.spent();
         let hooks = Rc::clone(&self.hooks);
         Ok(Box::pin(self.parked(async move {
             let coverage: Option<&dyn Fn() -> bool> = require_coverage.then_some(&expired);
@@ -1450,8 +1535,11 @@ impl Binding {
     pub fn set_identity_claims(&self, author: &[u8], claims: serde_json::Value) -> HostResult<()> {
         let author = self.author_of(author)?;
         let claims = self::claims(author, claims)?;
-        self.db.set_identity_claims(author, claims);
-        self.hooks.progress.wake_all();
+        // Unchanged claims (a host repeats them before each write) wake
+        // nobody.
+        if self.db.set_identity_claims(author, claims) {
+            self.hooks.progress.wake_all();
+        }
         Ok(())
     }
 
@@ -1488,6 +1576,37 @@ impl Binding {
         Ok((id, future))
     }
 
+    /// The Inspector's `explain`: for each of `rows` (uuid strings) of
+    /// `table`, which clauses of its read policy (the arms of its top-level
+    /// `Or`) hold for `author` with `claims`. Answers the number of clauses,
+    /// and for each row found its id (hyphenated) and which clauses hold.
+    pub fn explain_read_clauses(
+        &self,
+        table: &str,
+        rows: &[String],
+        author: &[u8],
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<(usize, Vec<(String, Vec<bool>)>)> {
+        let author = self.author_of(author)?;
+        let claims = self::claims(author, claims.unwrap_or(serde_json::Value::Null))?;
+        let rows = rows
+            .iter()
+            .map(|row| {
+                uuid::Uuid::parse_str(row)
+                    .map(|id| RowUuid::from_bytes(*id.as_bytes()))
+                    .map_err(|error| HostError::Argument(format!("row id {row}: {error}")))
+            })
+            .collect::<HostResult<Vec<_>>>()?;
+        let (clauses, found) = self.db.explain_read_clauses(table, &rows, author, claims)?;
+        Ok((
+            clauses,
+            found
+                .into_iter()
+                .map(|(id, holds)| (id.0.hyphenated().to_string(), holds))
+                .collect(),
+        ))
+    }
+
     /// Drop a pending advice request; it resolves `"unknown"`.
     pub fn cancel_permission_advice(&self, id: u64) {
         self.db.cancel_permission_advice_request(id);
@@ -1508,10 +1627,21 @@ impl Binding {
     /// `local`, on the server's acceptance for `global` (rejecting if it
     /// refused).
     pub fn wait_for(&self, seq: u64, tier: &str) -> HostResult<HostFuture<()>> {
+        self.wait_for_seq(seq, tier, true)
+    }
+
+    /// `reports`: whether a rejection this wait sees counts as reported, so
+    /// a later [`Self::wait_for_sync_global`] doesn't report it
+    /// again (an observing wait leaves it to that).
+    fn wait_for_seq(&self, seq: u64, tier: &str, reports: bool) -> HostResult<HostFuture<()>> {
         let tier = binding_args::durability_tier(tier)?;
         let db = self.db.clone();
         Ok(Box::pin(self.hooks.progress.parked(async move {
-            db.wait_for_transaction(seq, tier).await?;
+            if reports {
+                db.wait_for_transaction(seq, tier).await?;
+            } else {
+                db.observe_transaction(seq, tier).await?;
+            }
             Ok(())
         })))
     }
@@ -1535,7 +1665,7 @@ impl Binding {
             let error = error.clone();
             Box::pin(async move { Err(HostError::Engine(error)) })
         } else {
-            self.wait_for(write.seq, tier)?
+            self.wait_for_seq(write.seq, tier, claim.is_some())?
         };
         let Some(claim) = claim else {
             return Ok(fate);
@@ -1556,9 +1686,27 @@ impl Binding {
         }))
     }
 
+    /// TS `waitForSync`: like [`Self::wait_for_pending_writes_global`] for
+    /// the writes of `writer` (a trusted session's author bytes; `None` for
+    /// this database's own), also failing with a rejection of theirs that
+    /// settled before and no wait reported (see [`Db::wait_for_sync`]).
+    pub fn wait_for_sync_global(&self, writer: Option<&[u8]>) -> HostResult<HostFuture<()>> {
+        let writer = writer.map(|bytes| self.author_of(bytes)).transpose()?;
+        let db = self.db.clone();
+        Ok(Box::pin(self.hooks.progress.parked(async move {
+            db.wait_for_sync(DurabilityTier::Global, writer).await?;
+            Ok(())
+        })))
+    }
+
     /// How many local commits still wait for the server's verdict.
     pub fn pending_upload_count(&self) -> usize {
         self.db.pending_upload_count()
+    }
+
+    /// See [`crate::db::Db::upload_status`].
+    pub fn upload_status(&self) -> crate::db::UploadStatus {
+        self.db.upload_status()
     }
 
     /// Apply received frames and send what is due; waits wake.
@@ -1852,10 +2000,15 @@ pub enum EventChunk {
     },
     /// `{ type: "closed" }`.
     Closed,
-    /// `{ type: "rejected", reason: { type: "ServerFailure", detail } }`.
+    /// `{ type: "rejected", reason: { type: "ServerFailure", detail,
+    /// errorCode } }`.
     Rejected {
         /// Why.
         detail: String,
+        /// The rejection's core [`crate::db::ErrorCode`], as its
+        /// `as_str` spelling (`"authority_changed"`, …): what a host's
+        /// error `code` carries for the same error.
+        code: &'static str,
     },
 }
 
@@ -1877,7 +2030,10 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             tier: format!("{tier:?}"),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
-        SubscriptionEvent::Rejected { reason, .. } => EventChunk::Rejected { detail: reason },
+        SubscriptionEvent::Rejected { code, reason, .. } => EventChunk::Rejected {
+            detail: reason,
+            code: code.as_str(),
+        },
     })
 }
 
@@ -2015,6 +2171,9 @@ pub struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    /// The optional features the host negotiated with the peer
+    /// ([`Link::set_features`]).
+    features: Rc<std::cell::Cell<crate::wire::WireFeatures>>,
 }
 
 struct QueueTransport {
@@ -2032,6 +2191,10 @@ impl WireTransport for QueueTransport {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         self.queues.inbound.borrow_mut().pop_front()
+    }
+
+    fn features(&self) -> crate::wire::WireFeatures {
+        self.queues.features.get()
     }
 }
 
@@ -2055,6 +2218,15 @@ impl Link {
     /// The binding this link belongs to.
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+
+    /// The optional wire features the host negotiated with the peer in
+    /// its `Hello`. An upstream link uses them to decide what it may send:
+    /// a serializable commit that read through a branch view goes only to
+    /// a peer with [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`].
+    pub fn set_features(&self, features: crate::wire::WireFeatures) {
+        self.queues.features.set(features);
+        self.binding.hooks.schedule_tick();
     }
 
     /// Frames received from the peer; applied on the next tick.

@@ -1,9 +1,12 @@
-import type { AccountIdentity } from "../accounts/state.js";
+import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { switchJazzSessionUser, type JazzSession } from "./state.js";
+import { switchJazzSessionUser, type SessionCore } from "./state.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
+
+/** What an app's `onSignedOut` hook decides (see `watchBackendUser`). */
+export type SignedOutDecision = "sign-out" | "keep";
 
 export interface BackendWatchEvents {
   /** Call `check` when the page or app comes back to the foreground. */
@@ -12,6 +15,15 @@ export interface BackendWatchEvents {
   crossTab?: { post(): void; listen(check: () => void): () => void };
   /** Whether the page or app is in the foreground now (its cookies are fresh). */
   isVisible?(): boolean;
+  /**
+   * Run `probe` so that the windows of one browser ask the backend one at a
+   * time, never at once. Several windows asking at once (on focus after a
+   * laptop wakes) each carry the session cookie, and auth middleware on the
+   * route may refresh it once per request: with single-use refresh tokens,
+   * all but one refresh fail. Asked one after another, each request carries
+   * the cookie the one before it refreshed. Each window still asks itself.
+   */
+  singleFlight?<T>(probe: () => Promise<T>): Promise<T>;
 }
 
 /**
@@ -94,17 +106,21 @@ export interface BackendWatch {
  * again, once, which gives them a new account; reconnecting would only be
  * refused again.
  *
- * A sync server refusing the sign-in (`authRefused`) asks the backend too, but
- * only to reconnect, with backoff, while it still names the same user. It
- * never signs anyone out: a background tab's cookie may just be stale, so a
- * sign-out waits for a check after focus returns (or for the app to call
- * `reauthenticate`). A probe that reports there is no backend (404) is asked
+ * A sync server refusing the sign-in (`authRefused`, say after
+ * `jazz.revokeUser`) asks the backend too. While it still names the same
+ * user, the client reconnects, with backoff. When it says no one is signed
+ * in and the page is visible (its cookies are fresh), that answer counts as
+ * the first of the two a sign-out needs: a second one `confirmMs` later
+ * signs the user out (after `onSignedOut`), so a revoked user's open tab
+ * doesn't stay signed in and unsynced for long. A background tab's cookie
+ * may just be stale, so there a sign-out waits for a check after focus
+ * returns (or for the app to call `reauthenticate`). A probe that reports there is no backend (404) is asked
  * again with backoff, since a deploy or a proxy may answer 404 for a moment;
  * only 404s that keep coming for a while (`notFoundRetryMs`, three answers)
  * stop the watch. A stopped watch rejects every later `reauthenticate`.
  */
 export function watchBackendUser<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   probe: () => Promise<BackendUser | null>,
   events: BackendWatchEvents,
   options: {
@@ -113,12 +129,6 @@ export function watchBackendUser<Client>(
     reconnect?: () => void;
     /** The first wait before reconnecting after a refusal; it doubles up to a minute. */
     reconnectBackoffMs?: number;
-    /**
-     * After a refusal the backend agrees with (no one signed in) while the
-     * page is visible, wait this long and check again as on focus, so a
-     * revoked user in a tab that stays focused is signed out. Default 30s.
-     */
-    refusedConfirmMs?: number;
     /**
      * Link a local-first guest to a signed-in user who has no account yet
      * (default true). Off, the watch leaves that guest as it is: the app
@@ -138,6 +148,23 @@ export function watchBackendUser<Client>(
      * to a minute. Default 2s.
      */
     retryMs?: number;
+    /**
+     * Whether this device forgot a guest's account: another tab linked it
+     * to a user (their sign-up) under `clearOnSignOut`, so it is theirs now.
+     * Such a guest signs out when the backend says no one is signed in, as
+     * that user does. Left out, a guest never signs out on its own.
+     */
+    forgotten?: (account: AccountHandle) => Promise<boolean>;
+    /**
+     * Called when your backend says no one is signed in any more (confirmed
+     * by a second answer a moment later), before the session signs the
+     * user out. Return `"keep"` to stay signed in for now (your app refreshed
+     * its session itself, or redirects to sign-in first): the session asks
+     * your backend again on the next focus, refusal or `refresh()`.
+     * Return `"sign-out"` (or nothing) to sign out. A hook that throws signs
+     * out.
+     */
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
@@ -182,16 +209,12 @@ export function watchBackendUser<Client>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   // The sync link was refused and hasn't connected since.
   let refusedPending = false;
-  let refusedConfirm: ReturnType<typeof setTimeout> | undefined;
-  const refusedConfirmMs = options.refusedConfirmMs ?? 30_000;
   const resetRefusal = () => {
     refusedPending = false;
     backoffMs = firstBackoffMs;
     reconnectAt = 0;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
-    if (refusedConfirm) clearTimeout(refusedConfirm);
-    refusedConfirm = undefined;
   };
   let stopped = false;
   const linkGuest = options.linkGuest ?? true;
@@ -409,27 +432,56 @@ export function watchBackendUser<Client>(
       return attempt(session.loginWithBackend());
     }
     signedOutLink = undefined;
-    if (!backendUser) return;
-    if (refused) {
-      // Never sign out on a refusal alone (the cookie may be stale), but a
-      // visible page's cookies are fresh: check again shortly as on focus.
-      if (!refusedConfirm && (events.isVisible?.() ?? false))
-        refusedConfirm = setTimeout(() => {
-          refusedConfirm = undefined;
-          check();
-        }, refusedConfirmMs);
-      return;
+    // A guest that is someone else's account now: the app can't keep it.
+    let forgottenGuest = false;
+    if (!backendUser) {
+      // A guest another tab linked to a user, who has signed out since: the
+      // account is theirs, so it signs out here too (and, with
+      // `clearOnSignOut`, is wiped), instead of staying open in memory.
+      if (current?.issuer !== LOCAL_FIRST_ISSUER || !startedWith || !options.forgotten) return;
+      const forgotten = await options.forgotten(startedWith).catch(() => false);
+      if (!forgotten) return;
+      if (quiet(asked)) return busy();
+      forgottenGuest = true;
     }
+    // A background tab's cookie may be stale: a refusal there waits for a
+    // check after focus. A visible page's cookies are fresh, so its answer
+    // counts as the first, and a second one shortly after confirms it.
+    // Visibility counts when the refusal is checked: a tab that goes to the
+    // background during the confirmation wait is still signed out once the
+    // second answer agrees (and `onSignedOut` lets it).
+    if (refused && !(events.isVisible?.() ?? false)) return;
     if (!asked) {
       await new Promise((resolve) => setTimeout(resolve, confirmMs));
       if (quiet()) return;
       signedIn = await ask();
-      if (signedIn !== null || quiet()) return;
+      if (quiet()) return;
+      if (signedIn !== null) {
+        // Someone is signed in after all (the app refreshed its session):
+        // a refused link follows that answer as a plain check would, so it
+        // reconnects (or switches users) instead of staying refused.
+        if (refused) check();
+        return;
+      }
     }
     // The app moved on meanwhile (signed out itself, continued as a guest,
     // signed someone in): that account is not the one this answer was about.
     if (session.getSnapshot().account !== startedWith) return busy();
+    if (!forgottenGuest) {
+      if ((await askSignedOut()) === "keep" || quiet(asked)) return;
+      if (session.getSnapshot().account !== startedWith) return busy();
+    }
     return attempt(session.logout());
+  }
+  /** The app's `onSignedOut` decision; a hook that fails signs out. */
+  async function askSignedOut(): Promise<SignedOutDecision> {
+    if (!options.onSignedOut) return "sign-out";
+    try {
+      return (await options.onSignedOut()) === "keep" ? "keep" : "sign-out";
+    } catch (cause) {
+      console.error("Jazz: onSignedOut threw, so the session signs out.", cause);
+      return "sign-out";
+    }
   }
   /** Run `run` once the session is no longer mid-transition (or now). */
   function whenSettled(run: () => void) {
@@ -589,22 +641,42 @@ function linkRefused(cause: unknown): boolean {
 }
 
 /** Focus, visibility and BroadcastChannel events for a browser page. */
-export function browserBackendWatchEvents(channelName: string): BackendWatchEvents {
+export function browserBackendWatchEvents(
+  channelName: string,
+  /** The lock its checks take, shared with the sync connection's renewals (`sessionRefreshLockName`). */
+  refreshLock = `${channelName}:probe`,
+): BackendWatchEvents {
+  // The channel is open only while something listens: a session whose
+  // startup failed before its watch started (or after it stopped) holds
+  // none, so a provider retrying a failed createJazzClient leaks nothing.
   const crossTab =
     typeof BroadcastChannel === "function"
       ? (() => {
-          const channel = new BroadcastChannel(channelName);
+          let channel: BroadcastChannel | undefined;
           const listeners = new Set<() => void>();
-          channel.onmessage = () => {
-            for (const listener of listeners) listener();
-          };
           return {
-            post: () => channel.postMessage("account-changed"),
+            post() {
+              if (channel) return channel.postMessage("account-changed");
+              // Nothing in this tab listens: tell the others through a
+              // channel of its own (a message posted before close is sent).
+              const once = new BroadcastChannel(channelName);
+              once.postMessage("account-changed");
+              once.close();
+            },
             listen(check: () => void) {
+              if (!channel) {
+                const opened = new BroadcastChannel(channelName);
+                opened.onmessage = () => {
+                  for (const listener of listeners) listener();
+                };
+                channel = opened;
+              }
               listeners.add(check);
               return () => {
                 listeners.delete(check);
-                if (!listeners.size) channel.close();
+                if (listeners.size || !channel) return;
+                channel.close();
+                channel = undefined;
               };
             },
           };
@@ -625,7 +697,54 @@ export function browserBackendWatchEvents(channelName: string): BackendWatchEven
     },
     crossTab,
     isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
+    singleFlight: browserSingleFlight(refreshLock),
   };
+}
+
+/**
+ * The longest one window holds the turn: a window whose request hangs (its
+ * page is frozen, its network stalled) lets the others ask after this long.
+ */
+export const SINGLE_FLIGHT_TURN_MS = 5_000;
+
+/**
+ * {@link BackendWatchEvents.singleFlight} for the windows of one browser: a
+ * Web Lock takes turns, held until the probe settles or for
+ * {@link SINGLE_FLIGHT_TURN_MS}, whichever is first. Each window's probe asks
+ * the backend itself; no answer is shared or stored. Without Web Locks,
+ * every probe runs on its own.
+ */
+export function browserSingleFlight(
+  name: string,
+): (<T>(probe: () => Promise<T>) => Promise<T>) | undefined {
+  const locks = globalThis.navigator?.locks;
+  if (!locks) return undefined;
+  return <T>(probe: () => Promise<T>) =>
+    new Promise<T>((resolve, reject) => {
+      let started = false;
+      const run = () => {
+        started = true;
+        const answer = probe();
+        answer.then(resolve, reject);
+        return answer;
+      };
+      locks
+        .request(name, () => {
+          const answer = run();
+          let turn: ReturnType<typeof setTimeout> | undefined;
+          return Promise.race([
+            answer.then(
+              () => undefined,
+              () => undefined,
+            ),
+            new Promise<void>((done) => (turn = setTimeout(done, SINGLE_FLIGHT_TURN_MS))),
+          ]).finally(() => clearTimeout(turn));
+        })
+        // Locks unavailable here after all (an opaque origin): ask anyway.
+        .catch(() => {
+          if (!started) run();
+        });
+    });
 }
 
 /** Whether a failed check may pass if asked again: the network, a timeout, or a 5xx. */

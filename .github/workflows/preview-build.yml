@@ -114,6 +114,10 @@ jobs:
           test "${#TARBALLS[@]}" -eq 1
           tar -tf "${TARBALLS[0]}" > "${PACK_DIRECTORY}/contents.txt"
           grep -Fxq 'package/dist/dev/inspector-overlay/embedded/embedded.html' "${PACK_DIRECTORY}/contents.txt"
+          grep -Fxq 'package/dist/dev/inspector-overlay/embedded/backend.html' "${PACK_DIRECTORY}/contents.txt"
+          # What createJazz serves the Inspector from: the UI as a module, so it ships wherever the code does.
+          tar -xOf "${TARBALLS[0]}" package/dist/backend/inspector-ui-files.js > "${PACK_DIRECTORY}/inspector-ui-files.js"
+          grep -Fq '"backend.html":' "${PACK_DIRECTORY}/inspector-ui-files.js"
 
       - name: Publish to pkg.pr.new
         env:
@@ -144,3 +148,6 @@ jobs:
             --commentWithSha \
             --packageManager=pnpm \
             "${PACKAGES[@]}"
+          # Every package must install from the short-SHA URL pkg.pr.new
+          # prints; the job summary lists those install commands.
+          node dev/scripts/check-pkg-pr-new-urls.mjs "${PREVIEW_COMMIT}" "${PACKAGES[@]}"

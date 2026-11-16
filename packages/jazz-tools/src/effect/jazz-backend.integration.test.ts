@@ -1,32 +1,38 @@
 import { Effect, Fiber, Layer, Schema, Stream } from "effect";
 import { HttpServerRequest } from "effect/http";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
 import { createJazz, memory } from "../backend/index.js";
-import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { startTestJazz } from "../testing/index.js";
+import { createDb } from "../runtime/default-create-db.js";
+import { startTestJazz, testApp } from "../testing/index.js";
 import { Jazz, JazzBackend, JazzNoAccount, JazzWriteRejected } from "./backend/index.js";
 
-const app = s.defineApp(
-  {
-    notes: s.table({ text: s.string() }, {}),
-    posts: s.table({ text: s.string() }, {}),
-    diaries: s.table({ text: s.string() }, {}),
+/** A device account of its own (a fresh store) for each session a test opens. */
+function memoryAccountStore() {
+  let stored: string | null = null;
+  return {
+    read: async () => stored,
+    update: async (transform: (current: string | null) => string | null) => {
+      stored = transform(stored);
+    },
+  };
+}
+
+const app = testApp({
+  tables: {
+    notes: { columns: { text: "string" } },
+    posts: { columns: { text: "string" } },
+    diaries: { columns: { text: "string" } },
   },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.diaries.allowRead.where({ $createdBy: session.user });
-  policy.diaries.allowInsert.always();
-  policy.posts.allowRead.always();
-  policy.posts.allowInsert.always();
-  policy.posts.allowUpdate.always();
-  policy.posts.allowDelete.always();
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.never();
-  policy.notes.allowUpdate.never();
-  policy.notes.allowDelete.never();
 });
+// Absent operations are denied: notes are read-only.
+const permissions = {
+  format: 1,
+  tables: {
+    diaries: { read: "$createdBy = session.user", insert: "true" },
+    posts: { read: "true", insert: "true", update: "true", delete: "true" },
+    notes: { read: "true" },
+  },
+};
 
 /** A request handler written once, against the plain Jazz service. */
 const createPost = (text: string) =>
@@ -43,14 +49,18 @@ describe("JazzBackend Effect layer", () => {
   it("serves request handlers as the requesting user and syncs to Effect clients", async () => {
     // The app's Jazz decides who a request is (its `authenticate`); Effect
     // clients sync as guests through it.
-    const server = await startTestJazz({
-      app,
-      permissions,
-      coreOptions: { allowLocalFirstAuth: true },
-    });
+    const server = await startTestJazz({ app, permissions });
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
-      const clientLayer = Jazz.layer(await localAccountConfig(server.appId, server.url));
+      const clientLayer = Jazz.layer({
+        scope: server.appId,
+        serverUrl: server.url,
+        initial: "device",
+        client: async () => ({ createClient: createDb }),
+        localFirst: "now",
+        store: memoryAccountStore(),
+        driver: { type: "memory" },
+      });
       // The reader is a user the backend serves without a client of their own.
       await server.jazz.createAccountFor("effect-reader");
       const headers = { authorization: `Bearer ${server.bearer("effect-reader")}` };
@@ -187,7 +197,7 @@ describe("JazzBackend Effect layer", () => {
       store: memory(),
       authenticate: (request) => {
         seenBodies.push(request.body);
-        return { userId: "body-reader" };
+        return { userId: "body-reader", expiresAt: Math.floor(Date.now() / 1000) + 3600 };
       },
     });
     try {

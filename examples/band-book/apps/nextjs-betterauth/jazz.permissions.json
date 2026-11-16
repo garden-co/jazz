@@ -1,0 +1,364 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "d146c88f5a56c17fe704630e02663f4f88fd9fb41bdade92273ac9e54f1d9265"
+  },
+  "tables": {
+    "attachments": {
+      "read": "allowedTo.read(page)",
+      "insert": {
+        "allOf": [
+          "allowedTo.update(page)",
+          "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+        ]
+      },
+      "update": "false",
+      "delete": "allowedTo.update(page)"
+    },
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "blocks": {
+      "read": "allowedTo.read(page)",
+      "insert": {
+        "allOf": [
+          "allowedTo.update(page)",
+          "exists pages(id = this.pageId, workspaceId = this.workspaceId)",
+          {
+            "anyOf": [
+              "parentBlockId = null",
+              "exists blocks(id = this.parentBlockId, pageId = this.pageId)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": "allowedTo.update(page)",
+        "new": {
+          "allOf": [
+            "allowedTo.update(page)",
+            "exists blocks(id = this.id, pageId = this.pageId, workspaceId = this.workspaceId)",
+            {
+              "anyOf": [
+                "parentBlockId = null",
+                "exists blocks(id = this.parentBlockId, pageId = this.pageId)"
+              ]
+            }
+          ]
+        }
+      },
+      "delete": "allowedTo.update(page)"
+    },
+    "invites": {
+      "read": {
+        "anyOf": [
+          {
+            "allOf": [
+              { "allOf": ["pageId = null", "role in ['member', 'viewer']"] },
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner'])"
+            ]
+          },
+          {
+            "allOf": [
+              "role in ['editor', 'viewer']",
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+              "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+            ]
+          }
+        ]
+      },
+      "insert": {
+        "anyOf": [
+          {
+            "allOf": [
+              { "allOf": ["pageId = null", "role in ['member', 'viewer']"] },
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner'])"
+            ]
+          },
+          {
+            "allOf": [
+              "role in ['editor', 'viewer']",
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+              "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+            ]
+          }
+        ]
+      },
+      "update": "false",
+      "delete": {
+        "anyOf": [
+          {
+            "allOf": [
+              { "allOf": ["pageId = null", "role in ['member', 'viewer']"] },
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner'])"
+            ]
+          },
+          {
+            "allOf": [
+              "role in ['editor', 'viewer']",
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+              "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+            ]
+          }
+        ]
+      }
+    },
+    "issues": {
+      "read": "allowedTo.read(page)",
+      "insert": {
+        "allOf": [
+          "allowedTo.update(page)",
+          "exists pages(id = this.pageId, parentId = this.databaseId, workspaceId = this.workspaceId, kind = 'issue')",
+          "exists pages(id = this.databaseId, kind = 'issues')"
+        ]
+      },
+      "update": {
+        "old": "allowedTo.update(page)",
+        "new": {
+          "allOf": [
+            "allowedTo.update(page)",
+            "exists issues(id = this.id, pageId = this.pageId, databaseId = this.databaseId, workspaceId = this.workspaceId)"
+          ]
+        }
+      },
+      "delete": "allowedTo.update(page)"
+    },
+    "members": {
+      "read": {
+        "anyOf": [
+          "account = session.user",
+          "exists members(workspaceId = this.workspaceId, account = session.user)"
+        ]
+      },
+      "insert": {
+        "anyOf": [
+          "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner'])",
+          {
+            "allOf": [
+              { "allOf": ["account = session.user", "role = 'owner'"] },
+              "exists workspaces(id = this.workspaceId, $createdBy.account = session.user)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner'])",
+        "new": {
+          "allOf": [
+            "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner'])",
+            "exists members(id = this.id, workspaceId = this.workspaceId, account = this.account)"
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner'])",
+          "account = session.user"
+        ]
+      }
+    },
+    "pageGrants": {
+      "read": {
+        "anyOf": [
+          "account = session.user",
+          {
+            "allOf": [
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+              "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+            ]
+          }
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+          "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+        ]
+      },
+      "update": {
+        "old": {
+          "allOf": [
+            "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+            "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "allOf": [
+                "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+                "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+              ]
+            },
+            "exists pageGrants(id = this.id, pageId = this.pageId, account = this.account)"
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          {
+            "allOf": [
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+              "exists pages(id = this.pageId, workspaceId = this.workspaceId)"
+            ]
+          },
+          "account = session.user"
+        ]
+      }
+    },
+    "pages": {
+      "read": {
+        "anyOf": [
+          "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member', 'viewer'])",
+          "exists pageGrants(pageId = this.id, account = session.user)",
+          "allowedTo.read(parent, maxDepth: 8)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "parentId = null",
+              "exists pages(id = this.parentId, workspaceId = this.workspaceId)"
+            ]
+          },
+          {
+            "anyOf": [
+              "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+              "allowedTo.update(parent, maxDepth: 8)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            {
+              "anyOf": [
+                "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+                "allowedTo.update(parent, maxDepth: 8)"
+              ]
+            },
+            "exists pageGrants(pageId = this.id, account = session.user, role = 'editor')"
+          ]
+        },
+        "new": {
+          "allOf": [
+            "exists pages(id = this.id, workspaceId = this.workspaceId, kind = this.kind)",
+            {
+              "anyOf": [
+                "parentId = null",
+                "exists pages(id = this.parentId, workspaceId = this.workspaceId)"
+              ]
+            },
+            {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+                    "allowedTo.update(parent, maxDepth: 8)"
+                  ]
+                },
+                {
+                  "allOf": [
+                    "exists pageGrants(pageId = this.id, account = session.user, role = 'editor')",
+                    "exists pages(id = this.id, parentId = this.parentId)"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "exists members(workspaceId = this.workspaceId, account = session.user, role in ['owner', 'member'])",
+          "allowedTo.update(parent, maxDepth: 8)"
+        ]
+      }
+    },
+    "sheetComments": {
+      "read": "allowedTo.read(page)",
+      "insert": {
+        "allOf": [
+          "author = session.user",
+          "allowedTo.read(page)",
+          "exists pages(id = this.pageId, workspaceId = this.workspaceId, kind = 'song')"
+        ]
+      },
+      "update": {
+        "old": { "anyOf": ["author = session.user", "allowedTo.update(page)"] },
+        "new": {
+          "allOf": [
+            "allowedTo.read(page)",
+            "exists sheetComments(id = this.id, pageId = this.pageId, workspaceId = this.workspaceId, author = this.author)"
+          ]
+        }
+      },
+      "delete": { "anyOf": ["author = session.user", "allowedTo.update(page)"] }
+    },
+    "sheetPresence": {
+      "read": "allowedTo.read(page)",
+      "insert": {
+        "allOf": [
+          "account = session.user",
+          "allowedTo.read(page)",
+          "exists pages(id = this.pageId, workspaceId = this.workspaceId, kind = 'song')"
+        ]
+      },
+      "update": {
+        "old": "account = session.user",
+        "new": {
+          "allOf": [
+            "account = session.user",
+            "exists sheetPresence(id = this.id, pageId = this.pageId, workspaceId = this.workspaceId)"
+          ]
+        }
+      },
+      "delete": { "anyOf": ["account = session.user", "allowedTo.update(page)"] }
+    },
+    "songSheets": {
+      "read": "allowedTo.read(page)",
+      "insert": {
+        "allOf": [
+          "allowedTo.update(page)",
+          "exists pages(id = this.pageId, workspaceId = this.workspaceId, kind = 'song')"
+        ]
+      },
+      "update": {
+        "old": "allowedTo.update(page)",
+        "new": {
+          "allOf": [
+            "allowedTo.update(page)",
+            "exists songSheets(id = this.id, pageId = this.pageId, workspaceId = this.workspaceId)"
+          ]
+        }
+      },
+      "delete": "allowedTo.update(page)"
+    },
+    "workspaces": {
+      "read": "exists members(workspaceId = this.id, account = session.user)",
+      "insert": "true",
+      "update": "exists members(workspaceId = this.id, account = session.user, role in ['owner'])",
+      "delete": "exists members(workspaceId = this.id, account = session.user, role in ['owner'])"
+    }
+  }
+}

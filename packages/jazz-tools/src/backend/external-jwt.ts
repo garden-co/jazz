@@ -9,7 +9,11 @@ import {
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import type { JwtPayload } from "../runtime/client-session.js";
 import { isRecord, toError } from "../runtime/util.js";
-import { RequestAuthenticationError } from "./request-auth.js";
+import {
+  AuthenticationUnavailableError,
+  isAuthenticationUnavailableError,
+  RequestAuthenticationError,
+} from "./request-auth.js";
 
 /**
  * Verifying an identity provider's JWTs, for `fromJWT`: the signature (a JWKS
@@ -78,17 +82,23 @@ async function fetchRemoteJwks(jwksUrl: string): Promise<LocalJwksDocument> {
     throw new Error("Global fetch is required for jwksUrl verification");
   }
 
+  // Only the provider not answering (the network, an error status, the
+  // deadline) is an outage the client should wait out. A bad jwksUrl or a
+  // document that isn't a JWKS is the app's setup, and stays a plain Error.
+  const url = parseJwksUrl(jwksUrl);
   return withAuthRequestDeadline(async (signal) => {
     let response: Response;
     try {
-      response = await fetchFn(parseJwksUrl(jwksUrl), { redirect: "error", signal });
+      response = await fetchFn(url, { redirect: "error", signal });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Unable to fetch JWKS: ${message}`);
+      throw new AuthenticationUnavailableError(`Unable to fetch JWKS: ${message}`, {
+        cause: error,
+      });
     }
 
     if (!response.ok) {
-      throw new Error(`Unable to fetch JWKS: HTTP ${response.status}`);
+      throw new AuthenticationUnavailableError(`Unable to fetch JWKS: HTTP ${response.status}`);
     }
 
     let body: unknown;
@@ -105,7 +115,7 @@ async function fetchRemoteJwks(jwksUrl: string): Promise<LocalJwksDocument> {
     return {
       keys: body.keys.filter((key): key is Record<string, unknown> => isRecord(key)),
     };
-  }, new Error("Unable to fetch JWKS: request timed out"));
+  }, new AuthenticationUnavailableError("Unable to fetch JWKS: request timed out"));
 }
 
 async function getRemoteJwksDocument(
@@ -133,9 +143,11 @@ async function getRemoteJwksDocument(
     // down: keep failing, so a token with a new key is retried rather than
     // refused by keys that predate it.
     if (jwksRefreshFailures.has(jwksUrl)) {
-      throw new Error(`JWKS refresh from ${jwksUrl} failed recently; retrying after the cooldown`, {
-        cause: jwksRefreshFailures.get(jwksUrl),
-      });
+      const cause = jwksRefreshFailures.get(jwksUrl);
+      const message = `JWKS refresh from ${jwksUrl} failed recently; retrying after the cooldown`;
+      throw isAuthenticationUnavailableError(cause)
+        ? new AuthenticationUnavailableError(message, { cause })
+        : new Error(message, { cause });
     }
     return cached.document;
   }
@@ -442,6 +454,24 @@ function ensureJwtDomain(payload: JwtPayload, config: ExternalJwtConfig): void {
   }
 }
 
+/**
+ * The JWKS document. When the provider doesn't answer, the
+ * `AuthenticationUnavailableError` names the JWKS for the backend's log.
+ */
+async function availableJwksDocument(
+  jwksUrl: string,
+  forceRefresh = false,
+): Promise<LocalJwksDocument> {
+  try {
+    return await getRemoteJwksDocument(jwksUrl, forceRefresh);
+  } catch (error) {
+    if (!isAuthenticationUnavailableError(error)) throw error;
+    throw new AuthenticationUnavailableError(`JWKS ${jwksUrl} is unavailable: ${error.message}`, {
+      cause: error,
+    });
+  }
+}
+
 /** @internal Verify `token`'s signature, expiry, issuer and audience. */
 export async function verifyExternalJwt(
   token: string,
@@ -460,14 +490,14 @@ export async function verifyExternalJwt(
   if (config.jwksUrl) {
     // Fetching the JWKS can fail on the server's side (a bad jwksUrl, a
     // provider outage); only a token that fails verification is the caller's.
-    let jwks = await getRemoteJwksDocument(config.jwksUrl);
+    let jwks = await availableJwksDocument(config.jwksUrl);
     try {
       await verifyJwtSignatureWithJwks(token, jwks);
     } catch {
       // A refresh that fails throws, so the client retries, and keeps
       // throwing through its cooldown; only a refresh that succeeds can
       // refuse an unknown key.
-      jwks = await getRemoteJwksDocument(config.jwksUrl, true);
+      jwks = await availableJwksDocument(config.jwksUrl, true);
       try {
         await verifyJwtSignatureWithJwks(token, jwks);
       } catch (refreshError) {

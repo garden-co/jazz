@@ -156,3 +156,263 @@ bandChatBenchmarks.push(
     source,
   },
 );
+
+bandChatBenchmarks.push({
+  name: "band_chat_presence_on_nested_page",
+  title: "BandChat · a presence stamp under nested includes",
+  description:
+    "A member stamps `lastSeen` on their profile while another member has a room open. The open page is the newest 100 messages, each with its sender and its system rows, and each system row with the three people it names: forward relations nested under a reverse one, as an app's nested includes compile. The page shows whole profiles and the member appears on it, so the stamp re-reads the page and every relation under it.",
+  fixture:
+    "8 members, 4 rooms, 400 messages; half the messages carry one or two system rows. Messages and system rows are readable to room members only. The page is open and hydrated before timing.",
+  storage: "In-memory Jazz database",
+  includes: [
+    "The profile update and its commit (about 0.5% of the time)",
+    "Re-reading the open page with its nested relations, and draining the update",
+  ],
+  excludes: ["Schema compilation, seeding, opening the page and teardown"],
+  work: {
+    count: 1,
+    unit: "presence stamps/s",
+    explanation: "One stamp per iteration, delivered to the one open page.",
+  },
+  source,
+});
+
+bandChatBenchmarks.push({
+  name: "band_chat_open_nested_page",
+  title: "BandChat · open a page with nested includes",
+  description:
+    "A member opens a room page whose messages nest their people: the newest 100 messages, each with its sender and its system rows, and each system row with the three people it names, through the membership read policies, until the first published result. One full read of a nested page with no write: the read a live page repeats whenever a person on it changes.",
+  fixture:
+    "8 members, 4 rooms, 400 messages; half the messages carry one or two system rows. Messages and system rows are readable to room members only. A freshly seeded store per sample.",
+  storage: "In-memory Jazz database",
+  includes: ["subscribe_for_identity opening, runtime ticks and the first published page"],
+  excludes: ["Schema compilation, seeding and query preparation", "Subscription teardown"],
+  work: {
+    count: 1,
+    unit: "pages opened/s",
+    explanation: "One page opening per iteration, returning 100 messages with their relations.",
+  },
+  source,
+});
+
+const online =
+  "100 members and 100 chats; each member is in five chats, which overlap as group chats do (five members each). Every membership has a read mark, every chat an agent, a call (every other one ended) and 30 messages, every third a reply. Read policies check chat membership; users are readable when they are the reader or discoverable, unique names inherit from their user, drafts are their writer's.";
+const listShape =
+  "Each member's chat list is the adopter's: their memberships (not banned, not deleted) by pin then creation, each with its chat, the chat's roster with each user and their unique names, its open group call (limit 1), the latest read mark of someone else (limit 1) and its agents.";
+const fanoutExcludes = [
+  "Schema compilation, seeding, opening and hydrating every live result",
+  "Sync, network and rendering",
+];
+bandChatBenchmarks.push(
+  {
+    name: "band_chat_read_mark_chat_lists_open[100]",
+    title: "BandChat · a read mark while 100 chat lists are open",
+    description: `Every member has their chat list open. One member reads to the newest message of one of their chats: their read mark is updated in place, and the chat's four other members see it as the chat's latest mark. Read marks are reached only through the lists' relations, so correlation watches (#5333) wake only the five lists holding that chat; without them all 100 re-run. ${listShape}`,
+    fixture: `${online} All 100 chat lists are open and hydrated before timing.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The read-mark update and its commit (about 0.5% of the time)",
+      "Dispatch, re-running the woken lists, and draining all 100",
+    ],
+    excludes: fanoutExcludes,
+    work: {
+      count: 1,
+      unit: "read marks/s",
+      explanation: "One read mark per iteration; the 100 open lists are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_membership_change_chat_lists_open[100]",
+    title: "BandChat · a member joins a chat while 100 chat lists are open",
+    description: `Every member has their chat list open. One member joins a chat they were not in: their list gains it and the chat's five members see them in its roster. Read policies check membership with \`chat_members.exists.where({ chatId, userId: session })\`, which evidence watches (#5341) key by the session's user, so about six lists wake; without them all 100 re-run. ${listShape}`,
+    fixture: `${online} All 100 chat lists are open and hydrated before timing; each sample's join is undone, untimed, before the next.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The membership insert and its commit (about 0.3% of the time)",
+      "Dispatch, re-running the woken lists, and draining all 100",
+    ],
+    excludes: [...fanoutExcludes, "Leaving the chat again between samples"],
+    work: {
+      count: 1,
+      unit: "joins/s",
+      explanation: "One join per iteration; the 100 open lists are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_membership_change_relation_policy_chat_lists_open[100]",
+    title: "BandChat · a join under a relation-style membership policy",
+    description: `The same join, with the read policies' membership check written as a relation-style \`exists(...)\`: the chat's memberships joined to their \`users\` row, which must be the reader. It grants the same rows, but fan-out watches the tables such a policy reads whole, so every one of the 100 lists re-runs. This case tracks that gap: a fix shows up as a gain toward the \`exists.where\` case. ${listShape}`,
+    fixture: `${online} All 100 chat lists are open and hydrated before timing; each sample's join is undone, untimed, before the next.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The membership insert and its commit (under 0.1% of the time)",
+      "Dispatch, re-running all 100 lists, and draining them",
+    ],
+    excludes: [...fanoutExcludes, "Leaving the chat again between samples"],
+    work: {
+      count: 1,
+      unit: "joins/s",
+      explanation: "One join per iteration; the 100 open lists are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_thread_reply_to_rooms_open[100]",
+    title: "BandChat · a reply while 100 rooms are open",
+    description:
+      "Every member keeps a different room open: its newest 25 messages, each with the message it replies to (a self-relation on messages). One member posts a reply in their room; that room shows it and drops its oldest shown message, and every other room stays quiet. The self-relation no longer drops the rooms' `chatId` key (#5333), so only that room wakes; without it all 100 rooms re-run.",
+    fixture: `${online} All 100 rooms are open and hydrated before timing.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The message insert and its commit (about 4% of the time)",
+      "Dispatch, re-running the woken room, and draining all 100",
+    ],
+    excludes: fanoutExcludes,
+    work: {
+      count: 1,
+      unit: "messages delivered/s",
+      explanation: "One message per iteration; the 100 open rooms are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_typing_drafts_rooms_open[100]",
+    title: "BandChat · typing a message while 100 rooms are open",
+    description:
+      "Every member has their room and their composer (their own draft in it) open. One member types a short message: 13 draft upserts, one per keystroke, each a commit that reaches only their composer, then the message, which reaches their room. Measures fan-out per commit on one store, with 200 live results to check against each write. The server's per-tick pass over every connected session is not in it: that needs a server with 100 sessions.",
+    fixture: `${online} All 100 rooms and 100 composers are open and hydrated before timing.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "13 draft updates and one message insert, and their commits (about a quarter of the time)",
+      "Dispatching each commit, re-running the woken composer or room, and draining all 200 results",
+    ],
+    excludes: [...fanoutExcludes, "A server, its sessions and its per-tick session pass"],
+    work: {
+      count: 1,
+      unit: "messages typed/s",
+      explanation: "One typed message (14 commits) per iteration; the open rooms are load context.",
+    },
+    source,
+  },
+);
+
+const nightlySource = "examples/band-chat/benchmarks/benches/nightly.rs";
+const band =
+  "200 members, 1,000 rooms: one room with 100,000 messages and 50 members, ten rooms of 10,000 and 989 rooms of 10–200 (303,695 messages). Every tenth message in the busy rooms has 1–3 reactions; every member has one read marker per room (a read-up-to row, updated in place). The reader is a member of 100 rooms. Declared indexes: messages (roomId, $createdAt) and readMarkers (roomId, lastReadAt). Membership read policies throughout; settled before timing.";
+const bandStorage = "In-memory Jazz database; in-process authority, no network";
+const bandExcludes = [
+  "Schema compilation, seeding and query preparation",
+  "Network, rendering and subscription teardown",
+];
+const deepRoomCase = (
+  name: string,
+  title: string,
+  description: string,
+  includes: string,
+  unit: string,
+  explanation: string,
+  count = 1,
+): BenchmarkMetadata => ({
+  name,
+  title,
+  description,
+  fixture: band,
+  storage: bandStorage,
+  includes: [includes],
+  excludes: bandExcludes,
+  work: { count, unit, explanation },
+  source: nightlySource,
+});
+bandChatBenchmarks.push(
+  deepRoomCase(
+    "band_chat_open_deep_room[100000]",
+    "BandChat · open a room with a long history",
+    "A member opens the 100,000-message room: the newest 50 messages, each with its sender and its reactions, through the membership read policy, until the first published page. The page is 50 messages at any depth; the cost should not follow the room's size.",
+    "subscribe_for_identity opening, runtime ticks and the first published page",
+    "rooms opened/s",
+    "One room opening per iteration, returning a 50-message page.",
+  ),
+  deepRoomCase(
+    "band_chat_scroll_back_deep[100000]",
+    "BandChat · scroll back deep into a room",
+    "The 50 messages before a cursor halfway down the 100,000-message room (`$createdAt < cursor`, newest first), with senders and reactions. Cursor paging, not offset: the page should cost the same at any depth.",
+    "Opening the page subscription until its first published result",
+    "pages/s",
+    "One 50-message page per iteration, 50,000 messages deep.",
+  ),
+  deepRoomCase(
+    "band_chat_jump_to_message[100000]",
+    "BandChat · jump to a message",
+    "Jumping to a reply or search hit a quarter of the way into the 100,000-message room: the 25 messages up to it and the 25 after it, as two bounded windows with senders and reactions.",
+    "Opening both windows until each publishes",
+    "jumps/s",
+    "One jump (two 25-message windows) per iteration.",
+  ),
+  deepRoomCase(
+    "band_chat_search_room[100000]",
+    "BandChat · search a room",
+    "A one-shot read of the newest 50 messages in the 100,000-message room that contain a word, with senders. One message in 2,000 matches.",
+    "One all_for_identity read, its relations nested as the client does",
+    "searches/s",
+    "One search per iteration, returning 50 hits.",
+  ),
+  deepRoomCase(
+    "band_chat_live_window_new_message[100000]",
+    "BandChat · a new message in an open room with a long history",
+    "The reader has the 100,000-message room open (newest 50, senders and reactions). A bandmate's message passes the insert policy, is accepted and reaches the open page.",
+    "Message insert, authority acceptance, runtime ticks until the open page shows it",
+    "messages delivered/s",
+    "One message per iteration.",
+  ),
+  deepRoomCase(
+    "band_chat_inbox_open[100]",
+    "BandChat · open the room list",
+    "The reader's room list: every room they can read (100), each with its newest message (newest first, limit 1) and the reader's own marker. Unread state, order and preview all come from this one subscription; nobody writes to the room when they post.",
+    "Opening the room-list subscription until its first published result",
+    "room lists/s",
+    "One room list of 100 rooms per iteration.",
+  ),
+  deepRoomCase(
+    "band_chat_inbox_new_message[100]",
+    "BandChat · a new message reaches the room list",
+    "The room list is open. A bandmate's message lands in one of the reader's rooms and becomes that room's newest message in the list.",
+    "Message insert, authority acceptance, runtime ticks until the room list changes",
+    "messages delivered/s",
+    "One message per iteration; the 100-room list is load context.",
+  ),
+  deepRoomCase(
+    "band_chat_unread_count_deep[100000]",
+    "BandChat · unread count in a room with a long history",
+    "The reader's unread count for the 100,000-message room: messages from others after their marker (`$createdAt > marker`), capped at 100. Five are unread, so the count should cost five rows, not the room.",
+    "Opening the count subscription until its first published result",
+    "counts/s",
+    "One count per iteration, returning 5.",
+  ),
+  deepRoomCase(
+    "band_chat_unread_count_new_message[100000]",
+    "BandChat · unread count goes up",
+    "The reader's unread count for the 100,000-message room is live; a bandmate's message arrives and the count goes up by one.",
+    "Message insert, authority acceptance, runtime ticks until the count changes",
+    "messages delivered/s",
+    "One message per iteration.",
+  ),
+  deepRoomCase(
+    "band_chat_marker_move_fanout[50]",
+    "BandChat · read receipts reach everyone in the room",
+    "All 50 members have the room open with everyone's read markers (check marks). One member reads to the newest message: their marker row is updated in place (the app does this at most every 5 s per open room), and all 50 open views show the moved marker.",
+    "Marker update, authority acceptance, runtime ticks until every view shows it",
+    "marker moves/s",
+    "One marker move per iteration; the 50 open views are load context.",
+  ),
+  deepRoomCase(
+    "band_chat_read_by_sheet[50]",
+    "BandChat · who read this message",
+    '"Read by" on a recent message in the 50-member room: the room\'s read markers at or past the message (`lastReadAt >= message`). The app shows the current members among them by name, without times. One read.',
+    "One all_for_identity read",
+    "sheets/s",
+    "One sheet per iteration; 20 of 50 members have read the message.",
+  ),
+);

@@ -1,62 +1,67 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { migration as m } from "../migration-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { appMigrations } from "../testing/client-migrations.js";
-import { startTestJazz } from "../testing/index.js";
+import { startTestJazz, testApp } from "../testing/index.js";
 
 it("preserves rows and their relationship through table and reference-column renames", async () => {
-  const person = s.table({ name: s.string() }, {});
-  const before = {
-    users: person,
-    notes: s.table(
-      { title: s.string(), authorId: s.uuid() },
-      { author: s.rel("users", "authorId") },
-    ),
-  };
-  const after = {
-    people: person,
-    messages: s.table(
-      { title: s.string(), ownerId: s.uuid(), reviewerId: s.uuid().optional() },
-      { owner: s.rel("people", "ownerId"), reviewer: s.rel("people", "reviewerId") },
-    ),
-  };
-  const migration = m.defineMigration({
-    from: before,
-    to: after,
-    renameTables: {
-      people: m.renameTableFrom("users"),
-      messages: m.renameTableFrom("notes"),
-    },
-    migrate: {
-      messages: {
-        ownerId: m.renameFrom("authorId"),
-        reviewerId: m.add.ref("people", { default: null }),
+  const oldApp = testApp({
+    tables: {
+      users: { columns: { name: "string" } },
+      notes: {
+        columns: { title: "string", authorId: "uuid" },
+        relations: { author: { rel: "users", column: "authorId" } },
       },
     },
   });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
+  const newApp = testApp({
+    tables: {
+      people: { columns: { name: "string" } },
+      messages: {
+        columns: { title: "string", ownerId: "uuid", reviewerId: "uuid?" },
+        relations: {
+          owner: { rel: "people", column: "ownerId" },
+          reviewer: { rel: "people", column: "reviewerId" },
+        },
+      },
+    },
+    history: {
+      v1: {
+        tables: {
+          users: { columns: { name: "string" } },
+          notes: {
+            columns: { title: "string", authorId: { type: "uuid", references: "users" } },
+          },
+        },
+      },
+    },
+    migrations: [
+      {
+        from: "v1",
+        renameTables: { people: "users", messages: "notes" },
+        migrate: {
+          messages: {
+            ownerId: { renameFrom: "authorId" },
+            reviewerId: { add: "uuid", default: null },
+          },
+        },
+      },
+    ],
   });
-  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
-    policy.users.allowRead.always();
-    policy.users.allowInsert.always();
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
-  const newPermissions = definePermissions(newApp, ({ policy }) => {
-    policy.people.allowRead.always();
-    policy.people.allowInsert.always();
-    policy.messages.allowRead.always();
-    policy.messages.allowInsert.always();
-  });
+  const oldPermissions = {
+    format: 1,
+    tables: { users: { read: "true", insert: "true" }, notes: { read: "true", insert: "true" } },
+  };
+  const newPermissions = {
+    format: 1,
+    tables: {
+      people: { read: "true", insert: "true" },
+      messages: { read: "true", insert: "true" },
+    },
+  };
   const server = await startTestJazz({
     app: oldApp,
     permissions: oldPermissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -69,7 +74,7 @@ it("preserves rows and their relationship through table and reference-column ren
     await db.shutdown();
     db = undefined;
 
-    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
+    await server.redeploy({ app: newApp, permissions: newPermissions });
     db = await createDb(account);
     expect(await db.all(newApp.people, { tier: "remote" })).toEqual([owner]);
     expect(

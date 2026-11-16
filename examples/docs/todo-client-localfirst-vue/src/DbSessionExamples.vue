@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { useDb, useSession } from "jazz-tools/vue";
-import { app } from "../schema.js";
+import { useDb, useJazzSession } from "jazz-tools/vue";
+import { app } from "../jazz.generated.js";
 
 // #region db-access-vue
 // Must be called inside setup() or <script setup>
@@ -12,11 +12,14 @@ async function addTodo(title: string) {
 // #endregion db-access-vue
 
 // #region session-vue
-const session = useSession(); // ComputedRef<Session | null>
+// Who is signed in: { accountId, kind: "device" | "backend", identity, claims } | null.
+// Your permissions see the same user as `session.user` (the accountId),
+// `session.identity` and `session.claims`.
+const { snapshot } = useJazzSession(); // snapshot.value.user
 // #endregion session-vue
 
 void addTodo;
-void session;
+void snapshot;
 </script>
 
 <template></template>

@@ -22,9 +22,14 @@ export interface AccountManagerConfig {
   env?: string;
   runtimeSources?: RuntimeSourcesConfig;
   /**
-   * Supply durable storage on native/server hosts; browser defaults to
-   * localStorage. Only that browser default reopens the last external account
-   * before its provider confirms it.
+   * Where this device keeps its accounts' selection and device account keys.
+   * A browser page or worker defaults to localStorage; only that default
+   * reopens the last external account before its provider confirms it.
+   * Elsewhere (Node, Deno, Bun, a CLI) the default keeps the selection in
+   * memory for this process, which is enough for a user your backend names
+   * (`bearer`); a device account there needs a durable store (a file, the OS
+   * keychain) and is refused without one (`DeviceAccountNeedsStoreError`).
+   * React Native requires one; `jazz-tools/expo` supplies it.
    */
   store?: AccountStore;
   /**

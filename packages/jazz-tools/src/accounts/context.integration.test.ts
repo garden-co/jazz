@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDb, schema } from "../index.js";
+import { testApp } from "../testing/test-app.js";
+import { createDb } from "../runtime/default-create-db.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
 import { mapAuthReason, type AuthFailureReason } from "../runtime/auth-state.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { createAccountManager } from "./create-account-manager.js";
+import { createAccountManagerWithMinter } from "./account-manager-core.js";
+import { mintLocalFirstTokenInJs } from "../thin/index.js";
 
 function failAuth(db: object, reason: AuthFailureReason): void {
   (db as { markUnauthenticated(reason: AuthFailureReason): void }).markUnauthenticated(reason);
@@ -12,10 +15,7 @@ function failAuth(db: object, reason: AuthFailureReason): void {
 describe("account context authority", () => {
   it("opens locally without activating its registry transport and rejects another app or authority", async () => {
     const { serverUrl: _serverUrl, ...config } = await localAccountConfig("local-only-account");
-    const app = schema.defineApp(
-      { notes: schema.table({ text: schema.string() }, {}) },
-      { migrations: "none" },
-    );
+    const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
     const db = await createDb(config);
     try {
       const { value: row } = await db.insert(app.notes, { text: "offline" });
@@ -106,6 +106,45 @@ describe("account context authority", () => {
       await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
       expect(refresh).toHaveBeenCalledOnce();
     } finally {
+      await db.shutdown();
+    }
+  });
+
+  it("renews a refused local-first token with a new one, not the token the load cached", async () => {
+    let stored: string | null = null;
+    const mintToken = vi.fn(mintLocalFirstTokenInJs);
+    const accounts = await createAccountManagerWithMinter(
+      {
+        appId: "local-first-refused-cached-token",
+        serverUrl: "http://127.0.0.1:1",
+        store: {
+          async read() {
+            return stored;
+          },
+          async update(transform) {
+            stored = transform(stored);
+          },
+        },
+      },
+      mintToken,
+    );
+    const account = accounts.createLocalFirst();
+    const db = await createDb({
+      appId: "local-first-refused-cached-token",
+      account,
+      driver: { type: "memory" },
+    });
+    try {
+      expect(mintToken).toHaveBeenCalledOnce();
+      // A second later (a token's iat has whole seconds), the server refuses
+      // it as expired, as one whose clock runs ahead of this device's would.
+      const later = Date.now() + 2_000;
+      vi.spyOn(Date, "now").mockReturnValue(later);
+      failAuth(db, "expired");
+      await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
+      expect(mintToken).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.restoreAllMocks();
       await db.shutdown();
     }
   });

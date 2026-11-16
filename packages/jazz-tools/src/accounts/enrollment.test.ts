@@ -197,13 +197,32 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
   await expect(accountToken(backend, registry)).rejects.toThrow(
     /backend_account_requires_backend_host/,
   );
-  await expect(manager.linkWithBackend()).rejects.toThrow(/local_first_account_required/);
+  await expect(manager.linkWithBackend()).rejects.toThrow(
+    /local_first_account_required: .*came from your backend.*refresh\(\)/,
+  );
   const invalidated = vi.fn();
   onAccountInvalidated(backend, invalidated);
   manager.createLocalFirst();
   manager.logout();
   expect(invalidated).toHaveBeenCalledOnce();
   expect(() => accountRegistry(backend)).toThrow(/invalid_account_handle/);
+});
+
+it("rejects a whitespace-only backend secret before asking the backend host (#2051)", async () => {
+  const admitBackend = vi.fn(async () => ({ nodeId: id }));
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
+    backend: { admitBackend },
+  });
+  for (const backendSecret of ["  ", "\n"]) {
+    await expect(admitBackendAccount(manager, { backendSecret })).rejects.toMatchObject({
+      code: "invalid_backend_secret",
+      message: expect.stringMatching(/backendSecret is only whitespace/),
+    });
+  }
+  expect(admitBackend).not.toHaveBeenCalled();
+  expect(manager.getLoggedIn()).toBeUndefined();
 });
 
 it("rejects unsupported backend hosts and fences late backend admission on logout", async () => {
@@ -296,6 +315,6 @@ it("says what to do when the backend refuses to link a guest, and keeps the gues
   const refusal = await manager.linkWithBackend().catch((error: unknown) => error);
   // Apps still branch on the code; the message says what to do instead.
   expect(refusal).toMatchObject({ name: "AccountAuthError", code: "link_refused", status: 409 });
-  expect((refusal as Error).message).toMatch(/already have an account.*loginWithBackend\(\)/);
+  expect((refusal as Error).message).toMatch(/already have an account.*refresh\(\)/);
   expect(manager.getLoggedIn()).toBe(signedIn);
 });

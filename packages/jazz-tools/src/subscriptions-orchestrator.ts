@@ -148,6 +148,12 @@ interface InternalCacheEntry<T extends { id: string }> {
   rejectfulfilled: (error: unknown) => void;
   listeners: Set<QueryEntryCallbacks<T>>;
   cleanupTimeoutId: ReturnType<typeof setTimeout> | null;
+  parkTimeoutId: ReturnType<typeof setTimeout> | null;
+  /**
+   * True while the entry keeps its last result but holds no source
+   * subscription (see {@link SubscriptionsOrchestrator.parkEntry}).
+   */
+  parked: boolean;
   unsubscribe?: () => void;
   status: UseAllState<T>["status"];
   error: unknown;
@@ -186,7 +192,22 @@ export class SubscriptionsOrchestrator {
       }),
     );
   }
+  /**
+   * How long an entry nobody listens to stays in the cache. Within it, a
+   * returning reader (back-navigation, a Suspense reader committing after its
+   * first result, a remount) sees the last result at once instead of loading.
+   */
   private readonly cleanupDelayMs = 30_000;
+  /**
+   * How long a settled entry nobody listens to keeps its source subscription
+   * live before it is parked: it keeps its last result for
+   * {@link cleanupDelayMs}, but stops costing work on every write (local
+   * re-evaluation, and the server refreshing the query's window). A returning
+   * reader sees the parked result at once while the entry resubscribes; the
+   * fresh subscription's opening reset replaces it. Long enough to cover a
+   * remount in the same navigation (StrictMode, key changes, transitions).
+   */
+  private readonly liveGraceMs = 1_000;
   // A key owns either its registration (including an identity-stable SSR seed)
   // or its live entry. Teardown retires all state for that key together.
   private readonly slots = new Map<string, QuerySlot<any>>();
@@ -210,8 +231,31 @@ export class SubscriptionsOrchestrator {
 
     this.session = session;
 
-    for (const slot of this.slots.values()) {
-      if (slot.phase === "live") this.resubscribeEntry(slot.entry);
+    for (const slot of Array.from(this.slots.values())) {
+      if (slot.phase !== "live") continue;
+      // A parked entry has no readers, and its rows belong to the old session.
+      if (slot.entry.parked) this.destroyEntry(slot.entry);
+      else this.resubscribeEntry(slot.entry);
+    }
+  }
+
+  /**
+   * The upstream link is connected again (after `db.reconnect()`, a network
+   * outage, or a store reset). A rejected entry has no subscription left, so
+   * without this a reader that stays mounted would keep the rejection for
+   * good, even when it no longer holds (an authority change the reconnect
+   * fixed, say). Every rejected entry that still has readers subscribes again
+   * from `pending`; one whose readers left is destroyed on its cleanup
+   * deadline as before. An error that does hold (an invalid query) is
+   * reported again, once per recovery.
+   */
+  retryRejected(): void {
+    for (const slot of Array.from(this.slots.values())) {
+      if (slot.phase !== "live") continue;
+      const entry = slot.entry;
+      if (entry.state.status !== "rejected" || entry.listeners.size === 0) continue;
+      this.trace("retry", entry);
+      this.resubscribeEntry(entry);
     }
   }
 
@@ -327,11 +371,20 @@ export class SubscriptionsOrchestrator {
       },
       listeners: new Set(),
       cleanupTimeoutId: null,
+      parkTimeoutId: null,
+      parked: false,
       subscribe: (callbacks) => {
         this.cancelCleanup(entry);
         entry.listeners.add(callbacks);
+        // A resubscription that fails at once already told every listener,
+        // this one included.
+        let told = false;
+        if (entry.parked) {
+          this.unparkEntry(entry);
+          told = entry.state.status === "rejected";
+        }
 
-        if (entry.state.status === "rejected") {
+        if (entry.state.status === "rejected" && !told) {
           callbacks.onError?.(entry.state.error);
         }
 
@@ -369,8 +422,11 @@ export class SubscriptionsOrchestrator {
   }
 
   private scheduleCleanup(entry: InternalCacheEntry<any>): void {
+    if (entry.listeners.size > 0) return;
+    // An entry that settles after its reader left still parks after the grace.
+    this.schedulePark(entry);
     // Updates do not renew ownership: preserve the first unused deadline.
-    if (entry.listeners.size > 0 || entry.cleanupTimeoutId !== null) return;
+    if (entry.cleanupTimeoutId !== null) return;
     entry.cleanupTimeoutId = setTimeout(() => {
       if (entry.listeners.size === 0) {
         this.destroyEntry(entry);
@@ -379,9 +435,49 @@ export class SubscriptionsOrchestrator {
   }
 
   private cancelCleanup(entry: InternalCacheEntry<any>): void {
+    if (entry.parkTimeoutId !== null) {
+      clearTimeout(entry.parkTimeoutId);
+      entry.parkTimeoutId = null;
+    }
     if (!entry.cleanupTimeoutId) return;
     clearTimeout(entry.cleanupTimeoutId);
     entry.cleanupTimeoutId = null;
+  }
+
+  /**
+   * Park a settled, unused entry after {@link liveGraceMs}. A pending entry
+   * stays live: an uncommitted Suspense reader is waiting on its first result
+   * (the delta that settles it schedules the park). A rejected entry has
+   * already lost its subscription.
+   */
+  private schedulePark(entry: InternalCacheEntry<any>): void {
+    if (entry.parked || entry.parkTimeoutId !== null) return;
+    if (entry.listeners.size > 0 || entry.state.status !== "fulfilled") return;
+    entry.parkTimeoutId = setTimeout(() => {
+      entry.parkTimeoutId = null;
+      if (entry.listeners.size === 0 && entry.state.status === "fulfilled") {
+        this.parkEntry(entry);
+      }
+    }, this.liveGraceMs);
+  }
+
+  /**
+   * Drop the source subscription but keep the last result readable until the
+   * cleanup deadline. Bumping the generation ignores anything the old
+   * subscription still delivers.
+   */
+  private parkEntry(entry: InternalCacheEntry<any>): void {
+    this.trace("park", entry);
+    entry.unsubscribe?.();
+    entry.unsubscribe = undefined;
+    entry.generation += 1;
+    entry.parked = true;
+  }
+
+  private unparkEntry(entry: InternalCacheEntry<any>): void {
+    this.trace("unpark", entry);
+    entry.parked = false;
+    this.subscribeEntry(entry);
   }
 
   private destroyEntry(entry: InternalCacheEntry<any>): void {
@@ -390,6 +486,9 @@ export class SubscriptionsOrchestrator {
       entry.unsubscribe();
     }
     entry.unsubscribe = undefined;
+    // Whatever the old subscription still delivers is ignored.
+    entry.generation += 1;
+    entry.parked = false;
     entry.listeners.clear();
     this.cancelCleanup(entry);
     const slot = this.slots.get(entry.key);
@@ -473,7 +572,7 @@ export class SubscriptionsOrchestrator {
   /**
    * Reset an entry to a fresh `pending` state with a new deferred, so a later
    * suspense read awaits the reload rather than the stale resolved promise.
-   * Used by session-change resubscription.
+   * Used by session-change resubscription and by {@link retryRejected}.
    */
   private resetEntryToPending<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     const next = makeDeferred<T[]>();

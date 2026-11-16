@@ -1,10 +1,10 @@
 import { createMemo } from "solid-js";
-import { useAll, useSession } from "jazz-tools/solid";
-import { app } from "../session-app.js";
+import { useAll, useJazzSession } from "jazz-tools/solid";
+import { app } from "../session-app/jazz.generated.js";
 
 export function AuthSessionExamples() {
-  const session = useSession();
-  const sessionUser = createMemo(() => session()?.user ?? null);
+  const { snapshot } = useJazzSession();
+  const sessionUser = createMemo(() => snapshot().user?.accountId ?? null);
   const ownedTodos = useAll(() => ({
     query: sessionUser() ? app.todos.where({ owner_id: sessionUser()! }) : undefined,
   }));

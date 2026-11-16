@@ -1,0 +1,24 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "4e5059c375fb9cdc1399e2d3105f6b09e9e49e483f0b0859bf0568dc5ace3d93"
+  },
+  "tables": {
+    "chatInvites": {
+      "columns": { "chatId": "uuid", "code": "string", "singleUse": "boolean" },
+      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+    },
+    "chatMembers": {
+      "columns": { "chatId": "uuid", "user_id": "uuid", "inviteId": "string?" },
+      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+    },
+    "chats": {
+      "columns": {},
+      "relations": {
+        "invites": { "reverse": "chatInvites", "relation": "chat" },
+        "members": { "reverse": "chatMembers", "relation": "chat" }
+      }
+    }
+  }
+}

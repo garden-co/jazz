@@ -1,11 +1,13 @@
 import { afterEach, expect, it } from "vitest";
-import { generateAuthSecret, schema, ReadTier } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { generateAuthSecret, ReadTier } from "../../src/index.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { createJazzClient } from "../../src/session/create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
+import { app } from "./apps/worker-remote-tiers/jazz.generated.js";
+import permissions from "./apps/worker-remote-tiers/jazz.permissions.json";
 import {
+  deploy,
   createJazzServerTransportControl,
   getJazzServerInfo,
   jazzAppFetch,
@@ -19,14 +21,7 @@ import {
 // The same rules are pinned in Rust (tests/binding_host.rs), for NAPI, and for
 // React Native foregrounds over the native relay.
 
-const app = schema.defineApp(
-  { entries: schema.table({ title: schema.string() }, {}) },
-  { migrations: "none" },
-);
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.entries.allowRead.always(),
-  policy.entries.allowInsert.always(),
-]);
+// The app (apps/worker-remote-tiers): entries everyone may read and insert.
 
 const ctx = new TestCleanup();
 afterEach(async () => {
@@ -68,10 +63,16 @@ it("waits for a tab's firstLoadRemoteWaitMs in its worker, then shows the worker
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("worker-first-load-wait"));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: permissions,
+  });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const transport = await createJazzServerTransportControl(serverUrl);
   try {
@@ -137,10 +138,16 @@ it("holds a tab's Global wait for a write made after its worker published an out
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("worker-global-wait-outage"));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: permissions,
+  });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const transport = await createJazzServerTransportControl(serverUrl);
   try {
@@ -196,12 +203,12 @@ it("holds a tab's Global wait armed before its worker published an outage", asyn
     appId,
     serverUrl: coreUrl,
     adminSecret,
-    schema: app.wasmSchema,
-    permissions,
+    app,
+    permissions: permissions,
   });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const transport = await createJazzServerTransportControl(serverUrl);
   try {
@@ -261,12 +268,12 @@ it("holds a session's Global wait through its worker's outage after a reload", a
     appId,
     serverUrl: coreUrl,
     adminSecret,
-    schema: app.wasmSchema,
-    permissions,
+    app,
+    permissions: permissions,
   });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const userUrl = await jazzAppUserUrl(backend, "alice");
   const transport = await createJazzServerTransportControl(userUrl);

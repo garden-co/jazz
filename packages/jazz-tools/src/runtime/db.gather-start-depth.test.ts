@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -8,24 +7,18 @@ import { startTestJazz } from "../testing/index.js";
 
 // garden-co/jazz#3778: `gather` honours `start` and `maxDepth` for a backend
 // client and for a user client whose rows are behind a read policy.
-const app = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-        owner: s.uuid(),
-        parent_id: s.uuid().optional(),
-      },
-      { parent: s.rel("todos", "parent_id") },
-    ),
+const app = testApp({
+  tables: {
+    todos: {
+      columns: { title: "string", done: "boolean", owner: "uuid", parent_id: "uuid?" },
+      relations: { parent: { rel: "todos", column: "parent_id" } },
+    },
   },
-  { migrations: "none" },
-);
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
 });
+const permissions = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
 
 let server: Awaited<ReturnType<typeof startTestJazz>>;
 let backend: Db;
@@ -34,9 +27,9 @@ const ids: Record<string, string> = {};
 
 beforeAll(async () => {
   server = await startTestJazz({
-    app: app,
-    permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    app,
+    permissions,
+    coreOptions: { inMemory: true },
   });
   const account = await localAccountConfig(server.appId, server.url);
   user = await createDb(account);

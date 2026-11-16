@@ -1,7 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { schema as s } from "jazz-tools";
 import type { Db, TransactionScope, WriteResult } from "jazz-tools";
-import { createPolicyTestApp } from "jazz-tools/testing";
+import { createPolicyTestApp, testApp } from "jazz-tools/testing";
 import type { PolicyTestApp } from "jazz-tools/testing";
 import { MemoryRouter } from "react-router";
 import type * as ReactRouter from "react-router";
@@ -12,49 +11,36 @@ import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 const issuer = "https://inspector-save.test";
 const userId = "editor";
 const permittedOwner = "00000000-0000-4000-8000-000000000001";
-const inspectorSaveApp = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        owner_id: s.uuid(),
-        rank: s.bigint().optional(),
-        largeCounts: s.array(s.bigint()).optional(),
-        textNumber: s.string().optional().default("restored-default"),
-        jsonNumber: s.json().optional(),
-        payload: s.bytes().optional(),
+const ownRows = "owner_id = session.user";
+const inspectorSaveApp = testApp({
+  tables: {
+    todos: {
+      columns: {
+        title: "string",
+        owner_id: "uuid",
+        rank: "bigint?",
+        largeCounts: { array: "bigint", optional: true },
+        textNumber: { type: "string", optional: true, default: "restored-default" },
+        jsonNumber: { json: true, optional: true },
+        payload: "bytes?",
       },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
-const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.where({ owner_id: session.user });
-  policy.todos.allowUpdate.where({ owner_id: session.user });
-  policy.todos.allowDelete.where({ owner_id: session.user });
 });
+const inspectorSavePermissions = {
+  format: 1,
+  tables: { todos: { read: ownRows, insert: ownRows, update: ownRows, delete: ownRows } },
+};
 
 // Keep the BYTEA regression independent of unrelated nullable JSON semantics
 // tracked in #2733, while exercising the complete grid query against a real Db.
-const inspectorByteaApp = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        owner_id: s.uuid(),
-        payload: s.bytes().optional(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
-const inspectorByteaPermissions = s.definePermissions(inspectorByteaApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.where({ owner_id: session.user });
+const inspectorByteaApp = testApp({
+  tables: { todos: { columns: { title: "string", owner_id: "uuid", payload: "bytes?" } } },
 });
+const inspectorByteaPermissions = {
+  format: 1,
+  tables: { todos: { read: ownRows, insert: ownRows } },
+};
 
 let currentSchema = inspectorSaveApp.wasmSchema;
 let latestQuery: GenericQueryBuilder | null = null;
@@ -578,7 +564,7 @@ describe("TableDataGrid real Db save retries", () => {
       if (!query) throw new Error("TableDataGrid did not issue a query");
       expect(JSON.parse(query._build())).toMatchObject({
         conditions: [{ column: "payload", op: "eq", value: [0, 255] }],
-        select: ["*", "$createdAt", "$createdBy", "$updatedAt", "$updatedBy"],
+        select: ["*", "$createdAt", "$updatedAt", "$createdBy", "$updatedBy"],
         orderBy: [["id", "asc"]],
         limit: 26,
         offset: 0,

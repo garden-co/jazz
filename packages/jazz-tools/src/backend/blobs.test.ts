@@ -58,6 +58,19 @@ describe("vercelBlob()", () => {
     expect(resolveCoreBlobs({}, {}, warn)).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no Blob store is connected/));
   });
+
+  it("says a vercel() core has no Blob store once per process, however many copies of jazz-tools load", async () => {
+    // Said here, or already by an earlier test in this process.
+    resolveCoreBlobs({}, {}, () => {});
+    const warn = vi.fn();
+    resolveCoreBlobs({}, {}, warn);
+    // Next.js bundles each route on its own: another copy of this module.
+    vi.resetModules();
+    const copy = await import("./vercel-store.js");
+    expect(copy.resolveCoreBlobs).not.toBe(resolveCoreBlobs);
+    copy.resolveCoreBlobs({}, {}, warn);
+    expect(warn).not.toHaveBeenCalled();
+  });
 });
 
 describe("environmentOf", () => {

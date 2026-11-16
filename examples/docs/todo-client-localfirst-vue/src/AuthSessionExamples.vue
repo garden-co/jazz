@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useAll, useSession } from "jazz-tools/vue";
-import { app } from "../session-app.js";
+import { useAll, useJazzSession } from "jazz-tools/vue";
+import { app } from "../session-app/jazz.generated.js";
 
 // #region auth-session-vue-hook
-const session = useSession();
+const { snapshot } = useJazzSession();
 // #endregion auth-session-vue-hook
 
 // #region auth-session-vue-user
-const sessionUser = computed(() => session.value?.user ?? null);
+const sessionUser = computed(() => snapshot.value.user?.accountId ?? null);
 // #endregion auth-session-vue-user
 
 // #region auth-session-vue-query

@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/index.js";
 import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
   sleep,
@@ -23,9 +22,10 @@ import {
   jazzAppUserUrl,
   loginAtJazzAppUser,
   startJazzApp,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import permissions from "../../permissions.js";
-import { app } from "../../schema.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated.js";
 import { posterShopScenario } from "../../src/scenario.js";
 
 declare const __JAZZ_EXAMPLE_TOPOLOGY_SEED__: string;
@@ -132,11 +132,11 @@ describe("PosterShop cross-topology recovery", () => {
             name: "owner bootstrap and editor admission",
             run: async () => {
               const core = await getJazzServerInfo(uniqueDbName("poster-shop-topology"));
-              await deploy({
+              await deployApp({
                 appId: core.appId,
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
-                schema: app,
+                app: app,
                 permissions,
               });
               server = await startJazzApp(core, { schema: app, permissions });

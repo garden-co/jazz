@@ -24,7 +24,7 @@ import {
   useAll,
   useSession,
 } from "jazz-tools/vue";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 interface Scope {
@@ -55,7 +55,7 @@ function scope(label: string): Scope {
 }
 
 /**
- * Await a `db.insert()` result up to edge-tier durability and return the
+ * Await a `db.insert()` result up to global-tier durability (the server has accepted it) and return the
  * inserted value. Use this between dependent writes so the next op sees the
  * prior one — both for policy checks (`isBandMember`) and for relation
  * includes that need the related row to be visible at the server.
@@ -106,7 +106,7 @@ async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted
     scope: SCOPE,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
-    initial: "local-first",
+    initial: "device",
   });
   const client = session.getSnapshot().client;
   if (!client) throw new Error("the session opened no client");
@@ -202,7 +202,7 @@ describe("world-tour Jazz + Vue integration", () => {
 
     const userId = sessionUser(client);
 
-    // Each dependent insert awaits edge-tier confirmation. The stop's policy
+    // Each dependent insert awaits the server's (global-tier) confirmation. The stop's policy
     // check (isBandMember) and the include-resolution of `venue` both require
     // the prior writes to be visible at the server before the next op lands.
     const band = await inserted(

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "edde451e7139a7f55bc30ccced16e7710c9376e9993d75e87a46664c14899071"
+  },
+  "tables": {
+    "messages": {
+      "read": {
+        "anyOf": [
+          "chat_id = 'announcements'",
+          { "allOf": ["chat_id = 'chat-01'", "session.claims.role in ['admin', 'member']"] }
+        ]
+      },
+      "insert": {
+        "anyOf": [
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          { "allOf": ["chat_id = 'chat-01'", "session.claims.role in ['admin', 'member']"] }
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+            {
+              "allOf": [
+                "chat_id = 'chat-01'",
+                { "anyOf": ["$createdBy.account = session.user", "session.claims.role = 'admin'"] }
+              ]
+            }
+          ]
+        },
+        "new": "exists messages(id = this.id, chat_id = this.chat_id)"
+      },
+      "delete": {
+        "anyOf": [
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          {
+            "allOf": [
+              "chat_id = 'chat-01'",
+              { "anyOf": ["$createdBy.account = session.user", "session.claims.role = 'admin'"] }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

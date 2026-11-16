@@ -5,6 +5,7 @@ import { TableSchemaDefinition } from "./components/data-explorer/TableSchemaDef
 import { InspectorLayout } from "./components/inspector-layout";
 import { LiveQuery } from "./pages/live-query";
 import { SettingsPage } from "./pages/settings";
+import { LinkedQuery } from "./backend/pages";
 
 export function InspectorRoutes() {
   return (
@@ -17,6 +18,7 @@ export function InspectorRoutes() {
         </Route>
         <Route path="live-query" element={<LiveQuery />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="linked" element={<LinkedQuery />} />
       </Route>
     </Routes>
   );

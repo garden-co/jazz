@@ -14,6 +14,7 @@ import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useHostSubscriptions } from "../../contexts/host-link.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { LiveQueryFilters } from "./LiveQueryFilters.js";
+import { BackendSessions } from "../../backend/pages.js";
 import styles from "./index.module.css";
 
 const SERVER_SUBSCRIPTIONS_POLL_MS = 20_000;
@@ -159,6 +160,13 @@ function useServerSubscriptionTelemetry() {
   return { queries, generatedAt, error, isLoading };
 }
 
+/**
+ * The page's Db records subscriptions only while it is in devMode, which
+ * mounting the Inspector turns on: ones opened earlier aren't seen.
+ */
+const BEFORE_MOUNT_NOTE =
+  "Lists subscriptions opened since the Inspector was mounted, or all of them when the page's Jazz client config has devMode: true. Listing earlier ones is not supported yet.";
+
 function OverlayLiveQuery() {
   const { wasmSchema } = useDevtoolsContext();
   // The host pushes on every active-query change; subscribing here (the only
@@ -244,6 +252,7 @@ function OverlayLiveQuery() {
           <p className={styles.subtitle}>
             Active `Db.subscribe(...)` subscriptions captured from the inspected page runtime.
           </p>
+          <p className={styles.statusText}>{BEFORE_MOUNT_NOTE}</p>
         </div>
         <LiveQueryFilters
           availableTables={availableTables}
@@ -253,12 +262,20 @@ function OverlayLiveQuery() {
           onTierChange={setSelectedTier}
         />
       </header>
-      {filteredSubscriptions.length === 0 ? (
+      {subscriptions.length === 0 ? (
+        // Not "none": the page may well have subscriptions this can't see.
         <section className={styles.emptyState}>
-          <p className={styles.emptyTitle}>No active subscriptions</p>
-          <p className={styles.emptyText}>
-            Create a live query in the inspected page to see it here.
+          <p className={styles.emptyTitle}>
+            No subscriptions opened since the Inspector was mounted
           </p>
+          <p className={styles.emptyText}>
+            Subscriptions the page opened before that aren't listed: that is not supported yet. Pass{" "}
+            <code>devMode: true</code> in the page&apos;s Jazz client config to list them all.
+          </p>
+        </section>
+      ) : filteredSubscriptions.length === 0 ? (
+        <section className={styles.emptyState}>
+          <p className={styles.emptyTitle}>No subscriptions match these filters</p>
         </section>
       ) : (
         <div className={styles.tableShell}>
@@ -398,6 +415,9 @@ export function LiveQuery() {
 
   if (runtime === "standalone") {
     return <StandaloneLiveQuery />;
+  }
+  if (runtime === "backend") {
+    return <BackendSessions />;
   }
 
   return <OverlayLiveQuery />;

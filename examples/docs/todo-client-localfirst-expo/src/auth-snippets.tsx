@@ -1,6 +1,5 @@
-import { Text, View } from "react-native";
-import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools/react-native";
-import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
+import { Button, Text, View } from "react-native";
+import { JazzProvider, useJazzSession } from "jazz-tools/expo";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 
 function TodoApp() {
@@ -8,29 +7,37 @@ function TodoApp() {
 }
 
 // #region auth-localfirst-expo
-export function LocalFirstAuthExpoApp() {
+// Everyone starts as a guest: a device account, whose key Expo keeps in SecureStore.
+export function DeviceAccountExpoApp() {
   return (
-    <JazzSessionProvider
-      config={{ serverUrl: "https://your-app.example/jazz", initial: "local-first" }}
-    >
+    <JazzProvider config={{ serverUrl: "https://your-app.example/jazz", initial: "device" }}>
       <View>
         <Text>My App</Text>
         <TodoApp />
       </View>
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 // #endregion auth-localfirst-expo
 
 // #region auth-localfirst-expo-backup
-export function getRecoveryPhrase(account: AccountHandle): string {
-  return RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
+export function useRecoveryPhrase() {
+  const { exportDeviceKey } = useJazzSession();
+  return () => RecoveryPhrase.fromSecret(exportDeviceKey());
 }
 // #endregion auth-localfirst-expo-backup
 
 // #region auth-localfirst-expo-restore
 export function useRestoreRecoveryPhrase() {
-  const { restoreLocalFirst } = useJazzSession();
-  return (userInput: string) => restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
+  const { restoreDeviceAccount } = useJazzSession();
+  return (userInput: string) => restoreDeviceAccount(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-expo-restore
+
+// #region auth-refresh-expo
+// After your own sign-in or sign-out: Jazz asks your backend who is signed in now.
+export function AfterSignIn() {
+  const { refresh, pending } = useJazzSession();
+  return <Button title="Continue" disabled={!!pending} onPress={() => void refresh()} />;
+}
+// #endregion auth-refresh-expo

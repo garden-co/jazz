@@ -1,5 +1,4 @@
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 /**
  * Core browser canary for the React todo app.
  *
@@ -12,9 +11,13 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act, useEffect } from "react";
 import { App } from "../../src/App.js";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
+
+type AccountStore = ReturnType<typeof memoryAccountStore>;
+// These tests are about the local-first client (IndexedDB, sync between replicas).
+const loadLocalFirst = () => import("jazz-tools/local-first");
 import { useDb } from "jazz-tools/react";
 
 type TestWindow = Window & {
@@ -79,7 +82,7 @@ async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: strin
   });
 }
 
-function TodosEdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
+function TodosRemoteReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
   const db = useDb();
   useEffect(() => {
     // A remote read of the same relation establishes the causal frontier that
@@ -100,18 +103,13 @@ describe("React Todo App core browser canary", () => {
   async function mountApp(config: {
     appId?: string;
     serverUrl?: string;
-    secret?: string;
+    /** The device account's store: mounts sharing one are the same user. */
+    store?: AccountStore;
     driver?: DbConfig["driver"];
-    onEdgeSettled?: (error: Error | null) => void;
+    onRemoteSettled?: (error: Error | null) => void;
   }): Promise<HTMLDivElement> {
-    const { onEdgeSettled, secret, ...dbConfig } = config;
+    const { onRemoteSettled, store = memoryAccountStore(), ...dbConfig } = config;
     const appId = dbConfig.appId ?? "test-app";
-    const account = await prepareTestAccount(
-      createAccountManager,
-      appId,
-      dbConfig.serverUrl ?? SERVER_URL,
-      secret,
-    );
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
@@ -119,8 +117,8 @@ describe("React Todo App core browser canary", () => {
 
     await act(async () => {
       r.render(
-        <App config={{ appId, ...dbConfig, account }}>
-          {onEdgeSettled && <TodosEdgeReadinessProbe onSettled={onEdgeSettled} />}
+        <App config={{ appId, ...dbConfig, store, client: loadLocalFirst, localFirst: "now" }}>
+          {onRemoteSettled && <TodosRemoteReadinessProbe onSettled={onRemoteSettled} />}
         </App>,
       );
     });
@@ -165,35 +163,33 @@ describe("React Todo App core browser canary", () => {
   it("syncs two persistent IndexedDB app instances through the app's backend", async () => {
     const writerDbName = uniqueDbName("core-writer");
     const readerDbName = uniqueDbName("core-reader");
-    let writerEdgeResult: Error | null | undefined;
-    let readerEdgeResult: Error | null | undefined;
+    let writerRemoteResult: Error | null | undefined;
+    let readerRemoteResult: Error | null | undefined;
 
     const writer = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
-      secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
-      onEdgeSettled: (error) => {
-        writerEdgeResult = error;
+      onRemoteSettled: (error) => {
+        writerRemoteResult = error;
       },
     });
     const reader = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
-      onEdgeSettled: (error) => {
-        readerEdgeResult = error;
+      onRemoteSettled: (error) => {
+        readerRemoteResult = error;
       },
     });
 
     await waitFor(
-      () => writerEdgeResult !== undefined && readerEdgeResult !== undefined,
+      () => writerRemoteResult !== undefined && readerRemoteResult !== undefined,
       15000,
-      "both todo subscriptions should establish edge coverage before the online write",
+      "both todo subscriptions should complete a remote read before the online write",
     );
-    if (writerEdgeResult) throw writerEdgeResult;
-    if (readerEdgeResult) throw readerEdgeResult;
+    if (writerRemoteResult) throw writerRemoteResult;
+    if (readerRemoteResult) throw readerRemoteResult;
 
     await addTodo(writer, "Core writer todo");
     await waitFor(
@@ -240,12 +236,13 @@ describe("React Todo App core browser canary", () => {
   it("reopens a persistent IndexedDB app instance with DOM-written todos", async () => {
     const dbName = uniqueDbName("core-reopen");
     const title = "Core durable todo";
+    const store = memoryAccountStore();
 
     const firstSession = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
-      secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+      store,
     });
 
     await addTodoAndWaitForLocalDurability(firstSession, title);
@@ -261,7 +258,7 @@ describe("React Todo App core browser canary", () => {
       appId: SCOPE,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
-      secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+      store,
     });
 
     await waitFor(
@@ -276,39 +273,39 @@ describe("React Todo App core browser canary", () => {
   it("reopened persistent IndexedDB client catches up a locally durable write after websocket reconnect", async () => {
     const writerDbName = uniqueDbName("core-reconnect-writer");
     const readerDbName = uniqueDbName("core-reconnect-reader");
-    const writerSecret = "jazz-auth-v1:71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
-    const readerSecret = "jazz-auth-v1:Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
+    const writerStore = memoryAccountStore();
+    const readerStore = memoryAccountStore();
     const onlineTitle = "Core reconnect online todo";
     const offlineTitle = "Core reconnect offline todo";
-    let writerEdgeResult: Error | null | undefined;
-    let readerEdgeResult: Error | null | undefined;
+    let writerRemoteResult: Error | null | undefined;
+    let readerRemoteResult: Error | null | undefined;
 
     const writer = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
-      secret: writerSecret,
-      onEdgeSettled: (error) => {
-        writerEdgeResult = error;
+      store: writerStore,
+      onRemoteSettled: (error) => {
+        writerRemoteResult = error;
       },
     });
     const reader = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      secret: readerSecret,
-      onEdgeSettled: (error) => {
-        readerEdgeResult = error;
+      store: readerStore,
+      onRemoteSettled: (error) => {
+        readerRemoteResult = error;
       },
     });
 
     await waitFor(
-      () => writerEdgeResult !== undefined && readerEdgeResult !== undefined,
+      () => writerRemoteResult !== undefined && readerRemoteResult !== undefined,
       15000,
-      "both todo subscriptions should establish edge coverage before the online write",
+      "both todo subscriptions should complete a remote read before the online write",
     );
-    if (writerEdgeResult) throw writerEdgeResult;
-    if (readerEdgeResult) throw readerEdgeResult;
+    if (writerRemoteResult) throw writerRemoteResult;
+    if (readerRemoteResult) throw readerRemoteResult;
 
     await addTodo(writer, onlineTitle);
     await waitFor(
@@ -326,22 +323,22 @@ describe("React Todo App core browser canary", () => {
       "writer should render the locally durable todo while reader is offline",
     );
 
-    let edgeResult: Error | null | undefined;
+    let remoteResult: Error | null | undefined;
     const reconnectedReader = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      secret: readerSecret,
-      onEdgeSettled: (error) => {
-        edgeResult = error;
+      store: readerStore,
+      onRemoteSettled: (error) => {
+        remoteResult = error;
       },
     });
     await waitFor(
-      () => edgeResult !== undefined,
+      () => remoteResult !== undefined,
       15000,
-      "reopened reader should establish todo edge coverage before catch-up",
+      "reopened reader should complete a remote todo read before catch-up",
     );
-    if (edgeResult) throw edgeResult;
+    if (remoteResult) throw remoteResult;
 
     // The prior online row is already in this reader's IndexedDB store. Check that
     // local rehydration separately, so a later failure is unambiguously the

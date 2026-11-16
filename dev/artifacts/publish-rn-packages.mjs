@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { verifyRnPackSize } from "./verify-rn-pack-size.mjs";
 const receipt = JSON.parse(readFileSync(process.env.JAZZ_RN_VERIFIED_RECEIPT, "utf8"));
 const names = ["jazz-rn-android", "jazz-rn-ios", "jazz-rn"];
@@ -18,9 +18,27 @@ for (const entry of receipt) {
   const existing = spawnSync("npm", ["view", `${entry.name}@${entry.version}`, "version"], {
     stdio: "ignore",
   });
-  if (existing.status === 0) console.log(`${entry.name}@${entry.version} already published`);
-  else
-    execFileSync("npm", ["publish", entry.tarball, "--tag", "alpha", "--access", "public"], {
-      stdio: "inherit",
-    });
+  if (existing.status === 0) {
+    console.log(`${entry.name}@${entry.version} already published`);
+    continue;
+  }
+  const publish = spawnSync(
+    "npm",
+    ["publish", entry.tarball, "--tag", "latest", "--access", "public"],
+    { encoding: "utf8", stdio: ["ignore", "inherit", "pipe"] },
+  );
+  process.stderr.write(publish.stderr ?? "");
+  if (publish.status === 0) continue;
+  // npm accepts a large upload (the RN native packages are ~100 MB) before it
+  // serves it: until then `npm view` finds nothing, and publishing again answers
+  // E409 "Cannot publish over previously staged version". That version is
+  // already ours on the registry, so treat it as published instead of stopping
+  // the job before jazz-tools and create-jazz.
+  if (/E409/.test(publish.stderr ?? "") && /previously staged version/.test(publish.stderr ?? "")) {
+    console.log(
+      `${entry.name}@${entry.version} is already staged on npm; treating it as published`,
+    );
+    continue;
+  }
+  throw new Error(`npm publish ${entry.name}@${entry.version} failed (exit ${publish.status})`);
 }

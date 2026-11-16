@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
 import { accountRegistryUrl, type AccountDbConfig } from "../accounts/context.js";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
 import {
   PostcardWriter,
@@ -36,22 +36,15 @@ vi.mock("react-native", () => ({
   },
 }));
 import {
-  createDb,
-  REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
   type JazzClient,
-  useLocalFirstAuth,
 } from "./index.js";
+import { createDb } from "./create-db.js";
 import { openJazzClient, type OpenJazzClientConfig } from "./create-jazz-client.js";
 
-const app = s.defineApp(
-  {
-    notes: s.table({ title: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
 
@@ -115,12 +108,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
   it("exports the exact installed-package persistence boundary messages", () => {
     expect(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR).toMatch(/JazzRelay native artifact/);
-  });
-
-  it("never falls back to browser localStorage for a React Native auth root", () => {
-    expect(() => useLocalFirstAuth({} as never)).toThrow(
-      REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
-    );
   });
 
   it("rejects a server-only credential copied through a React Native client config", async () => {
@@ -211,7 +198,8 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           expect(reader.string()).toBe("notes");
           expect(reader.u64()).toBe(0); // native allocates the row id
           expect(reader.bytes().length).toBeGreaterThan(0);
-          expect(JSON.parse(reader.string())).toEqual({ updatedAtMs: expect.any(Number) });
+          // An ordinary write names no time: the authority stamps it.
+          expect(JSON.parse(reader.string())).toEqual({});
           return Uint8Array.from([23, ...new Uint8Array(16).fill(4), ...rowId]);
         }
         case 21:

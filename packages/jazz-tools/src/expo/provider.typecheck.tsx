@@ -1,18 +1,18 @@
-import { JazzProvider, useJazzAuth, useDb, useSyncStatus, type SyncStatus } from "./index.js";
+import { JazzProvider, useJazzSession, useDb, useSyncStatus, type SyncStatus } from "./index.js";
 function Data() {
   useDb();
   useSyncStatus() satisfies SyncStatus;
-  const { logout, retry, reauthenticate, user, status } = useJazzAuth();
-  void logout;
+  const { signOut, retry, refresh, user, status } = useJazzSession();
+  void signOut;
   void retry;
-  void reauthenticate;
+  void refresh;
   void user?.claims;
+  void user?.identity.subject;
   return status;
 }
 export const expoApplication = (
   <JazzProvider
-    scope="expo-app"
-    serverUrl="https://sync.example.test"
+    config={{ scope: "expo-app", serverUrl: "https://sync.example.test" }}
     signedOut={null}
     error={({ retry }) => {
       void retry;
@@ -23,14 +23,16 @@ export const expoApplication = (
   </JazzProvider>
 );
 export const expoApplicationWithoutGuests = (
-  <JazzProvider serverUrl="https://app.example.test/jazz" initial="signed-out" signedOut={null}>
+  <JazzProvider
+    config={{ serverUrl: "https://app.example.test/jazz", initial: "signed-out" }}
+    signedOut={null}
+  >
     <Data />
   </JazzProvider>
 );
 export const expoApplicationWithBearer = (
   <JazzProvider
-    serverUrl="https://app.example.test/jazz"
-    bearer={async () => "app-token"}
+    config={{ serverUrl: "https://app.example.test/jazz", bearer: async () => "app-token" }}
     signedOut={null}
   >
     <Data />

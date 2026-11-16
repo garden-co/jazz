@@ -26,6 +26,9 @@ export function makeFakeClient(params: {
   let syncStatus: SyncStatus = {
     link: { state: "connecting" },
     pendingUploads: 0,
+    oldestPendingAt: null,
+    rejected: 0,
+    lastError: null,
     synced: false,
   };
   const syncListeners = new Set<(status: SyncStatus) => void>();

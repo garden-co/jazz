@@ -1,4 +1,24 @@
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { structuralBigInt } from "../runtime/structural-values.js";
+import { isDefinedMigration, witnessColumns, type DefinedMigration } from "../migrations.js";
+import { isDefinedTable } from "../schema-dsl/table.js";
+import {
+  readableColumn,
+  type ReadableJson,
+  type ReadableTable,
+} from "../schema-dsl/readable-app.js";
+import { compileApp } from "./codegen-napi.js";
+
+/** The engine's hash of a schema in its JSON form (`{ "tables": … }`), through jazz-napi. */
+async function schemaHashOf(engineSchemaJson: string): Promise<string> {
+  // A specifier bundlers can't follow: this module is Node tooling only.
+  const specifier = "jazz-napi";
+  const napi = (await import(/* @vite-ignore */ specifier)) as {
+    schemaHash(engineSchemaJson: string): string;
+  };
+  return napi.schemaHash(engineSchemaJson);
+}
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
@@ -6,6 +26,7 @@ import type {
   Value,
 } from "../drivers/types.js";
 import { columnTypeSignature, shortSchemaHash, tableSchemasEqual } from "./schema-utils.js";
+import { enumVariantChange, onlyAddsEnumVariants } from "../runtime/schema-metadata.js";
 
 function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string[] {
   const names = new Set([...Object.keys(fromSchema), ...Object.keys(toSchema)]);
@@ -96,8 +117,6 @@ function baseBuilderExpression(columnType: WasmColumnType): string {
       return columnType.schema ? `s.json(${jsonSchemaExpression(columnType.schema)})` : "s.json()";
     case "Enum":
       return `s.enum(${columnType.variants.map((variant) => JSON.stringify(variant)).join(", ")})`;
-    case "EnumPayload":
-      throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
       return "s.uuid()";
     case "Array":
@@ -255,8 +274,6 @@ function renderColumnOperationExpression(
       return `${m}.enum(${columnType.variants
         .map((variant) => JSON.stringify(variant))
         .join(", ")}, { ${defaultEntry} })`;
-    case "EnumPayload":
-      throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
       return column.references
         ? `${m}.ref(${JSON.stringify(column.references)}, { ${defaultEntry} })`
@@ -291,8 +308,12 @@ export const UNFILLED_STUB_TODO =
 /**
  * A column kept under the same name must keep its type and optionality: no
  * migration step changes them in place, so a stub for such a change could
- * never typecheck (#2163). That includes a JSON column's schema and an enum
- * column's variants. Refuse it with the supported alternative.
+ * never typecheck (#2163). That includes a JSON column's schema. An enum
+ * column (or an array of enums) may gain variants at the end of its list,
+ * since the rows it holds pass unchanged and sort as before, but not lose
+ * one (renaming or removing a variant needs a value mapping no migration
+ * step has yet) or reorder them. Refuse those with the supported
+ * alternative.
  */
 function refuseUnsupportedSharedColumnChanges(
   tableName: string,
@@ -311,20 +332,60 @@ function refuseUnsupportedSharedColumnChanges(
       );
     }
     if (columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type)) {
+      if (onlyAddsEnumVariants(source.column_type, column.column_type)) continue;
+      const enumChange = enumVariantChange(source.column_type, column.column_type);
+      if (enumChange && enumChange.dropped.length === 0) {
+        throw new Error(
+          `Changing the order of the enum variants of column ${JSON.stringify(name)} is not ` +
+            `supported: add new variants at the end of the list. A variant's position is its ` +
+            `sort order, so moving one would change how existing rows sort and rewrite every ` +
+            `stored value of the column.`,
+        );
+      }
+      if (enumChange) {
+        const dropped = enumChange.dropped.map((variant) => JSON.stringify(variant)).join(", ");
+        throw new Error(
+          `Changing the enum variants of column ${JSON.stringify(name)} is not supported yet: ` +
+            `it no longer declares ${dropped}. A migration can add enum variants, but renaming ` +
+            `or removing one is planned for a later release. ` +
+            KEEP_VALUES_ADVICE,
+        );
+      }
       // A migration can only add, drop or rename a column, so a column's
-      // JSON Schema and its enum variants are part of its type too.
+      // JSON Schema is part of its type too.
       const change =
         source.column_type.type === "Json" && column.column_type.type === "Json"
           ? "the JSON Schema of"
-          : source.column_type.type === "Enum" && column.column_type.type === "Enum"
-            ? "the enum variants of"
-            : "the type of";
+          : "the type of";
       throw new Error(
         `Changing ${change} column ${JSON.stringify(name)} is not supported yet. ` +
           KEEP_VALUES_ADVICE,
       );
     }
   }
+}
+
+/**
+ * The kept columns that gain enum variants, as notes for the stub: their
+ * rows pass unchanged, so they need no step.
+ */
+function enumVariantAdditionNotes(fromTable: WasmSchema[string], toTable: WasmSchema[string]) {
+  return toTable.columns.flatMap((column) => {
+    const source = fromTable.columns.find((candidate) => candidate.name === column.name);
+    if (!source) return [];
+    const change = enumVariantChange(source.column_type, column.column_type);
+    if (
+      !change ||
+      change.added.length === 0 ||
+      !onlyAddsEnumVariants(source.column_type, column.column_type)
+    )
+      return [];
+    const added = change.added.map((variant) => JSON.stringify(variant)).join(", ");
+    return [
+      `Column ${JSON.stringify(column.name)} gains enum variant${change.added.length === 1 ? "" : "s"} ` +
+        `${added}: existing rows are unchanged, so it needs no step.`,
+    ];
+  });
 }
 
 function inferTableSuggestions(
@@ -467,7 +528,15 @@ function renderMigrationBody(
     for (const property of suggestion.properties) {
       lines.push(`  ${property}`);
     }
-    if (suggestion.comments.length === 0 && suggestion.properties.length === 0) {
+    const enumNotes = enumVariantAdditionNotes(fromTable, toTable);
+    for (const note of enumNotes) {
+      lines.push(`  // ${note}`);
+    }
+    if (
+      suggestion.comments.length === 0 &&
+      suggestion.properties.length === 0 &&
+      enumNotes.length === 0
+    ) {
       const referenceAddition = toTable.columns.some(
         (column) =>
           column.references &&
@@ -575,4 +644,588 @@ export default m.defineMigration({
 ${sections.join("\n")}
 });
 `;
+}
+
+// ============================================================================
+// Snapshots and history (alpha.66: TS migrations → jazz.app.json)
+// ============================================================================
+
+/** A schema version in `jazz.app.json`'s readable form: `{ tables }`. */
+export interface ReadableVersion {
+  tables: Record<string, ReadableTable>;
+}
+
+/** A `migrations` entry of `jazz.app.json` (SPEC §10.10). */
+export interface ReadableMigration {
+  name?: string;
+  from: string;
+  to?: string;
+  createTables?: string[];
+  dropTables?: string[];
+  renameTables?: Record<string, string>;
+  migrate?: Record<string, Record<string, ReadableJson>>;
+}
+
+/** Loads a migration file (`migrations/*.ts`) and returns its exports. */
+export type ModuleLoader = (file: string) => Promise<Record<string, unknown>>;
+
+const SNAPSHOT_FILE = /^(?:(\d{8,17}T\d{6})-)?([0-9a-f]{12})\.json$/i;
+const MIGRATION_FILE = /-([0-9a-f]{12})-([0-9a-f]{12})\.ts$/i;
+
+/**
+ * A version's tables without their columns' `transform`s: a snapshot holds
+ * what is stored, and the top-level `transforms` that name a column's view
+ * type aren't part of a version (nor of its schema hash).
+ */
+function withoutTransforms(tables: Record<string, ReadableTable>): Record<string, ReadableTable> {
+  return Object.fromEntries(
+    Object.entries(tables).map(([name, table]) => {
+      const columns = (table as { columns?: Record<string, unknown> }).columns;
+      if (!columns) return [name, table];
+      return [
+        name,
+        {
+          ...table,
+          columns: Object.fromEntries(
+            Object.entries(columns).map(([column, spec]) => {
+              if (spec && typeof spec === "object" && "transform" in spec) {
+                const { transform: _transform, ...stored } = spec as Record<string, unknown>;
+                return [column, stored];
+              }
+              return [column, spec];
+            }),
+          ),
+        } as ReadableTable,
+      ];
+    }),
+  );
+}
+
+/**
+ * The engine schema (the snapshot's contents) and its full hash of a version
+ * given in readable form, through the Rust compiler (napi `compileApp`).
+ * Relations a table declares are kept on the snapshot, as .64 wrote them;
+ * they are not part of the hash.
+ */
+export async function snapshotFromVersion(
+  versionTables: Record<string, ReadableTable>,
+): Promise<{ hash: string; schema: WasmSchema }> {
+  const compiled = (await compileApp(
+    JSON.stringify({
+      $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+      tables: withoutTransforms(versionTables),
+    }),
+  )) as {
+    schema: { current: string; schemas: Array<{ hash: string; schema: { tables: WasmSchema } }> };
+  };
+  const current = compiled.schema.schemas.find((entry) => entry.hash === compiled.schema.current);
+  if (!current) throw new Error("compileApp returned no current schema");
+  const schema: WasmSchema = {};
+  for (const [name, table] of Object.entries(current.schema.tables)) {
+    const relations = versionTables[name]?.relations as
+      | Record<string, { rel?: string; column?: string; reverse?: string; relation?: string }>
+      | undefined;
+    schema[name] = relations
+      ? {
+          ...table,
+          relations: Object.fromEntries(
+            Object.entries(relations).map(([relation, spec]) => [
+              relation,
+              spec.rel !== undefined
+                ? { kind: "forward" as const, table: spec.rel, column: spec.column! }
+                : { kind: "reverse" as const, table: spec.reverse!, relation: spec.relation! },
+            ]),
+          ),
+        }
+      : table;
+  }
+  return { hash: current.hash, schema };
+}
+
+const ENGINE_TYPE_NAMES: Record<string, string> = {
+  Text: "string",
+  Integer: "int",
+  BigInt: "bigint",
+  Double: "float",
+  Boolean: "boolean",
+  Timestamp: "timestamp",
+  Uuid: "uuid",
+  Bytea: "bytes",
+};
+
+function engineType(type: WasmColumnType): ReadableJson {
+  const name = ENGINE_TYPE_NAMES[type.type];
+  if (name) return name;
+  switch (type.type) {
+    case "Enum":
+      return { enum: [...type.variants] };
+    case "Json":
+      return { json: (type.schema as ReadableJson | undefined) ?? true };
+    case "Array":
+      return { array: engineType(type.element) };
+    default:
+      throw new Error(`a ${type.type} column can't be written to jazz.app.json`);
+  }
+}
+
+function base64(bytes: ArrayLike<number>): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
+  return btoa(binary);
+}
+
+function engineValue(value: Value, type: WasmColumnType): ReadableJson {
+  switch (value.type) {
+    case "Null":
+      return null;
+    case "Integer":
+    case "Double":
+    case "Timestamp":
+      return Number(value.value);
+    case "BigInt":
+      return String(structuralBigInt(value.value));
+    case "Boolean":
+      return value.value;
+    case "Text":
+      return type.type === "Json" ? (JSON.parse(value.value) as ReadableJson) : value.value;
+    case "Uuid":
+      return value.value;
+    case "Bytea": {
+      const bytes = value.value as unknown;
+      if (typeof bytes === "string") return bytes;
+      return base64(bytes as ArrayLike<number>);
+    }
+    case "Array": {
+      const element = type.type === "Array" ? type.element : type;
+      return value.value.map((item) => engineValue(item, element));
+    }
+    default:
+      throw new Error(`a ${value.type} default can't be written to jazz.app.json`);
+  }
+}
+
+const MERGE_NAMES: Record<string, string> = {
+  Counter: "counter",
+  GSet: "g-set",
+  Text: "text",
+  Markdown: "markdown",
+  Html: "html",
+};
+
+function engineColumn(column: ColumnDescriptor): ReadableJson {
+  const type = engineType(column.column_type);
+  const plain =
+    column.default === undefined && column.merge_strategy === undefined && !column.references;
+  if (plain && typeof type === "string") return column.nullable ? `${type}?` : type;
+  return {
+    ...(typeof type === "string" ? { type } : (type as Record<string, ReadableJson>)),
+    ...(column.nullable ? { optional: true } : {}),
+    ...(column.default === undefined
+      ? {}
+      : { default: engineValue(column.default, column.column_type) }),
+    ...(column.merge_strategy ? { merge: MERGE_NAMES[column.merge_strategy]! } : {}),
+    ...(column.references ? { references: column.references } : {}),
+  };
+}
+
+/** A snapshot (engine schema) as a readable history version: columns with `references`, no relations. */
+export function snapshotToVersion(schema: WasmSchema): ReadableVersion {
+  const tables: Record<string, ReadableTable> = {};
+  for (const [name, table] of Object.entries(schema)) {
+    const entry: ReadableTable = {
+      columns: Object.fromEntries(
+        table.columns.map((column) => [column.name, engineColumn(column)]),
+      ),
+    };
+    const indexes: ReadableJson[] = [
+      ...(table.indexed_columns ?? []),
+      ...(table.composite_indexes ?? []).map((index) => [...index]),
+    ];
+    if (indexes.length > 0) entry.indexes = indexes;
+    if (table.branchBy?.length) entry.branchBy = [...table.branchBy];
+    if (table.history) entry.history = table.history;
+    tables[name] = entry;
+  }
+  return { tables };
+}
+
+/** A migration witness table as a readable version table (references, no relations). */
+function witnessVersionTable(table: unknown): ReadableTable {
+  const columns = witnessColumns(table as never);
+  const entry: ReadableTable = {
+    columns: Object.fromEntries(
+      Object.entries(columns).map(([name, column]) => [name, readableColumn(column)]),
+    ),
+  };
+  if (isDefinedTable(table)) {
+    const indexes: ReadableJson[] = [
+      ...(table.indexedColumns ?? []),
+      ...(table.compositeIndexes ?? []).map((index) => [...index]),
+    ];
+    if (indexes.length > 0) entry.indexes = indexes;
+    if (table.branchColumns?.length) entry.branchBy = [...table.branchColumns];
+    if (table.historyRetention) entry.history = table.historyRetention;
+  }
+  return entry;
+}
+
+/**
+ * The version on the other side of `migration`, from the version on this
+ * side (`direction` "backward": from `to` to `from`): the known tables, with
+ * the witness's tables, renames, created and dropped tables applied.
+ */
+function deriveVersion(
+  known: Record<string, ReadableTable>,
+  migration: DefinedMigration,
+  direction: "backward" | "forward",
+): Record<string, ReadableTable> {
+  const steps = migration.steps;
+  const out: Record<string, ReadableTable> = { ...known };
+  const witness = (direction === "backward" ? migration.from : migration.to) as Record<
+    string,
+    unknown
+  >;
+  const renames = Object.entries(steps.renameTables ?? {});
+  if (direction === "backward") {
+    for (const table of steps.createTables ?? []) delete out[table];
+    for (const [target, source] of renames) {
+      if (out[target]) out[source] = out[target]!;
+      delete out[target];
+    }
+  } else {
+    for (const table of steps.dropTables ?? []) delete out[table];
+    for (const [target, source] of renames) {
+      if (out[source]) out[target] = out[source]!;
+      delete out[source];
+    }
+  }
+  for (const [name, table] of Object.entries(witness)) out[name] = witnessVersionTable(table);
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
+function unwrapDefault(value: unknown): unknown {
+  let current = value;
+  while (
+    typeof current === "object" &&
+    current !== null &&
+    "default" in current &&
+    !isDefinedMigration(current) &&
+    Object.keys(current).length === 1
+  )
+    current = (current as { default: unknown }).default;
+  return current;
+}
+
+interface LoadedMigrationFile {
+  file: string;
+  fromHash: string;
+  toHash: string;
+  migration: DefinedMigration;
+}
+
+async function listDir(dir: string): Promise<string[]> {
+  try {
+    return (await readdir(dir)).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+/** `migrations/*.ts`, oldest first (their names start with a timestamp), loaded. */
+async function loadMigrationFiles(
+  migrationsDir: string,
+  loadModule: ModuleLoader,
+): Promise<LoadedMigrationFile[]> {
+  const out: LoadedMigrationFile[] = [];
+  for (const name of await listDir(migrationsDir)) {
+    if (!name.endsWith(".ts") || name.endsWith(".d.ts") || name === "index.ts") continue;
+    const file = join(migrationsDir, name);
+    // A stub's TODOs are decisions `migrations create` left to the author:
+    // a migration with one left would publish the wrong lens.
+    const todos = (await readFile(file, "utf8"))
+      .split("\n")
+      .map((line, index) => ({ line: index + 1, match: UNFILLED_STUB_TODO.exec(line) }))
+      .filter((entry) => entry.match);
+    if (todos.length > 0)
+      throw new Error(
+        `migrations/${name} has ${todos.length} unresolved TODO${todos.length === 1 ? "" : "s"} left by \`jazz-tools migrations create\`: ` +
+          todos.map(({ line, match }) => `line ${line}: ${match![1]}`).join("; ") +
+          ". Write the step it asks for (e.g. `col: m.add.int({ default: 0 })`) and delete the TODO comment.",
+      );
+    const exports = await loadModule(file);
+    const migration = unwrapDefault(exports.default ?? exports.migration);
+    if (!isDefinedMigration(migration))
+      throw new Error(
+        `migrations/${name}: export default m.defineMigration({...}) (from "jazz-tools": \`import { schema as s, migration as m }\`).`,
+      );
+    const fromFile = MIGRATION_FILE.exec(name);
+    const fromHash = (migration.fromHash ?? fromFile?.[1])?.toLowerCase();
+    const toHash = (migration.toHash ?? fromFile?.[2])?.toLowerCase();
+    if (!fromHash || !toHash)
+      throw new Error(
+        `migrations/${name}: name its versions with fromHash and toHash (or end the file name with -<from>-<to>.ts).`,
+      );
+    out.push({
+      file: name,
+      fromHash: shortSchemaHash(fromHash),
+      toHash: shortSchemaHash(toHash),
+      migration,
+    });
+  }
+  return out;
+}
+
+interface SnapshotEntry {
+  file: string;
+  timestamp?: string;
+  hash: string;
+  schema: WasmSchema;
+}
+
+/** `migrations/snapshots/*.json`, each with its full hash. */
+export async function listSnapshots(migrationsDir: string): Promise<SnapshotEntry[]> {
+  const dir = join(migrationsDir, "snapshots");
+  const out: SnapshotEntry[] = [];
+  for (const file of await listDir(dir)) {
+    const match = SNAPSHOT_FILE.exec(file);
+    if (!match) continue;
+    const schema = JSON.parse(await readFile(join(dir, file), "utf8")) as WasmSchema;
+    const hash = await schemaHashOf(JSON.stringify({ tables: schema }));
+    if (shortSchemaHash(hash) !== match[2]!.toLowerCase())
+      throw new Error(
+        `migrations/snapshots/${file}: its schema hashes to ${shortSchemaHash(hash)}, not ${match[2]}. Snapshots are written by \`jazz-tools migrations create\`; don't edit them.`,
+      );
+    out.push({ file, ...(match[1] ? { timestamp: match[1] } : {}), hash, schema });
+  }
+  return out;
+}
+
+export interface MigrationHistory {
+  /** Earlier versions, oldest first, by short hash: `jazz.app.json`'s `history`. */
+  history: Record<string, ReadableVersion>;
+  /** `jazz.app.json`'s `migrations`, in file order. */
+  migrations: ReadableMigration[];
+  /** The current schema's full hash. */
+  current: string;
+}
+
+/**
+ * The history `jazz.app.json` ships, from `migrations/*.ts` and
+ * `migrations/snapshots/*.json`: every version a migration names (but the
+ * current one) and the migrations. A version without a snapshot is derived
+ * from its neighbour along the migration, through the migration's witness
+ * tables, and must hash to the name the migration gives it.
+ */
+export async function loadMigrationHistory(options: {
+  migrationsDir: string;
+  /** The current schema's tables, readable (`jazz.app.json`'s `tables`). */
+  currentTables: Record<string, ReadableTable>;
+  loadModule: ModuleLoader;
+}): Promise<MigrationHistory> {
+  const current = await snapshotFromVersion(options.currentTables);
+  const currentShort = shortSchemaHash(current.hash);
+  const files = await loadMigrationFiles(options.migrationsDir, options.loadModule);
+  if (files.length === 0) return { history: {}, migrations: [], current: current.hash };
+
+  const versions = new Map<string, Record<string, ReadableTable>>();
+  versions.set(currentShort, snapshotToVersion(current.schema).tables);
+  for (const snapshot of await listSnapshots(options.migrationsDir))
+    versions.set(shortSchemaHash(snapshot.hash), snapshotToVersion(snapshot.schema).tables);
+
+  // Derive what no snapshot holds, walking migrations until nothing changes.
+  const failures = new Map<string, string>();
+  for (let progress = true; progress; ) {
+    progress = false;
+    for (const entry of files) {
+      for (const [known, unknown, direction] of [
+        [entry.toHash, entry.fromHash, "backward"],
+        [entry.fromHash, entry.toHash, "forward"],
+      ] as const) {
+        if (versions.has(unknown) || !versions.has(known)) continue;
+        const derived = deriveVersion(versions.get(known)!, entry.migration, direction);
+        let hash: string;
+        try {
+          hash = shortSchemaHash((await snapshotFromVersion(derived)).hash);
+        } catch (error) {
+          failures.set(unknown, `${entry.file}: ${(error as Error).message}`);
+          continue;
+        }
+        if (hash !== unknown) {
+          failures.set(
+            unknown,
+            `${entry.file}: its ${direction === "backward" ? "from" : "to"} tables give version ${hash}, not ${unknown}`,
+          );
+          continue;
+        }
+        versions.set(unknown, derived);
+        progress = true;
+      }
+    }
+  }
+
+  const history: Record<string, ReadableVersion> = {};
+  const migrations: ReadableMigration[] = [];
+  for (const entry of files) {
+    for (const hash of [entry.fromHash, entry.toHash]) {
+      if (hash === currentShort || history[hash]) continue;
+      const tables = versions.get(hash);
+      if (!tables)
+        throw new Error(
+          `migrations/${entry.file}: no snapshot of version ${hash} (migrations/snapshots/*-${hash}.json), ` +
+            `and it can't be derived from the migrations around it` +
+            (failures.has(hash) ? ` (${failures.get(hash)})` : "") +
+            ".",
+        );
+      history[hash] = { tables };
+    }
+    migrations.push({
+      from: entry.fromHash,
+      ...(entry.toHash === currentShort ? {} : { to: entry.toHash }),
+      ...(entry.migration.steps as Omit<ReadableMigration, "from" | "to">),
+    });
+  }
+  return { history, migrations, current: current.hash };
+}
+
+// ============================================================================
+// migrations create
+// ============================================================================
+
+function createTimestamp(now: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+}
+
+function timestampDate(timestamp: string): Date {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/.exec(timestamp);
+  if (!m) return new Date(0);
+  return new Date(Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!));
+}
+
+function normalizeMigrationName(name: string): string {
+  const normalized = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (normalized.length === 0)
+    throw new Error("Migration name must contain at least one ASCII letter or digit.");
+  return normalized;
+}
+
+/** Whether rows of `from` need a step to read as `to` (tables or columns differ beyond enum additions). */
+function requiresMigration(from: WasmSchema, to: WasmSchema): boolean {
+  const names = (schema: WasmSchema) => Object.keys(schema).sort().join("\0");
+  if (names(from) !== names(to)) return true;
+  return Object.keys(from).some((table) => {
+    const left = new Map(from[table]!.columns.map((c) => [c.name, c]));
+    const right = to[table]!.columns;
+    if (left.size !== right.length) return true;
+    return right.some((column) => {
+      const source = left.get(column.name);
+      if (!source) return true;
+      if (source.nullable !== column.nullable || source.references !== column.references)
+        return true;
+      return (
+        columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type) &&
+        !onlyAddsEnumVariants(source.column_type, column.column_type)
+      );
+    });
+  });
+}
+
+function snapshotText(schema: WasmSchema): string {
+  return `${JSON.stringify(schema, null, 2)}\n`;
+}
+
+export interface CreateMigrationResult {
+  /** Whether anything was written. */
+  changed: boolean;
+  /** The first snapshot of a project without one: nothing to diff against yet. */
+  initial?: boolean;
+  /** Rows of the previous version read as the new one unchanged: only a snapshot was written. */
+  migrationRequired?: boolean;
+  fromHash?: string;
+  toHash?: string;
+  /** The migration stub written, relative to `migrationsDir`. */
+  file?: string;
+  /** The snapshot written, relative to `migrationsDir`. */
+  snapshot?: string;
+  /** The stub's TODO lines, left for the author. */
+  todos?: string[];
+}
+
+/**
+ * `jazz-tools migrations create`: diff the current schema against the
+ * latest snapshot and, when rows need a step, write the snapshot of the
+ * current schema and a migration stub (.64's shape) to fill in.
+ */
+export async function createMigration(options: {
+  migrationsDir: string;
+  currentTables: Record<string, ReadableTable>;
+  name?: string;
+  loadModule: ModuleLoader;
+  now?: Date;
+}): Promise<CreateMigrationResult> {
+  const { migrationsDir } = options;
+  const current = await snapshotFromVersion(options.currentTables);
+  const snapshots = await listSnapshots(migrationsDir);
+  const timestamped = snapshots
+    .filter((entry) => entry.timestamp)
+    .sort((a, b) => (a.file < b.file ? -1 : 1));
+  let baseline: SnapshotEntry | undefined = timestamped.at(-1);
+  if (!baseline) {
+    // Snapshots .64 named by hash alone: the version the last migration leads to.
+    const files = await loadMigrationFiles(migrationsDir, options.loadModule);
+    const last = files.at(-1)?.toHash;
+    baseline =
+      (last && snapshots.find((entry) => shortSchemaHash(entry.hash) === last)) ||
+      (snapshots.length === 1 ? snapshots[0] : undefined);
+  }
+  const latestTimestamp = timestamped.at(-1)?.timestamp;
+  let timestamp = createTimestamp(options.now);
+  if (latestTimestamp && timestamp <= latestTimestamp)
+    timestamp = createTimestamp(new Date(timestampDate(latestTimestamp).getTime() + 1000));
+  const toShort = shortSchemaHash(current.hash);
+  const snapshotFile = `${timestamp}-${toShort}.json`;
+  const writeSnapshot = async () => {
+    await mkdir(join(migrationsDir, "snapshots"), { recursive: true });
+    await writeFile(join(migrationsDir, "snapshots", snapshotFile), snapshotText(current.schema));
+    return `snapshots/${snapshotFile}`;
+  };
+
+  if (!baseline) {
+    return { changed: true, initial: true, toHash: current.hash, snapshot: await writeSnapshot() };
+  }
+  if (baseline.hash === current.hash) return { changed: false };
+  if (!requiresMigration(baseline.schema, current.schema)) {
+    return {
+      changed: true,
+      migrationRequired: false,
+      fromHash: baseline.hash,
+      toHash: current.hash,
+      snapshot: await writeSnapshot(),
+    };
+  }
+  const name = options.name ? normalizeMigrationName(options.name) : "unnamed";
+  const file = `${timestamp}-${name}-${shortSchemaHash(baseline.hash)}-${toShort}.ts`;
+  const stub = renderMigrationStub({
+    fromHash: baseline.hash,
+    toHash: current.hash,
+    fromSchema: baseline.schema,
+    toSchema: current.schema,
+  });
+  await mkdir(migrationsDir, { recursive: true });
+  await writeFile(join(migrationsDir, file), stub);
+  const snapshot = await writeSnapshot();
+  return {
+    changed: true,
+    migrationRequired: true,
+    fromHash: baseline.hash,
+    toHash: current.hash,
+    file,
+    snapshot,
+    todos: stub.split("\n").filter((line) => UNFILLED_STUB_TODO.test(line)),
+  };
 }

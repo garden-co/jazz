@@ -3,17 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NapiDb } from "jazz-napi";
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
+import { testApp, testPermissions } from "../testing/test-app.js";
 import { createJazzContext } from "../backend/create-jazz-context.js";
 
 // Native callback counts are intentional: correct synchronous row callbacks
 // alone do not reveal a queued host-task backlog (#2979).
 it("coalesces native subscription wakes and retains a wake requested from its callback", async () => {
-  const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
-  const permissions = s.definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-    policy.notes.allowUpdate.always();
+  const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
+  const permissions = testPermissions(app, {
+    tables: { notes: { read: "true", insert: "true", update: "true" } },
   });
   const path = mkdtempSync(join(tmpdir(), "jazz-napi-startup-wakes-"));
   const originalScheduler = NapiDb.prototype.setTickScheduler;

@@ -3,10 +3,11 @@ Makes a caller-owned Jazz client available to descendant Svelte components.
 The caller remains responsible for shutting the client down.
 -->
 <script lang="ts">
-	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
 	import type { Db } from '../runtime/db.js';
 	import { getSubscriptionStore } from '../subscription-store-internal.js';
 	import { initJazzContext } from './context.svelte.js';
+	import { untrack } from 'svelte';
+	import { hideJazzSession } from './session-state.js';
 	import type { JazzClient } from './create-jazz-client.js';
 	import { toError } from '../runtime/util.js';
 
@@ -14,10 +15,15 @@ The caller remains responsible for shutting the client down.
 		client: JazzClient | Promise<JazzClient>;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
-		autoAttachDevTools?: boolean;
+		/** @internal Set by `<JazzProvider>` for its session's own client. */
+		inSession?: boolean;
 	}
 
-	let { client, children, fallback, autoAttachDevTools = true }: Props = $props();
+	let { client, children, fallback, inSession = false }: Props = $props();
+
+	// Its children read this client, not an enclosing <JazzProvider>'s session.
+	// Context is set once, at init, so the initial value is the one that counts.
+	if (!untrack(() => inSession)) hideJazzSession();
 
 	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
@@ -25,6 +31,7 @@ The caller remains responsible for shutting the client down.
 	function clearContext(): void {
 		ctx.db = null;
 		ctx.session = null;
+		ctx.client = null;
 		ctx.subscriptionStore = null;
 	}
 
@@ -44,16 +51,13 @@ The caller remains responsible for shutting the client down.
 
 				ctx.db = resolvedClient.db;
 				ctx.session = resolvedClient.session ?? null;
+				ctx.client = resolvedClient;
 				ctx.subscriptionStore = getSubscriptionStore(resolvedClient);
 				stopSessionSync = resolvedClient.db.onAuthChanged(({ session }) => {
 					if (!cancelled) {
 						ctx.session = session;
 					}
 				});
-
-				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
-					startInspectorOnce(resolvedClient.db);
-				}
 			})
 			.catch((reason) => {
 				if (!cancelled) {

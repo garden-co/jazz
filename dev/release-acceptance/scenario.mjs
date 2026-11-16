@@ -6,22 +6,53 @@ import { pathToFileURL } from "node:url";
 const [configPath, phase] = process.argv.slice(2);
 const c = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(join(c.project, "package.json"));
-const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
+const jazzTools = await import(pathToFileURL(require.resolve("jazz-tools")));
 const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+// alpha.61 renamed local-first guests to device accounts and moved the
+// account handle off the session snapshot; older releases keep the old names.
+const deviceAccounts = typeof backendModule.acceptDeviceAccounts === "function";
+const deviceInitial = deviceAccounts ? "device" : "local-first";
+const accountIdOf = (snap) => (deviceAccounts ? snap.user?.accountId : snap.account?.id);
 const { createJazz, remote } = backendModule;
 // Baseline packages that predate the rename call it createJazzSession.
 const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
-const app = s.defineApp(
-  {
+// From alpha.65 an app is its jazz.app.json and jazz.permissions.json (bound
+// here as its jazz.generated.ts would bind it); baselines before it use the
+// TS DSL. Both describe the same tables, so the schema hash is the same.
+let app;
+let permissions;
+if (typeof jazzTools.bindApp === "function") {
+  const { testApp } = await import(pathToFileURL(require.resolve("jazz-tools/testing")));
+  app = testApp({
+    tables: {
+      docs: { columns: { label: "string", body: "string", metadata: "json" } },
+      denied: { columns: { value: "string" } },
+    },
+  });
+  permissions = {
+    format: 1,
+    tables: { docs: { read: "true", insert: "true", update: "true", delete: "true" } },
+  };
+} else {
+  const { schema: s } = jazzTools;
+  const definition = {
     docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
     denied: s.table({ value: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
-    policy.docs[op].always();
-});
+  };
+  // createJazz refuses `{ migrations: "none" }` with remote() from alpha.62:
+  // ship the app's single version, as its generated migrations module would.
+  // Baseline packages without `appMigrations` take "none".
+  const { appMigrations } = await import(
+    pathToFileURL(require.resolve("jazz-tools/testing"))
+  ).catch(() => ({}));
+  app = s.defineApp(definition, {
+    migrations: typeof appMigrations === "function" ? await appMigrations(definition) : "none",
+  });
+  permissions = s.definePermissions(app, ({ policy }) => {
+    for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
+      policy.docs[op].always();
+  });
+}
 const sessions = new Set();
 const backends = new Set();
 const timeout = async (promise, label, ms = 20000) => {
@@ -96,16 +127,17 @@ async function open(name) {
       permissions,
       driver: { type: "persistent", dataPath: join(c.state, name) },
       store: store(name),
-      initial: "local-first",
+      initial: deviceInitial,
     }),
     `open ${name}`,
   );
   sessions.add(session);
   const snap = session.getSnapshot();
   assert(snap.client, snap.error?.message ?? snap.status);
-  assert(snap.account);
-  assert.notEqual(snap.account.id, "00000000-0000-0000-0000-000000000000");
-  return { session, db: snap.client.db, account: snap.account?.id };
+  const account = accountIdOf(snap);
+  assert(account);
+  assert.notEqual(account, "00000000-0000-0000-0000-000000000000");
+  return { session, db: snap.client.db, account };
 }
 async function close(x) {
   await timeout(x.session.getSnapshot().client.shutdown({ waitForSync: false }), "shutdown");

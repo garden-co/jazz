@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../../index.js";
+import { testApp } from "../../testing/test-app.js";
 import { createDb } from "../default-create-db.js";
 import {
   acquireNodeForegroundNodeLease,
@@ -18,11 +18,13 @@ import { isRandomNodeUuid } from "../runtime-entropy.js";
 
 const roots: string[] = [];
 let restoreCwd: (() => void) | undefined;
-const publicRuntimeEntry = new URL("../../../dist/index.js", import.meta.url).href;
-const memoryApp = s.defineApp(
-  { notes: s.table({ title: s.string() }, {}) },
-  { migrations: "none" },
-);
+// The built modules a Node session opens its local-first Db with.
+const builtCreateDb = new URL("../../../dist/runtime/default-create-db.js", import.meta.url).href;
+const builtAccountManager = new URL(
+  "../../../dist/accounts/create-account-manager.js",
+  import.meta.url,
+).href;
+const memoryApp = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 afterEach(async () => {
   restoreCwd?.();
@@ -44,8 +46,9 @@ type PublicNodeChild = {
 };
 
 /**
- * Uses the built public `createDb` entrypoint in a separate Node process. The
- * lease pool must protect this surface, rather than merely an internal helper.
+ * Opens a persistent Db with the built package's own modules in a separate
+ * Node process, as a Node session does. The lease pool must protect the
+ * built code, rather than merely the source under test.
  */
 function spawnPublicPersistentDb(
   root: string,
@@ -59,7 +62,8 @@ function spawnPublicPersistentDb(
       "--input-type=module",
       "--eval",
       [
-        `import { createDb, createAccountManager } from ${JSON.stringify(publicRuntimeEntry)};`,
+        `import { createDb } from ${JSON.stringify(builtCreateDb)};`,
+        `import { createAccountManager } from ${JSON.stringify(builtAccountManager)};`,
         `let stored = null;`,
         `const accounts = await createAccountManager({ appId: ${JSON.stringify(appId)}, serverUrl: "http://127.0.0.1:1", store: { async read() { return stored; }, async update(transform) { stored = transform(stored); } } });`,
         `const account = accounts.restoreLocalFirst(${JSON.stringify(secret)});`,

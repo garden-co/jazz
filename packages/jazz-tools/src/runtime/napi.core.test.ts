@@ -1,5 +1,4 @@
 import { allowAll } from "./testing/allow-all.js";
-import { schema as s } from "../index.js";
 import { translateQuery } from "./query-adapter.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -12,7 +11,7 @@ import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
 import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
+import { startLocalJazzServer, testApp, type LocalJazzServerHandle } from "../testing/index.js";
 import {
   FEATURE_PAYLOAD_ZSTD,
   WIRE_PROTOCOL_VERSION,
@@ -38,9 +37,8 @@ import {
   mergePermissionsIntoWasmSchema,
   type CompiledPermissionsMap,
 } from "../schema-permissions.js";
-import { computeSchemaHash } from "../schema-hash.js";
-import { deployArtifacts } from "../dev/catalogue.js";
-import { fetchMigrationGraph } from "../dev/migration-graph.js";
+import { publishLoadedDeployment } from "../dev/catalogue.js";
+import { boundApp } from "../typed-app.js";
 import {
   createOpenTransactionId,
   type TxId,
@@ -60,20 +58,26 @@ function testExternalAccountId(userId: string): string {
 /**
  * Publish `schema` with `permissions` as a bundle, as createJazz does on
  * boot, and answer its id: a user session the backend states is pinned to it.
+ * `equivalent` is a `testApp` with the same columns, for the schema's hash
+ * (the server checks it against `schema`).
  */
 async function publishBundle(
   server: LocalJazzServerHandle,
+  equivalent: { wasmSchema: WasmSchema },
   schema: WasmSchema,
   permissions: CompiledPermissionsMap,
 ): Promise<string> {
   const structural = mergePermissionsIntoWasmSchema(schema, {});
-  const targetSchemaHash = await computeSchemaHash(structural);
+  const targetSchemaHash = boundApp(equivalent.wasmSchema)!.schema.current;
   const target = { appId: server.appId, serverUrl: server.url, adminSecret: server.adminSecret! };
-  const deployed = await deployArtifacts(target, await fetchMigrationGraph(target), {
-    targetSchemaHash,
-    schemas: [{ hash: targetSchemaHash, schema: structural }],
-    migrations: [],
-    permissions,
+  const deployed = await publishLoadedDeployment(target, {
+    deployment: {
+      targetSchemaHash,
+      schemas: [{ hash: targetSchemaHash, schema: { tables: structural } }],
+      migrations: [],
+      permissions,
+    },
+    warnings: [],
   });
   return deployed.bundle;
 }
@@ -295,6 +299,11 @@ const OWNED_TODOS_SCHEMA = {
   },
 } satisfies WasmSchema;
 
+/** {@link OWNED_TODOS_SCHEMA}'s columns as a `jazz.app.json`: its hash. */
+const OWNED_TODOS_APP = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean", owner_id: "string" } } },
+});
+
 const CHAT_POLICY_SCHEMA = {
   chats: {
     relations: {
@@ -453,6 +462,21 @@ const CHAT_POLICY_SCHEMA = {
   },
 } satisfies WasmSchema;
 
+/** {@link CHAT_POLICY_SCHEMA}'s columns as a `jazz.app.json`: its hash. */
+const CHAT_POLICY_APP = testApp({
+  tables: {
+    chats: { columns: { title: "string", visibility: "string", owner_id: "string" } },
+    chat_members: {
+      columns: { chat_id: "uuid", user_id: "string" },
+      relations: { chat: { rel: "chats", column: "chat_id" } },
+    },
+    messages: {
+      columns: { chat_id: "uuid", text: "string" },
+      relations: { chat: { rel: "chats", column: "chat_id" } },
+    },
+  },
+});
+
 describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () => {
   let server: LocalJazzServerHandle | null = null;
   const runtimes: NativeRuntimeAdapter[] = [];
@@ -514,12 +538,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       account: testAccountId(authorSeed),
       identity: { issuer: "urn:jazz:test", subject: authorSeed },
     };
-    const provenanceApp = s.defineApp(
-      {
-        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-      },
-      { migrations: "none" },
-    );
+    const provenanceApp = testApp({
+      tables: { todos: { columns: { title: "string", done: "boolean" } } },
+    });
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
@@ -682,7 +703,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
     // Published as createJazz publishes it; the link is pinned to it.
-    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+    const bundle = await publishBundle(server, OWNED_TODOS_APP, OWNED_TODOS_SCHEMA as WasmSchema, {
       todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
@@ -769,6 +790,54 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await expect(runtime.query(query)).resolves.toEqual([
       expect.objectContaining({ id: inserted.id }),
     ]);
+  });
+
+  it("drains pooled NAPI subscriptions in one call, returning only those with events", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-subscription-pool:node"),
+      testAuthorBytes("jazz-napi-subscription-pool:author"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    const db = (runtime as unknown as { db: InstanceType<typeof NapiDb> }).db;
+    const pool = db.createSubscriptionPool();
+    const quiet = db.subscribe(queryFromTable("todos"));
+    const busy = db.subscribe(queryFromTable("todos"));
+    try {
+      const quietId = quiet.joinPool(pool);
+      const busyId = busy.joinPool(pool);
+      expect(busy.joinPool(pool)).toBe(busyId);
+      expect(pool.size).toBe(2);
+      // Both opened: each has its opening event.
+      const openings = pool.drain();
+      expect(openings.map((batch) => batch.id)).toEqual([quietId, busyId]);
+      for (const batch of openings) {
+        expect(batch.error ?? null).toBeNull();
+        expect(batch.events).toEqual([expect.objectContaining({ type: "delta", reset: true })]);
+      }
+      expect(pool.drain()).toEqual([]);
+      expect(quiet.close()).toBe(true);
+      expect(pool.size).toBe(1);
+      runtime.insert("todos", {
+        title: { type: "Text", value: "pooled" },
+        done: { type: "Boolean", value: false },
+      });
+      const changes = pool.drain();
+      expect(changes.map((batch) => batch.id)).toEqual([busyId]);
+      expect(changes[0]!.events).toEqual([
+        expect.objectContaining({ type: "delta", reset: false }),
+      ]);
+      // readAll still reads a pooled subscription on its own.
+      expect(busy.readAll()).toEqual([]);
+      expect(() => quiet.readAll()).toThrow(/subscription is closed/);
+    } finally {
+      quiet.close();
+      busy.close();
+    }
   });
 
   it("opens, mutates one row, and queries it through the native runtime payload shape", async () => {
@@ -1227,6 +1296,23 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
             return (...args: unknown[]) => {
               const source = Reflect.apply(value, target, args) as object;
               return "setWake" in source ? observePending(source) : observeSource(source);
+            };
+          }
+          // Activated subscriptions are read through the runtime's pool.
+          if (property === "createSubscriptionPool" && typeof value === "function") {
+            return () => {
+              const pool = Reflect.apply(value, target, []) as {
+                drain(): Array<{ events: NapiSubscriptionEvent[] }>;
+              };
+              // The pool itself goes back to `joinPool`, so it stays the
+              // native object: only its `drain` is observed.
+              const drain = pool.drain.bind(pool);
+              pool.drain = () => {
+                const batches = drain();
+                for (const batch of batches) rawEvents.push(...batch.events);
+                return batches;
+              };
+              return pool;
             };
           }
           return typeof value === "function" ? value.bind(target) : value;
@@ -1895,7 +1981,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       backendSecret: "core-napi-permission-advice-backend",
       adminSecret: "core-napi-permission-advice-admin",
     });
-    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+    const bundle = await publishBundle(server, OWNED_TODOS_APP, OWNED_TODOS_SCHEMA as WasmSchema, {
       todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
@@ -1999,7 +2085,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
     // Published as createJazz publishes it; the link is pinned to it.
-    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+    const bundle = await publishBundle(server, OWNED_TODOS_APP, OWNED_TODOS_SCHEMA as WasmSchema, {
       todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
@@ -2082,7 +2168,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
     // Published as createJazz publishes it; the link is pinned to it.
-    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+    const bundle = await publishBundle(server, OWNED_TODOS_APP, OWNED_TODOS_SCHEMA as WasmSchema, {
       todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
@@ -2137,7 +2223,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
     // Published as createJazz publishes it; the link is pinned to it.
-    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+    const bundle = await publishBundle(server, OWNED_TODOS_APP, OWNED_TODOS_SCHEMA as WasmSchema, {
       todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
@@ -2452,6 +2538,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
     const bundle = await publishBundle(
       server,
+      CHAT_POLICY_APP,
       CHAT_POLICY_SCHEMA as WasmSchema,
       Object.fromEntries(
         Object.entries(CHAT_POLICY_SCHEMA).map(([name, table]) => [name, table.policies ?? {}]),

@@ -14,15 +14,22 @@ fan-out.
 
 ## Cases and former names
 
-| Case                                          | Former case                                                           |
-| --------------------------------------------- | --------------------------------------------------------------------- |
-| `band_chat_open_room[10000]`                  | `chat_open_chat[10000]` (Chat example)                                |
-| `band_chat_send_100[10000]`                   | `chat_send_100[10000]` (Chat example)                                 |
-| `band_chat_post_announcements[10000]`         | `auth_chat_send[10000]` and `auth_chat_open_room` (auth chat example) |
-| `band_chat_new_message_rooms_open[100]`       | `matching_write_fanout` (`crates/jazz` route subscription curve)      |
-| `band_chat_timeline_second_page[4096]`        | unchanged (the 1,024 point was dropped)                               |
-| `band_chat_unread_recent_rooms[4096]`         | unchanged (the 1,024 point was dropped)                               |
-| `band_chat_caught_up_fast_resume[100, 10000]` | unchanged (the 1,000 point was dropped)                               |
+| Case                                                               | Former case                                                           |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| `band_chat_open_room[10000]`                                       | `chat_open_chat[10000]` (Chat example)                                |
+| `band_chat_send_100[10000]`                                        | `chat_send_100[10000]` (Chat example)                                 |
+| `band_chat_post_announcements[10000]`                              | `auth_chat_send[10000]` and `auth_chat_open_room` (auth chat example) |
+| `band_chat_new_message_rooms_open[100]`                            | `matching_write_fanout` (`crates/jazz` route subscription curve)      |
+| `band_chat_timeline_second_page[4096]`                             | unchanged (the 1,024 point was dropped)                               |
+| `band_chat_unread_recent_rooms[4096]`                              | unchanged (the 1,024 point was dropped)                               |
+| `band_chat_caught_up_fast_resume[100, 10000]`                      | unchanged (the 1,000 point was dropped)                               |
+| `band_chat_presence_on_nested_page`                                | new                                                                   |
+| `band_chat_open_nested_page`                                       | new                                                                   |
+| `band_chat_read_mark_chat_lists_open[100]`                         | new (`crates/jazz/benches/fanout_relations.rs`, local only)           |
+| `band_chat_membership_change_chat_lists_open[100]`                 | new (`crates/jazz/benches/fanout_policy_tables.rs`, local only)       |
+| `band_chat_membership_change_relation_policy_chat_lists_open[100]` | new                                                                   |
+| `band_chat_thread_reply_to_rooms_open[100]`                        | new (`crates/jazz/benches/fanout_relations.rs`, local only)           |
+| `band_chat_typing_drafts_rooms_open[100]`                          | new                                                                   |
 
 `band_chat_author_history` was dropped: StagePlan's bounded activity page
 measures the same indexed, ordered, bounded read. The route subscription curve
@@ -41,6 +48,106 @@ claim, posting announcements needs `admin`, and the admin's open view is the
 room's whole history, so every post updates a 10,000-message view (#2086).
 The auth chat room opening itself (`auth_chat_open_room`) happens untimed in
 its fixture; `band_chat_open_room` measures opening a policy-protected room.
+
+## A hundred members online
+
+`src/chat_fanout.rs` measures one write while 100 members each keep a live
+result open, shaped like an adopter's chat app that was load-tested with 100
+users. Each case is the CodSpeed receipt for one fan-out behaviour: which live
+results a write wakes. The timed write's own commit is a small part of the
+time; most of it is dispatch and re-running the woken results.
+
+| Case                                                               | Write, and what it protects                                                                                  |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `band_chat_read_mark_chat_lists_open[100]`                         | A read mark; correlation watches (#5333) wake the 5 lists holding its chat, not all 100                      |
+| `band_chat_membership_change_chat_lists_open[100]`                 | A join under `chat_members.exists.where({ chatId, userId: session })`; evidence watches (#5341) wake about 6 |
+| `band_chat_membership_change_relation_policy_chat_lists_open[100]` | The same join under a relation-style `exists(...)` through `users`: still all 100 (the gap it tracks)        |
+| `band_chat_thread_reply_to_rooms_open[100]`                        | A reply in one of 100 open rooms that include `replyTo`; the self-relation keeps the `chatId` key (#5333)    |
+| `band_chat_typing_drafts_rooms_open[100]`                          | 13 draft upserts and a message, with 100 rooms and 100 composers open: fan-out per commit                    |
+
+The chat list is the adopter's: a member's memberships, each with its chat,
+the chat's roster with users and their unique names, its open group call, the
+latest read mark of someone else and its agents. The typing case runs on one
+store, so it does not include the server's per-tick pass over every connected
+session; that needs a server with 100 sessions. `tests/chat_fanout.rs` checks
+that each case wakes what its fix promises, and every result without the fix
+(the engine's `testing` switches).
+
+## A band after years of use
+
+`src/deep_room.rs` measures BandChat where real chats spend their time: deep
+in one room's history, in a room list of a hundred rooms, and on read state.
+Its schema and policies mirror the app's `jazz.app.json` and `jazz.permissions.json`: the
+room list reads each room's newest message instead of a `lastActivityAt` that
+members bump, and each member's read marker, one "read up to" row per room
+updated in place, is readable by co-members (check marks and "Read by").
+
+The fixture is a power law, not a uniform spread: 200 members and 1,000 rooms,
+one with 100,000 messages and 50 members, ten with 10,000 and 989 with 10–200
+(303,695 messages). The busy rooms carry reactions, and every member has a read
+marker per room; the reader belongs to 100 rooms and has five unread messages
+in the deep room.
+
+| Case                                         | What the user does                                  |
+| -------------------------------------------- | --------------------------------------------------- |
+| `band_chat_open_deep_room[100000]`           | Opens the deep room: newest 50, senders, reactions  |
+| `band_chat_scroll_back_deep[100000]`         | The 50 before a cursor halfway down                 |
+| `band_chat_jump_to_message[100000]`          | 25 up to a message a quarter in, and 25 after it    |
+| `band_chat_search_room[100000]`              | Newest 50 messages containing a word, one read      |
+| `band_chat_live_window_new_message[100000]`  | A bandmate's message reaches the open deep room     |
+| `band_chat_inbox_open[100]`                  | The room list: 100 rooms, newest message, marker    |
+| `band_chat_inbox_new_message[100]`           | A message reaches the open room list                |
+| `band_chat_unread_count_deep[100000]`        | Capped count after the marker: five unread          |
+| `band_chat_unread_count_new_message[100000]` | The live count goes up                              |
+| `band_chat_marker_move_fanout[50]`           | One member reads; 50 open views see the marker move |
+| `band_chat_read_by_sheet[50]`                | "Read by" for a recent message, one read            |
+
+Every page and count here is bounded (50, 25 + 25, limit 1, cap 100), so none
+of them should cost the room's or the table's size.
+
+These cases are the `nightly` bench target, measured by the nightly CodSpeed
+run on main rather than on every merge: each case seeds the band (about 3 s on
+an M-series laptop), and the live cases seed a fresh band for every sample, so
+a local run takes about 4 minutes, nearly all of it seeding. Run them locally
+with `cargo bench -p jazz-example-band-chat-benchmark --bench nightly`.
+
+The schema declares the two indexes these reads need, as an app developer
+would: `messages (roomId, $createdAt)` serves every page, the count and each
+room's newest message, and `readMarkers (roomId, lastReadAt)` serves "Read by".
+Without them the pages sort the whole room (tens of milliseconds at 100,000),
+and a live update, which re-runs its query, costs as much.
+`tests/deep_room.rs` checks every case's result on a miniature of the same
+shape.
+
+### Memory
+
+`band-chat-memory-receipt` counts heap bytes at the global allocator while
+each read runs: the peak, what the open view holds, and what is left once the
+view is dropped and the engine has finalized it. SQLite allocates with the
+system malloc, past that allocator, so the receipt reads SQLite's own counters
+beside it. Process RSS cannot answer this per read, because the allocator
+keeps freed pages.
+
+```sh
+cargo run --release -p jazz-example-band-chat-benchmark --bin band-chat-memory-receipt -- 100000
+```
+
+At 100,000 messages the seeded database holds 117 MB in SQLite (in-memory, so
+that is the whole database) and 0.5 MB on the Rust heap. Every read, the Rust
+heap and SQLite together:
+
+| Read                | Rows | Peak MB | Held open MB | After close MB |
+| ------------------- | ---- | ------- | ------------ | -------------- |
+| Open the room       | 50   | 0.1     | 0.1          | < 0.1          |
+| Scroll back         | 50   | 0.1     | 0.1          | < 0.1          |
+| Jump to a message   | 50   | 0.1     | 0.1          | < 0.1          |
+| Search the room     | 50   | < 0.1   | < 0.1        | < 0.1          |
+| Unread count        | 5    | < 0.1   | < 0.1        | < 0.1          |
+| Room list           | 100  | 0.1     | 0.1          | < 0.1          |
+| Read by             | 20   | < 0.1   | < 0.1        | < 0.1          |
+| Open the room again | 50   | 0.1     | 0.1          | < 0.1          |
+
+The whole receipt, seeding included, peaks at 127 MB of process footprint.
 
 ## Timeline, unread rooms and resume
 

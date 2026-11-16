@@ -88,6 +88,8 @@ mod replica_settlement;
 mod schema_migration_policies;
 #[path = "../scope_revocation.rs"]
 mod scope_revocation;
+#[path = "../server_read_priority.rs"]
+mod server_read_priority;
 #[path = "../server_subscriptions.rs"]
 mod server_subscriptions;
 #[path = "../split_messages.rs"]

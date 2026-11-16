@@ -576,6 +576,19 @@ textarea.input {
   color: var(--color-text-secondary);
 }
 
+/* Descriptions and notes are Markdown. */
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown a {
+  color: var(--color-text-accent);
+}
+
 /* ─── Calendar ─── */
 
 .calendar {

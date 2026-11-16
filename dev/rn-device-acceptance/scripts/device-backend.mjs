@@ -4,7 +4,7 @@
 // driver starts it after the Core harness and passes its URL to the device;
 // the device never talks to Core directly (a core admits only its backend).
 import { createServer } from "node:http";
-import { acceptLocalFirstAuth, createJazz, remote } from "jazz-tools/backend";
+import { acceptDeviceAccounts, createJazz, remote } from "jazz-tools/backend";
 import { schemaSource } from "../src/scope-fixture.ts";
 
 const coreUrl = process.env.JAZZ_DEVICE_CORE_URL;
@@ -34,7 +34,7 @@ const jazz = await createJazz({
   permissions,
   store: remote({ url: coreUrl, appId, secret }),
   // Without it, createJazz refuses local-first guests.
-  authenticate: acceptLocalFirstAuth,
+  authenticate: acceptDeviceAccounts,
 });
 const server = createServer((req, res) =>
   jazz.nodeHandler(req, res, () => {

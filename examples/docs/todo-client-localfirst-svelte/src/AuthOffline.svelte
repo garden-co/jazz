@@ -1,10 +1,11 @@
 <!-- #region auth-offline-svelte -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import type { DbConfig } from "jazz-tools";
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  // Prepare a handle outside this context with createAccountManager.
-  let { config, children }: { config: DbConfig; children: Snippet } = $props();
+  import { JazzProvider } from "jazz-tools/svelte";
+  let { children }: { children: Snippet } = $props();
+  // No server: Jazz stays on this device, with one device account per browser profile.
 </script>
-<JazzSvelteProvider config={{...config, serverUrl: undefined}}>{@render children()}</JazzSvelteProvider>
+<JazzProvider config={{ serverUrl: null, client: () => import("jazz-tools/local-first") }}>
+  {@render children()}
+</JazzProvider>
 <!-- #endregion auth-offline-svelte -->

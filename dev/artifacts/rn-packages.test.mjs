@@ -84,6 +84,44 @@ test("packed set exports a verified receipt; publish retries skip completed payl
       calls.filter((x) => x[0] === "publish").map((x) => x[1]),
       [receipt[1].tarball, receipt[2].tarball],
     );
+    // npm has accepted jazz-rn-android but doesn't serve it yet: `view` misses
+    // and `publish` answers E409 "previously staged". The retry continues.
+    const staged = join(bin, "npm-staged");
+    write(
+      staged,
+      '#!/usr/bin/env node\nconst fs=require("fs");const a=process.argv.slice(2);fs.appendFileSync(process.env.NPM_TEST_LOG,JSON.stringify(a)+"\\n");if(a[0]==="view")process.exit(1);if(a[0]==="publish"&&a[1].includes("jazz-rn-android")){process.stderr.write(process.env.NPM_TEST_STDERR);process.exit(1)}',
+    );
+    execFileSync("chmod", ["+x", staged]);
+    const stagedBin = join(root, "staged-bin");
+    mkdirSync(stagedBin);
+    symlinkSync(staged, join(stagedBin, "npm"));
+    const stagedEnv = { ...env, PATH: `${stagedBin}:${process.env.PATH}` };
+    writeFileSync(log, "");
+    execFileSync("node", [publish], {
+      env: {
+        ...stagedEnv,
+        NPM_TEST_STDERR:
+          'npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/jazz-rn-android - Cannot publish over previously staged version "2.0.0-alpha.55".\n',
+      },
+      stdio: "pipe",
+    });
+    assert.deepEqual(
+      readFileSync(log, "utf8")
+        .trim()
+        .split("\n")
+        .map(JSON.parse)
+        .filter((x) => x[0] === "publish")
+        .map((x) => x[1]),
+      receipt.map((x) => x.tarball),
+    );
+    // Any other publish failure still stops the job.
+    writeFileSync(log, "");
+    assert.notEqual(
+      spawnSync("node", [publish], {
+        env: { ...stagedEnv, NPM_TEST_STDERR: "npm error code E403\nnpm error 403 Forbidden\n" },
+      }).status,
+      0,
+    );
     writeFileSync(log, "");
     writeFileSync(receipt[2].tarball, "changed");
     assert.notEqual(spawnSync("node", [publish], { env }).status, 0);

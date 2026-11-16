@@ -1,13 +1,13 @@
 import type { Jazz } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
-import { app } from "@/schema";
-import permissions from "@/permissions";
+import { app } from "@/jazz.generated";
+import permissions from "@/jazz.permissions.json" with { type: "json" };
 import { serverConfig } from "./config";
 
 // Load the native backend at runtime rather than through the Next bundler.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { acceptLocalFirstAuth, createJazz, remote, sqlite } = createRequire(import.meta.url)(
+const { acceptDeviceAccounts, createJazz, remote, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -31,12 +31,17 @@ export function backend(): Promise<Jazz> {
       ? remote({ ...sync, appId: serverConfig.appId })
       : sqlite({ path: serverConfig.dataPath }),
     // Better Auth's session cookie decides who the shopper is. Guests have
-    // no Better Auth session: they stay on their local-first account.
+    // no Better Auth session: they stay on their device account.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      // Signed out: a local-first guest shopper.
-      return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+      // Signed out: a device-account guest shopper.
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+          }
+        : acceptDeviceAccounts(request);
     },
   }).ready());
   // A failed start must not poison later requests.

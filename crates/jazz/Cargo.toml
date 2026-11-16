@@ -1,10 +1,24 @@
 [package]
-name = "jazz"
-version = "0.1.0"
+name = "jazz-core"
+version.workspace = true
 edition = "2024"
+description = "Jazz's engine: a local-first, distributed, real-time database with full edit history and authorized sync, on SQLite."
 autobins = false
 autobenches = false
 autotests = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Only what builds the library: tests, benches and their fixtures stay in the repo.
+include = ["src/**", "build.rs", "README.md", "ENV.md"]
+readme = "README.md"
+
+# Published as jazz-core (`jazz` on crates.io is an unrelated project); the
+# library keeps the name `jazz`, so code still says `use jazz::`.
+[lib]
+name = "jazz"
+path = "src/lib.rs"
 
 [features]
 # Jazz is the common semantic library. Process and target shells select
@@ -65,8 +79,11 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [dev-dependencies]
 # Jazz's own tests (and the layer crates' test helpers they call) need the
-# `testing` feature, so a featureless `cargo test -p jazz` enables it here.
-jazz = { path = ".", default-features = false, features = ["testing"] }
+# `testing` feature, so a featureless `cargo test -p jazz-core` enables it here.
+jazz = { package = "jazz-core", path = ".", default-features = false, features = ["testing"] }
+# The JSON Schemas of the app files, checked against the fixtures (jazz-model
+# already depends on this crate).
+jsonschema = { version = "0.42", default-features = false }
 divan.workspace = true
 jazz-benchmark-guard = { path = "../benchmark-guard" }
 hdrhistogram = "7.5.4"
@@ -98,6 +115,14 @@ harness = false
 
 [[bench]]
 name = "fanout_wire"
+harness = false
+
+[[bench]]
+name = "fanout_relations"
+harness = false
+
+[[bench]]
+name = "fanout_policy_tables"
 harness = false
 
 [[test]]

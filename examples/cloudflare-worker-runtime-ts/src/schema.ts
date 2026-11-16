@@ -1,9 +1,11 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-};
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Todo = s.RowOf<typeof app.todos>;
+});
+
+const { definePermissions } = schema;
+
+export const permissions = definePermissions({
+  todos: {},
+});

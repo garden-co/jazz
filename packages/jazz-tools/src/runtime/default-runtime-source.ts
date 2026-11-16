@@ -211,7 +211,12 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       !browserMode,
       selfSignedClientProof,
       backendMode,
-      { appId: clientScope(config), thresholdMs: config.slowQueryThresholdMs },
+      {
+        appId: clientScope(config),
+        thresholdMs: config.slowQueryThresholdMs,
+        // End users see a browser's console: plan and SQL go to debug.
+        ...(isBrowserRuntime() ? { consoleDetail: "summary" as const } : {}),
+      },
       migrations,
       bearer && config.serverUrl ? bearerWebSocket(config.serverUrl, bearer) : undefined,
     );

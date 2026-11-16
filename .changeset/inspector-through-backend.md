@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+Inspect and change an app's data through its own backend. A new `inspect` hook on `createJazz` decides who may do so. It grants unlimited access to every row, so gate it with your hosting provider's login or an SSO proxy in production. The backend serves the Inspector at `<basePath>/inspect/` and a JSON API at `<basePath>/inspect/api`. Agents use `jazz-tools inspect` or `jazz-tools inspect mcp` with a token a person approves in the browser. Every answer links to the Inspector, open on the same rows. `db.getSyncStatus()` now also says since when the oldest write has waited (`oldestPendingAt`), how many writes the server rejected (`rejected`), and the latest rejection or link failure with its time (`lastError`). In a browser, `window.__jazz.status()` and `window.__jazz.waitForSync()` report the same for the page. For a local-first page, `mountInspector(db)` from `jazz-tools/inspector` docks an Inspector of the page's own Db, loaded from `<basePath>/inspect/embedded.html` on the same origin.

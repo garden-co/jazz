@@ -1,0 +1,133 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "0ffbe48513a68b9377fec6c1eae13f351e4edb059d1d1ad24615cbc360d20b85"
+  },
+  "tables": {
+    "files": {
+      "read": "allowedTo.read(folder)",
+      "insert": { "allOf": ["owner_id = session.user", "allowedTo.update(folder)"] },
+      "update": {
+        "old": "allowedTo.update(folder)",
+        "new": {
+          "allOf": [
+            "allowedTo.update(folder)",
+            "exists files(id = this.id, owner_id = this.owner_id)",
+            {
+              "anyOf": [
+                "exists files(id = this.id, folder_id = this.folder_id)",
+                "owner_id = session.user",
+                {
+                  "allOf": [
+                    "exists folders(id = this.folder_id, owner_id = session.user)",
+                    "exists files(id = this.id).folder(owner_id = session.user)"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "delete": "allowedTo.update(folder)"
+    },
+    "folderInvites": {
+      "read": "exists folders(id = this.folder_id, owner_id = session.user)",
+      "insert": "exists folders(id = this.folder_id, owner_id = session.user)",
+      "delete": "exists folders(id = this.folder_id, owner_id = session.user)"
+    },
+    "folderMembers": {
+      "read": {
+        "anyOf": [
+          "user_id = session.user",
+          "exists folders(id = this.folder_id, owner_id = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "user_id = session.user",
+          "exists folders(id = this.folder_id, owner_id = this.folder_owner_id)",
+          "exists folderInvites(folder_id = this.folder_id, code = this.invite_code, role = this.role)"
+        ]
+      },
+      "update": {
+        "old": "exists folders(id = this.folder_id, owner_id = session.user)",
+        "new": {
+          "allOf": [
+            "exists folders(id = this.folder_id, owner_id = session.user)",
+            "exists folderMembers(id = this.id, folder_id = this.folder_id, user_id = this.user_id, folder_owner_id = this.folder_owner_id)"
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "user_id = session.user",
+          "exists folders(id = this.folder_id, owner_id = session.user)"
+        ]
+      }
+    },
+    "folders": {
+      "read": {
+        "anyOf": [
+          "owner_id = session.user",
+          "exists folderMembers(folder_id = this.id, user_id = session.user)",
+          "allowedTo.read(parent, maxDepth: 8)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          { "anyOf": ["parent_id = null", "allowedTo.update(parent, maxDepth: 8)"] },
+          {
+            "anyOf": [
+              { "allOf": ["parent_id = null", "owner_id = session.user"] },
+              "exists folders(id = this.parent_id, owner_id = this.owner_id)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "owner_id = session.user",
+            "exists folderMembers(folder_id = this.id, user_id = session.user, role = 'editor')",
+            "allowedTo.update(parent, maxDepth: 8)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            "exists folders(id = this.id, owner_id = this.owner_id)",
+            {
+              "anyOf": [
+                "exists folders(id = this.id, parent_id = this.parent_id)",
+                { "allOf": ["parent_id = null", "exists folders(id = this.id, parent_id = null)"] },
+                {
+                  "allOf": [
+                    "owner_id = session.user",
+                    {
+                      "anyOf": [
+                        "parent_id = null",
+                        "exists folders(id = this.parent_id, owner_id = session.user)"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "delete": { "anyOf": ["owner_id = session.user", "allowedTo.update(parent, maxDepth: 8)"] }
+    },
+    "profiles": {
+      "read": {
+        "anyOf": [
+          "id = session.user",
+          "allowedTo.read(memberships)",
+          "allowedTo.read(hostedMemberships)"
+        ]
+      },
+      "insert": "id = session.user",
+      "update": "id = session.user"
+    }
+  }
+}

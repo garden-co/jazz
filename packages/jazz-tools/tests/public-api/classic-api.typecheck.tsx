@@ -1,4 +1,7 @@
-import { co, z, CoMap, Group, schema as s, type AccountHandle, type Db } from "jazz-tools";
+import { co, z, CoMap, Group, type Db } from "jazz-tools";
+// `../../` from here and from the scratch copy scripts/classic-api.test.mjs
+// compiles (packages/jazz-tools/.test-tmp/<dir>/) both reach the package root.
+import { app, type Todo } from "../../tests/public-api/apps/todos/jazz.generated.js";
 import {
   useCoState,
   useAccount,
@@ -20,8 +23,6 @@ import {
   type JazzProviderProps as VueProviderProps,
 } from "jazz-tools/vue";
 import type { JazzProviderProps as SolidProviderProps } from "jazz-tools/solid";
-
-declare const account: AccountHandle;
 
 // These imports must resolve against emitted declarations, never tsconfig src aliases.
 // @ts-expect-error Classic members must not become valid schema builders.
@@ -69,32 +70,28 @@ useJazzContext();
 useAcceptInvite();
 
 const oldVueProps: VueProviderProps = {
-  config: { appId: "classic-vue-types", account },
+  config: { scope: "classic-vue-types" },
   // @ts-expect-error Diagnostics must not make Classic props supported.
   AccountSchema: undefined,
 };
-const currentVueProps: VueProviderProps = { config: { appId: "current-vue-types", account } };
+const currentVueProps: VueProviderProps = { config: { scope: "current-vue-types" } };
 const currentSolidProps: SolidProviderProps = {
-  config: { appId: "current-solid-types", account },
+  config: { scope: "current-solid-types" },
   children: "Jazz 2",
 };
 void [oldVueProps, currentVueProps, currentSolidProps];
 
 // Positive consumers prevent unrelated module/type-resolution failures from hiding
 // accidental rejection of the supported Jazz 2 schema, query and React interfaces.
-const app = s.defineApp(
-  { todos: s.table({ title: s.string(), done: s.boolean() }, {}) },
-  { migrations: "none" },
-);
 declare const db: Db;
 db.insert(app.todos, { title: "Jazz 2", done: false });
-const todo: s.RowOf<typeof app.todos> = { id: "todo", title: "Jazz 2", done: false };
+const todo: Todo = { id: "todo", title: "Jazz 2", done: false };
 function Todos() {
   const { data } = useAll(app.todos.where({ done: false }));
   return data?.map((row) => <p key={row.id}>{row.title}</p>);
 }
 const currentReact = (
-  <JazzProvider config={{ appId: "classic-diagnostic-types", account }}>
+  <JazzProvider config={{ scope: "classic-diagnostic-types" }}>
     <Todos />
   </JazzProvider>
 );

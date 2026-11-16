@@ -22,6 +22,28 @@ const DEFAULT_SERVICE_NAME: &str = "jazz-server";
 static PROCESS_TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static PROCESS_TRACING_INIT: OnceLock<()> = OnceLock::new();
 
+/// A log filter with `defaults` (e.g. `jazz=info`) under `RUST_LOG`: a
+/// target `RUST_LOG` names takes the level it gives there, and the defaults
+/// cover only the targets it leaves out. (`EnvFilter::from_default_env()`
+/// followed by `add_directive` is the other way round: the default replaces
+/// the user's directive for the same target, so `RUST_LOG=jazz=debug` still
+/// logged at info.)
+pub fn env_filter_with_defaults(defaults: &[&str]) -> tracing_subscriber::EnvFilter {
+    env_filter_from(defaults, std::env::var("RUST_LOG").ok().as_deref())
+}
+
+/// [`env_filter_with_defaults`] with `env` for `RUST_LOG`. Directives are
+/// added in order and a later one replaces an earlier one for the same
+/// target, so `env`'s come last.
+fn env_filter_from(defaults: &[&str], env: Option<&str>) -> tracing_subscriber::EnvFilter {
+    let mut directives = defaults.join(",");
+    if let Some(env) = env.map(str::trim).filter(|env| !env.is_empty()) {
+        directives.push(',');
+        directives.push_str(env);
+    }
+    tracing_subscriber::EnvFilter::new(directives)
+}
+
 /// Installs process-global OTLP tracing once, retaining the provider for the
 /// process lifetime. Later calls are intentionally no-ops: Rust permits only
 /// one global tracing subscriber.
@@ -37,12 +59,12 @@ pub fn init_process_tracing_with_endpoint_once(
         let endpoint = normalize_otlp_traces_endpoint(collector_url);
         let provider = init_tracer_provider_with_endpoint(service_name, Some(&endpoint));
         let otel_layer = layer(&provider);
-        let mut filter = tracing_subscriber::EnvFilter::from_default_env();
         for directive in directives {
-            filter = filter.add_directive(directive.parse().unwrap_or_else(|error| {
-                panic!("invalid tracing directive {directive:?}: {error}")
-            }));
+            if let Err(error) = directive.parse::<tracing_subscriber::filter::Directive>() {
+                panic!("invalid tracing directive {directive:?}: {error}");
+            }
         }
+        let filter = env_filter_with_defaults(directives);
 
         if tracing::subscriber::set_global_default(
             tracing_subscriber::registry().with(filter).with(otel_layer),
@@ -331,6 +353,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_log_sets_the_level_of_a_target_it_names() {
+        use tracing::Level;
+        // Whether `jazz` and `jazz_tools` debug events pass, under `env`.
+        let debug = |env: Option<&str>| {
+            let subscriber = tracing_subscriber::registry()
+                .with(env_filter_from(&["jazz=info", "jazz_tools=info"], env));
+            tracing::subscriber::with_default(subscriber, || {
+                (
+                    tracing::enabled!(target: "jazz", Level::DEBUG),
+                    tracing::enabled!(target: "jazz_tools", Level::DEBUG),
+                )
+            })
+        };
+        // A target RUST_LOG names takes its level there, and the defaults
+        // keep the targets it leaves out.
+        assert_eq!(debug(Some("jazz=debug")), (true, false));
+        assert_eq!(debug(Some("jazz_tools=debug")), (false, true));
+        assert_eq!(debug(None), (false, false));
+        assert_eq!(debug(Some(" ")), (false, false));
+        // A bare level stays below the more specific defaults, as before.
+        assert_eq!(debug(Some("debug")), (false, false));
+    }
 
     #[tokio::test]
     async fn active_websockets_gauge_reports_the_count() {

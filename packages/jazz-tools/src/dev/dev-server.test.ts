@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { JazzServer } from "jazz-napi";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "undici";
-import { schema as s } from "../index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { JazzClient } from "../runtime/client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../runtime/testing/wasm-runtime-test-utils.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
@@ -130,19 +130,12 @@ describe("startLocalJazzServer via JazzServer", () => {
     "boots a client with app, query, and raw schema sources",
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
-      const app = s.defineApp(
-        {
-          todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-        },
-        { migrations: "none" },
-      );
-      const permissions = s.definePermissions(app, ({ policy }) => {
-        policy.todos.allowRead.always();
-        policy.todos.allowInsert.always();
+      const app = testApp({ tables: { todos: { columns: { title: "string", done: "boolean" } } } });
+      const permissions = testPermissions(app, {
+        tables: { todos: { read: "true", insert: "true" } },
       });
-      const embeddedDenial = s.definePermissions(app, ({ policy }) => {
-        policy.todos.allowRead.never();
-        policy.todos.allowInsert.never();
+      const embeddedDenial = testPermissions(app, {
+        tables: { todos: { read: "false", insert: "false" } },
       });
       const sources = [
         app,
@@ -159,7 +152,6 @@ describe("startLocalJazzServer via JazzServer", () => {
             server = await startLocalJazzServer({
               port: await getAvailablePort(),
               inMemory: true,
-              allowLocalFirstAuth: true,
               schema: source,
               permissions,
             });

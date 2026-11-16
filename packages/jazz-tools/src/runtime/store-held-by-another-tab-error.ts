@@ -20,6 +20,17 @@ export const STORE_HELD_BY_ANOTHER_TAB_ERROR_CODE = "store_held_by_another_tab";
  * the other tab lets go. Writes made in the meantime stay in this tab's
  * memory until it joins: a reload before then loses them.
  *
+ * A wait or read that failed with this error stays failed: it doesn't
+ * resume when the tab joins. The writes behind a failed `wait()` are not
+ * lost; they go to the store once the tab joins. Call `wait()` (or the
+ * read) again once the sync status is no longer `held-by-another-tab`.
+ * Calling it while the store is still held fails at once with this error.
+ * Live queries that read only this tab's own data keep running throughout.
+ *
+ * `db.deleteClientStorage()` waits for the store the same way, and fails
+ * with this error past the same patience; called again once the other tab
+ * lets go, it deletes the store.
+ *
  * Detect it with {@link isStoreHeldByAnotherTabError}, which checks the
  * stable `code`.
  */

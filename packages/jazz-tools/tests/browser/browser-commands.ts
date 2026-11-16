@@ -1,15 +1,34 @@
 import { commands } from "vitest/browser";
 
+import {
+  TRANSPORT_CONTROL_COMMAND_NAMES,
+  type JazzServerTransportControlBrowserCommands,
+} from "./transport-control-commands.js";
+
 import type { JazzServerInfo } from "./testing-server.js";
-import type { WasmSchema } from "../../src/drivers/types.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
+import type { LoadedDeployment } from "../../src/dev/catalogue.js";
+import type { BoundApp } from "../../src/typed-app.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
+  /**
+   * Optional: only configs whose tests deploy from the browser register it.
+   * What `deploy` publishes for the app whose bindings passed `bound` to
+   * `bindApp` and its `jazz.permissions.json`, built in Node by Jazz's Rust
+   * loader (the browser can't load jazz-napi).
+   */
+  jazzTestDeployment?(bound: BoundApp, permissions: TestPermissionsFile): Promise<LoadedDeployment>;
   jazzAppFront(
     coreUrl: string,
-    app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
+    app: {
+      /** What the app's bindings passed to `bindApp`: its schema, history and migrations. */
+      bound: BoundApp;
+      /** Its `jazz.permissions.json`. */
+      permissions: TestPermissionsFile;
+      pageOrigin: string;
+    },
   ): Promise<string>;
   jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
   /** Optional: only configs whose tests sign users out register it. */
@@ -29,24 +48,10 @@ export interface JazzServerBrowserCommands {
   ): Promise<{ status: number; headers: [string, string][]; body: string }>;
 }
 
-export interface JazzServerTransportControlBrowserCommands {
-  jazzServerTransportControlCreate(serverUrl: string): Promise<string>;
-  jazzServerTransportControlBlock(url: string, direction: "both" | "inbound"): Promise<void>;
-  jazzServerTransportControlUnblock(url: string): Promise<void>;
-  jazzServerTransportControlDown(url: string): Promise<void>;
-  jazzServerTransportControlUp(url: string, serverUrl?: string): Promise<void>;
-  jazzServerTransportControlStop(proxyUrl: string): Promise<void>;
-}
+export type { JazzServerTransportControlBrowserCommands };
 
 export function jazzServerTransportControlBrowserCommands(): JazzServerTransportControlBrowserCommands {
-  if (
-    !hasFunction(commands, "jazzServerTransportControlCreate") ||
-    !hasFunction(commands, "jazzServerTransportControlBlock") ||
-    !hasFunction(commands, "jazzServerTransportControlUnblock") ||
-    !hasFunction(commands, "jazzServerTransportControlDown") ||
-    !hasFunction(commands, "jazzServerTransportControlUp") ||
-    !hasFunction(commands, "jazzServerTransportControlStop")
-  ) {
+  if (!TRANSPORT_CONTROL_COMMAND_NAMES.every((name) => hasFunction(commands, name))) {
     throw new Error("Browser test project is missing the Jazz server transport-control commands.");
   }
   return commands as unknown as JazzServerTransportControlBrowserCommands;

@@ -1,58 +1,58 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
+import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
+import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import {
-  createAccountManager,
   createClient,
+  mintLocalFirstTokenInJs,
   prefetchThinQueries,
   upgradeToLocalFirst,
 } from "./index.js";
-import { ThinRuntime } from "./thin-runtime.js";
+import { THIN_WRITE_RESEND_WINDOW_MS, ThinRuntime } from "./thin-runtime.js";
+
+/** The account manager the thin entry used to export: it signs in JavaScript. */
+const createAccountManager = (config: AccountManagerConfig) =>
+  createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
 import { decodeThinResponse, isThinResponse } from "./wire.js";
 import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
+// documents (branched by `branch`), files and notes; typed, for the streaming inputs.
+import { app } from "../../tests/typed-app/apps/thin/jazz.generated.js";
 
-const app = s.defineApp(
-  {
-    notes: s.table({ text: s.string(), done: s.boolean() }, {}),
-    documents: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
-    files: s.table({ name: s.string(), data: s.bytes() }, {}),
+const mine = "$createdBy = session.user";
+const permissions = {
+  format: 1,
+  tables: {
+    notes: { read: mine, insert: "true", update: mine, delete: mine },
+    documents: { read: mine, insert: "true", update: mine },
+    files: { read: mine, insert: "true" },
   },
-  { migrations: "none" },
-);
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ $createdBy: session.user });
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.where({ $createdBy: session.user });
-  policy.notes.allowDelete.where({ $createdBy: session.user });
-  policy.documents.allowRead.where({ $createdBy: session.user });
-  policy.documents.allowInsert.always();
-  policy.documents.allowUpdate.where({ $createdBy: session.user });
-  policy.files.allowRead.where({ $createdBy: session.user });
-  policy.files.allowInsert.always();
-});
+};
 
 const opened: Db[] = [];
 let server: TestJazz | undefined;
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const db of opened.splice(0)) await db.shutdown();
   await server?.stop();
   server = undefined;
 });
 
-async function startServer(): Promise<TestJazz> {
+async function startServer(
+  coreOptions: { maxConnectionsPerUser?: number } = {},
+): Promise<TestJazz> {
   server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true, ...coreOptions },
   });
   return server;
 }
@@ -103,6 +103,47 @@ describe("self-signed tokens", () => {
 });
 
 describe("thin client", () => {
+  it("signs in on the next load with the token the last one minted, without signing again", async () => {
+    const server = await startServer();
+    let stored: string | null = null;
+    const store = {
+      async read() {
+        return stored;
+      },
+      async update(transform: (current: string | null) => string) {
+        stored = transform(stored);
+      },
+    };
+    const open = async () => {
+      const mintToken = vi.fn(mintLocalFirstTokenInJs);
+      const accounts = await createAccountManagerWithMinter(
+        { appId: server.appId, serverUrl: server.url, store },
+        mintToken,
+      );
+      const db = await createClient({
+        appId: server.appId,
+        serverUrl: server.url,
+        account: accounts.getLoggedIn() ?? accounts.createLocalFirst(),
+      });
+      opened.push(db);
+      return { db, mintToken };
+    };
+    const first = await open();
+    const note = first.db.insert(app.notes, { text: "first load", done: false });
+    await note.wait({ tier: "global" });
+    expect(first.mintToken).toHaveBeenCalledOnce();
+    await expect.poll(() => JSON.parse(stored!).tokens).toBeDefined();
+    await first.db.shutdown();
+
+    // The reload: the server takes the stored token and names the same user.
+    const second = await open();
+    expect((await second.db.all(app.notes)).map((row) => row.text)).toEqual(["first load"]);
+    await second.db
+      .insert(app.notes, { text: "second load", done: false })
+      .wait({ tier: "global" });
+    expect(second.mintToken).not.toHaveBeenCalled();
+  }, 60_000);
+
   it("reads, writes and subscribes through the server under its own policies", async () => {
     const server = await startServer();
     const alice = await thinDb(server);
@@ -439,6 +480,49 @@ describe("thin client", () => {
     expect(links.filter((link) => link.startsWith("offline"))).toEqual(["offline network"]);
   }, 60_000);
 
+  // R42: tabs of one user past the server's connection cap per user. Before,
+  // the server evicted the oldest tab, which reconnected and evicted the next
+  // one, in a loop of hundreds of reconnects a minute that the app never saw.
+  // Now the tab past the cap waits, reports the cap as its link's failure,
+  // and joins once a slot frees; the tabs already in are never disturbed.
+  it("a tab past the connection cap per user waits, names the cap, and joins when a tab closes", async () => {
+    const server = await startServer({ maxConnectionsPerUser: 2 });
+    const secret = formatAuthSecret(new Uint8Array(32).fill(0x42));
+    const tabs = [await thinDb(server, secret), await thinDb(server, secret)];
+    const drops: string[] = [];
+    for (const [index, tab] of tabs.entries()) {
+      await tab.insert(app.notes, { text: `tab ${index}`, done: false }).wait({ tier: "global" });
+      expect(tab.getSyncStatus().link).toEqual({ state: "connected" });
+      tab.onSyncStatusChange(({ link }) => {
+        if (link.state !== "connected") drops.push(`tab ${index}: ${link.state}`);
+      });
+    }
+
+    const extra = await thinDb(server, secret);
+    const unsubscribe = extra.subscribe(app.notes, () => undefined);
+    await expect
+      .poll(() => extra.getSyncStatus().link, { timeout: 10_000 })
+      .toEqual({ state: "offline", reason: "network", retrying: true });
+    expect(extra.getSyncStatus().lastError).toMatchObject({
+      kind: "network",
+      message: expect.stringContaining("connection cap per user"),
+    });
+    // Its retries back off and never disturb the tabs that are in.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(drops).toEqual([]);
+    for (const tab of tabs) expect(tab.getSyncStatus().link).toEqual({ state: "connected" });
+
+    // A tab closes: the waiting one joins, and the other tab stays in.
+    const closing = tabs.pop()!;
+    opened.splice(opened.indexOf(closing), 1);
+    await closing.shutdown();
+    await expect
+      .poll(() => extra.getSyncStatus().link, { timeout: 15_000 })
+      .toEqual({ state: "connected" });
+    expect(drops.filter((drop) => drop.startsWith("tab 0"))).toEqual([]);
+    unsubscribe();
+  }, 60_000);
+
   it("sends a write again when its answer is lost with the connection, and the server writes it once", async () => {
     const server = await startServer();
     const db = await thinDb(server);
@@ -476,6 +560,118 @@ describe("thin client", () => {
       ["in flight", true],
     ]);
     expect(runtime.pendingUploadCount()).toBe(0);
+  }, 60_000);
+
+  it("still sends a write again just inside its resend window, and the server writes it once", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    // The runtime's clock, moved by the test: the answer is lost a moment
+    // before the window closes.
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    const internals = runtime as unknown as {
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    const receive = internals.receive.bind(runtime);
+    let dropped = false;
+    internals.receive = (carrier, piece) => {
+      if (!dropped && isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        dropped = true;
+        skew = THIN_WRITE_RESEND_WINDOW_MS - 5_000;
+        internals.lost(carrier, { code: "websocket_closed", retry: "later", message: "lost" });
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const inserted = db.insert(app.notes, { text: "in flight", done: false });
+    await inserted.wait({ tier: "global" });
+    expect(dropped).toBe(true);
+    const rows = await db.all(app.notes);
+    expect(rows.map((row) => row.text).sort()).toEqual(["first", "in flight"]);
+    expect(runtime.pendingUploadCount()).toBe(0);
+  }, 60_000);
+
+  it("does not send a write again once its resend window has passed, and its fate is unknown", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    const internals = runtime as unknown as {
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    // The write's answer is lost with a connection that drops ten minutes
+    // after it was first sent.
+    const receive = internals.receive.bind(runtime);
+    let written = 0;
+    internals.receive = (carrier, piece) => {
+      if (isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        written += 1;
+        skew = THIN_WRITE_RESEND_WINDOW_MS;
+        internals.lost(carrier, { code: "websocket_closed", retry: "later", message: "lost" });
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    const error = await write.wait({ tier: "global" }).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
+      name: "ThinConnectionLostError",
+      message: expect.stringContaining("not sent again"),
+    });
+    // Sent once only: no resend came back answered.
+    expect(written).toBe(1);
+    expect(runtime.pendingUploadCount()).toBe(0);
+  }, 60_000);
+
+  it("ends a write waiting offline to go out again once its resend window passes", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      open(): void;
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    // The answer is lost, and the client stays offline: it never connects
+    // again while the test's clock moves past the window.
+    const receive = internals.receive.bind(runtime);
+    let lost!: () => void;
+    const answerLost = new Promise<void>((resolve) => (lost = resolve));
+    internals.receive = (carrier, piece) => {
+      if (isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        internals.open = () => undefined;
+        vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+        internals.lost(carrier, { code: "websocket_closed", retry: "later", message: "lost" });
+        lost();
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    const outcome = write.wait({ tier: "global" }).catch((cause: unknown) => cause);
+    await answerLost;
+    let settled = false;
+    void outcome.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(THIN_WRITE_RESEND_WINDOW_MS - 1_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    vi.useRealTimers();
+    expect(await outcome).toMatchObject({
+      name: "ThinConnectionLostError",
+      message: expect.stringContaining("not sent again"),
+    });
   }, 60_000);
 
   it("does not send a write again under a new credential, which may name another user", async () => {
@@ -588,19 +784,32 @@ describe("thin client", () => {
       db.update(app.notes, theirs.id, { done: true }).wait({ tier: "global" }),
     ).rejects.toThrow();
     await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+    // The sync status counts it and names it as the last error.
+    expect(db.getSyncStatus()).toMatchObject({
+      pendingUploads: 0,
+      oldestPendingAt: null,
+      rejected: 1,
+      lastError: { kind: "rejected", at: expect.any(Number) },
+    });
 
-    await db.insert(app.notes, { text: "mine", done: false }).wait({ tier: "global" });
+    // A write waiting for its answer says since when.
+    const before = Date.now();
+    const mine = db.insert(app.notes, { text: "mine", done: false });
+    const waiting = db.getSyncStatus();
+    expect(waiting.pendingUploads).toBe(1);
+    expect(waiting.oldestPendingAt).toBeGreaterThanOrEqual(before);
+    await mine.wait({ tier: "global" });
     await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+    expect(db.getSyncStatus()).toMatchObject({ oldestPendingAt: null, rejected: 1 });
   }, 60_000);
 
   it("fails reads and writes once the server can't serve its schema, instead of hanging", async () => {
     const server = await startServer();
     const db = await thinDb(server);
     // A bundle built against a schema this server doesn't have.
-    const stale = s.defineApp(
-      { notes: s.table({ text: s.string(), done: s.boolean(), extra: s.string() }, {}) },
-      { migrations: "none" },
-    );
+    const stale = testApp({
+      tables: { notes: { columns: { text: "string", done: "boolean", extra: "string" } } },
+    });
     const notDeployed = { name: "ThinRemoteError", code: "SchemaNotDeployed" };
     await expect(db.all(stale.notes)).rejects.toMatchObject(notDeployed);
     await expect(
@@ -745,6 +954,64 @@ describe("thin client", () => {
     await expect.poll(() => liveError?.message).toMatch(/for good/);
     unsubscribe();
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+  }, 60_000);
+
+  // E12: a sign-out drains writes with `shutdown({ waitForSync: true })`.
+  // Once the server refuses the sign-in (the user's access was revoked),
+  // nothing answers a write that waits to go out, and nothing renews a
+  // stopping runtime's credential: the drain fails instead of hanging, and
+  // the write ends saying why, not that it timed out.
+  it("fails the shutdown drain while the server refuses its sign-in, and says so to the write", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "auth_failed",
+      retry: "never",
+      message: "session revoked: revokeUser",
+    });
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "auth" });
+    const write = db.insert(app.notes, { text: "after the ban", done: false });
+    const outcome = write.wait({ tier: "global" }).catch((error: unknown) => error);
+    await expect.poll(() => db.getSyncStatus().pendingUploads).toBe(1);
+    // The upgrade's drain runs beside the app, which may still renew the
+    // credential: it waits through the refusal until the app shuts down
+    // (`endStreamWait` aborts its signal), and then fails too.
+    const appRunning = new AbortController();
+    let upgradeDrain: unknown = "pending";
+    void runtime.waitForPendingWrites("global", { inFlightStreams: appRunning.signal }).then(
+      () => (upgradeDrain = "drained"),
+      (error: unknown) => (upgradeDrain = error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(upgradeDrain).toBe("pending");
+    appRunning.abort();
+    await expect
+      .poll(() => upgradeDrain)
+      .toMatchObject({ message: expect.stringMatching(/refused this client's sign-in/) });
+    // A drain that waits through the refusal would never settle.
+    await expect(db.shutdown({ waitForSync: true })).rejects.toMatchObject({
+      name: "GracefulShutdownSyncError",
+    });
+    // `waitForSync` still waits: the app may renew the credential.
+    let synced = false;
+    void db.waitForSync().then(
+      () => (synced = true),
+      () => (synced = true),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(synced).toBe(false);
+    await db.shutdown();
+    const error = (await outcome) as Error;
+    expect(error.name).toBe("ThinRequestNotSentError");
+    expect(error.message).toMatch(
+      /the server refused this client's sign-in \(auth_failed: session revoked: revokeUser\)/,
+    );
   }, 60_000);
 
   it("fails a transaction its connection took with it, and nothing else", async () => {

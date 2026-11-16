@@ -1,0 +1,236 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "6f87a189c60cf55a356fa8f9b8c6c0531fcc00baa5469498a01ab3b3ad6e0d9a"
+  },
+  "tables": {
+    "albums": {
+      "columns": {
+        "title": "string",
+        "artist": "string",
+        "cover_locator": "string?",
+        "cover_image": "bytes?",
+        "cover_mime": "string?"
+      },
+      "relations": { "tracksViaAlbum": { "reverse": "tracks", "relation": "album" } },
+      "indexes": ["title"]
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "userId": "uuid",
+        "ipAddress": "string?",
+        "userAgent": "string?"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "invitations": {
+      "columns": {
+        "playlist_id": "uuid",
+        "subject": "uuid",
+        "role": { "enum": ["listener", "editor"] },
+        "status": { "enum": ["pending", "accepted", "revoked"] }
+      },
+      "relations": { "playlist": { "rel": "playlists", "column": "playlist_id" } }
+    },
+    "playback_positions": {
+      "columns": { "playlist_id": "uuid", "track_id": "uuid", "position_ms": "int" },
+      "relations": {
+        "playlist": { "rel": "playlists", "column": "playlist_id" },
+        "track": { "rel": "tracks", "column": "track_id" }
+      }
+    },
+    "playlist_entries": {
+      "columns": { "playlist_id": "uuid", "track_id": "uuid", "position": "float" },
+      "relations": {
+        "playlist": { "rel": "playlists", "column": "playlist_id" },
+        "track": { "rel": "tracks", "column": "track_id" }
+      },
+      "indexes": ["playlist_id", "position"]
+    },
+    "playlists": {
+      "columns": { "name": "string" },
+      "relations": {
+        "invitationsViaPlaylist": { "reverse": "invitations", "relation": "playlist" },
+        "playback_positionsViaPlaylist": { "reverse": "playback_positions", "relation": "playlist" },
+        "playlist_entriesViaPlaylist": { "reverse": "playlist_entries", "relation": "playlist" }
+      }
+    },
+    "tracks": {
+      "columns": {
+        "album_id": "uuid",
+        "title": "string",
+        "ordinal": "int",
+        "duration_ms": "int",
+        "audio_bytes": "bytes?",
+        "audio_mime": "string?",
+        "audio_byte_length": "int?"
+      },
+      "relations": {
+        "album": { "rel": "albums", "column": "album_id" },
+        "playback_positionsViaTrack": { "reverse": "playback_positions", "relation": "track" },
+        "playlist_entriesViaTrack": { "reverse": "playlist_entries", "relation": "track" }
+      },
+      "indexes": ["album_id", "ordinal"]
+    }
+  },
+  "history": {
+    "0f7261148930": {
+      "tables": {
+        "albums": {
+          "columns": {
+            "title": "string",
+            "artist": "string",
+            "cover_locator": "string?",
+            "cover_image": "bytes?",
+            "cover_mime": "string?"
+          },
+          "indexes": ["title"]
+        },
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "ipAddress": "string?",
+            "userAgent": "string?"
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "invitations": {
+          "columns": {
+            "playlist_id": { "type": "uuid", "references": "playlists" },
+            "subject": "uuid",
+            "role": { "enum": ["listener", "editor"] },
+            "status": { "enum": ["pending", "accepted", "revoked"] }
+          }
+        },
+        "playback_positions": {
+          "columns": {
+            "playlist_id": { "type": "uuid", "references": "playlists" },
+            "track_id": { "type": "uuid", "references": "tracks" },
+            "position_ms": "int"
+          }
+        },
+        "playlist_entries": {
+          "columns": {
+            "playlist_id": { "type": "uuid", "references": "playlists" },
+            "track_id": { "type": "uuid", "references": "tracks" },
+            "position": "float"
+          },
+          "indexes": ["playlist_id", "position"]
+        },
+        "playlists": { "columns": { "name": "string" } },
+        "tracks": {
+          "columns": {
+            "album_id": { "type": "uuid", "references": "albums" },
+            "title": "string",
+            "ordinal": "int",
+            "duration_ms": "int",
+            "audio_bytes": "bytes?",
+            "audio_mime": "string?",
+            "audio_byte_length": "int?"
+          },
+          "indexes": ["album_id", "ordinal"]
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "0f7261148930",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

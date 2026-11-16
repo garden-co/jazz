@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { RemoteLinkState } from "../remote-link-state.js";
 import { DirectConnectionManager } from "./direct-connection-manager.js";
 import type { DbForConnection } from "./types.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
@@ -73,4 +74,76 @@ describe("DirectConnectionManager explicit offline state", () => {
     await nextTick();
     expect(wakes).toBe(2);
   });
+});
+
+describe("DirectConnectionManager lazy transport observation", () => {
+  function fixture() {
+    let state: RemoteLinkState = "connecting";
+    const observers = new Set<() => void>();
+    let bindings = 0;
+    const runtime = {
+      remoteLinkState: () => state,
+      onRemoteLinkStateChange(listener: () => void, signal: AbortSignal) {
+        bindings++;
+        observers.add(listener);
+        signal.addEventListener("abort", () => observers.delete(listener), { once: true });
+      },
+    };
+    const manager = new DirectConnectionManager({
+      config: { serverUrl: "ws://example.invalid", appId: "lazy-observer" },
+      runtimeSource: {
+        nativeConnection: { configured: () => true },
+        createClient: () => ({ onMutationError() {}, getRuntime: () => runtime }),
+      },
+      isShuttingDown: false,
+      markUnauthenticated() {},
+      clearAuthError() {},
+      onMutationError() {},
+    } as unknown as DbForConnection);
+    return {
+      manager,
+      bindings: () => bindings,
+      emit(next: RemoteLinkState) {
+        state = next;
+        for (const listener of [...observers]) listener();
+      },
+    };
+  }
+
+  it("observes real connection loss and recovery after a listener precedes client creation", () => {
+    const f = fixture();
+    const controller = new AbortController();
+    const states: RemoteLinkState[] = [];
+    try {
+      f.manager.onRemoteLinkStateChange((state) => states.push(state), controller.signal);
+      expect(f.bindings()).toBe(0);
+      f.manager.getClient({});
+      expect(f.bindings()).toBe(1);
+      expect(states).toEqual([]);
+      f.emit("connected");
+      f.emit("unavailable");
+      f.emit("connected");
+      expect(states).toEqual(["connected", "unavailable", "connected"]);
+      f.manager.getClient({});
+      expect(f.bindings()).toBe(1);
+    } finally {
+      controller.abort();
+    }
+  });
+
+  it.each(["before creation", "after binding"])(
+    "does not deliver after cancellation %s",
+    (when) => {
+      const f = fixture();
+      const controller = new AbortController();
+      const states: RemoteLinkState[] = [];
+      f.manager.onRemoteLinkStateChange((state) => states.push(state), controller.signal);
+      if (when === "after binding") f.manager.getClient({});
+      controller.abort();
+      f.manager.getClient({});
+      f.emit("connected");
+      expect(states).toEqual([]);
+      expect(f.bindings()).toBe(when === "after binding" ? 1 : 0);
+    },
+  );
 });

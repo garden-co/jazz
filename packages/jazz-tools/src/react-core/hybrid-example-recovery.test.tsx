@@ -2,26 +2,20 @@ import React from "react";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
-import { createJazzSessionOwner, type JazzSession } from "../session/state.js";
+import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
-import { ConfiguredJazzAppProvider } from "./app.js";
+import { JazzSessionProvider } from "./session.js";
 function TestAppProvider(
   props: Pick<
-    React.ComponentProps<typeof ConfiguredJazzAppProvider>,
+    React.ComponentProps<typeof JazzSessionProvider>,
     "children" | "signedOut" | "loading" | "error"
   >,
 ) {
-  return (
-    <ConfiguredJazzAppProvider
-      {...props}
-      config={{}}
-      createJazzClient={async () => fixture.session!}
-    />
-  );
+  return <JazzSessionProvider {...props} config={{}} openCore={async () => fixture.session!} />;
 }
 const fixture = vi.hoisted(() => ({
-  session: undefined as JazzSession<ReturnType<typeof makeFakeClient>> | undefined,
+  session: undefined as SessionCore<ReturnType<typeof makeFakeClient>> | undefined,
   signedIn: false,
   signOutCalls: 0,
   failSignOut: false,

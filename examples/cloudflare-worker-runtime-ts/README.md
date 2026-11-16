@@ -6,11 +6,11 @@ Minimal Wrangler example that proves Jazz can boot inside Cloudflare Workers by 
 
 - `wrangler dev` can bundle the Worker locally
 - Cloudflare's Worker runtime can import `jazz-wasm/pkg/jazz_wasm_bg.wasm` as a `WebAssembly.Module`
-- `createDb({ account, runtimeSources: { wasmModule } })` can initialize Jazz without relying on browser asset URLs
-- The example uses the public `jazz-tools` package and a prepared opaque account handle.
-- Each `/smoke` request owns a disposable local-first account and in-memory database, then shuts it down. Requests never share a user context. This demonstrates runtime initialization, not durable storage or authentication.
+- `createJazzClient({ serverUrl: null, initial: "device", runtimeSources: { wasmModule }, … })` can initialize Jazz without relying on browser asset URLs; `session.db` is its database
+- The example uses the public `jazz-tools` package.
+- Each `/smoke` request owns a disposable device account and in-memory database, then closes its session. Requests never share a user context. This demonstrates runtime initialization, not durable storage or authentication.
 
-For an authenticated application, run Jazz in your Worker's backend with `createJazz` and read the request's user with `jazz.forReqUser(request)`. Use an appropriate durable account store when retaining local-first signing roots. The smoke example supplies an ephemeral request-local store and omits the context server URL, so it performs no sync or registry request.
+For an authenticated application, run Jazz in your Worker's backend with `createJazz` and read the request's user with `jazz.forReqUser(request)`. Use an appropriate durable account `store` when retaining device accounts. The smoke example supplies an ephemeral request-local store and sets `serverUrl: null`, so it performs no sync or registry request.
 
 ## Run locally
 

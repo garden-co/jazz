@@ -9,7 +9,7 @@
   let { client }: Props = $props();
 </script>
 
-<JazzSvelteClientProvider {client} autoAttachDevTools={false}>
+<JazzSvelteClientProvider {client}>
   {#snippet children({ db })}
     <p data-client-provider-state="ready">{db.getAuthState().session?.authMode}</p>
   {/snippet}

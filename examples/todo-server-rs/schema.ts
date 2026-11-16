@@ -1,12 +1,11 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   projects: s.table(
+    { name: s.string() },
     {
-      name: s.string(),
+      todosViaProject: s.reverse("todos", "projectRelation"),
     },
-    { todosViaProject: s.reverse("todos", "projectRelation") },
   ),
   todos: s.table(
     {
@@ -18,11 +17,23 @@ const schema = {
     },
     {
       parentRelation: s.rel("todos", "parent"),
-      todosViaParent: s.reverse("todos", "parentRelation"),
       projectRelation: s.rel("projects", "project"),
+      todosViaParent: s.reverse("todos", "parentRelation"),
     },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions } = schema;
+
+export const permissions = definePermissions({
+  projects: {
+    read: true,
+    insert: true,
+  },
+  todos: {
+    read: true,
+    insert: true,
+    update: true,
+    delete: true,
+  },
+});

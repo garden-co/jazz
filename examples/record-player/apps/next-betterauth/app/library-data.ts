@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
-import { useAll, useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { useAll, useDb, useJazzSession } from "jazz-tools/react";
+import { app } from "../jazz.generated";
 import { JazzRecordPlayerStore } from "../src/record-player";
 
 export function useStore(): JazzRecordPlayerStore {
@@ -12,7 +12,7 @@ export function useStore(): JazzRecordPlayerStore {
 
 /** The signed-in user's Jazz account ID: the value other people invite. */
 export function useAccountId(): string | undefined {
-  return useSession()?.user ?? undefined;
+  return useJazzSession().user?.accountId ?? undefined;
 }
 
 /**

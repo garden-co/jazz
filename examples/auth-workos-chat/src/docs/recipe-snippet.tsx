@@ -1,12 +1,12 @@
-import { JazzProvider, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzSession } from "jazz-tools/react";
 import { useWorkOSSession } from "../session.js";
 function YourApp({ signOut }: { signOut: () => Promise<void> }) {
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   return (
     <button
       onClick={async () => {
         await signOut();
-        await reauthenticate();
+        await refresh();
       }}
     >
       Sign out
@@ -20,7 +20,7 @@ export function App() {
   const { signIn, signOut } = useWorkOSSession();
   return (
     <JazzProvider
-      serverUrl="/jazz"
+      config={{ serverUrl: "/jazz" }}
       signedOut={<button onClick={() => void signIn()}>Sign in</button>}
     >
       <YourApp signOut={signOut} />
@@ -28,5 +28,5 @@ export function App() {
   );
 }
 // Jazz asks your backend's `authenticate` who is signed in on start and on
-// focus; call `reauthenticate()` from `useJazzAuth()` after your own sign-out.
+// focus; call `refresh()` from `useJazzSession()` after your own sign-out.
 // #endregion workos-jazz-react

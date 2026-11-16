@@ -1,7 +1,14 @@
 [package]
 name = "jazz-server"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+description = "The Jazz sync server, as a library."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Only what builds the library: tests, benches and their fixtures stay in the repo.
+include = ["src/**", "build.rs", "README.md"]
 
 [features]
 default = []
@@ -27,6 +34,8 @@ bytes = "1"
 futures = "0.3"
 futures-util = "0.3"
 http = "1"
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 hex = "0.4"
 hmac = "0.12"
@@ -62,6 +71,7 @@ uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 flate2 = "1"
 jazz = { workspace = true, default-features = false, features = ["testing"] }
 tempfile = "3.27.0"
+tokio = { version = "1", features = ["io-util", "test-util"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = [
   "connect",
   "rustls-tls-native-roots",

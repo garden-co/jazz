@@ -15,7 +15,7 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <Theme theme={jazzTheme} mode="system">
       <JazzProvider
-        serverUrl="/jazz"
+        config={{ serverUrl: "/jazz" }}
         signedOut={<SignIn />}
         loading={<Loading />}
         error={(state) => (

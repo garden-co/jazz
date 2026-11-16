@@ -1,10 +1,8 @@
 <!-- #region provider-svelte -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import type { DbConfig } from "jazz-tools";
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  // Prepare a handle outside this context with createAccountManager.
-  let { config, children }: { config: DbConfig; children: Snippet } = $props();
+  import { JazzProvider, type JazzClientConfig } from "jazz-tools/svelte";
+  let { config, children }: { config: JazzClientConfig; children: Snippet } = $props();
 </script>
-<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
+<JazzProvider {config}>{@render children()}</JazzProvider>
 <!-- #endregion provider-svelte -->

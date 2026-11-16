@@ -13,7 +13,32 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { DOWNLOAD_CORE, startScript } from "./vercel-store.js";
+import { DOWNLOAD_CORE, newerVersion, startScript } from "./vercel-store.js";
+import { VERSION_ORDER } from "./fixtures/version-order.js";
+
+// The start script's own version order, run in bash: it decides which core
+// a Drive runs, so it must agree with newerVersion.
+describe("vercel() core version order", () => {
+  it("newerVersion orders release candidates before their release", () => {
+    for (const [a, b, expected] of VERSION_ORDER) {
+      expect([a, b, newerVersion(a, b)]).toEqual([a, b, expected]);
+    }
+  });
+
+  it("orders release candidates before their release, as newerVersion does", () => {
+    const script = startScript("2.0.0", "https://example.invalid/core.tgz", {
+      issuer: "https://oidc.example",
+      audience: "aud",
+      subject: "sub",
+    });
+    const newer = script.match(/^newer\(\) \{\n[\s\S]*?\n\}$/m)?.[0];
+    expect(newer).toBeDefined();
+    for (const [a, b, expected] of VERSION_ORDER) {
+      const result = spawnSync("bash", ["-c", `${newer}\nnewer "$1" "$2"`, "newer", a, b]);
+      expect([a, b, result.status === 0]).toEqual([a, b, expected]);
+    }
+  });
+});
 
 // The downloader the start script runs, in this machine's Node: a 4xx is
 // permanent, a 5xx or a network error transient.
@@ -72,9 +97,12 @@ describe("vercel() core download", () => {
 describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   let root: string;
   const children: ChildProcess[] = [];
+  /** What the start scripts wrote to stderr (which the Sandbox appends to /data/server.log). */
+  let stderr = "";
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "jazz-start-"));
+    stderr = "";
     mkdirSync(join(root, "data/bin"), { recursive: true });
     mkdirSync(join(root, "tmp"));
     mkdirSync(join(root, "fakebin"));
@@ -132,10 +160,11 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     const script = join(root, `start-${Math.random()}.sh`);
     writeFileSync(script, startScript(version, tarballUrl, workload, blobs, root));
     const child = spawn("bash", [script], {
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       detached: true,
       env: { ...process.env, PATH: `${join(root, "fakebin")}:${process.env.PATH}` },
     });
+    child.stderr!.on("data", (chunk) => (stderr += chunk));
     children.push(child);
     const exited = new Promise<number>((resolve) =>
       child.on("exit", (code) => resolve(code ?? -1)),
@@ -313,6 +342,19 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     writeFileSync(join(root, "tmp/jazz.version"), "0.9.0\n");
     expect(await start("1.0.0")).toBe("running");
     expect(alive(String(bystander.pid))).toBe(true);
+  });
+
+  it("says nothing about a pid file that is missing or names a process that is gone", async () => {
+    installFake("1.0.0");
+    // A Drive's first start: no pid file yet.
+    expect(await start("1.0.0")).toBe("running");
+    // A start after the Sandbox stopped: the pid file outlived its process.
+    const gone = spawnSync("true").pid;
+    spawnSync("kill", ["-9", read("tmp/jazz.pid")!]);
+    writeFileSync(join(root, "tmp/jazz.pid"), `${gone}\n`);
+    expect(await start("1.0.0")).toBe("running");
+    expect(stderr).not.toContain("cmdline");
+    expect(stderr).toBe("");
   });
 
   it("runs one server when several instances start at once", async () => {

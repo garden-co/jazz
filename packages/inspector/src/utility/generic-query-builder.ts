@@ -80,6 +80,25 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
     return clone;
   }
 
+  /** The query's parts, values as given (bigints, dates and bytes included). */
+  parts(): {
+    table: string;
+    conditions: Array<{ column: string; op: string; value: unknown }>;
+    select: string[];
+    orderBy: Array<[string, "asc" | "desc"]>;
+    limit: number | undefined;
+    offset: number | undefined;
+  } {
+    return {
+      table: this._table,
+      conditions: [...this._conditions],
+      select: [...this._selectColumns],
+      orderBy: [...this._orderBys],
+      limit: this._limitVal,
+      offset: this._offsetVal,
+    };
+  }
+
   _build(): string {
     return JSON.stringify({
       table: this._table,

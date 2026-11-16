@@ -231,6 +231,35 @@ pub enum Sql {
 }
 
 impl Sql {
+    /// The value as an in-process key: a type tag, then the payload (bytes
+    /// as hex). Two values get the same key exactly when their `Debug`
+    /// prints are equal (the form keys used before), without running the
+    /// formatter: the tag keeps the variants apart, an integer prints in
+    /// decimal, a real by its bits (shortest round-trip printing is
+    /// injective on non-NaN reals, -0.0 included) and every NaN as one key,
+    /// as `Debug` prints them all as `NaN` (SQLite stores none, see
+    /// [`to_sql`]). Keys are compared and hashed in this process only.
+    pub(crate) fn key(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let hex = |tag: char, bytes: &[u8]| {
+            let mut out = String::with_capacity(1 + 2 * bytes.len());
+            out.push(tag);
+            for byte in bytes {
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+            out
+        };
+        match self {
+            Sql::Null => "N".to_owned(),
+            Sql::Integer(v) => format!("I{v}"),
+            Sql::Real(v) if v.is_nan() => "RNaN".to_owned(),
+            Sql::Real(v) => hex('R', &v.to_bits().to_be_bytes()),
+            Sql::Text(bytes) => hex('T', bytes),
+            Sql::Blob(bytes) => hex('B', bytes),
+        }
+    }
+
     pub(crate) fn as_ref(&self) -> ValueRef<'_> {
         match self {
             Sql::Null => ValueRef::Null,
@@ -1087,12 +1116,63 @@ fn stored_provenance_columns() -> Vec<Column> {
         .collect()
 }
 
-fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
+pub(crate) fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
     match ty {
         ValueType::Nullable(inner) => inner,
         ty => ty,
     }
 }
+
+/// A session claim as a value of type `ty`, for comparing it with a column
+/// (or literal) of that type. One rule for every place a policy or query
+/// compares a claim (plain and `EXISTS` policies, relation policies, query
+/// predicates, fan-out pins), so they all grant the same rows.
+///
+/// A claim is JSON, so its type is only known from what it is compared
+/// with: a UUID column reads a string as the UUID it spells, a text column
+/// a UUID claim as its hyphenated text, and an Integer or BigInt column a
+/// string as the integer it spells in canonical decimal (`"42"`, not
+/// `"042"` or `"42.0"`; timestamps take numbers only). A claim the type cannot hold is `None`: it matches nothing.
+/// Each claim converts to at most one value, so no claim matches a row it
+/// does not name. Other types compare the claim as it is.
+pub(crate) fn claim_as(ty: &ValueType, claim: Value) -> Option<Value> {
+    let claim = match claim {
+        Value::Nullable(None) => return None,
+        Value::Nullable(Some(inner)) => *inner,
+        claim => claim,
+    };
+    Some(match (unwrap_nullable_type(ty), claim) {
+        (ValueType::Uuid, Value::String(text)) => Value::Uuid(text.parse().ok()?),
+        (ValueType::Uuid, claim @ Value::Uuid(_)) => claim,
+        (ValueType::Uuid, _) => return None,
+        (ValueType::String, Value::Uuid(uuid)) => Value::String(uuid.to_string()),
+        // Integer and BigInt columns; a timestamp (`U64`) never reads a
+        // string as its milliseconds.
+        (ValueType::I32 | ValueType::I64, Value::String(text)) => {
+            let number: i64 = text.parse().ok()?;
+            if number.to_string() != text {
+                return None;
+            }
+            Value::I64(number)
+        }
+        (_, claim) => claim,
+    })
+}
+
+/// [`claim_as`] for every element of an array claim, as an `IN` list
+/// compares them with a column of type `ty`.
+pub(crate) fn claims_as(ty: &ValueType, claim: Value) -> Vec<Value> {
+    match claim {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| claim_as(ty, item))
+            .collect(),
+        claim => claim_as(ty, claim).into_iter().collect(),
+    }
+}
+
+/// The type of a row id.
+static ROW_ID_TYPE: ValueType = ValueType::Uuid;
 
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
@@ -1120,6 +1200,15 @@ fn provenance_columns() -> Vec<Column> {
 }
 
 impl Table {
+    /// The type of `name` (a row id is a UUID), or `None` for a column this
+    /// table does not have.
+    pub(crate) fn column_type(&self, name: &str) -> Option<&ValueType> {
+        if name == "id" {
+            return Some(&ROW_ID_TYPE);
+        }
+        self.column(name).map(|column| &column.ty)
+    }
+
     /// A readable column: an application or provenance column.
     pub fn column(&self, name: &str) -> Option<&Column> {
         self.columns
@@ -1385,6 +1474,53 @@ impl Schema {
         }
         self.policies_from = Some(current);
         self
+    }
+
+    /// `self` (a [`Schema::stored_view`]) with each enum column declaring
+    /// the variants `version` declares for the same stored column, or
+    /// `None` when they already agree. The stored view takes its variants
+    /// from the current schema, but a session writes under its own
+    /// version (a deploy admits versions without making them current), so
+    /// its cells are checked against that version's variants: one that
+    /// adds a variant may write it, one that lacks it may not.
+    pub(crate) fn with_enum_variants_of(&self, version: &Schema) -> Option<Self> {
+        let differs = |view: &Self| {
+            version.tables.values().any(|table| {
+                view.tables.get(&table.stored).is_some_and(|stored| {
+                    table.columns.iter().any(|column| {
+                        column.variants.is_some()
+                            && stored
+                                .columns
+                                .iter()
+                                .find(|candidate| candidate.stored == column.stored)
+                                .is_some_and(|candidate| candidate.variants != column.variants)
+                    })
+                })
+            })
+        };
+        if !differs(self) {
+            return None;
+        }
+        let mut view = self.clone();
+        for table in version.tables.values() {
+            let Some(stored) = view.tables.get_mut(&table.stored) else {
+                continue;
+            };
+            for column in table
+                .columns
+                .iter()
+                .filter(|column| column.variants.is_some())
+            {
+                if let Some(candidate) = stored
+                    .columns
+                    .iter_mut()
+                    .find(|candidate| candidate.stored == column.stored)
+                {
+                    candidate.variants = column.variants.clone();
+                }
+            }
+        }
+        Some(view)
     }
 
     /// `current` named by stored names, the names writes travel by: each
@@ -2249,5 +2385,78 @@ impl JsonCheck {
         let compiled = crate::tools::CompiledSchema::new(schema)
             .map_err(|error| crate::tools::json_schema_failure(error, path))?;
         Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::Sql;
+
+    /// The keys this form replaced: `Debug` prints.
+    fn old(value: &Sql) -> String {
+        format!("{value:?}")
+    }
+
+    fn edge_values() -> Vec<Sql> {
+        let mut out = vec![Sql::Null];
+        for v in [0, 1, -1, 10, i64::MIN, i64::MAX] {
+            out.push(Sql::Integer(v));
+        }
+        for v in [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            1e300,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ] {
+            out.push(Sql::Real(v));
+        }
+        for bytes in [&b""[..], b"1", b"a", b"ab", b"\x00", b"\xff\x00", b"I1"] {
+            out.push(Sql::Text(bytes.to_vec()));
+            out.push(Sql::Blob(bytes.to_vec()));
+        }
+        out
+    }
+
+    /// Same key exactly when the old key was the same, both ways: a pair
+    /// that matched and no longer does would be a missed wake.
+    #[test]
+    fn keys_keep_the_equality_classes_of_debug_prints() {
+        let mut values = edge_values();
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let r = next();
+            values.push(match r % 5 {
+                0 => Sql::Null,
+                1 => Sql::Integer((next() % 7) as i64 - 3),
+                2 => Sql::Real(f64::from_bits(next())),
+                3 => Sql::Text((0..r % 4).map(|_| (next() % 3) as u8).collect()),
+                _ => Sql::Blob((0..r % 4).map(|_| (next() % 3) as u8).collect()),
+            });
+        }
+        for a in &values[..200] {
+            for b in &values {
+                assert_eq!(
+                    old(a) == old(b),
+                    a.key() == b.key(),
+                    "{a:?} vs {b:?}: keys {} / {}",
+                    a.key(),
+                    b.key()
+                );
+            }
+        }
     }
 }

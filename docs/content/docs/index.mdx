@@ -5,45 +5,47 @@ description: "Get a first glimpse of how to set Jazz up and how to use it from t
 
 Jazz is a relational database that runs inside your backend, with real-time queries and permissions built in. Query and update data from your server or directly from your frontend, using a thin client or a local-first client for offline support.
 
-Every Jazz app is defined first by its database schema and permission policies. They're verbose, but agents are good at writing and checking them.
+Every Jazz app is defined first by its database schema and permission policies. You write both in TypeScript, in `schema.ts`.
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-export const app = s.defineApp(
-  { todos: s.table({ title: s.string(), done: s.boolean() }, {}) },
-  { migrations },
-);
-```
+export const schema = s.defineSchema({
+  todos: s.table({ title: s.string(), done: s.boolean() }),
+});
 
-```ts title="permissions.ts"
-import { schema as s } from "jazz-tools";
-import { app } from "./schema";
+const { definePermissions, session } = schema;
 
 // Each user sees and edits only the todos they created
-export default s.definePermissions(app, ({ policy, session }) => {
-  const isCreator = { $createdBy: session.user };
-  policy.todos.allowRead.where(isCreator);
-  policy.todos.allowInsert.where(isCreator);
-  policy.todos.allowUpdate.where(isCreator);
-  policy.todos.allowDelete.where(isCreator);
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
+  },
 });
 ```
 
-Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your code imports are the ones it enforces.
+Run `npx jazz-tools generate` after writing it, and again after each change. It checks the schema
+and permissions and writes `jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts`, the
+typed `app` your code imports. Commit all of them. See [Defining Tables](/docs/schemas/defining-tables).
+
+Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your backend imports are the ones it enforces.
 
 ```ts title="server.ts"
 import { Hono } from "hono";
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
-  authenticate: async (request) => getSignedInUser(request), // your own auth: { userId } or null
+  authenticate: async (request) => getSignedInUser(request), // your own auth: { userId, expiresAt } or null
 });
 
 new Hono()
@@ -60,17 +62,17 @@ new Hono()
   .all("/jazz/*", (c) => jazz.handle(c.req.raw));
 ```
 
-You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 160 KB gzipped) or a full local-first client (about 3.4 MB gzipped, mostly the WASM engine).
+You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (%bundle.thin% gzipped) or a full local-first client (its Wasm engine adds %bundle.wasm% gzipped).
 
-<Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect"]} persist updateAnchor>
+<Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect", "Swift", "Kotlin"]} persist updateAnchor>
   <Tab value="JavaScript">
     ```ts title="client.ts"
     import { createJazzClient } from "jazz-tools/client";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     // Asks your backend's /jazz route who is signed in, with your app's own session cookie
-    const jazz = await createJazzClient({});
-    const db = jazz.getSnapshot().client!.db;
+    const session = await createJazzClient({ serverUrl: "/jazz" });
+    const db = session.db; // the signed-in user's Db
 
     // Live query: updates as soon as the server (or anyone else) changes a todo
     db.subscribe(app.todos.where({ done: false }), (todos) => {
@@ -82,7 +84,7 @@ You can also query and write to the database right from your frontend. It is pro
   <Tab value="React">
     ```tsx title="Todos.tsx"
     import { useAll } from "jazz-tools/react";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     export function Todos() {
       const { data: todos = [], db } = useAll(app.todos.where({ done: false }));
@@ -99,8 +101,8 @@ You can also query and write to the database right from your frontend. It is pro
     ```tsx title="App.tsx"
     import { JazzProvider } from "jazz-tools/react";
 
-    // Connects to /jazz on your backend by default, signed in as your app's current user
-    <JazzProvider>
+    // Connects to /jazz on your backend, signed in as your app's current user
+    <JazzProvider config={{ serverUrl: "/jazz" }}>
       <Todos />
     </JazzProvider>;
     ```
@@ -110,7 +112,7 @@ You can also query and write to the database right from your frontend. It is pro
     ```vue title="Todos.vue"
     <script setup lang="ts">
     import { useAll } from "jazz-tools/vue";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     const { data: todos, db } = useAll(app.todos.where({ done: false }));
     </script>
@@ -129,8 +131,8 @@ You can also query and write to the database right from your frontend. It is pro
     </script>
 
     <template>
-      <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
-      <JazzProvider>
+      <!-- Connects to /jazz on your backend, signed in as your app's current user -->
+      <JazzProvider :config="{ serverUrl: '/jazz' }">
         <Todos />
       </JazzProvider>
     </template>
@@ -141,7 +143,7 @@ You can also query and write to the database right from your frontend. It is pro
     ```svelte title="Todos.svelte"
     <script lang="ts">
       import { QuerySubscription } from "jazz-tools/svelte";
-      import { app } from "./schema";
+      import { app } from "./jazz.generated";
 
       const todos = new QuerySubscription(app.todos.where({ done: false }));
     </script>
@@ -159,8 +161,8 @@ You can also query and write to the database right from your frontend. It is pro
       import { JazzProvider } from "jazz-tools/svelte";
     </script>
 
-    <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
-    <JazzProvider>
+    <!-- Connects to /jazz on your backend, signed in as your app's current user -->
+    <JazzProvider config={{ serverUrl: "/jazz" }}>
       <Todos />
     </JazzProvider>
     ```
@@ -170,7 +172,7 @@ You can also query and write to the database right from your frontend. It is pro
     ```tsx title="Todos.tsx"
     import { For } from "solid-js";
     import { useAll } from "jazz-tools/solid";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     export function Todos() {
       const todos = useAll(() => ({ query: app.todos.where({ done: false }) }));
@@ -191,8 +193,8 @@ You can also query and write to the database right from your frontend. It is pro
     ```tsx title="App.tsx"
     import { JazzProvider } from "jazz-tools/solid";
 
-    // Connects to /jazz on your backend by default, signed in as your app's current user
-    <JazzProvider>
+    // Connects to /jazz on your backend, signed in as your app's current user
+    <JazzProvider config={{ serverUrl: "/jazz" }}>
       <Todos />
     </JazzProvider>;
     ```
@@ -202,7 +204,7 @@ You can also query and write to the database right from your frontend. It is pro
     ```ts title="todos.ts"
     import { Effect, Stream } from "effect";
     import { Jazz } from "jazz-tools/effect";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     const program = Effect.gen(function* () {
       const jazz = yield* Jazz;
@@ -214,8 +216,28 @@ You can also query and write to the database right from your frontend. It is pro
     });
 
     // Same config as createJazzClient(): asks /jazz who is signed in, with your session cookie
-    program.pipe(Effect.provide(Jazz.layer()), Effect.runPromise);
+    program.pipe(Effect.provide(Jazz.layer({ serverUrl: "/jazz" })), Effect.runPromise);
     ```
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift" meta='title="App.swift"'>
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-client
+    </include>
+
+    <include cwd lang="swift" meta='title="App.swift"'>
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-subscriptions-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin" meta='title="App.kt"'>
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-client
+    </include>
+
+    <include cwd lang="kotlin" meta='title="App.kt"'>
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-subscriptions-kotlin
+    </include>
 
   </Tab>
 </Tabs>
@@ -232,7 +254,7 @@ Set up the client: [Thin Client](/docs/setup/web-client/thin-client) (the defaul
 
 ## What you'll learn, in order
 
-- [Setup](/docs/setup/run-locally)&hairsp;—&hairsp;run locally, deploy to Vercel, Jazz Cloud or your own server, add a backend, then a client
+- [Setup](/docs/setup/run-locally)&hairsp;—&hairsp;run locally, deploy to Vercel or your own server, add a backend, then a client
 - [Schemas & Policies](/docs/schemas/defining-tables)&hairsp;—&hairsp;tables, column types, relationships, who can do what, and migrations
 - [Reading Data](/docs/reading/queries)&hairsp;—&hairsp;queries, live subscriptions and framework hooks
 - [Writing Data](/docs/writing/writing-data)&hairsp;—&hairsp;inserts, updates, transactions and mergeable text

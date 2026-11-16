@@ -1,5 +1,5 @@
 import * as React from "react";
-import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
+import { JazzProvider, useJazzSession, useAuthState } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
@@ -54,6 +54,7 @@ function ChatShell({
 const config = {
   serverUrl: "/jazz",
   driver: { type: "memory" as const },
+  initial: "device" as const,
 };
 
 export function App() {
@@ -70,13 +71,7 @@ export function App() {
     />
   );
   return (
-    <JazzProvider
-      {...config}
-      initial="local-first"
-      signedOut={screen}
-      loading={screen}
-      error={screen}
-    >
+    <JazzProvider config={config} signedOut={screen} loading={screen} error={screen}>
       {screen}
     </JazzProvider>
   );
@@ -93,16 +88,16 @@ function SessionScreen({
   reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
   recovery: React.RefObject<(() => Promise<void>) | undefined>;
 }) {
-  const { sessionActions: actions, ...session } = useJazzAuth();
+  const session = useJazzSession();
   React.useEffect(() => {
     if (restored.current || session.status !== "ready") return;
     restored.current = true;
     void perform(async () => {
-      if (await fetchSignedInUser()) await actions.loginWithBackend();
+      if (await fetchSignedInUser()) await session.refresh();
     }).catch(() => {});
   }, [session.status]);
   // This is the manual hybrid escape hatch: no automatic enrollment connector
-  // runs while signup links the provider identity to this local-first account.
+  // runs while signup links the provider identity to this device account.
   async function perform(action: () => Promise<void>) {
     recovery.current = action;
     try {
@@ -115,19 +110,19 @@ function SessionScreen({
   }
   async function signIn(email: string, password: string) {
     await requestSignIn(email, password);
-    await perform(() => actions.loginWithBackend());
+    await perform(() => session.refresh());
   }
   async function signUp(email: string, password: string) {
     await requestSignUp(email, password);
-    // The backend links this browser's local-first account to the new user,
+    // The backend links this browser's device account to the new user,
     // so everything written as a guest stays theirs.
-    await perform(() => actions.linkWithBackend());
+    await perform(() => session.linkDeviceAccount());
   }
   async function signOut() {
     await perform(async () => {
-      await actions.logout();
+      await session.signOut();
       await requestSignOut();
-      await actions.createLocalFirst();
+      await session.createDeviceAccount();
     });
   }
   const error = providerError ?? session.error;
@@ -139,9 +134,7 @@ function SessionScreen({
           <button
             onClick={() =>
               void perform(
-                session.error
-                  ? session.retry
-                  : (recovery.current ?? (() => actions.loginWithBackend())),
+                session.error ? session.retry : (recovery.current ?? (() => session.refresh())),
               ).catch(() => {})
             }
           >

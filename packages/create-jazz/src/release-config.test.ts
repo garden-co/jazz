@@ -77,6 +77,11 @@ describe("release config", () => {
       fs.mkdirSync(path.join(toolsDir, "scripts"), { recursive: true });
       fs.mkdirSync(embedded, { recursive: true });
       fs.writeFileSync(path.join(embedded, "embedded.html"), "<html>fixture inspector</html>");
+      // The page the backend serves at <basePath>/inspect/.
+      fs.writeFileSync(
+        path.join(embedded, "backend.html"),
+        "<html>fixture backend inspector</html>",
+      );
       fs.writeFileSync(
         path.join(fixture, "pnpm-workspace.yaml"),
         "packages:\n  - packages/jazz-tools\n",
@@ -98,9 +103,23 @@ describe("release config", () => {
         spawnSync("bash", ["-e", "-c", steps[verify]!.run!], { cwd: fixture, encoding: "utf8" });
       const valid = runGate();
       expect(valid.status, valid.stderr).toBe(0);
-      // Planted missing payload: the same packed-presence gate must fail.
-      fs.rmSync(path.join(toolsDir, "dist/dev/inspector-overlay/embedded/embedded.html"));
-      expect(runGate().status).not.toBe(0);
+      // Planted missing payload: the same packed-presence gate must fail,
+      // for either page.
+      for (const page of ["backend.html", "embedded.html"]) {
+        const staged = path.join(toolsDir, "dist/dev/inspector-overlay/embedded", page);
+        const kept = fs.readFileSync(staged);
+        fs.rmSync(staged);
+        expect(runGate().status, page).not.toBe(0);
+        fs.writeFileSync(staged, kept);
+      }
+      // The module createJazz serves the Inspector from must carry the UI,
+      // not the empty placeholder tsc emits.
+      const uiModule = path.join(toolsDir, "dist/backend/inspector-ui-files.js");
+      const generated = fs.readFileSync(uiModule);
+      fs.writeFileSync(uiModule, "export const INSPECTOR_UI_FILES = null;\n");
+      expect(runGate().status, "placeholder module").not.toBe(0);
+      fs.writeFileSync(uiModule, generated);
+      expect(runGate().status).toBe(0);
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true });
     }

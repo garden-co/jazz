@@ -4,3 +4,5 @@ dist
 next-env.d.ts
 public/_jazz
 .jazz
+test-results
+playwright-report

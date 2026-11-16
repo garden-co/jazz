@@ -10,8 +10,10 @@ A relationship is a UUID column that holds another row's `id`, plus a name for f
 Store the other row's id in a UUID column, then name the relation with `s.rel(targetTable, column)`
 in the table's second argument:
 
-```ts
-const schema = {
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
   posts: s.table(
     { authorId: s.uuid(), title: s.string() },
     {
@@ -19,13 +21,13 @@ const schema = {
     },
   ),
   users: s.table({ name: s.string() }),
-};
+});
 ```
 
 A UUID column without an `s.rel` stays an ordinary UUID column: queries can't include through it
-and policies can't follow it. In particular, `exists` rules that correlate across tables need the
-column declared with `s.rel`; a plain `s.uuid()` column fails validation with
-`JoinNotRefCompatible`.
+and policies can't follow it. In particular, the correlation that links the two rows of an `exists` rule must follow a
+relation; a plain `s.uuid()` column there fails validation with `JoinNotRefCompatible` (see
+[Share-based access](/docs/schemas/policies#share-based-access)).
 
 ## Optional and many
 
@@ -41,13 +43,21 @@ Jazz doesn't generate the inverse of a relation. Declare it on the target table 
 `s.reverse(sourceTable, forwardRelationName)`. The second argument is the forward relation's name,
 not the column:
 
-```ts
-users: s.table(
-  { name: s.string() },
-  {
-    authoredPosts: s.reverse("posts", "author"),
-  },
-),
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  posts: s.table(
+    { authorId: s.uuid(), title: s.string() },
+    {
+      author: s.rel("users", "authorId"),
+    },
+  ),
+  users: s.table(
+    { name: s.string() },
+    {
+      authoredPosts: s.reverse("posts", "author"),
+    },
+  ),
+});
 ```
 
 A reverse relation returns the matching source rows as an array.
@@ -72,8 +82,9 @@ have been deleted, or permissions may hide it. See
 
 ## Permissions that follow relations
 
-Relation names are what policies use to follow references: `allowedTo.read("author")` and the
-other `allowedTo.*` helpers, `hopTo`, and correlated `exists` rules. See
+Relation names are what policies use to follow references: `allowedTo.read(post.author)` and the
+other `allowedTo.*` helpers, `post.author.where({ … })`, relation hops such as
+`exists.posts({ … }).hop("author", { … })`, and correlated `exists` rules. See
 [Inherited access](/docs/schemas/policies#inherited-access-allowedto) in Declarative Permissions.
 
 ## Adding a relation later

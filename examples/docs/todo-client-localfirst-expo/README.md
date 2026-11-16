@@ -20,7 +20,7 @@ Expo example for local-first todos using `jazz-tools/react-native` + `jazz-rn`.
 - Physical devices: either reach the backend on your machine's LAN IP (plain HTTP; the device must be on
   the same network and allow cleartext traffic), or deploy the backend behind a device-trusted HTTPS endpoint.
 - Set `EXPO_PUBLIC_JAZZ_SERVER_URL` to a device-reachable `/jazz` URL of the backend otherwise. The Expo adapter does not rewrite loopback HTTP URLs into a device endpoint.
-- Account preparation uses `createAccountManager` from `jazz-tools/expo`, backed by SecureStore with native atomic updates. Contexts receive an opaque account handle. A matching native development build is required; Expo Go is unsupported.
+- `<JazzProvider config={{ serverUrl, initial: "device" }}>` from `jazz-tools/expo` starts everyone as a guest: a device account whose key Expo keeps in SecureStore, with native atomic updates. A matching native development build is required; Expo Go is unsupported.
 - Todos carry `owner_id`, and mutations are authorized against `session.user`.
 
 ## Commands

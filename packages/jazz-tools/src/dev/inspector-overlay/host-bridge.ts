@@ -1,5 +1,6 @@
 import type { Db, DbConfig } from "../../runtime/db.js";
 import { resolveDefaultPersistentDbName, resolvePersistentDbBaseName } from "../../runtime/db.js";
+import { clientScope } from "../../runtime/client-scope.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   internalSessionFromVerifiedReservedJwtPayload,
@@ -59,7 +60,9 @@ function buildOverlayDbConfig(
   const browserWorkerSession = overlayBrowserWorkerSession(config, session);
   if (!config.jwtToken) throw new Error("Inspector host requires a resolved client bearer");
   const physicalConfig: InspectorHostConfig = {
-    appId: config.appId,
+    // What the runtime's context is scoped by: a browser session names no app
+    // id, so its endpoint. The overlay finds the host's context by it.
+    appId: clientScope(config),
     accountId: config.accountId,
     accountRegistryAuthority: config.accountRegistryAuthority,
     serverUrl: config.serverUrl,
@@ -126,7 +129,9 @@ export function installInspectorHost(
       if (live) return live;
       const registered = getRegisteredWasmSchema();
       if (registered) return registered;
-      throw new Error("Inspector: no schema available — no client and no defineApp() yet.");
+      throw new Error(
+        "Inspector: no schema available — no client and no app from jazz.generated.ts yet.",
+      );
     },
     getActiveSubscriptions() {
       return serializeActiveSubscriptions(db.getActiveQuerySubscriptions());

@@ -5,6 +5,7 @@
     "durability-tiers",
     "framework-patterns",
     "examples",
+    "app-files",
     "internals",
     "local-first-auth-internals"
   ]

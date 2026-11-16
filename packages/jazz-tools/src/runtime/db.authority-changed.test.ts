@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import type { SyncStatus } from "./sync-status.js";
@@ -9,11 +8,8 @@ import { isAuthorityChangedError } from "./authority-changed-error.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-const permissions = definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-});
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
 
 /** Resolve with the first status `matches` accepts, now or after a change. */
 function statusWhere(db: Db, matches: (status: SyncStatus) => boolean): Promise<SyncStatus> {
@@ -44,7 +40,6 @@ it("reports a server whose store was recreated as authority-changed", async () =
     appId: randomUUID(),
     adminSecret: randomUUID(),
     backendSecret: randomUUID(),
-    allowLocalFirstAuth: true,
     inMemory: true,
   };
   const start = (port?: number) =>
@@ -71,6 +66,9 @@ it("reports a server whose store was recreated as authority-changed", async () =
     expect(await statusWhere(alice, (status) => status.link.state === "offline")).toEqual({
       link: { state: "offline", reason: "authority-changed", retrying: false },
       pendingUploads: 1,
+      oldestPendingAt: expect.any(Number),
+      rejected: 0,
+      lastError: expect.objectContaining({ kind: "authority-changed" }),
       synced: false,
     });
 

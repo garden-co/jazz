@@ -1,7 +1,7 @@
 import "@garden-co/design/jazz/tokens.css";
 import "@garden-co/design/jazz/fonts.css";
 import "./styles.css";
-import { createJazzApp } from "jazz-tools/client";
+import { createJazzClient, type JazzClient, type JazzSession } from "jazz-tools/client";
 import { bootstrapWorkspace } from "@/src/lib/account-enrollment";
 import { authClient } from "./auth-client";
 import { chatScreen } from "./chat";
@@ -18,8 +18,10 @@ const status = (message: string, error = false) =>
   );
 
 // Better Auth's session drives sign-in; the server's Jazz (`createJazz` in
-// src/lib/backend-jazz-client.ts) reads it in `authenticate`.
-const jazz = createJazzApp({ serverUrl: "/jazz" });
+// src/lib/backend-jazz-client.ts) reads it in `authenticate`. The session
+// exists once it started; until then the app shows its loading screen.
+let jazz: JazzSession<JazzClient> | undefined;
+let startError: Error | undefined;
 
 let shown: { key: string; dispose?(): void } | undefined;
 function show(key: string, render: () => HTMLElement | { element: HTMLElement; dispose(): void }) {
@@ -61,7 +63,7 @@ async function signOut() {
   // Signs out of Better Auth, then Jazz follows the backend's answer.
   await authClient.signOut();
   // A failure shows as Jazz's error state; leave the page either way.
-  await jazz.reauthenticate().catch(() => {});
+  await jazz?.refresh().catch(() => {});
   window.location.assign("/");
 }
 
@@ -71,22 +73,25 @@ function update() {
   if (!session.data)
     return show("signed-out", () =>
       // A failure shows as Jazz's error state below.
-      signInScreen(() => jazz.reauthenticate().catch(() => {})),
+      signInScreen(async () => {
+        await jazz?.refresh().catch(() => {});
+      }),
     );
   const user = session.data.user as { id: string; name: string };
-  const snapshot = jazz.getSnapshot();
-  if (snapshot.status === "error")
-    return show(`error:${snapshot.error?.message}`, () =>
-      status(snapshot.error?.message ?? "Could not open MusicAgent.", true),
+  const snapshot = jazz?.getSnapshot();
+  const error = startError ?? (snapshot?.status === "error" ? snapshot.error : undefined);
+  if (startError || snapshot?.status === "error")
+    return show(`error:${error?.message}`, () =>
+      status(error?.message ?? "Could not open MusicAgent.", true),
     );
-  const client = snapshot.status === "ready" ? snapshot.client : undefined;
-  const account = client?.session?.user;
+  const client = snapshot?.status === "ready" ? snapshot.client : undefined;
+  const account = snapshot?.user?.accountId;
   if (!client || !account) return show("loading", () => status("Opening MusicAgent…"));
   const key = `chat:${user.id}:${account}`;
   if (shown?.key === key) return;
   show(`preparing:${key}`, () => status("Preparing your booking desk…"));
   void prepare(user.id).then(({ ok, agentLabel }) => {
-    if (jazz.getSnapshot().client !== client) return;
+    if (jazz?.getSnapshot().client !== client) return;
     if (!ok)
       return show(`failed:${key}`, () => status("The workspace could not be prepared.", true));
     show(key, () =>
@@ -102,5 +107,15 @@ function update() {
 }
 
 authClient.$store.atoms.session!.subscribe(update);
-jazz.subscribe(update);
+createJazzClient({ serverUrl: "/jazz" }).then(
+  (session) => {
+    jazz = session;
+    session.subscribe(update);
+    update();
+  },
+  (error: unknown) => {
+    startError = error instanceof Error ? error : new Error(String(error));
+    update();
+  },
+);
 update();

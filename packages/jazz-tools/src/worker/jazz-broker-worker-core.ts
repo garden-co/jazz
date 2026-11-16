@@ -28,6 +28,8 @@ import {
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
+  type BrowserDeleteStoreRequest,
+  type BrowserDeleteStoreResponse,
   type BrowserWorkerInitOptions,
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
@@ -44,6 +46,7 @@ import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.j
 import { toError } from "../runtime/util.js";
 import type { RemoteLinkState } from "../runtime/remote-link-state.js";
 import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
+import { compareRuntimeAdmission } from "./runtime-admission.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -479,6 +482,7 @@ function attachBootstrapPort(
       | BrowserForegroundNodeLeaseProbeRequest
       | BrowserForegroundNodeLeaseAcquireRequest
       | BrowserForegroundNodeLeaseCancelRequest
+      | BrowserDeleteStoreRequest
     >,
   ) {
     const message = messageEvent.data;
@@ -515,6 +519,12 @@ function attachBootstrapPort(
       // the bootstrap reservation created in `onconnect`.
       if (message?.type === "connect-runtime") {
         post(port, { type: "worker-closing" } satisfies BrowserSharedWorkerConnectResponse);
+      } else if (message?.type === "delete-store") {
+        // The closing realm may still own the store: delete nothing now.
+        post(port, {
+          type: "delete-store-result",
+          outcome: "held",
+        } satisfies BrowserDeleteStoreResponse);
       } else if (
         message?.type === "probe-foreground-node-lease-worker" ||
         message?.type === "acquire-foreground-node-lease"
@@ -538,6 +548,30 @@ function attachBootstrapPort(
     }
     if (message?.type === "cancel-foreground-node-lease") {
       closeBootstrapPort();
+      return;
+    }
+    if (message?.type === "delete-store") {
+      if (scope) {
+        closeBootstrapPort();
+        return;
+      }
+      operationStarted = true;
+      clearTimeout(idleTimer);
+      recordWorkerLifecycle("delete-store", message.dbName, null);
+      void deleteStoreWithoutTabs(message.dbName, message.runtimeSources)
+        .then(
+          (outcome) =>
+            post(port, {
+              type: "delete-store-result",
+              outcome,
+            } satisfies BrowserDeleteStoreResponse),
+          (error: unknown) =>
+            post(port, {
+              type: "delete-store-error",
+              error: serializeBrowserRelayError(toError(error)),
+            } satisfies BrowserDeleteStoreResponse),
+        )
+        .finally(closeBootstrapPort);
       return;
     }
     if (message?.type !== "connect-runtime" && message?.type !== "acquire-foreground-node-lease") {
@@ -586,6 +620,61 @@ function attachBootstrapPort(
     parentLifetime.abort();
     if (!operationStarted) closeBootstrapPort();
   };
+}
+
+/**
+ * Delete `dbName`'s store, which no tab has open (`delete-store`, #5250): the
+ * page store, the SQLite VFS beside it and the lease pool inside it. `held`,
+ * deleting nothing, while a tab of this realm has it attached or is joining
+ * it (an admission or a lease in flight), or another realm (another deploy's
+ * worker) owns it: the physical database lock is the fence, as for any owner.
+ * An idle context, owner or lease pool this realm kept is released first.
+ */
+async function deleteStoreWithoutTabs(
+  dbName: string,
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): Promise<"deleted" | "held"> {
+  for (const context of [...contexts.values()]) {
+    if (context.options.dbName !== dbName) continue;
+    if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return "held";
+    await releaseIdleContext(context);
+  }
+  const leaseOwner = foregroundLeaseOwners.get(dbName);
+  if (
+    [...contexts.values()].some((context) => context.options.dbName === dbName) ||
+    physicalDatabaseOwnerAdmissions.has(dbName) ||
+    (leaseOwner &&
+      (leaseOwner.pendingLeaseAllocations > 0 || leaseOwner.pendingLeaseFinalizations > 0))
+  )
+    return "held";
+  // Active leases without an attached runtime are a gone tab's: nothing
+  // notices a crashed tab's lease port. The page asks only under its
+  // exclusive per-account lock, which every browser session tab with a
+  // local-first client holds before it opens the store (with clearOnSignOut
+  // or without), so no tab is joining. The delete takes the lease pool with it.
+  pendingRuntimeOwnerRetirements.delete(dbName);
+  // Its durable epoch record goes with the store; the lock is released either way.
+  await releasePhysicalDatabaseOwner(dbName).catch(() => undefined);
+  if (leaseOwner) {
+    foregroundLeaseOwners.delete(dbName);
+    leaseOwner.pageStore.close();
+  }
+  let epoch: BrowserPhysicalDatabaseEpoch;
+  try {
+    epoch = await acquireBrowserPhysicalDatabaseEpoch(dbName);
+  } catch (error) {
+    if (error instanceof BrowserPhysicalDatabaseBusyError) return "held";
+    throw error;
+  }
+  try {
+    await IndexedDbPageStore.destroy(dbName);
+    // The SQLite file lives in its VFS's own IndexedDB store.
+    const wasmModule = await loadWorkerWasmModule(runtimeSources);
+    await wasmModule.WasmDb.destroyBrowserStorage(undefined, dbName);
+  } finally {
+    await epoch.release();
+  }
+  return "deleted";
 }
 
 async function acquireForegroundNodeLease(
@@ -988,9 +1077,12 @@ async function connectTab(
     if (context && !workerTelemetryCompatible(context.options, message.options)) {
       throw new Error("incompatible persistent browser telemetry configuration");
     }
-    if (context && context.fingerprint !== message.fingerprint) {
+    const admission = context
+      ? compareRuntimeAdmission(context.fingerprint, message.fingerprint, message.options.schema)
+      : "admit";
+    if (admission !== "admit") {
       throw new Error(
-        differsOnlyInSignIn(context.fingerprint, message.fingerprint)
+        admission === "held-by-another-sign-in"
           ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
           : "incompatible persistent browser configuration",
       );
@@ -1152,7 +1244,12 @@ async function initialize(context: RuntimeContext): Promise<void> {
       {
         selfSignedClientProof: proof,
         scopeIsolatedRelay: true,
-        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+        slowQueryLog: {
+          appId: options.appId,
+          thresholdMs: options.slowQueryThresholdMs,
+          // End users see a browser's console: plan and SQL go to debug.
+          consoleDetail: "summary",
+        },
       },
     );
     context.runtime = runtime;
@@ -1323,6 +1420,7 @@ async function configureServer(
     // same account's upstream connection, which already carries this tab's
     // local writes for that account.
     if (!carriesCredential(options.authJson) && carriesCredential(context.serverAuthJson)) return;
+    context.runtime?.assertCredentialKeepsPrincipal(options.authJson);
     context.serverAuthJson = options.authJson;
     if (context.serverConnectionStarted) await requireRuntime(context).updateAuth(options.authJson);
     return;
@@ -1588,9 +1686,27 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     result(peer, message.id);
     return;
   }
+  if (message.type === "store-pending-uploads") {
+    let pendingUploads: number | undefined;
+    try {
+      pendingUploads = peer.context.runtime?.uploadStatus().pending;
+    } catch {
+      pendingUploads = undefined;
+    }
+    result(peer, message.id, undefined, { pendingUploads });
+    return;
+  }
   if (message.type === "prepare-storage-reset") {
     peer.context.intentionalStorageReset = true;
-    result(peer, message.id);
+    // What the reset loses: every write of the store the server hasn't
+    // confirmed, whichever tab made it, recovered ones included.
+    let pendingUploads: number | undefined;
+    try {
+      pendingUploads = peer.context.runtime?.uploadStatus().pending;
+    } catch {
+      pendingUploads = undefined;
+    }
+    result(peer, message.id, undefined, { pendingUploads });
     return;
   }
   if (message.type === "abort-storage-reset") {
@@ -1788,6 +1904,9 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
       let authenticationRejected = false;
       await enqueueTransportTransition(peer.context, async () => {
+        // Refuse another principal's credential before storing it or
+        // publishing its claims, even while explicitly disconnected (#4476).
+        activeRuntime.assertCredentialKeepsPrincipal(message.authJson);
         const authFailureEpoch = peer.context.authFailureEpoch;
         try {
           if (!peer.context.explicitlyDisconnected) {
@@ -1874,6 +1993,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         const own =
           carriesCredential(message.authJson) || !carriesCredential(peer.context.serverAuthJson);
         const authJson = own ? message.authJson : peer.context.serverAuthJson;
+        activeRuntime.assertCredentialKeepsPrincipal(authJson);
         const dial = carriesCredential(authJson);
         if (dial) {
           activeRuntime.connect(serverUrl, authJson);
@@ -2037,6 +2157,7 @@ function result(
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     workerRealmId?: string;
+    pendingUploads?: number;
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
@@ -2359,25 +2480,6 @@ function workerTelemetryCompatible(
   return (current.logLevel ?? DEFAULT_WASM_LOG_LEVEL) === (next.logLevel ?? DEFAULT_WASM_LOG_LEVEL);
 }
 
-/**
- * Whether two worker fingerprints of one store differ only in who is signed
- * in (`authClass`, see `createBrowserWorkerFingerprint`). The store is the
- * account's either way (the storage owner already matched), so the tab only
- * waits for the store's current sign-in to go.
- */
-function differsOnlyInSignIn(open: string, requested: string): boolean {
-  try {
-    const { authClass: openAuth, ...openRest } = JSON.parse(open) as Record<string, unknown>;
-    const { authClass: requestedAuth, ...requestedRest } = JSON.parse(requested) as Record<
-      string,
-      unknown
-    >;
-    return openAuth !== requestedAuth && JSON.stringify(openRest) === JSON.stringify(requestedRest);
-  } catch {
-    return false;
-  }
-}
-
 function runtimeKey(options: BrowserWorkerInitOptions): string {
   // One runtime/page-store owner per physical IndexedDB root. The persistent
   // owner marker covers distinct worker assets that cannot share this realm.
@@ -2390,7 +2492,8 @@ function post(
     | BrowserFollowerPortEvent
     | BrowserSharedWorkerConnectResponse
     | BrowserForegroundNodeLeaseAcquireResponse
-    | BrowserForegroundNodeLeasePortEvent,
+    | BrowserForegroundNodeLeasePortEvent
+    | BrowserDeleteStoreResponse,
 ): void {
   port.postMessage(event);
 }

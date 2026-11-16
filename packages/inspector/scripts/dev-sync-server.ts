@@ -29,7 +29,7 @@ export default async function runServer({
       serverUrl: serverHandle.url,
       appId: serverHandle.appId,
       adminSecret: serverHandle.adminSecret,
-      schema: app,
+      app,
       permissions: serverPermissions,
     });
 

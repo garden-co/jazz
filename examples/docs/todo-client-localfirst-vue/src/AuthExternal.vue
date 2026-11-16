@@ -1,23 +1,19 @@
 <script setup lang="ts">
-import { createAccountManager, type DbConfig } from "jazz-tools";
-import { JazzProvider, useAccountState } from "jazz-tools/vue";
-const props = defineProps<{
-  accounts: Awaited<ReturnType<typeof createAccountManager>>;
-  config: Omit<DbConfig, "account">;
-}>();
-const state = useAccountState(props.accounts);
-// Login starts without a context. Before linking, finish the old context's
-// shutdown({ waitForSync: true }), then call accounts.linkWithBackend outside it.
+import { JazzProvider, useJazzSession, type JazzClient, type JazzSession } from "jazz-tools/vue";
+// A session you opened with await createJazzClient({ serverUrl: "/jazz" }).
+const props = defineProps<{ session: JazzSession<JazzClient> }>();
+const { snapshot, refresh } = useJazzSession(props.session);
+// After your own sign-in has set its session cookie, ask your backend who is signed in.
 function signIn() {
-  void props.accounts.loginWithBackend().catch(() => {});
+  void refresh().catch(() => {});
 }
 </script>
 <template>
-  <JazzProvider v-if="state.account" :config="{ ...config, account: state.account }"
-    ><slot
-  /></JazzProvider>
-  <template v-else>
-    <button :disabled="!!state.pending" @click="signIn">Sign in</button>
-    <p v-if="state.error" role="alert">{{ state.error.message }}</p>
-  </template>
+  <JazzProvider :session="session">
+    <slot />
+    <template #signedOut>
+      <button :disabled="!!snapshot.pending" @click="signIn">Sign in</button>
+      <p v-if="snapshot.error" role="alert">{{ snapshot.error.message }}</p>
+    </template>
+  </JazzProvider>
 </template>

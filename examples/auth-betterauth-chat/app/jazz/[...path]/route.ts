@@ -1,5 +1,6 @@
 import { jazz } from "../../../src/lib/jazz.server";
 
+// #region default-stack-route
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -13,3 +14,4 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   return (await jazz()).next().DELETE(request);
 }
+// #endregion default-stack-route

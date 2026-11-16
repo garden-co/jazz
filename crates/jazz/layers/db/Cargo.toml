@@ -1,8 +1,14 @@
 [package]
 name = "jazz-db"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Jazz's database: the thread-affine Db facade over SQLite."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Only what builds the library: tests, benches and their fixtures stay in the repo.
+include = ["src/**", "build.rs", "README.md", "fixtures/binding_codec_golden.json"]
 
 [features]
 default = []
@@ -30,3 +36,4 @@ serde_json = "1.0.145"
 futures = "0.3"
 serde = { version = "1.0.228", features = ["derive"] }
 postcard = { version = "1.1.3", features = ["alloc"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }

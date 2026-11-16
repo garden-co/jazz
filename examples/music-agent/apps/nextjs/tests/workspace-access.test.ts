@@ -3,8 +3,8 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Db } from "jazz-tools";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
-import { app } from "../schema";
-import permissions from "../permissions";
+import { app } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 // The browser's side of the app: a user signed in with Better Auth, syncing
 // through the app's own `/jazz` route (as the browser does), and reading under
@@ -87,15 +87,15 @@ async function signIn(email: string, name: string) {
     driver: { type: "memory" },
   });
   closers.push(() => browser.close());
-  await browser.loginWithBackend();
-  const { client, status, error } = browser.getSnapshot();
+  await browser.refresh();
+  const { user, status, error } = browser.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
   const account = await jazz.accountFor(
     new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
   );
   if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
-  expect(client!.session!.user!).toBe(account);
-  return { db: client!.db, accountId: account, userId: session!.user.id };
+  expect(user?.accountId).toBe(account);
+  return { db: browser.db, accountId: account, userId: session!.user.id };
 }
 let userId: string;
 let otherUserId: string;

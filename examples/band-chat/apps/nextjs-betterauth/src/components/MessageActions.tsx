@@ -11,24 +11,29 @@ import {
   ToggleButton,
   VStack,
 } from "@astryxdesign/core";
-import { app, type Reaction } from "../../schema";
+import { app, type Reaction } from "../../jazz.generated";
 import { displayNameFor, useDirectory } from "../lib/profiles";
 import type { MessageSummary } from "./RoomView";
 
 const QUICK_REACTIONS = ["👍", "❤️", "🔥", "😂", "🎸", "🥁", "🎤", "👏"];
 const EMOJI = /^(\p{Extended_Pictographic}|\p{Emoji_Component}|\p{Emoji_Presentation})+$/u;
 
-/** Reaction toggles, the reaction picker and (for your own messages) delete. */
+/**
+ * Reaction toggles, the reaction picker and, for your own messages, who read
+ * it and delete.
+ */
 export function MessageActions({
   message,
   reactions,
   author,
   isMine,
+  onShowReadBy,
 }: {
   message: MessageSummary;
   reactions: Reaction[];
   author: string;
   isMine: boolean;
+  onShowReadBy: () => void;
 }) {
   const db = useDb();
   const directory = useDirectory();
@@ -70,6 +75,7 @@ export function MessageActions({
           label="Message options"
           size="sm"
           items={[
+            { label: "Read by", onClick: onShowReadBy },
             {
               label: "Delete message",
               variant: "destructive",

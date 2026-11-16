@@ -21,7 +21,10 @@ same scenarios.
     the real content type (`application/wasm` for the runtime), precompressed brotli or gzip, and
     `immutable` caching. It proxies everything else to the app server;
   - a local JazzServer (`sync.mjs`) with a fresh data dir. It uses the app's own server options
-    and deploys the app's schema and permissions.
+    and deploys the app's schema and permissions. The Next.js apps' backends keep their data
+    there; the Vite apps run Jazz in memory inside `vite preview`, so a scenario that needs a fresh,
+    empty store (World Tour's first visit) restarts the preview server instead
+    (`server.restartStore()`).
 - **Fixtures.** Before an app's cases run, `setup` creates its fixture users and content. This is
   untimed: for example, an owner signed up and on the measured page. The cases then run in
   `metadata.ts` order.

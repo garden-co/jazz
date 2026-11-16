@@ -4,11 +4,14 @@ import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { sqlite } from "jazz-tools/backend";
 import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
-import { app as schemaApp } from "../schema.js";
-import permissions from "../permissions.js";
+import { app as schemaApp } from "../jazz.generated.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 // Your own auth decides who a request is (a session cookie, a header).
-declare function currentUser(request: Request): Promise<{ id: string } | null>;
+// `sessionExpiresAt`: when that session expires, in Unix seconds.
+declare function currentUser(
+  request: Request,
+): Promise<{ id: string; sessionExpiresAt: number } | null>;
 
 // The app's Jazz for the whole server, closed when the server stops.
 const JazzLive = JazzBackend.layer({
@@ -17,7 +20,7 @@ const JazzLive = JazzBackend.layer({
   store: sqlite({ path: "./data/jazz" }),
   async authenticate(request) {
     const user = await currentUser(request);
-    return user ? { userId: user.id } : null;
+    return user ? { userId: user.id, expiresAt: user.sessionExpiresAt } : null;
   },
 });
 

@@ -26,6 +26,93 @@ const oneShot = (name: string, title: string, predicate: string): BenchmarkMetad
   source,
 });
 
+const textSource = "examples/band-book/benchmarks/benches/walltime.rs";
+const textNightlySource = "examples/band-book/benchmarks/benches/text_merge.rs";
+const textFixture =
+  'An authority and two devices in one process, connected over in-memory transports, all subscribed to a one-column `songSheets` table whose `body` is `s.string().merge("markdown")`, the column type of song sheets in the app. The table has no workspace or page columns, and its policies allow every read and write. A song paragraph is a 270-character lyric with Markdown emphasis; a long note is generated prose with Markdown runs and a line break every 40 words.';
+const textStorage = "In-memory databases on every replica (no file I/O)";
+const textIncludes = [
+  "The device reconnecting, uploading its pending writes and each one settling at the authority (Global tier), merged where it missed a version",
+  "Delivery of the result to both devices",
+];
+const textExcludes = [
+  "Permission checks: the fixture table allows every read and write",
+  "Seeding the sheet, taking the devices offline and making the edits",
+  "The other device's write, accepted before the timed reconnect",
+  "Network: transports are in-memory queues",
+];
+const oneMerge = (explanation: string) => ({
+  count: 1,
+  unit: "merges/s",
+  explanation,
+});
+
+const textMergeBenchmarks: BenchmarkMetadata[] = [
+  {
+    name: "band_book_text_fast_path",
+    title: "BandBook · reconnect with an edit nobody else made",
+    description:
+      "A device edited a song sheet while offline and nobody else changed it. It reconnects; the authority finds no version it missed and applies the write as is (the text merge fast path).",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One write accepted without merging; the baseline for the merge cases."),
+    source: textSource,
+  },
+  {
+    name: "band_book_text_concurrent_paragraph",
+    title: "BandBook · merge two offline edits to one paragraph",
+    description:
+      "Two devices edited the same song paragraph while offline, one at the start and one at the end. The first has reconnected and its write was accepted; the second reconnects and its write is merged with it, keeping both edits.",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One three-way merge of a paragraph, plus accepting and delivering it."),
+    source: textSource,
+  },
+  {
+    name: "band_book_text_offline_chain[20]",
+    title: "BandBook · reconnect with 20 offline writes to one paragraph",
+    description:
+      "A device typed into a paragraph offline, one write per pause (20 writes), while the other device edited the start of the same paragraph five times online. It reconnects; each of its 20 writes is merged over what it had seen.",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: {
+      count: 20,
+      unit: "merged writes/s",
+      explanation: "Twenty chained writes, each merged on arrival.",
+    },
+    source: textNightlySource,
+  },
+  ...[100_000, 1_000_000].map((bytes) => ({
+    name: `band_book_text_long_note[${bytes}]`,
+    title: `BandBook · merge two offline edits to a ${bytes >= 1_000_000 ? `${bytes / 1_000_000} MB` : `${bytes / 1_000} KB`} note`,
+    description: `Two devices made 200 scattered word insertions each to a ${bytes.toLocaleString("en-US")}-byte tour note while offline, interleaved through the note. The first has reconnected; the second reconnects and its write is merged, keeping all 400 insertions.`,
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One three-way merge of a long value with 200 edits per side."),
+    source: textNightlySource,
+  })),
+  {
+    name: "band_book_text_over_budget[1000000]",
+    title: "BandBook · a 1 MB merge past the work budget",
+    description:
+      "One device replaced a 1,000,000-byte note with different text while the other made 200 scattered insertions offline. Merging them would exceed the merge's work budget (100 million diff steps), so the authority stops and the later write's whole value wins: the worst case a merge can cost.",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One merge attempt that runs out of budget, then the later write wins."),
+    source: textNightlySource,
+  },
+];
+
 export const bandBookBenchmarks: BenchmarkMetadata[] = [
   oneShot(
     "band_book_workspace_pages_unrestricted",
@@ -62,4 +149,47 @@ export const bandBookBenchmarks: BenchmarkMetadata[] = [
     },
     source,
   },
+  ...textMergeBenchmarks,
 ];
+
+// Contention: another band opening its big workspace on the same server.
+const contention = "examples/band-book/benchmarks/benches/contention.rs";
+for (const [request, title, unit, timed] of [
+  [
+    "open_my_pages",
+    "open my pages",
+    "page lists/s",
+    "One remote read of your newest 50 pages, from request to verified rows",
+  ],
+  [
+    "check_off_page",
+    "check off a page",
+    "check-offs/s",
+    "One page update, from the call until the server acknowledges it (GlobalServer)",
+  ],
+] as const) {
+  for (const [arm, during] of [
+    ["idle", "with the server otherwise idle"],
+    ["during_workspace_open", "while another band's member opens their big workspace"],
+  ] as const) {
+    bandBookBenchmarks.push({
+      name: `band_book_${request}_${arm}`,
+      title: `BandBook contention · ${title}, ${arm === "idle" ? "idle" : "during a workspace open"}`,
+      description: `A member of one band requests over a WebSocket to one durable server ${during}. Opening the workspace loads its sidebar: every page, oldest first, unbounded, under the owner OR workspace-member policy; two devices reopen it back to back. Compare with the other arm: the difference is how long one large read holds up another tenant's cheap request.`,
+      fixture:
+        "One durable SQLite server: band A's workspace has 5,000 pages, band B's 200, interleaved in one table.",
+      storage: "Durable SQLite server over WebSockets; each client has its own thread",
+      includes: [timed],
+      excludes: [
+        "Seeding, server start, client sign-in and warm-up",
+        "The browsing clients' work, except as it delays the server",
+      ],
+      work: {
+        count: 1,
+        unit,
+        explanation: "One request per iteration; workspace opens are not counted.",
+      },
+      source: contention,
+    });
+  }
+}
