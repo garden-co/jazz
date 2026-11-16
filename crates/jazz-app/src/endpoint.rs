@@ -13,7 +13,10 @@
 //!   resolves (or creates) their account;
 //! - `<base>/apps/<id>/ws`: the user's sync socket, whose prelude the
 //!   backend admits on its own word and relays to the core, pinned to the
-//!   permissions bundle it published ([`Endpoint::serve_socket`]).
+//!   permissions bundle it published ([`Endpoint::serve_socket`]). A thin
+//!   client's transactions are served here, by an in-memory client linked
+//!   to the core as the same session (SPEC 8.14): the core only accepts
+//!   them finished.
 //! - `POST <base>/apps/<id>/accounts/backend-link[/challenge]`: a device
 //!   account links to the user who signs up, proving its key on a
 //!   challenge issued for them.
@@ -50,6 +53,7 @@ use crate::handle::{BackendLink, Jazz};
 
 #[cfg(feature = "axum")]
 mod axum;
+mod thin;
 
 /// The issuer `createJazz` names the app's users by.
 const BACKEND_ISSUER: &str = "jazz:backend";
@@ -84,6 +88,9 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 const CORE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many sockets an endpoint serves at once, by default.
 const DEFAULT_MAX_SOCKETS: usize = 10_000;
+/// Thin sessions with transactions served at once, each by a client (and a
+/// thread) of its own.
+const DEFAULT_MAX_TRANSACTION_CLIENTS: usize = 256;
 
 /// An HTTP request as the host's server received it: what
 /// [`Authenticate`] reads (cookies, `Authorization`), and what
@@ -363,6 +370,9 @@ struct Inner {
     max_sockets: usize,
     /// Sockets open now.
     sockets: Arc<std::sync::atomic::AtomicUsize>,
+    max_transaction_clients: usize,
+    /// Thin sessions' transaction clients running now.
+    transaction_clients: Arc<std::sync::atomic::AtomicUsize>,
     http: reqwest::Client,
     /// What link challenges are signed with: derived from the admin secret,
     /// so every instance of the app's backend reads the others'.
@@ -394,6 +404,9 @@ enum Admission {
     Admitted {
         prelude: Vec<u8>,
         who: Admitted,
+        /// Who the socket's session is, for the client that serves a thin
+        /// session's transactions.
+        auth: thin::SessionAuth,
         /// When the client is asked to reconnect.
         until: Instant,
     },
@@ -443,6 +456,8 @@ impl Endpoint {
                 guest_key_after_link: GuestKeyAfterLink::Keep,
                 max_sockets: DEFAULT_MAX_SOCKETS,
                 sockets: Arc::default(),
+                max_transaction_clients: DEFAULT_MAX_TRANSACTION_CLIENTS,
+                transaction_clients: Arc::default(),
                 http,
                 challenge_key,
                 accounts: Mutex::new(HashMap::new()),
@@ -475,6 +490,23 @@ impl Endpoint {
         self.reconfigure(|inner| inner.max_sockets = max)
     }
 
+    /// How many thin sessions this endpoint serves transactions for at once
+    /// (default 256), each with an in-memory client and a thread of its
+    /// own, from its first transaction request to the end of its socket.
+    /// One more session's transaction requests are refused with
+    /// `backpressure`, to try again later.
+    pub fn max_transaction_clients(self, max: usize) -> Self {
+        self.reconfigure(|inner| inner.max_transaction_clients = max)
+    }
+
+    /// How many thin sessions' transaction clients run now.
+    #[doc(hidden)]
+    pub fn transaction_clients(&self) -> usize {
+        self.inner
+            .transaction_clients
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn reconfigure(self, change: impl FnOnce(&mut Inner)) -> Self {
         let mut inner = match Arc::try_unwrap(self.inner) {
             Ok(inner) => inner,
@@ -489,6 +521,8 @@ impl Endpoint {
                 guest_key_after_link: shared.guest_key_after_link,
                 max_sockets: shared.max_sockets,
                 sockets: shared.sockets.clone(),
+                max_transaction_clients: shared.max_transaction_clients,
+                transaction_clients: shared.transaction_clients.clone(),
                 http: shared.http.clone(),
                 challenge_key: shared.challenge_key.clone(),
                 accounts: Mutex::new(HashMap::new()),
@@ -1108,8 +1142,13 @@ impl Endpoint {
                 };
             }
         };
-        let (prelude, until) = match admission {
-            Admission::Admitted { prelude, until, .. } => (prelude, until),
+        let (prelude, until, auth) = match admission {
+            Admission::Admitted {
+                prelude,
+                until,
+                auth,
+                ..
+            } => (prelude, until, auth),
             Admission::Unverified => {
                 let _ = outgoing
                     .send(auth_failed(
@@ -1157,8 +1196,43 @@ impl Endpoint {
         }
         let expiry = tokio::time::sleep_until(until.into());
         tokio::pin!(expiry);
+        let target = thin::SessionTarget {
+            server: core.server.clone(),
+            app_id: core.app_id,
+            backend_secret: core.backend_secret.clone(),
+            bundle: self.inner.bundle.clone(),
+            auth,
+        };
+        // A thin client (its Hello asks for thin results) has its
+        // transaction requests served here, not by the core (SPEC 8.14).
+        let mut hello_seen = false;
+        let mut thin: Option<ThinSocket> = None;
+        let (answers, mut answered) = tokio::sync::mpsc::unbounded_channel();
+        // Since when the thin socket's requests wait on an answer: one that
+        // never comes (the core dropped it) must not hold them forever.
+        let mut waiting_since: Option<tokio::time::Instant> = None;
+        let clients = (
+            &self.inner.transaction_clients,
+            self.inner.max_transaction_clients,
+        );
         let closed = loop {
+            // (At the top: arms that `continue` pass through here too.)
+            waiting_since = match &thin {
+                Some(thin) if thin.router.is_waiting() => {
+                    Some(waiting_since.unwrap_or_else(tokio::time::Instant::now))
+                }
+                _ => None,
+            };
+            let waited_out = waiting_since.map(|since| since + thin::ANSWER_DEADLINE);
             tokio::select! {
+                () = async {
+                    match waited_out {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    break Closed { code: 1011, reason: "an answer never came".into() };
+                },
                 message = incoming.next() => match message {
                     // More than the core takes in one message: it would
                     // close the link, so the endpoint does, for this socket.
@@ -1166,16 +1240,63 @@ impl Endpoint {
                         break Closed { code: 1009, reason: "message too big".into() };
                     }
                     Some(message) => {
+                        if !hello_seen {
+                            hello_seen = true;
+                            if asks_thin_results(&message) {
+                                thin = Some(ThinSocket::default());
+                            }
+                        } else if let Some(thin) = &mut thin {
+                            if !thin.take_client_message(&message) {
+                                break Closed::policy("undecodable thin frame");
+                            }
+                            if !send_all(&mut to_core, thin.release(&target, clients, &answers)).await {
+                                break Closed { code: 1011, reason: "the sync server went away".into() };
+                            }
+                            continue;
+                        }
                         if to_core.send(Message::Binary(message.into())).await.is_err() {
                             break Closed { code: 1011, reason: "the sync server went away".into() };
                         }
                     }
                     None => break Closed::normal(),
                 },
+                Some(answer) = answered.recv() => {
+                    if let Some(thin) = &mut thin {
+                        thin.router.answered(&answer);
+                    }
+                    let mut sent = true;
+                    for frame in thin::answer_frames(answer) {
+                        let Ok(message) = encode_websocket_frame_batch(&[frame]) else {
+                            continue;
+                        };
+                        if outgoing.send(message).await.is_err() {
+                            sent = false;
+                            break;
+                        }
+                    }
+                    if !sent {
+                        break Closed::normal();
+                    }
+                    // The backend's answer may free frames waiting on it.
+                    if let Some(thin) = &mut thin
+                        && !send_all(&mut to_core, thin.release(&target, clients, &answers)).await
+                    {
+                        break Closed { code: 1011, reason: "the sync server went away".into() };
+                    }
+                },
                 message = from_core.next() => match message {
                     Some(Ok(Message::Binary(data))) => {
+                        if let Some(thin) = &mut thin {
+                            thin.note_core_message(&data);
+                        }
                         if outgoing.send(data.to_vec()).await.is_err() {
                             break Closed::normal();
+                        }
+                        // The core's answers may free requests waiting on them.
+                        if let Some(thin) = &mut thin
+                            && !send_all(&mut to_core, thin.release(&target, clients, &answers)).await
+                        {
+                            break Closed { code: 1011, reason: "the sync server went away".into() };
                         }
                     }
                     Some(Ok(Message::Close(frame))) => {
@@ -1287,6 +1408,7 @@ impl Endpoint {
             return Ok(Admission::Admitted {
                 prelude: self.pinned(forwarded),
                 who: Admitted::DeviceAccount,
+                auth: thin::SessionAuth::DeviceAccount(token.to_owned()),
                 until: now + self.inner.session_ttl,
             });
         }
@@ -1309,6 +1431,7 @@ impl Endpoint {
         let Some(until) = reauthenticate_at(now, user.expires_at, self.inner.session_ttl) else {
             return Ok(Admission::Expired);
         };
+        let auth = thin::SessionAuth::User(session.clone());
         // As TS `sessionFor` states it to the core.
         let session = json!({
             "account_id": session.account_id.map(|account| account.0.to_string()),
@@ -1324,6 +1447,7 @@ impl Endpoint {
         Ok(Admission::Admitted {
             prelude: self.pinned(forwarded),
             who: Admitted::User(user.user_id),
+            auth,
             until,
         })
     }
@@ -1488,6 +1612,120 @@ fn reauthenticate() -> Vec<u8> {
         WireRetry::AfterResume,
         format!("{REAUTHENTICATE_PREFIX} the session reached the expiry authenticate gave it"),
     )
+}
+
+/// Send `messages` to the core, in order. False once it went away.
+async fn send_all<S>(to_core: &mut S, messages: Vec<Vec<u8>>) -> bool
+where
+    S: Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+{
+    for message in messages {
+        if to_core
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                message.into(),
+            ))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether a client's Hello (its first message after the prelude) asks
+/// for thin results: a thin client, whose transactions the backend serves.
+fn asks_thin_results(message: &[u8]) -> bool {
+    let Ok(frames) = jazz::wire::decode_websocket_frame_batch(message) else {
+        return false;
+    };
+    frames.first().is_some_and(|frame| {
+        matches!(
+            jazz::wire::decode_frame(frame),
+            Ok(WireFrame::Hello(hello)) if hello.features & jazz::wire::FEATURE_THIN_RESULTS != 0
+        )
+    })
+}
+
+/// A thin client's socket, past its Hello: its frames split between the
+/// core and the session's client, in the client's order.
+#[derive(Default)]
+struct ThinSocket {
+    router: thin::ThinRouter,
+    /// Started on the session's first transaction request.
+    client: Option<thin::SessionClient>,
+}
+
+impl ThinSocket {
+    /// Take one client message. False when it does not decode.
+    fn take_client_message(&mut self, message: &[u8]) -> bool {
+        jazz::wire::decode_websocket_frame_batch(message)
+            .ok()
+            .is_some_and(|frames| self.router.from_client(frames).is_ok())
+    }
+
+    /// Note one message the core sent the client.
+    fn note_core_message(&mut self, message: &[u8]) {
+        if let Ok(frames) = jazz::wire::decode_websocket_frame_batch(message) {
+            self.router.from_core(&frames);
+        }
+    }
+
+    /// Release what may go now: backend requests to the session's client,
+    /// and the messages for the core, returned (a frame each).
+    fn release(
+        &mut self,
+        target: &thin::SessionTarget,
+        clients: (&Arc<std::sync::atomic::AtomicUsize>, usize),
+        answers: &tokio::sync::mpsc::UnboundedSender<jazz::thin::ThinResponse>,
+    ) -> Vec<Vec<u8>> {
+        let mut to_core = Vec::new();
+        for step in self.router.ready() {
+            match step {
+                jazz::thin_transactions::Step::ToCore(frames) => {
+                    to_core.extend(frames.iter().filter_map(|frame| {
+                        encode_websocket_frame_batch(std::slice::from_ref(frame)).ok()
+                    }))
+                }
+                jazz::thin_transactions::Step::ToBackend(request) => {
+                    let client = match &self.client {
+                        Some(client) => client,
+                        None => {
+                            let Some(schema) = self.router.schema() else {
+                                let _ = answers.send(jazz::thin::ThinResponse {
+                                    id: request.id,
+                                    body: jazz::thin::ThinBody::Error {
+                                        code: "Argument".to_owned(),
+                                        message: "bind the connection to a schema first".to_owned(),
+                                    },
+                                });
+                                continue;
+                            };
+                            let Some(slot) = SocketSlot::take(clients.0, clients.1) else {
+                                let _ = answers.send(jazz::thin::ThinResponse {
+                                    id: request.id,
+                                    body: jazz::thin::ThinBody::Error {
+                                        code: "backpressure".to_owned(),
+                                        message: "the backend serves as many sessions' transactions as it may; try again later"
+                                            .to_owned(),
+                                    },
+                                });
+                                continue;
+                            };
+                            self.client.insert(thin::SessionClient::start(
+                                target.clone(),
+                                schema.to_vec(),
+                                answers.clone(),
+                                Box::new(slot),
+                            ))
+                        }
+                    };
+                    client.send(request);
+                }
+            }
+        }
+        to_core
+    }
 }
 
 #[cfg(test)]
