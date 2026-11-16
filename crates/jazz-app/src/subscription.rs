@@ -31,6 +31,7 @@ pub struct Delta<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Added<T> {
     /// The result this is.
     pub key: ResultKey,
@@ -39,6 +40,7 @@ pub struct Added<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Updated<T> {
     /// The result that changed.
     pub key: ResultKey,
@@ -50,6 +52,7 @@ pub struct Updated<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Removed {
     /// The result that went.
     pub key: ResultKey,

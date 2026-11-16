@@ -31,9 +31,9 @@
 //! part of a release yet: `Endpoint`, the app's `/jazz` handler served
 //! natively. Run an app's main backend with TS `createJazz`.
 //!
-//! Not supported yet: partial reads of large values. A bearer session is renewed by reconnecting with a fresh bearer,
-//! as TypeScript's bearer clients do (in-place renewal is for cookie
-//! sessions).
+//! Not supported yet: partial reads of large values. A bearer session is
+//! renewed by reconnecting with a fresh bearer, as TypeScript's bearer
+//! clients do (in-place renewal is for cookie sessions).
 
 mod advice;
 mod app;
@@ -89,7 +89,7 @@ pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, TransactionId};
+pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, ResultKey, TransactionId};
 
 /// Stateless anchors and ranges into text values (cursors, selections,
 /// comments), captured from one value and found again in later ones, as
