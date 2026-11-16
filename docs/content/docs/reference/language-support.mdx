@@ -78,7 +78,8 @@ compared with TypeScript.
     - running your main backend in Go (publishing permissions, serving `/jazz`): run it in
       TypeScript with `createJazz`;
     - guest (anonymous) users;
-    - nested rows and catalogue enums in bindings;
+    - nested rows, catalogue enums and transaction-id columns: Go bindings are refused for apps that
+      declare them;
     - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
       reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
       column.
