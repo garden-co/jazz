@@ -38,8 +38,6 @@ enum Indexes {
     Both,
     /// `search` over the title only.
     TitleOnly,
-    /// [`Indexes::Both`] with `similar` server-only.
-    VectorServerOnly,
 }
 
 /// `notes(title, body?, project, embedding)`, `project` B-tree indexed.
@@ -71,15 +69,6 @@ fn schema_with(indexes: Indexes, restrict_inserts: bool) -> JazzSchema {
             )
             .vector_index("similar", "embedding", VectorMetric::L2),
         Indexes::TitleOnly => table.text_index("search", [("title", 1)], "jazz-text/1:en", false),
-        Indexes::VectorServerOnly => table
-            .text_index(
-                "search",
-                [("title", 2), ("body", 1)],
-                "jazz-text/1:en",
-                false,
-            )
-            .vector_index("similar", "embedding", VectorMetric::L2)
-            .server_only(),
     };
     compile_schema(&SchemaBuilder::new().table(table).build())
 }
@@ -520,24 +509,26 @@ fn vector_searches_are_filter_first_and_bounded_on_the_authority() {
     );
 }
 
-/// A server-only index is not maintained on clients: a client's local
-/// search through it is refused with `index_server_only`, while its other
-/// indexes work.
+/// No index is server-only yet (SPEC 20.9): results a client cannot
+/// recompute need a design of their own, so the declaration is refused.
 #[test]
-fn a_server_only_index_is_refused_on_a_client() {
-    let alice = client(2, schema_with(Indexes::VectorServerOnly, false));
-    insert(&alice, 1, note("Garden", None, "home", &[0.0, 0.0]));
-    assert_eq!(ids(&alice, &search("garden")), [1]);
-    let error = try_ids(
-        &alice,
-        &Query::from("notes").search("similar", nearest(&[0.0, 0.0], 1)),
-    )
-    .expect_err("server-only");
-    assert_eq!(error.reason, Some(Reason::IndexServerOnly));
+fn a_server_only_index_is_refused_where_it_is_declared() {
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .policies(allow_all_policies())
+                .text_index("search", [("title", 1)], "jazz-text/1:en", false),
+        )
+        .build();
+    for table in schema.values_mut() {
+        table.specialised_indexes[0].server_only = true;
+    }
+    let error = jazz::schema::JazzSchema::new(&schema).expect_err("refused");
     assert!(
         error
-            .message
-            .contains("index `notes.similar` is server-only"),
+            .to_string()
+            .contains("serverOnly indexes are not supported yet"),
         "{error}"
     );
 }

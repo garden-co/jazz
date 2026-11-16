@@ -1198,6 +1198,14 @@ fn validate_specialised_indexes(
         if !seen.insert(index.name.as_str()) {
             return Err(err(path, "two specialised indexes with the same name"));
         }
+        // Results a client cannot recompute need a design of their own
+        // (SPEC 20.9): until then no index is server-only.
+        if index.server_only {
+            return Err(err(
+                format!("{path}.serverOnly"),
+                "serverOnly indexes are not supported yet",
+            ));
+        }
         let column = |column: &str, option: &str| {
             table.columns.column(column).ok_or_else(|| {
                 err(
@@ -6744,7 +6752,6 @@ mod specialised_index_tests {
             )
             .vector_index("similar", "embedding", VectorMetric::Cosine)
             .geo_index("place", "lat", "lng")
-            .server_only()
     }
 
     fn refusal(with: impl FnOnce(TableSchemaBuilder) -> TableSchemaBuilder) -> String {
@@ -6809,7 +6816,6 @@ mod specialised_index_tests {
         let reordered = notes(|table| {
             table
                 .geo_index("place", "lat", "lng")
-                .server_only()
                 .vector_index("similar", "embedding", VectorMetric::Cosine)
                 .text_index(
                     "search",
@@ -6818,16 +6824,7 @@ mod specialised_index_tests {
                     true,
                 )
         });
-        // `server_only` marks the last-added index: make `place` the
-        // server-only one in both.
-        let mut expected = notes(all_kinds);
-        for index in &mut expected
-            .get_mut(&TableName::new("notes"))
-            .unwrap()
-            .specialised_indexes
-        {
-            index.server_only = index.name == "place";
-        }
+        let expected = notes(all_kinds);
         assert_eq!(
             convert_public_schema(&reordered).unwrap().version_id(),
             convert_public_schema(&expected).unwrap().version_id()
@@ -6870,7 +6867,7 @@ mod specialised_index_tests {
         );
         assert_eq!(
             hex("place"),
-            "000000000000000e6a617a7a2d69782d6465636c2f310000000000000005706c6163650200000000000000036c617400000000000000036c6e6701"
+            "000000000000000e6a617a7a2d69782d6465636c2f310000000000000005706c6163650200000000000000036c617400000000000000036c6e6700"
         );
     }
 
@@ -6933,6 +6930,18 @@ mod specialised_index_tests {
         assert_eq!(
             refusal(|t| t.geo_index("place", "lat", "lat")),
             "$.notes.specialised_indexes.place.geo: a geo index needs two different columns"
+        );
+        let mut server_only = notes(|t| t.geo_index("place", "lat", "lng"));
+        server_only
+            .get_mut(&TableName::new("notes"))
+            .unwrap()
+            .specialised_indexes[0]
+            .server_only = true;
+        assert_eq!(
+            convert_public_schema(&server_only)
+                .expect_err("not supported yet")
+                .to_string(),
+            "$.notes.specialised_indexes.place.serverOnly: serverOnly indexes are not supported yet"
         );
         assert_eq!(
             refusal(|t| t.index_only(["embedding"])),

@@ -806,14 +806,6 @@ impl TableSchemaBuilder {
         })
     }
 
-    /// Mark the most recently added specialised index server-only.
-    pub fn server_only(mut self) -> Self {
-        if let Some(index) = self.specialised_indexes.last_mut() {
-            index.server_only = true;
-        }
-        self
-    }
-
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name

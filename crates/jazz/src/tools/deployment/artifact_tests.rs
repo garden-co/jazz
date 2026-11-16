@@ -2541,7 +2541,7 @@ fn indexed_todos() -> ArtifactInput {
                 metric: VectorMetric::Cosine,
                 ann: VectorAnn::Exact,
             },
-            server_only: true,
+            server_only: false,
         },
         SpecialisedIndex {
             name: "place".into(),
@@ -2577,7 +2577,7 @@ fn specialised_indexes_round_trip_through_the_app_file() {
                 "analyzer": "jazz-text/1:en",
                 "prefix": true
             },
-            { "name": "similar", "vector": "embedding", "metric": "cosine", "serverOnly": true }
+            { "name": "similar", "vector": "embedding", "metric": "cosine" }
         ])
     );
     let validator = jsonschema::validator_for(&json_schema("jazz.app.schema.json")).unwrap();
@@ -2661,6 +2661,10 @@ fn malformed_specialised_indexes_are_refused_by_path() {
         (
             serde_json::json!({ "name": "g", "geo": { "lat": "lat", "lng": "lng" }, "serverOnly": "yes" }),
             "tables.todos.indexes[0].serverOnly: must be true or false",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": { "lat": "lat", "lng": "lng" }, "serverOnly": true }),
+            "serverOnly indexes are not supported yet",
         ),
         (
             serde_json::json!({ "name": "g", "geo": { "lat": "title", "lng": "lng" } }),
