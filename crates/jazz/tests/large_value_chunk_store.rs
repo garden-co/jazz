@@ -2390,7 +2390,10 @@ fn a_part_a_chunked_values_content_refuses_is_reported_by_the_readers_own_read()
         // range past the end: a query's part is clamped to its value
         // (#5502).
         for (label, query) in [
-            ("utf-16 past the end", part(Part::TextUtf16 { from: 0, to: past })),
+            (
+                "utf-16 past the end",
+                part(Part::TextUtf16 { from: 0, to: past }),
+            ),
             ("utf-8", body(split + 1, split + 41)),
             (
                 "utf-16",
