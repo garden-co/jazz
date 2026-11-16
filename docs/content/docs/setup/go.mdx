@@ -1,0 +1,84 @@
+---
+title: Go Backend
+description: "Open a Jazz app from Go with the jazz-go module and typed bindings generated from jazz.app.json."
+---
+
+A Go service can be your app's backend. It opens the app from the same `jazz.app.json` and
+`jazz.permissions.json` as every other language, with typed bindings generated from them. On start
+it publishes the app's permissions, then acts as one user of the app.
+
+The Go module, `github.com/garden-co/jazz/packages/jazz-go`, wraps Jazz's Rust core through cgo. It
+uses only the standard library: `context` for every call and channels for subscriptions. It isn't
+published as a tagged module yet, so build it from the Jazz repository:
+
+```bash
+git clone https://github.com/garden-co/jazz
+cd jazz && cargo build --release -p jazz-ffi   # the static library cgo links
+```
+
+```go title="go.mod"
+require github.com/garden-co/jazz/packages/jazz-go v0.0.0
+
+replace github.com/garden-co/jazz/packages/jazz-go => ../jazz/packages/jazz-go
+```
+
+Building needs cgo (a C compiler) and Rust. The module finds the library in the repository's
+`target/release`. If you build it elsewhere, point `CGO_LDFLAGS` at that directory (`-L<dir>`).
+
+## Generate the bindings
+
+With a `go.mod` that requires `jazz-go` beside `jazz.app.json`, `jazz-tools generate` writes the
+`jazzapp` package to `jazzapp/jazz_app.go`:
+
+```bash
+npx jazz-tools generate            # checks the files, writes jazzapp/jazz_app.go
+npx jazz-tools generate --check    # in CI: fails if jazzapp/jazz_app.go is stale
+```
+
+Commit `jazzapp/jazz_app.go` and import it as `<your module>/jazzapp`. Per table it gives you:
+
+- a row struct (`Task`), with `json` tags of the column names. Nullable columns are pointers;
+- `NewTask`, the row to insert. Nullable and defaulted columns are pointers you may leave nil;
+- `TaskPatch`, whose fields change a column only when you set them with `jazz.Set(…)`;
+- a string type with constants for each enum column (`TaskStatus`, `TaskStatusTodo`, …);
+- a table value (`jazzapp.Tasks`) with typed columns (`jazzapp.Tasks.Status.Eq(…)`), `Query()`,
+  `Insert`, `Update` and `Delete`.
+
+## Open the app
+
+<include cwd lang="go" meta='title="main.go"'>
+  ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#context-setup-go-backend
+</include>
+
+Writes are local-first: a write the server's permissions refuse returns no error. It is never
+synced, and other users never see it.
+
+A `*jazz.DB` is safe for concurrent use. Every call takes a `context.Context`. A cancelled context
+returns at once, but the call still runs to its end, so a write may still apply. Before the process
+exits, call `db.Close()`.
+
+A backend that syncs needs the sync server's URL, its admin secret (`AdminSecret`, to publish the
+permissions) and its backend secret (`BackendSecret`, to vouch for the user it acts as). Like every
+backend, give it no HTTP surface that callers can reach without your own authentication.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Go tab
+for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan
+command-line app.
+
+## Not supported yet
+
+- computed fields and transforms: `jazz-tools generate` refuses Go bindings for an app that
+  declares them;
+- payload enums (enums with fields), nested rows and catalogue enums;
+- collaborative text merging: a `merge: "text"` column (like StagePlan's `tasks.notes`) reads and
+  writes as a plain string, and a write replaces the whole text;
+- includes, relations in queries, `select` and recursive queries;
+- transactions;
+- durability tiers (reads and writes use the defaults);
+- subscription deltas carry no positions: re-sort an `OrderBy` subscription's rows yourself;
+- non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
+  reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
+  column. In a subscription, such a row ends it with an error delta;
+- syncing as an end user (with a JWT): without a backend's permissions and secrets, the app opens
+  as a local client only;
+- a published, tagged Go module, and Windows builds.
