@@ -432,10 +432,13 @@ export class ThinRuntime implements Runtime {
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
       onFrame: (frame) => this.receive(carrier, frame),
-      // The server's planned re-authentication arrives as an error on an open
-      // connection, ahead of its close: handle it as the connection's end.
+      // The server's planned re-authentication, and a refusal of an admitted
+      // session (`jazz.revokeUser`), arrive as an error on an open connection,
+      // ahead of its close: handle it as the connection's end, so a refusal
+      // says why (`revoked`) rather than reading as a dropped connection.
       onError: (error) => {
-        if (isReauthenticateWireError(error)) this.lost(carrier, error);
+        if (isReauthenticateWireError(error) || wireAuthFailureReason(error))
+          this.lost(carrier, error);
       },
       onTerminal: (error) => this.lost(carrier, error),
     });

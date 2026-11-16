@@ -834,6 +834,72 @@ it("signs a revoked user out of a visible tab at the second signed-out answer, n
   await t.session.close();
 });
 
+// A background tab used to wait for focus after jazz.revokeUser. A refusal
+// that says the session was revoked signs it out as a visible tab is: at the
+// second signed-out answer, after onSignedOut. Other refusals still wait.
+it("signs a revoked user out of a background tab at the second signed-out answer", async () => {
+  vi.useFakeTimers();
+  const onSignedOut = vi.fn(() => "sign-out" as const);
+  const t = await setup(user("alice"), {
+    clearOnSignOut: true,
+    confirmMs: 2_000,
+    onSignedOut,
+  });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(t.probe).toHaveBeenCalledTimes(1);
+  t.signIn(null);
+  // The link goes offline: auth first, and says why a moment later.
+  t.watch.authRefused();
+  t.watch.authRefused("revoked");
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1_999);
+  expect(onSignedOut).not.toHaveBeenCalled();
+  expect(t.session.getSnapshot().status).toBe("ready");
+  await vi.advanceTimersByTimeAsync(1);
+  expect(onSignedOut).toHaveBeenCalledOnce();
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["wipe:alice", "close:alice"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("keeps a revoked background tab whose second answer names the user again", async () => {
+  vi.useFakeTimers();
+  const onSignedOut = vi.fn(() => "sign-out" as const);
+  const t = await setup(user("alice"), { confirmMs: 2_000, onSignedOut });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  // Revoked to make her sign in again, with a cookie being refreshed: one
+  // signed-out answer, then the backend names her again.
+  t.signIn(null);
+  t.watch.authRefused("revoked");
+  await vi.advanceTimersByTimeAsync(0);
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(onSignedOut).not.toHaveBeenCalled();
+  expect(t.reconnect).toHaveBeenCalledOnce();
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("leaves a background tab refused for another reason to the next focus", async () => {
+  vi.useFakeTimers();
+  const t = await setup(user("alice"), { confirmMs: 2_000 });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  t.signIn(null);
+  t.watch.authRefused("expired");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.focus();
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("reconnects a refused visible tab whose second answer names the user again", async () => {
   vi.useFakeTimers();
   const onSignedOut = vi.fn(() => "sign-out" as const);

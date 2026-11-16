@@ -98,8 +98,11 @@ within `sessionTtlSeconds`. On Vercel and other serverless hosts, the request th
 usually runs on a different instance than their sync connections, so `revokeUser` there rarely
 reaches them. To sign out the browser the user is in, every tab of it, call `refresh()` on the
 client after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)). A connection
-`revokeUser` does end asks your backend who is signed in; in a background tab, a "no one" answer
-then waits until the tab is in front again, since its cookies may be stale.
+`revokeUser` does end asks your backend who is signed in, in a background tab too: the refusal
+says the session was revoked, so a "no one" answer there signs the user out as in a tab in view
+(confirmed by a second answer two seconds later, after `onSignedOut`). Until then the link reads
+`{ state: "offline", reason: "auth", authReason: "revoked" }` in `db.getSyncStatus()`, and writes
+made meanwhile stay pending: stop taking edits from there if your app shouldn't accept them.
 
 ### Keep auth middleware off Jazz's routes
 
@@ -165,7 +168,9 @@ Jazz asks your backend who is signed in at these moments; the identity always co
 A "no one is signed in" answer signs the user out only once a second answer, two seconds later,
 agrees, so one failed session refresh in `authenticate` signs no one out. After `refresh()` Jazz
 follows the first answer. After a refused connection, a tab in the background doesn't sign out on
-its own: its cookies may be stale, so it asks again when it is in front. A failed check (a network
+its own: its cookies may be stale, so it asks again when it is in front. A connection
+`jazz.revokeUser` ended is the exception: the backend ended it on purpose, so a background tab
+follows the two answers as a tab in view does. A failed check (a network
 error, a timeout, a 5xx) is tried again with backoff. A device remembers the
 user your backend signed in (their account, identity and claims, never a credential), so a reload
 reopens their account straight away, offline too, and the first answer confirms it: another user

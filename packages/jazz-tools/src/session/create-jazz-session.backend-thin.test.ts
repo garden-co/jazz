@@ -653,6 +653,60 @@ describe("browser session against the app's backend", () => {
     expect(session.getSnapshot().status).toBe("signed-out");
   }, 60_000);
 
+  // A revoked tab in the background used to wait for focus before signing
+  // out. The refusal says why (link.authReason "revoked"), and a revoked
+  // background tab signs out as a visible one does: at the second
+  // signed-out answer, after onSignedOut.
+  for (const variant of ["thin", "local-first"] as const)
+    it(`signs a revoked ${variant} tab in the background out, and says it was revoked`, async () => {
+      const auth = tokenAuth("alice:1");
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate: auth.authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      const served = await listen(jazz);
+      cookies(served.origin, "alice:1");
+      vi.stubGlobal("document", { visibilityState: "hidden" });
+      const onSignedOut = vi.fn(() => "sign-out" as const);
+      const session = await createJazzClient({
+        serverUrl: `${served.origin}/jazz`,
+        store: memoryStore(),
+        driver: { type: "memory" },
+        onSignedOut,
+        ...(variant === "local-first"
+          ? { client: async () => ({ createClient: createLocalFirstDb }) }
+          : {}),
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      if (variant === "local-first")
+        await expect
+          .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+          .toBe(false);
+      const client = session.getSnapshot().client!;
+      const owner = client.session!.user!;
+      await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
+      const links: unknown[] = [];
+      const stop = client.db.onSyncStatusChange(({ link }) => links.push(link));
+      cleanups.push(async () => stop());
+
+      auth.valid.delete("alice:1");
+      expect(await jazz.revokeUser("alice")).toBe(1);
+      await expect
+        .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 20 })
+        .toBe("signed-out");
+      expect(onSignedOut).toHaveBeenCalledOnce();
+      expect(links).toContainEqual({
+        state: "offline",
+        reason: "auth",
+        retrying: false,
+        authReason: "revoked",
+      });
+    }, 60_000);
+
   // E12: a revoked tab with a write that can never upload used to hang in
   // `transitioning` (signOut) for good, its write's wait neither resolving
   // nor rejecting: sign-out waited for an upload the server will never take.
