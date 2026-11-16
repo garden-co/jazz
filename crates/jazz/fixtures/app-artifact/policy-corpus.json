@@ -347,6 +347,126 @@
       }
     },
     {
+      "name": "$createdBy = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$createdBy = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$createdBy.identity = session.identity",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$createdBy.identity = session.identity"
+          }
+        }
+      }
+    },
+    {
+      "name": "$updatedBy = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$updatedBy = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$updatedBy.account = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$updatedBy.account = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$updatedBy.identity = session.identity",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$updatedBy.identity = session.identity"
+          }
+        }
+      }
+    },
+    {
+      "name": "$deletedBy = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$deletedBy = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$deletedBy.account = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$deletedBy.account = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$deletedBy.identity = session.identity",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$deletedBy.identity = session.identity"
+          }
+        }
+      }
+    },
+    {
       "name": "every policy variant",
       "permissions": {
         "format": 1,

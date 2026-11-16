@@ -968,13 +968,9 @@ function fill(text: string, args: string[]): string {
   return text.replace(PLACEHOLDER_RE, (_, i: string) => args[Number(i)]!);
 }
 
-/** `$createdBy.account` is the DSL's `$createdBy`. */
+/** The DSL's key for a column: the file's name, one to one (`$createdBy`, `"$createdBy.account"`, …). */
 function conditionKey(column: string): string {
-  return column === "$createdBy.account"
-    ? "$createdBy"
-    : column === "$updatedBy.account"
-      ? "$updatedBy"
-      : column;
+  return column;
 }
 
 function objectText(entries: [string, string][]): string {

@@ -2703,7 +2703,19 @@ fn the_policy_corpus_matches_its_fixture() {
             "tables": { table: { "read": read }, other: { "read": "true", "update": "true" } },
         })
     };
-    for &(table, source) in CONSTRUCTS {
+    // Magic columns in both spellings: each is its own DSL key.
+    const MAGIC: &[&str] = &[
+        "$createdBy = session.user",
+        "$createdBy.identity = session.identity",
+        "$updatedBy = session.user",
+        "$updatedBy.account = session.user",
+        "$updatedBy.identity = session.identity",
+        "$deletedBy = session.user",
+        "$deletedBy.account = session.user",
+        "$deletedBy.identity = session.identity",
+    ];
+    let magic: Vec<(&str, &str)> = MAGIC.iter().map(|&source| ("todos", source)).collect();
+    for &(table, source) in CONSTRUCTS.iter().chain(magic.iter()) {
         cases.push(
             serde_json::json!({ "name": source, "permissions": file_for(table, source.into()) }),
         );

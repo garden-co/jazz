@@ -51,7 +51,7 @@ import {
   runningPackageRoot,
   type Project,
 } from "./project.js";
-import { refuseDroppedConditions, refuseEnvironmentReads } from "./permissions-check.js";
+import { environmentReads, refuseDroppedConditions } from "./permissions-check.js";
 import { refusePayloadEnums } from "./payload-enums.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
 import { codemodSchema, codemodSpreadModule } from "./schema-ts.js";
@@ -130,7 +130,13 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     notes.push(...checkLegacyFiles(project, legacy));
   }
   const scan = scanImports(project);
-  refuseEnvironmentReads(project, schemaSources(project, scan));
+  const envReads = environmentReads(project, schemaSources(project, scan));
+  if (envReads.length > 0) {
+    notes.push(
+      "The old schema or permissions read the environment. The printed permissions hold the values `validate` resolved them to, " +
+        `so the env-dependent logic needs a look by hand:\n${envReads.map((r) => `  ${r}`).join("\n")}`,
+    );
+  }
   refuseDroppedConditions(project);
   const appText = readFileSync(project.appFile, "utf8");
   const permissionsText = readFileSync(project.permissionsJsonFile, "utf8");
@@ -185,13 +191,24 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   const skipTables = new Set<string>();
   for (const spread of codemod.spreads) {
     const text = readFileSync(spread.file, "utf8");
-    const tables = spreadTables(ts, spread.file, text);
+    const tables = spreadTables(ts, spread.file, text, spread.exported);
     // Tables whose rules are all `true`/`false` keep living in the module.
     const plain = tables.every((t) => plainRules(permissions.tables[t]));
     const permissionsText = plain
       ? `export const permissions = ${plainPermissions(tables, permissions)};`
       : undefined;
-    const edited = codemodSpreadModule({ ts, file: spread.file, text, permissionsText });
+    const edited = codemodSpreadModule({
+      ts,
+      file: spread.file,
+      text,
+      exported: spread.exported,
+      permissionsText,
+    });
+    for (const name of edited.dropped) {
+      notes.push(
+        `Dropped \`${name}\` from ${rel(spread.file)}: it used the module's own app, which alpha.66 doesn't have.`,
+      );
+    }
     if (plain && edited.hadPermissions) {
       const local = `${spread.local.replace(/(Schema|Tables)$/, "")}Permissions`;
       spreadPermissions.push(local);
@@ -506,12 +523,12 @@ function runGenerate(schemaDir: string): void {
 }
 
 /** The table names a spread module's `export const schema = {…}` declares. */
-function spreadTables(ts: typeof TS, file: string, text: string): string[] {
+function spreadTables(ts: typeof TS, file: string, text: string, exported: string): string[] {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   for (const statement of source.statements) {
     if (!ts.isVariableStatement(statement)) continue;
     for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== "schema") continue;
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== exported) continue;
       let init = declaration.initializer;
       while (init && (ts.isAsExpression(init) || ts.isSatisfiesExpression(init)))
         init = init.expression;
