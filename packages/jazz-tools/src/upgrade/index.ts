@@ -1,23 +1,30 @@
 /**
- * `jazz-tools upgrade`: convert an alpha.64 app (schema.ts, permissions.ts,
- * migrations/) to alpha.65, where jazz.app.json and jazz.permissions.json
- * are the only source and jazz.generated.ts holds the typed bindings.
+ * `jazz-tools upgrade`: convert an alpha.65 app (schema.ts with `defineApp`,
+ * the callback permissions.ts, migrations/ with its index.ts) to alpha.66,
+ * where TS is the source again: `schema.ts` exports `schema`
+ * (`s.defineSchema`) and `permissions` (`definePermissions`), and `generate`
+ * writes jazz.app.json, jazz.permissions.json and jazz.generated.ts from it.
  *
- * 1. The app's own jazz-tools (≤ alpha.64) must find its app files current.
- * 2. TS-only columns become `computed` fields and `transforms`, their
- *    callbacks moved unchanged into jazz.computed.ts.
- * 3. jazz.app.json must already carry migrations/'s history and migrations.
- * 4. schema.ts, permissions.ts and migrations/ are deleted (and helper files
- *    only they used); what else schema.ts exported moves to app-extras.ts.
- * 5. Imports are rewritten to the new files; slicing goes.
- * 6. jazz.generated.ts is generated and the project typechecked, errors
- *    reported as file:line and left in place.
- * 7. A closing note on factoring repeated permissions into `defs`.
+ * 1. The app's own jazz-tools (alpha.65) must find its JSON files fresh.
+ * 2. schema.ts: `defineApp(schema, { migrations })` → `export const schema =
+ *    s.defineSchema({…})`, keeping the author's comments; the app and row
+ *    types come from jazz.generated.ts, other exports move to app-extras.ts.
+ * 3. The permissions are printed from the fresh jazz.permissions.json into
+ *    schema.ts (or permissions.ts, when the old one was large); a spread
+ *    tables module (Better Auth's) exports `tables` and `permissions`.
+ * 4. Imports of `./schema` go to `./jazz.generated`, `app.slice(…)` becomes
+ *    `app`, and scripts calling `validate` call `generate`.
+ * 5. migrations/index.ts is deleted; the stubs and snapshots stay.
+ * 6. `generate` runs.
+ * 7. The schema hashes and the bundle id must be what they were: otherwise
+ *    every file is put back and upgrade refuses.
  *
- * Every refusal comes before the first write.
+ * Every refusal before step 6 comes before the first write.
  */
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -26,27 +33,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, relative } from "node:path";
 import type * as TS from "typescript";
-import {
-  appTables,
-  editAppJson,
-  isObject,
-  parseAppJson,
-  printAppJson,
-  tableColumns,
-  tsOnlyMarkers,
-  type Json,
-} from "./app-json.js";
-import { convertComputed } from "./computed.js";
+import { printPermissions, type AppJson, type PermissionsJson } from "../printer/index.js";
+import { formatTs, layout, loadPrettier } from "../printer/format.js";
+import { isObject, parseAppJson, tsOnlyMarkers } from "./app-json.js";
 import { UpgradeRefusal, notSupportedYet } from "./errors.js";
 import { convertExtras } from "./extras.js";
-import { checkLegacyFiles, dslAlpha, findLegacyJazzTools } from "./legacy.js";
-import { checkMigrations, shippedHashes, straySnapshots } from "./migrations.js";
-import { pascal, readGeneratedNames, rowTypeName, type TableTypeNames } from "./names.js";
+import { checkLegacyFiles, dslAlpha, findLegacyJazzTools } from "./fresh.js";
+import { readGeneratedNames } from "./names.js";
 import { createProgram, typeErrors } from "./program.js";
 import {
-  COMPUTED_FILE,
   EXTRAS_FILE,
   GENERATED_FILE,
   locateProject,
@@ -57,21 +54,28 @@ import {
 import { refuseDroppedConditions, refuseEnvironmentReads } from "./permissions-check.js";
 import { refusePayloadEnums } from "./payload-enums.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
+import { codemodSchema, codemodSpreadModule } from "./schema-ts.js";
 import { PackageAliases } from "./aliases.js";
+import { specifierLike } from "./edits.js";
 
 export { UpgradeRefusal } from "./errors.js";
+
+/** A permissions.ts longer than this keeps its own file. */
+const SEPARATE_PERMISSIONS_LINES = 150;
 
 export interface UpgradeOptions {
   /** The app's directory (default: cwd). */
   dir?: string;
-  /** Where schema.ts is, when not in `dir`, `dir/src` or `dir/src/lib` (and not found below `dir`). */
+  /** Where schema.ts is, when not in `dir`, `dir/src` or `dir/src/lib`. */
   schemaDir?: string;
   /** Plan and report, write nothing. */
   dryRun?: boolean;
   /** Skip the closing typecheck. */
   skipTypecheck?: boolean;
-  /** jazz.generated.ts from jazz.app.json's text (default: jazz-napi's `generate`). */
-  generate?: (appJson: string) => string | Promise<string>;
+  /** Skip step 1 (tests whose fixtures have no installed alpha.65). */
+  skipFreshCheck?: boolean;
+  /** Step 6: write the JSON files and bindings from the new TS (default: this jazz-tools' `generate`). */
+  generate?: (schemaDir: string) => void | Promise<void>;
 }
 
 export interface UpgradeReport {
@@ -92,8 +96,15 @@ export interface UpgradeReport {
   preexistingTypeErrors: string[];
   /** Whether the typecheck ran. */
   typechecked: boolean;
-  /** `"TODO: …"` strings left in jazz.app.json. */
-  todos: number;
+  /** The schema hashes and bundle id, which upgrade keeps. */
+  identity?: ArtifactIdentity;
+}
+
+/** What a deployment of the app is: its bundle id and every version's schema hash. */
+export interface ArtifactIdentity {
+  bundle: string;
+  current: string;
+  schemas: string[];
 }
 
 export async function upgradeProject(options: UpgradeOptions = {}): Promise<UpgradeReport> {
@@ -101,140 +112,190 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   const { ts } = project;
   const rel = (path: string) => relative(project.root, path) || path;
   const notes: string[] = [];
+  if (!existsSync(project.schemaFile)) {
+    throw new UpgradeRefusal(
+      `${rel(project.schemaFile)} is missing: upgrade converts an alpha.65 schema.ts`,
+    );
+  }
 
-  // 1. The app files must be current.
-  const legacy = findLegacyJazzTools(project);
-  notes.push(...checkLegacyFiles(project, legacy));
+  if (/\.defineSchema\(/.test(readFileSync(project.schemaFile, "utf8"))) {
+    throw new UpgradeRefusal(
+      `${rel(project.schemaFile)} already calls \`defineSchema\`: this app is on alpha.66's layout, run \`npx jazz-tools generate\``,
+    );
+  }
+
+  // 1. The JSON files must be fresh: the permissions are printed from them.
+  if (!options.skipFreshCheck) {
+    const legacy = findLegacyJazzTools(project);
+    notes.push(...checkLegacyFiles(project, legacy));
+  }
   const scan = scanImports(project);
-  // Fail closed on policies alpha.64 compiled from values the source doesn't hold.
   refuseEnvironmentReads(project, schemaSources(project, scan));
   refuseDroppedConditions(project);
-
   const appText = readFileSync(project.appFile, "utf8");
-  const app = parseAppJson(appText);
-  const tables = appTables(app);
-  // Enum columns with cases are gone in alpha.65; refuse before anything is written.
-  refusePayloadEnums(app);
-  const markers = tsOnlyMarkers(app);
+  const permissionsText = readFileSync(project.permissionsJsonFile, "utf8");
+  const appJson = parseAppJson(appText);
+  refusePayloadEnums(appJson);
+  if (Object.keys(tsOnlyMarkers(appJson)).length > 0 || /"computed"\s*:/.test(appText)) {
+    throw notSupportedYet("computed columns and transforms", rel(project.appFile));
+  }
+  const app = JSON.parse(appText) as AppJson;
+  const permissions = JSON.parse(permissionsText) as PermissionsJson;
+  const before = await artifactIdentity(appText, permissionsText);
 
-  // 2. TS-only columns → computed / transforms.
+  // 2. schema.ts.
+  const generatedText = await napiGenerate(appText);
+  const names = readGeneratedNames(generatedText);
   const schemaProgram = createProgram(ts, [project.schemaFile], project.compilerOptions, undefined);
-  let computed;
   let extras;
   try {
-    computed = convertComputed({
-      ts,
-      program: schemaProgram.program,
-      schemaFile: project.schemaFile,
-      tables,
-      markers,
-    });
-    notes.push(...computed.notes);
-    const edited = editAppJson(app, computed);
-    if (edited.droppedSlices.length > 0) {
-      notes.push(
-        `Dropped \`slices\` (${edited.droppedSlices.join(", ")}) from jazz.app.json: schema slicing is gone.`,
-      );
-    }
-
-    // 3. Migrations are in the file already.
-    const migrations = checkMigrations(app, project.migrationsDir);
-    if (migrations.unshipped.length > 0) {
-      notes.push(
-        `Deleted with migrations/, never shipped (no snapshot of their versions): ${migrations.unshipped.join(", ")}.`,
-      );
-    }
-    if (migrations.versions > 1) {
-      notes.push(
-        `jazz.app.json carries ${migrations.versions} schema versions and ${migrations.migrations} migration${migrations.migrations === 1 ? "" : "s"}.`,
-      );
-    }
-
-    var newAppText = printAppJson(edited.app);
-    // 6a. The bindings, from the edited file (unless TODOs block them).
-    var generatedText: string | null = null;
-    if (computed.todos === 0) {
-      try {
-        generatedText = await (options.generate ?? napiGenerate)(newAppText);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new UpgradeRefusal(
-          `generating jazz.generated.ts from the converted jazz.app.json failed: ${message}`,
-        );
-      }
-    }
-    var names = generatedText ? readGeneratedNames(generatedText) : fallbackNames(edited.app);
-
-    // 4. What schema.ts exported besides the schema.
     extras = convertExtras({
       ts,
       program: schemaProgram.program,
       schemaFile: project.schemaFile,
       tables: names.tables,
       generatedExports: names.exports,
-      movedToComputed: computed.movedExports,
+      movedToComputed: [],
       jsExtensions: scan.jsExtensions,
       importedNames: scan.schemaNames,
       notes,
     });
-    for (const name of extras.dropped)
-      notes.push(
-        `Dropped \`${name}\` from schema.ts's exports: it was schema DSL, and nothing imports it.`,
-      );
-    var deleted = deletedFiles(project, scan);
-    const versions = new Set([
-      ...(isObject(app.history) ? Object.keys(app.history) : []),
-      ...(project.migrationsDir ? shippedHashes(project.migrationsDir) : []),
-    ]);
-    const stray = straySnapshots(project.root, project.migrationsDir, versions);
-    for (const file of stray) deleted.add(file);
-    if (stray.length > 0) {
-      notes.push(
-        `Deleted this app's schema snapshots outside migrations/ too: ${stray.map((f) => relative(project.root, f)).join(", ")}.`,
-      );
-    }
   } finally {
     schemaProgram.dispose();
   }
-
-  // 5. Imports.
-  const generatedFile = join(project.schemaDir, GENERATED_FILE);
+  const schemaText = readFileSync(project.schemaFile, "utf8");
   const extrasFile = join(project.schemaDir, EXTRAS_FILE);
-  const computedFile = join(project.schemaDir, COMPUTED_FILE);
-  for (const path of [extrasFile, computedFile, generatedFile]) {
-    if (existsSync(path) && !deleted.has(path)) {
-      throw new UpgradeRefusal(
-        `${rel(path)} exists already; upgrade writes it: move it away and run upgrade again`,
+  const codemod = codemodSchema({
+    ts,
+    file: project.schemaFile,
+    text: schemaText,
+    exports: extras.exports,
+    extrasSpecifier: scan.jsExtensions ? "./app-extras.js" : "./app-extras",
+    resolve: (specifier) => resolveImport(project, specifier, project.schemaFile),
+    root: project.root,
+  });
+
+  // 3. The permissions, printed from jazz.permissions.json.
+  const prettier = await loadPrettier(project.root);
+  const format = async (text: string, file: string) =>
+    prettier ? formatTs(text, { file, prettier }) : layout(text);
+  const writes: Array<[string, string]> = [];
+  const spreadPermissions: string[] = [];
+  const spreadImports: string[] = [];
+  const skipTables = new Set<string>();
+  for (const spread of codemod.spreads) {
+    const text = readFileSync(spread.file, "utf8");
+    const tables = spreadTables(ts, spread.file, text);
+    // Tables whose rules are all `true`/`false` keep living in the module.
+    const plain = tables.every((t) => plainRules(permissions.tables[t]));
+    const permissionsText = plain
+      ? `export const permissions = ${plainPermissions(tables, permissions)};`
+      : undefined;
+    const edited = codemodSpreadModule({ ts, file: spread.file, text, permissionsText });
+    if (plain && edited.hadPermissions) {
+      const local = `${spread.local.replace(/(Schema|Tables)$/, "")}Permissions`;
+      spreadPermissions.push(local);
+      spreadImports.push(
+        `import { permissions as ${local} } from ${JSON.stringify(spread.specifier)};`,
       );
+      for (const t of tables) skipTables.add(t);
+    }
+    writes.push([spread.file, await formatSpread(edited.text, spread.file, prettier)]);
+    codemod.changes.push(`${rel(spread.file)}: exports \`tables\` and \`permissions\``);
+  }
+  const printed = printPermissions(app, permissions, { spreads: spreadPermissions, skipTables });
+  if (printed.unsupported.length > 0) {
+    throw new UpgradeRefusal(
+      `the TS DSL can't express these permissions of ${rel(project.permissionsJsonFile)} yet:\n` +
+        printed.unsupported.map((u) => `  ${u.path}: ${u.text}\n    ${u.reason}`).join("\n"),
+    );
+  }
+  const oldPermissions = project.permissionsFile
+    ? readFileSync(project.permissionsFile, "utf8")
+    : "";
+  const separate =
+    project.permissionsFile !== undefined &&
+    oldPermissions.split("\n").length > SEPARATE_PERMISSIONS_LINES &&
+    !codemod.inlinePermissions;
+  const deleted = new Set<string>(project.permissionsSources);
+  if (separate) deleted.delete(project.permissionsFile!);
+  const permissionsBody = await format(printed.code, project.schemaFile);
+  let newSchema: string;
+  if (separate) {
+    newSchema = withImports(ts, project.schemaFile, codemod.text, []);
+    const schemaSpecifier = scan.jsExtensions ? "./schema.js" : "./schema";
+    const head = [
+      `import { schema as s } from "jazz-tools";`,
+      `import { schema } from ${JSON.stringify(schemaSpecifier)};`,
+      ...spreadImports,
+    ].join("\n");
+    writes.push([project.permissionsFile!, `${head}\n\n${permissionsBody}`]);
+    notes.push(
+      `${rel(project.permissionsFile!)} was long: the printed permissions stay in their own file.`,
+    );
+  } else {
+    newSchema = `${withImports(ts, project.schemaFile, codemod.text, spreadImports)}\n${permissionsBody}`;
+  }
+  writes.unshift([project.schemaFile, newSchema]);
+  notes.push(
+    "The permissions were printed from jazz.permissions.json: repeated conditions became helpers (`isChatMember`, `rule1`, …). Rename them, and bring back what the old permissions.ts said in comments or constants.",
+  );
+
+  // 5. migrations/index.ts goes; the stubs and snapshots stay.
+  if (project.migrationsDir) {
+    for (const name of ["index.ts", "index.js"]) {
+      const index = join(project.migrationsDir, name);
+      if (existsSync(index)) deleted.add(index);
     }
   }
+
+  // 4. Imports of schema.ts and permissions.ts.
+  const generatedFile = join(project.schemaDir, GENERATED_FILE);
+  if (extras.extrasFile) {
+    if (existsSync(extrasFile)) {
+      throw new UpgradeRefusal(
+        `${rel(extrasFile)} exists already; upgrade writes it: move it away and run upgrade again`,
+      );
+    }
+    writes.push([extrasFile, extras.extrasFile]);
+  }
   const aliases = new PackageAliases(project.root);
+  const untouched = new Set([
+    project.schemaFile,
+    ...codemod.spreads.map((s) => s.file),
+    ...deleted,
+    ...(separate ? [project.permissionsFile!] : []),
+  ]);
   const rewrites = rewriteProject({
     aliases,
     project,
     exports: extras.exports,
     tables: names.tables,
-    deleted,
+    deleted: untouched,
     generatedFile,
     extrasFile,
-    computedFile,
+    computedFile: join(project.schemaDir, "jazz.computed.ts"),
   });
   const config = configEdits(
     project,
     rewrites.files.some((f) => f.importsJson),
     deleted,
   );
-  const manifest = manifestEdit(project, deleted);
-  // package.json `imports` aliases, on top of the root manifest's edits.
+  const manifest = manifestEdit(project);
   const aliasEdits = aliases.apply(
     manifest ? new Map([[manifest.file, manifest.text]]) : undefined,
   );
+  for (const file of rewrites.files) writes.push([file.file, file.text]);
+  if (config.file) writes.push([config.file, config.text]);
+  if (manifest && !aliasEdits.has(manifest.file)) writes.push([manifest.file, manifest.text]);
+  for (const [file, edit] of aliasEdits) writes.push([file, edit.text]);
 
   const report: UpgradeReport = {
     dir: project.root,
-    written: [],
+    written: writes.map(([path]) => rel(path)),
     deleted: [...deleted].map(rel).sort(),
     rewrites: [
+      ...codemod.changes,
       ...rewrites.files.flatMap((f) => f.changes),
       ...config.changes,
       ...(manifest?.changes ?? []),
@@ -245,86 +306,71 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     typeErrors: [],
     preexistingTypeErrors: [],
     typechecked: false,
-    todos: computed.todos,
+    identity: before,
   };
-  report.notes.push(...defsNote(project));
-
-  const writes: Array<[string, string]> =
-    newAppText === appText ? [] : [[project.appFile, newAppText]];
-  if (computed.computedFile) writes.push([computedFile, computed.computedFile]);
-  if (extras.extrasFile) writes.push([extrasFile, extras.extrasFile]);
-  // A Rust app (a crate on `jazz-app-support`) gets Rust bindings instead, as `jazz-tools generate` writes them.
-  const rustApp = isRustApp(project.schemaDir);
-  if (generatedText && !rustApp) writes.push([generatedFile, generatedText]);
-  if (rustApp && computed.todos === 0) {
-    const rust = await rustBindings(newAppText);
-    if (typeof rust === "string") writes.push([join(project.schemaDir, RUST_BINDINGS_FILE), rust]);
-    else {
-      report.notes.push(
-        `${RUST_BINDINGS_FILE} was not written (${rust.reason}); run \`npx jazz-tools generate\` once this jazz-tools generates Rust bindings.`,
-      );
-    }
-  }
-  for (const file of rewrites.files) writes.push([file.file, file.text]);
-  if (config.file) writes.push([config.file, config.text]);
-  if (manifest && !aliasEdits.has(manifest.file)) writes.push([manifest.file, manifest.text]);
-  for (const [file, edit] of aliasEdits) writes.push([file, edit.text]);
-  report.written = writes.map(([path]) => rel(path));
-
   if (options.dryRun) return report;
 
-  // The project's errors before the conversion, against its own jazz-tools,
-  // so the closing typecheck tells upgrade's errors from ones it found there.
-  let before: Map<string, number> | undefined;
-  if (!options.skipTypecheck && !isRustApp(project.schemaDir)) {
-    const roots = new Set(project.configFileNames);
-    for (const file of rewrites.files)
-      if (/\.(ts|tsx|mts|cts)$/.test(file.file)) roots.add(file.file);
-    if (roots.size > 0) {
-      const handle = createProgram(ts, [...roots], project.compilerOptions, undefined);
-      try {
-        before = countTypeErrors(typeErrors(ts, handle.program, project.root));
-      } finally {
-        handle.dispose();
+  // The project's errors before the conversion, so the closing typecheck tells upgrade's apart.
+  let beforeErrors: Map<string, number> | undefined;
+  if (!options.skipTypecheck)
+    beforeErrors = countTypeErrors(projectTypeErrors(project, writes, new Set()));
+
+  // Write, keeping what was there to put back.
+  const originals = new Map<string, string | null>();
+  for (const path of [
+    ...writes.map(([p]) => p),
+    ...deleted,
+    project.appFile,
+    project.permissionsJsonFile,
+    generatedFile,
+  ]) {
+    if (!originals.has(path))
+      originals.set(path, existsSync(path) ? readFileSync(path, "utf8") : null);
+  }
+  const restore = () => {
+    for (const [path, text] of originals) {
+      if (text === null) rmSync(path, { force: true });
+      else {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, text);
       }
     }
-  }
-
+  };
   for (const [path, text] of writes) writeFileSync(path, text);
   for (const path of deleted) rmSync(path, { force: true });
   removeEmptyDirs([...deleted].map(dirname), project.root);
 
-  if (computed.todos > 0) {
-    report.notes.push(
-      `jazz.app.json has ${computed.todos} "TODO: …" upgrade couldn't decide. Resolve them, then run \`npx jazz-tools generate\` to write jazz.generated.ts, and typecheck.`,
+  // 6. generate, and 7. the same deployment.
+  try {
+    await (options.generate ?? runGenerate)(project.schemaDir);
+    const after = await artifactIdentity(
+      readFileSync(project.appFile, "utf8"),
+      readFileSync(project.permissionsJsonFile, "utf8"),
     );
-    return report;
-  }
-  // 6b. Typecheck against this jazz-tools (a Rust app has no TS to check).
-  if (rustApp)
-    report.notes.push(
-      "This is a Rust app: run `cargo check` to typecheck it against the new bindings.",
-    );
-  if (!options.skipTypecheck && !rustApp) {
-    const roots = new Set(project.configFileNames.filter((f) => !deleted.has(f)));
-    for (const [path] of writes) if (/\.(ts|tsx|mts|cts)$/.test(path)) roots.add(path);
-    const runtime = runningPackageRoot();
-    const installedNow = installedJazzTools(project);
-    const override =
-      installedNow &&
-      dslAlpha(packageVersion(installedNow)) !== null &&
-      realpathSync(installedNow) !== realpathSync(runtime)
-        ? runtime
-        : undefined;
-    const handle = createProgram(ts, [...roots], project.compilerOptions, override);
-    try {
-      const split = splitTypeErrors(before, typeErrors(ts, handle.program, project.root));
-      report.typeErrors = split.added;
-      report.preexistingTypeErrors = split.preexisting;
-      report.typechecked = true;
-    } finally {
-      handle.dispose();
+    const differences = identityDifferences(before, after);
+    if (differences.length > 0) {
+      throw new UpgradeRefusal(
+        `the converted app would deploy differently, so upgrade put every file back:\n${differences.map((d) => `  ${d}`).join("\n")}\n` +
+          "Please report this with the app's jazz.app.json and jazz.permissions.json.",
+      );
     }
+  } catch (error) {
+    restore();
+    if (error instanceof UpgradeRefusal) throw error;
+    throw new UpgradeRefusal(
+      `\`generate\` failed on the converted app, so upgrade put every file back:\n  ${(error instanceof Error ? error.message : String(error)).replace(/\n/g, "\n  ")}`,
+    );
+  }
+  report.written.push(rel(project.appFile), rel(project.permissionsJsonFile), rel(generatedFile));
+  report.notes.push(
+    `The schema hashes and the bundle id (${before.bundle.slice(0, 12)}) are unchanged.`,
+  );
+
+  if (!options.skipTypecheck) {
+    const split = splitTypeErrors(beforeErrors, projectTypeErrors(project, writes, deleted));
+    report.typeErrors = split.added;
+    report.preexistingTypeErrors = split.preexisting;
+    report.typechecked = true;
     const views = project.sources.filter((f) => /\.(svelte|vue)$/.test(f));
     if (views.length > 0) {
       report.notes.push(
@@ -334,6 +380,159 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   }
   return report;
 }
+
+function projectTypeErrors(
+  project: Project,
+  writes: Array<[string, string]>,
+  deleted: Set<string>,
+) {
+  const { ts } = project;
+  const roots = new Set(project.configFileNames.filter((f) => !deleted.has(f)));
+  for (const [path] of writes)
+    if (/\.(ts|tsx|mts|cts)$/.test(path) && existsSync(path)) roots.add(path);
+  if (roots.size === 0) return [];
+  const runtime = runningPackageRoot();
+  const installed = installedJazzTools(project);
+  const override =
+    installed &&
+    dslAlpha(packageVersion(installed)) !== null &&
+    realpathSync(installed) !== realpathSync(runtime)
+      ? runtime
+      : undefined;
+  const handle = createProgram(ts, [...roots], project.compilerOptions, override);
+  try {
+    return typeErrors(ts, handle.program, project.root);
+  } finally {
+    handle.dispose();
+  }
+}
+
+/** The bundle id and schema hashes `load` computes for the two files. */
+export async function artifactIdentity(
+  app: string,
+  permissions: string,
+): Promise<ArtifactIdentity> {
+  const napi = (await import("jazz-napi")) as unknown as {
+    loadAppArtifact(
+      app: string,
+      permissions: string,
+    ): {
+      bundle: string;
+      current: string;
+      deployment: { schemas: { hash: string }[] };
+    };
+  };
+  const loaded = napi.loadAppArtifact(app, permissions);
+  return {
+    bundle: loaded.bundle,
+    current: loaded.current,
+    schemas: loaded.deployment.schemas.map((s) => s.hash),
+  };
+}
+
+export function identityDifferences(before: ArtifactIdentity, after: ArtifactIdentity): string[] {
+  const out: string[] = [];
+  if (before.current !== after.current)
+    out.push(`current schema hash ${before.current} → ${after.current}`);
+  const a = [...before.schemas].sort().join(", ");
+  const b = [...after.schemas].sort().join(", ");
+  if (a !== b) out.push(`schema versions [${a}] → [${b}]`);
+  if (before.bundle !== after.bundle) out.push(`bundle id ${before.bundle} → ${after.bundle}`);
+  return out;
+}
+
+/** This jazz-tools' `generate`, in the app's directory. */
+function runGenerate(schemaDir: string): void {
+  const bin = join(runningPackageRoot(), "bin", "jazz-tools.js");
+  const result = spawnSync(process.execPath, [bin, "generate"], {
+    cwd: schemaDir,
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${result.stdout ?? ""}${result.stderr ?? ""}`.trim());
+}
+
+/** The table names a spread module's `export const schema = {…}` declares. */
+function spreadTables(ts: typeof TS, file: string, text: string): string[] {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== "schema") continue;
+      let init = declaration.initializer;
+      while (init && (ts.isAsExpression(init) || ts.isSatisfiesExpression(init)))
+        init = init.expression;
+      if (init && ts.isObjectLiteralExpression(init)) {
+        return init.properties.flatMap((p) =>
+          p.name && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? [p.name.text] : [],
+        );
+      }
+    }
+  }
+  return [];
+}
+
+function plainRules(rules: PermissionsJson["tables"][string] | undefined): boolean {
+  return Object.entries(rules ?? {}).every(
+    ([key, value]) => key === "$comment" || value === "true" || value === "false",
+  );
+}
+
+function plainPermissions(tables: string[], permissions: PermissionsJson): string {
+  const body = tables.map((table) => {
+    const rules = permissions.tables[table] ?? {};
+    const entries = (["read", "insert", "update", "delete"] as const)
+      .filter((op) => rules[op] !== undefined)
+      .map((op) => `${op}: ${rules[op] as string}`);
+    return `  ${/^[A-Za-z_$][\w$]*$/.test(table) ? table : JSON.stringify(table)}: { ${entries.join(", ")} },`;
+  });
+  return `{\n${body.join("\n")}\n}`;
+}
+
+async function formatSpread(
+  text: string,
+  file: string,
+  prettier: Awaited<ReturnType<typeof loadPrettier>>,
+) {
+  return prettier ? formatTs(text, { file, prettier }) : text;
+}
+
+/** `text` with `lines` added after its last import. */
+function withImports(ts: typeof TS, file: string, text: string, lines: string[]): string {
+  if (lines.length === 0) return text;
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const last = source.statements.filter(ts.isImportDeclaration).pop();
+  const at = last ? last.getEnd() : 0;
+  return `${text.slice(0, at)}\n${lines.join("\n")}${text.slice(at)}`;
+}
+
+/** package.json: scripts calling `jazz-tools validate` call `generate`. */
+function manifestEdit(
+  project: Project,
+): { file: string; text: string; changes: string[] } | undefined {
+  const file = join(project.root, "package.json");
+  if (!existsSync(file)) return undefined;
+  const text = readFileSync(file, "utf8");
+  const changes: string[] = [];
+  let next = text;
+  let manifest: { scripts?: Record<string, string> };
+  try {
+    manifest = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  for (const [name, script] of Object.entries(manifest.scripts ?? {})) {
+    const renamed = renameValidate(script);
+    if (renamed === script) continue;
+    changes.push(
+      `package.json: script "${name}": \`jazz-tools validate\` → \`jazz-tools generate\``,
+    );
+    next = next.replace(JSON.stringify(script), JSON.stringify(renamed));
+  }
+  return next === text ? undefined : { file, text: next, changes };
+}
+
+export { notSupportedYet, isObject, specifierLike, extname };
 
 async function napiGenerate(appJson: string): Promise<string> {
   const napi = (await import("jazz-napi")) as unknown as {
@@ -347,39 +546,6 @@ async function napiGenerate(appJson: string): Promise<string> {
   return napi.generate("ts", appJson);
 }
 
-const RUST_BINDINGS_FILE = join("src", "jazz_app.rs");
-
-/**
- * Whether `dir` is a Rust app, as `jazz-tools generate` tells: a crate (a
- * `Cargo.toml` with `[package]`) that depends on `jazz-app-support`, or one with
- * committed `src/jazz_app.rs`. A workspace root or an unrelated crate isn't.
- */
-export function isRustApp(dir: string): boolean {
-  const manifest = join(dir, "Cargo.toml");
-  if (!existsSync(manifest)) return false;
-  const text = readFileSync(manifest, "utf8");
-  if (!/^\s*\[package\]/m.test(text)) return false;
-  if (existsSync(join(dir, RUST_BINDINGS_FILE))) return true;
-  return /^\s*jazz-app-support\s*=|^\s*\[(?:dev-|build-)?dependencies\.jazz-app-support\]/m.test(
-    text,
-  );
-}
-
-/** The `jazz-app-support` crate's bindings, or why this jazz-napi can't generate them. */
-async function rustBindings(appJson: string): Promise<string | { reason: string }> {
-  try {
-    const napi = (await import("jazz-napi")) as unknown as {
-      generate?: (lang: string, app: string) => string;
-    };
-    if (typeof napi.generate !== "function") return { reason: "this jazz-napi has no `generate`" };
-    return napi.generate("rust", appJson);
-  } catch (error) {
-    return {
-      reason: (error instanceof Error ? error.message : String(error)).replace(/[.\s]*$/, ""),
-    };
-  }
-}
-
 /** The project's resolved jazz-tools package directory, if installed. */
 function installedJazzTools(project: Project): string | undefined {
   try {
@@ -389,24 +555,6 @@ function installedJazzTools(project: Project): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** Generated names by jazz-codegen's rules, for a file whose TODOs block generating. */
-function fallbackNames(app: { [key: string]: Json }): {
-  tables: Record<string, TableTypeNames>;
-  exports: Set<string>;
-} {
-  const tables: Record<string, TableTypeNames> = {};
-  const exports = new Set<string>(["app"]);
-  for (const [name, table] of Object.entries(appTables(app))) {
-    const row = rowTypeName(name);
-    tables[name] = { row, insert: `${row}Insert` };
-    exports.add(row).add(`${row}Insert`);
-    for (const [column, spec] of Object.entries(tableColumns(table))) {
-      if (isObject(spec) && "enum" in spec) exports.add(`${row}${pascal(column)}`);
-    }
-  }
-  return { tables, exports };
 }
 
 interface ImportScan {
@@ -485,44 +633,6 @@ function schemaSources(project: Project, scan: ImportScan): string[] {
   return [...out];
 }
 
-const DSL_IMPORT =
-  /import\s*(?:type\s*)?\{[^}]*\b(?:schema|definePermissions)\b[^}]*\}\s*from\s*["']jazz-tools(?:\/permissions)?["']/;
-
-/**
- * schema.ts, permissions.ts, migrations/, and the schema DSL files only they
- * import (generated Better Auth tables, say): once nothing else imports them.
- */
-function deletedFiles(project: Project, scan: ImportScan): Set<string> {
-  const deleted = new Set<string>([project.schemaFile]);
-  for (const file of project.permissionsSources) deleted.add(file);
-  if (project.migrationsDir) {
-    const walk = (dir: string): void => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) walk(path);
-        else deleted.add(path);
-      }
-    };
-    walk(project.migrationsDir);
-  }
-  // Grow the set while a DSL file is imported only by deleted files.
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const [file] of scan.imports) {
-      if (deleted.has(file)) continue;
-      const importers = [...scan.imports]
-        .filter(([, targets]) => targets.has(file))
-        .map(([f]) => f);
-      if (importers.length === 0 || !importers.every((f) => deleted.has(f))) continue;
-      if (!DSL_IMPORT.test(readFileSync(file, "utf8"))) continue;
-      deleted.add(file);
-      changed = true;
-    }
-  }
-  return deleted;
-}
-
 function removeEmptyDirs(dirs: string[], root: string): void {
   for (const start of new Set(dirs)) {
     let dir = start;
@@ -588,114 +698,12 @@ function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * package.json: scripts calling `jazz-tools validate` call `generate` (its
- * alpha.65 name), and a pinned alpha jazz-tools / jazz-napi moves to this one.
- */
-function manifestEdit(
-  project: Project,
-  deleted: Set<string>,
-): { file: string; text: string; changes: string[] } | undefined {
-  const file = join(project.root, "package.json");
-  if (!existsSync(file)) return undefined;
-  const text = readFileSync(file, "utf8");
-  const changes: string[] = [];
-  let next = text;
-  let manifest: { scripts?: Record<string, string> };
-  try {
-    manifest = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  for (const [name, script] of Object.entries(manifest.scripts ?? {})) {
-    let renamed = renameValidate(script);
-    if (renamed !== script) {
-      changes.push(
-        `package.json: script "${name}": \`jazz-tools validate\` → \`jazz-tools generate\``,
-      );
-    }
-    const retargeted = retargetAuthOutput(renamed, project, deleted);
-    if (retargeted !== renamed) {
-      changes.push(
-        `package.json: script "${name}": the Better Auth CLI now writes its tables into ${relative(project.root, project.appFile)}`,
-      );
-      renamed = retargeted;
-    }
-    if (renamed === script) continue;
-    const quoted = JSON.stringify(script);
-    if (!next.includes(quoted)) continue;
-    next = next.replace(quoted, JSON.stringify(renamed));
-  }
-  const version = packageVersion(runningPackageRoot());
-  // A pre-release build of upgrade itself has no version to pin.
-  if (dslAlpha(version) === null) {
-    next = next.replace(
-      /("jazz-(?:tools|napi)"\s*:\s*")([~^]?)(2\.0\.0-alpha\.\d+)"/g,
-      (whole, head: string, range: string, old: string) => {
-        if (dslAlpha(old) === null) return whole;
-        changes.push(
-          `package.json: ${head.match(/"([^"]+)"/)![1]} ${range}${old} → ${range}${version}`,
-        );
-        return `${head}${range}${version}"`;
-      },
-    );
-  }
-  return next === text ? undefined : { file, text: next, changes };
-}
-
-/**
- * A Better Auth CLI `generate` that wrote its DSL module (`--output
- * ./schema-better-auth/schema.ts`, which upgrade deletes) writes jazz.app.json
- * now: the adapter merges its tables into the app file (by default
- * ./jazz.app.json, relative to where the script runs).
- */
-export function retargetAuthOutput(script: string, project: Project, deleted: Set<string>): string {
-  if (!/\bgenerate\b/.test(script) || !/(?:better-auth\/cli|\bauth(?:@\S+)?)\s/.test(script))
-    return script;
-  return script.replace(
-    /(\s)--output(?:=|\s+)(["']?)([^\s"']+\.ts)\2/g,
-    (whole, space: string, _q, path: string) => {
-      if (!deleted.has(resolve(project.root, path))) return whole;
-      const app = relative(project.root, project.appFile).split("\\").join("/");
-      return app === "jazz.app.json" ? "" : `${space}--output ./${app}`;
-    },
-  );
-}
-
 /** A shell command with every jazz-tools CLI `validate` call renamed to `generate`. */
 export function renameValidate(script: string): string {
   return script.replace(
     /((?:^|[\s;&|('"])(?:(?:npx|pnpm(?: exec)?|yarn|bunx)\s+)?(?:jazz-tools(?:@\S+)?|\S*jazz-tools\/(?:dist\/cli\.js|bin\/jazz-tools\.js))\s+)validate\b/g,
     "$1generate",
   );
-}
-
-/** Step 7: permission expressions repeated across policies. */
-function defsNote(project: Project): string[] {
-  let permissions;
-  try {
-    permissions = JSON.parse(readFileSync(project.permissionsJsonFile, "utf8")) as Json;
-  } catch {
-    return [];
-  }
-  const counts = new Map<string, number>();
-  const walk = (value: Json | undefined, key?: string): void => {
-    if (typeof value === "string") {
-      if (key === "$schema" || value === "true" || value === "false" || value.length < 24) return;
-      counts.set(value, (counts.get(value) ?? 0) + 1);
-    } else if (Array.isArray(value)) value.forEach((v) => walk(v));
-    else if (isObject(value)) {
-      for (const [k, v] of Object.entries(value)) if (k !== "defs" && k !== "$comment") walk(v, k);
-    }
-  };
-  walk(permissions);
-  const repeated = [...counts].filter(([, n]) => n > 1).sort((a, b) => b[1] - a[1]);
-  if (repeated.length === 0) return [];
-  const [top, n] = repeated[0]!;
-  return [
-    `jazz.permissions.json repeats ${repeated.length} expression${repeated.length === 1 ? "" : "s"} (e.g. \`${top}\`, ${n}×): ` +
-      "consider factoring them into `defs`, which policies reference by name.",
-  ];
 }
 
 /** The report as the CLI prints it. */
@@ -730,8 +738,6 @@ export function formatReport(report: UpgradeReport, dryRun = false): string {
   }
   return lines.join("\n");
 }
-
-export { notSupportedYet };
 
 /** How many times each error (file, code, first message line) occurs. */
 export function countTypeErrors(errors: readonly { key: string }[]): Map<string, number> {
