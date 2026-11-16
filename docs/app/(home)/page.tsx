@@ -64,10 +64,7 @@ import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
-  // Your tables and relations, typed
   app,
-
-  // Who may read and write which rows
   permissions,
 
   // Where the data lives: one core per Vercel environment,
