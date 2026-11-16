@@ -195,6 +195,27 @@ test("crate publication selector tests are a reachable lint partition contract",
   );
 });
 
+test("CI lint runs jazz-app-support's rustdoc with warnings denied, with and without the endpoint", () => {
+  const lint = planFor({ partition: "lint" });
+  const rustdoc = lint.filter(
+    ({ executable, args }) => executable === "cargo" && args[0] === "doc",
+  );
+  assert.deepEqual(rustdoc, [
+    {
+      label: "jazz-app-support rustdoc",
+      executable: "cargo",
+      args: ["doc", "-p", "jazz-app-support", "--no-deps"],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+    {
+      label: "jazz-app-support rustdoc (unstable-endpoint)",
+      executable: "cargo",
+      args: ["doc", "-p", "jazz-app-support", "--no-deps", "--features", "unstable-endpoint"],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+  ]);
+});
+
 test("focused mode is explicitly smaller and cannot be mistaken for CI-equivalent", () => {
   const focused = planFor({ mode: "focused" });
   const complete = planFor({ mode: "ci-equivalent" });
