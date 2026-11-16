@@ -68,18 +68,29 @@ named error.
 "indexes": [
   "owner",
   ["project", "$createdAt"],
-  { "name": "search", "text": { "title": 4, "body": 1 },
+  { "name": "search",
+    "text": { "title": 4, "body": { "weight": 1, "length": 256 } },
     "analyzer": "jazz-text/1:en", "prefix": true },
   { "name": "similar", "vector": "embedding", "metric": "cosine" },
   { "name": "place", "geo": { "lat": "lat", "lng": "lng" } }
 ]
 ```
 
-| kind key | value                                                           | other keys                                                                                                    |
-| -------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `text`   | string column → integer weight 1–15                             | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`                                      |
-| `vector` | a `vector` column                                               | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
-| `geo`    | `{ "lat": <f64 column>, "lng": <f64 column> }` (degrees, WGS84) | `serverOnly`                                                                                                  |
+| kind key | value                                                                  | other keys                                                                                                    |
+| -------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `text`   | string column → weight 1–15, or `{ "weight": 1–15, "length": 1–4096 }` | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`                                      |
+| `vector` | a `vector` column                                                      | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
+| `geo`    | `{ "lat": <f64 column>, "lng": <f64 column> }` (degrees, WGS84)        | `serverOnly`                                                                                                  |
+
+A text field's **weight** multiplies its terms' impacts, and its **length**
+is the reference length in terms that the impact formula compares the
+field's actual length with (20.10.1). The weight-only form has length 32,
+which suits titles, names and other short strings. For long text
+(descriptions, bodies, documents), declare a length of about 256; with 32, a
+word appearing once in a body of a few hundred terms scores almost nothing.
+Both are baked into each posting's impact when a row is indexed, so changing
+a field's weight or length, like any change to the declaration, changes the
+declaration's canonical bytes and rebuilds the index (20.2).
 
 The artifact is the only place indexes are declared; generated bindings
 for each language read them from it. The JSON Schema in
@@ -446,21 +457,25 @@ word whose stem is shorter than what has been typed (`runn`) matches only
 once completed. A query with no terms and no prefix after analysis is
 refused (20.4).
 
-The impact of a term in a field with weight `w`, frequency `f` and field
-length `L` terms (after step 5) is
+The impact of a term in a field with declared weight `w` and reference
+length `R` (20.1: 1–4096, default 32), frequency `f` and actual length `L`
+terms (after step 5) is
 
 ```text
-impact = min(255, floor(w * 16 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * L / 32))))
+impact = min(255, floor(w * 16 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * L / R))))
 ```
 
-computed in binary64 in that order; per row a term's impact is the sum over
-its fields, capped at 255. It is BM25's term-frequency part with a fixed
-reference length of 32 terms and no corpus term weight. A term occurring
-once in a field of more than about 1 200 terms has impact 0 at weight 1. It
-still matches, but adds nothing to the score.
+computed in binary64 in that order, with `w`, `R`, `f` and `L` exact
+integers; per row a term's impact is the sum over its fields, capped at 255.
+It is BM25's term-frequency part with a declared reference length per field
+in place of the corpus's average length, and no corpus term weight. A term
+occurring once in a field as long as its reference length has impact
+`16 * w` (239 at `w = 15`, by rounding). One occurring once in a field of more than about `37 * R` terms has
+impact 0 at weight 1: it still matches, but adds nothing to the score.
 
-The fixtures in `SPEC/fixtures/ix/text/` pin the terms, postings and query
-terms of both analyzers, byte for byte.
+The fixtures in `SPEC/fixtures/ix/text/` pin the terms, postings (with
+default and declared lengths) and query terms of both analyzers, and the
+impact formula over a grid of `w`, `R`, `f` and `L`, byte for byte.
 
 ### 20.10.2 Vector
 
