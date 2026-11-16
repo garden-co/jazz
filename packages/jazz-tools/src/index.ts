@@ -17,10 +17,12 @@ export {
   Profile,
 } from "./classic-api.js";
 
-// Removed in alpha.65 (files as source): stubs that throw, pointing at `jazz-tools upgrade`.
+// The TS authoring DSL (`schema.ts`, `migrations/*.ts`), read by `jazz-tools generate`.
+export { schema } from "./schema-namespace.js";
+export { migration } from "./migration-namespace.js";
+
+// Removed in alpha.65: stubs that throw, pointing at `jazz-tools upgrade`.
 export {
-  schema,
-  migration,
   defineApp,
   defineSchema,
   defineSliceableApp,

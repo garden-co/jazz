@@ -7,7 +7,7 @@ import { PersistedWriteRejectedError } from "../runtime/client.js";
 import type { Db, QueryBuilder, TransactionScope } from "../runtime/db.js";
 import type { BackendSchemaInput } from "../backend/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { createJazzAppFile } from "./schema.js";
+import { createJazzSchemaSourceFile } from "./schema.js";
 import { readTableIndexes } from "./indexes.js";
 import type { JazzBuiltCondition, JazzRowRecord, JazzSortBy } from "./types.js";
 import {
@@ -648,7 +648,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async createSchema({ file, tables }) {
-          return createJazzAppFile({
+          return createJazzSchemaSourceFile({
             file,
             tables,
             getModelName: getPrefixedModelName,
