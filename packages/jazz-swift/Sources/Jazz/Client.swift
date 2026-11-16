@@ -60,6 +60,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         // exhaustive.
         case .NoAccount(_, let message): return JazzError.refused(message)
         case .Unsynced(_, let message): return JazzError.io(message)
+        // A trusted backend client's: a Swift app never opens one.
+        case .BundleMismatch(_, _, let message): return JazzError.refused(message)
         }
     }
 }
