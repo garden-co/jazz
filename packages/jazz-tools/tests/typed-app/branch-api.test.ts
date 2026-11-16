@@ -205,7 +205,7 @@ describe("branch API", () => {
 
     // Branch writes inside a transaction stay allowed.
     tx.update(app.documents, original.id, { title: "Draft" }, { branch: "draft", base: "main" });
-    await tx.commit().wait({ tier: "local" });
+    await tx.commit().wait();
     expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
       title: "Draft",
     });
