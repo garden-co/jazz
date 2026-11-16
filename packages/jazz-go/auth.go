@@ -262,6 +262,8 @@ func (db *DB) SignOut(ctx context.Context) error {
 	if err := db.call(ctx, "signOut", map[string]any{}, nil); err != nil {
 		return err
 	}
+	// The app is closed: let its streams take their last states first.
+	db.awaitStreamsEnd(2 * time.Second)
 	return db.Close()
 }
 

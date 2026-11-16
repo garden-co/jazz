@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Config is how an app is opened. Generated bindings' Open sets App.
@@ -105,7 +106,37 @@ type DB struct {
 	// stops its jazz-ffi side at once; its channel closes once what was
 	// queued is sent.
 	streamsMu sync.Mutex
-	streams   map[uint64]func()
+	streams   map[uint64]*openStream
+}
+
+// openStream is one of a DB's subscriptions or watches.
+type openStream struct {
+	sub *subscriber
+	// end stops its jazz-ffi side; its channel closes once what was
+	// queued is sent.
+	end func()
+}
+
+// awaitStreamsEnd waits, up to d, until jazz-ffi has sent each of the
+// DB's streams its last callback: after signOut or deleteClientStorage
+// close the app, so Close doesn't cut off the states before it (the
+// session's final signedOut).
+func (db *DB) awaitStreamsEnd(d time.Duration) {
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		db.streamsMu.Lock()
+		open := 0
+		for _, st := range db.streams {
+			st.sub.mu.Lock()
+			if !st.sub.ended {
+				open++
+			}
+			st.sub.mu.Unlock()
+		}
+		db.streamsMu.Unlock()
+		if open == 0 {
+			return
+		}
+	}
 }
 
 // endStreams ends the DB's subscriptions and watches (closing their
@@ -113,8 +144,8 @@ type DB struct {
 func (db *DB) endStreams() {
 	db.streamsMu.Lock()
 	ends := make([]func(), 0, len(db.streams))
-	for _, end := range db.streams {
-		ends = append(ends, end)
+	for _, st := range db.streams {
+		ends = append(ends, st.end)
 	}
 	db.streams = nil
 	db.streamsMu.Unlock()
