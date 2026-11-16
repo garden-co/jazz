@@ -336,9 +336,6 @@ mod tests {
         dir
     }
 
-    /// Plain `generate` rewrites TS bindings an older generator wrote (another
-    /// output digest) and keeps ones a formatter reformatted (the same
-    /// digest); `--check` passes on both, as their source and format match.
     /// Bindings headed as before alpha.66 still read: `--check` passes on
     /// them, and plain `generate` rewrites them with today's header.
     #[test]
@@ -352,6 +349,17 @@ mod tests {
                 crate::ts::HEADER,
             ),
             (Lang::Rust, crate::rust::LEGACY_HEADER, crate::rust::HEADER),
+            (
+                Lang::Swift,
+                crate::swift::LEGACY_HEADER,
+                crate::swift::HEADER,
+            ),
+            (
+                Lang::Kotlin,
+                crate::kotlin::LEGACY_HEADER,
+                crate::kotlin::HEADER,
+            ),
+            (Lang::Go, crate::go::LEGACY_HEADER, crate::go::HEADER),
         ] {
             generate(&dir, &[lang.into()], false).unwrap();
             let path = dir.join(lang.file());
@@ -377,6 +385,9 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Plain `generate` rewrites TS bindings an older generator wrote (another
+    /// output digest) and keeps ones a formatter reformatted (the same
+    /// digest); `--check` passes on both, as their source and format match.
     #[test]
     fn generate_rewrites_what_the_generator_now_writes_differently() {
         let dir = dir();
