@@ -43,16 +43,19 @@ and `include!` its output.
 ## Open the app
 
 <include cwd lang="rust" meta='title="src/main.rs"'>
-  ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
+  ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend-client
 </include>
 
-`jazz_app::Jazz` is `Send + Clone`, so it can sit in shared state, such as an Axum router's. The
-client runs on a thread of its own. Before the process exits, call `jazz.shutdown().await`, so that
-the calls already made finish and the local store closes.
+The app opens as a [backend client](/docs/setup/backend-client) of your TypeScript main backend:
+it connects to the main backend's `/jazz` with a machine credential, and the main backend's
+`trustWorkload` decides whether it is trusted or scoped to one user. It opens with the app's
+`jazz.permissions.json`, as TypeScript's `createJazzClient` does.
 
-The backend needs the sync server's admin secret, to publish the bundle, and its backend secret, to
-vouch for the user it acts as. Like every backend, give it no HTTP surface that callers can reach
-without your own authentication.
+`jazz_app::Jazz` is `Send + Clone`, so it can sit in shared state, such as an Axum router's. The
+client runs on a thread of its own. Before the process exits, call
+`jazz.close(jazz_app::CLOSE_TIMEOUT).await`, so that queued writes reach the main backend and the
+local store closes. Give the service no HTTP surface that callers can reach without your own
+authentication.
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Rust tab
 for each example. `examples/todo-server-rs` in the repository is a complete service.
