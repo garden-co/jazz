@@ -1,8 +1,7 @@
 import { schema as s } from "jazz-tools";
 import { betterAuthSchema } from "./auth-schema";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   albums: s
     .table(
@@ -75,7 +74,95 @@ const schema = {
     },
     { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
+
+const createdByMe = { $createdBy: session.user };
+
+const isInvitation = (playlist_id: s.Uuid) =>
+  exists.invitations({ playlist_id, subject: session.user, role: "editor", status: "accepted" });
+
+export const permissions = definePermissions({
+  albums: {
+    read: true,
+    insert: createdByMe,
+  },
+  better_auth_account: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_jwks: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_session: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_user: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_verification: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  invitations: {
+    read: (invitation) => anyOf({ subject: session.user }, invitation.playlist.where(createdByMe)),
+    insert: (invitation) => invitation.playlist.where(createdByMe),
+    updateIf: (invitation) =>
+      anyOf(invitation.playlist.where(createdByMe), { subject: session.user, status: "pending" }),
+    updateTo: (invitation) =>
+      anyOf(
+        invitation.playlist.where(createdByMe),
+        allOf(
+          exists.invitations({
+            id: invitation.id,
+            playlist_id: invitation.playlist_id,
+            subject: invitation.subject,
+            role: invitation.role,
+            status: "pending",
+          }),
+          { subject: session.user, status: "accepted" },
+        ),
+      ),
+    delete: (invitation) => invitation.playlist.where(createdByMe),
+  },
+  playback_positions: {
+    read: createdByMe,
+    insert: true,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+  playlist_entries: {
+    read: (playlistEntry) => allowedTo.read(playlistEntry.playlist),
+    insert: (playlistEntry) =>
+      anyOf(allowedTo.update(playlistEntry.playlist), isInvitation(playlistEntry.playlist_id)),
+    update: (playlistEntry) => anyOf(createdByMe, isInvitation(playlistEntry.playlist_id)),
+    delete: (playlistEntry) => anyOf(createdByMe, isInvitation(playlistEntry.playlist_id)),
+  },
+  playlists: {
+    read: (playlist) =>
+      anyOf(
+        createdByMe,
+        exists.invitations({ playlist_id: playlist.id, subject: session.user, status: "accepted" }),
+      ),
+    insert: true,
+    update: createdByMe,
+  },
+  tracks: {
+    read: true,
+    insert: createdByMe,
+  },
+});

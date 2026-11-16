@@ -1,6 +1,6 @@
 import { schema as s } from "jazz-tools";
 
-export const schema = {
+export const tables = {
   better_auth_user: s.table(
     {
       name: s.string(),
@@ -76,34 +76,13 @@ export const schema = {
   ),
 };
 
-type AppSchema = s.Schema<typeof schema>;
-// Never deployed on its own: the app that spreads `schema` ships the migrations.
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
+type AppSchema = s.Schema<typeof tables>;
 export const wasmSchema = app.wasmSchema;
 
-export const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.better_auth_user.allowRead.never();
-  policy.better_auth_user.allowInsert.never();
-  policy.better_auth_user.allowUpdate.never();
-  policy.better_auth_user.allowDelete.never();
-
-  policy.better_auth_session.allowRead.never();
-  policy.better_auth_session.allowInsert.never();
-  policy.better_auth_session.allowUpdate.never();
-  policy.better_auth_session.allowDelete.never();
-
-  policy.better_auth_account.allowRead.never();
-  policy.better_auth_account.allowInsert.never();
-  policy.better_auth_account.allowUpdate.never();
-  policy.better_auth_account.allowDelete.never();
-
-  policy.better_auth_verification.allowRead.never();
-  policy.better_auth_verification.allowInsert.never();
-  policy.better_auth_verification.allowUpdate.never();
-  policy.better_auth_verification.allowDelete.never();
-
-  policy.better_auth_jwks.allowRead.never();
-  policy.better_auth_jwks.allowInsert.never();
-  policy.better_auth_jwks.allowUpdate.never();
-  policy.better_auth_jwks.allowDelete.never();
-});
+export const permissions = {
+  better_auth_user: { read: false, insert: false, update: false, delete: false },
+  better_auth_session: { read: false, insert: false, update: false, delete: false },
+  better_auth_account: { read: false, insert: false, update: false, delete: false },
+  better_auth_verification: { read: false, insert: false, update: false, delete: false },
+  better_auth_jwks: { read: false, insert: false, update: false, delete: false },
+};

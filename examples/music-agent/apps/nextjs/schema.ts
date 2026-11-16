@@ -1,8 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
 
   // Written once by the bootstrap route. Links the Better Auth user (known from
@@ -133,13 +132,84 @@ const schema = {
       { conversation: s.rel("conversations", "conversationId"), turn: s.rel("turns", "turnId") },
     )
     .indexOnly(["conversationId"]),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Conversation = s.RowOf<typeof app.conversations>;
-export type Turn = s.RowOf<typeof app.turns>;
-/** Turns as the UI reads them: with Jazz's own creation time (`$createdAt`). */
-export type TimedTurn = Turn & { $createdAt: Date };
-export type ToolCall = s.RowOf<typeof app.toolCalls>;
-export type Attachment = s.RowOf<typeof app.attachments>;
+const { definePermissions, allowedTo, session, anyOf, allOf } = schema;
+
+const ownerAccountIsMe = { ownerAccount: session.user };
+
+export const permissions = definePermissions({
+  artists: {
+    read: ownerAccountIsMe,
+  },
+  attachments: {
+    read: (attachment) => allowedTo.read(attachment.conversation),
+    insert: (attachment) =>
+      allOf(
+        attachment.conversation.where(ownerAccountIsMe),
+        attachment.turn.where({ conversationId: attachment.conversationId, role: "user" }),
+      ),
+  },
+  better_auth_account: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_jwks: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_session: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_user: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_verification: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  calendarEvents: {
+    read: ownerAccountIsMe,
+  },
+  conversations: {
+    read: ownerAccountIsMe,
+    insert: (conversation) => allOf(ownerAccountIsMe, conversation.artist.where(ownerAccountIsMe)),
+    updateIf: ownerAccountIsMe,
+    updateTo: (conversation) =>
+      allOf(ownerAccountIsMe, conversation.artist.where(ownerAccountIsMe)),
+    delete: ownerAccountIsMe,
+  },
+  profiles: {
+    read: { accountId: session.user },
+  },
+  songs: {
+    read: ownerAccountIsMe,
+  },
+  toolCalls: {
+    read: (toolCall) => allowedTo.read(toolCall.conversation),
+  },
+  turns: {
+    read: (turn) => allowedTo.read(turn.conversation),
+    insert: (turn) =>
+      allOf(
+        { role: "user", status: "complete" },
+        turn.conversation.where(ownerAccountIsMe),
+        anyOf({ parentId: null }, turn.parent.where({ conversationId: turn.conversationId })),
+      ),
+  },
+  venues: {
+    read: ownerAccountIsMe,
+  },
+});

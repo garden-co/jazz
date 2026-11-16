@@ -1,8 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   canvases: s.table(
     { title: s.string(), width: s.int(), height: s.int() },
@@ -130,11 +129,112 @@ const schema = {
       { canvas: s.rel("canvases", "canvasId") },
     )
     .indexOnly(["canvasId"]),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Canvas = s.RowOf<typeof app.canvases>;
-export type Layer = s.RowOf<typeof app.layers>;
-export type Shape = s.RowOf<typeof app.shapes>;
-export type Cursor = s.RowOf<typeof app.cursors>;
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
+
+const isCanvasMember = (canvasId: s.Uuid) =>
+  exists.canvasMembers({ canvasId, memberAuthor: session.user, role: ["editor", "admin"] });
+
+const isCanvasMemberAdmin = (canvasId: s.Uuid) =>
+  exists.canvasMembers({ canvasId, memberAuthor: session.user, role: "admin" });
+
+const isCanvasMember2 = (canvasId: s.Uuid) =>
+  exists.canvasMembers({ canvasId, memberAuthor: session.user });
+
+const authorIsMe = { author: session.user };
+
+export const permissions = definePermissions({
+  assets: {
+    read: (asset) => allowedTo.read(asset.canvas),
+    insert: (asset) => isCanvasMember(asset.canvasId),
+    update: false,
+    delete: (asset) => isCanvasMember(asset.canvasId),
+  },
+  better_auth_account: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_jwks: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_session: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_user: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_verification: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  canvasInvites: {
+    read: (canvasInvite) => isCanvasMemberAdmin(canvasInvite.canvasId),
+    insert: (canvasInvite) => isCanvasMemberAdmin(canvasInvite.canvasId),
+    update: false,
+    delete: (canvasInvite) => isCanvasMemberAdmin(canvasInvite.canvasId),
+  },
+  canvasMembers: {
+    read: (canvasMember) => allowedTo.read(canvasMember.canvas),
+    insert: (canvasMember) => allowedTo.update(canvasMember.canvas),
+    update: (canvasMember) => allowedTo.update(canvasMember.canvas),
+    delete: (canvasMember) =>
+      anyOf(allowedTo.update(canvasMember.canvas), { memberAuthor: session.user }),
+  },
+  canvases: {
+    read: (canvas) => isCanvasMember2(canvas.id),
+    insert: false,
+    update: (canvas) => isCanvasMemberAdmin(canvas.id),
+    delete: (canvas) => isCanvasMemberAdmin(canvas.id),
+  },
+  checkpoints: {
+    read: (checkpoint) => allowedTo.read(checkpoint.canvas),
+    insert: (checkpoint) => isCanvasMemberAdmin(checkpoint.canvasId),
+    update: false,
+    delete: false,
+  },
+  cursors: {
+    read: (cursor) => allowedTo.read(cursor.canvas),
+    insert: (cursor) => allOf(authorIsMe, isCanvasMember2(cursor.canvasId)),
+    updateIf: authorIsMe,
+    updateTo: (cursor) => allOf(authorIsMe, isCanvasMember2(cursor.canvasId)),
+    delete: authorIsMe,
+  },
+  layers: {
+    read: (layer) => allowedTo.read(layer.canvas),
+    insert: (layer) => isCanvasMember(layer.canvasId),
+    update: (layer) => isCanvasMember(layer.canvasId),
+    delete: (layer) => allOf(isCanvasMember(layer.canvasId), { locked: false }),
+  },
+  shapes: {
+    read: (shape) => allowedTo.read(shape.canvas),
+    insert: (shape) =>
+      allOf(
+        shape.layer.where({ canvasId: shape.canvasId, locked: false }),
+        isCanvasMember(shape.canvasId),
+      ),
+    update: (shape) =>
+      allOf(
+        shape.layer.where({ canvasId: shape.canvasId, locked: false }),
+        isCanvasMember(shape.canvasId),
+      ),
+    delete: (shape) =>
+      allOf(
+        shape.layer.where({ canvasId: shape.canvasId, locked: false }),
+        isCanvasMember(shape.canvasId),
+      ),
+  },
+});

@@ -1,7 +1,6 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   bands: s.table(
     {
       name: s.string(),
@@ -79,15 +78,74 @@ const schema = {
     },
     { stop: s.rel("stops", "stopId"), band: s.rel("bands", "bandId") },
   ),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+});
 
 const stopWithVenueQuery = app.stops.include({ venue: true });
 
-export type Band = s.RowOf<typeof app.bands>;
-export type Member = s.RowOf<typeof app.members>;
-export type Venue = s.RowOf<typeof app.venues>;
-export type StopWithVenue = s.RowOf<typeof stopWithVenueQuery>;
-export type StopStatus = StopWithVenue["status"];
+const { definePermissions, exists, session, anyOf, allOf } = schema;
+
+const ownerIsMe = { ownerId: session.user };
+
+const isMember = (bandId: s.Uuid) => exists.members({ bandId, userId: session.user });
+
+const mine = { userId: session.user };
+
+export const permissions = definePermissions({
+  bandInvites: {
+    read: (bandInvite) => bandInvite.band.where(ownerIsMe),
+    insert: (bandInvite) => bandInvite.band.where(ownerIsMe),
+    delete: (bandInvite) => bandInvite.band.where(ownerIsMe),
+  },
+  bands: {
+    read: true,
+    insert: ownerIsMe,
+    updateIf: (band) => isMember(band.id),
+    updateTo: (band, old) => allOf(isMember(band.id), { ownerId: old.ownerId }),
+    delete: ownerIsMe,
+  },
+  members: {
+    read: (member) => anyOf(mine, isMember(member.bandId)),
+    insert: (member) =>
+      allOf(
+        mine,
+        anyOf(
+          member.band.where(ownerIsMe),
+          exists.bandInvites({ bandId: member.bandId, code: member.inviteCode }),
+        ),
+      ),
+    delete: (member) => anyOf(mine, member.band.where(ownerIsMe)),
+  },
+  stopNotes: {
+    read: (stopNote) => isMember(stopNote.bandId),
+    insert: (stopNote) =>
+      allOf(isMember(stopNote.bandId), stopNote.stop.where({ bandId: stopNote.bandId })),
+    updateIf: (stopNote) => isMember(stopNote.bandId),
+    updateTo: (stopNote) =>
+      allOf(isMember(stopNote.bandId), stopNote.stop.where({ bandId: stopNote.bandId })),
+    delete: (stopNote) => isMember(stopNote.bandId),
+  },
+  stops: {
+    read: (stop) => anyOf({ status: "confirmed" }, isMember(stop.bandId)),
+    insert: (stop) => allOf(isMember(stop.bandId), stop.venue.where({ bandId: stop.bandId })),
+    updateIf: (stop) => isMember(stop.bandId),
+    updateTo: (stop) => allOf(isMember(stop.bandId), stop.venue.where({ bandId: stop.bandId })),
+    delete: (stop) => isMember(stop.bandId),
+  },
+  venues: {
+    read: true,
+    insert: (venue) => allOf(ownerIsMe, anyOf({ bandId: null }, isMember(venue.bandId))),
+    updateIf: (venue) => anyOf({ bandId: null, ownerId: session.user }, isMember(venue.bandId)),
+    updateTo: (venue) =>
+      allOf(
+        anyOf({ bandId: null, ownerId: session.user }, isMember(venue.bandId)),
+        anyOf(
+          exists.venues({ id: venue.id, ownerId: venue.ownerId, bandId: venue.bandId }),
+          allOf(
+            { bandId: null },
+            exists.venues({ id: venue.id, ownerId: venue.ownerId, bandId: null }),
+          ),
+        ),
+      ),
+    delete: (venue) => anyOf({ bandId: null, ownerId: session.user }, isMember(venue.bandId)),
+  },
+});

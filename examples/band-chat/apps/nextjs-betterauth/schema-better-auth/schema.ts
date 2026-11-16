@@ -2,7 +2,7 @@ import { schema as s } from "jazz-tools";
 
 // Generated Better Auth tables are deliberately a separate module. The root
 // application spreads the schema and deny-all policies into its own app.
-export const schema = {
+export const tables = {
   better_auth_user: s.table(
     {
       name: s.string(),
@@ -63,20 +63,12 @@ export const schema = {
   ),
 };
 
-type BetterAuthSchema = s.Schema<typeof schema>;
-export const app: s.App<BetterAuthSchema> = s.defineApp(schema, { migrations: "none" });
+type BetterAuthSchema = s.Schema<typeof tables>;
 
-export const permissions = s.definePermissions(app, ({ policy }) => {
-  for (const table of [
-    policy.better_auth_user,
-    policy.better_auth_session,
-    policy.better_auth_account,
-    policy.better_auth_verification,
-    policy.better_auth_jwks,
-  ]) {
-    table.allowRead.never();
-    table.allowInsert.never();
-    table.allowUpdate.never();
-    table.allowDelete.never();
-  }
-});
+export const permissions = {
+  better_auth_user: { read: false, insert: false, update: false, delete: false },
+  better_auth_session: { read: false, insert: false, update: false, delete: false },
+  better_auth_account: { read: false, insert: false, update: false, delete: false },
+  better_auth_verification: { read: false, insert: false, update: false, delete: false },
+  better_auth_jwks: { read: false, insert: false, update: false, delete: false },
+};

@@ -1,8 +1,8 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
+import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   profiles: s.table(
     {
@@ -126,13 +126,106 @@ const schema = {
       { session: s.rel("sessions", "session_id"), profile: s.rel("profiles", "profile_id") },
     )
     .indexOnly(["session_id", "heartbeat_at"]),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Session = s.RowOf<typeof app.sessions>;
-export type Track = s.RowOf<typeof app.tracks>;
-export type Step = s.RowOf<typeof app.steps>;
-export type Pattern = s.RowOf<typeof app.patterns>;
-export type Instrument = Track["instrument"];
-export type MemberRole = s.RowOf<typeof app.session_members>["role"];
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
+
+const isSessionMember = (session_id: s.Uuid) =>
+  exists.session_members({ session_id, member_author: session.user });
+
+const isSessionMemberEditor = (session_id: s.Uuid) =>
+  exists.session_members({ session_id, member_author: session.user, role: "editor" });
+
+const isSessionMemberOwner = (session_id: s.Uuid) =>
+  exists.session_members({ session_id, member_author: session.user, role: "owner" });
+
+const createdByMe = { $createdBy: session.user };
+
+const authorIsMe = { author: session.user };
+
+export const permissions = definePermissions({
+  ...betterAuthPermissions,
+  patterns: {
+    read: (pattern) => isSessionMember(pattern.session_id),
+    insert: (pattern) =>
+      anyOf(isSessionMemberEditor(pattern.session_id), isSessionMemberOwner(pattern.session_id)),
+    update: (pattern) =>
+      anyOf(isSessionMemberEditor(pattern.session_id), isSessionMemberOwner(pattern.session_id)),
+    delete: (pattern) => pattern.session.where(createdByMe),
+  },
+  presence: {
+    read: (presence) => isSessionMember(presence.session_id),
+    insert: (presence) =>
+      allOf(isSessionMember(presence.session_id), allowedTo.update(presence.profile)),
+    update: (presence) =>
+      allOf(isSessionMember(presence.session_id), allowedTo.update(presence.profile)),
+    delete: createdByMe,
+  },
+  profiles: {
+    read: (profile) => anyOf(authorIsMe, allowedTo.read(profile.presenceViaProfile)),
+    insert: authorIsMe,
+    update: authorIsMe,
+    delete: authorIsMe,
+  },
+  session_members: {
+    read: (sessionMember) => allowedTo.read(sessionMember.session),
+    insert: (sessionMember) => allowedTo.update(sessionMember.session),
+    update: false,
+    delete: (sessionMember) => allowedTo.update(sessionMember.session),
+  },
+  sessions: {
+    read: (row) => anyOf(createdByMe, isSessionMember(row.id)),
+    insert: true,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+  steps: {
+    read: (step) => isSessionMember(step.session_id),
+    insert: (step) =>
+      allOf(
+        anyOf(isSessionMemberEditor(step.session_id), isSessionMemberOwner(step.session_id)),
+        step.track.where({ session_id: step.session_id }),
+        step.pattern.where({ session_id: step.session_id }),
+      ),
+    update: (step) =>
+      allOf(
+        anyOf(isSessionMemberEditor(step.session_id), isSessionMemberOwner(step.session_id)),
+        step.track.where({ session_id: step.session_id }),
+        step.pattern.where({ session_id: step.session_id }),
+      ),
+    delete: (step) =>
+      anyOf(isSessionMemberEditor(step.session_id), isSessionMemberOwner(step.session_id)),
+  },
+  tracks: {
+    read: (track) => isSessionMember(track.session_id),
+    insert: (track) =>
+      anyOf(isSessionMemberEditor(track.session_id), isSessionMemberOwner(track.session_id)),
+    update: (track) =>
+      anyOf(isSessionMemberEditor(track.session_id), isSessionMemberOwner(track.session_id)),
+    delete: (track) => track.session.where(createdByMe),
+  },
+  transport_observations: {
+    read: (transportObservation) => isSessionMember(transportObservation.session_id),
+    insert: (transportObservation) =>
+      allOf(
+        anyOf(
+          isSessionMemberEditor(transportObservation.session_id),
+          isSessionMemberOwner(transportObservation.session_id),
+        ),
+        anyOf(
+          { pattern_id: null },
+          transportObservation.pattern.where({ session_id: transportObservation.session_id }),
+        ),
+      ),
+    update: (transportObservation) =>
+      anyOf(
+        isSessionMemberEditor(transportObservation.session_id),
+        isSessionMemberOwner(transportObservation.session_id),
+      ),
+    delete: (transportObservation) =>
+      anyOf(
+        isSessionMemberEditor(transportObservation.session_id),
+        isSessionMemberOwner(transportObservation.session_id),
+      ),
+  },
+});

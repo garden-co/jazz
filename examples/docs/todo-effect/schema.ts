@@ -1,7 +1,6 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations/index.js";
 
-const schema = {
+export const schema = s.defineSchema({
   todos: s.table(
     {
       title: s.string(),
@@ -24,9 +23,19 @@ const schema = {
     },
     { todos: s.reverse("todos", "project") },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions } = schema;
 
-export type Todo = s.RowOf<typeof app.todos>;
+export const permissions = definePermissions({
+  projects: {
+    read: true,
+    insert: true,
+  },
+  todos: {
+    read: true,
+    insert: true,
+    update: true,
+    delete: true,
+  },
+});

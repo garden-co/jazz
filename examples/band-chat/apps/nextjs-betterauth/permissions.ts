@@ -1,164 +1,111 @@
-import { definePermissions, type RowContext, type RowRefValue } from "jazz-tools/permissions";
+import { schema as s } from "jazz-tools";
+import { schema } from "./schema";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
-import { app, type Reaction, type Room } from "./schema";
 
-const bandChatPermissions = definePermissions(
-  app,
-  ({ policy, session, allOf, anyOf, allowedTo }) => {
-    const me = session.user;
-    const isMember = (room: RowContext<Room>) =>
-      policy.roomMembers.exists.where({ roomId: room.id, memberAuthor: me });
-    const isMemberOf = (roomId: RowRefValue) =>
-      policy.roomMembers.exists.where({ roomId, memberAuthor: me });
-    const isCreatorOf = (roomId: RowRefValue) =>
-      policy.rooms.exists.where({ id: roomId, "$createdBy.account": me });
-    const canMutateReaction = (reaction: RowContext<Reaction>) =>
-      allOf([
-        { author: me },
-        policy.messages.exists.where({ id: reaction.messageId, roomId: reaction.roomId }),
-        isMemberOf(reaction.roomId),
-      ]);
+const { definePermissions, exists, allowedTo, session, anyOf, allOf, ne } = schema;
 
-    // Profiles are visible to their owner, to anyone who can read a message
-    // they sent or a membership that names them (co-members), and to a room
-    // creator who can read their join request.
-    policy.profiles.allowRead.where(
-      anyOf([
-        { author: me },
-        allowedTo.read("messagesViaSender"),
-        allowedTo.read("membershipsViaProfile"),
-        allowedTo.read("joinRequestsViaProfile"),
-      ]),
-    );
-    policy.profiles.allowInsert.where({ author: me });
-    policy.profiles.allowUpdate.whereOld({ author: me }).whereNew({ author: me });
-    policy.profiles.allowDelete.where({ author: me });
+const isRoomMember = (roomId: s.Uuid) => exists.roomMembers({ roomId, memberAuthor: session.user });
 
-    // The room creator has a short local bootstrap window before its own
-    // membership row is visible; every other identity must already be a member.
-    policy.rooms.allowRead.where((room) => anyOf([{ "$createdBy.account": me }, isMember(room)]));
-    policy.rooms.allowInsert.always();
-    // Only the creator may rename the room. Members never write to it: the
-    // room list orders and marks rooms by their newest message.
-    policy.rooms.allowUpdate
-      .whereOld({ "$createdBy.account": me })
-      .whereNew({ "$createdBy.account": me });
-    policy.rooms.allowDelete.where({ "$createdBy.account": me });
+const requesterIsMe = { requester: session.user };
 
-    policy.roomMembers.allowRead.where(allowedTo.read("room"));
-    // Only the room creator can admit members. In particular, no rule permits an
-    // identity to insert its own membership into someone else's room.
-    //
-    // Every membership names the admitted account's own profile, and that
-    // account must be the creator or have asked to join this room. Knowing an account id is therefore not enough to put someone in
-    // a room. The admission may delete the request in the same transaction:
-    // the check sees the committed request (INV-RLS-9).
-    //
-    // Adding people the creator already shares another room with, without a
-    // request, would need `allowedTo.read("memberProfile")` here. On INSERT
-    // that currently requires UPDATE authority on the profile, not READ
-    // (garden-co/jazz#1900), so it is denied even when the creator can read it.
-    policy.roomMembers.allowInsert.where((member) =>
-      allOf([
-        isCreatorOf(member.roomId),
-        { memberProfileId: { isNull: false } },
-        policy.profiles.exists.where({
-          id: member.memberProfileId,
-          author: member.memberAuthor,
-        }),
-        anyOf([
-          { memberAuthor: me },
-          policy.joinRequests.exists.where({
-            roomId: member.roomId,
-            requester: member.memberAuthor,
-          }),
-        ]),
-      ]),
-    );
-    policy.roomMembers.allowUpdate.never();
-    // The creator removes members; a member may also leave on their own.
-    policy.roomMembers.allowDelete.where((member) =>
-      anyOf([isCreatorOf(member.roomId), { memberAuthor: me }]),
-    );
+const createdByMe = { $createdBy: session.user };
 
-    policy.joinRequests.allowRead.where((request) =>
-      anyOf([{ requester: me }, isCreatorOf(request.roomId)]),
-    );
-    policy.joinRequests.allowInsert.where((request) =>
-      allOf([
-        { requester: me },
-        policy.profiles.exists.where({ id: request.profileId, author: me }),
-      ]),
-    );
-    policy.joinRequests.allowUpdate.never();
-    policy.joinRequests.allowDelete.where((request) =>
-      anyOf([{ requester: me }, isCreatorOf(request.roomId)]),
-    );
+const authorIsMe = { author: session.user };
 
-    // Read markers: one "read up to" row per member and room, no history.
-    // Co-members see each other's markers (the check marks and "Read by"
-    // under a message); outsiders and ex-members see none.
-    policy.readMarkers.allowRead.where((marker) => isMemberOf(marker.roomId));
-    policy.readMarkers.allowInsert.where((marker) =>
-      allOf([{ reader: me }, isMemberOf(marker.roomId)]),
-    );
-    // Only the reader moves their own marker, and only while a member. That a
-    // marker only moves forward is the app's rule (useMarkRead never writes
-    // an earlier position), not this policy's: a policy cannot yet compare a
-    // column with the written row's value other than for equality (#5130).
-    policy.readMarkers.allowUpdate
-      .whereOld({ reader: me })
-      .whereNew((marker) => allOf([{ reader: me }, isMemberOf(marker.roomId)]));
-    // A reader drops their own marker when they leave; the room creator drops
-    // a member's marker when removing them, so an ex-member leaves no trace.
-    policy.readMarkers.allowDelete.where((marker) =>
-      anyOf([{ reader: me }, isCreatorOf(marker.roomId)]),
-    );
+const readerIsMe = { reader: session.user };
 
-    policy.messages.allowRead.where((message) => isMemberOf(message.roomId));
-    policy.messages.allowInsert.where((message) =>
-      allOf([
-        isMemberOf(message.roomId),
-        policy.profiles.exists.where({ id: message.senderId, author: me }),
-        anyOf([
-          { canvasId: { isNull: true } },
-          policy.canvases.exists.where({ id: message.canvasId, roomId: message.roomId }),
-        ]),
-      ]),
-    );
-    policy.messages.allowUpdate.never();
-    policy.messages.allowDelete.where((message) =>
-      policy.profiles.exists.where({ id: message.senderId, author: me }),
-    );
+const memberAuthorIsMe = { memberAuthor: session.user };
 
-    policy.reactions.allowRead.where(allowedTo.read("message"));
-    // `roomId` is a denormalized authorization carrier: matching it against
-    // both the referenced message and current membership is equivalent to the
-    // message read policy without trusting a caller-supplied room id alone.
-    policy.reactions.allowInsert.where(canMutateReaction);
-    policy.reactions.allowUpdate.never();
-    policy.reactions.allowDelete.where(canMutateReaction);
-
-    policy.canvases.allowRead.where((canvas) => isMemberOf(canvas.roomId));
-    policy.canvases.allowInsert.where((canvas) => isMemberOf(canvas.roomId));
-    policy.canvases.allowUpdate.never();
-    policy.canvases.allowDelete.never();
-
-    // `roomId` is again a carrier: it must match the canvas and a current
-    // membership, so a removed member can no longer draw.
-    policy.strokes.allowRead.where((stroke) => isMemberOf(stroke.roomId));
-    policy.strokes.allowInsert.where((stroke) =>
-      allOf([
-        { author: me },
-        isMemberOf(stroke.roomId),
-        policy.canvases.exists.where({ id: stroke.canvasId, roomId: stroke.roomId }),
-      ]),
-    );
-    policy.strokes.allowUpdate.never();
-    policy.strokes.allowDelete.where((stroke) =>
-      allOf([{ author: me }, isMemberOf(stroke.roomId)]),
-    );
+export const permissions = definePermissions({
+  ...betterAuthPermissions,
+  canvases: {
+    read: (canvas) => isRoomMember(canvas.roomId),
+    insert: (canvas) => isRoomMember(canvas.roomId),
+    update: false,
+    delete: false,
   },
-);
-
-export default { ...betterAuthPermissions, ...bandChatPermissions };
+  joinRequests: {
+    read: (joinRequest) => anyOf(requesterIsMe, joinRequest.room.where(createdByMe)),
+    insert: (joinRequest) => allOf(requesterIsMe, joinRequest.profile.where(authorIsMe)),
+    update: false,
+    delete: (joinRequest) => anyOf(requesterIsMe, joinRequest.room.where(createdByMe)),
+  },
+  messages: {
+    read: (message) => isRoomMember(message.roomId),
+    insert: (message) =>
+      allOf(
+        isRoomMember(message.roomId),
+        message.sender.where(authorIsMe),
+        anyOf({ canvasId: null }, message.canvas.where({ roomId: message.roomId })),
+      ),
+    update: false,
+    delete: (message) => message.sender.where(authorIsMe),
+  },
+  profiles: {
+    read: (profile) =>
+      anyOf(
+        authorIsMe,
+        allowedTo.read(profile.messagesViaSender),
+        allowedTo.read(profile.membershipsViaProfile),
+        allowedTo.read(profile.joinRequestsViaProfile),
+      ),
+    insert: authorIsMe,
+    update: authorIsMe,
+    delete: authorIsMe,
+  },
+  reactions: {
+    read: (reaction) => allowedTo.read(reaction.message),
+    insert: (reaction) =>
+      allOf(
+        authorIsMe,
+        reaction.message.where({ roomId: reaction.roomId }),
+        isRoomMember(reaction.roomId),
+      ),
+    update: false,
+    delete: (reaction) =>
+      allOf(
+        authorIsMe,
+        reaction.message.where({ roomId: reaction.roomId }),
+        isRoomMember(reaction.roomId),
+      ),
+  },
+  readMarkers: {
+    read: (readMarker) => isRoomMember(readMarker.roomId),
+    insert: (readMarker) => allOf(readerIsMe, isRoomMember(readMarker.roomId)),
+    updateIf: readerIsMe,
+    updateTo: (readMarker) => allOf(readerIsMe, isRoomMember(readMarker.roomId)),
+    delete: (readMarker) => anyOf(readerIsMe, readMarker.room.where(createdByMe)),
+  },
+  roomMembers: {
+    read: (roomMember) => allowedTo.read(roomMember.room),
+    insert: (roomMember) =>
+      allOf(
+        roomMember.room.where(createdByMe),
+        { memberProfileId: ne(null) },
+        roomMember.memberProfile.where({ author: roomMember.memberAuthor }),
+        anyOf(
+          memberAuthorIsMe,
+          exists.joinRequests({ roomId: roomMember.roomId, requester: roomMember.memberAuthor }),
+        ),
+      ),
+    update: false,
+    delete: (roomMember) => anyOf(roomMember.room.where(createdByMe), memberAuthorIsMe),
+  },
+  rooms: {
+    read: (room) => anyOf(createdByMe, isRoomMember(room.id)),
+    insert: true,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+  strokes: {
+    read: (stroke) => isRoomMember(stroke.roomId),
+    insert: (stroke) =>
+      allOf(
+        authorIsMe,
+        isRoomMember(stroke.roomId),
+        stroke.canvas.where({ roomId: stroke.roomId }),
+      ),
+    update: false,
+    delete: (stroke) => allOf(authorIsMe, isRoomMember(stroke.roomId)),
+  },
+});

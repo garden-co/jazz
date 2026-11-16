@@ -1,35 +1,8 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
+import { ACTIVITY_KINDS, TASK_STATUSES } from "./app-extras";
 
-/**
- * StagePlan: a crew preparing shows.
- *
- * The core tables mirror the W1 "team task board" workload one to one, so the
- * benchmark can later run against this schema:
- *
- *   W1 users     -> crew       (a person's display profile)
- *   W1 projects  -> shows      (a gig with venue, date and doors time)
- *   W1 tasks     -> tasks      (show, title, status, assignee; updated_at is $updatedAt)
- *   W1 comments  -> comments   (task, author, body; created_at is $createdAt)
- *   W1 activity  -> activity   (show, task, actor, kind; created_at is $createdAt)
- *
- * On top of that, StagePlan adds what a real app needs for permissions
- * (showCrew memberships and private showInvites) and a personal checklist.
- */
-export const TASK_STATUSES = ["todo", "doing", "done", "blocked"] as const;
-export type TaskStatus = (typeof TASK_STATUSES)[number];
-
-export const ACTIVITY_KINDS = [
-  "created",
-  "moved",
-  "assigned",
-  "renamed",
-  "commented",
-  "deleted",
-] as const;
-
-const schema = {
+export const schema = s.defineSchema({
   // Better Auth's tables, written only by the backend (see permissions.ts).
   ...betterAuthSchema,
 
@@ -137,16 +110,140 @@ const schema = {
     },
     {},
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
 
-export type Crew = s.RowOf<typeof app.crew>;
-export type Show = s.RowOf<typeof app.shows>;
-export type ShowCrew = s.RowOf<typeof app.showCrew>;
-export type Task = s.RowOf<typeof app.tasks>;
-export type Comment = s.RowOf<typeof app.comments>;
-export type Activity = s.RowOf<typeof app.activity>;
-export type ActivityKind = Activity["kind"];
-export type ChecklistItem = s.RowOf<typeof app.checklistItems>;
+const isShowCrew = (showId: s.Uuid) => exists.showCrew({ showId, account: session.user });
+
+const chiefAccountIsMe = { chiefAccount: session.user };
+
+const accountIsMe = { account: session.user };
+
+const ownerAccountIsMe = { ownerAccount: session.user };
+
+const isShowCrew2 = (showId: s.Uuid, crewId: s.Uuid) => exists.showCrew({ showId, crewId });
+
+export const permissions = definePermissions({
+  activity: {
+    read: (activity) => anyOf(isShowCrew(activity.showId), activity.show.where(chiefAccountIsMe)),
+    insert: (activity) =>
+      allOf(
+        anyOf(isShowCrew(activity.showId), activity.show.where(chiefAccountIsMe)),
+        activity.actor.where(accountIsMe),
+      ),
+  },
+  better_auth_account: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_jwks: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_session: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_user: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_verification: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  checklistItems: {
+    read: ownerAccountIsMe,
+    insert: ownerAccountIsMe,
+    update: ownerAccountIsMe,
+    delete: ownerAccountIsMe,
+  },
+  comments: {
+    read: (comment) => allowedTo.read(comment.task),
+    insert: (comment) => allOf(allowedTo.read(comment.task), comment.author.where(accountIsMe)),
+    delete: (comment) => comment.author.where(accountIsMe),
+  },
+  crew: {
+    read: true,
+    insert: accountIsMe,
+    update: accountIsMe,
+  },
+  showCrew: {
+    read: (showCrew) => anyOf(isShowCrew(showCrew.showId), showCrew.show.where(chiefAccountIsMe)),
+    insert: (showCrew) =>
+      anyOf(
+        allOf(
+          { account: session.user, role: "chief" },
+          showCrew.show.where(chiefAccountIsMe),
+          showCrew.crew.where(accountIsMe),
+        ),
+        allOf(
+          { account: session.user, role: "crew" },
+          showCrew.crew.where(accountIsMe),
+          exists.showInvites({ showId: showCrew.showId, code: showCrew.inviteCode }),
+        ),
+      ),
+    updateIf: accountIsMe,
+    updateTo: (showCrew, old) =>
+      allOf(
+        { account: session.user, inviteCode: null },
+        showCrew.crew.where(accountIsMe),
+        anyOf(
+          allOf(
+            { role: "crew" },
+            exists.showCrew({ id: showCrew.id, showId: showCrew.showId, role: "crew" }),
+          ),
+          allOf({ role: "chief" }, showCrew.show.where(chiefAccountIsMe), { showId: old.showId }),
+        ),
+      ),
+    delete: (showCrew) => anyOf(accountIsMe, showCrew.show.where(chiefAccountIsMe)),
+  },
+  showInvites: {
+    read: (showInvite) => showInvite.show.where(chiefAccountIsMe),
+    insert: (showInvite) => showInvite.show.where(chiefAccountIsMe),
+    updateIf: (showInvite) => showInvite.show.where(chiefAccountIsMe),
+    updateTo: (showInvite, old) =>
+      allOf(showInvite.show.where(chiefAccountIsMe), { showId: old.showId }),
+    delete: (showInvite) => showInvite.show.where(chiefAccountIsMe),
+  },
+  shows: {
+    read: (show) =>
+      anyOf(isShowCrew(show.id), exists.shows({ id: show.id, chiefAccount: session.user })),
+    insert: chiefAccountIsMe,
+    update: chiefAccountIsMe,
+    delete: chiefAccountIsMe,
+  },
+  tasks: {
+    read: (task) => anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
+    insert: (task) =>
+      allOf(
+        anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
+        anyOf({ assigneeId: null }, isShowCrew2(task.showId, task.assigneeId)),
+      ),
+    updateIf: (task) => anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
+    updateTo: (task) =>
+      allOf(
+        anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
+        anyOf({ assigneeId: null }, isShowCrew2(task.showId, task.assigneeId)),
+      ),
+    delete: (task) =>
+      anyOf(
+        task.show.where(chiefAccountIsMe),
+        allOf(
+          { $createdBy: session.user },
+          anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
+        ),
+      ),
+  },
+});

@@ -1,9 +1,9 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterauthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterauthSchema } from "./schema-better-auth/schema";
+import { permissions as betterauthPermissions } from "./schema-better-auth/schema";
 
 // #region default-stack-schema
-const schema = {
+export const schema = s.defineSchema({
   ...betterauthSchema,
   messages: s.table(
     {
@@ -14,10 +14,24 @@ const schema = {
     },
     {},
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-// #endregion default-stack-schema
+const { definePermissions, session, anyOf, allOf, eq } = schema;
 
-export type Message = s.RowOf<typeof app.messages>;
+const roleIsAdmin = eq(session.claims.role, "admin");
+
+export const permissions = definePermissions({
+  ...betterauthPermissions,
+  messages: {
+    read: anyOf({ chat_id: "announcements" }, { chat_id: "chat-01" }),
+    insert: anyOf(allOf({ chat_id: "announcements" }, roleIsAdmin), { chat_id: "chat-01" }),
+    update: anyOf(allOf({ chat_id: "announcements" }, roleIsAdmin), {
+      chat_id: "chat-01",
+      $createdBy: session.user,
+    }),
+    delete: anyOf(allOf({ chat_id: "announcements" }, roleIsAdmin), {
+      chat_id: "chat-01",
+      $createdBy: session.user,
+    }),
+  },
+});
