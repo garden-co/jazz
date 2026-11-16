@@ -657,7 +657,9 @@ has not accepted yet. Rows a transaction writes cannot grant each other access i
 each one has to be allowed by rows that already exist or that the transaction writes and are
 themselves allowed. Every write must also still be allowed by the state the whole transaction
 leaves behind, so demoting your own membership from admin in the same transaction as creating a
-document that requires admin is rejected. The order in which you make the writes doesn't matter.
+document that requires admin is rejected. The order in which you make the writes doesn't matter. See
+[Know when permissions are checked](/docs/writing/transactions#know-when-permissions-are-checked)
+for when a transaction's writes are checked and more examples.
 
 Importing many rows whose permissions rest on rows that already exist (for example, thousands of
 folders under existing parents) is checked once per row. A transaction whose rows mostly depend on
