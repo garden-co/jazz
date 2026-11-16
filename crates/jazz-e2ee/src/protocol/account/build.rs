@@ -20,13 +20,15 @@ use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{ProtocolError, ProtocolResult, RecoveryFailure, RefusalCode};
 use super::super::ids;
 use super::super::json;
+use super::super::local_first::LocalFirstIdentity;
 use super::super::records::KeyColumns;
 use super::super::records::account::{
-    AccountAction, AccountIdentity, AccountRoot, AccountSuccessor, ChallengeCoordinates,
-    DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow, DeviceProof, DeviceRequest,
-    LEDGER_VERSION, PublicAccountSuccessor, PublicDeviceApproval, RecoveryDelivery, RecoveryRoot,
-    approval_context, approval_signed_bytes, delivery_marker_context, identity_context,
-    proof_signed_bytes, recovery_delivery_context, successor_context,
+    AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSuccessor,
+    ChallengeCoordinates, DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow,
+    DeviceProof, DeviceRequest, LEDGER_VERSION, PublicAccountSuccessor, PublicDeviceApproval,
+    RecoveryDelivery, RecoveryRoot, approval_context, approval_signed_bytes,
+    delivery_marker_context, identity_context, proof_signed_bytes, recovery_delivery_context,
+    successor_context,
 };
 use super::super::signing;
 use super::key::AccountKey;
@@ -292,9 +294,10 @@ pub struct ResetPolicy {
     pub allow_account_reset: bool,
 }
 
-/// Reset preconditions (§2.11): an app-authenticated account, reset
-/// allowed, a canonical root (`state`), this device's request matching its
-/// keys, and this device not active in the current generation.
+/// Reset preconditions (§2.11): an app-authenticated session, reset
+/// allowed, a canonical `app` root (`state`; an account whose root is
+/// `local-first` never resets, whoever signs in), this device's request
+/// matching its keys, and this device not active in the current generation.
 pub fn check_reset(
     writer: &AccountWriter<'_>,
     policy: ResetPolicy,
@@ -303,7 +306,8 @@ pub fn check_reset(
     public: &PublicAccountLedger,
     private: &PrivateAccountLedger,
 ) -> ProtocolResult<RootPermit> {
-    if policy.local_first || !policy.allow_account_reset {
+    if policy.local_first || !policy.allow_account_reset || state.root.row.kind != AccountKind::App
+    {
         return refuse(RefusalCode::AccountResetNotAllowed);
     }
     writer.check_device_request(device, public, private)?;
@@ -320,16 +324,35 @@ pub fn check_reset(
     })
 }
 
+/// What authenticates a new account root (§2.3).
+#[derive(Debug, Clone, Copy)]
+pub enum RootAuthority<'a> {
+    /// An account of the application's own sign-in: the root is
+    /// authenticated only by its author.
+    App,
+    /// A local-first account: the root is signed by the identity, whose key
+    /// must derive the account ID.
+    LocalFirst(&'a LocalFirstIdentity),
+}
+
 /// The identity and public root `permit` allows for `device` (§2.3; at
-/// `g + 1` the reset of §2.11). Both envelopes are opened again.
+/// `g + 1` the reset of §2.11), of the kind `authority` gives. Both
+/// envelopes are opened again and a local-first signature is verified
+/// before the records are returned.
 pub fn account_root(
     writer: &AccountWriter<'_>,
     device: &LocalDevice,
     permit: &RootPermit,
+    authority: RootAuthority<'_>,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<RootRecords> {
     if permit.device_id != device.id {
         return refuse(RefusalCode::NoDeviceRequest);
+    }
+    if let RootAuthority::LocalFirst(identity) = authority
+        && identity.account_id(writer.domain).as_deref() != Some(writer.account_id)
+    {
+        return refuse(RefusalCode::LocalFirstIdentityMismatch);
     }
     let generation = permit.generation;
     let application = writer.application()?;
@@ -360,6 +383,31 @@ pub fn account_root(
         "",
     )?;
     let verification = writer.wrap(&key, &marker_context, &Z32, rng)?;
+    let mut root = AccountRoot {
+        id: ids::random_v4(rng)?,
+        ledger_version: LEDGER_VERSION,
+        generation,
+        account_id: writer.account_id.to_owned(),
+        device_id: device.id.clone(),
+        epoch_id: epoch_id.clone(),
+        kind: AccountKind::App,
+        local_first_public_key: None,
+        local_first_signature: None,
+    };
+    if let RootAuthority::LocalFirst(identity) = authority {
+        root.kind = AccountKind::LocalFirst;
+        root.local_first_public_key = Some(identity.public_key().to_vec());
+        root.local_first_signature = Some(Vec::new());
+        let bytes = root.signed_bytes(&application, &device.keys())?;
+        let signature = identity.sign(&bytes)?;
+        provider_check(read_back(super::super::local_first::verify(
+            writer.registry,
+            identity.public_key(),
+            &bytes,
+            &signature,
+        ))?)?;
+        root.local_first_signature = Some(signature);
+    }
     Ok(RootRecords {
         identity: AccountIdentity {
             id: identity_id,
@@ -370,14 +418,7 @@ pub fn account_root(
             envelope,
             verification,
         },
-        root: AccountRoot {
-            id: ids::random_v4(rng)?,
-            ledger_version: LEDGER_VERSION,
-            generation,
-            account_id: writer.account_id.to_owned(),
-            device_id: device.id.clone(),
-            epoch_id,
-        },
+        root,
         key,
     })
 }

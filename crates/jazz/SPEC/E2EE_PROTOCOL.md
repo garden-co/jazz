@@ -101,7 +101,8 @@ Every record ID, epoch ID, device ID and recovery root ID is a lowercase UUID
 string, generated at random, except where a derivation is stated. Signed statements check IDs against
 `^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
 (versions 4 or 7). Account IDs are the authenticated Jazz account ID: any
-non-empty string. A recovery root derived from a recovery secret (§2.9) has a
+non-empty string; a local-first account's ID is derived from its
+local-first public key (§2.3). A recovery root derived from a recovery secret (§2.9) has a
 derived version 8 ID, and recovery root IDs accept versions 4, 7 and 8. The
 space root ID is derived (§3.2) and is version 8, as are
 the IDs of grants and group membership records staged by the recipient sync
@@ -317,7 +318,7 @@ wherever it enters JSON. `covers` (§1.3) is text. Optional columns
 | `__e2ee_device_requests`           | `publicKey`, `mechanism`, `version`, `signingPublicKey`, `signingMechanism`, `signingVersion`                                                                                             | device ID       | private    | A device's identity, written by that device.                                                            |
 | `__e2ee_device_keys`               | `deviceId` and the six key columns of the request                                                                                                                                         | random          | public     | Public projection of the request's keys; must equal it. Written by the device.                          |
 | `__e2ee_account_identities`        | `ledgerVersion` (1), `generation`, `deviceId`, `epochId`, `envelope`, `verification`                                                                                                      | identity ID     | private    | Private account root: root epoch key sealed to the first device, plus its marker. Written at bootstrap. |
-| `__e2ee_account_roots`             | `ledgerVersion` (1), `generation`, `accountId`, `deviceId`, `epochId`                                                                                                                     | random          | public     | Public account root. Written at bootstrap in the same transaction as the identity.                      |
+| `__e2ee_account_roots`             | `ledgerVersion` (1), `generation`, `accountId`, `deviceId`, `epochId`, `kind`, `localFirstPublicKey?`, `localFirstSignature?`                                                             | random          | public     | Public account root. Written at bootstrap in the same transaction as the identity.                      |
 | `__e2ee_device_challenges`         | `deviceId`, `epochId`, `envelope`                                                                                                                                                         | challenge ID    | private    | An approval challenge to a requesting device. Written by the approving device.                          |
 | `__e2ee_device_proofs`             | `challengeId`, `proof`, `signature`                                                                                                                                                       | challenge ID    | private    | The requesting device's possession proof.                                                               |
 | `__e2ee_device_approvals`          | `challengeId`, `signerId`, `verification`, `signature`                                                                                                                                    | challenge ID    | private    | Private approval with its account-key marker.                                                           |
@@ -330,6 +331,12 @@ wherever it enters JSON. `covers` (§1.3) is text. Optional columns
 
 `action` is `remove-device` or `retire-recovery-root`; exactly the matching
 target column is set.
+
+A root's `kind` is `local-first` (an account founded by a local-first
+identity, §2.3) or `app` (an account of the application's own sign-in). A
+`local-first` root sets both `localFirstPublicKey` (the raw 32-byte Ed25519
+public key) and `localFirstSignature`; an `app` root sets neither. Any other
+combination is malformed.
 
 The identity ID is the account ID for generation 0 (the first bootstrap). For
 a reset (§2.11) it is the version 8 UUID formed, as for space IDs (§3.2), from
@@ -403,13 +410,16 @@ Account and device tables (fixed policies):
   session account and the row's `generation` (§1.2) and a request for
   `deviceId` created by the same account; generation 0 only when the account
   has no identity, a later generation only when the account has an identity
-  of the generation before it, the session is not `local-first`, and the
-  deployed encryption configuration sets `allowAccountReset` (§2.11); read by
-  that account.
+  of the generation before it, the session is not `local-first`, the account
+  was not founded by a local-first identity, and the deployed encryption
+  configuration sets `allowAccountReset` (§2.11); read by that account.
 - R6. `__e2ee_account_roots`: insert only with `accountId = session account`
   and a matching identity (identity ID of that generation, same device, epoch,
   generation and ledger version) by the same account, in the same
-  transaction.
+  transaction. The root's `kind` is `local-first` exactly when the account
+  was founded by a local-first identity (Jazz's account registry), and the
+  server then also checks the local-first key and signature as replay does
+  (§2.4 step 1); an account founded otherwise writes `app` roots.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.
@@ -816,29 +826,90 @@ Then generate `epochId` and a 32-byte key `K`, and insert atomically:
 - identity `{id: account, generation: 0, deviceId, epochId, ledgerVersion: 1,
 envelope: seal(device.pub, A(deviceId, "envelope"), K),
 verification: wrap(K, A("", "verification"), Z32)}`,
-- public root `{accountId, generation: 0, deviceId, epochId, ledgerVersion: 1}`,
+- public root `{accountId, generation: 0, deviceId, epochId, ledgerVersion: 1,
+kind, localFirstPublicKey?, localFirstSignature?}`,
 
 where `A(recipient, column) = ctx{application: D, policy:
 "jazz.e2ee.account-identity.v1", scope: "account", identifier: account,
 table: "__e2ee_account_identities", row: account, column, epoch: epochId,
-recipient}`. Both envelopes are opened again before submission. The root is
-not signed: its authority is `$createdBy` plus R5–R6. At most one concurrent
-bootstrap is accepted.
+recipient}`. Both envelopes are opened again before submission. At most one
+bootstrap is accepted (§0 item 5).
+
+**How a root is authenticated depends on how the account signs in.**
+
+- **Local-first accounts** (`packages/jazz-tools/src/local-first-auth`). The
+  account secret derives an Ed25519 key (`SHA-512(UTF8("jazz-auth-sign-v1")
+  ‖ secret)[0..32]` as the seed), whose public key `pk` derives the
+  **subject** `UUIDv5(namespace = UTF8("jazz-auth-key-v1"), name = pk)` (the
+  16 ASCII bytes are the namespace), which Jazz's account registry turns into
+  the account ID `UUIDv5(namespace = appId, name =
+UTF8("jazz-account-founder-v1") ‖ 0x00 ‖ UTF8(subject))`. The root has
+  `kind: "local-first"`, `localFirstPublicKey: pk`, and `localFirstSignature`,
+  a `jazz.sodium.sign` v1 signature by that key over
+
+  `ctx{application: D, policy: "jazz.e2ee.local-first-account-root.v1",
+scope: "account", identifier: account, table: "__e2ee_account_roots", row:
+rootId, column: "local-first-signature", epoch: epochId, recipient:
+deviceId} ‖ frame[decimal generation, decimal ledgerVersion, pk,
+env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`
+
+  with the root device's published key columns: the signature binds
+  everything the root introduces (account, generation, epoch, device and its
+  keys). Writing it needs the account secret; the SDK holds the derived key
+  pair only in memory, never prints it, and refuses
+  (`local-first-identity-mismatch`) an identity whose key does not derive
+  the account ID. Nobody without the secret, the server included, can write
+  or substitute such a root.
+  Fixture: the secret of bytes `00`–`1f` gives `pk =
+ff3d97bfb89227b2ae43697296031fe63bcfb9628f17df15e0e28013021451d9`, subject
+  `fa65957a-8b63-53c8-8187-fb1568365fa1` and, for application
+  `6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b`, account ID
+  `d31c2893-e3f2-5285-9034-66bb6757657c` (the cases of
+  `local-first-auth/test-vectors.json`, checked by both suites).
+
+- **App accounts** (the application's own sign-in). The client has nothing
+  to check a root against: the root has `kind: "app"`, is not signed, and its
+  authority is `$createdBy` plus R5–R6. Clients trust the first root they see
+  (trust on first use, §8). The account's own devices detect a later
+  substitution (`root-not-mine`, §2.4).
 
 ### 2.4 Account replay
 
 Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
 
-1. **Root.** Let `g` be the highest `generation` among the account's public
-   roots. The canonical root is the earliest public root of generation `g`,
-   ties by smallest ID; every row before it (and every row of an earlier
-   generation) is ignored for the current state (§2.11). A generation `g > 0`
-   counts only if a root of generation `g − 1` was accepted before it;
-   otherwise those roots are ignored. Any root with `ledgerVersion ≠ 1` is an
-   unsupported capability. Any other root of generation `g` that differs in
-   account, device or epoch is an intrinsic contradiction
-   (`conflicting-roots`). Conflicting device-key rows, or a root device without
-   keys, are intrinsic contradictions.
+1. **Root.** Any root with `ledgerVersion ≠ 1` is an unsupported capability,
+   valid or not. Every other root is checked by itself, against the whole
+   read (so every view of one read, current or as of a position, agrees),
+   and does not count, and is reported with its code, if:
+   - it is malformed (`root-malformed`) or names another account
+     (`root-foreign-account`);
+   - it is `local-first` and its public key does not derive the account ID
+     (`root-key-mismatch`) or its signature over the bytes of §2.3, with the
+     root device's published keys, does not verify
+     (`root-signature-invalid`); a root device without keys is the
+     contradiction `missing-root-key`;
+   - it is `app` and the read has a valid `local-first` root of the account
+     (`root-kind-mismatch`): a local-first account's roots of every
+     generation are signed by its identity, so its kind cannot be
+     downgraded, and a later generation of it is only ever written by the
+     secret's holder.
+
+   The roots that pass form a chain. Generation 0's **counting roots** are
+   its valid roots; generation `g > 0`'s are its valid roots accepted
+   strictly after the canonical root of `g − 1`. The **canonical root** of a
+   generation is its earliest counting root, ties by smallest ID. A valid
+   root that is not counting is reported (`root-unchained`). The chain ends
+   at the first generation without a counting root; its last canonical root
+   is the current root, and every row before it (and every row of an earlier
+   generation) is ignored for the current state (§2.11). Another counting
+   root of any generation of the chain that differs from that generation's
+   canonical root in device or epoch is an intrinsic contradiction
+   (`conflicting-roots`), so a contradiction of generation 0 fails the
+   current state after a reset as it fails every state as of a later
+   position. Conflicting device-key rows, or a root device without keys, are
+   intrinsic contradictions. Rejected roots never fail replay; the runtime
+   reports them like unreadable rows (§4.3).
+
 2. **Grants within an epoch.** Public approvals of the current epoch strictly
    after the epoch's position are applied in batches of equal position. An
    approval is accepted iff its signer was active _before the batch_, its
@@ -847,15 +918,21 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    `recoverySignature`. A recovery approval (§2.9) is accepted regardless of
    the signer's membership. A false verification skips the row; a signer
    failure propagates. A missing recipient key is an intrinsic contradiction.
-3. **Successors.** Visited in position order. A candidate is skipped if its
-   account or predecessor differs, it is not strictly after the current epoch
-   position, its epoch was already used, **another successor of the same
-   predecessor or any recovery root has the same position**, it is malformed,
-   its public `revision` differs from the recomputed one, its signer was not
-   active before it, its target is not an active device (removal) or not a
-   valid, earlier, unretired recovery root (retirement), its signature fails,
-   or its `membership` is not exactly the active set minus the target. The
-   first accepted successor of the current epoch advances the epoch.
+3. **Successors.** Visited one position at a time, in position order. A
+   candidate is **valid** unless its account or predecessor differs, it is
+   not strictly after the current epoch position, its epoch was already
+   used, it is malformed, its public `revision` differs from the recomputed
+   one, its signer was not active before it, its target is not an active
+   device (removal) or not a valid, earlier, unretired recovery root
+   (retirement), its signature fails, or its `membership` is not exactly the
+   active set minus the target. Rows at one position were written in one
+   transaction, which only the account itself or the server can produce;
+   their order is undefined. So a valid candidate is accepted only if it is
+   the only valid successor of the current epoch at its position and no
+   valid recovery root (§2.9) is at that position; otherwise none of them
+   is. Rows that fail any check, successors or recovery roots, never take
+   part in this rule, so an invalid row cannot block a valid successor. The
+   accepted successor advances the epoch.
 4. Unsupported signing mechanisms or versions raise
    `UnsupportedE2EECapabilityError`; they are never treated as invalid. The
    same holds in private verification (below): a private record whose
@@ -878,6 +955,30 @@ needs a new device ID. Removal is per generation: a device removed before a
 reset is not removed in the new generation, and can be approved there again;
 only an active device of the new generation can approve it, so this grants
 nothing the account's devices could not already grant.
+
+**Root not mine.** A device of the account treats a canonical root that does
+not match its own knowledge of the account as the loud contradiction
+`root-not-mine`, surfaced to the user as a security alert, never as an
+ordinary failure:
+
+- a device holding the local-first identity: the canonical root is not a
+  `local-first` root of its key;
+- private verification (below): the account's own identity of the canonical
+  generation names another device or epoch than the canonical root;
+- a floor (below) whose root is not the canonical root of its generation in
+  the chain.
+
+For an app account the floor is the only check that catches a substitution
+the server makes after the device first verified the account; before that
+first observation the device trusts what it sees (§8).
+
+**Floors.** After it verifies an account state, a device persists, in its
+private store, the account's **floor**: the read's cut, the generation, the
+canonical root of that generation, and the current epoch with its position.
+A later read is refused with `stale-state` if its cut is earlier, its
+generation lower, or (same generation) the floor's epoch is not in its
+chain; it is `root-not-mine` if the chain's root of the floor's generation is
+not the floor's root. The floor then advances to the newer state.
 
 **Private verification.** A device that wants the account key also reads the
 private tables (same cut) and accepts: the identity only if it matches the
@@ -1196,8 +1297,12 @@ the application opts in with `"allowAccountReset": true` in the top-level
 deploy request). It is never
 available to a local-first account: there the account secret is the account,
 and losing it is losing the account. The server enforces both: R5 refuses an
-identity of generation above 0 from a local-first session, or when the
-deployed configuration does not allow reset.
+identity of generation above 0 from a local-first session, for an account
+founded by a local-first identity (also when it signs in through a linked
+identity of the application), or when the deployed configuration does not
+allow reset. Clients enforce the local-first part themselves: a root of a
+local-first account counts only if its identity signed it (§2.4 step 1), so
+nobody without the secret can reset it.
 
 Stage `account-reset`. Preconditions, read at one cut: the account has a
 canonical root of generation `g`; this device has a request whose keys match
@@ -2702,7 +2807,13 @@ flattened into a bare `refused`. The data-error codes are exactly
 `invalid-ciphertext`, `empty-cell`, `superseded`, `stale-space` and
 `encryption-failed`. Encryption status events (not data errors) are
 `account-reset` and `reset-approval-needed` (§2.11) and key requests to
-answer (§3.4).
+answer (§3.4). Account roots that do not count are reported with
+`root-malformed`, `root-foreign-account`, `root-key-mismatch`,
+`root-signature-invalid`, `root-kind-mismatch` or `root-unchained` (§2.4
+step 1); they never fail replay. `root-not-mine` (§2.4) is a security alert
+the SDK surfaces to the user: the account's root is not the one its own
+devices know. `stale-state` (§2.4, "Floors") refuses evidence older than
+state the device already verified.
 Every reader from the first release knows all of them, so that rows written
 by a later schema version degrade to a reported gap. An equality query on a
 space whose conversion or tag backfill is unfinished fails with the query
@@ -2757,31 +2868,32 @@ dropped.)
 Refusals that had no code in the TypeScript implementation (only a message)
 get these codes:
 
-| Code                          | Refusal                                                                                                                                              |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `account-has-history`         | Bootstrap found existing account evidence (§2.3).                                                                                                    |
-| `device-identity-conflict`    | A device request or key row exists with different keys (§2.2).                                                                                       |
-| `device-keys-mismatch`        | The device's keys do not match its accepted request.                                                                                                 |
-| `no-device-request`           | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                |
-| `reset-device-active`         | An account reset by a device that is still active in the current generation (§2.11).                                                                 |
-| `device-not-active`           | The acting device is not an active device of the account.                                                                                            |
-| `device-removed`              | The device was removed and needs a new device ID.                                                                                                    |
-| `stale-challenge`             | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                            |
-| `approval-closed`             | The approval handle was closed or belongs to another operation.                                                                                      |
-| `invalid-possession-proof`    | The requesting device's possession proof failed (§2.5).                                                                                              |
-| `target-not-active`           | The device or recovery root to remove or retire is not active (§2.8).                                                                                |
-| `unsupported-recipient`       | A recipient device or recovery root uses an unsupported mechanism and cannot be required.                                                            |
-| `space-sealed`                | The space is sealed (§3.4).                                                                                                                          |
-| `group-sealed`                | The group is sealed (§3.1).                                                                                                                          |
-| `recipient-absent`            | A removal names a recipient that is not present.                                                                                                     |
-| `recipient-needs-maintenance` | A recipient's account epoch changed; the space or group must rotate first.                                                                           |
-| `group-unavailable`           | A group to add has no public-key record.                                                                                                             |
-| `account-reset-not-allowed`   | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                     |
-| `space-pending`               | An encrypted write to a space that no key manager has created yet, by a session that does not manage it (§3.3).                                      |
-| `confirmation-stale`          | A premise of a recipient confirmation changed before the publication committed (§3.8).                                                               |
-| `recipient-still-declared`    | A self-removal of the member role while a membership row still names the account (R26).                                                              |
-| `recipients-declared`         | An explicit recipient change for a space or group whose recipients follow a declared relation (§3.4).                                                |
-| `last-manager`                | The grants or membership records would leave a space or group with no manager recipient (R25), or the SDK recognised that leaving or demoting would. |
+| Code                            | Refusal                                                                                                                                              |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `account-has-history`           | Bootstrap found existing account evidence (§2.3).                                                                                                    |
+| `device-identity-conflict`      | A device request or key row exists with different keys (§2.2).                                                                                       |
+| `device-keys-mismatch`          | The device's keys do not match its accepted request.                                                                                                 |
+| `no-device-request`             | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                |
+| `reset-device-active`           | An account reset by a device that is still active in the current generation (§2.11).                                                                 |
+| `device-not-active`             | The acting device is not an active device of the account.                                                                                            |
+| `device-removed`                | The device was removed and needs a new device ID.                                                                                                    |
+| `stale-challenge`               | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                            |
+| `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                      |
+| `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                              |
+| `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                |
+| `unsupported-recipient`         | A recipient device or recovery root uses an unsupported mechanism and cannot be required.                                                            |
+| `space-sealed`                  | The space is sealed (§3.4).                                                                                                                          |
+| `group-sealed`                  | The group is sealed (§3.1).                                                                                                                          |
+| `recipient-absent`              | A removal names a recipient that is not present.                                                                                                     |
+| `recipient-needs-maintenance`   | A recipient's account epoch changed; the space or group must rotate first.                                                                           |
+| `group-unavailable`             | A group to add has no public-key record.                                                                                                             |
+| `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                     |
+| `space-pending`                 | An encrypted write to a space that no key manager has created yet, by a session that does not manage it (§3.3).                                      |
+| `confirmation-stale`            | A premise of a recipient confirmation changed before the publication committed (§3.8).                                                               |
+| `recipient-still-declared`      | A self-removal of the member role while a membership row still names the account (R26).                                                              |
+| `recipients-declared`           | An explicit recipient change for a space or group whose recipients follow a declared relation (§3.4).                                                |
+| `last-manager`                  | The grants or membership records would leave a space or group with no manager recipient (R25), or the SDK recognised that leaving or demoting would. |
+| `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                         |
 
 ## 8. Security properties and non-goals
 
@@ -2818,9 +2930,11 @@ Non-goals and explicit limits:
     (§3.8);
   - account X is answered as passing `manageKeys`; X enrols itself as a
     manager recipient, and any manager holding the key delivers to it (§3.8);
-  - the unsigned account root of an account that has not bootstrapped is
+  - the unsigned root of an app account that has not bootstrapped is
     written by someone who can write as that account; managers deliver to
-    that device (§2.3), and the same holds for an account reset (§2.11).
+    that device (§2.3), and the same holds for an account reset (§2.11). A
+    local-first account's root is signed by its identity and cannot be
+    forged this way (below).
   - an `admitted` notice for a reset-pending account is accepted outside the
     transaction of the root or of the account's first `add` (§2.11); the
     notice form of the pending-author rule (§3.1) cannot detect it, so
@@ -2830,6 +2944,22 @@ Non-goals and explicit limits:
   Possible later work: clients could show members when a space's recipient
   set changes, so that an unexpected recipient is noticed.
 
+- **App account roots are trusted on first use.** A local-first account's
+  root is signed by the key its account ID derives from, so no one without
+  the secret can forge or replace it, or reset the account (§2.3, §2.4). An
+  app account has nothing a client can check its root against: whoever can
+  write as the account, the server included, can write its first root, and
+  a server can show a different root (another device and key) to clients
+  that have not seen the account before, or that see it only through that
+  server. Every account and device that first meets the account then
+  delivers keys to that device. The account's own devices raise
+  `root-not-mine` when they see a root other than the one they verified
+  (§2.4), but only from their first observation on; other accounts have no
+  way to tell. The SDK should present `root-not-mine` as "your encryption
+  identity was replaced on the server; your data may be exposed", not as a
+  sync error. A server can also show an app root for an account founded
+  local-first to clients that never see its signed root; the account's own
+  devices then raise `root-not-mine`.
 - **Removal cannot erase copies.** A delivered key is never revoked: removal
   withholds future keys (by rotation) and Jazz stops delivering future rows.
   Keys, plaintext and ciphertext a former member already obtained remain with

@@ -22,6 +22,7 @@ const RECOVERY_APPROVAL_POLICY: &str = "jazz.e2ee.recovery-device-approval.v1";
 const SUCCESSOR_POLICY: &str = "jazz.e2ee.account-successor.v1";
 const PUBLIC_SUCCESSOR_POLICY: &str = "jazz.e2ee.public-account-successor.v1";
 const RECOVERY_POLICY: &str = "jazz.e2ee.recovery.v1";
+const LOCAL_FIRST_ROOT_POLICY: &str = "jazz.e2ee.local-first-account-root.v1";
 const SCOPE: &str = "account";
 
 /// `__e2ee_device_requests`: a device's identity; row ID = device ID.
@@ -52,7 +53,15 @@ pub struct AccountIdentity {
     pub verification: Vec<u8>,
 }
 
-/// `__e2ee_account_roots`: the public, unsigned account root.
+super::string_enum!(
+    /// How the account signs in, as its root states it (§1.2, §2.3).
+    AccountKind { LocalFirst => "local-first", App => "app" }
+);
+
+/// `__e2ee_account_roots`: the public account root. A `local-first` root
+/// carries the local-first public key that derives the account ID and that
+/// key's signature over [`AccountRoot::signed_bytes`]; an `app` root carries
+/// neither and is authenticated only by its author (`$createdBy`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRoot {
     pub id: String,
@@ -61,6 +70,9 @@ pub struct AccountRoot {
     pub account_id: String,
     pub device_id: String,
     pub epoch_id: String,
+    pub kind: AccountKind,
+    pub local_first_public_key: Option<Vec<u8>>,
+    pub local_first_signature: Option<Vec<u8>>,
 }
 
 /// `__e2ee_device_challenges`.
@@ -232,11 +244,74 @@ impl AccountIdentity {
 }
 
 impl AccountRoot {
+    /// A complete received root: a `local-first` root has a 32-byte
+    /// public key and a signature, an `app` root neither.
     pub fn validate(&self) -> ProtocolResult<()> {
+        self.check_unsigned()?;
+        match &self.local_first_signature {
+            Some(signature) => ensure_bytes(signature, "empty root signature"),
+            None => Ok(()),
+        }
+    }
+
+    fn check_unsigned(&self) -> ProtocolResult<()> {
         ensure_id(&self.id, IdForm::Random, "invalid account root ID")?;
         ensure_account(&self.account_id, "empty account ID")?;
         ensure_id(&self.device_id, IdForm::Random, "invalid device ID")?;
-        ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")
+        ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
+        match (
+            self.kind,
+            &self.local_first_public_key,
+            &self.local_first_signature,
+        ) {
+            (AccountKind::App, None, None) => Ok(()),
+            (AccountKind::LocalFirst, Some(key), Some(_)) => ensure(
+                key.len() == super::super::local_first::PUBLIC_KEY_BYTES,
+                "invalid local-first public key",
+            ),
+            _ => ensure(false, "account root columns do not match its kind"),
+        }
+    }
+
+    /// The bytes a `local-first` root's signature covers (§2.3):
+    /// `ctx{application: D, policy: "jazz.e2ee.local-first-account-root.v1",
+    /// scope: "account", identifier: account, table: "__e2ee_account_roots",
+    /// row: rootId, column: "local-first-signature", epoch: epochId,
+    /// recipient: deviceId} ‖ frame[decimal generation, decimal
+    /// ledgerVersion, localFirstPublicKey, env(signingMechanism,
+    /// signingPublicKey), env(mechanism, publicKey)]`, with the root
+    /// device's key columns. An `app` root has none.
+    pub fn signed_bytes(
+        &self,
+        application: &AccountDomain,
+        device_keys: &KeyColumns,
+    ) -> ProtocolResult<Vec<u8>> {
+        self.check_unsigned()?;
+        let public_key = self.local_first_public_key.as_deref().ok_or(
+            super::super::error::ProtocolError::InvalidRecord("an app account root is not signed"),
+        )?;
+        device_keys.validate()?;
+        let prefix = context(CryptoContext {
+            application: application.as_str(),
+            policy: LOCAL_FIRST_ROOT_POLICY,
+            scope: SCOPE,
+            identifier: &self.account_id,
+            table: "__e2ee_account_roots",
+            row: &self.id,
+            column: "local-first-signature",
+            epoch: &self.epoch_id,
+            recipient: &self.device_id,
+        })?;
+        append_framed(
+            prefix,
+            &[
+                self.generation.to_string().as_bytes(),
+                self.ledger_version.to_string().as_bytes(),
+                public_key,
+                &device_keys.signing_envelope()?,
+                &device_keys.sealing_envelope()?,
+            ],
+        )
     }
 
     /// Whether `identity` is this root's private half: same generation,

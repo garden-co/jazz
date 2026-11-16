@@ -14,7 +14,7 @@ use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::error::{
     IntrinsicContradiction, ProtocolError, RecoveryFailure, RefusalCode, UnsupportedCapability,
 };
-use jazz_e2ee::protocol::records::account::AccountRoot;
+use jazz_e2ee::protocol::records::account::{AccountKind, AccountRoot};
 use jazz_e2ee::protocol::{Accepted, Position, ids, signing};
 
 fn refused(code: RefusalCode) -> ProtocolError {
@@ -256,8 +256,9 @@ fn removal_rotates_and_excludes_the_device() {
     );
 }
 
-/// Two successors of one predecessor at one position are unordered: neither
-/// is accepted, and the epoch does not move.
+/// Two valid successors of one predecessor at one position were written in
+/// one transaction and are unordered: neither is accepted, and the epoch
+/// does not move.
 #[test]
 fn concurrent_successors_at_one_position_both_lose() {
     let env = Env::new("alice");
@@ -297,8 +298,8 @@ fn concurrent_successors_at_one_position_both_lose() {
     assert!(state.removed.is_empty());
 }
 
-/// A successor accepted at the same position as a recovery root is skipped;
-/// so is one whose public revision differs from replay's.
+/// A successor accepted at the same position as a valid recovery root is
+/// skipped; so is one whose public revision differs from replay's.
 #[test]
 fn successor_tie_with_recovery_root_and_wrong_revision_are_skipped() {
     let env = Env::new("alice");
@@ -638,6 +639,9 @@ fn a_generation_counts_only_after_the_previous_one() {
         account_id: "alice".into(),
         device_id: phone.id.clone(),
         epoch_id: ids::random_v4(&mut rng).unwrap(),
+        kind: AccountKind::App,
+        local_first_public_key: None,
+        local_first_signature: None,
     };
     let at = ledger.next();
     ledger.public.roots.push(Accepted::new(at, early));
@@ -923,7 +927,14 @@ fn debug_output_never_contains_secrets() {
     ledger.request(&phone, &mut rng);
     let writer = env.writer();
     let permit = build::check_bootstrap(&writer, &laptop, &ledger.public, &ledger.private).unwrap();
-    let root = build::account_root(&writer, &laptop, &permit, &mut rng).unwrap();
+    let root = build::account_root(
+        &writer,
+        &laptop,
+        &permit,
+        build::RootAuthority::App,
+        &mut rng,
+    )
+    .unwrap();
     for rendered in [format!("{root:?}"), format!("{root:#?}")] {
         debug_free_of(&rendered, &root.key);
     }

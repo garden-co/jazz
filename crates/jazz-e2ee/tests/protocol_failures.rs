@@ -268,7 +268,14 @@ fn unreadable_fresh_output_is_a_provider_failure() {
     ledger.request(&laptop, &mut rng);
     let writer = env.writer();
     let permit = build::check_bootstrap(&writer, &laptop, &ledger.public, &ledger.private).unwrap();
-    let error = build::account_root(&writer, &laptop, &permit, &mut rng).unwrap_err();
+    let error = build::account_root(
+        &writer,
+        &laptop,
+        &permit,
+        build::RootAuthority::App,
+        &mut rng,
+    )
+    .unwrap_err();
     assert_eq!(error, ProtocolError::ProviderFailure);
     assert!(error.is_provider_failure());
 }

@@ -12,14 +12,15 @@ use crate::registry::Registry;
 
 use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{
-    IntrinsicContradiction, ProtocolError, ProtocolResult, UnsupportedCapability,
+    IntrinsicContradiction, ProtocolError, ProtocolResult, RootRejection, UnsupportedCapability,
 };
 use super::super::json;
+use super::super::local_first;
 use super::super::position::{Accepted, Position};
 use super::super::records::KeyColumns;
 use super::super::records::account::{
-    AccountAction, AccountRoot, LEDGER_VERSION, PublicAccountSuccessor, PublicDeviceApproval,
-    RecoveryRoot,
+    AccountAction, AccountKind, AccountRoot, LEDGER_VERSION, PublicAccountSuccessor,
+    PublicDeviceApproval, RecoveryRoot,
 };
 use super::super::signing;
 use super::ledger::PublicAccountLedger;
@@ -37,6 +38,24 @@ pub struct AccountEpoch {
     pub members: BTreeSet<String>,
 }
 
+/// A root that does not count, with the reason (§2.4 step 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedRoot {
+    pub root_id: String,
+    pub position: Position,
+    pub reason: RootRejection,
+}
+
+/// The roots of one view: the counting root of each generation of the
+/// chain, and the roots that do not count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootSelection {
+    /// The canonical root of generation 0, 1, …; the last is the current
+    /// root. Empty when the account has no counting root.
+    pub chain: Vec<Accepted<AccountRoot>>,
+    pub rejected: Vec<RejectedRoot>,
+}
+
 /// An account's verified state at a cut (or as of a position).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountState {
@@ -44,6 +63,10 @@ pub struct AccountState {
     /// The canonical root's generation (§2.11).
     pub generation: u64,
     pub root: Accepted<AccountRoot>,
+    /// The canonical root of every generation up to the current one.
+    pub roots: Vec<Accepted<AccountRoot>>,
+    /// Roots of this view that do not count, for reporting.
+    pub rejected_roots: Vec<RejectedRoot>,
     /// The epoch chain from the canonical root; the last is current.
     pub epochs: Vec<AccountEpoch>,
     /// Active devices of the current epoch.
@@ -88,6 +111,77 @@ impl AccountState {
             .iter()
             .find(|root| root.row.id == root_id)
     }
+
+    /// What a device keeps of this state to refuse older evidence later
+    /// (§2.4, "Floors"): the read's cut, the generation, the root of that
+    /// generation and the current epoch.
+    pub fn floor(&self, through: Position) -> AccountFloor {
+        let epoch = self.current_epoch();
+        AccountFloor {
+            through,
+            generation: self.generation,
+            root_id: self.root.row.id.clone(),
+            epoch_id: epoch.epoch_id.clone(),
+            epoch_position: epoch.position,
+        }
+    }
+
+    /// Checks this state, replayed from a read at cut `through`, against a
+    /// floor the device persisted earlier for the same account. Evidence
+    /// older than the floor (an earlier cut, an earlier generation, or the
+    /// floor's epoch missing from the chain) is
+    /// [`ProtocolError::StaleState`]; a chain whose root of the floor's
+    /// generation is not the floor's root is [`ProtocolError::RootNotMine`].
+    pub fn check_floor(&self, through: Position, floor: &AccountFloor) -> ProtocolResult<()> {
+        if self.account_id.is_empty()
+            || through < floor.through
+            || self.generation < floor.generation
+        {
+            return Err(ProtocolError::StaleState);
+        }
+        let root = usize::try_from(floor.generation)
+            .ok()
+            .and_then(|generation| self.roots.get(generation));
+        if root.is_none_or(|root| root.row.id != floor.root_id) {
+            return Err(ProtocolError::RootNotMine);
+        }
+        if self.generation == floor.generation
+            && !self.epochs.iter().any(|epoch| {
+                epoch.epoch_id == floor.epoch_id && epoch.position == floor.epoch_position
+            })
+        {
+            return Err(ProtocolError::StaleState);
+        }
+        Ok(())
+    }
+
+    /// For a device holding the account's local-first identity: the
+    /// canonical root must be a `local-first` root of that identity's key,
+    /// or the root is not the account's own ([`ProtocolError::RootNotMine`]).
+    pub fn check_local_first(
+        &self,
+        identity: &local_first::LocalFirstIdentity,
+    ) -> ProtocolResult<()> {
+        let own = self.root.row.kind == AccountKind::LocalFirst
+            && self.root.row.local_first_public_key.as_deref() == Some(identity.public_key());
+        if own {
+            Ok(())
+        } else {
+            Err(ProtocolError::RootNotMine)
+        }
+    }
+}
+
+/// The newest account state a device has verified (§2.4, "Floors"), kept in
+/// its private store. A later read is refused if it is older.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountFloor {
+    pub through: Position,
+    pub generation: u64,
+    /// The canonical root of `generation`.
+    pub root_id: String,
+    pub epoch_id: String,
+    pub epoch_position: Position,
 }
 
 /// Replays one account's ledger read, and its states as of earlier
@@ -98,7 +192,10 @@ pub struct AccountReplay<'a> {
     ledger: &'a PublicAccountLedger,
     registry: &'a Registry,
     application: AccountDomain,
+    domain: AppDomain,
     recovery_validity: RefCell<BTreeMap<String, bool>>,
+    root_checks: RefCell<BTreeMap<String, Option<RootRejection>>>,
+    local_first_key: RefCell<Option<Option<Vec<u8>>>>,
     states: RefCell<BTreeMap<Position, Option<AccountState>>>,
 }
 
@@ -108,6 +205,14 @@ fn by_position_then_id<T: super::super::position::RowId>(rows: &mut [&Accepted<T
             .cmp(&b.position)
             .then_with(|| json::utf16_cmp(a.row.row_id(), b.row.row_id()))
     });
+}
+
+/// A successor that passed every check but the same-transaction rule.
+struct ValidSuccessor {
+    candidate: Accepted<PublicAccountSuccessor>,
+    accepted: Vec<Accepted<PublicDeviceApproval>>,
+    target: String,
+    members: BTreeSet<String>,
 }
 
 /// The set of devices active within one epoch, built batch by batch.
@@ -125,9 +230,12 @@ impl<'a> AccountReplay<'a> {
         ledger.check()?;
         Ok(Self {
             application: domain.account(&ledger.account_id)?,
+            domain: domain.clone(),
             ledger,
             registry,
             recovery_validity: RefCell::new(BTreeMap::new()),
+            root_checks: RefCell::new(BTreeMap::new()),
+            local_first_key: RefCell::new(None),
             states: RefCell::new(BTreeMap::new()),
         })
     }
@@ -185,8 +293,287 @@ impl<'a> AccountReplay<'a> {
         Ok(self.as_of(position)?.map(|state| state.generation))
     }
 
+    /// The canonical root at the cut, if the account has a counting root.
+    pub fn canonical_root(&self) -> ProtocolResult<Option<Accepted<AccountRoot>>> {
+        Ok(self.select_roots(self.ledger)?.chain.pop())
+    }
+
+    /// The roots at the cut that do not count, with their reasons.
+    pub fn rejected_roots(&self) -> ProtocolResult<Vec<RejectedRoot>> {
+        Ok(self.select_roots(self.ledger)?.rejected)
+    }
+
+    /// The local-first key of the account, if the cut has a valid
+    /// `local-first` root (the earliest one's key). Decided once over the
+    /// whole read, so every view of this replay agrees on the account's
+    /// kind.
+    fn account_local_first_key(&self) -> ProtocolResult<Option<Vec<u8>>> {
+        if let Some(key) = self.local_first_key.borrow().as_ref() {
+            return Ok(key.clone());
+        }
+        let mut roots: Vec<_> = self
+            .ledger
+            .roots
+            .iter()
+            .filter(|root| root.row.kind == AccountKind::LocalFirst)
+            .collect();
+        by_position_then_id(&mut roots);
+        let mut found = None;
+        for root in roots {
+            if self.local_first_check(root)?.is_none() {
+                found = root.row.local_first_public_key.clone();
+                break;
+            }
+        }
+        *self.local_first_key.borrow_mut() = Some(found.clone());
+        Ok(found)
+    }
+
+    /// The checks every root needs before its kind's own: well formed, of
+    /// this account, and supported.
+    fn common_root_check(&self, root: &AccountRoot) -> Option<RootRejection> {
+        if root.validate().is_err() {
+            Some(RootRejection::Malformed)
+        } else if root.account_id != self.ledger.account_id {
+            Some(RootRejection::ForeignAccount)
+        } else {
+            None
+        }
+    }
+
+    /// A `local-first` root's own checks: its key derives the account ID,
+    /// and its signature over the root and its device's keys verifies.
+    fn local_first_check(
+        &self,
+        root: &Accepted<AccountRoot>,
+    ) -> ProtocolResult<Option<RootRejection>> {
+        if let Some(rejection) = self.common_root_check(&root.row) {
+            return Ok(Some(rejection));
+        }
+        let (Some(public_key), Some(signature)) = (
+            root.row.local_first_public_key.as_deref(),
+            root.row.local_first_signature.as_deref(),
+        ) else {
+            return Ok(Some(RootRejection::Malformed));
+        };
+        if !local_first::derives_account(&self.domain, public_key, &root.row.account_id) {
+            return Ok(Some(RootRejection::KeyMismatch));
+        }
+        let keys = device_keys(self.ledger)?;
+        let device = keys
+            .get(&root.row.device_id)
+            .ok_or(ProtocolError::Intrinsic(
+                IntrinsicContradiction::MissingRootKey,
+            ))?;
+        let Ok(bytes) = root.row.signed_bytes(&self.application, device) else {
+            return Ok(Some(RootRejection::Malformed));
+        };
+        if local_first::verify(self.registry, public_key, &bytes, signature)? {
+            Ok(None)
+        } else {
+            Ok(Some(RootRejection::SignatureInvalid))
+        }
+    }
+
+    /// Whether `root` may count (§2.4 step 1), memoised by root ID. Checked
+    /// against the whole read, so the answer is the same in every view.
+    fn root_check(&self, root: &Accepted<AccountRoot>) -> ProtocolResult<Option<RootRejection>> {
+        if let Some(check) = self.root_checks.borrow().get(&root.row.id) {
+            return Ok(*check);
+        }
+        let check = match root.row.kind {
+            AccountKind::LocalFirst => {
+                let check = self.local_first_check(root)?;
+                if check.is_none()
+                    && self.account_local_first_key()?.as_deref()
+                        != root.row.local_first_public_key.as_deref()
+                {
+                    // Two keys deriving one account ID: not reachable
+                    // without a SHA-1 collision of the derivation.
+                    return Err(ProtocolError::Intrinsic(
+                        IntrinsicContradiction::ConflictingRoots,
+                    ));
+                }
+                check
+            }
+            AccountKind::App => match self.common_root_check(&root.row) {
+                Some(rejection) => Some(rejection),
+                None if self.account_local_first_key()?.is_some() => {
+                    Some(RootRejection::KindMismatch)
+                }
+                None => None,
+            },
+        };
+        self.root_checks
+            .borrow_mut()
+            .insert(root.row.id.clone(), check);
+        Ok(check)
+    }
+
+    /// The root chain of `view` (§2.4 step 1). Only roots that pass every
+    /// check count. Generation 0's counting roots are all valid roots of
+    /// generation 0; generation `g > 0`'s are the valid roots of generation
+    /// `g` accepted strictly after the canonical root of `g − 1`. The
+    /// canonical root of each generation is its earliest counting root (ties
+    /// by smallest ID), and any other counting root of that generation that
+    /// differs in device or epoch is a contradiction, at every generation of
+    /// the chain, so current replay and every state as of a later position
+    /// agree. A root with another ledger version is an unsupported
+    /// capability, valid or not.
+    pub fn select_roots(&self, view: &PublicAccountLedger) -> ProtocolResult<RootSelection> {
+        if view
+            .roots
+            .iter()
+            .any(|root| root.row.ledger_version != LEDGER_VERSION)
+        {
+            return Err(ProtocolError::Unsupported(
+                UnsupportedCapability::LedgerVersion,
+            ));
+        }
+        let mut roots: Vec<_> = view.roots.iter().collect();
+        by_position_then_id(&mut roots);
+        let mut rejected = Vec::new();
+        let mut valid = Vec::new();
+        for root in roots {
+            match self.root_check(root)? {
+                Some(reason) => rejected.push(RejectedRoot {
+                    root_id: root.row.id.clone(),
+                    position: root.position,
+                    reason,
+                }),
+                None => valid.push(root),
+            }
+        }
+        let mut chain: Vec<Accepted<AccountRoot>> = Vec::new();
+        let mut counted = BTreeSet::new();
+        let mut generation = 0u64;
+        loop {
+            let floor = chain.last().map(|root| root.position);
+            let counting: Vec<_> = valid
+                .iter()
+                .copied()
+                .filter(|root| {
+                    root.row.generation == generation && floor.is_none_or(|f| root.position > f)
+                })
+                .collect();
+            let Some(canonical) = counting.first() else {
+                break;
+            };
+            if counting.iter().any(|root| {
+                root.row.device_id != canonical.row.device_id
+                    || root.row.epoch_id != canonical.row.epoch_id
+            }) {
+                return Err(ProtocolError::Intrinsic(
+                    IntrinsicContradiction::ConflictingRoots,
+                ));
+            }
+            counted.extend(counting.iter().map(|root| root.row.id.clone()));
+            chain.push((*canonical).clone());
+            let Some(next) = generation.checked_add(1) else {
+                break;
+            };
+            generation = next;
+        }
+        for root in valid {
+            if !counted.contains(&root.row.id) {
+                rejected.push(RejectedRoot {
+                    root_id: root.row.id.clone(),
+                    position: root.position,
+                    reason: RootRejection::Unchained,
+                });
+            }
+        }
+        rejected.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| json::utf16_cmp(&a.root_id, &b.root_id))
+        });
+        Ok(RootSelection { chain, rejected })
+    }
+
+    /// Whether a successor `candidate` of `epoch` passes every check of
+    /// §2.4 step 3 except the same-transaction rule, which the caller
+    /// applies among the candidates that pass. Returns the members and the
+    /// target on success.
+    fn successor_valid(
+        &self,
+        run: &Run<'_, '_>,
+        epoch: &AccountEpoch,
+        used_epochs: &BTreeSet<String>,
+        candidate: &Accepted<PublicAccountSuccessor>,
+    ) -> ProtocolResult<Option<ValidSuccessor>> {
+        let successor = &candidate.row;
+        let position = candidate.position;
+        if successor.account_id != run.account_id
+            || successor.predecessor != epoch.epoch_id
+            || position <= epoch.position
+            || used_epochs.contains(&successor.epoch_id)
+        {
+            return Ok(None);
+        }
+        let Ok(membership) = successor.validate() else {
+            return Ok(None);
+        };
+        let Ok(bytes) = successor.signed_bytes(&self.application) else {
+            return Ok(None);
+        };
+        let members = run.members(epoch, Some(position))?;
+        let revision = json::encode_revision(members.accepted.iter().map(|a| &a.row.id));
+        if revision.as_deref() != Ok(successor.revision.as_slice()) {
+            return Ok(None);
+        }
+        if !members.active.contains(&successor.signer_id) {
+            return Ok(None);
+        }
+        let Ok(target) = successor.target_id().map(str::to_owned) else {
+            return Ok(None);
+        };
+        let mut expected = members.active.clone();
+        match successor.action {
+            AccountAction::RemoveDevice => {
+                if !expected.remove(&target) {
+                    return Ok(None);
+                }
+            }
+            AccountAction::RetireRecoveryRoot => {
+                let Some(root) = run
+                    .view
+                    .recovery_roots
+                    .iter()
+                    .find(|root| root.row.id == target)
+                else {
+                    return Ok(None);
+                };
+                if root.position >= position
+                    || run.retired.contains_key(&target)
+                    || !run.recovery_valid(root)?
+                {
+                    return Ok(None);
+                }
+            }
+        }
+        if !run.verify_device(&successor.signer_id, &bytes, &successor.signature)? {
+            return Ok(None);
+        }
+        if membership.len() != expected.len()
+            || membership.iter().any(|device| !expected.contains(device))
+        {
+            return Ok(None);
+        }
+        Ok(Some(ValidSuccessor {
+            candidate: candidate.clone(),
+            accepted: members.accepted,
+            target,
+            members: expected,
+        }))
+    }
+
     fn replay(&self, view: &PublicAccountLedger) -> ProtocolResult<Option<AccountState>> {
-        let Some(root) = canonical_root(view)? else {
+        let RootSelection {
+            chain: roots,
+            rejected: rejected_roots,
+        } = self.select_roots(view)?;
+        let Some(root) = roots.last().cloned() else {
             return Ok(None);
         };
         let keys = device_keys(view)?;
@@ -215,80 +602,53 @@ impl<'a> AccountReplay<'a> {
 
         let mut successors: Vec<_> = view.successors.iter().collect();
         by_position_then_id(&mut successors);
-        for candidate in successors {
-            let epoch = epochs.last().expect("root epoch");
-            let successor = &candidate.row;
-            let position = candidate.position;
-            if successor.account_id != view.account_id
-                || successor.predecessor != epoch.epoch_id
-                || position <= epoch.position
-                || used_epochs.contains(&successor.epoch_id)
-            {
+        // Successors are taken one transaction (position) at a time. Rows
+        // accepted at one position were written in one transaction, which
+        // only the account itself or the server can produce: if more than one
+        // valid successor of the current epoch, or a successor and a valid
+        // recovery root, share it, the order between them is undefined and
+        // none of the successors is accepted. Invalid rows never take part.
+        let mut index = 0;
+        while index < successors.len() {
+            let position = successors[index].position;
+            let end = successors[index..]
+                .iter()
+                .position(|candidate| candidate.position != position)
+                .map_or(successors.len(), |offset| index + offset);
+            let batch = &successors[index..end];
+            index = end;
+            let epoch = epochs.last().expect("root epoch").clone();
+            let mut valid = Vec::new();
+            for candidate in batch {
+                if let Some(found) = self.successor_valid(&run, &epoch, &used_epochs, candidate)? {
+                    valid.push(found);
+                }
+            }
+            if valid.len() != 1 {
                 continue;
             }
-            // Concurrent successors of one predecessor, or a successor
-            // accepted with a recovery root, are unordered: neither wins.
-            let tied = view.successors.iter().any(|other| {
-                other.row.id != successor.id
-                    && other.row.predecessor == successor.predecessor
-                    && other.position == position
-            }) || view
+            let mut tied = false;
+            for root in view
                 .recovery_roots
                 .iter()
-                .any(|root| root.position == position);
+                .filter(|root| root.position == position)
+            {
+                if run.recovery_valid(root)? {
+                    tied = true;
+                    break;
+                }
+            }
             if tied {
                 continue;
             }
-            let Ok(membership) = successor.validate() else {
-                continue;
-            };
-            let Ok(bytes) = successor.signed_bytes(&self.application) else {
-                continue;
-            };
-            let members = run.members(epoch, Some(position))?;
-            let revision = json::encode_revision(members.accepted.iter().map(|a| &a.row.id));
-            if revision.as_deref() != Ok(successor.revision.as_slice()) {
-                continue;
-            }
-            if !members.active.contains(&successor.signer_id) {
-                continue;
-            }
-            let Ok(target) = successor.target_id().map(str::to_owned) else {
-                continue;
-            };
-            let mut expected = members.active.clone();
-            match successor.action {
-                AccountAction::RemoveDevice => {
-                    if !expected.remove(&target) {
-                        continue;
-                    }
-                }
-                AccountAction::RetireRecoveryRoot => {
-                    let Some(root) = view
-                        .recovery_roots
-                        .iter()
-                        .find(|root| root.row.id == target)
-                    else {
-                        continue;
-                    };
-                    if root.position >= position
-                        || run.retired.contains_key(&target)
-                        || !run.recovery_valid(root)?
-                    {
-                        continue;
-                    }
-                }
-            }
-            if !run.verify_device(&successor.signer_id, &bytes, &successor.signature)? {
-                continue;
-            }
-            if membership.len() != expected.len()
-                || membership.iter().any(|device| !expected.contains(device))
-            {
-                continue;
-            }
-            approvals.extend(members.accepted);
-            match successor.action {
+            let ValidSuccessor {
+                candidate,
+                accepted,
+                target,
+                members,
+            } = valid.pop().expect("one valid successor");
+            approvals.extend(accepted);
+            match candidate.row.action {
                 AccountAction::RemoveDevice => {
                     run.removed.insert(target);
                 }
@@ -296,12 +656,12 @@ impl<'a> AccountReplay<'a> {
                     run.retired.insert(target, position);
                 }
             }
-            used_epochs.insert(successor.epoch_id.clone());
+            used_epochs.insert(candidate.row.epoch_id.clone());
             epochs.push(AccountEpoch {
-                epoch_id: successor.epoch_id.clone(),
+                epoch_id: candidate.row.epoch_id.clone(),
                 position,
-                successor: Some(candidate.clone()),
-                members: expected,
+                successor: Some(candidate),
+                members,
             });
         }
 
@@ -325,7 +685,9 @@ impl<'a> AccountReplay<'a> {
         Ok(Some(AccountState {
             account_id: view.account_id.clone(),
             generation: root.row.generation,
-            root: root.clone(),
+            root,
+            roots,
+            rejected_roots,
             epochs,
             active: current.active,
             removed: run.removed,
@@ -513,69 +875,6 @@ impl Run<'_, '_> {
         }
         Ok(true)
     }
-}
-
-/// The canonical root (§2.4 step 1). A root of generation `g > 0` counts only
-/// if a counting root of generation `g − 1` was accepted strictly before it.
-/// Among counting roots of the highest generation, the earliest (ties by
-/// smallest ID) is canonical; any other counting root of that generation
-/// that differs in account, device or epoch is a contradiction.
-pub fn canonical_root(
-    view: &PublicAccountLedger,
-) -> ProtocolResult<Option<&Accepted<AccountRoot>>> {
-    if view
-        .roots
-        .iter()
-        .any(|root| root.row.ledger_version != LEDGER_VERSION)
-    {
-        return Err(ProtocolError::Unsupported(
-            UnsupportedCapability::LedgerVersion,
-        ));
-    }
-    let mut roots: Vec<_> = view
-        .roots
-        .iter()
-        .filter(|root| root.row.validate().is_ok())
-        .collect();
-    by_position_then_id(&mut roots);
-    let mut generation = 0u64;
-    let mut counting: Vec<&Accepted<AccountRoot>> = roots
-        .iter()
-        .copied()
-        .filter(|root| root.row.generation == 0)
-        .collect();
-    if counting.is_empty() {
-        return Ok(None);
-    }
-    loop {
-        let floor = counting[0].position;
-        let Some(next_generation) = generation.checked_add(1) else {
-            break;
-        };
-        let next: Vec<_> = roots
-            .iter()
-            .copied()
-            .filter(|root| root.row.generation == next_generation && root.position > floor)
-            .collect();
-        if next.is_empty() {
-            break;
-        }
-        generation = next_generation;
-        counting = next;
-    }
-    let canonical = counting[0];
-    let contradicts = |root: &Accepted<AccountRoot>| {
-        root.row.account_id != canonical.row.account_id
-            || root.row.device_id != canonical.row.device_id
-            || root.row.epoch_id != canonical.row.epoch_id
-    };
-    if canonical.row.account_id != view.account_id || counting.iter().any(|root| contradicts(root))
-    {
-        return Err(ProtocolError::Intrinsic(
-            IntrinsicContradiction::ConflictingRoots,
-        ));
-    }
-    Ok(Some(canonical))
 }
 
 /// The account's device keys by device ID. Two rows of one device with

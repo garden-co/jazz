@@ -164,7 +164,7 @@ pub fn random_v4(rng: &mut dyn crate::RandomSource) -> crate::Result<String> {
     Ok(format_uuid(&bytes))
 }
 
-fn format_uuid(bytes: &[u8; 16]) -> String {
+pub(crate) fn format_uuid(bytes: &[u8; 16]) -> String {
     let mut out = String::with_capacity(36);
     for (index, byte) in bytes.iter().enumerate() {
         if matches!(index, 4 | 6 | 8 | 10) {

@@ -51,6 +51,38 @@ impl IntrinsicContradiction {
     }
 }
 
+/// Why an account root does not count (§2.4 step 1). Such a root is
+/// reported and otherwise ignored; it never fails replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RootRejection {
+    /// The row does not satisfy its own format.
+    Malformed,
+    /// The row names another account than the one replayed.
+    ForeignAccount,
+    /// A `local-first` root whose public key does not derive the account ID.
+    KeyMismatch,
+    /// A `local-first` root whose signature does not verify.
+    SignatureInvalid,
+    /// An `app` root of an account that has a valid `local-first` root.
+    KindMismatch,
+    /// A root of generation `g > 0` not accepted after a counting root of
+    /// generation `g − 1`.
+    Unchained,
+}
+
+impl RootRejection {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Malformed => "root-malformed",
+            Self::ForeignAccount => "root-foreign-account",
+            Self::KeyMismatch => "root-key-mismatch",
+            Self::SignatureInvalid => "root-signature-invalid",
+            Self::KindMismatch => "root-kind-mismatch",
+            Self::Unchained => "root-unchained",
+        }
+    }
+}
+
 /// The refusal codes of §7, carried by publication errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -78,6 +110,7 @@ pub enum RefusalCode {
     RecipientStillDeclared,
     RecipientsDeclared,
     LastManager,
+    LocalFirstIdentityMismatch,
 }
 
 impl RefusalCode {
@@ -106,6 +139,7 @@ impl RefusalCode {
             Self::RecipientStillDeclared => "recipient-still-declared",
             Self::RecipientsDeclared => "recipients-declared",
             Self::LastManager => "last-manager",
+            Self::LocalFirstIdentityMismatch => "local-first-identity-mismatch",
         }
     }
 }
@@ -168,6 +202,16 @@ pub enum ProtocolError {
     AccountKeyUnavailable,
     #[error("E2EE recovery failed")]
     Recovery(RecoveryFailure),
+    /// The account's canonical root is not the one this device knows its
+    /// account wrote (`root-not-mine`, §2.4): the server, or whoever can
+    /// write as the account, replaced it. Surfaced to the user; never
+    /// treated as an ordinary failure.
+    #[error("The E2EE account root is not this account's own")]
+    RootNotMine,
+    /// The evidence is older than a state this device already verified
+    /// (`stale-state`, §2.4 "Floors"): a rollback or withheld rows.
+    #[error("E2EE evidence is older than state already verified")]
+    StaleState,
 }
 
 impl From<Error> for ProtocolError {
@@ -192,6 +236,8 @@ impl ProtocolError {
             Self::Intrinsic(kind) => Some(kind.code()),
             Self::Refused(kind) => Some(kind.code()),
             Self::Recovery(kind) => Some(kind.code()),
+            Self::RootNotMine => Some("root-not-mine"),
+            Self::StaleState => Some("stale-state"),
             _ => None,
         }
     }

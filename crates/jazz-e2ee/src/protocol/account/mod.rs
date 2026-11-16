@@ -18,4 +18,6 @@ pub mod replay;
 pub use key::{AccountKey, AccountKeyEvidence, AuthenticatedAccountKey};
 pub use ledger::{PrivateAccountLedger, PublicAccountLedger};
 pub use private::{PrivateEvidence, VerifiedApproval, verify_private};
-pub use replay::{AccountEpoch, AccountReplay, AccountState};
+pub use replay::{
+    AccountEpoch, AccountFloor, AccountReplay, AccountState, RejectedRoot, RootSelection,
+};

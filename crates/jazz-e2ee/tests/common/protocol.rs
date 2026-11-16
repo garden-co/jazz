@@ -3,14 +3,16 @@
 
 use jazz_e2ee::agility::MechanismConfig;
 use jazz_e2ee::protocol::account::build::{
-    self, AccountWriter, ApprovalRecords, LocalDevice, ResetPolicy, RotationRecords, RotationTarget,
+    self, AccountWriter, ApprovalRecords, LocalDevice, ResetPolicy, RootAuthority, RotationRecords,
+    RotationTarget,
 };
 use jazz_e2ee::protocol::account::{
     AccountKey, AccountKeyEvidence, AccountReplay, AccountState, PrivateAccountLedger,
     PrivateEvidence, PublicAccountLedger, verify_private,
 };
-use jazz_e2ee::protocol::derive::RecoveryKeys;
+use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::domain::{AccountDomain, AppDomain};
+use jazz_e2ee::protocol::local_first::LocalFirstIdentity;
 use jazz_e2ee::protocol::records::account::RecoveryRoot;
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult};
 use jazz_e2ee::registry::Registry;
@@ -25,6 +27,8 @@ pub struct Env {
     pub config: MechanismConfig,
     pub domain: AppDomain,
     pub account: String,
+    /// The local-first identity of a local-first account.
+    pub identity: Option<LocalFirstIdentity>,
 }
 
 impl Env {
@@ -38,6 +42,25 @@ impl Env {
             config,
             domain: AppDomain::new(APP_ID, Some("test")).unwrap(),
             account: account.to_owned(),
+            identity: None,
+        }
+    }
+
+    /// A local-first account: its ID is the one the secret's identity
+    /// founds, and its roots are signed by that identity.
+    pub fn local_first(secret: [u8; 32]) -> Self {
+        let identity =
+            LocalFirstIdentity::from_secret(&RecoverySecret::from_bytes(secret)).unwrap();
+        let mut env = Self::new("pending");
+        env.account = identity.account_id(&env.domain).unwrap();
+        env.identity = Some(identity);
+        env
+    }
+
+    pub fn authority(&self) -> RootAuthority<'_> {
+        match &self.identity {
+            Some(identity) => RootAuthority::LocalFirst(identity),
+            None => RootAuthority::App,
         }
     }
 
@@ -125,7 +148,7 @@ impl Ledger {
                 .unwrap()
         };
         assert_eq!(permit.generation(), generation);
-        let records = build::account_root(&writer, device, &permit, rng).unwrap();
+        let records = build::account_root(&writer, device, &permit, env.authority(), rng).unwrap();
         let at = self.next();
         self.private
             .identities

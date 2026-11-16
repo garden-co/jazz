@@ -518,6 +518,10 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
         "181861d75da53f4d7ae9675db94876fb9c2b3cfbfce1a1f65ce8235788802807",
     ),
     (
+        "local-first account root",
+        "e64e3656b255c4e638d80254fe13981bf7b95eaeb4c51a3c3fdd7cc6232c8209",
+    ),
+    (
         "recovery delivery context",
         "46461c62e2128155884595d677787ad0db2aadd9c2a8943aaf4f6890c8e97cc5",
     ),
@@ -847,6 +851,72 @@ fn signed_bytes() {
         ])
         .unwrap(),
     ));
+    let account_root = AccountRoot {
+        id: R1.into(),
+        ledger_version: 1,
+        generation: 0,
+        account_id: "alice".into(),
+        device_id: D1.into(),
+        epoch_id: E1.into(),
+        kind: AccountKind::LocalFirst,
+        local_first_public_key: Some(vec![0x33; 32]),
+        local_first_signature: Some(vec![]),
+    };
+    cases.push((
+        "local-first account root",
+        account_root.signed_bytes(&da, &keys()).unwrap(),
+        append(
+            ctx(
+                da.as_str(),
+                "jazz.e2ee.local-first-account-root.v1",
+                "account",
+                "alice",
+                "__e2ee_account_roots",
+                R1,
+                "local-first-signature",
+                E1,
+                D1,
+            ),
+            &[
+                b"0",
+                b"1",
+                &[0x33; 32],
+                &env("jazz.sodium.sign", &[0x22; 32]),
+                &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+            ],
+        ),
+    ));
+    let app_root = AccountRoot {
+        kind: AccountKind::App,
+        local_first_public_key: None,
+        local_first_signature: None,
+        ..account_root.clone()
+    };
+    assert!(app_root.validate().is_ok());
+    assert!(app_root.signed_bytes(&da, &keys()).is_err());
+    for broken in [
+        AccountRoot {
+            local_first_signature: None,
+            ..account_root.clone()
+        },
+        AccountRoot {
+            local_first_public_key: Some(vec![0x33; 31]),
+            ..account_root.clone()
+        },
+        AccountRoot {
+            kind: AccountKind::App,
+            ..account_root.clone()
+        },
+        AccountRoot {
+            local_first_signature: Some(vec![]),
+            ..account_root.clone()
+        },
+    ] {
+        assert!(matches!(
+            broken.validate(),
+            Err(ProtocolError::InvalidRecord(_))
+        ));
+    }
     let recovery_delivery = RecoveryDelivery {
         id: R1.into(),
         root_id: R2.into(),

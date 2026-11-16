@@ -17,7 +17,7 @@ use super::super::records::account::{
 };
 use super::super::signing;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
-use super::replay::{AccountReplay, AccountState, canonical_root};
+use super::replay::{AccountReplay, AccountState};
 
 /// A private approval whose challenge, proof, request keys and signatures
 /// verify, and whose public approval replay accepted.
@@ -83,7 +83,9 @@ pub fn verify_private(
     private: &PrivateAccountLedger,
 ) -> ProtocolResult<PrivateEvidence> {
     private.check()?;
-    let same_root = canonical_root(replay.ledger())?.is_some_and(|root| *root == state.root);
+    let same_root = replay
+        .canonical_root()?
+        .is_some_and(|root| root == state.root);
     if private.through != replay.ledger().through
         || state.account_id != replay.ledger().account_id
         || !same_root
@@ -115,6 +117,21 @@ pub fn verify_private(
                     .is_some()
         })
         .cloned();
+    // The account's own identity of this generation names another device
+    // or epoch than the canonical root:
+    // the public root is not the one the account wrote (§2.4,
+    // `root-not-mine`). R5 and R6 allow one identity per generation, written
+    // with its root.
+    if identity.is_none()
+        && private.identities.iter().any(|identity| {
+            identity.row.id == identity_id
+                && identity.row.generation == state.generation
+                && identity.row.validate(account_id).is_ok()
+                && !state.root.row.matches_identity(&identity.row)
+        })
+    {
+        return Err(ProtocolError::RootNotMine);
+    }
 
     let mut approvals = Vec::new();
     for approval in &private.approvals {
