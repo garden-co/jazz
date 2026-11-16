@@ -1,6 +1,8 @@
-//! The `jazz-app-test-relay` bin, as a binding's test runs it: a core, a
-//! backend for the bundle, the bin printing its endpoint, and an end user's
-//! device-key client syncing through it. Needs `--features test-relay`.
+//! The `jazz-app-test-relay` bin, as a binding's test runs it: a core, the
+//! bin printing its endpoint, and an end user's device-key client syncing
+//! through it. The bundle comes from a backend the test opens (`--bundle`),
+//! or the bin publishes it itself (`--app`/`--permissions`), for
+//! client-only bindings. Needs `--features test-relay`.
 
 #[path = "bindings/todos.rs"]
 mod bindings;
@@ -9,20 +11,19 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use bindings::{NewTodo, todos};
+use bindings::{NewTodo, Todo, todos};
 use futures::StreamExt;
 use jazz_app::{AppFiles, AppId, Auth, Backend, Config, DeviceKey, Jazz, Link, ReadTier};
 use jazz_server::JazzServer;
 
-/// Kills the bin if the test fails before it stops it.
-struct Bin(Child);
-
-impl Drop for Bin {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+const APP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/todos/jazz.app.json"
+);
+const PERMISSIONS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/todos/jazz.permissions.json"
+);
 
 /// The built bin: Cargo's `CARGO_BIN_EXE_*` when it sets it (it doesn't
 /// here, as with jazz-cli's tests), else the bin beside this test's `deps/`.
@@ -44,73 +45,89 @@ fn relay_bin() -> std::path::PathBuf {
     bin
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_account_syncs_through_the_bin() {
+/// The running bin, and the endpoint it printed. Killed if a test fails
+/// before it stops it.
+struct Bin {
+    child: Option<Child>,
+    endpoint: String,
+}
+
+impl Bin {
+    /// Runs the bin against `server`, with the secrets from env and `args`
+    /// naming the bundle.
+    async fn start(server: &JazzServer, app_id: AppId, args: &[&str]) -> Self {
+        let mut child = Command::new(relay_bin())
+            .args(["--core", &server.base_url()])
+            .args(["--app-id", &app_id.to_string()])
+            .args(args)
+            .env("JAZZ_BACKEND_SECRET", server.backend_secret())
+            .env("JAZZ_ADMIN_SECRET", server.admin_secret())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn jazz-app-test-relay");
+        let stdout = child.stdout.take().unwrap();
+        let endpoint = tokio::task::spawn_blocking(move || {
+            let mut line = String::new();
+            BufReader::new(stdout).read_line(&mut line).unwrap();
+            line.trim().to_owned()
+        })
+        .await
+        .unwrap();
+        assert!(
+            endpoint.starts_with("http://") && endpoint.ends_with("/jazz"),
+            "{endpoint:?}"
+        );
+        Self {
+            child: Some(child),
+            endpoint,
+        }
+    }
+
+    /// SIGTERM stops it cleanly.
+    async fn terminate(mut self) {
+        let mut child = self.child.take().unwrap();
+        let pid = child.id().to_string();
+        let killed = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+        assert!(killed.success());
+        let status = tokio::task::spawn_blocking(move || child.wait().unwrap())
+            .await
+            .unwrap();
+        assert!(status.success(), "{status:?}");
+    }
+}
+
+impl Drop for Bin {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+async fn start_server() -> (AppId, JazzServer) {
     let app_id = AppId::random();
     let server = JazzServer::builder()
         .with_app_id(app_id)
         .start()
         .await
         .expect("start a Jazz server");
-    let permissions = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/todos/jazz.permissions.json"
-    ))
-    .unwrap();
-    let backend = bindings::open(
-        Config::new(app_id).server(server.base_url()).backend(
-            Backend::new(
-                server.backend_secret(),
-                server.admin_secret(),
-                "todo-service",
-            )
-            .permissions(permissions),
-        ),
-    )
-    .await
-    .expect("open the app's backend");
+    (app_id, server)
+}
 
-    let mut bin = Bin(Command::new(relay_bin())
-        .args(["--core", &server.base_url()])
-        .args(["--app-id", &app_id.to_string()])
-        .env("JAZZ_BACKEND_SECRET", server.backend_secret())
-        .env("JAZZ_ADMIN_SECRET", server.admin_secret())
-        .args(["--bundle", backend.bundle().unwrap()])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn jazz-app-test-relay"));
-    let stdout = bin.0.stdout.take().unwrap();
-    let endpoint = tokio::task::spawn_blocking(move || {
-        let mut line = String::new();
-        BufReader::new(stdout).read_line(&mut line).unwrap();
-        line.trim().to_owned()
-    })
-    .await
-    .unwrap();
-    assert!(
-        endpoint.starts_with("http://") && endpoint.ends_with("/jazz"),
-        "{endpoint:?}"
-    );
-
-    let files = AppFiles::new(
-        std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/todos/jazz.app.json"
-        ))
-        .unwrap(),
-        None,
-    );
-    let key = DeviceKey::generate().unwrap();
-    let phone = Jazz::open(
+/// A device account's client through the bin, once connected.
+async fn device(app_id: AppId, endpoint: &str, key: &DeviceKey) -> Jazz {
+    let files = AppFiles::new(std::fs::read(APP).unwrap(), None);
+    let jazz = Jazz::open(
         files,
         Config::new(app_id)
-            .server(&endpoint)
+            .server(endpoint)
             .user(Auth::Device(key.clone())),
     )
     .await
     .expect("open as a device account through the bin");
-    assert_eq!(phone.account(), Some(key.account(app_id)));
-    let mut changes = phone.sync_changes();
+    assert_eq!(jazz.account(), Some(key.account(app_id)));
+    let mut changes = jazz.sync_changes();
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(status) = changes.next().await {
             if status.link == Link::Connected {
@@ -120,14 +137,14 @@ async fn a_device_account_syncs_through_the_bin() {
     })
     .await
     .expect("the client connects through the bin");
+    jazz
+}
 
-    let written = phone
-        .insert(NewTodo::new("Through the bin", false))
-        .await
-        .unwrap();
-    let seen = tokio::time::timeout(Duration::from_secs(10), async {
+/// Every todo `jazz` reads from the server, once there is one.
+async fn remote_todos(jazz: &Jazz) -> Vec<Todo> {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let rows = backend
+            let rows = jazz
                 .all_with(todos::query(), ReadTier::Remote)
                 .await
                 .unwrap();
@@ -138,19 +155,111 @@ async fn a_device_account_syncs_through_the_bin() {
         }
     })
     .await
-    .expect("the row reaches the backend");
-    assert_eq!(seen, vec![written]);
+    .expect("the row reaches the server")
+}
 
-    // SIGTERM stops it cleanly.
-    let pid = bin.0.id().to_string();
-    let killed = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
-    assert!(killed.success());
-    let status = tokio::task::spawn_blocking(move || bin.0.wait().unwrap())
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_account_syncs_through_the_bin() {
+    let (app_id, server) = start_server().await;
+    let backend = bindings::open(
+        Config::new(app_id).server(server.base_url()).backend(
+            Backend::new(
+                server.backend_secret(),
+                server.admin_secret(),
+                "todo-service",
+            )
+            .permissions(std::fs::read(PERMISSIONS).unwrap()),
+        ),
+    )
+    .await
+    .expect("open the app's backend");
+    let bin = Bin::start(&server, app_id, &["--bundle", backend.bundle().unwrap()]).await;
+
+    let phone = device(app_id, &bin.endpoint, &DeviceKey::generate().unwrap()).await;
+    let written = phone
+        .insert(NewTodo::new("Through the bin", false))
         .await
         .unwrap();
-    assert!(status.success(), "{status:?}");
+    assert_eq!(remote_todos(&backend).await, vec![written]);
 
+    bin.terminate().await;
     phone.shutdown().await.unwrap();
     backend.shutdown().await.unwrap();
     server.shutdown().await;
+}
+
+/// A client-only binding's test: no backend of its own, the bin publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bin_publishes_the_bundle_itself() {
+    let (app_id, server) = start_server().await;
+    let bin = Bin::start(
+        &server,
+        app_id,
+        &["--app", APP, "--permissions", PERMISSIONS],
+    )
+    .await;
+
+    let key = DeviceKey::generate().unwrap();
+    let phone = device(app_id, &bin.endpoint, &key).await;
+    let written = phone
+        .insert(NewTodo::new("Published by the bin", false))
+        .await
+        .unwrap();
+    // Another device of the same account reads it back through the bin.
+    let laptop = device(app_id, &bin.endpoint, &key).await;
+    assert_eq!(remote_todos(&laptop).await, vec![written]);
+
+    bin.terminate().await;
+    phone.shutdown().await.unwrap();
+    laptop.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// Exit codes a caller can rely on: 0 for `--help`, 2 for bad arguments,
+/// 1 when it can't publish.
+#[test]
+fn the_bin_exits_with_its_codes() {
+    let run = |args: &[&str]| {
+        Command::new(relay_bin())
+            .args(args)
+            .env("JAZZ_BACKEND_SECRET", "backend")
+            .env("JAZZ_ADMIN_SECRET", "admin")
+            .output()
+            .unwrap()
+    };
+    let help = run(&["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).starts_with("usage:"));
+
+    let core = ["--core", "http://127.0.0.1:9", "--app-id"];
+    let app_id = AppId::random().to_string();
+    let with = |more: &[&'static str]| {
+        let mut args = core.to_vec();
+        args.push(&app_id);
+        args.extend_from_slice(more);
+        run(&args).status.code()
+    };
+    assert_eq!(run(&[]).status.code(), Some(2));
+    assert_eq!(run(&["--nope"]).status.code(), Some(2));
+    assert_eq!(with(&[]), Some(2), "no bundle");
+    assert_eq!(
+        with(&["--app", APP]),
+        Some(2),
+        "--app without --permissions"
+    );
+    assert_eq!(
+        with(&["--bundle", "b", "--app", APP, "--permissions", PERMISSIONS]),
+        Some(2),
+        "both ways to the bundle"
+    );
+    assert_eq!(
+        with(&[
+            "--app",
+            "/nonexistent/jazz.app.json",
+            "--permissions",
+            PERMISSIONS
+        ]),
+        Some(1),
+        "unreadable app files"
+    );
 }

@@ -8,14 +8,15 @@ use jazz::db::{FirstLoad, ReadOpts};
 use jazz::tools::ReadTier;
 
 use crate::error::{Error, Result};
-use crate::handle::{Jazz, decode_result, read_opts};
+use crate::handle::{DefaultRead, Jazz, decode_result, read_opts};
 use crate::include::Row;
 use crate::query::{Column, Query};
 use crate::subscription::{self, Subscription};
 use crate::value::ColumnValue;
 
-/// How a read or subscription runs. `ReadOptions::default()` reads local
-/// data first and delivers at once.
+/// How a read or subscription runs. `ReadOptions::default()` reads as a
+/// read that names no tier does ([`crate::DefaultRead`]), as TypeScript's
+/// options without a `tier`.
 #[derive(Debug, Clone, Default)]
 pub struct ReadOptions {
     tier: Option<ReadTier>,
@@ -51,7 +52,12 @@ impl ReadOptions {
 
     /// The core's read options, refusing what can't be answered: a remote
     /// read with nobody to ask, or a remote read told to wait for remote.
-    fn into_core<T: Row>(self, query: &Query<T>, serverless: bool) -> Result<ReadOpts> {
+    fn into_core<T: Row>(
+        self,
+        query: &Query<T>,
+        serverless: bool,
+        default: DefaultRead,
+    ) -> Result<ReadOpts> {
         if self.tier == Some(ReadTier::Remote) {
             if self.first_load_remote_wait.is_some() {
                 return Err(Error::Config(
@@ -64,8 +70,14 @@ impl ReadOptions {
                 ));
             }
         }
-        let mut opts = read_opts(query, self.tier.unwrap_or(ReadTier::LocalFirst));
-        if let Some(wait) = self.first_load_remote_wait {
+        let mut opts = match (self.tier, self.first_load_remote_wait) {
+            // No tier: the client's default, as TS resolves it. A server
+            // runtime reads Remote whatever the wait says.
+            (None, None) => default.opts(query),
+            (None, Some(_)) if default == DefaultRead::Remote => default.opts(query),
+            (tier, _) => read_opts(query, tier.unwrap_or(ReadTier::LocalFirst)),
+        };
+        if let (Some(wait), false) = (self.first_load_remote_wait, opts.tier == ReadTier::Remote) {
             opts.first_load = FirstLoad::WaitForRemote {
                 timeout_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
             };
@@ -82,7 +94,7 @@ impl Jazz {
         query: Query<T>,
         options: ReadOptions,
     ) -> Result<Vec<T>> {
-        let opts = options.into_core(&query, self.info.serverless)?;
+        let opts = options.into_core(&query, self.info.serverless, self.info.default_read)?;
         let query = query.into_untyped()?;
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
@@ -100,7 +112,7 @@ impl Jazz {
         query: Query<T>,
         options: ReadOptions,
     ) -> Result<Subscription<T>> {
-        let opts = options.into_core(&query, self.info.serverless)?;
+        let opts = options.into_core(&query, self.info.serverless, self.info.default_read)?;
         let query = query.into_untyped()?;
         if jazz::schema::history::is_history_table(&query.table) {
             return Err(Error::Unsupported(
