@@ -66,10 +66,10 @@ npx jazz-tools generate --check    # in CI: fails if any of them is stale
 ```
 
 A Swift client of an app whose schema lives elsewhere (its TypeScript backend's, say) gets a
-two-line `schema.ts` that re-exports it, for example:
+two-line `schema.ts` that re-exports it, as StagePlan's Swift example does:
 
 ```ts
-export { schema, permissions } from "../backend/schema";
+export { schema, permissions } from "../react-localfirst/schema";
 ```
 
 Detection picks Swift from the `Package.swift`; `--lang swift` selects it explicitly.
