@@ -262,7 +262,10 @@ db.update(
 ```
 
 For byte-oriented text, use `{ fromUtf8, toUtf8 }` in `within` and
-`{ atUtf8, deleteUtf8, insert }` in each splice. Jazz rejects out-of-range
+`{ atUtf8, deleteUtf8, insert }` in each splice. In Rust, text pages and
+splices count UTF-8 bytes (`str` indices): `jazz.splice(id, column,
+Page::text(from..to), vec![Splice::text(at, delete, "revised")])`, and an
+offset inside a code point fails with `Error::TextOffset`. Jazz rejects out-of-range
 coordinates and text boundaries that split a code point or surrogate pair. This
 revision does not add a page-staleness/CAS check; keep page coordinates aligned
 with the value your application last read. `update(..., { applyDiffs })` is for
