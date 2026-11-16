@@ -23,7 +23,8 @@ android="${3:-}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
-version=2.0.0-alpha.66
+# Lockstep: jazz-tools' version, as the Gradle builds read it.
+version="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' packages/jazz-tools/package.json)"
 found=0
 for dir in "$natives"/*/; do
   ls "$dir" | grep -Eq '^(lib)?jazz_ffi\.(so|dylib|dll)$' || {

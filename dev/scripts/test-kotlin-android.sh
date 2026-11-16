@@ -85,8 +85,11 @@ if ! "$cache/cargo/bin/cargo-ndk" --version 2>/dev/null | grep -q " $cargo_ndk_v
 fi
 export PATH="$cache/cargo/bin:$PATH"
 
+# KOTLIN_ANDROID_TASKS: more tasks to run with the build (dev/scripts/publish-kotlin.sh's
+# publishToMavenLocal, publishToMavenCentral).
+read -ra extra_tasks <<<"${KOTLIN_ANDROID_TASKS:-}"
 gradle --no-daemon --console=plain -p packages/jazz-kotlin-android \
-  -PcargoProfile="${CARGO_PROFILE:-dev}" assembleRelease
+  -PcargoProfile="${CARGO_PROFILE:-dev}" assembleRelease "${extra_tasks[@]}"
 
 # The AAR must carry jazz-ffi for every ABI, and the library's classes.
 aar=packages/jazz-kotlin-android/build/outputs/aar/jazz-kotlin-android-release.aar
