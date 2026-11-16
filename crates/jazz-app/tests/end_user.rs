@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bindings::{NewTodo, Todo, todos};
 use futures::StreamExt;
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, Error, Jazz, Link, ReadTier, SessionState,
     Storage, TokenReason, UserKind,
 };
@@ -328,8 +328,8 @@ async fn an_end_user_needs_someone_signed_in_and_the_apps_endpoint() {
 /// The status once `done` holds for it.
 async fn sync_until(
     jazz: &Jazz,
-    done: impl Fn(&jazz_app::SyncStatus) -> bool,
-) -> jazz_app::SyncStatus {
+    done: impl Fn(&jazz_app_support::SyncStatus) -> bool,
+) -> jazz_app_support::SyncStatus {
     let mut changes = jazz.sync_changes();
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(status) = changes.next().await {
@@ -390,7 +390,7 @@ async fn sync_status_counts_uploads_until_the_server_has_them() {
 
 /// The session's state once `done` holds for it.
 async fn session_until(
-    session: &jazz_app::Session,
+    session: &jazz_app_support::Session,
     done: impl Fn(&SessionState) -> bool,
 ) -> SessionState {
     let mut changes = session.changes();
@@ -408,7 +408,7 @@ async fn session_until(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_bearer_is_renewed_expires_and_recovers_but_a_revoked_one_is_not() {
-    use jazz_app::AuthFailure;
+    use jazz_app_support::AuthFailure;
     let app = App::start().await;
     let token = Arc::new(Mutex::new("token-alice".to_owned()));
     let asked = Arc::new(Mutex::new(Vec::new()));
@@ -528,13 +528,13 @@ async fn a_slow_provider_does_not_hold_up_signing_out() {
     app.stop().await;
 }
 
-fn machine(token: &'static str) -> impl jazz_app::TokenProvider + 'static {
+fn machine(token: &'static str) -> impl jazz_app_support::TokenProvider + 'static {
     move |_: TokenReason| async move { Ok(Some(token.to_owned())) }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts() {
-    use jazz_app::BackendClientKind;
+    use jazz_app_support::BackendClientKind;
     let app = App::start().await;
     let job = Jazz::open(
         files(),
@@ -608,7 +608,9 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
         Err(Error::Config(_))
     ));
 
-    job.close(jazz_app::CLOSE_TIMEOUT).await.expect("drained");
+    job.close(jazz_app_support::CLOSE_TIMEOUT)
+        .await
+        .expect("drained");
     assert!(remote_todos(&alice, 3).await.contains(&digest));
     assert!(matches!(job.all(todos::query()).await, Err(Error::Stopped)));
     alice.shutdown().await.unwrap();
@@ -617,7 +619,7 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refused() {
-    use jazz_app::BackendClientKind;
+    use jazz_app_support::BackendClientKind;
     let app = App::start().await;
     let agent = Jazz::open(
         files(),
@@ -645,7 +647,7 @@ async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refuse
         .await
         .unwrap();
     assert_eq!(remote_todos(&app.backend, 1).await.len(), 1);
-    agent.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+    agent.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
 
     let untrusted = Jazz::open(
         files(),
@@ -752,7 +754,7 @@ async fn sync_status_reports_rejections_and_link_failures_as_typescript_does() {
     .await
     .unwrap();
     let rejected = sync_until(&erin, |status| status.rejected == 1).await;
-    let Some(jazz_app::SyncError::Rejected { code, .. }) = &rejected.last_error else {
+    let Some(jazz_app_support::SyncError::Rejected { code, .. }) = &rejected.last_error else {
         panic!("a rejection: {rejected:?}");
     };
     assert!(!code.is_empty());
@@ -767,7 +769,7 @@ async fn sync_status_reports_rejections_and_link_failures_as_typescript_does() {
         matches!(
             status.link,
             Link::Offline {
-                reason: jazz_app::Offline::Auth,
+                reason: jazz_app_support::Offline::Auth,
                 ..
             }
         )
@@ -902,7 +904,7 @@ async fn reads_without_a_tier_see_what_the_server_has() {
     // Options that name no tier read the same way.
     assert_eq!(
         agent
-            .all_with_options(todos::query(), jazz_app::ReadOptions::default())
+            .all_with_options(todos::query(), jazz_app_support::ReadOptions::default())
             .await
             .unwrap(),
         vec![written.clone()]

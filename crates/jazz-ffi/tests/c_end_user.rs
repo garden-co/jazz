@@ -127,25 +127,25 @@ unsafe extern "C" fn watch_cb(ctx: *mut c_void, kind: *const c_char, json: *cons
 
 struct App {
     server: jazz_server::JazzServer,
-    backend: jazz_app::Jazz,
+    backend: jazz_app_support::Jazz,
     _relay: relay::Relay,
     config: Box<dyn Fn(Value) -> String + Send + Sync>,
 }
 
 async fn app() -> App {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
         .await
         .unwrap();
-    let files = jazz_app::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
+    let files = jazz_app_support::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
         .with_permissions(STAGE_PLAN_PERMISSIONS.as_bytes().to_vec());
-    let backend = jazz_app::Jazz::open(
+    let backend = jazz_app_support::Jazz::open(
         files,
-        jazz_app::Config::new(app_id)
+        jazz_app_support::Config::new(app_id)
             .server(server.base_url())
-            .backend(jazz_app::Backend::new(
+            .backend(jazz_app_support::Backend::new(
                 server.backend_secret(),
                 server.admin_secret(),
                 "stage-plan",

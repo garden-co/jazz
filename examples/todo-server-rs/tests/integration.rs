@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ::jazz_app::{AppId, Backend, Config, Jazz, ReadTier, Storage};
+use ::jazz_app_support::{AppId, Backend, Config, Jazz, ReadTier, Storage};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -296,7 +296,7 @@ fn bindings_are_current() {
 }
 
 fn jazz_app_source(file: &[u8]) -> String {
-    ::jazz_app::jazz::tools::deployment::artifact::source_hash(file)
+    ::jazz_app_support::jazz::tools::deployment::artifact::source_hash(file)
 }
 
 /// Stopping ends the live streams, so a graceful shutdown isn't held open

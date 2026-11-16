@@ -10,7 +10,7 @@ use serde_json::json;
 /// may not insert a task into it. With no server there's no advice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn can_answers_as_the_server_would() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()

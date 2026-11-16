@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bindings::{Document, DocumentUpdate, NewDocument, NewDraft, documents, drafts};
 use futures::StreamExt;
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, Backend, Branch, Config, Error, Jazz, Order, ReadTier, Rows, Snapshot,
 };
 use jazz_server::JazzServer;
@@ -19,7 +19,7 @@ fn titles(rows: &[Document]) -> Vec<(&str, &str)> {
         .collect()
 }
 
-fn by_title() -> jazz_app::Query<Document> {
+fn by_title() -> jazz_app_support::Query<Document> {
     documents::query().order_by(documents::title(), Order::Asc)
 }
 
@@ -262,7 +262,7 @@ async fn transactions_and_selectors() {
         assert!(draft.get::<Document>(intro.id).await.is_err());
         let refused = draft
             .upsert(
-                jazz_app::ObjectId::new(),
+                jazz_app_support::ObjectId::new(),
                 NewDocument::new("draft", "Upserted"),
             )
             .await;
@@ -341,7 +341,7 @@ async fn a_serializable_transaction_writes_into_a_branch() {
             draft.insert(NewDocument::new("draft", "Notes"))?;
             let _ignored = draft
                 .upsert(
-                    jazz_app::ObjectId::new(),
+                    jazz_app_support::ObjectId::new(),
                     NewDocument::new("draft", "Never"),
                 )
                 .await;
@@ -398,7 +398,7 @@ async fn drafts_sync_through_the_server() {
         .unwrap();
     let draft = writer
         .on_branch(Branch::from("draft").over("main"))
-        .durable(jazz_app::DurabilityTier::GlobalServer);
+        .durable(jazz_app_support::DurabilityTier::GlobalServer);
     draft
         .update(
             intro.id,
@@ -415,7 +415,7 @@ async fn drafts_sync_through_the_server() {
         .unwrap();
     writer.wait_for_sync().await.unwrap();
 
-    let seen = |view: jazz_app::OnBranch, want: usize| async move {
+    let seen = |view: jazz_app_support::OnBranch, want: usize| async move {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let rows = view.all_with(by_title(), ReadTier::Remote).await.unwrap();
@@ -440,7 +440,7 @@ async fn drafts_sync_through_the_server() {
     // not updated or read.
     let locked = writer
         .on_branch(Branch::from("locked").over("main"))
-        .durable(jazz_app::DurabilityTier::GlobalServer);
+        .durable(jazz_app_support::DurabilityTier::GlobalServer);
     let hidden = locked
         .insert(NewDocument::new("locked", "Hidden"))
         .await
@@ -471,7 +471,9 @@ async fn drafts_sync_through_the_server() {
     server.shutdown().await;
 }
 
-async fn next(changes: &mut jazz_app::Subscription<Document>) -> jazz_app::Delta<Document> {
+async fn next(
+    changes: &mut jazz_app_support::Subscription<Document>,
+) -> jazz_app_support::Delta<Document> {
     tokio::time::timeout(Duration::from_secs(5), changes.next())
         .await
         .expect("a delta")

@@ -1,6 +1,6 @@
 //! jazz-ffi v2: backend clients, machines syncing through the app's main
 //! backend with their own credential (`"auth": { "credential": true }`),
-//! against jazz-app's `relay/` stand-in for `createJazz` with
+//! against jazz-app-support's `relay/` stand-in for `createJazz` with
 //! `backendClients`. Trusted (`machine-trusted`) or scoped (`token-agent`),
 //! as the main backend decides; `for_user` on a trusted one; closing with a
 //! timeout. Through UniFFI and the C ABI.
@@ -28,26 +28,26 @@ impl TokenProvider for Machine {
 
 struct App {
     server: jazz_server::JazzServer,
-    backend: jazz_app::Jazz,
+    backend: jazz_app_support::Jazz,
     relay: relay::Relay,
-    app_id: jazz_app::AppId,
+    app_id: jazz_app_support::AppId,
 }
 
 impl App {
     async fn start() -> Self {
-        let app_id = jazz_app::AppId::random();
+        let app_id = jazz_app_support::AppId::random();
         let server = jazz_server::JazzServer::builder()
             .with_app_id(app_id)
             .start()
             .await
             .unwrap();
-        let files = jazz_app::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
+        let files = jazz_app_support::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
             .with_permissions(STAGE_PLAN_PERMISSIONS.as_bytes().to_vec());
-        let backend = jazz_app::Jazz::open(
+        let backend = jazz_app_support::Jazz::open(
             files,
-            jazz_app::Config::new(app_id)
+            jazz_app_support::Config::new(app_id)
                 .server(server.base_url())
-                .backend(jazz_app::Backend::new(
+                .backend(jazz_app_support::Backend::new(
                     server.backend_secret(),
                     server.admin_secret(),
                     "stage-plan",

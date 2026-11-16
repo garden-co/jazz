@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use ::jazz_app::{AppId, Backend, Config, Jazz, ReadTier, Storage};
+use ::jazz_app_support::{AppId, Backend, Config, Jazz, ReadTier, Storage};
 use jazz_server::JazzServer;
 use stage_plan_rust_cli::jazz_app::{self, TaskStatus, tasks};
 use stage_plan_rust_cli::{ShowDetails, add_task, ensure_show, me, move_task, tasks_of};
@@ -79,7 +79,7 @@ async fn a_chief_plans_a_show() {
         .all(
             tasks::query()
                 .filter(tasks::status().eq(TaskStatus::Doing))
-                .order_by(tasks::rank(), ::jazz_app::Order::Asc),
+                .order_by(tasks::rank(), ::jazz_app_support::Order::Asc),
         )
         .await
         .unwrap();
@@ -130,7 +130,7 @@ fn app_files_are_stage_plans() {
 fn bindings_are_current() {
     assert_eq!(
         jazz_app::SOURCE,
-        ::jazz_app::jazz::tools::deployment::artifact::source_hash(APP.as_bytes()),
+        ::jazz_app_support::jazz::tools::deployment::artifact::source_hash(APP.as_bytes()),
         "src/jazz_app.rs is stale: run `npx jazz-tools generate`"
     );
 }

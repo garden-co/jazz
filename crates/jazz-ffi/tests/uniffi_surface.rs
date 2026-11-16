@@ -303,7 +303,7 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     assert_eq!(counts.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
 }
 
-/// What jazz-app cannot do (offsets in includes, foreign session issuers),
+/// What jazz-app-support cannot do (offsets in includes, foreign session issuers),
 /// misconfigured servers and invalid input are refused with `Refused`, naming the pattern.
 #[test]
 fn refuses_what_it_cannot_do_by_name() {
@@ -399,7 +399,7 @@ fn refuses_what_it_cannot_do_by_name() {
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_acts_as_its_session_user_under_permissions() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()

@@ -6,9 +6,9 @@
 //! any JSON; bytes → base64 string; array → JSON array; optional → null.
 
 use base64::Engine as _;
-use jazz_app::jazz::query::{self as q, OrderDirection, Predicate};
-use jazz_app::jazz::records::Value as CoreValue;
-use jazz_app::jazz::tools::{
+use jazz_app_support::jazz::query::{self as q, OrderDirection, Predicate};
+use jazz_app_support::jazz::records::Value as CoreValue;
+use jazz_app_support::jazz::tools::{
     ColumnType, ObjectId, OrderedRowDelta, QueryResultField, Schema, TableName, TableSchema, Value,
 };
 use serde_json::{Map, Number, Value as Json, json};
@@ -828,7 +828,7 @@ fn lit(value: Value) -> q::Operand {
     q::lit(core(value))
 }
 
-/// As jazz-app turns column values into query literals.
+/// As jazz-app-support turns column values into query literals.
 fn core(value: Value) -> CoreValue {
     match value {
         Value::Boolean(value) => CoreValue::Bool(value),
@@ -849,7 +849,7 @@ fn core(value: Value) -> CoreValue {
 /// result). Rows that only moved carry no new value and are left out: the
 /// contract's deltas carry no positions.
 pub(crate) fn delta_json(table: &Shape, delta: OrderedRowDelta, reset: bool) -> Result<String> {
-    let id = |key: &jazz_app::jazz::tools::ResultKey| {
+    let id = |key: &jazz_app_support::jazz::tools::ResultKey| {
         key.row_id()
             .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))
     };
@@ -893,8 +893,8 @@ pub(crate) fn edits(
     table: &TableSchema,
     table_name: &str,
     edits: &Json,
-) -> Result<Vec<jazz_app::jazz::db::LargeValueUpdate>> {
-    use jazz_app::jazz::db::{
+) -> Result<Vec<jazz_app_support::jazz::db::LargeValueUpdate>> {
+    use jazz_app_support::jazz::db::{
         JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
     };
     let edits = edits

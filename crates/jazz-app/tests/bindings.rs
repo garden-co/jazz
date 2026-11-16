@@ -1,6 +1,6 @@
 //! The committed bindings the other tests use are what the Rust back end
 //! of jazz-codegen generates for their fixtures. Regenerate them with
-//! `JAZZ_UPDATE_BINDINGS=1 cargo test -p jazz-app --test bindings`.
+//! `JAZZ_UPDATE_BINDINGS=1 cargo test -p jazz-app-support --test bindings`.
 
 use jazz_codegen::Lang;
 
@@ -20,7 +20,7 @@ fn committed_bindings_are_generated() {
         let committed = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(
             committed == generated,
-            "{path} is stale: run JAZZ_UPDATE_BINDINGS=1 cargo test -p jazz-app --test bindings"
+            "{path} is stale: run JAZZ_UPDATE_BINDINGS=1 cargo test -p jazz-app-support --test bindings"
         );
     }
 }

@@ -1,4 +1,4 @@
-//! JSON-in/JSON-out bindings of [`jazz_app`] for other languages.
+//! JSON-in/JSON-out bindings of [`jazz_app_support`] for other languages.
 //!
 //! Two surfaces over one dynamic handle:
 //! - UniFFI (proc-macros) for Swift and Kotlin: [`JazzHandle`],

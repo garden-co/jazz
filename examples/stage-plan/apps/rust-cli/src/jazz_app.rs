@@ -23,7 +23,7 @@ pub enum ActivityKind {
     Deleted,
 }
 
-::jazz_app::text_enum!(ActivityKind {
+::jazz_app_support::text_enum!(ActivityKind {
     Created => "created",
     Moved => "moved",
     Assigned => "assigned",
@@ -41,7 +41,7 @@ pub enum ShowCrewRole {
     Crew,
 }
 
-::jazz_app::text_enum!(ShowCrewRole {
+::jazz_app_support::text_enum!(ShowCrewRole {
     Chief => "chief",
     Crew => "crew",
 });
@@ -59,7 +59,7 @@ pub enum TaskStatus {
     Blocked,
 }
 
-::jazz_app::text_enum!(TaskStatus {
+::jazz_app_support::text_enum!(TaskStatus {
     Todo => "todo",
     Doing => "doing",
     Done => "done",
@@ -69,13 +69,13 @@ pub enum TaskStatus {
 /// A row of `activity`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Activity {
-    pub id: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     /// `taskId`.
-    pub task_id: ::jazz_app::ObjectId,
+    pub task_id: ::jazz_app_support::ObjectId,
     /// `actorId`.
-    pub actor_id: ::jazz_app::ObjectId,
+    pub actor_id: ::jazz_app_support::ObjectId,
     pub kind: ActivityKind,
     pub detail: ::std::option::Option<::std::string::String>,
 }
@@ -84,11 +84,11 @@ pub struct Activity {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewActivity {
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     /// `taskId`.
-    pub task_id: ::jazz_app::ObjectId,
+    pub task_id: ::jazz_app_support::ObjectId,
     /// `actorId`.
-    pub actor_id: ::jazz_app::ObjectId,
+    pub actor_id: ::jazz_app_support::ObjectId,
     pub kind: ActivityKind,
     pub detail: ::std::option::Option<::std::string::String>,
 }
@@ -96,7 +96,7 @@ pub struct NewActivity {
 impl NewActivity {
     /// A new row with the columns it requires, in this order: `showId`, `taskId`, `actorId`, `kind`. The others
     /// are left out; set them with `NewActivity { column: …, ..NewActivity::new(…) }`.
-    pub fn new(show_id: impl ::std::convert::Into<::jazz_app::ObjectId>, task_id: impl ::std::convert::Into<::jazz_app::ObjectId>, actor_id: impl ::std::convert::Into<::jazz_app::ObjectId>, kind: impl ::std::convert::Into<ActivityKind>) -> Self {
+    pub fn new(show_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, task_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, actor_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, kind: impl ::std::convert::Into<ActivityKind>) -> Self {
         Self {
             show_id: show_id.into(),
             task_id: task_id.into(),
@@ -111,25 +111,25 @@ impl NewActivity {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ActivityUpdate {
     /// `showId`.
-    pub show_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub show_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     /// `taskId`.
-    pub task_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub task_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     /// `actorId`.
-    pub actor_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub actor_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub kind: ::std::option::Option<ActivityKind>,
     pub detail: ::std::option::Option<::std::option::Option<::std::string::String>>,
 }
 
-impl ::jazz_app::Table for Activity {
+impl ::jazz_app_support::Table for Activity {
     const NAME: &'static str = "activity";
     const COLUMNS: &'static [&'static str] = &["showId", "taskId", "actorId", "kind", "detail"];
     type New = NewActivity;
     type Update = ActivityUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let show_id = row.take::<::jazz_app::ObjectId>("showId")?;
-        let task_id = row.take::<::jazz_app::ObjectId>("taskId")?;
-        let actor_id = row.take::<::jazz_app::ObjectId>("actorId")?;
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
+        let show_id = row.take::<::jazz_app_support::ObjectId>("showId")?;
+        let task_id = row.take::<::jazz_app_support::ObjectId>("taskId")?;
+        let actor_id = row.take::<::jazz_app_support::ObjectId>("actorId")?;
         let kind = row.take::<ActivityKind>("kind")?;
         let detail = row.take::<::std::option::Option<::std::string::String>>("detail")?;
         ::std::result::Result::Ok(Self {
@@ -142,55 +142,55 @@ impl ::jazz_app::Table for Activity {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewActivity {
+impl ::jazz_app_support::Insert for NewActivity {
     type Row = Activity;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.show_id;
-        cells.insert("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.task_id;
-        cells.insert("taskId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("taskId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.actor_id;
-        cells.insert("actorId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("actorId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.kind;
-        cells.insert("kind".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("kind".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.detail;
-        cells.insert("detail".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("detail".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for ActivityUpdate {
+impl ::jazz_app_support::Update for ActivityUpdate {
     type Row = Activity;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.show_id {
-            cells.push(("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.task_id {
-            cells.push(("taskId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("taskId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.actor_id {
-            cells.push(("actorId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("actorId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.kind {
-            cells.push(("kind".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("kind".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.detail {
-            cells.push(("detail".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("detail".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -202,69 +202,69 @@ pub mod activity {
     use super::*;
 
     /// Every row of `activity`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<Activity> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<Activity> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `activity`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Activity>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<Activity>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<Activity, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<Activity, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `showId`.
-    pub fn show_id() -> ::jazz_app::Column<Activity, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("showId")
+    pub fn show_id() -> ::jazz_app_support::Column<Activity, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("showId")
     }
 
     /// Column `taskId`.
-    pub fn task_id() -> ::jazz_app::Column<Activity, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("taskId")
+    pub fn task_id() -> ::jazz_app_support::Column<Activity, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("taskId")
     }
 
     /// Column `actorId`.
-    pub fn actor_id() -> ::jazz_app::Column<Activity, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("actorId")
+    pub fn actor_id() -> ::jazz_app_support::Column<Activity, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("actorId")
     }
 
     /// Column `kind`.
-    pub fn kind() -> ::jazz_app::Column<Activity, ActivityKind> {
-        ::jazz_app::Column::new("kind")
+    pub fn kind() -> ::jazz_app_support::Column<Activity, ActivityKind> {
+        ::jazz_app_support::Column::new("kind")
     }
 
     /// Column `detail`.
-    pub fn detail() -> ::jazz_app::Column<Activity, ::std::option::Option<::std::string::String>> {
-        ::jazz_app::Column::new("detail")
+    pub fn detail() -> ::jazz_app_support::Column<Activity, ::std::option::Option<::std::string::String>> {
+        ::jazz_app_support::Column::new("detail")
     }
 
     /// Relation `actor`: the `crew` row `actorId` references.
-    pub fn actor() -> ::jazz_app::One<Activity, Crew> {
-        ::jazz_app::One::new("actorId")
+    pub fn actor() -> ::jazz_app_support::One<Activity, Crew> {
+        ::jazz_app_support::One::new("actorId")
     }
 
     /// Relation `show`: the `shows` row `showId` references.
-    pub fn show() -> ::jazz_app::One<Activity, Show> {
-        ::jazz_app::One::new("showId")
+    pub fn show() -> ::jazz_app_support::One<Activity, Show> {
+        ::jazz_app_support::One::new("showId")
     }
 
     /// Relation `task`: the `tasks` row `taskId` references.
-    pub fn task() -> ::jazz_app::One<Activity, Task> {
-        ::jazz_app::One::new("taskId")
+    pub fn task() -> ::jazz_app_support::One<Activity, Task> {
+        ::jazz_app_support::One::new("taskId")
     }
 }
 
 /// A row of `checklistItems`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChecklistItem {
-    pub id: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
     pub title: ::std::string::String,
     pub done: bool,
     /// `ownerAccount`.
-    pub owner_account: ::jazz_app::ObjectId,
+    pub owner_account: ::jazz_app_support::ObjectId,
 }
 
 /// A new row of `checklistItems`: [`NewChecklistItem::new`] takes the columns it requires.
@@ -273,13 +273,13 @@ pub struct NewChecklistItem {
     pub title: ::std::string::String,
     pub done: bool,
     /// `ownerAccount`.
-    pub owner_account: ::jazz_app::ObjectId,
+    pub owner_account: ::jazz_app_support::ObjectId,
 }
 
 impl NewChecklistItem {
     /// A new row with the columns it requires, in this order: `title`, `done`, `ownerAccount`. The others
     /// are left out; set them with `NewChecklistItem { column: …, ..NewChecklistItem::new(…) }`.
-    pub fn new(title: impl ::std::convert::Into<::std::string::String>, done: impl ::std::convert::Into<bool>, owner_account: impl ::std::convert::Into<::jazz_app::ObjectId>) -> Self {
+    pub fn new(title: impl ::std::convert::Into<::std::string::String>, done: impl ::std::convert::Into<bool>, owner_account: impl ::std::convert::Into<::jazz_app_support::ObjectId>) -> Self {
         Self {
             title: title.into(),
             done: done.into(),
@@ -294,19 +294,19 @@ pub struct ChecklistItemUpdate {
     pub title: ::std::option::Option<::std::string::String>,
     pub done: ::std::option::Option<bool>,
     /// `ownerAccount`.
-    pub owner_account: ::std::option::Option<::jazz_app::ObjectId>,
+    pub owner_account: ::std::option::Option<::jazz_app_support::ObjectId>,
 }
 
-impl ::jazz_app::Table for ChecklistItem {
+impl ::jazz_app_support::Table for ChecklistItem {
     const NAME: &'static str = "checklistItems";
     const COLUMNS: &'static [&'static str] = &["title", "done", "ownerAccount"];
     type New = NewChecklistItem;
     type Update = ChecklistItemUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
         let title = row.take::<::std::string::String>("title")?;
         let done = row.take::<bool>("done")?;
-        let owner_account = row.take::<::jazz_app::ObjectId>("ownerAccount")?;
+        let owner_account = row.take::<::jazz_app_support::ObjectId>("ownerAccount")?;
         ::std::result::Result::Ok(Self {
             id: row.id(),
             title,
@@ -315,45 +315,45 @@ impl ::jazz_app::Table for ChecklistItem {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewChecklistItem {
+impl ::jazz_app_support::Insert for NewChecklistItem {
     type Row = ChecklistItem;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.title;
-        cells.insert("title".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("title".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.done;
-        cells.insert("done".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("done".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.owner_account;
-        cells.insert("ownerAccount".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("ownerAccount".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for ChecklistItemUpdate {
+impl ::jazz_app_support::Update for ChecklistItemUpdate {
     type Row = ChecklistItem;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.title {
-            cells.push(("title".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("title".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.done {
-            cells.push(("done".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("done".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.owner_account {
-            cells.push(("ownerAccount".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("ownerAccount".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -365,44 +365,44 @@ pub mod checklist_items {
     use super::*;
 
     /// Every row of `checklistItems`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<ChecklistItem> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<ChecklistItem> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `checklistItems`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ChecklistItem>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<ChecklistItem>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<ChecklistItem, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<ChecklistItem, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `title`.
-    pub fn title() -> ::jazz_app::Column<ChecklistItem, ::std::string::String> {
-        ::jazz_app::Column::new("title")
+    pub fn title() -> ::jazz_app_support::Column<ChecklistItem, ::std::string::String> {
+        ::jazz_app_support::Column::new("title")
     }
 
     /// Column `done`.
-    pub fn done() -> ::jazz_app::Column<ChecklistItem, bool> {
-        ::jazz_app::Column::new("done")
+    pub fn done() -> ::jazz_app_support::Column<ChecklistItem, bool> {
+        ::jazz_app_support::Column::new("done")
     }
 
     /// Column `ownerAccount`.
-    pub fn owner_account() -> ::jazz_app::Column<ChecklistItem, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("ownerAccount")
+    pub fn owner_account() -> ::jazz_app_support::Column<ChecklistItem, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("ownerAccount")
     }
 }
 
 /// A row of `comments`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comment {
-    pub id: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
     /// `taskId`.
-    pub task_id: ::jazz_app::ObjectId,
+    pub task_id: ::jazz_app_support::ObjectId,
     /// `authorId`.
-    pub author_id: ::jazz_app::ObjectId,
+    pub author_id: ::jazz_app_support::ObjectId,
     pub body: ::std::string::String,
 }
 
@@ -410,16 +410,16 @@ pub struct Comment {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewComment {
     /// `taskId`.
-    pub task_id: ::jazz_app::ObjectId,
+    pub task_id: ::jazz_app_support::ObjectId,
     /// `authorId`.
-    pub author_id: ::jazz_app::ObjectId,
+    pub author_id: ::jazz_app_support::ObjectId,
     pub body: ::std::string::String,
 }
 
 impl NewComment {
     /// A new row with the columns it requires, in this order: `taskId`, `authorId`, `body`. The others
     /// are left out; set them with `NewComment { column: …, ..NewComment::new(…) }`.
-    pub fn new(task_id: impl ::std::convert::Into<::jazz_app::ObjectId>, author_id: impl ::std::convert::Into<::jazz_app::ObjectId>, body: impl ::std::convert::Into<::std::string::String>) -> Self {
+    pub fn new(task_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, author_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, body: impl ::std::convert::Into<::std::string::String>) -> Self {
         Self {
             task_id: task_id.into(),
             author_id: author_id.into(),
@@ -432,21 +432,21 @@ impl NewComment {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CommentUpdate {
     /// `taskId`.
-    pub task_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub task_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     /// `authorId`.
-    pub author_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub author_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub body: ::std::option::Option<::std::string::String>,
 }
 
-impl ::jazz_app::Table for Comment {
+impl ::jazz_app_support::Table for Comment {
     const NAME: &'static str = "comments";
     const COLUMNS: &'static [&'static str] = &["taskId", "authorId", "body"];
     type New = NewComment;
     type Update = CommentUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let task_id = row.take::<::jazz_app::ObjectId>("taskId")?;
-        let author_id = row.take::<::jazz_app::ObjectId>("authorId")?;
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
+        let task_id = row.take::<::jazz_app_support::ObjectId>("taskId")?;
+        let author_id = row.take::<::jazz_app_support::ObjectId>("authorId")?;
         let body = row.take::<::std::string::String>("body")?;
         ::std::result::Result::Ok(Self {
             id: row.id(),
@@ -456,45 +456,45 @@ impl ::jazz_app::Table for Comment {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewComment {
+impl ::jazz_app_support::Insert for NewComment {
     type Row = Comment;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.task_id;
-        cells.insert("taskId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("taskId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.author_id;
-        cells.insert("authorId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("authorId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.body;
-        cells.insert("body".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("body".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for CommentUpdate {
+impl ::jazz_app_support::Update for CommentUpdate {
     type Row = Comment;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.task_id {
-            cells.push(("taskId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("taskId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.author_id {
-            cells.push(("authorId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("authorId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.body {
-            cells.push(("body".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("body".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -506,65 +506,65 @@ pub mod comments {
     use super::*;
 
     /// Every row of `comments`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<Comment> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<Comment> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `comments`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Comment>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<Comment>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<Comment, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<Comment, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `taskId`.
-    pub fn task_id() -> ::jazz_app::Column<Comment, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("taskId")
+    pub fn task_id() -> ::jazz_app_support::Column<Comment, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("taskId")
     }
 
     /// Column `authorId`.
-    pub fn author_id() -> ::jazz_app::Column<Comment, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("authorId")
+    pub fn author_id() -> ::jazz_app_support::Column<Comment, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("authorId")
     }
 
     /// Column `body`.
-    pub fn body() -> ::jazz_app::Column<Comment, ::std::string::String> {
-        ::jazz_app::Column::new("body")
+    pub fn body() -> ::jazz_app_support::Column<Comment, ::std::string::String> {
+        ::jazz_app_support::Column::new("body")
     }
 
     /// Relation `author`: the `crew` row `authorId` references.
-    pub fn author() -> ::jazz_app::One<Comment, Crew> {
-        ::jazz_app::One::new("authorId")
+    pub fn author() -> ::jazz_app_support::One<Comment, Crew> {
+        ::jazz_app_support::One::new("authorId")
     }
 
     /// Relation `task`: the `tasks` row `taskId` references.
-    pub fn task() -> ::jazz_app::One<Comment, Task> {
-        ::jazz_app::One::new("taskId")
+    pub fn task() -> ::jazz_app_support::One<Comment, Task> {
+        ::jazz_app_support::One::new("taskId")
     }
 }
 
 /// A row of `crew`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Crew {
-    pub id: ::jazz_app::ObjectId,
-    pub account: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
+    pub account: ::jazz_app_support::ObjectId,
     pub name: ::std::string::String,
 }
 
 /// A new row of `crew`: [`NewCrew::new`] takes the columns it requires.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewCrew {
-    pub account: ::jazz_app::ObjectId,
+    pub account: ::jazz_app_support::ObjectId,
     pub name: ::std::string::String,
 }
 
 impl NewCrew {
     /// A new row with the columns it requires, in this order: `account`, `name`. The others
     /// are left out; set them with `NewCrew { column: …, ..NewCrew::new(…) }`.
-    pub fn new(account: impl ::std::convert::Into<::jazz_app::ObjectId>, name: impl ::std::convert::Into<::std::string::String>) -> Self {
+    pub fn new(account: impl ::std::convert::Into<::jazz_app_support::ObjectId>, name: impl ::std::convert::Into<::std::string::String>) -> Self {
         Self {
             account: account.into(),
             name: name.into(),
@@ -575,18 +575,18 @@ impl NewCrew {
 /// Changes to a row of `crew`: a `None` field leaves its column as it is.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CrewUpdate {
-    pub account: ::std::option::Option<::jazz_app::ObjectId>,
+    pub account: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub name: ::std::option::Option<::std::string::String>,
 }
 
-impl ::jazz_app::Table for Crew {
+impl ::jazz_app_support::Table for Crew {
     const NAME: &'static str = "crew";
     const COLUMNS: &'static [&'static str] = &["account", "name"];
     type New = NewCrew;
     type Update = CrewUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let account = row.take::<::jazz_app::ObjectId>("account")?;
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
+        let account = row.take::<::jazz_app_support::ObjectId>("account")?;
         let name = row.take::<::std::string::String>("name")?;
         ::std::result::Result::Ok(Self {
             id: row.id(),
@@ -595,40 +595,40 @@ impl ::jazz_app::Table for Crew {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewCrew {
+impl ::jazz_app_support::Insert for NewCrew {
     type Row = Crew;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.account;
-        cells.insert("account".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("account".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.name;
-        cells.insert("name".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("name".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for CrewUpdate {
+impl ::jazz_app_support::Update for CrewUpdate {
     type Row = Crew;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.account {
-            cells.push(("account".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("account".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.name {
-            cells.push(("name".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("name".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -640,50 +640,50 @@ pub mod crew {
     use super::*;
 
     /// Every row of `crew`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<Crew> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<Crew> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `crew`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Crew>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<Crew>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<Crew, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<Crew, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `account`.
-    pub fn account() -> ::jazz_app::Column<Crew, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("account")
+    pub fn account() -> ::jazz_app_support::Column<Crew, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("account")
     }
 
     /// Column `name`.
-    pub fn name() -> ::jazz_app::Column<Crew, ::std::string::String> {
-        ::jazz_app::Column::new("name")
+    pub fn name() -> ::jazz_app_support::Column<Crew, ::std::string::String> {
+        ::jazz_app_support::Column::new("name")
     }
 
     /// Relation `assignedTasks`: the `tasks` rows whose `assigneeId` references this row.
-    pub fn assigned_tasks() -> ::jazz_app::Many<Crew, Task> {
-        ::jazz_app::Many::new("assigneeId")
+    pub fn assigned_tasks() -> ::jazz_app_support::Many<Crew, Task> {
+        ::jazz_app_support::Many::new("assigneeId")
     }
 
     /// Relation `memberships`: the `showCrew` rows whose `crewId` references this row.
-    pub fn memberships() -> ::jazz_app::Many<Crew, ShowCrew> {
-        ::jazz_app::Many::new("crewId")
+    pub fn memberships() -> ::jazz_app_support::Many<Crew, ShowCrew> {
+        ::jazz_app_support::Many::new("crewId")
     }
 }
 
 /// A row of `showCrew`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShowCrew {
-    pub id: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     /// `crewId`.
-    pub crew_id: ::jazz_app::ObjectId,
-    pub account: ::jazz_app::ObjectId,
+    pub crew_id: ::jazz_app_support::ObjectId,
+    pub account: ::jazz_app_support::ObjectId,
     pub role: ShowCrewRole,
     /// `inviteCode`.
     pub invite_code: ::std::option::Option<::std::string::String>,
@@ -693,10 +693,10 @@ pub struct ShowCrew {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewShowCrew {
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     /// `crewId`.
-    pub crew_id: ::jazz_app::ObjectId,
-    pub account: ::jazz_app::ObjectId,
+    pub crew_id: ::jazz_app_support::ObjectId,
+    pub account: ::jazz_app_support::ObjectId,
     pub role: ShowCrewRole,
     /// `inviteCode`.
     pub invite_code: ::std::option::Option<::std::string::String>,
@@ -705,7 +705,7 @@ pub struct NewShowCrew {
 impl NewShowCrew {
     /// A new row with the columns it requires, in this order: `showId`, `crewId`, `account`, `role`. The others
     /// are left out; set them with `NewShowCrew { column: …, ..NewShowCrew::new(…) }`.
-    pub fn new(show_id: impl ::std::convert::Into<::jazz_app::ObjectId>, crew_id: impl ::std::convert::Into<::jazz_app::ObjectId>, account: impl ::std::convert::Into<::jazz_app::ObjectId>, role: impl ::std::convert::Into<ShowCrewRole>) -> Self {
+    pub fn new(show_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, crew_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, account: impl ::std::convert::Into<::jazz_app_support::ObjectId>, role: impl ::std::convert::Into<ShowCrewRole>) -> Self {
         Self {
             show_id: show_id.into(),
             crew_id: crew_id.into(),
@@ -720,25 +720,25 @@ impl NewShowCrew {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ShowCrewUpdate {
     /// `showId`.
-    pub show_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub show_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     /// `crewId`.
-    pub crew_id: ::std::option::Option<::jazz_app::ObjectId>,
-    pub account: ::std::option::Option<::jazz_app::ObjectId>,
+    pub crew_id: ::std::option::Option<::jazz_app_support::ObjectId>,
+    pub account: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub role: ::std::option::Option<ShowCrewRole>,
     /// `inviteCode`.
     pub invite_code: ::std::option::Option<::std::option::Option<::std::string::String>>,
 }
 
-impl ::jazz_app::Table for ShowCrew {
+impl ::jazz_app_support::Table for ShowCrew {
     const NAME: &'static str = "showCrew";
     const COLUMNS: &'static [&'static str] = &["showId", "crewId", "account", "role", "inviteCode"];
     type New = NewShowCrew;
     type Update = ShowCrewUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let show_id = row.take::<::jazz_app::ObjectId>("showId")?;
-        let crew_id = row.take::<::jazz_app::ObjectId>("crewId")?;
-        let account = row.take::<::jazz_app::ObjectId>("account")?;
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
+        let show_id = row.take::<::jazz_app_support::ObjectId>("showId")?;
+        let crew_id = row.take::<::jazz_app_support::ObjectId>("crewId")?;
+        let account = row.take::<::jazz_app_support::ObjectId>("account")?;
         let role = row.take::<ShowCrewRole>("role")?;
         let invite_code = row.take::<::std::option::Option<::std::string::String>>("inviteCode")?;
         ::std::result::Result::Ok(Self {
@@ -751,55 +751,55 @@ impl ::jazz_app::Table for ShowCrew {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewShowCrew {
+impl ::jazz_app_support::Insert for NewShowCrew {
     type Row = ShowCrew;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.show_id;
-        cells.insert("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.crew_id;
-        cells.insert("crewId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("crewId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.account;
-        cells.insert("account".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("account".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.role;
-        cells.insert("role".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("role".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.invite_code;
-        cells.insert("inviteCode".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("inviteCode".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for ShowCrewUpdate {
+impl ::jazz_app_support::Update for ShowCrewUpdate {
     type Row = ShowCrew;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.show_id {
-            cells.push(("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.crew_id {
-            cells.push(("crewId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("crewId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.account {
-            cells.push(("account".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("account".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.role {
-            cells.push(("role".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("role".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.invite_code {
-            cells.push(("inviteCode".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("inviteCode".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -811,62 +811,62 @@ pub mod show_crew {
     use super::*;
 
     /// Every row of `showCrew`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<ShowCrew> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<ShowCrew> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `showCrew`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ShowCrew>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<ShowCrew>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<ShowCrew, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<ShowCrew, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `showId`.
-    pub fn show_id() -> ::jazz_app::Column<ShowCrew, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("showId")
+    pub fn show_id() -> ::jazz_app_support::Column<ShowCrew, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("showId")
     }
 
     /// Column `crewId`.
-    pub fn crew_id() -> ::jazz_app::Column<ShowCrew, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("crewId")
+    pub fn crew_id() -> ::jazz_app_support::Column<ShowCrew, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("crewId")
     }
 
     /// Column `account`.
-    pub fn account() -> ::jazz_app::Column<ShowCrew, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("account")
+    pub fn account() -> ::jazz_app_support::Column<ShowCrew, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("account")
     }
 
     /// Column `role`.
-    pub fn role() -> ::jazz_app::Column<ShowCrew, ShowCrewRole> {
-        ::jazz_app::Column::new("role")
+    pub fn role() -> ::jazz_app_support::Column<ShowCrew, ShowCrewRole> {
+        ::jazz_app_support::Column::new("role")
     }
 
     /// Column `inviteCode`.
-    pub fn invite_code() -> ::jazz_app::Column<ShowCrew, ::std::option::Option<::std::string::String>> {
-        ::jazz_app::Column::new("inviteCode")
+    pub fn invite_code() -> ::jazz_app_support::Column<ShowCrew, ::std::option::Option<::std::string::String>> {
+        ::jazz_app_support::Column::new("inviteCode")
     }
 
     /// Relation `crew`: the `crew` row `crewId` references.
-    pub fn crew() -> ::jazz_app::One<ShowCrew, Crew> {
-        ::jazz_app::One::new("crewId")
+    pub fn crew() -> ::jazz_app_support::One<ShowCrew, Crew> {
+        ::jazz_app_support::One::new("crewId")
     }
 
     /// Relation `show`: the `shows` row `showId` references.
-    pub fn show() -> ::jazz_app::One<ShowCrew, Show> {
-        ::jazz_app::One::new("showId")
+    pub fn show() -> ::jazz_app_support::One<ShowCrew, Show> {
+        ::jazz_app_support::One::new("showId")
     }
 }
 
 /// A row of `showInvites`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShowInvite {
-    pub id: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     pub code: ::std::string::String,
 }
 
@@ -874,14 +874,14 @@ pub struct ShowInvite {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewShowInvite {
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     pub code: ::std::string::String,
 }
 
 impl NewShowInvite {
     /// A new row with the columns it requires, in this order: `showId`, `code`. The others
     /// are left out; set them with `NewShowInvite { column: …, ..NewShowInvite::new(…) }`.
-    pub fn new(show_id: impl ::std::convert::Into<::jazz_app::ObjectId>, code: impl ::std::convert::Into<::std::string::String>) -> Self {
+    pub fn new(show_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, code: impl ::std::convert::Into<::std::string::String>) -> Self {
         Self {
             show_id: show_id.into(),
             code: code.into(),
@@ -893,18 +893,18 @@ impl NewShowInvite {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ShowInviteUpdate {
     /// `showId`.
-    pub show_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub show_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub code: ::std::option::Option<::std::string::String>,
 }
 
-impl ::jazz_app::Table for ShowInvite {
+impl ::jazz_app_support::Table for ShowInvite {
     const NAME: &'static str = "showInvites";
     const COLUMNS: &'static [&'static str] = &["showId", "code"];
     type New = NewShowInvite;
     type Update = ShowInviteUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let show_id = row.take::<::jazz_app::ObjectId>("showId")?;
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
+        let show_id = row.take::<::jazz_app_support::ObjectId>("showId")?;
         let code = row.take::<::std::string::String>("code")?;
         ::std::result::Result::Ok(Self {
             id: row.id(),
@@ -913,40 +913,40 @@ impl ::jazz_app::Table for ShowInvite {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewShowInvite {
+impl ::jazz_app_support::Insert for NewShowInvite {
     type Row = ShowInvite;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.show_id;
-        cells.insert("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.code;
-        cells.insert("code".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("code".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for ShowInviteUpdate {
+impl ::jazz_app_support::Update for ShowInviteUpdate {
     type Row = ShowInvite;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.show_id {
-            cells.push(("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.code {
-            cells.push(("code".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("code".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -958,46 +958,46 @@ pub mod show_invites {
     use super::*;
 
     /// Every row of `showInvites`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<ShowInvite> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<ShowInvite> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `showInvites`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ShowInvite>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<ShowInvite>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<ShowInvite, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<ShowInvite, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `showId`.
-    pub fn show_id() -> ::jazz_app::Column<ShowInvite, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("showId")
+    pub fn show_id() -> ::jazz_app_support::Column<ShowInvite, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("showId")
     }
 
     /// Column `code`.
-    pub fn code() -> ::jazz_app::Column<ShowInvite, ::std::string::String> {
-        ::jazz_app::Column::new("code")
+    pub fn code() -> ::jazz_app_support::Column<ShowInvite, ::std::string::String> {
+        ::jazz_app_support::Column::new("code")
     }
 
     /// Relation `show`: the `shows` row `showId` references.
-    pub fn show() -> ::jazz_app::One<ShowInvite, Show> {
-        ::jazz_app::One::new("showId")
+    pub fn show() -> ::jazz_app_support::One<ShowInvite, Show> {
+        ::jazz_app_support::One::new("showId")
     }
 }
 
 /// A row of `shows`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Show {
-    pub id: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
     pub name: ::std::string::String,
     pub venue: ::std::string::String,
     pub date: ::std::string::String,
     pub doors: ::std::string::String,
     /// `chiefAccount`.
-    pub chief_account: ::jazz_app::ObjectId,
+    pub chief_account: ::jazz_app_support::ObjectId,
 }
 
 /// A new row of `shows`: [`NewShow::new`] takes the columns it requires.
@@ -1008,13 +1008,13 @@ pub struct NewShow {
     pub date: ::std::string::String,
     pub doors: ::std::string::String,
     /// `chiefAccount`.
-    pub chief_account: ::jazz_app::ObjectId,
+    pub chief_account: ::jazz_app_support::ObjectId,
 }
 
 impl NewShow {
     /// A new row with the columns it requires, in this order: `name`, `venue`, `date`, `doors`, `chiefAccount`. The others
     /// are left out; set them with `NewShow { column: …, ..NewShow::new(…) }`.
-    pub fn new(name: impl ::std::convert::Into<::std::string::String>, venue: impl ::std::convert::Into<::std::string::String>, date: impl ::std::convert::Into<::std::string::String>, doors: impl ::std::convert::Into<::std::string::String>, chief_account: impl ::std::convert::Into<::jazz_app::ObjectId>) -> Self {
+    pub fn new(name: impl ::std::convert::Into<::std::string::String>, venue: impl ::std::convert::Into<::std::string::String>, date: impl ::std::convert::Into<::std::string::String>, doors: impl ::std::convert::Into<::std::string::String>, chief_account: impl ::std::convert::Into<::jazz_app_support::ObjectId>) -> Self {
         Self {
             name: name.into(),
             venue: venue.into(),
@@ -1033,21 +1033,21 @@ pub struct ShowUpdate {
     pub date: ::std::option::Option<::std::string::String>,
     pub doors: ::std::option::Option<::std::string::String>,
     /// `chiefAccount`.
-    pub chief_account: ::std::option::Option<::jazz_app::ObjectId>,
+    pub chief_account: ::std::option::Option<::jazz_app_support::ObjectId>,
 }
 
-impl ::jazz_app::Table for Show {
+impl ::jazz_app_support::Table for Show {
     const NAME: &'static str = "shows";
     const COLUMNS: &'static [&'static str] = &["name", "venue", "date", "doors", "chiefAccount"];
     type New = NewShow;
     type Update = ShowUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
         let name = row.take::<::std::string::String>("name")?;
         let venue = row.take::<::std::string::String>("venue")?;
         let date = row.take::<::std::string::String>("date")?;
         let doors = row.take::<::std::string::String>("doors")?;
-        let chief_account = row.take::<::jazz_app::ObjectId>("chiefAccount")?;
+        let chief_account = row.take::<::jazz_app_support::ObjectId>("chiefAccount")?;
         ::std::result::Result::Ok(Self {
             id: row.id(),
             name,
@@ -1058,55 +1058,55 @@ impl ::jazz_app::Table for Show {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewShow {
+impl ::jazz_app_support::Insert for NewShow {
     type Row = Show;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.name;
-        cells.insert("name".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("name".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.venue;
-        cells.insert("venue".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("venue".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.date;
-        cells.insert("date".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("date".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.doors;
-        cells.insert("doors".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("doors".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.chief_account;
-        cells.insert("chiefAccount".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("chiefAccount".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for ShowUpdate {
+impl ::jazz_app_support::Update for ShowUpdate {
     type Row = Show;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.name {
-            cells.push(("name".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("name".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.venue {
-            cells.push(("venue".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("venue".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.date {
-            cells.push(("date".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("date".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.doors {
-            cells.push(("doors".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("doors".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.chief_account {
-            cells.push(("chiefAccount".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("chiefAccount".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -1118,76 +1118,76 @@ pub mod shows {
     use super::*;
 
     /// Every row of `shows`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<Show> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<Show> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `shows`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Show>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<Show>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<Show, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<Show, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `name`.
-    pub fn name() -> ::jazz_app::Column<Show, ::std::string::String> {
-        ::jazz_app::Column::new("name")
+    pub fn name() -> ::jazz_app_support::Column<Show, ::std::string::String> {
+        ::jazz_app_support::Column::new("name")
     }
 
     /// Column `venue`.
-    pub fn venue() -> ::jazz_app::Column<Show, ::std::string::String> {
-        ::jazz_app::Column::new("venue")
+    pub fn venue() -> ::jazz_app_support::Column<Show, ::std::string::String> {
+        ::jazz_app_support::Column::new("venue")
     }
 
     /// Column `date`.
-    pub fn date() -> ::jazz_app::Column<Show, ::std::string::String> {
-        ::jazz_app::Column::new("date")
+    pub fn date() -> ::jazz_app_support::Column<Show, ::std::string::String> {
+        ::jazz_app_support::Column::new("date")
     }
 
     /// Column `doors`.
-    pub fn doors() -> ::jazz_app::Column<Show, ::std::string::String> {
-        ::jazz_app::Column::new("doors")
+    pub fn doors() -> ::jazz_app_support::Column<Show, ::std::string::String> {
+        ::jazz_app_support::Column::new("doors")
     }
 
     /// Column `chiefAccount`.
-    pub fn chief_account() -> ::jazz_app::Column<Show, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("chiefAccount")
+    pub fn chief_account() -> ::jazz_app_support::Column<Show, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("chiefAccount")
     }
 
     /// Relation `activity`: the `activity` rows whose `showId` references this row.
-    pub fn activity() -> ::jazz_app::Many<Show, Activity> {
-        ::jazz_app::Many::new("showId")
+    pub fn activity() -> ::jazz_app_support::Many<Show, Activity> {
+        ::jazz_app_support::Many::new("showId")
     }
 
     /// Relation `crew`: the `showCrew` rows whose `showId` references this row.
-    pub fn crew() -> ::jazz_app::Many<Show, ShowCrew> {
-        ::jazz_app::Many::new("showId")
+    pub fn crew() -> ::jazz_app_support::Many<Show, ShowCrew> {
+        ::jazz_app_support::Many::new("showId")
     }
 
     /// Relation `invites`: the `showInvites` rows whose `showId` references this row.
-    pub fn invites() -> ::jazz_app::Many<Show, ShowInvite> {
-        ::jazz_app::Many::new("showId")
+    pub fn invites() -> ::jazz_app_support::Many<Show, ShowInvite> {
+        ::jazz_app_support::Many::new("showId")
     }
 
     /// Relation `tasks`: the `tasks` rows whose `showId` references this row.
-    pub fn tasks() -> ::jazz_app::Many<Show, Task> {
-        ::jazz_app::Many::new("showId")
+    pub fn tasks() -> ::jazz_app_support::Many<Show, Task> {
+        ::jazz_app_support::Many::new("showId")
     }
 }
 
 /// A row of `tasks`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Task {
-    pub id: ::jazz_app::ObjectId,
+    pub id: ::jazz_app_support::ObjectId,
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     pub title: ::std::string::String,
     pub status: TaskStatus,
     /// `assigneeId`.
-    pub assignee_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub assignee_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub notes: ::std::option::Option<::std::string::String>,
     pub rank: f64,
 }
@@ -1196,11 +1196,11 @@ pub struct Task {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewTask {
     /// `showId`.
-    pub show_id: ::jazz_app::ObjectId,
+    pub show_id: ::jazz_app_support::ObjectId,
     pub title: ::std::string::String,
     pub status: TaskStatus,
     /// `assigneeId`.
-    pub assignee_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub assignee_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub notes: ::std::option::Option<::std::string::String>,
     pub rank: f64,
 }
@@ -1208,7 +1208,7 @@ pub struct NewTask {
 impl NewTask {
     /// A new row with the columns it requires, in this order: `showId`, `title`, `status`, `rank`. The others
     /// are left out; set them with `NewTask { column: …, ..NewTask::new(…) }`.
-    pub fn new(show_id: impl ::std::convert::Into<::jazz_app::ObjectId>, title: impl ::std::convert::Into<::std::string::String>, status: impl ::std::convert::Into<TaskStatus>, rank: impl ::std::convert::Into<f64>) -> Self {
+    pub fn new(show_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, title: impl ::std::convert::Into<::std::string::String>, status: impl ::std::convert::Into<TaskStatus>, rank: impl ::std::convert::Into<f64>) -> Self {
         Self {
             show_id: show_id.into(),
             title: title.into(),
@@ -1224,26 +1224,26 @@ impl NewTask {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TaskUpdate {
     /// `showId`.
-    pub show_id: ::std::option::Option<::jazz_app::ObjectId>,
+    pub show_id: ::std::option::Option<::jazz_app_support::ObjectId>,
     pub title: ::std::option::Option<::std::string::String>,
     pub status: ::std::option::Option<TaskStatus>,
     /// `assigneeId`.
-    pub assignee_id: ::std::option::Option<::std::option::Option<::jazz_app::ObjectId>>,
+    pub assignee_id: ::std::option::Option<::std::option::Option<::jazz_app_support::ObjectId>>,
     pub notes: ::std::option::Option<::std::option::Option<::std::string::String>>,
     pub rank: ::std::option::Option<f64>,
 }
 
-impl ::jazz_app::Table for Task {
+impl ::jazz_app_support::Table for Task {
     const NAME: &'static str = "tasks";
     const COLUMNS: &'static [&'static str] = &["showId", "title", "status", "assigneeId", "notes", "rank"];
     type New = NewTask;
     type Update = TaskUpdate;
 
-    fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let show_id = row.take::<::jazz_app::ObjectId>("showId")?;
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
+        let show_id = row.take::<::jazz_app_support::ObjectId>("showId")?;
         let title = row.take::<::std::string::String>("title")?;
         let status = row.take::<TaskStatus>("status")?;
-        let assignee_id = row.take::<::std::option::Option<::jazz_app::ObjectId>>("assigneeId")?;
+        let assignee_id = row.take::<::std::option::Option<::jazz_app_support::ObjectId>>("assigneeId")?;
         let notes = row.take::<::std::option::Option<::std::string::String>>("notes")?;
         let rank = row.take::<f64>("rank")?;
         ::std::result::Result::Ok(Self {
@@ -1257,60 +1257,60 @@ impl ::jazz_app::Table for Task {
         })
     }
 
-    fn id(&self) -> ::jazz_app::ObjectId {
+    fn id(&self) -> ::jazz_app_support::ObjectId {
         self.id
     }
 }
 
-impl ::jazz_app::Insert for NewTask {
+impl ::jazz_app_support::Insert for NewTask {
     type Row = Task;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.show_id;
-        cells.insert("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.title;
-        cells.insert("title".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("title".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.status;
-        cells.insert("status".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("status".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.assignee_id;
-        cells.insert("assigneeId".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("assigneeId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.notes;
-        cells.insert("notes".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("notes".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.rank;
-        cells.insert("rank".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        cells.insert("rank".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
 
-impl ::jazz_app::Update for TaskUpdate {
+impl ::jazz_app_support::Update for TaskUpdate {
     type Row = Task;
 
     fn into_cells(
         self,
-        _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.show_id {
-            cells.push(("showId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("showId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.title {
-            cells.push(("title".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("title".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.status {
-            cells.push(("status".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("status".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.assignee_id {
-            cells.push(("assigneeId".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("assigneeId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.notes {
-            cells.push(("notes".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("notes".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.rank {
-            cells.push(("rank".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+            cells.push(("rank".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -1322,68 +1322,68 @@ pub mod tasks {
     use super::*;
 
     /// Every row of `tasks`; narrow it with `filter`.
-    pub fn query() -> ::jazz_app::Query<Task> {
-        ::jazz_app::Query::all()
+    pub fn query() -> ::jazz_app_support::Query<Task> {
+        ::jazz_app_support::Query::all()
     }
 
     /// Every accepted version of `tasks`'s rows; bound it to rows with `id` or `id().is_in`.
-    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Task>> {
-        ::jazz_app::Query::history()
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<Task>> {
+        ::jazz_app_support::Query::history()
     }
 
-    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
-    pub fn id() -> ::jazz_app::Column<Task, ::jazz_app::ObjectId> {
-        ::jazz_app::id()
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<Task, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
     }
 
     /// Column `showId`.
-    pub fn show_id() -> ::jazz_app::Column<Task, ::jazz_app::ObjectId> {
-        ::jazz_app::Column::new("showId")
+    pub fn show_id() -> ::jazz_app_support::Column<Task, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("showId")
     }
 
     /// Column `title`.
-    pub fn title() -> ::jazz_app::Column<Task, ::std::string::String> {
-        ::jazz_app::Column::new("title")
+    pub fn title() -> ::jazz_app_support::Column<Task, ::std::string::String> {
+        ::jazz_app_support::Column::new("title")
     }
 
     /// Column `status`.
-    pub fn status() -> ::jazz_app::Column<Task, TaskStatus> {
-        ::jazz_app::Column::new("status")
+    pub fn status() -> ::jazz_app_support::Column<Task, TaskStatus> {
+        ::jazz_app_support::Column::new("status")
     }
 
     /// Column `assigneeId`.
-    pub fn assignee_id() -> ::jazz_app::Column<Task, ::std::option::Option<::jazz_app::ObjectId>> {
-        ::jazz_app::Column::new("assigneeId")
+    pub fn assignee_id() -> ::jazz_app_support::Column<Task, ::std::option::Option<::jazz_app_support::ObjectId>> {
+        ::jazz_app_support::Column::new("assigneeId")
     }
 
     /// Column `notes`.
-    pub fn notes() -> ::jazz_app::Column<Task, ::std::option::Option<::std::string::String>> {
-        ::jazz_app::Column::new("notes")
+    pub fn notes() -> ::jazz_app_support::Column<Task, ::std::option::Option<::std::string::String>> {
+        ::jazz_app_support::Column::new("notes")
     }
 
     /// Column `rank`.
-    pub fn rank() -> ::jazz_app::Column<Task, f64> {
-        ::jazz_app::Column::new("rank")
+    pub fn rank() -> ::jazz_app_support::Column<Task, f64> {
+        ::jazz_app_support::Column::new("rank")
     }
 
     /// Relation `activity`: the `activity` rows whose `taskId` references this row.
-    pub fn activity() -> ::jazz_app::Many<Task, Activity> {
-        ::jazz_app::Many::new("taskId")
+    pub fn activity() -> ::jazz_app_support::Many<Task, Activity> {
+        ::jazz_app_support::Many::new("taskId")
     }
 
     /// Relation `assignee`: the `crew` row `assigneeId` references.
-    pub fn assignee() -> ::jazz_app::One<Task, Crew, ::jazz_app::Nullable> {
-        ::jazz_app::One::new("assigneeId")
+    pub fn assignee() -> ::jazz_app_support::One<Task, Crew, ::jazz_app_support::Nullable> {
+        ::jazz_app_support::One::new("assigneeId")
     }
 
     /// Relation `comments`: the `comments` rows whose `taskId` references this row.
-    pub fn comments() -> ::jazz_app::Many<Task, Comment> {
-        ::jazz_app::Many::new("taskId")
+    pub fn comments() -> ::jazz_app_support::Many<Task, Comment> {
+        ::jazz_app_support::Many::new("taskId")
     }
 
     /// Relation `show`: the `shows` row `showId` references.
-    pub fn show() -> ::jazz_app::One<Task, Show> {
-        ::jazz_app::One::new("showId")
+    pub fn show() -> ::jazz_app_support::One<Task, Show> {
+        ::jazz_app_support::One::new("showId")
     }
 }
 
@@ -1479,6 +1479,6 @@ pub const APP: &str = r#"{
 /// Opens the app. A backend (`Config::backend`, with its
 /// `jazz.permissions.json`) first publishes the app's permissions bundle
 /// and pins the session it acts in to it.
-pub async fn open(config: ::jazz_app::Config) -> ::jazz_app::Result<::jazz_app::Jazz> {
-    ::jazz_app::Jazz::open(::jazz_app::AppFiles::new(APP, ::std::option::Option::None), config).await
+pub async fn open(config: ::jazz_app_support::Config) -> ::jazz_app_support::Result<::jazz_app_support::Jazz> {
+    ::jazz_app_support::Jazz::open(::jazz_app_support::AppFiles::new(APP, ::std::option::Option::None), config).await
 }

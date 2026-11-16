@@ -156,7 +156,7 @@ describe("scripts", () => {
 });
 
 describe("Rust apps", () => {
-  it("are crates that depend on jazz-app or commit src/jazz_app.rs, as `jazz-tools generate` tells", () => {
+  it("are crates that depend on jazz-app-support or commit src/jazz_app.rs, as `jazz-tools generate` tells", () => {
     const dir = mkdtempSync(join(tmpdir(), "jazz-upgrade-rust-"));
     try {
       expect(isRustApp(dir)).toBe(false);
@@ -169,7 +169,7 @@ describe("Rust apps", () => {
       expect(isRustApp(dir), "an unrelated crate").toBe(false);
       writeFileSync(
         join(dir, "Cargo.toml"),
-        '[package]\nname = "x"\n\n[dependencies]\njazz-app = { path = "../jazz-app" }\n',
+        '[package]\nname = "x"\n\n[dependencies]\njazz-app-support = { path = "../jazz-app-support" }\n',
       );
       expect(isRustApp(dir)).toBe(true);
       writeFileSync(join(dir, "Cargo.toml"), '[package]\nname = "x"\n');
