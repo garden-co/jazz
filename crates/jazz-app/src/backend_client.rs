@@ -243,7 +243,11 @@ impl Jazz {
                 "for_user: pass the user's id, as the main backend's authenticate names it".into(),
             ));
         }
-        let session = user_session(link, user_id, claims).await?;
+        // On the client's runtime, whatever the caller's executor.
+        let (link, user) = (link.clone(), user_id.to_owned());
+        let session = self
+            .with_client(move |_| async move { user_session(&link, &user, claims).await })
+            .await?;
         Ok(self.scoped(session))
     }
 }

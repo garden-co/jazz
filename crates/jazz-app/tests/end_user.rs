@@ -397,11 +397,15 @@ async fn a_device_account_links_to_the_users_provider_account() {
         .unwrap();
     let session = device.session().unwrap().clone();
 
-    // Carol signs up with the app's own auth, and keeps her device's data.
-    let carol = session
-        .link("token-carol")
-        .await
-        .expect("link the device account");
+    // Carol signs up with the app's own auth, and keeps her device's data,
+    // from any executor (the request runs on the client's runtime).
+    let carol = std::thread::spawn({
+        let session = session.clone();
+        move || futures::executor::block_on(session.link("token-carol"))
+    })
+    .join()
+    .expect("no panic outside a Tokio runtime")
+    .expect("link the device account");
     assert_eq!(carol.account, key.account(app.app_id));
     assert_eq!(carol.kind, UserKind::Backend);
     assert_eq!(carol.subject, "carol");
@@ -656,6 +660,16 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
         .await
         .expect("act for alice");
     assert!(as_alice.acts_for_user());
+    // From any executor, not only Tokio's: the requests run on the client's.
+    let elsewhere = {
+        let job = job.clone();
+        std::thread::spawn(move || {
+            futures::executor::block_on(job.for_user("alice", serde_json::Value::Null))
+        })
+        .join()
+        .expect("no panic outside a Tokio runtime")
+    };
+    assert!(elsewhere.is_ok(), "{elsewhere:?}");
     as_alice
         .insert(NewTodo::new("Your weekly digest", false))
         .await
