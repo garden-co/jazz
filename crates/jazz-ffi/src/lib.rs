@@ -8,7 +8,7 @@
 //! Rows, queries and deltas are plain JSON typed by the app's schema; see
 //! the crate's README for the shapes. Not supported yet (refused with
 //! `JazzError::Refused`): includes, connecting to a sync server as an end
-//! user with a JWT, writing enums with payloads, reads inside transactions
+//! user with a JWT, reads inside transactions
 //! (and transactions altogether), computed columns and transforms (the
 //! language's bindings implement them over the stored values).
 
@@ -17,6 +17,7 @@ mod convert;
 mod core;
 mod endpoint;
 mod error;
+mod gate;
 mod relational;
 
 use std::sync::Arc;
@@ -264,8 +265,9 @@ impl JazzHandle {
         })())
     }
 
-    /// Writes the row with this id: inserts it, or replaces its columns.
-    /// `row_json` is a whole row, as for an insert. Returns the row.
+    /// Writes the row with this id: a new id inserts (`row_json` then holds
+    /// every required column), an existing one sets the columns `row_json`
+    /// names. Returns the row.
     pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
         self.core.surface(
             self.core
@@ -303,6 +305,7 @@ impl JazzHandle {
         Ok(Arc::new(Upload {
             handle: self,
             upload,
+            open: std::sync::atomic::AtomicBool::new(true),
         }))
     }
 
@@ -619,6 +622,16 @@ impl Watch {
 pub struct Upload {
     handle: Arc<JazzHandle>,
     upload: u64,
+    /// Not yet finished or aborted: dropped, it aborts.
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        if self.open.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let _ = self.handle.core.upload_abort(self.upload);
+        }
+    }
 }
 
 #[uniffi::export]
@@ -631,6 +644,7 @@ impl Upload {
 
     /// Commits the row with its value; returns the row.
     pub fn finish(&self) -> Result<String> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
         self.handle.core.surface(
             self.handle
                 .core
@@ -639,6 +653,7 @@ impl Upload {
     }
 
     pub fn abort(&self) -> Result<()> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
         self.handle
             .core
             .surface(self.handle.core.upload_abort(self.upload))

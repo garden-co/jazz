@@ -21,6 +21,8 @@ export interface BuildOptions {
   schemaDir: string;
   /** Write nothing; fail if jazz.generated.ts isn't what generate would write. */
   check?: boolean;
+  /** `--lang <lang>` (repeatable): the bindings' languages; by default each the app's files name. */
+  lang?: string[];
 }
 
 export interface SchemaCompileOptions {
@@ -39,8 +41,9 @@ const DEPLOY_REMOVED =
 
 const SERVER_REMOVED =
   "`jazz-tools server` was removed. Jazz runs inside your backend: " +
-  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server, and " +
-  "`createJazz({ store: remote({ url, appId, secret }) })` uses Jazz Cloud.";
+  "`createJazz({ store: vercel() })` runs it on Vercel, and " +
+  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server. " +
+  "Jazz Cloud is deprecated for new apps.";
 
 export const VALIDATE_RENAMED =
   "`jazz-tools validate` was renamed to `jazz-tools generate` in alpha.65: it checks jazz.app.json and " +
@@ -64,13 +67,21 @@ function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   }
   return {
     command,
-    options: { schemaDir: resolve(process.cwd(), schemaDir), check: args.includes("--check") },
+    options: {
+      schemaDir: resolve(process.cwd(), schemaDir),
+      check: args.includes("--check"),
+      lang: langFlags(args),
+    },
   };
 }
 
 /** `jazz-tools generate [--check]`: check jazz.app.json and jazz.permissions.json, write the bindings. */
 export async function generate(options: BuildOptions): Promise<void> {
-  const result = await generateApp({ cwd: options.schemaDir, check: options.check });
+  const result = await generateApp({
+    cwd: options.schemaDir,
+    check: options.check,
+    ...(options.lang?.length ? { lang: options.lang } : {}),
+  });
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
   }
@@ -123,6 +134,26 @@ export interface MigrationCommandOptions {
 export interface CreateMigrationOptions {
   schemaDir: string;
   name?: string;
+  /** `--lang <lang>` (repeatable), as for `generate`. */
+  lang?: string[];
+}
+
+/** Every `--lang <lang>` (or `--lang=<lang>`) given; one without a value is refused. */
+export function langFlags(args: readonly string[]): string[] {
+  const langs: string[] = [];
+  args.forEach((arg, i) => {
+    if (arg.startsWith("--lang=")) {
+      const lang = arg.slice("--lang=".length);
+      if (!lang) throw new Error("Missing value for --lang (e.g. --lang ts).");
+      langs.push(lang);
+    } else if (arg === "--lang") {
+      const lang = args[i + 1];
+      if (!lang || lang.startsWith("--"))
+        throw new Error("Missing value for --lang (e.g. --lang ts).");
+      langs.push(lang);
+    }
+  });
+  return langs;
 }
 
 // Framework bundlers (Vite, SvelteKit, Next.js, Expo) expose public env vars
@@ -313,10 +344,18 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
 
 /** `jazz-tools migrations create --name <name>`: record the schema change in jazz.app.json. */
 export async function createMigration(options: CreateMigrationOptions): Promise<string | null> {
-  const result = await createAppMigration({ cwd: options.schemaDir, name: options.name ?? "" });
+  const result = await createAppMigration({
+    cwd: options.schemaDir,
+    name: options.name ?? "",
+    ...(options.lang?.length ? { lang: options.lang } : {}),
+  });
   const file = relative(process.cwd(), join(result.dir, "jazz.app.json")) || "jazz.app.json";
   if (!result.changed) {
-    console.log("No schema changes since jazz.generated.ts was generated: no migration needed.");
+    console.log(
+      result.note
+        ? `${result.note[0]!.toUpperCase()}${result.note.slice(1)}.`
+        : "No schema changes since jazz.generated.ts was generated: no migration needed.",
+    );
     return null;
   }
   console.log(
@@ -360,7 +399,10 @@ function printHelp(): void {
     "  generate              Check jazz.app.json and jazz.permissions.json and write jazz.generated.ts",
   );
   console.log(
-    "                        (--check: write nothing, fail if the bindings are out of date; for CI)",
+    "                        (--check: write nothing, fail if the bindings are out of date; for CI;",
+  );
+  console.log(
+    "                        --lang <ts|rust|…>: the bindings' languages, by default each the app's files name)",
   );
   console.log("  migrations create     Record a schema change in jazz.app.json (--name <name>)");
   console.log("  migrations graph      Visualize the full migration graph");
@@ -370,9 +412,11 @@ function printHelp(): void {
   console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",
   );
-  console.log("  login | logout | whoami");
+  console.log("  login | logout | whoami (deprecated)");
   console.log("                        Sign in to Jazz Cloud with your dashboard account");
-  console.log("  teams, apps           Manage Jazz Cloud teams and apps (see `apps --help`)");
+  console.log(
+    "  teams, apps           (deprecated) Manage Jazz Cloud teams and apps (see `apps --help`)",
+  );
   console.log(
     "  inspect <command>     Read and change an app's data through its backend (see `inspect --help`)",
   );
@@ -503,9 +547,14 @@ if (isMainModule()) {
     let task: Promise<unknown>;
 
     if (subcommand === "create") {
-      const commandArgs = args.slice(2);
+      // `--lang=x` is `--lang x`, so the pairs below check it like any flag.
+      const commandArgs = args
+        .slice(2)
+        .flatMap((arg) =>
+          arg.startsWith("--lang=") ? ["--lang", arg.slice("--lang=".length)] : [arg],
+        );
       task = (async () => {
-        assertFlagPairs(commandArgs, ["--schema-dir", "--name"], (arg) =>
+        assertFlagPairs(commandArgs, ["--schema-dir", "--name", "--lang"], (arg) =>
           ["--fromHash", "--toHash", "--migrations-dir"].includes(arg)
             ? `${arg} was removed: migrations go from the version in jazz.generated.ts to jazz.app.json's tables.`
             : `Unknown migrations create argument: ${arg}.`,
@@ -513,6 +562,7 @@ if (isMainModule()) {
         await createMigration({
           schemaDir: resolve(process.cwd(), getFlagValue(commandArgs, "--schema-dir") ?? "."),
           name: getFlagValue(commandArgs, "--name"),
+          lang: langFlags(commandArgs),
         });
       })();
     } else if (subcommand === "graph") {

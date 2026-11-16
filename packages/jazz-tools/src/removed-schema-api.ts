@@ -38,13 +38,36 @@ export function removedSchemaApi(name: string): RemovedApi {
   return stub as unknown as RemovedApi;
 }
 
+/**
+ * What `s.enum({ ...cases })` throws: enum cases with fields are gone for
+ * good, not just moved to jazz.app.json (jazz#5758).
+ */
+export const ENUM_CASES_NOT_SUPPORTED =
+  'enum cases with fields are not supported; use s.enum("a", "b") plus a nullable column per field, or s.json() (see https://github.com/garden-co/jazz/issues/5758)';
+
+/** `schema.enum`: like every removed member, except that the object form names its own refusal. */
+function removedEnum(): RemovedApi {
+  const stub = function removedJazzSchemaApi(...args: unknown[]): never {
+    if (args.length === 1 && typeof args[0] === "object" && args[0] !== null) {
+      throw new Error(ENUM_CASES_NOT_SUPPORTED);
+    }
+    throw removedSchemaApiError("schema.enum");
+  };
+  Object.defineProperty(stub, "name", { value: "schema.enum" });
+  return stub as unknown as RemovedApi;
+}
+
 /** A removed namespace: each member it had is a stub that throws, naming itself. */
 function removedNamespace<const TMembers extends readonly string[]>(
   namespace: string,
   members: TMembers,
 ): { readonly [K in TMembers[number]]: RemovedApi } {
   const stubs: Record<string, RemovedApi> = {};
-  for (const member of members) stubs[member] = removedSchemaApi(`${namespace}.${member}`);
+  for (const member of members)
+    stubs[member] =
+      namespace === "schema" && member === "enum"
+        ? removedEnum()
+        : removedSchemaApi(`${namespace}.${member}`);
   return Object.freeze(stubs) as { readonly [K in TMembers[number]]: RemovedApi };
 }
 

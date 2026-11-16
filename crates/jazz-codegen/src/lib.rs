@@ -18,6 +18,7 @@ mod json_schema;
 pub mod migrations;
 pub mod model;
 pub mod names;
+pub mod project;
 pub mod rust;
 pub mod swift;
 pub mod ts;
@@ -127,7 +128,18 @@ impl Lang {
     pub fn detected_in(self, dir: &std::path::Path) -> bool {
         let marker = dir.join(self.marker());
         match self {
-            Lang::TypeScript => marker.exists(),
+            // The files may sit in `src/` or `src/lib/` of the package, as
+            // the npm CLI finds them.
+            Lang::TypeScript => {
+                marker.exists()
+                    || (dir.ends_with("src")
+                        && dir.parent().is_some_and(|p| p.join(self.marker()).exists()))
+                    || (dir.ends_with("src/lib")
+                        && dir
+                            .parent()
+                            .and_then(|p| p.parent())
+                            .is_some_and(|p| p.join(self.marker()).exists()))
+            }
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
             Lang::Swift => std::fs::read_to_string(marker)
