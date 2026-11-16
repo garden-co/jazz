@@ -143,7 +143,12 @@ public final class JazzText<R: Row>: @unchecked Sendable {
     /// `range`'s UTF-16 offsets as positions of `base`'s Unicode scalars.
     static func scalarRange(_ range: NSRange, in base: String) throws -> Range<String.Index> {
         let utf16 = base.utf16
-        guard range.location >= 0, range.length >= 0, range.location + range.length <= utf16.count else {
+        guard range.location != NSNotFound else {
+            throw JazzError.refused("the range has no location (NSNotFound)")
+        }
+        guard range.location >= 0, range.length >= 0, range.location <= utf16.count,
+            range.length <= utf16.count - range.location
+        else {
             throw JazzError.refused("range \(range) is outside the text (\(utf16.count) UTF-16 units)")
         }
         let lower = utf16.index(utf16.startIndex, offsetBy: range.location)

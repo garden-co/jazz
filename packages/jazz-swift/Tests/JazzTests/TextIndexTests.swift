@@ -25,7 +25,11 @@ final class TextIndexTests: XCTestCase {
     }
 
     func testSurrogatePairsAndBoundsAreRefused() {
-        for (base, location, length) in [("a😀b", 2, 0), ("a😀b", 1, 1), ("a😀b", 2, 2), ("ab", 1, 5), ("ab", -1, 1)] {
+        for (base, location, length) in [
+            ("a😀b", 2, 0), ("a😀b", 1, 1), ("a😀b", 2, 2), ("ab", 1, 5), ("ab", -1, 1), ("ab", 3, 0),
+            // No overflow: NSNotFound (Int.max) and Int.max lengths are refused.
+            ("ab", NSNotFound, 0), ("ab", NSNotFound, 1), ("ab", 1, Int.max),
+        ] {
             XCTAssertThrowsError(try replacing(base, location, length, with: "X"), "\(base) \(location) \(length)") {
                 guard case .refused = $0 as? JazzError else { return XCTFail("\($0)") }
             }
