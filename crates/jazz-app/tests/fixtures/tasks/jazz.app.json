@@ -33,7 +33,10 @@
         "notes": { "type": "string", "optional": true, "merge": "text" },
         "attachment": "bytes?"
       },
-      "computed": { "urgent": { "type": "boolean", "from": ["score", "priority"] } }
+      "computed": {
+        "urgent": { "type": "boolean", "from": ["score", "priority"] },
+        "titleLen": { "type": "int", "from": ["title"] }
+      }
     }
   },
   "transforms": { "isoDate": { "stored": "timestamp", "view": "string" } }
