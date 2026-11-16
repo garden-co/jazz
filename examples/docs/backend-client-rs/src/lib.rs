@@ -3,11 +3,11 @@
 
 use todo_server_docs::jazz_app;
 
-/// Connects to the main backend's `/jazz` as a scoped machine, reads, and
+/// Connects to the main backend's `/jazz` as a backend client, reads, and
 /// closes.
 pub async fn backend_client() -> ::jazz_app::Result<()> {
     // #region backend-client-connect-rust
-    use ::jazz_app::{AppId, Config, Storage, TokenReason};
+    use ::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage, TokenReason};
     use jazz_app::todos; // the generated bindings
 
     // The main backend trusts this workload in `backendClients`, with
@@ -21,12 +21,18 @@ pub async fn backend_client() -> ::jazz_app::Result<()> {
                 .map(|token| Some(token.trim().to_owned()))
                 .map_err(|e| ::jazz_app::Error::Config(format!("reading the workload token: {e}")))
         });
-    let jazz = jazz_app::open(config).await?;
+    // The schema the bindings embed, and the app's permissions, which a
+    // backend client needs (TS `createJazzClient`'s `permissions`).
+    let files = AppFiles::new(jazz_app::APP, None)
+        .with_permissions(include_bytes!("../jazz.permissions.json").as_slice());
+    let jazz = Jazz::open(files, config).await?;
+    // A read that names no tier waits for the main backend's answer
+    // (`ReadTier::Remote`); `all_with(query, ReadTier::LocalFirst)` reads local data.
     let open = jazz
         .all(todos::query().filter(todos::done().eq(false)))
         .await?;
     println!("{} open todos", open.len());
-    jazz.shutdown().await?;
+    jazz.close(CLOSE_TIMEOUT).await?;
     // #endregion backend-client-connect-rust
     Ok(())
 }
