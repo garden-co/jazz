@@ -165,8 +165,8 @@ was. Each says what to do, with `file:line` where there is one:
   `npx jazz-tools migrations create --name <name>` first, commit, then upgrade.
 - **The wrong `jazz-tools` installed:** `upgrade` needs the app's alpha.65 (or older) installed to
   check the files, and `typescript` to read `schema.ts`.
-- **Computed fields and transforms** in an app with `schema.ts` (`computed columns and transforms
-  is not supported yet by \`jazz-tools upgrade\``). `upgrade` doesn't convert them yet: take them
+- **Computed fields and transforms** in an app with `schema.ts` (``computed columns and transforms
+  is not supported yet by `jazz-tools upgrade` ``). `upgrade` doesn't convert them yet: take them
   out, upgrade, and add them back as in
   [Computed fields and transforms](#computed-fields-and-transforms). An app without `schema.ts` is
   converted with them.
@@ -198,7 +198,8 @@ so the schema hashes and the bundle id don't change, and `upgrade` still checks 
    computed field from the table's second argument, and each column's `.transform(…)`, keeping the
    stored type (`dueAt: s.timestamp().transform(isoDate)` becomes `dueAt: s.timestamp()`). Keep the
    callbacks aside for step 4. Run alpha.65's `npx jazz-tools validate` and commit.
-2. **Run `upgrade`** as above.
+2. **Run `upgrade`** as above. Its typecheck reports the code that still uses the removed fields:
+   that's expected until steps 3 to 5 put them back.
 3. **In the new `schema.ts`,** declare them in the table's columns:
    - a computed field as `s.computed(type, [columns it reads])`. It reads stored columns of its
      table, or `"id"`. An optional result is an optional type, such as `s.int().optional()`;
