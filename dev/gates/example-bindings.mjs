@@ -23,14 +23,12 @@ export function exampleAppDirs(cwd = root) {
     { cwd, encoding: "utf8" },
   );
   if (listed.status !== 0) throw new Error(`git ls-files failed: ${listed.stderr}`);
-  return (
-    listed.stdout
-      .split("\n")
-      .filter(Boolean)
-      .map((file) => dirname(file))
-      .filter((dir) => !isSwiftPackage(resolve(cwd, dir)))
-      .sort()
-  );
+  return listed.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((file) => dirname(file))
+    .filter((dir) => !isSwiftPackage(resolve(cwd, dir)))
+    .sort();
 }
 
 /**
