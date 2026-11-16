@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use futures_util::FutureExt as _;
 use jazz::account_registry::AccountId;
+use jazz::db::ReadOpts;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
     Session, TableName, TransactionId,
@@ -24,6 +25,7 @@ use crate::auth::{Auth, DEVICE_TOKEN_TTL_SECS, TokenReason};
 use crate::backend;
 use crate::config::{Config, Storage};
 use crate::error::{Error, Result};
+use crate::include::Row;
 use crate::query::Query;
 use crate::session::{
     self as user_session, Credential, Session as UserSession, SyncStatus, User, UserKind,
@@ -55,7 +57,7 @@ pub struct Jazz {
     pub(crate) commands: mpsc::UnboundedSender<Command>,
     pub(crate) info: Arc<Info>,
     /// The user one of the endpoint's handles acts for
-    /// ([`crate::Endpoint::for_user`]): its reads and writes run as their
+    /// (`Endpoint::for_user`): its reads and writes run as their
     /// session, under their permissions, on the endpoint's trusted link.
     pub(crate) scope: Option<Arc<Session>>,
     /// Whether this handle acts for one of the backend's users.
@@ -65,16 +67,19 @@ pub struct Jazz {
     pub(crate) durability: Option<DurabilityTier>,
 }
 
+#[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
 pub(crate) struct Info {
     bundle: Option<String>,
     account: Option<AccountId>,
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
+    /// Where the local store lives, for [`Jazz::delete_client_storage`].
+    pub(crate) storage_dir: Option<std::path::PathBuf>,
     /// An end user's session ([`Config::user`]).
     pub(crate) session: Option<UserSession>,
     pub(crate) sync: watch::Receiver<SyncStatus>,
-    /// What a backend holds to vouch for its users ([`crate::Endpoint`]).
+    /// What a backend holds to vouch for its users (`Endpoint`).
     pub(crate) backend: Option<BackendLink>,
     /// How this backend was opened, for the trusted client its endpoint
     /// acts for its users with.
@@ -83,6 +88,7 @@ pub(crate) struct Info {
 
 /// A backend's way to the core, for the endpoint it serves its users with.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
 pub(crate) struct BackendLink {
     pub server: String,
     pub app_id: jazz::tools::AppId,
@@ -119,10 +125,11 @@ impl Jazz {
     }
 
     /// The client a backend's endpoint acts for its users with
-    /// ([`crate::Endpoint::for_user`]), as `createJazz`'s backend session:
+    /// (`Endpoint::for_user`), as `createJazz`'s backend session:
     /// its link states only the backend's secret and the bundle it is pinned
     /// to, so the core trusts it to act for the sessions its calls name, and
     /// its schema carries the permissions, so their reads evaluate here too.
+    #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
     pub(crate) async fn open_for_users(&self) -> Result<Self> {
         let Some((files, config)) = self.info.opened_with.clone() else {
             return Err(Error::Config(
@@ -192,6 +199,16 @@ impl Jazz {
             ));
         }
         let serverless = config.server_url.is_none();
+        let storage_dir = match &config.storage {
+            Storage::Dir(dir) => Some(dir.clone()),
+            Storage::Memory => None,
+        };
+        // Held until the client has stopped: `delete_client_storage` won't
+        // pull the store from under this app.
+        let store = storage_dir
+            .as_deref()
+            .map(crate::lifecycle::StoreDir::hold)
+            .transpose()?;
         let opened_with = config
             .backend
             .is_some()
@@ -204,7 +221,7 @@ impl Jazz {
                 // The session stops the client through this, without keeping
                 // it alive: it stops with its last handle all the same.
                 let stopper = commands.downgrade();
-                move || run(files, config, link, receiver, ready, stopper)
+                move || run(files, config, link, store, receiver, ready, stopper)
             })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let Opened {
@@ -221,6 +238,7 @@ impl Jazz {
                 account,
                 implementations,
                 serverless,
+                storage_dir,
                 session,
                 sync,
                 backend,
@@ -248,6 +266,7 @@ impl Jazz {
 
     /// This backend's handle, acting as `session`'s user: the same client,
     /// with every read and write run as them and their permissions.
+    #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
     pub(crate) fn scoped(&self, session: Session) -> Self {
         Self {
             commands: self.commands.clone(),
@@ -308,16 +327,17 @@ impl Jazz {
     }
 
     /// Every row `query` matches, reading local data first.
-    pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
+    pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
         self.all_with(query, ReadTier::LocalFirst).await
     }
 
     /// Every row `query` matches, read at `tier`.
-    pub async fn all_with<T: Table>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
-        let query = query.into_untyped();
+    pub async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
-            let rows = client.query(query, tier).await?;
+            let rows = client.query_with_opts(query, opts).await?;
             rows.into_iter()
                 .map(|row| decode_result::<T>(row, &implementations))
                 .collect()
@@ -326,7 +346,7 @@ impl Jazz {
     }
 
     /// The first row `query` matches.
-    pub async fn one<T: Table>(&self, query: Query<T>) -> Result<Option<T>> {
+    pub async fn one<T: Row>(&self, query: Query<T>) -> Result<Option<T>> {
         Ok(self.all(query.limit(1)).await?.into_iter().next())
     }
 
@@ -375,21 +395,27 @@ impl Jazz {
 
     /// Subscribes to `query`: a stream of its changes, starting with the
     /// rows it matches now.
-    pub async fn subscribe<T: Table>(&self, query: Query<T>) -> Result<Subscription<T>> {
+    pub async fn subscribe<T: Row>(&self, query: Query<T>) -> Result<Subscription<T>> {
         self.subscribe_with(query, ReadTier::LocalFirst).await
     }
 
     /// [`Jazz::subscribe`] at `tier`.
-    pub async fn subscribe_with<T: Table>(
+    pub async fn subscribe_with<T: Row>(
         &self,
         query: Query<T>,
         tier: ReadTier,
     ) -> Result<Subscription<T>> {
-        let query = query.into_untyped();
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
+        if jazz::schema::history::is_history_table(&query.table) {
+            return Err(Error::Unsupported(
+                "subscribing to history; read it with Jazz::all".into(),
+            ));
+        }
         let (sender, receiver) = mpsc::unbounded_channel();
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
-            let stream = client.subscribe_with_read_tier(query, tier).await?;
+            let stream = client.subscribe_with_opts(query, opts).await?;
             tokio::task::spawn_local(subscription::forward::<T>(stream, sender, implementations));
             Ok(())
         })
@@ -405,8 +431,8 @@ impl Jazz {
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
     ///
-    /// On a handle acting for a user ([`crate::Endpoint::for_user`]) it does
-    /// nothing: [`crate::Endpoint::shutdown`] stops the client it shares.
+    /// On a handle acting for a user (`Endpoint::for_user`) it does
+    /// nothing: `Endpoint::shutdown` stops the client it shares.
     pub async fn shutdown(&self) -> Result<()> {
         if self.for_user {
             return Ok(());
@@ -417,6 +443,13 @@ impl Jazz {
         }
         done.await.unwrap_or(Ok(()))
     }
+}
+
+/// The read options of `query` at `tier`.
+pub(crate) fn read_opts<T: Row>(query: &Query<T>, tier: ReadTier) -> ReadOpts {
+    let mut opts = ReadOpts::for_read_tier(tier);
+    opts.read_view.include_deleted = query.reads_deleted();
+    opts
 }
 
 /// Inserts `new`, returning it as stored and its write (none when staged in
@@ -445,12 +478,12 @@ pub(crate) fn insert<N: Insert>(
     Ok((table::decode(id, fields, implementations)?, written))
 }
 
-pub(crate) fn decode_result<T: Table>(
+pub(crate) fn decode_result<T: Row>(
     row: QueryResult,
     implementations: &Implementations,
 ) -> Result<T> {
     let id = row.key.row_id().ok_or_else(|| Error::Decode {
-        table: T::NAME,
+        table: <T::Table as Table>::NAME,
         message: "a joined result is not a row".into(),
     })?;
     table::decode(id, row.fields, implementations)
@@ -458,6 +491,7 @@ pub(crate) fn decode_result<T: Table>(
 
 /// Which link a backend opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
 enum Link {
     /// Its own: the session of the user it acts as, pinned to its bundle.
     Own,
@@ -470,10 +504,12 @@ fn run(
     files: AppFiles,
     config: Config,
     link: Link,
+    store: Option<crate::lifecycle::StoreDir>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
     stopper: mpsc::WeakUnboundedSender<Command>,
 ) {
+    let client_serverless = config.server_url.is_none();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -487,17 +523,22 @@ fn run(
         }
     };
     let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async move {
+    let stopped = local.block_on(&runtime, async move {
         let (client, opened) = match connect(files, config, link, stopper).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
-                return;
+                return None;
             }
         };
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
-            return;
+            return None;
+        }
+        // Refused writes no durable wait claimed go to `mutation_errors`.
+        if !client_serverless {
+            client.track_mutation_errors();
+            tokio::task::spawn_local(crate::lifecycle::report_mutation_errors(client.clone()));
         }
         // Jobs run as local tasks, so a slow one never holds up the rest.
         // Subscription forwarders are spawned by their jobs and are not in
@@ -547,20 +588,34 @@ fn run(
             jobs.abort_all();
             while jobs.join_next().await.is_some() {}
         }
+        // No job is left: roll back the transactions still open while the
+        // client runs, so none is dropped with the thread's locals.
+        crate::transaction::roll_back_parked();
         let result = client.shutdown().await;
-        let failure = result.as_ref().err().map(ToString::to_string);
-        let mut replies = stopped.into_iter();
-        if let Some(first) = replies.next() {
-            let _ = first.send(result.map_err(Error::from));
-        }
-        // Every other caller learns the same outcome.
-        for reply in replies {
-            let _ = reply.send(match &failure {
-                None => Ok(()),
-                Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
-            });
-        }
+        Some((result, stopped))
     });
+    // The store's connections close with the last clone of the client, and
+    // the tasks holding clones go with the `LocalSet`: only once both are
+    // gone is the store closed, for `delete_client_storage` to remove (a
+    // file it unlinks while SQLite still maps it is a SIGBUS).
+    drop(local);
+    drop(runtime);
+    drop(store);
+    let Some((result, stopped)) = stopped else {
+        return;
+    };
+    let failure = result.as_ref().err().map(ToString::to_string);
+    let mut replies = stopped.into_iter();
+    if let Some(first) = replies.next() {
+        let _ = first.send(result.map_err(Error::from));
+    }
+    // Every other caller learns the same outcome.
+    for reply in replies {
+        let _ = reply.send(match &failure {
+            None => Ok(()),
+            Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
+        });
+    }
 }
 
 pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {

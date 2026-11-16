@@ -20,10 +20,12 @@
 //! - `APP_ACCEPT_DEVICE_ACCOUNTS=1`: let device accounts sync too;
 //! - `PORT` (default 4000).
 //!
-//! Clients connect to `http://localhost:$PORT/jazz`. The core and this
-//! server must run with the app id the clients use: a TS client derives it
-//! from its generated bindings, and every account route answers 404 for
-//! another id.
+//! Clients connect to `http://localhost:$PORT/jazz`. The endpoint serves
+//! its own app whatever app id a client names in its paths, as TS
+//! `createJazz` does, so signed-in users sync even when their client
+//! derived another id. Device accounts need the same app id on both sides:
+//! their tokens are signed for the client's id, and tokens for another id
+//! are refused (endpoint-URL audiences are not supported yet).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
