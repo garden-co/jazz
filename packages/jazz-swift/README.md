@@ -1,5 +1,23 @@
 # Jazz for Swift
 
+> **Experimental: client only, backends are TypeScript.** A Swift app is an
+> end-user client of your app, syncing through its TypeScript backend's
+> `createJazz` handler; Swift doesn't run a backend.
+>
+> - **Supported:** typed bindings from your app's `schema.ts`, queries,
+>   includes and hops, subscriptions (`AsyncSequence`), writes at a durability
+>   tier, mergeable and serializable transactions, mergeable text, uploads,
+>   history reads, device accounts and your sign-in's bearer tokens, sync
+>   status, on Linux (tested in CI). It should work on macOS, but isn't
+>   tested there yet.
+> - **Not supported yet:** running a backend or serving `/jazz`, iOS and
+>   macOS UI apps (not built or tested yet), Keychain storage for device keys,
+>   guest users, history subscriptions, payload enums and nested rows.
+>
+> The full list is the Swift setup page's "Not supported yet"
+> (docs/content/docs/setup/swift.mdx) and
+> [Language Support](https://jazz.tools/docs/reference/language-support).
+
 The Swift runtime of Jazz: `async`/`await` calls and `AsyncThrowingStream`
 subscriptions over `crates/jazz-ffi` (the Jazz core, built from Rust, through
 UniFFI). Apps call it through typed bindings: author the app's `schema.ts`
