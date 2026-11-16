@@ -13,6 +13,10 @@
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
 //! ```
 //!
+//! Related rows come with a query's rows through `include` (a tuple per
+//! row: `(Todo, Option<Project>)`), and `select` reads only some columns
+//! (a [`Partial`] row); see [`Query::include`] and [`Query::select`].
+//!
 //! An end user's client ([`Config::user`]) signs in with a device account
 //! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
 //! [`Jazz::session`] follows it; [`Session::link`] carries a device account
@@ -22,9 +26,10 @@
 //! `/jazz` handler, as TS `createJazz` serves it, with the app's own
 //! sign-in deciding who each request's user is.
 //!
-//! Not supported yet: includes (nested related rows in one result), reads
-//! inside transactions. A bearer session is renewed by reconnecting with a
-//! fresh bearer, as TypeScript's bearer clients do (in-place renewal is for
+//! Not supported yet: these query forms the TypeScript client has:
+//! `hopTo`, `gather`, `union`, history (`$history`) and partial reads of
+//! large values. A bearer session is renewed by reconnecting with a fresh
+//! bearer, as TypeScript's bearer clients do (in-place renewal is for
 //! cookie sessions).
 
 mod advice;
@@ -36,6 +41,7 @@ mod edit;
 pub mod endpoint;
 mod error;
 mod handle;
+mod include;
 mod large;
 mod lifecycle;
 mod query;
@@ -54,10 +60,15 @@ pub use edit::TextColumn;
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::Jazz;
+pub use include::{
+    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+};
 pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
-pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
+pub use query::{
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, id, updated_at,
+};
 pub use session::{
     AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
 };

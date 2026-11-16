@@ -7,12 +7,15 @@ use std::sync::Arc;
 use jazz::tools::{ObjectId, QueryResultField, Value};
 
 use crate::error::{Error, Result};
+use crate::include::Row;
 use crate::value::ColumnValue;
 
 /// A table's row type, generated from `jazz.app.json`.
 pub trait Table: Sized + Send + 'static {
     /// The table's name in `jazz.app.json`.
     const NAME: &'static str;
+    /// The table's stored columns, as `jazz.app.json` names them.
+    const COLUMNS: &'static [&'static str];
     /// Values for a new row.
     type New: Insert<Row = Self>;
     /// A partial update of a row.
@@ -51,6 +54,21 @@ pub struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
+    pub(crate) fn new(
+        table: &'static str,
+        id: ObjectId,
+        fields: Vec<QueryResultField>,
+        implementations: &'a Implementations,
+    ) -> Self {
+        Self {
+            table,
+            id,
+            fields,
+            next: 0,
+            implementations,
+        }
+    }
+
     pub fn id(&self) -> ObjectId {
         self.id
     }
@@ -80,6 +98,36 @@ impl<'a> Fields<'a> {
         })
     }
 
+    /// Takes the next column's value: partial rows hold their values in the
+    /// order they were selected.
+    pub(crate) fn take_next<T: ColumnValue>(&mut self) -> Result<T> {
+        let Some(field) = self.fields.get_mut(self.next) else {
+            return Err(self.error(format!("no column at {}", self.next)));
+        };
+        self.next += 1;
+        let name = field.name.clone();
+        let value = std::mem::replace(&mut field.value, Value::Null);
+        T::from_value(value).map_err(|value| {
+            self.error(format!(
+                "column {name} holds {value:?}, not a {}",
+                std::any::type_name::<T>()
+            ))
+        })
+    }
+
+    /// Takes the field `name`'s value as it is: an include's rows.
+    pub(crate) fn take_raw(&mut self, name: &str) -> Result<Value> {
+        let field = self
+            .fields
+            .iter_mut()
+            .find(|field| field.name == name)
+            .ok_or_else(|| Error::Decode {
+                table: self.table,
+                message: format!("no include {name}"),
+            })?;
+        Ok(std::mem::replace(&mut field.value, Value::Null))
+    }
+
     fn error(&self, message: String) -> Error {
         Error::Decode {
             table: self.table,
@@ -88,18 +136,17 @@ impl<'a> Fields<'a> {
     }
 }
 
-pub(crate) fn decode<T: Table>(
+pub(crate) fn decode<R: Row>(
     id: ObjectId,
     fields: Vec<QueryResultField>,
     implementations: &Implementations,
-) -> Result<T> {
-    T::decode(&mut Fields {
-        table: T::NAME,
+) -> Result<R> {
+    R::decode_fields(&mut Fields::new(
+        <R::Table as Table>::NAME,
         id,
         fields,
-        next: 0,
         implementations,
-    })
+    ))
 }
 
 /// What the app's code implements of what `jazz.app.json` declares: its

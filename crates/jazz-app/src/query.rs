@@ -6,10 +6,12 @@ use jazz::query::{self as q, OrderDirection, Predicate};
 use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
 
+use crate::include::{IntoInclude, Partial, Row, Selection, With};
 use crate::table::Table;
 use crate::value::{ColumnValue, Timestamp};
 
-/// A query of rows of `T`.
+/// A query of rows of a table, yielding `T`s: the table's rows, or
+/// [`Partial`] rows of it, with the rows it includes after them.
 #[derive(Debug, Clone)]
 pub struct Query<T> {
     query: q::Query,
@@ -25,9 +27,48 @@ impl<T: Table> Query<T> {
         }
     }
 
+    /// Reads only the `columns` (a stored column, or a tuple of up to
+    /// twelve): each row as a [`Partial`] holding its id and their values,
+    /// in order. The id is always there: don't select [`id`].
+    ///
+    /// ```ignore
+    /// // Query<Partial<Todo, (String, bool)>>
+    /// todos::query().select((todos::title(), todos::done()))
+    /// ```
+    pub fn select<S: Selection<T>>(self, columns: S) -> Query<Partial<T, S::Values>> {
+        let mut query = self.query;
+        query.select = Some(columns.names().into_iter().map(str::to_owned).collect());
+        Query {
+            query,
+            row: PhantomData,
+        }
+    }
+}
+
+impl<T: Row> Query<T> {
+    /// Includes the rows of a relation of the table with each row, after
+    /// what the row already has: `Todo` becomes `(Todo, Option<Project>)`,
+    /// `(Todo, Option<Project>)` becomes `(Todo, Option<Project>, Vec<Todo>)`.
+    /// See [`crate::Include`] for what each relation includes.
+    pub fn include<I>(self, relation: I) -> Query<<T as With<I::Output>>::Output>
+    where
+        I: IntoInclude<<T as Row>::Table>,
+        T: With<<I as IntoInclude<<T as Row>::Table>>::Output>,
+    {
+        let mut query = self.query;
+        let at = query.array_subqueries.len();
+        query
+            .array_subqueries
+            .push(relation.into_include().into_subquery(at));
+        Query {
+            query,
+            row: PhantomData,
+        }
+    }
+
     /// Only rows matching `condition`. Conditions add up: a row must match
     /// each.
-    pub fn filter(mut self, condition: Condition<T>) -> Self {
+    pub fn filter(mut self, condition: Condition<T::Table>) -> Self {
         self.query.filters.push(condition.predicate);
         self
     }
@@ -40,7 +81,7 @@ impl<T: Table> Query<T> {
         )))
     }
 
-    pub fn order_by<V>(mut self, column: Column<T, V>, order: Order) -> Self {
+    pub fn order_by<V>(mut self, column: Column<T::Table, V>, order: Order) -> Self {
         self.query.order_by.push(q::OrderBy {
             column: column.name.to_owned(),
             direction: match order {
@@ -225,25 +266,36 @@ impl<T, V: ColumnValue> Column<T, Option<V>> {
     }
 }
 
-/// A forward relation: `T`'s `column` references one row of `U`.
+/// A forward relation: `T`'s `column` references one row of `U`. `N` is
+/// whether the column may be null: [`NotNull`] or [`Nullable`].
 #[derive(Debug)]
-pub struct One<T, U> {
+pub struct One<T, U, N = NotNull> {
     column: &'static str,
     types: PhantomData<fn() -> (T, U)>,
+    nullability: PhantomData<N>,
 }
 
-impl<T, U> Clone for One<T, U> {
+/// A forward relation's column always holds a reference.
+#[derive(Debug, Clone, Copy)]
+pub enum NotNull {}
+
+/// A forward relation's column may be null.
+#[derive(Debug, Clone, Copy)]
+pub enum Nullable {}
+
+impl<T, U, N> Clone for One<T, U, N> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T, U> Copy for One<T, U> {}
+impl<T, U, N> Copy for One<T, U, N> {}
 
-impl<T: Table, U: Table> One<T, U> {
+impl<T: Table, U: Table, N> One<T, U, N> {
     pub const fn new(column: &'static str) -> Self {
         Self {
             column,
             types: PhantomData,
+            nullability: PhantomData,
         }
     }
 
@@ -260,6 +312,42 @@ impl<T: Table, U: Table> One<T, U> {
     /// Rows of `T` that reference the row of `U` with this id.
     pub fn referencing(self, id: ObjectId) -> Condition<T> {
         Condition::new(q::eq(q::col(self.column), literal(Value::Uuid(id))))
+    }
+}
+
+/// A forward relation over an array column: `T`'s `column` holds the ids
+/// of rows of `U`. `N` is whether the column may be null.
+#[derive(Debug)]
+pub struct Refs<T, U, N = NotNull> {
+    column: &'static str,
+    types: PhantomData<fn() -> (T, U)>,
+    nullability: PhantomData<N>,
+}
+
+impl<T, U, N> Clone for Refs<T, U, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T, U, N> Copy for Refs<T, U, N> {}
+
+impl<T: Table, U: Table, N> Refs<T, U, N> {
+    pub const fn new(column: &'static str) -> Self {
+        Self {
+            column,
+            types: PhantomData,
+            nullability: PhantomData,
+        }
+    }
+
+    /// The array column holding the references.
+    pub fn column(&self) -> &'static str {
+        self.column
+    }
+
+    /// Rows of `T` whose array references the row of `U` with this id.
+    pub fn referencing(self, id: ObjectId) -> Condition<T> {
+        Condition::new(q::contains(q::col(self.column), literal(Value::Uuid(id))))
     }
 }
 
@@ -284,6 +372,11 @@ impl<T: Table, U: Table> Many<T, U> {
             column,
             types: PhantomData,
         }
+    }
+
+    /// `U`'s column holding the reference.
+    pub fn column(&self) -> &'static str {
+        self.column
     }
 
     /// The rows of `U` referencing the row of `T` with this id.
