@@ -349,7 +349,10 @@ async fn a_serializable_transaction_writes_into_a_branch() {
             // A serializable transaction can't read through a branch yet
             // (jazz#5806), so writes that read back are refused before
             // staging: this ignored upsert commits nothing.
-            assert!(draft.get::<Document>(intro.id).await.is_err());
+            assert!(matches!(
+                draft.get::<Document>(intro.id).await,
+                Err(Error::Unsupported(_))
+            ));
             let _ignored = draft
                 .upsert(
                     jazz_app_support::ObjectId::new(),
