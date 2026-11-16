@@ -37,7 +37,12 @@ struct App {
 
 impl App {
     async fn start() -> Self {
-        let app_id = AppId::random();
+        Self::start_for(AppId::random()).await
+    }
+
+    /// A fresh server, store and backend for `app_id`: a new history, as a
+    /// recreated server store has.
+    async fn start_for(app_id: AppId) -> Self {
         let server = JazzServer::builder()
             .with_app_id(app_id)
             .start()
@@ -937,6 +942,89 @@ async fn reads_without_a_tier_see_what_the_server_has() {
     user.shutdown().await.unwrap();
     local.shutdown().await.unwrap();
     app.stop().await;
+}
+
+/// A server serving another history than the client's store (its store was
+/// recreated): the client stops syncing with it and says so, as TypeScript
+/// does (`authority-changed`), and its local data stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_with_another_history_is_reported_as_authority_changed() {
+    let first = App::start().await;
+    let app_id = first.app_id;
+    let key = DeviceKey::generate().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let open = |app: &App| {
+        Jazz::open(
+            client_files(),
+            app.user(Auth::Device(key.clone()))
+                .storage(Storage::Dir(dir.path().into())),
+        )
+    };
+    let phone = open(&first).await.unwrap();
+    let kept = phone
+        .insert(NewTodo::new("Synced once", false))
+        .await
+        .unwrap();
+    phone.wait_for_sync().await.unwrap();
+    phone.shutdown().await.unwrap();
+    first.stop().await;
+
+    // The same app's server, on a new store.
+    let second = App::start_for(app_id).await;
+    let phone = open(&second)
+        .await
+        .expect("an authority change still opens");
+    let stopped = sync_until(&phone, |status| matches!(status.link, Link::Offline { .. })).await;
+    assert_eq!(
+        stopped.link,
+        Link::Offline {
+            reason: jazz_app::Offline::AuthorityChanged,
+            retrying: false,
+            auth: None,
+        },
+        "{stopped:?}"
+    );
+    assert!(matches!(
+        stopped.last_error,
+        Some(jazz_app::SyncError::AuthorityChanged { .. })
+    ));
+    let json = serde_json::to_value(&stopped).unwrap();
+    assert_eq!(json["link"]["reason"], "authority-changed");
+    assert_eq!(json["lastError"]["kind"], "authority-changed");
+
+    // Reconnecting tries the server again (as TS's `db.reconnect()`), and
+    // finds it serving another history still.
+    tokio::time::timeout(Duration::from_secs(10), phone.reconnect())
+        .await
+        .expect("reconnect returns after an authority change")
+        .unwrap();
+    let again = sync_until(&phone, |status| {
+        matches!(
+            status.link,
+            Link::Offline {
+                reason: jazz_app::Offline::AuthorityChanged,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(!again.synced);
+
+    // Local data stays usable, and nothing is reset.
+    assert_eq!(
+        phone
+            .all_with(todos::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap(),
+        vec![kept]
+    );
+    phone
+        .insert(NewTodo::new("Written after", false))
+        .await
+        .unwrap();
+
+    phone.shutdown().await.unwrap();
+    second.stop().await;
 }
 
 /// While the server is unreachable, a backend client's default (`Remote`)
