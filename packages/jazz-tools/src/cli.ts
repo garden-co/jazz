@@ -419,7 +419,7 @@ function printHelp(): void {
   );
   console.log("  migrations graph      Visualize the full migration graph");
   console.log(
-    "  upgrade               Convert an alpha.64 app (schema.ts, permissions.ts, migrations/) to the files",
+    "  upgrade               Convert an alpha.65 app to alpha.66's schema.ts (or write it from a JSON-only app's files)",
   );
   console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",
@@ -527,9 +527,12 @@ if (isMainModule()) {
           schemaDir: getFlagValue(commandArgs, "--schema-dir"),
         });
         console.log(formatReport(report, dryRun));
-        if (report.typeErrors.length > 0 || report.todos > 0) process.exitCode = 1;
+        if (report.typeErrors.length > 0) process.exitCode = 1;
       }),
     );
+  } else if (command === "print-ts") {
+    // Hidden: the examples' TS from their JSON (src/printer/cli.ts).
+    exitOnError(import("./printer/cli.js").then(({ runPrintTs }) => runPrintTs(args.slice(1))));
   } else if (command === "validate") {
     console.error(VALIDATE_RENAMED);
     process.exit(1);
