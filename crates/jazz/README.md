@@ -8,7 +8,7 @@ unrelated project). Its library is still named `jazz`, so code keeps writing
 jazz = { package = "jazz-core", version = "=<the jazz-tools version>" }
 ```
 
-Most apps want `jazz-app` instead, and the CLI is `cargo install jazz-tools`.
+Most apps want `jazz-app-support` instead, and the CLI is `cargo install jazz-tools`.
 
 jazz is a local-first, distributed, real-time database with full edit history,
 RLS-authorized sync, and two transaction kinds — eventually-consistent

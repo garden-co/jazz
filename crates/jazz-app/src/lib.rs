@@ -7,7 +7,7 @@
 //! they build on: the [`Jazz`] handle and the traits they implement.
 //!
 //! ```ignore
-//! let jazz = jazz_app::open(config).await?;            // generated
+//! let jazz = jazz_app_support::open(config).await?;            // generated
 //! let open = jazz.all(todos::query().filter(todos::done().eq(false))).await?;
 //! let todo = jazz.insert(NewTodo { title: "Write docs".into(), ..Default::default() }).await?;
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
