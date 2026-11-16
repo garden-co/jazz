@@ -16,7 +16,8 @@
 //!
 //! It prints the endpoint URL (`http://127.0.0.1:<port>/jazz`, a client's
 //! `server`) as one line on stdout, once it is ready, then serves until
-//! killed; it exits cleanly on SIGTERM or SIGINT.
+//! killed; it exits cleanly on SIGTERM or SIGINT. Exit codes: 0 on a signal
+//! (and for `--help`), 2 for bad arguments, 1 if it can't publish or print.
 //!
 //! - `--core`: the core's base URL (a running `jazz-server`).
 //! - `JAZZ_BACKEND_SECRET`, `JAZZ_ADMIN_SECRET`: the core's secrets for the
@@ -27,8 +28,9 @@
 //!   - `--app <path> --permissions <path>`: the relay opens a jazz-app
 //!     backend on the core with the app's `jazz.app.json` and
 //!     `jazz.permissions.json` (e.g. StagePlan's), which publishes them, and
-//!     serves the bundle that backend reports. The backend stays open while
-//!     the relay serves. For client-only bindings, which open no backend.
+//!     serves the bundle that backend reports. It closes that backend before
+//!     printing the endpoint: the bundle lives on the core. For client-only
+//!     bindings, which open no backend.
 //!   - `--bundle <id>`: a bundle the caller published, e.g. by opening a
 //!     backend (jazz-ffi, or jazz-app's `Backend`) with the app's permissions
 //!     and calling `bundle()` on it.
@@ -72,7 +74,8 @@ fn parse_args() -> Result<Args, String> {
     let (mut bundle, mut app, mut permissions) = (None, None, None);
     while let Some(flag) = args.next() {
         if flag == "-h" || flag == "--help" {
-            return Err(USAGE.into());
+            println!("{USAGE}");
+            std::process::exit(0);
         }
         let slot = match flag.as_str() {
             "--core" => &mut core,
@@ -119,9 +122,10 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// Opens a backend with the app's files, which publishes them: the backend,
-/// to keep open while serving, and its bundle.
-async fn publish(args: &Args, app: &str, permissions: &str) -> Result<(Jazz, String), String> {
+/// Opens a backend with the app's files, which publishes them on the core,
+/// and closes it again: the bundle lives on the core, which is all the
+/// relay needs, so nothing is held while serving.
+async fn publish(args: &Args, app: &str, permissions: &str) -> Result<String, String> {
     let read = |path: &str| std::fs::read(path).map_err(|error| format!("read {path}: {error}"));
     let files = AppFiles::new(read(app)?, None);
     let config = Config::new(args.app_id).server(&args.core).backend(
@@ -135,7 +139,11 @@ async fn publish(args: &Args, app: &str, permissions: &str) -> Result<(Jazz, Str
         .bundle()
         .ok_or("the backend reports no bundle")?
         .to_owned();
-    Ok((backend, bundle))
+    backend
+        .shutdown()
+        .await
+        .map_err(|error| format!("close the publishing backend: {error}"))?;
+    Ok(bundle)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -147,10 +155,10 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (backend, bundle) = match &args.bundle {
-        Bundle::Given(bundle) => (None, bundle.clone()),
+    let bundle = match &args.bundle {
+        Bundle::Given(bundle) => bundle.clone(),
         Bundle::Publish { app, permissions } => match publish(&args, app, permissions).await {
-            Ok((backend, bundle)) => (Some(backend), bundle),
+            Ok(bundle) => bundle,
             Err(message) => {
                 eprintln!("{message}");
                 return ExitCode::FAILURE;
@@ -176,9 +184,6 @@ async fn main() -> ExitCode {
 
     shutdown().await;
     drop(relay);
-    if let Some(backend) = backend {
-        let _ = backend.shutdown().await;
-    }
     ExitCode::SUCCESS
 }
 

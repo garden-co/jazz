@@ -2,8 +2,6 @@
 name = "jazz-app"
 version = "0.1.0"
 edition = "2024"
-# Not published: its test-relay bin serves tests/relay, a test stand-in.
-publish = false
 description = "Typed, Send + Clone Rust handle for a Jazz app opened from its jazz.app.json"
 
 [dependencies]
