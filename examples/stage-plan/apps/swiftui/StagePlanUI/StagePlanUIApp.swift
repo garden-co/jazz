@@ -1,7 +1,8 @@
 // StagePlan in SwiftUI: a show's tasks, live, through @JazzAll. It opens a
 // local client (no server) so it runs on its own, and puts it in the
 // environment as `\.jazz`. An app of yours uses
-// `JazzRoot(JazzApp.session(appId:serverUrl:…)) { … } signedOut: { … }`,
+// a `JazzApp.session(appId:serverUrl:…)` kept in its App, and
+// `JazzRoot(session) { … } signedOut: { … }`,
 // which does that for the signed-in user.
 import Jazz
 import SwiftUI

@@ -87,36 +87,48 @@
     /// The root of a Jazz app's views, as TS's `<JazzProvider>`: it follows
     /// `session`, shows `content` with the signed-in user's client in the
     /// environment (`\.jazz`, read by `@JazzAll`), `signedOut` while no one
-    /// is signed in, and `loading` meanwhile. A change of user rebuilds
-    /// `content`, so its queries follow the new user.
+    /// is signed in, and `loading` otherwise: while the session starts or
+    /// switches users, and when it failed or closed (read
+    /// `@Environment(\.jazzSession)`'s `status` and `error` there). A change
+    /// of user rebuilds `content`, so its queries follow the new user.
+    ///
+    /// Keep the session for the app's lifetime, in your `App`:
     ///
     /// ```swift
-    /// JazzRoot(JazzApp.session(appId: appId, serverUrl: endpoint, bearer: …)) {
-    ///     ContentView()
-    /// } signedOut: {
-    ///     SignInView()
+    /// @main struct MyApp: App {
+    ///     let session = JazzApp.session(appId: appId, serverUrl: endpoint, bearer: …)
+    ///     var body: some Scene {
+    ///         WindowGroup {
+    ///             JazzRoot(session) { ContentView() } signedOut: { SignInView() }
+    ///         }
+    ///     }
     /// }
     /// ```
+    ///
+    /// `JazzRoot` takes `session` once, when it first appears: the same view
+    /// given another session later keeps the first.
     @available(macOS 14, iOS 17, tvOS 17, watchOS 10, *)
     public struct JazzRoot<Content: View, SignedOut: View, Loading: View>: View {
-        @State private var state: JazzSessionState
+        @State private var holder = StateHolder()
+        private let session: () -> JazzSession
         private let content: () -> Content
         private let signedOut: () -> SignedOut
         private let loading: () -> Loading
 
         public init(
-            _ session: JazzSession,
+            _ session: @autoclosure @escaping () -> JazzSession,
             @ViewBuilder content: @escaping () -> Content,
             @ViewBuilder signedOut: @escaping () -> SignedOut,
             @ViewBuilder loading: @escaping () -> Loading
         ) {
-            _state = State(initialValue: JazzSessionState(session))
+            self.session = session
             self.content = content
             self.signedOut = signedOut
             self.loading = loading
         }
 
         public var body: some View {
+            let state = holder.state(session)
             Group {
                 if let client = state.client, state.status == .ready {
                     content()
@@ -132,21 +144,35 @@
         }
     }
 
+    /// `JazzRoot`'s session state, made once from the first session given.
+    @available(macOS 14, iOS 17, tvOS 17, watchOS 10, *)
+    @MainActor
+    final class StateHolder {
+        private var made: JazzSessionState?
+
+        func state(_ session: () -> JazzSession) -> JazzSessionState {
+            if let made { return made }
+            let state = JazzSessionState(session())
+            made = state
+            return state
+        }
+    }
+
     @available(macOS 14, iOS 17, tvOS 17, watchOS 10, *)
     extension JazzRoot where Loading == ProgressView<EmptyView, EmptyView> {
         /// `JazzRoot` with a `ProgressView` while the session starts.
         public init(
-            _ session: JazzSession,
+            _ session: @autoclosure @escaping () -> JazzSession,
             @ViewBuilder content: @escaping () -> Content,
             @ViewBuilder signedOut: @escaping () -> SignedOut
         ) {
-            self.init(session, content: content, signedOut: signedOut, loading: { ProgressView() })
+            self.init(session(), content: content, signedOut: signedOut, loading: { ProgressView() })
         }
     }
 
     /// A query's rows in a view, live, as TS's `useAll`: it reads the client
-    /// from the environment (`\.jazz`, set by `JazzRoot`), and follows a new
-    /// one when the user changes. `$rows` is its `JazzQuery`, for
+    /// from the environment (`\.jazz`, set by `JazzRoot`), and follows again
+    /// when the client (the user) or the query changes. `$rows` is its `JazzQuery`, for
     /// `isLoading` and `error`.
     ///
     /// ```swift
@@ -181,17 +207,21 @@
         }
     }
 
-    /// `JazzAll`'s query, kept across view updates and replaced with the client.
+    /// `JazzAll`'s query, kept across view updates; followed again when the
+    /// client or the query (by its JSON) changes.
     @available(macOS 14, iOS 17, tvOS 17, watchOS 10, *)
     @MainActor
     final class Live<R: Row> {
         private(set) var query: JazzQuery<R>?
         private var client: Client?
+        private var key: String?
 
         func follow(_ client: Client?, _ query: Query<R>) {
-            guard client !== self.client else { return }
+            let key = try? query.json()
+            guard client !== self.client || key != self.key else { return }
             self.query?.cancel()
             self.client = client
+            self.key = key
             self.query = client.map { JazzQuery($0, query) }
         }
     }

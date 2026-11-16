@@ -40,8 +40,9 @@ public enum DocsSnippets {
             appId: appId, serverUrl: endpoint,
             bearer: { _ in try await MySignIn.currentToken() },  // nil while signed out
             start: .device, dataDir: dataDir)
-        // The signed-in user's client, once someone is. `session.clients`
-        // gives the next one each time the user changes.
+        // The signed-in user's client, once the session is ready (it throws
+        // .noUser if no one is). `session.clients` gives the next one each
+        // time the user changes, and nil on sign-out.
         let jazz = try await session.client()
         // #endregion context-setup-swift-session
         return (session, jazz)

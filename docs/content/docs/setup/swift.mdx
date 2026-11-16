@@ -138,9 +138,9 @@ struct TasksView: View {
 }
 ```
 
-Outside SwiftUI, `try await session.client()` waits until someone is signed in and returns their
-client, and `session.clients` gives the next one each time the user changes (TypeScript's
-`followDb`):
+Outside SwiftUI, `try await session.client()` waits while the session starts and returns the
+signed-in user's client, and `session.clients` gives the next one each time the user changes, and
+`nil` on sign-out (TypeScript's `followDb`):
 
 <include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-session

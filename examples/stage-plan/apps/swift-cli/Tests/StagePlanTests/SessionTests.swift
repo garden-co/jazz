@@ -199,17 +199,27 @@ final class SessionTests: XCTestCase {
         let session = try await open(relay, token: token)
         var clients = session.clients.makeAsyncIterator()
         let first = try await clients.next()
-        let alice = try XCTUnwrap(first)
+        let alice = try XCTUnwrap(first ?? nil)
         let aliceAccount = try await alice.account()
         token.current = "token-bob"
         try await session.refresh()
-        let second = try await clients.next()
-        let bob = try XCTUnwrap(second)
+        // Alice's client stops being usable (nil), then bob's comes; or
+        // bob's straight away if the switch settled first.
+        var second = try await clients.next()
+        if case .some(.none) = second { second = try await clients.next() }
+        let bob = try XCTUnwrap(second ?? nil)
+        XCTAssertFalse(bob === alice)
         let bobAccount = try await bob.account()
         XCTAssertNotEqual(aliceAccount, bobAccount)
         let snapshot = try await session.snapshot()
         XCTAssertEqual(snapshot.user?.subject, "bob")
         XCTAssertEqual(bobAccount, snapshot.user?.account)
+        // Signing out: nil, so nobody keeps a client that would throw .replaced.
+        token.current = nil
+        try await session.refresh()
+        let third = try await clients.next()
+        XCTAssertNotNil(third)
+        XCTAssertNil(third ?? nil)
         try await session.close()
     }
 

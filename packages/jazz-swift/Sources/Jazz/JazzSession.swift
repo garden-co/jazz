@@ -34,7 +34,8 @@ public final class JazzSession: Sendable {
     /// A session of `app` (the text of `jazz.app.json`: `JazzApp.app`;
     /// the bindings' `JazzApp.session(…)` passes it) syncing through the
     /// app's Jazz endpoint `serverUrl`. It opens in the background: calls
-    /// wait for it, and fail as it does.
+    /// wait for it, and fail as it does. A session that failed to open
+    /// stays failed: make a new one to try again.
     ///
     /// - `bearer`: the app's own sign-in, as `Auth.bearer`: the current
     ///   token, or `nil` when signed out. `refresh()` asks it again.
@@ -122,19 +123,34 @@ public final class JazzSession: Sendable {
         }
     }
 
-    /// The client for each user signed in, each time that changes (a
-    /// sign-in, a sign-out then in again, a switch of user), as TS's
-    /// `followDb`. While no one is signed in, nothing comes. It fails with
-    /// `JazzError.closed` once the session closes.
-    public var clients: AsyncThrowingStream<Client, any Error> {
+    /// The client of the user signed in, each time that changes, as TS's
+    /// `followDb`: a client when someone is signed in (a sign-in, a switch
+    /// of user), `nil` when that client stops being usable (a sign-out, or
+    /// a switch under way). It fails with `JazzError.closed` once the
+    /// session closes.
+    public var clients: AsyncThrowingStream<Client?, any Error> {
         AsyncThrowingStream { continuation in
             let task = _Concurrency.Task {
                 do {
-                    var last: UInt64?
-                    for try await snapshot in self.snapshots where snapshot.status == .ready {
-                        guard snapshot.clientEpoch != last else { continue }
-                        last = snapshot.clientEpoch
-                        continuation.yield(try await self.client())
+                    var last: Client?
+                    var gave = false
+                    for try await snapshot in self.snapshots {
+                        var next: Client?
+                        if snapshot.status == .ready {
+                            do {
+                                next = try await self.client()
+                            } catch JazzError.noUser {
+                                // Signed out since: the snapshot that says so comes next.
+                                next = nil
+                            }
+                        }
+                        // Each client once (client() may already give a
+                        // newer epoch's), and nil only after a client.
+                        guard next !== last || !gave else { continue }
+                        if next == nil && !gave { continue }
+                        last = next
+                        gave = true
+                        continuation.yield(next)
                     }
                     continuation.finish()
                 } catch {
@@ -147,12 +163,14 @@ public final class JazzSession: Sendable {
 
     /// The client for the user signed in now, the same one until the user
     /// changes. While the session starts or switches users it waits; it
-    /// throws `JazzError.noUser` when no one is signed in, and the
-    /// session's error when it failed.
+    /// throws `JazzError.noUser` when no one is signed in (follow `clients`
+    /// to wait for a sign-in), the session's error when it failed, and
+    /// `JazzError.closed` once it's closed.
     public func client() async throws -> Client {
         try await Client.typed {
             let ffi = try await self.ffi()
             while true {
+                try _Concurrency.Task.checkCancellation()
                 let snapshot = try await self.snapshot()
                 switch snapshot.status {
                 case .starting, .transitioning:
