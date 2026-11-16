@@ -16,6 +16,7 @@ pub mod c_abi;
 mod convert;
 mod core;
 mod error;
+mod gate;
 
 use std::sync::Arc;
 
@@ -46,6 +47,59 @@ impl JazzHandle {
         let core = core::Core::open(&config_json)
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
         Ok(Arc::new(Self { core }))
+    }
+
+    /// Opens an app as an end user who signs in with the app's bearer
+    /// (`"auth": { "bearer": true }` in the config): `tokens` gives it.
+    #[uniffi::constructor]
+    pub fn open_with_tokens(
+        config_json: String,
+        tokens: Arc<dyn TokenProvider>,
+    ) -> Result<Arc<Self>> {
+        let contract = serde_json::from_str::<serde_json::Value>(&config_json)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
+            .unwrap_or(1);
+        let host = core::HostTokens(Arc::new(move |reason: &str| {
+            tokens
+                .token(reason.to_owned())
+                .map_err(|error| error.to_string())
+        }));
+        let core = core::Core::open_with_tokens(&config_json, Some(Arc::new(host)))
+            .map_err(|error| JazzError::from(error).for_contract(contract))?;
+        Ok(Arc::new(Self { core }))
+    }
+
+    /// The end user's session as JSON: `{"status": "signedIn", "user":
+    /// {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
+    /// `None` for a local app or a backend.
+    pub fn session_state(&self) -> Result<Option<String>> {
+        self.core.surface(self.core.session_state())
+    }
+
+    /// The connection's status as JSON: `{"link": ...}`.
+    pub fn sync_status(&self) -> Result<String> {
+        self.core.surface(self.core.sync_status())
+    }
+
+    /// Asks the token provider for a fresh token (reason `refresh`).
+    pub fn refresh(&self) -> Result<()> {
+        self.core.surface(self.core.refresh())
+    }
+
+    /// Signs the end user out and closes the app.
+    pub fn sign_out(&self) -> Result<()> {
+        self.core.surface(self.core.sign_out())
+    }
+
+    /// Calls `listener` with each session state, the current one first.
+    pub fn watch_session(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        self.watch("session", listener)
+    }
+
+    /// Calls `listener` with each sync status, the current one first.
+    pub fn watch_sync(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        self.watch("sync", listener)
     }
 
     /// The account id of the user a backend acts as (`session.user`);
@@ -238,6 +292,14 @@ impl JazzHandle {
 }
 
 impl JazzHandle {
+    fn watch(&self, what: &str, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        let inner = self.core.surface(
+            self.core
+                .watch(what, Box::new(move |state| listener.on_change(state))),
+        )?;
+        Ok(Arc::new(Watch { inner }))
+    }
+
     fn subscribe_with(
         &self,
         query_json: String,
@@ -419,6 +481,45 @@ impl std::fmt::Debug for JazzHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("JazzHandle")
     }
+}
+
+/// Where an end user's bearer tokens come from (the host's own sign-in).
+/// Called on a thread of its own, so it may block; `reason` is `connect`,
+/// `renew`, `expired` or `refresh` (the last two want a fresh token, not a
+/// cached one). `None` means no one is signed in (the app stops); an error
+/// means the fetch failed (a network blip): the session stays signed in and
+/// asks again.
+#[uniffi::export(with_foreign)]
+pub trait TokenProvider: Send + Sync {
+    fn token(&self, reason: String) -> Result<Option<String>>;
+}
+
+/// What a session or sync watch calls with each state (JSON).
+#[uniffi::export(with_foreign)]
+pub trait StateListener: Send + Sync {
+    fn on_change(&self, state_json: String);
+}
+
+/// A live watch of session or sync states; it ends when cancelled or
+/// dropped.
+#[derive(uniffi::Object)]
+pub struct Watch {
+    inner: core::Watch,
+}
+
+#[uniffi::export]
+impl Watch {
+    /// When it returns, no callback is running (unless called from one).
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+}
+
+/// A new device account's key as `jazz-auth-v1:…` text, for `"auth":
+/// {"deviceKey": …}`: keep it as a password, in the platform's keychain.
+#[uniffi::export]
+pub fn generate_device_key() -> Result<String> {
+    core::generate_device_key().map_err(JazzError::from)
 }
 
 /// What a subscription calls with its deltas.

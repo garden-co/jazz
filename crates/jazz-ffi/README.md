@@ -62,7 +62,24 @@ ship inside a mobile or desktop app. In .65, apps on users' devices open
 local-only clients (no `serverUrl`), because connecting as an end user with a
 JWT is not supported yet.
 
-Without `permissions`, it opens as a local client. `appId` is required for
+**End users** (contract v2): `"serverUrl"` is the app's Jazz endpoint (its
+backend's `createJazz` handler, never the core) and `"auth"` says who signs
+in: `{"deviceKey": "jazz-auth-v1:…"}` (a local-first device account; make one
+with `generate_device_key()` / `jazz_generate_device_key`, and keep it as a
+password in the platform's keychain) or `{"bearer": true}`, the app's own
+sign-in, whose tokens a host callback gives (UniFFI
+`JazzHandle.open_with_tokens(config, TokenProvider)`, C
+`jazz_open_user(config, token_cb, ctx, err)`): it is called on a thread of
+its own with `connect`, `renew`, `expired` or `refresh` and returns the token
+or none (signed out). `session_state()` / `"session"` gives
+`{"status": "signedIn"|"expired"|"signedOut", "user"?: {account, issuer,
+subject, claims, kind}}`; `sync_status()` / `"syncStatus"` gives `{"link":
+…}`; `watch_session` / `watch_sync` (C `jazz_watch(h, "session"|"sync", …)`,
+`jazz_unwatch`) call back with each state, the current one first;
+`refresh()` asks for a fresh token; `sign_out()` signs out and closes the
+app. Anonymous users are not supported (as in TS).
+
+Without `permissions` or `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
 ## Values, queries, rows, deltas
