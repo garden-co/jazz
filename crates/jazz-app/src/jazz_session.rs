@@ -109,6 +109,7 @@ impl From<&Error> for SessionError {
             Error::StoreHeld(_) => "storeHeld",
             Error::Stopped => "stopped",
             Error::BundleMismatch { .. } => "bundleMismatch",
+            Error::WriteRejected { .. } => "writeRejected",
             Error::Jazz(_) => "jazz",
         };
         Self {

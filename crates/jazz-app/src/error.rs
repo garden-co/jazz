@@ -39,6 +39,16 @@ pub enum Error {
     #[error("subscription rejected: {0}")]
     Rejected(String),
 
+    /// The server rejected a write: a [`durable`](crate::Jazz::durable)
+    /// write's, a transaction's or [`wait_for_sync`](crate::Jazz::wait_for_sync)'s.
+    /// `code` and `reason` are TS's (`PersistedWriteRejectedError`): `code`
+    /// is `permission_denied`, `serialization_conflict`,
+    /// `transaction_conflict`, `client_clock_too_far_ahead` or
+    /// `write_rejected`; `reason` says why, readably.
+    #[error("write rejected ({code}): {reason}")]
+    #[non_exhaustive]
+    WriteRejected { code: String, reason: String },
+
     /// The app's backend refused the request for good: retrying it as it is
     /// will not help (e.g. linking a device account to a user who already
     /// has another account).
@@ -106,7 +116,16 @@ pub enum Error {
 
     /// The client reported an error.
     #[error(transparent)]
-    Jazz(#[from] JazzError),
+    Jazz(JazzError),
+}
+
+impl From<JazzError> for Error {
+    fn from(error: JazzError) -> Self {
+        match error {
+            JazzError::WriteRejected { code, reason, .. } => Error::WriteRejected { code, reason },
+            error => Error::Jazz(error),
+        }
+    }
 }
 
 /// A result whose error is this crate's [`Error`] unless named. The default
