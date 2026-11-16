@@ -242,24 +242,32 @@ extension Client {
 
     /// A handle editing text-merge `column` of `row` by merges.
     public func text<R: Row>(_ row: R, _ column: Column<R, String?>) async throws(JazzError) -> JazzText<R> {
-        try await text(row, column.name)
+        do {
+            return try await textHandle(row, column: column.name)
+        } catch {
+            throw JazzError.wrap(error)
+        }
     }
 
     /// A handle editing text-merge `column` of `row` by merges.
     public func text<R: Row>(_ row: R, _ column: Column<R, String>) async throws(JazzError) -> JazzText<R> {
-        try await text(row, column.name)
+        do {
+            return try await textHandle(row, column: column.name)
+        } catch {
+            throw JazzError.wrap(error)
+        }
     }
 
-    func text<R: Row>(_ row: R, _ name: String) async throws(JazzError) -> JazzText<R> {
-        let current = try await Self.typed { () -> String in
-            let json = try Query<R>().where(Column<R, Jazz.ID>("id").eq(row.id)).json()
-            guard let found = try await Self.run({ try self.handle.one(queryJson: json) }) else {
-                throw JazzError.refused("no row \(row.id) in \(R.table)")
-            }
-            let object = try Coding.decode([String: JSONValue].self, found)
-            if case .string(let text)? = object[name] { return text }
-            return ""
+    // Untyped and named apart: Xcode 16's Swift (6.1) crashed emitting the
+    // typed-throws overloads calling a same-named generic helper.
+    func textHandle<R: Row>(_ row: R, column name: String) async throws -> JazzText<R> {
+        let json = try Query<R>().where(Column<R, Jazz.ID>("id").eq(row.id)).json()
+        guard let found = try await Self.run({ try self.handle.one(queryJson: json) }) else {
+            throw JazzError.refused("no row \(row.id) in \(R.table)")
         }
+        let object = try Coding.decode([String: JSONValue].self, found)
+        let current: String
+        if case .string(let text)? = object[name] { current = text } else { current = "" }
         return JazzText(jazz: self, id: row.id, column: name, current: current)
     }
 
