@@ -8,8 +8,8 @@ use std::process::Command;
 
 mod support;
 
-const APP: &str = r#"{ "format": 1, "tables": { "todos": { "columns": { "title": "string" } } } }"#;
-const PERMISSIONS: &str = r#"{ "format": 1, "tables": { "todos": { "read": "true" } } }"#;
+const APP: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json", "tables": { "todos": { "columns": { "title": "string" } } } }"#;
+const PERMISSIONS: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": { "todos": { "read": "true" } } }"#;
 
 fn app_dir(name: &str) -> PathBuf {
     let root =

@@ -808,10 +808,23 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 **Conventions.**
 
 - Plain JSON. Unknown keys are refused at every level, except `$comment`
-  (a string, allowed in every object) and a top-level `$schema` (a JSON
-  Schema URL, ignored on load; the writer puts
+  (a string, allowed in every object). Repeated keys are refused.
+- **Versioning.** A required top-level `$schema` names the file's JSON Schema
+  and so its version: `https://jazz.tools/schemas/jazz.app.v1.json`, resp.
+  `https://jazz.tools/schemas/jazz.permissions.v1.json`. The writer puts it
+  first; the reader reads it first, so a file from a newer Jazz
+  (`….v2.json`) is refused as such ("written by a newer Jazz") rather than
+  for fields this version doesn't know. A file without `$schema` is refused
+  with a hint to run `jazz-tools generate`; any other URL is refused.
+  There is no `format` field.
+- **Legacy files.** Jazz before alpha.66 wrote `"format": 1` and the unversioned
   `https://jazz.tools/schemas/jazz.app.schema.json`, resp.
-  `jazz.permissions.schema.json`, first). Repeated keys are refused.
+  `jazz.permissions.schema.json`. A file carrying `"format": 1` and/or the
+  unversioned URL still loads, as version 1 (another `format` is refused like
+  an unknown version). Any `$schema` next to `"format": 1` is accepted: it
+  was only an editor hint then. `jazz-tools upgrade` writes the versioned
+  form; tools that write the files whole write it too. Both unversioned JSON
+  Schemas stay published for editors.
 - Column and table names are identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Object key order is significant only for `columns` (declared order, which
   the schema hash covers) and `history` (oldest first). The writer lists
@@ -825,7 +838,7 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 
 | Field        | Type                  | Meaning                                                                |
 | ------------ | --------------------- | ---------------------------------------------------------------------- |
-| `format`     | integer               | `1`, read first; any other value is refused.                           |
+| `$schema`    | string                | `https://jazz.tools/schemas/jazz.app.v1.json`, read first.             |
 | `tables`     | map name → Table      | The current schema: the version the app's code is written against.     |
 | `history`    | map version → Version | Optional. Earlier versions the app still ships, by name, oldest first. |
 | `migrations` | array of Migration    | Optional. Lenses between versions.                                     |
@@ -949,11 +962,11 @@ removes `slices`.
 
 #### `jazz.permissions.json`
 
-| Field    | Type                      | Meaning                                                  |
-| -------- | ------------------------- | -------------------------------------------------------- |
-| `format` | integer                   | `1`.                                                     |
-| `defs`   | map signature → Policy    | Optional. Named, parameterised expressions.              |
-| `tables` | map table → TablePolicies | Every key must be a table of `jazz.app.json`'s `tables`. |
+| Field     | Type                      | Meaning                                                       |
+| --------- | ------------------------- | ------------------------------------------------------------- |
+| `$schema` | string                    | `https://jazz.tools/schemas/jazz.permissions.v1.json`, first. |
+| `defs`    | map signature → Policy    | Optional. Named, parameterised expressions.                   |
+| `tables`  | map table → TablePolicies | Every key must be a table of `jazz.app.json`'s `tables`.      |
 
 **TablePolicies** `{read?, insert?, update?, delete?}`. An absent operation
 is denied, as today.

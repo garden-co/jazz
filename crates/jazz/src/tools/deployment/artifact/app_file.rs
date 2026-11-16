@@ -49,6 +49,7 @@ pub struct AppFile {
 // The keys each object of the file takes (besides `$comment`), which the
 // JSON Schema in docs/public/schemas/ must list too.
 pub const TOP_KEYS: &[&str] = &[
+    // Legacy (before alpha.66): `$schema` carries the version now.
     "format",
     "$schema",
     "tables",
@@ -959,16 +960,10 @@ pub fn write(
     migrations: &[(Option<String>, Option<String>, &PublishMigrationRequest)],
     codegen: &Codegen,
 ) -> Result<Json, String> {
-    let mut top = vec![
-        (
-            "format".to_string(),
-            Json::Number(super::FORMAT.to_string()),
-        ),
-        (
-            "tables".to_string(),
-            write_tables(current, Some(codegen)).map_err(|e| format!("tables.{e}"))?,
-        ),
-    ];
+    let mut top = vec![(
+        "tables".to_string(),
+        write_tables(current, Some(codegen)).map_err(|e| format!("tables.{e}"))?,
+    )];
     if !history.is_empty() {
         top.push((
             "history".into(),

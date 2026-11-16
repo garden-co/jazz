@@ -34,6 +34,8 @@ import {
   isObject,
   parseAppJson,
   printAppJson,
+  versionedAppJson,
+  versionedPermissionsText,
   tableColumns,
   tsOnlyMarkers,
   type Json,
@@ -150,7 +152,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
       );
     }
 
-    var newAppText = printAppJson(edited.app);
+    var newAppText = printAppJson(versionedAppJson(edited.app));
     // 6a. The bindings, from the edited file (unless TODOs block them).
     var generatedText: string | null = null;
     if (computed.todos === 0) {
@@ -251,6 +253,11 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
 
   const writes: Array<[string, string]> =
     newAppText === appText ? [] : [[project.appFile, newAppText]];
+  if (existsSync(project.permissionsJsonFile)) {
+    const permissionsText = readFileSync(project.permissionsJsonFile, "utf8");
+    const versioned = versionedPermissionsText(permissionsText);
+    if (versioned !== permissionsText) writes.push([project.permissionsJsonFile, versioned]);
+  }
   if (computed.computedFile) writes.push([computedFile, computed.computedFile]);
   if (extras.extrasFile) writes.push([extrasFile, extras.extrasFile]);
   // A Rust app (a crate on `jazz-app-support`) gets Rust bindings instead, as `jazz-tools generate` writes them.

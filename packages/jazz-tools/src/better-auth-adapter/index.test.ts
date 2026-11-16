@@ -1274,10 +1274,10 @@ describe("jazzAdapter", () => {
       });
       const file = JSON.parse(generated.code);
       expect(file).toMatchObject({
-        $schema: "https://jazz.tools/schemas/jazz.app.schema.json",
-        format: 1,
+        $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
         tables: { better_auth_user: { columns: { name: "string" } } },
       });
+      expect(file).not.toHaveProperty("format");
       expect(Object.keys(file.tables).every((name) => name.startsWith("better_auth_"))).toBe(true);
       // No policies: every client read and write of the table is denied.
       expect(notes).toContain(
