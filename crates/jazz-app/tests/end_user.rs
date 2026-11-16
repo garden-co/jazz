@@ -936,3 +936,67 @@ async fn reads_without_a_tier_see_what_the_server_has() {
     local.shutdown().await.unwrap();
     app.stop().await;
 }
+
+/// While the server is unreachable, a backend client's default (`Remote`)
+/// read and subscription wait for it, as TypeScript's do: they neither fail
+/// nor answer from the local store. Once it is back, they answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_reads_wait_for_an_unreachable_server() {
+    let app = App::start().await;
+    let agent = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(machine("token-agent")),
+    )
+    .await
+    .unwrap();
+    connected(&agent).await;
+    let written = app
+        .backend
+        .insert(NewTodo::new("While the agent was away", false))
+        .await
+        .unwrap();
+    app.backend.wait_for_sync().await.unwrap();
+
+    app.relay.set_unreachable(true);
+    let read = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.all(todos::query()).await }
+    });
+    let mut changes = agent.subscribe(todos::query()).await.unwrap();
+    let first = tokio::spawn(async move {
+        let first = changes.next().await;
+        (first, changes)
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!read.is_finished(), "the read waits for the server");
+    assert!(
+        !first.is_finished(),
+        "the subscription waits for the server"
+    );
+
+    app.relay.set_unreachable(false);
+    let rows = tokio::time::timeout(Duration::from_secs(30), read)
+        .await
+        .expect("the read answers once the server is back")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rows, vec![written.clone()]);
+    let (first, changes) = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the subscription answers once the server is back")
+        .unwrap();
+    let added: Vec<_> = first
+        .unwrap()
+        .unwrap()
+        .added
+        .into_iter()
+        .map(|added| added.row)
+        .collect();
+    assert_eq!(added, vec![written]);
+
+    drop(changes);
+    agent.shutdown().await.unwrap();
+    app.stop().await;
+}

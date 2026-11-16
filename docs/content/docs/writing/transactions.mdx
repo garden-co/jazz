@@ -45,6 +45,7 @@ authority runs locally instead.
 | Best for            | Grouping normal local-first writes        | Enforcing an invariant across reads and writes                         |
 | Concurrent work     | Merges using Jazz's normal conflict rules | The authority validates the transaction as one serialisable unit       |
 | TypeScript callback | `db.transaction(...)`                     | `db.serializableTransaction(...)`                                      |
+| Go                  | `db.Tx(ctx, fn)`                          | `db.Tx(ctx, fn, jazz.Serializable())`                                  |
 | TypeScript wait     | `wait({ tier: "local" \| "global" })`     | `wait()`                                                               |
 | Offline             | Can commit locally and sync later         | Can be staged, but cannot be accepted until the authority is reachable |
 

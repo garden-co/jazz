@@ -144,9 +144,9 @@ it.skipIf(!CLIENT)(
       expect(stdout).not.toContain("LINK ");
       expect(requests.stream).toBe(1);
       expect(requests.sends).toBeGreaterThan(0);
-      // No DELETE is guaranteed: the process exits as it closes, and its
-      // response going ends the session here (as a socket's TCP close does).
-      expect(requests.deletes).toBeLessThanOrEqual(1);
+      // close() ends the session before it returns, so it ends here at once
+      // rather than when the response breaks off as the process exits.
+      expect(requests.deletes).toBe(1);
       expect(counts.upgraded).toBeGreaterThan(0);
       const rows = await jazz.db.all(app.todos.select("title"));
       expect(rows.map((row) => row.title as string).sort()).toEqual(["after idle", "before idle"]);

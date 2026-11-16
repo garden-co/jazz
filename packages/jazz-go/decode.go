@@ -154,16 +154,19 @@ func decodeRows[R any](app any, table string, raws []json.RawMessage) ([]R, erro
 
 func decodeDelta[R any](app any, table, text string) (Delta[R], error) {
 	var raw struct {
-		Added     []json.RawMessage `json:"added"`
-		Updated   []json.RawMessage `json:"updated"`
-		Removed   []string          `json:"removed"`
-		Reset     bool              `json:"reset"`
-		Coalesced bool              `json:"coalesced"`
+		Added       []json.RawMessage `json:"added"`
+		Updated     []json.RawMessage `json:"updated"`
+		Removed     []string          `json:"removed"`
+		RemovedKeys []string          `json:"removedKeys"`
+		Reset       bool              `json:"reset"`
+		Coalesced   bool              `json:"coalesced"`
 	}
 	if err := json.Unmarshal([]byte(text), &raw); err != nil {
 		return Delta[R]{}, err
 	}
-	d := Delta[R]{Removed: raw.Removed, Reset: raw.Reset, Coalesced: raw.Coalesced}
+	d := Delta[R]{Removed: raw.Removed, Reset: raw.Reset, Coalesced: raw.Coalesced,
+		AddedKeys: resultKeys(raw.Added), UpdatedKeys: resultKeys(raw.Updated),
+		RemovedKeys: removedKeys(raw.Removed, raw.RemovedKeys)}
 	var err error
 	if d.Added, err = decodeRows[R](app, table, raw.Added); err != nil {
 		return Delta[R]{}, err
@@ -214,4 +217,35 @@ func Fields(v any) (map[string]any, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// resultKey is a delta row's result key: its "$key", or its id from a
+// libjazz_ffi without result keys.
+func resultKey(row json.RawMessage) string {
+	var keys struct {
+		Key string `json:"$key"`
+		ID  string `json:"id"`
+	}
+	_ = json.Unmarshal(row, &keys)
+	if keys.Key != "" {
+		return keys.Key
+	}
+	return keys.ID
+}
+
+func resultKeys(rows []json.RawMessage) []string {
+	keys := make([]string, len(rows))
+	for i, row := range rows {
+		keys[i] = resultKey(row)
+	}
+	return keys
+}
+
+// removedKeys is a delta's "removedKeys", or its removed ids from a
+// libjazz_ffi without result keys.
+func removedKeys(removed, keys []string) []string {
+	if len(keys) == len(removed) {
+		return keys
+	}
+	return removed
 }

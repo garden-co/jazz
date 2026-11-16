@@ -149,7 +149,7 @@ final class StagePlanTests: XCTestCase {
             _ = try await stranger.jazz.insert(
                 JazzApp.NewTask(showId: show.id, title: "Sneaky", status: .todo, rank: 1), tier: .global)
             XCTFail("a stranger's task in someone else's show must be refused")
-        } catch {
+        } catch let error as JazzError {
             guard case .permissionDenied = error else { return XCTFail("\(error)") }
         }
         try await stranger.jazz.close()
@@ -199,7 +199,7 @@ final class StagePlanTests: XCTestCase {
         do {
             try await notes.insert("X", at: 2)
             XCTFail("an offset inside a surrogate pair must be refused")
-        } catch {
+        } catch let error as JazzError {
             guard case .refused = error else { return XCTFail("\(error)") }
         }
         try await notes.insert("X", at: 3)  // after the emoji

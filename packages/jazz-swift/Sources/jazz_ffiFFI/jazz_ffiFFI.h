@@ -344,6 +344,11 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_backend_client(uint64_t ptr, Rus
 uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_begin(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_begin_mergeable(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN_UPLOAD
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN_UPLOAD
 uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_begin_upload(uint64_t ptr, RustBuffer table, RustBuffer column, RustBuffer kind, RustBuffer id, RustBuffer row_json, RustCallStatus *_Nonnull out_status
@@ -367,6 +372,16 @@ void uniffi_jazz_ffi_fn_method_jazzhandle_delete(uint64_t ptr, RustBuffer table,
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DELETE_AT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DELETE_AT
 void uniffi_jazz_ffi_fn_method_jazzhandle_delete_at(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer tier, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+void uniffi_jazz_ffi_fn_method_jazzhandle_delete_client_storage(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DISCONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DISCONNECT
+void uniffi_jazz_ffi_fn_method_jazzhandle_disconnect(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_EDIT
@@ -407,6 +422,11 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_one(uint64_t ptr, RustBuffer que
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ONE_AT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ONE_AT
 RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_one_at(uint64_t ptr, RustBuffer query_json, RustBuffer tier, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_RECONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_RECONNECT
+void uniffi_jazz_ffi_fn_method_jazzhandle_reconnect(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_REFRESH
@@ -472,6 +492,11 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_upsert(uint64_t ptr, RustBuffer 
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WAIT_FOR_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WAIT_FOR_SYNC
 void uniffi_jazz_ffi_fn_method_jazzhandle_wait_for_sync(uint64_t ptr, RustBuffer tier, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_watch_mutation_errors(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_SESSION
@@ -971,6 +996,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_begin(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_begin_mergeable(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN_UPLOAD
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN_UPLOAD
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_begin_upload(void
@@ -998,6 +1029,18 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_delete(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DELETE_AT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DELETE_AT
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_delete_at(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_delete_client_storage(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DISCONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DISCONNECT
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_disconnect(void
     
 );
 #endif
@@ -1046,6 +1089,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_one(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ONE_AT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ONE_AT
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_one_at(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_RECONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_RECONNECT
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_reconnect(void
     
 );
 #endif
@@ -1124,6 +1173,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_upsert(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WAIT_FOR_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WAIT_FOR_SYNC
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_wait_for_sync(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_watch_mutation_errors(void
     
 );
 #endif

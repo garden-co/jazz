@@ -8,11 +8,12 @@ A Rust service can be a backend client of your app's TypeScript main backend (`c
 opens the app from the same `jazz.app.json` and `jazz.permissions.json`, with typed bindings, and
 the main backend decides whether it is trusted or acts as one user.
 
-The `jazz-app` crate isn't on crates.io yet, so depend on it from the Jazz repository:
+The `jazz-app` crate isn't on crates.io yet, so depend on it from the Jazz repository, at the
+release tag:
 
 ```toml title="Cargo.toml"
 [dependencies]
-jazz-app = { git = "https://github.com/garden-co/jazz" }
+jazz-app = { git = "https://github.com/garden-co/jazz", tag = "v2.0.0-alpha.66" }
 tokio = { version = "1", features = ["full"] }
 ```
 
