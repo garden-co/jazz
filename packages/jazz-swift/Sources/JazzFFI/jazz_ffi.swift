@@ -2900,6 +2900,14 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case Unsynced(pending: UInt64, reason: String
     )
+    /**
+     * Contract 2: a trusted backend client's `for_user` refused because
+     * the client's permissions bundle (`own`) isn't the one the main
+     * backend serves (`served`): reopen it with the app's published
+     * `jazz.permissions.json` (TS's `code: "bundle_mismatch"`).
+     */
+    case BundleMismatch(own: String, served: String, reason: String
+    )
 
     
 
@@ -2953,6 +2961,11 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             pending: try FfiConverterUInt64.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
+        case 9: return .BundleMismatch(
+            own: try FfiConverterString.read(from: &buf), 
+            served: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3003,6 +3016,13 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
         case let .Unsynced(pending,reason):
             writeInt(&buf, Int32(8))
             FfiConverterUInt64.write(pending, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .BundleMismatch(own,served,reason):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(own, into: &buf)
+            FfiConverterString.write(served, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
         }

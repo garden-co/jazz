@@ -23,6 +23,10 @@ func TestBackendClientErrors(t *testing.T) {
 	if !errors.Is(err, ErrUnsynced) || !errors.As(err, &e) || e.Pending != 2 {
 		t.Fatalf("unsynced = %#v", err)
 	}
+	err = parseError(`{"kind":"bundleMismatch","message":"permissions differ","own":"ab12","served":"cd34"}`)
+	if !errors.Is(err, ErrBundleMismatch) || !errors.As(err, &e) || e.OwnBundle != "ab12" || e.ServedBundle != "cd34" {
+		t.Fatalf("bundleMismatch = %#v", err)
+	}
 	err = parseError(`{"kind":"permission","message":"the main backend refused to act for u1"}`)
 	if !errors.Is(err, ErrPermission) {
 		t.Fatalf("403 = %#v", err)
