@@ -21,8 +21,7 @@ Three tables: the workspace itself, a members join table that records each user'
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "workspaces": {
       "columns": {
@@ -61,8 +60,7 @@ Three tables: the workspace itself, a members join table that records each user'
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "defs": {
     "isMember($workspace)": "exists workspaceMembers(workspaceId = $workspace, user_id = session.user)",
     "hasRole($workspace, $role)": "exists workspaceMembers(workspaceId = $workspace, user_id = session.user, role = $role)",

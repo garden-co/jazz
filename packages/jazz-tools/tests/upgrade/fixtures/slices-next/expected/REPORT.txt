@@ -1,5 +1,6 @@
 Wrote:
   jazz.app.json
+  jazz.permissions.json
   app-extras.ts
   jazz.generated.ts
   app/demo.html

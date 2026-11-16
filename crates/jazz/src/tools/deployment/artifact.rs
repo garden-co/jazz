@@ -37,17 +37,25 @@ use super::published::{
 use super::{DeploymentRequest, structural};
 use json::Json;
 
-/// The `format` of both files this version of Jazz reads and writes.
-pub const FORMAT: u32 = 1;
+/// The version of both files this version of Jazz reads and writes. A file
+/// names its version in `$schema`, the URL of its JSON Schema
+/// ([`APP_SCHEMA_URL`], [`PERMISSIONS_SCHEMA_URL`]).
+pub const VERSION: u32 = 1;
 
 /// The app's file: tables, relations, history and migrations.
 pub const APP_FILE: &str = "jazz.app.json";
 /// The backend's file: the current version's permissions.
 pub const PERMISSIONS_FILE: &str = "jazz.permissions.json";
 
-/// The JSON Schemas the files name in `$schema`.
-pub const APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.schema.json";
-pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permissions.schema.json";
+/// The JSON Schemas the files name in `$schema`, which carries their version.
+pub const APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.v1.json";
+pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permissions.v1.json";
+/// The unversioned URLs Jazz before alpha.66 wrote, next to `"format": 1`. Such files
+/// still load, as version 1.
+pub const LEGACY_APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.schema.json";
+pub const LEGACY_PERMISSIONS_SCHEMA_URL: &str =
+    "https://jazz.tools/schemas/jazz.permissions.schema.json";
+const SCHEMA_URL_BASE: &str = "https://jazz.tools/schemas/";
 
 /// Why a `jazz.app.json` or `jazz.permissions.json` was refused. Every
 /// message names the file and the JSON path, and inside an expression the
@@ -349,7 +357,7 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
             (table.clone(), names)
         })
         .collect();
-    let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
+    let permissions_json = read_version(PERMISSIONS_FILE, permissions)?;
     let permissions = permissions_file::read(
         &permissions_json,
         history.current_schema(),
@@ -482,7 +490,7 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
                 .collect()
         })
         .unwrap_or_default();
-    let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
+    let permissions_json = read_version(PERMISSIONS_FILE, permissions)?;
     let permissions = permissions_file::read(
         &permissions_json,
         history.current_schema(),
@@ -644,7 +652,7 @@ pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations
 }
 
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
-    let root = read_format(APP_FILE, json)?;
+    let root = read_version(APP_FILE, json)?;
     refuse_todos(&root)?;
     app_file::read(&root).map_err(|refusal| ArtifactError::at(APP_FILE, refusal))
 }
@@ -749,10 +757,14 @@ fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
     )))
 }
 
-/// The file as JSON, once its `format` is one this version reads. The
-/// format comes first, so a file from a newer Jazz is refused for what it is
-/// rather than for the fields this version doesn't know.
-fn read_format(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
+/// The file as JSON, once its version is one this version reads. The version
+/// comes first, so a file from a newer Jazz is refused for what it is rather
+/// than for the fields this version doesn't know.
+///
+/// `$schema` carries the version: `https://jazz.tools/schemas/<file>.v<N>.json`.
+/// Legacy files (before alpha.66) carry `"format": 1` and/or the unversioned
+/// `<file>.schema.json` URL instead; they read as version 1.
+fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
     let refuse = |message: String| ArtifactError::in_file(file, message);
     let root = json::parse(json).map_err(refuse)?;
     let Some(object) = root.as_object() else {
@@ -761,16 +773,76 @@ fn read_format(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
             root.kind()
         )));
     };
-    match object.iter().find(|(k, _)| k == "format").map(|(_, v)| v) {
+    let (url, legacy_url) = if file == APP_FILE {
+        (APP_SCHEMA_URL, LEGACY_APP_SCHEMA_URL)
+    } else {
+        (PERMISSIONS_SCHEMA_URL, LEGACY_PERMISSIONS_SCHEMA_URL)
+    };
+    let newer = |version: &str| {
+        refuse(format!(
+            "version {version} was written by a newer Jazz; this version of Jazz reads version \
+             {VERSION}. Upgrade jazz-tools"
+        ))
+    };
+    let get = |key: &str| object.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let format = match get("format") {
+        None => None,
+        Some(Json::Number(n)) if n == &VERSION.to_string() => Some(VERSION),
+        Some(Json::Number(n)) if n.parse::<u64>().is_ok_and(|n| n > u64::from(VERSION)) => {
+            return Err(newer(n));
+        }
+        Some(Json::Number(n)) if n.parse::<u64>().is_ok() => {
+            return Err(refuse(format!(
+                "version {n} is not supported; this version of Jazz reads version {VERSION}"
+            )));
+        }
+        Some(other) => {
+            return Err(refuse(format!(
+                "the legacy `format` must be the integer {VERSION}, not {}; drop it and name \
+                 \"$schema\": \"{url}\"",
+                json::print(other).trim_end()
+            )));
+        }
+    };
+    let file_stem = file.trim_end_matches(".json");
+    let versioned = |s: &str| -> Option<String> {
+        s.strip_prefix(SCHEMA_URL_BASE)
+            .and_then(|rest| rest.strip_prefix(file_stem))
+            .and_then(|rest| rest.strip_prefix(".v"))
+            .and_then(|rest| rest.strip_suffix(".json"))
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .map(str::to_string)
+    };
+    match get("$schema") {
+        // A legacy file: before alpha.66 `$schema` was only an editor hint, so any
+        // value (a relative path, another URL, null) loaded next to `format`.
+        // Only a versioned URL naming another version contradicts it.
+        Some(Json::String(s)) if format.is_some() && versioned(s).is_none() => Ok(root),
+        Some(other) if format.is_some() && !matches!(other, Json::String(_)) => Ok(root),
+        None if format.is_some() => Ok(root),
         None => Err(refuse(format!(
-            "no `format`; the file starts {{ \"format\": {FORMAT}, … }}"
+            "no `$schema`; the file starts {{ \"$schema\": \"{url}\", … }}. Run `jazz-tools \
+             generate` to write it"
         ))),
-        Some(Json::Number(n)) if n == &FORMAT.to_string() => Ok(root),
-        Some(Json::Number(n)) if n.parse::<u64>().is_ok() => Err(refuse(format!(
-            "format {n} is not supported by this version of Jazz, which reads format {FORMAT}"
-        ))),
+        Some(Json::String(s)) if s == legacy_url => Ok(root),
+        Some(Json::String(s)) => match versioned(s) {
+            Some(v) if v == VERSION.to_string() => Ok(root),
+            Some(v)
+                if format.is_none() && v.parse::<u64>().is_ok_and(|n| n > u64::from(VERSION)) =>
+            {
+                Err(newer(&v))
+            }
+            Some(v) if format.is_none() => Err(refuse(format!(
+                "version {v} is not supported; this version of Jazz reads version {VERSION}"
+            ))),
+            Some(v) => Err(refuse(format!(
+                "`$schema` names version {v} but the legacy `format` is {VERSION}; drop \
+                     `format`"
+            ))),
+            None => Err(refuse(format!("`$schema` must be \"{url}\", not \"{s}\""))),
+        },
         Some(other) => Err(refuse(format!(
-            "`format` must be the integer {FORMAT}, not {}",
+            "`$schema` must be the string \"{url}\", not {}",
             json::print(other).trim_end()
         ))),
     }
