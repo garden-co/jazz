@@ -38,21 +38,33 @@ pub const FORMAT: u32 = 2;
 pub const HEADER: &str =
     "// JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.";
 
-/// The marker beside `jazz.app.json` that says the app is written in Kotlin.
+/// The marker beside `jazz.app.json` that says the app is written in Kotlin
+/// (or its Groovy twin, [`GROOVY_MARKER`]).
 pub const MARKER: &str = "build.gradle.kts";
 
-/// The runtime a Kotlin app's `build.gradle.kts` depends on.
+/// A Groovy build script, which counts as [`MARKER`] does.
+pub const GROOVY_MARKER: &str = "build.gradle";
+
+/// The runtime a Kotlin app's build script depends on.
 pub const RUNTIME: &str = "jazz-kotlin";
 
-/// Whether `build` (a `build.gradle.kts`) is a Kotlin Jazz app's: it depends
-/// on the `jazz-kotlin` runtime, by coordinate or as a release's jar or AAR.
+/// The Android runtime (which brings [`RUNTIME`] with it).
+pub const ANDROID_RUNTIME: &str = "jazz-kotlin-android";
+
+/// Whether `build` (a `build.gradle.kts`, or a Groovy `build.gradle`) is a
+/// Kotlin Jazz app's: it depends on the `jazz-kotlin` or `jazz-kotlin-android`
+/// runtime, by coordinate or as a release's jar or AAR.
 pub fn is_app_build(build: &str) -> bool {
     build
         .lines()
         .map(|line| line.split("//").next().unwrap_or(""))
         .any(|line| {
-            line.contains(&format!(":{RUNTIME}\""))
-                || line.contains(&format!(":{RUNTIME}:"))
+            // `"tools.jazz:jazz-kotlin"`, `'tools.jazz:jazz-kotlin:<version>'`, …
+            [RUNTIME, ANDROID_RUNTIME].iter().any(|runtime| {
+                ['"', '\'', ':']
+                    .iter()
+                    .any(|end| line.contains(&format!(":{runtime}{end}")))
+            })
                 // The jar or AAR from a GitHub release: `files("libs/jazz-kotlin-<version>.jar")`.
                 || (line.contains(&format!("{RUNTIME}-"))
                     && (line.contains(".jar") || line.contains(".aar")))
@@ -1069,6 +1081,23 @@ mod tests {
         ));
         assert!(is_app_build(
             "implementation(files(\"libs/jazz-kotlin-android-2.0.0-alpha.66.aar\"))"
+        ));
+        // The Android runtime's coordinate.
+        assert!(is_app_build(
+            "implementation(\"tools.jazz:jazz-kotlin-android:2.0.0-alpha.66\")"
+        ));
+        assert!(!is_app_build(
+            "implementation(\"tools.jazz:jazz-kotlinx:1\")"
+        ));
+        // Groovy, with single quotes.
+        assert!(is_app_build(
+            "dependencies {\n    implementation 'tools.jazz:jazz-kotlin:2.0.0-alpha.66'\n}\n"
+        ));
+        assert!(is_app_build(
+            "implementation 'tools.jazz:jazz-kotlin-android'"
+        ));
+        assert!(is_app_build(
+            "implementation files('libs/jazz-kotlin-2.0.0-alpha.66.jar')"
         ));
     }
 
