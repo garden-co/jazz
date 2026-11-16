@@ -3,6 +3,8 @@
 
 use todo_server_docs::jazz_app;
 
+pub mod client;
+
 /// Connects to the main backend's `/jazz` as a scoped machine, reads, and
 /// closes.
 pub async fn backend_client() -> ::jazz_app_support::Result<()> {

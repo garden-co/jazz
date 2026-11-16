@@ -18,12 +18,21 @@ compared with TypeScript.
     **Experimental.** Rust is a client of your TypeScript main backend's `/jazz`, in two roles: an
     app signed in as one of your users (`Config::user`, with device accounts or bearer sign-in, and
     `JazzSession`), or a backend client, a service with a machine credential, trusted or scoped, with
-    `for_user` on a trusted client. See [Backend Client](/docs/setup/backend-client).
+    `for_user` on a trusted client. It has queries with includes, `select`, hops, gathers and unions,
+    history reads and subscriptions, partial reads (`Query::part`), branches and drafts, streaming
+    uploads, mergeable text, permission advice, guests (device accounts), positions in subscription
+    deltas, and `close(timeout)`. See [Rust](/docs/setup/rust) and
+    [Backend Client](/docs/setup/backend-client).
 
     It doesn't support yet:
 
     - running your app's main backend (serving its `/jazz` and publishing its permissions): run it
-      in TypeScript with `createJazz`.
+      in TypeScript with `createJazz`;
+    - a built-in secure store (keychain) for device keys: the app keeps the key itself;
+    - cookie sessions renewed in place: a Rust client signs in with a bearer and reconnects with a
+      fresh one;
+    - the browser-only parts of TypeScript's session: focus and visibility re-checks, cross-tab
+      sign-out, `clearOnSignOut` and the thin-client upgrade.
 
   </Tab>
   <Tab value="Swift">

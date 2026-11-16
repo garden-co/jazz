@@ -364,6 +364,7 @@ dependencies = [
 name = "backend-client-docs"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "jazz-app-support",
  "serde_json",
  "todo-server-docs",
