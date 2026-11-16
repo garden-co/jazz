@@ -69,7 +69,9 @@ export async function printTs(options: PrintTsOptions): Promise<string[]> {
   return written;
 }
 
-async function defaultSnapshot(): Promise<(tables: Record<string, TableJson>) => Promise<Snapshot>> {
+async function defaultSnapshot(): Promise<
+  (tables: Record<string, TableJson>) => Promise<Snapshot>
+> {
   const { snapshotFromVersion } = await import("../dev/migrations.js");
   return (tables) => snapshotFromVersion(tables as never);
 }

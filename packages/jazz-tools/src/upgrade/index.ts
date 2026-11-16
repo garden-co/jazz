@@ -21,7 +21,6 @@
  *
  * Every refusal before step 6 comes before the first write.
  */
-import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -223,14 +222,19 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   }
   // The old permissions' named values keep their names; what came from the environment gets a TODO.
   const oldSource =
-    codemod.inlinePermissions || !project.permissionsFile ? project.schemaFile : project.permissionsFile;
-  const constants = collectConstants(ts, oldSource, (spec, from) => resolveImport(project, spec, from));
+    codemod.inlinePermissions || !project.permissionsFile
+      ? project.schemaFile
+      : project.permissionsFile;
+  const constants = collectConstants(ts, oldSource, (spec, from) =>
+    resolveImport(project, spec, from),
+  );
   const printed = printPermissions(app, permissions, {
     spreads: spreadPermissions,
     skipTables,
     constants: constants.byValue,
     notes: envReads.map(
-      (read) => `TODO: ${read.replace(/: reads /, " read ")}; the value it had when \`validate\` ran is printed below.`,
+      (read) =>
+        `TODO: ${read.replace(/: reads /, " read ")}; the value it had when \`validate\` ran is printed below.`,
     ),
   });
   if (printed.unsupported.length > 0) {
@@ -249,7 +253,12 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   const deleted = new Set<string>(project.permissionsSources);
   if (separate) deleted.delete(project.permissionsFile!);
   const permissionsOut = separate ? project.permissionsFile! : project.schemaFile;
-  const named = constantImports(constants, printed.constantsUsed, permissionsOut, scan.jsExtensions);
+  const named = constantImports(
+    constants,
+    printed.constantsUsed,
+    permissionsOut,
+    scan.jsExtensions,
+  );
   const permissionsBody = await format(
     [...named.declarations, ...(named.declarations.length ? [""] : []), printed.code].join("\n"),
     project.schemaFile,
@@ -390,7 +399,8 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
         writeFileSync(path, text);
       }
     }
-    for (const path of appFiles(project.schemaDir)) if (!filesBefore.has(path)) rmSync(path, { force: true });
+    for (const path of appFiles(project.schemaDir))
+      if (!filesBefore.has(path)) rmSync(path, { force: true });
   };
   for (const [path, text] of writes) writeFileSync(path, text);
   for (const path of deleted) rmSync(path, { force: true });
@@ -748,7 +758,10 @@ function scanImports(project: Project): ImportScan {
         if (target) {
           targets.add(target);
           if (target === project.schemaFile && !project.permissionsSources.includes(file)) {
-            if (spec.text.startsWith(".")) spec.text.endsWith(".js") ? js++ : plain++;
+            if (spec.text.startsWith(".")) {
+              if (spec.text.endsWith(".js")) js++;
+              else plain++;
+            }
             if (ts.isImportDeclaration(node)) {
               const bindings = node.importClause?.namedBindings;
               if (bindings && ts.isNamedImports(bindings)) {

@@ -106,7 +106,11 @@ describe("the permissions printer", () => {
     const crewOrChief = (role: string) =>
       `exists crew(showId = this.showId, userId = session.user) or exists crew(showId = this.showId, userId = session.user, role = '${role}')`;
     const out = print(shows, {
-      notes: { read: crewOrChief("chief"), insert: crewOrChief("chief"), delete: crewOrChief("lead") },
+      notes: {
+        read: crewOrChief("chief"),
+        insert: crewOrChief("chief"),
+        delete: crewOrChief("lead"),
+      },
       cues: { read: crewOrChief("chief") },
     });
     expect(out.unsupported).toEqual([]);
@@ -121,8 +125,16 @@ describe("the permissions printer", () => {
   it("prints named values by name", () => {
     const out = printPermissions(
       app({ chats: { columns: { kind: "string", role: "string" } } }),
-      { format: 1, tables: { chats: { read: "kind = 'announcements' and role in ['admin', 'editor']" } } },
-      { constants: new Map([['"announcements"', "ANNOUNCEMENTS"], ['["admin", "editor"]', "editors"]]) },
+      {
+        format: 1,
+        tables: { chats: { read: "kind = 'announcements' and role in ['admin', 'editor']" } },
+      },
+      {
+        constants: new Map([
+          ['"announcements"', "ANNOUNCEMENTS"],
+          ['["admin", "editor"]', "editors"],
+        ]),
+      },
     );
     expect(out.code).toContain("read: { kind: ANNOUNCEMENTS, role: editors },");
     expect(out.constantsUsed.sort()).toEqual(["ANNOUNCEMENTS", "editors"]);

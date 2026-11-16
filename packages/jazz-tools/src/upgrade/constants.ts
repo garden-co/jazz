@@ -43,7 +43,8 @@ export function collectConstants(
     if (ts.isIdentifier(node)) used.add(node.text);
     ts.forEachChild(node, visit);
   };
-  for (const statement of source.statements) if (!ts.isImportDeclaration(statement)) visit(statement);
+  for (const statement of source.statements)
+    if (!ts.isImportDeclaration(statement)) visit(statement);
 
   const add = (name: string, value: unknown, constant: NamedConstant) => {
     const text = jsLiteral(value);
@@ -90,7 +91,9 @@ function literalConstants(
   for (const statement of only ? [only] : source.statements) {
     if (!ts.isVariableStatement(statement)) continue;
     if (!(statement.declarationList.flags & ts.NodeFlags.Const)) continue;
-    const exported = (ts.getModifiers(statement) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    const exported = (ts.getModifiers(statement) ?? []).some(
+      (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+    );
     if (exportedOnly && !exported) continue;
     for (const declaration of statement.declarationList.declarations) {
       if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
@@ -106,7 +109,11 @@ function literalConstants(
 }
 
 function literal(ts: Ts, node: TS.Expression): unknown {
-  while (ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isParenthesizedExpression(node)) {
+  while (
+    ts.isAsExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isParenthesizedExpression(node)
+  ) {
     node = node.expression;
   }
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
@@ -115,7 +122,8 @@ function literal(ts: Ts, node: TS.Expression): unknown {
   if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
   if (ts.isArrayLiteralExpression(node)) {
     const items = node.elements.map((e) => literal(ts, e as TS.Expression));
-    if (items.some((i) => i === undefined || (typeof i === "object" && i !== null))) return undefined;
+    if (items.some((i) => i === undefined || (typeof i === "object" && i !== null)))
+      return undefined;
     return items;
   }
   return undefined;
@@ -140,9 +148,12 @@ export function constantImports(
     let specifier = relative(dirname(file), constant.file!).split("\\").join("/");
     specifier = specifier.replace(/\.(ts|tsx|mts|cts|js|mjs)$/, jsExtensions ? ".js" : "");
     if (!specifier.startsWith(".")) specifier = `./${specifier}`;
-    const element = constant.exported && constant.exported !== name ? `${constant.exported} as ${name}` : name;
+    const element =
+      constant.exported && constant.exported !== name ? `${constant.exported} as ${name}` : name;
     byModule.set(specifier, [...(byModule.get(specifier) ?? []), element]);
   }
-  const imports = [...byModule].map(([spec, elements]) => `import { ${elements.sort().join(", ")} } from ${JSON.stringify(spec)};`);
+  const imports = [...byModule].map(
+    ([spec, elements]) => `import { ${elements.sort().join(", ")} } from ${JSON.stringify(spec)};`,
+  );
   return { imports, declarations };
 }

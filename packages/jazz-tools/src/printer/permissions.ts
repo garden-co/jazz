@@ -77,7 +77,14 @@ export interface PrintPermissionsOptions {
   notes?: string[];
 }
 
-const FLIP: Record<CmpOp, CmpOp> = { "=": "=", "!=": "!=", "<": ">", "<=": ">=", ">": "<", ">=": "<=" };
+const FLIP: Record<CmpOp, CmpOp> = {
+  "=": "=",
+  "!=": "!=",
+  "<": ">",
+  "<=": ">=",
+  ">": "<",
+  ">=": "<=",
+};
 const OP_FN: Record<Exclude<CmpOp, "=">, string> = {
   "!=": "ne",
   "<": "lt",
@@ -226,7 +233,8 @@ export function printPermissions(
   const lines: string[] = [];
   const tools = ["definePermissions", ...TOOL_ORDER.filter((t) => printer.tools.has(t))];
   lines.push(`const { ${tools.join(", ")} } = ${schemaName};`, "");
-  for (const helper of printer.helperOrder) lines.push(printHelper(helper, printer.bodies.get(helper)!), "");
+  for (const helper of printer.helperOrder)
+    lines.push(printHelper(helper, printer.bodies.get(helper)!), "");
   for (const note of options.notes ?? []) lines.push(`// ${note}`);
   const spreads = (options.spreads ?? []).map((s) => `...${s},`);
   lines.push(`export const permissions = definePermissions({`, ...spreads, body, `});`);
@@ -265,7 +273,9 @@ function selectHelpers(occurrences: Occurrence[], taken: Set<string>): Selection
   const byKey = new Map<string, number[]>();
   occurrences.forEach((o, i) => byKey.set(o.key, [...(byKey.get(o.key) ?? []), i]));
   const parent = new Map<number, number>();
-  occurrences.forEach((o, i) => o.children.forEach((c) => c !== i && !parent.has(c) && parent.set(c, i)));
+  occurrences.forEach((o, i) =>
+    o.children.forEach((c) => c !== i && !parent.has(c) && parent.set(c, i)),
+  );
   const ancestors = (i: number): number[] => {
     const out: number[] = [];
     for (let p = parent.get(i); p !== undefined; p = parent.get(p)) out.push(p);
@@ -293,13 +303,20 @@ function selectHelpers(occurrences: Occurrence[], taken: Set<string>): Selection
     const occ = byKey.get(key)!.map((i) => occurrences[i]!);
     const firstOcc = occ[0]!;
     const params = paramsOf(occ.map((o) => o.args));
-    const varying = params.flatMap((p, i) => ("name" in p && firstOcc.args[i]!.literal ? [p.name] : []));
+    const varying = params.flatMap((p, i) =>
+      "name" in p && firstOcc.args[i]!.literal ? [p.name] : [],
+    );
     const fixed = params.flatMap((p, i) =>
       "fixed" in p ? [`${pascal(firstOcc.args[i]!.name)}${pascal(p.fixed.replace(/"/g, ""))}`] : [],
     );
     // A combination too long to name by its parts is named for the row it checks.
-    const row = /^s\.Row<typeof \w+, "(\w+)">$/.exec(firstOcc.args.find((a) => a.type.startsWith("s.Row<"))?.type ?? "")?.[1];
-    const hint = (firstOcc.hint === "anyRule" || firstOcc.hint === "allRules") && row ? `${camel(singular(row))}Rule` : firstOcc.hint;
+    const row = /^s\.Row<typeof \w+, "(\w+)">$/.exec(
+      firstOcc.args.find((a) => a.type.startsWith("s.Row<"))?.type ?? "",
+    )?.[1];
+    const hint =
+      (firstOcc.hint === "anyRule" || firstOcc.hint === "allRules") && row
+        ? `${camel(singular(row))}Rule`
+        : firstOcc.hint;
     const base = hint + varying.map((n) => `With${pascal(n)}`).join("");
     const helper: Helper = { name: "", params };
     helpers.set(key, helper);
@@ -310,7 +327,8 @@ function selectHelpers(occurrences: Occurrence[], taken: Set<string>): Selection
   for (const d of drafts) counts.set(d.base, (counts.get(d.base) ?? 0) + 1);
   for (const d of drafts) {
     let name = d.base;
-    if ((counts.get(d.base) ?? 0) > 1 && d.qualifiers.length) name += `With${d.qualifiers.join("And")}`;
+    if ((counts.get(d.base) ?? 0) > 1 && d.qualifiers.length)
+      name += `With${d.qualifiers.join("And")}`;
     if (name.length > 40) name = d.base;
     d.helper.name = fresh(name, taken);
   }
@@ -340,7 +358,12 @@ function printHelper(helper: Helper, source: string): string {
 // Fragments
 // ---------------------------------------------------------------------------
 
-const lit = (text: string, hint?: string): Frag => ({ text, args: [], occ: [], ...(hint ? { hint } : {}) });
+const lit = (text: string, hint?: string): Frag => ({
+  text,
+  args: [],
+  occ: [],
+  ...(hint ? { hint } : {}),
+});
 
 /**
  * Join fragments with `render`, renumbering their placeholders. A row value
@@ -375,7 +398,9 @@ function canonical(frag: Frag): Frag {
     if (arg.literal) return all;
     const dot = arg.text.lastIndexOf(".");
     const row = dot > 0 ? rows.get(arg.text.slice(0, dot)) : undefined;
-    return row !== undefined && row !== Number(i) ? `${PLACEHOLDER(row)}${arg.text.slice(dot)}` : all;
+    return row !== undefined && row !== Number(i)
+      ? `${PLACEHOLDER(row)}${arg.text.slice(dot)}`
+      : all;
   });
   const order: number[] = [];
   text = text.replace(PLACEHOLDER_RE, (_, i: string) => {
@@ -441,7 +466,11 @@ class Printer {
     const helper = this.selection?.byKey.get(shape);
     const label = literalsInHint
       ? hint
-      : hint + c.args.filter((a) => a.literal).map((a) => pascal(a.text.replace(/"/g, ""))).join("");
+      : hint +
+        c.args
+          .filter((a) => a.literal)
+          .map((a) => pascal(a.text.replace(/"/g, "")))
+          .join("");
     if (!helper) return { ...c, occ: [...frag.occ, id], hint, label };
     this.seen.set(shape, [...(this.seen.get(shape) ?? []), c.args]);
     if (!this.bodies.has(helper)) {
@@ -457,8 +486,17 @@ class Printer {
     });
     const takes = helper.params.some((p) => "name" in p);
     const text = takes ? `${helper.name}(${callArgs.join(", ")})` : helper.name;
-    const passed = args.filter((a) => a.literal).map((a) => pascal(a.text.replace(/"/g, ""))).join("");
-    return { text, args, occ: [id], hint: helper.name, label: helper.name.replace(/With[A-Z]\w*$/, "") + passed };
+    const passed = args
+      .filter((a) => a.literal)
+      .map((a) => pascal(a.text.replace(/"/g, "")))
+      .join("");
+    return {
+      text,
+      args,
+      occ: [id],
+      hint: helper.name,
+      label: helper.name.replace(/With[A-Z]\w*$/, "") + passed,
+    };
   }
 
   private table(table: string, rules: TablePoliciesJson): string {
@@ -510,29 +548,42 @@ class Printer {
         throw new Unprintable(policy, (error as Error).message);
       }
       if (JSON.stringify(ast).includes('"kind":"call"')) {
-        throw new Unprintable(policy, "`defs` are not part of the alpha.66 format; inline them first");
+        throw new Unprintable(
+          policy,
+          "`defs` are not part of the alpha.66 format; inline them first",
+        );
       }
       try {
         return this.expr(ast, ctx, { table: ctx.table });
       } catch (error) {
-        if (error instanceof Unprintable && error.text === "") throw new Unprintable(policy, error.reason);
+        if (error instanceof Unprintable && error.text === "")
+          throw new Unprintable(policy, error.reason);
         throw error;
       }
     }
     if ("anyOf" in policy) {
-      return this.combinator("anyOf", policy.anyOf.map((p, i) => this.policy(p, ctx, `${path}.anyOf[${i}]`)));
+      return this.combinator(
+        "anyOf",
+        policy.anyOf.map((p, i) => this.policy(p, ctx, `${path}.anyOf[${i}]`)),
+      );
     }
     if ("allOf" in policy) {
       const items = policy.allOf.map((p) => (typeof p === "string" ? safeParse(p) : undefined));
       const merged = this.mergeConditions(items, ctx, { table: ctx.table });
       if (merged) return merged;
-      return this.combinator("allOf", policy.allOf.map((p, i) => this.policy(p, ctx, `${path}.allOf[${i}]`)));
+      return this.combinator(
+        "allOf",
+        policy.allOf.map((p, i) => this.policy(p, ctx, `${path}.allOf[${i}]`)),
+      );
     }
     if ("where" in policy) {
       const inner = this.policy(policy.where, ctx, `${path}.where`);
       return { ...inner, text: `${lineComment(policy.$comment)}${inner.text}` };
     }
-    throw new Unprintable(JSON.stringify(policy), "a policy with both `using` and `withCheck` has no DSL form");
+    throw new Unprintable(
+      JSON.stringify(policy),
+      "a policy with both `using` and `withCheck` has no DSL form",
+    );
   }
 
   /** `anyOf(…)` / `allOf(…)` / `not(…)`: a helper when it repeats. */
@@ -553,7 +604,12 @@ class Printer {
             if (i === 0) return w.join("");
             let shared = 0;
             while (shared < w.length - 1 && w[shared] === words[0]![shared]) shared++;
-            return pascal(w.slice(shared).join("").replace(/^is(?=[A-Z])/, ""));
+            return pascal(
+              w
+                .slice(shared)
+                .join("")
+                .replace(/^is(?=[A-Z])/, ""),
+            );
           })
           .join(sep);
       };
@@ -569,7 +625,11 @@ class Printer {
    * `a = 1 and b = 2` → `{ a: 1, b: 2 }`, when every item is a plain
    * condition on a distinct column of the scope.
    */
-  private mergeConditions(items: (Ast | undefined)[], ctx: RuleCtx, scope: Scope): Frag | undefined {
+  private mergeConditions(
+    items: (Ast | undefined)[],
+    ctx: RuleCtx,
+    scope: Scope,
+  ): Frag | undefined {
     if (items.length < 2 || items.some((i) => i === undefined)) return undefined;
     const entries: [string, Frag][] = [];
     for (const item of items) {
@@ -603,11 +663,17 @@ class Printer {
       case "bool":
         return lit(String(ast.value));
       case "or":
-        return this.combinator("anyOf", ast.items.map((i) => this.expr(i, ctx, scope)));
+        return this.combinator(
+          "anyOf",
+          ast.items.map((i) => this.expr(i, ctx, scope)),
+        );
       case "and": {
         const merged = this.mergeConditions(ast.items, ctx, scope);
         if (merged) return merged;
-        return this.combinator("allOf", ast.items.map((i) => this.expr(i, ctx, scope)));
+        return this.combinator(
+          "allOf",
+          ast.items.map((i) => this.expr(i, ctx, scope)),
+        );
       }
       case "not":
         return this.combinator("not", [this.expr(ast.inner, ctx, scope)]);
@@ -621,8 +687,14 @@ class Printer {
         this.tools.add("allowedTo");
         const depth = ast.maxDepth !== undefined ? `, { maxDepth: ${ast.maxDepth} }` : "";
         if (ast.target.kind === "via" && ast.target.table !== undefined) {
-          const target = member(member(`${this.schemaName}.tables`, ast.target.table), ast.target.column);
-          return lit(`allowedTo.${ast.op}(${target}${depth})`, `can${pascal(ast.op)}Via${pascal(ast.target.table)}`);
+          const target = member(
+            member(`${this.schemaName}.tables`, ast.target.table),
+            ast.target.column,
+          );
+          return lit(
+            `allowedTo.${ast.op}(${target}${depth})`,
+            `can${pascal(ast.op)}Via${pascal(ast.target.table)}`,
+          );
         }
         const name = ast.target.kind === "relation" ? ast.target.name : ast.target.column;
         return {
@@ -655,20 +727,30 @@ class Printer {
 
   /** A column of the checked row, as an argument. */
   private columnArg(ctx: RuleCtx, column: string): Arg {
-    return { text: member(ctx.row, column), name: column, type: valueType(this.kindOf(ctx.table, column)) };
+    return {
+      text: member(ctx.row, column),
+      name: column,
+      type: valueType(this.kindOf(ctx.table, column)),
+    };
   }
 
   /** `exists t(…)`, idiomatically. */
   private exists(ast: Extract<Ast, { kind: "exists" }>, ctx: RuleCtx, scope: Scope): Frag {
     if (scope.inExists) {
       // An `exists` inside another: its conditions name only its own rows.
-      return this.existsGeneric(ast, ctx, { table: ast.table, alias: ast.alias, inExists: true, nested: true });
+      return this.existsGeneric(ast, ctx, {
+        table: ast.table,
+        alias: ast.alias,
+        inExists: true,
+        nested: true,
+      });
     }
     const inner: Scope = { table: ast.table, alias: ast.alias, inExists: true };
     /** The checked row's column that `c` compares `col` of `t` with. */
     const outerOf = (c: Ast | undefined, col: string): string | undefined => {
       if (c?.kind !== "cmp" || c.op !== "=") return undefined;
-      if (c.left.kind !== "column" || !this.isInnerColumn(c.left, inner) || c.left.name !== col) return undefined;
+      if (c.left.kind !== "column" || !this.isInnerColumn(c.left, inner) || c.left.name !== col)
+        return undefined;
       return this.outerColumn(c.right, inner);
     };
     // `{ a: old.a, b: old.b }`: the old row is the same table's row with this id,
@@ -724,17 +806,27 @@ class Printer {
   private existsGeneric(ast: Extract<Ast, { kind: "exists" }>, ctx: RuleCtx, inner: Scope): Frag {
     this.tools.add("exists");
     const head = this.conditions(ast.conditions, ctx, inner);
-    if (!head) throw new Unprintable("", "an `exists` whose conditions aren't plain column conditions");
+    if (!head)
+      throw new Unprintable("", "an `exists` whose conditions aren't plain column conditions");
     const parts: Frag[] = [head.object ?? lit("{}"), ...head.extras];
     let frag = join(parts, (texts) => `${member("exists", ast.table)}(${texts.join(", ")})`);
     let table = ast.table;
     for (const hop of ast.hops) {
       const target = this.relationTarget(table, hop.relation);
       if (!target) throw new Unprintable("", `unknown relation \`${hop.relation}\` of ${table}`);
-      const conds = this.conditions(hop.conditions, ctx, { table: target, inExists: true, nested: inner.nested });
-      if (!conds) throw new Unprintable("", "a hop whose conditions aren't plain column conditions");
-      const hopParts = conds.object || conds.extras.length ? [conds.object ?? lit("{}"), ...conds.extras] : [];
-      frag = join([frag, ...hopParts], ([h, ...rest]) => `${h}.hop(${[JSON.stringify(hop.relation), ...rest].join(", ")})`);
+      const conds = this.conditions(hop.conditions, ctx, {
+        table: target,
+        inExists: true,
+        nested: inner.nested,
+      });
+      if (!conds)
+        throw new Unprintable("", "a hop whose conditions aren't plain column conditions");
+      const hopParts =
+        conds.object || conds.extras.length ? [conds.object ?? lit("{}"), ...conds.extras] : [];
+      frag = join(
+        [frag, ...hopParts],
+        ([h, ...rest]) => `${h}.hop(${[JSON.stringify(hop.relation), ...rest].join(", ")})`,
+      );
       table = target;
     }
     const hint = `is${pascal(singular(ast.table))}`;
@@ -773,7 +865,9 @@ class Printer {
     if (entries.length === 0) return { object: undefined, extras };
     // A constant object may be a helper used elsewhere (`msg.sender.where(mine)`).
     const constant = entries.every(([, v]) => v.args.every((a) => a.literal));
-    const object = constant ? this.conditionObject(entries, { table: scope.table }) : objectFrag(entries);
+    const object = constant
+      ? this.conditionObject(entries, { table: scope.table })
+      : objectFrag(entries);
     object.hint ??= conditionHint(entries);
     return { object, extras };
   }
@@ -781,7 +875,8 @@ class Printer {
   private isInnerColumn(op: Operand, scope: Scope): boolean {
     if (op.kind !== "column") return false;
     if (op.qual.kind === "none") return true;
-    if (op.qual.kind === "named") return op.qual.name === (scope.alias ?? scope.table) || op.qual.name === scope.table;
+    if (op.qual.kind === "named")
+      return op.qual.name === (scope.alias ?? scope.table) || op.qual.name === scope.table;
     if (!scope.inExists) return op.qual.kind === "this";
     return false;
   }
@@ -794,7 +889,8 @@ class Printer {
 
   /** A plain condition `[key, value]` on a column of the scope. */
   private condition(ast: Ast, ctx: RuleCtx, scope: Scope): [string, Frag] | undefined {
-    const column = (op: Operand) => (op.kind === "column" && this.isInnerColumn(op, scope) ? op.name : undefined);
+    const column = (op: Operand) =>
+      op.kind === "column" && this.isInnerColumn(op, scope) ? op.name : undefined;
     switch (ast.kind) {
       case "cmp": {
         let left = column(ast.left);
@@ -823,7 +919,9 @@ class Printer {
         if (left === undefined) return undefined;
         const kind = this.kindOf(scope.table, left);
         // A named list (`invitableRoles`) by name.
-        if (ast.values.every((v) => v.kind === "string" || v.kind === "number" || v.kind === "bool")) {
+        if (
+          ast.values.every((v) => v.kind === "string" || v.kind === "number" || v.kind === "bool")
+        ) {
           const text = `[${ast.values.map((v) => this.plainLiteral(v, kind)!).join(", ")}]`;
           const named = this.constants.get(text);
           if (named) {
@@ -861,7 +959,9 @@ class Printer {
       case "join": {
         const opts: string[] = [];
         if (rel.on.length) {
-          opts.push(`on: [${rel.on.map((c) => `[${colRefText(c.left)}, ${colRefText(c.right)}]`).join(", ")}]`);
+          opts.push(
+            `on: [${rel.on.map((c) => `[${colRefText(c.left)}, ${colRefText(c.right)}]`).join(", ")}]`,
+          );
         }
         if (rel.joinKind === "left") opts.push("left: true");
         const right = this.relation(rel.right);
@@ -913,13 +1013,23 @@ class Printer {
       case "false":
         return p.kind;
       case "or":
-        return this.call("anyOf", p.items.map((i) => this.predicate(i)));
+        return this.call(
+          "anyOf",
+          p.items.map((i) => this.predicate(i)),
+        );
       case "and": {
         const entries = p.items.map((i) => this.predEntry(i));
-        if (entries.length > 1 && entries.every((e) => e) && new Set(entries.map((e) => e![0])).size === entries.length) {
+        if (
+          entries.length > 1 &&
+          entries.every((e) => e) &&
+          new Set(entries.map((e) => e![0])).size === entries.length
+        ) {
           return objectText(entries as [string, string][]);
         }
-        return this.call("allOf", p.items.map((i) => this.predicate(i)));
+        return this.call(
+          "allOf",
+          p.items.map((i) => this.predicate(i)),
+        );
       }
       case "not":
         return this.call("not", [this.predicate(p.inner)]);
@@ -950,7 +1060,12 @@ class Printer {
   private valueRef(v: ValueRef): string {
     switch (v.kind) {
       case "literal":
-        if (v.value !== null && typeof v.value === "object" && "kind" in (v.value as object) && !v.text.startsWith("json(")) {
+        if (
+          v.value !== null &&
+          typeof v.value === "object" &&
+          "kind" in (v.value as object) &&
+          !v.text.startsWith("json(")
+        ) {
           return this.typed(v.value as Typed);
         }
         if (v.text.startsWith("json(")) return this.fn("jsonValue", jsLiteral(v.value));
@@ -1008,7 +1123,8 @@ class Printer {
 
   /** `session.claims.role = 'admin'` → `eq(session.claims.role, "admin")`: a helper when it repeats. */
   private sessionComparison(ast: Ast, ctx: RuleCtx, scope: Scope): Frag | undefined {
-    const plain = (op: Operand) => (op.kind === "session" ? undefined : this.value(op, ctx, scope, undefined));
+    const plain = (op: Operand) =>
+      op.kind === "session" ? undefined : this.value(op, ctx, scope, undefined);
     const claim = (path: string[]) => camel(path[path.length - 1]!);
     if (ast.kind === "cmp") {
       let [left, right, op] = [ast.left, ast.right, ast.op];
@@ -1020,7 +1136,8 @@ class Printer {
       const session = this.sessionText(left.path);
       const frag = wrap(value, (t) => this.fn(fn, `${session}, ${t}`));
       const shown = fill(value).replace(/"/g, "");
-      const hint = op === "=" ? `${claim(left.path)}Is${pascal(shown) || "Set"}` : `${claim(left.path)}Check`;
+      const hint =
+        op === "=" ? `${claim(left.path)}Is${pascal(shown) || "Set"}` : `${claim(left.path)}Check`;
       return this.shaped(frag, hint, undefined, true);
     }
     if (ast.kind === "inList" && ast.left.kind === "session") {
@@ -1100,7 +1217,11 @@ class Printer {
                 ? "boolean"
                 : "float";
         const name = camel(key.replace(/^\$/, "").replace(/\./g, " ")) || "value";
-        return { text: PLACEHOLDER(0), args: [{ text, name, type: valueType(valueKind), literal: true }], occ: [] };
+        return {
+          text: PLACEHOLDER(0),
+          args: [{ text, name, type: valueType(valueKind), literal: true }],
+          occ: [],
+        };
       }
       case "null":
         return lit("null");
