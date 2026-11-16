@@ -27,7 +27,12 @@ const files: string[] = [];
   }
 })(content);
 
-interface Snippet { file: string; line: number; name: string; json?: string }
+interface Snippet {
+  file: string;
+  line: number;
+  name: string;
+  json?: string;
+}
 const snippets: Snippet[] = [];
 for (const file of files) {
   const text = readFileSync(file, "utf8");
@@ -46,23 +51,36 @@ for (const file of files) {
     let code = body;
     const hasSchema = /s\.defineSchema\(/.test(code);
     // The schema a permissions-only block goes with: the latest one with every table it lists.
-    const listed = [...code.slice(code.indexOf("definePermissions(")).matchAll(/^ {2}(\w+): /gm)].map((x) => x[1]);
+    const listed = [
+      ...code.slice(code.indexOf("definePermissions(")).matchAll(/^ {2}(\w+): /gm),
+    ].map((x) => x[1]);
     const tablesOf = (b: string) => [...b.matchAll(/^ {2}(\w+): s\b/gm)].map((x) => x[1]);
-    const schemaBlock = [...schemaBlocks].reverse().find((b) => listed.every((t) => tablesOf(b).includes(t)));
+    const schemaBlock = [...schemaBlocks]
+      .reverse()
+      .find((b) => listed.every((t) => tablesOf(b).includes(t)));
     if (hasSchema && !/definePermissions\(/.test(code) && !/claims:/.test(code))
-      schemaBlocks.push(code.replace(/\n(const \{[^}]*\} =\s*schema;|export const permissions)[\s\S]*$/, "\n"));
+      schemaBlocks.push(
+        code.replace(/\n(const \{[^}]*\} =\s*schema;|export const permissions)[\s\S]*$/, "\n"),
+      );
     else if (!hasSchema && schemaBlock) code = `${schemaBlock}\n${code}`;
     else if (!hasSchema) continue;
     if (/from "\.\//.test(code)) continue; // imports another file of the app
     if (!/= ?\n?\s*schema;/.test(code) && /definePermissions\(/.test(code))
-      code = code.replace(/(\n(const |export const permissions))/, `\nconst { ${TOOLS} } = schema;\n$1`);
-    if (!/from "jazz-tools"/.test(code)) code = `import { schema as s } from "jazz-tools";\n${code}`;
+      code = code.replace(
+        /(\n(const |export const permissions))/,
+        `\nconst { ${TOOLS} } = schema;\n$1`,
+      );
+    if (!/from "jazz-tools"/.test(code))
+      code = `import { schema as s } from "jazz-tools";\n${code}`;
     // Fill `// ...` with the tables the block leaves out.
     if (/^\s*\/\/ \.\.\.\s*$/m.test(code)) {
       const tables = [...(schemaBlock ?? "").matchAll(/^ {2}(\w+): s\b/gm)].map((x) => x[1]);
       const perm = code.slice(code.indexOf("definePermissions({"));
       const listed = new Set([...perm.matchAll(/^ {2}(\w+): /gm)].map((x) => x[1]));
-      const fill = tables.filter((t) => !listed.has(t)).map((t) => `  ${t}: {},`).join("\n");
+      const fill = tables
+        .filter((t) => !listed.has(t))
+        .map((t) => `  ${t}: {},`)
+        .join("\n");
       code = code.replace(/^\s*\/\/ \.\.\.\s*$/m, fill);
     }
     code = code.replace(/from "jazz-tools"/g, 'from "../src/authoring.js"');
@@ -76,7 +94,11 @@ for (const file of files) {
 }
 writeFileSync(
   join(out, "tsconfig.json"),
-  JSON.stringify({ extends: "../tsconfig.json", compilerOptions: { noEmit: true, noUnusedLocals: false, rootDir: ".." }, include: ["./*.ts"] }),
+  JSON.stringify({
+    extends: "../tsconfig.json",
+    compilerOptions: { noEmit: true, noUnusedLocals: false, rootDir: ".." },
+    include: ["./*.ts"],
+  }),
 );
 let tscOut = "";
 try {
@@ -96,7 +118,9 @@ for (const s of snippets) {
 }
 // --canonical <jazz-napi .node>: print what `generate` writes (the Rust writer's canonical text).
 const napiPath = process.argv[process.argv.indexOf("--canonical") + 1];
-const napi = process.argv.includes("--canonical") ? createRequire(import.meta.url)(napiPath) : undefined;
+const napi = process.argv.includes("--canonical")
+  ? createRequire(import.meta.url)(napiPath)
+  : undefined;
 if (process.argv.includes("--json") || napi) {
   for (const s of snippets) {
     let readable: unknown;
@@ -105,8 +129,16 @@ if (process.argv.includes("--json") || napi) {
       readable = mod.__readable;
       if (napi && readable) {
         const written = napi.writeAppFiles(
-          JSON.stringify({ $schema: "https://jazz.tools/schemas/jazz.app.v1.json", ...mod.__schema, format: undefined }),
-          JSON.stringify({ $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json", ...(readable as object), format: undefined }),
+          JSON.stringify({
+            $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+            ...mod.__schema,
+            format: undefined,
+          }),
+          JSON.stringify({
+            $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
+            ...(readable as object),
+            format: undefined,
+          }),
           {},
         );
         readable = JSON.parse(written.permissions);
@@ -114,7 +146,9 @@ if (process.argv.includes("--json") || napi) {
     } catch (e: any) {
       readable = `ERROR ${String(e.message).split("\n").slice(0, 4).join(" | ")}`;
     }
-    console.log(`\n=== ${s.file}:${s.line}\n--- compiled:\n${JSON.stringify(readable, null, 2)}${s.json ? `\n--- page:\n${s.json}` : ""}`);
+    console.log(
+      `\n=== ${s.file}:${s.line}\n--- compiled:\n${JSON.stringify(readable, null, 2)}${s.json ? `\n--- page:\n${s.json}` : ""}`,
+    );
   }
 }
 process.exit(errors.size ? 1 : 0);
