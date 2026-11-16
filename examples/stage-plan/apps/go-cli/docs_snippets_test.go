@@ -301,8 +301,8 @@ func renameTask(ctx context.Context, db *jazz.DB, taskID, title string) error {
 
 // #region writing-serializable-transaction-go
 func moveIfStillTodo(ctx context.Context, db *jazz.DB, taskID string) error {
-	// Every Jazz transaction is serializable: if the task changed after it
-	// was read here, the commit fails with jazz.ErrConflict.
+	// A serializable transaction: if the task changed after it was read
+	// here, the commit fails with jazz.ErrConflict.
 	err := db.Tx(ctx, func(tx *jazz.Tx) error {
 		task, err := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(taskID)).One(ctx, tx)
 		if err != nil || task == nil || task.Status != jazzapp.TaskStatusTodo {

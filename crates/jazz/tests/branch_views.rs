@@ -3773,3 +3773,206 @@ fn row_state_bits_record_deletion_and_content_per_version() {
     .unwrap();
     assert_eq!(state(inherited, 0xd7), 0, "inherited update");
 }
+
+/// The host read path (`all_serialized_query`) inside an open transaction.
+fn titles_in_tx(
+    db: &Db,
+    opts: ReadOpts,
+    tx: jazz::model::transaction::OpenTransactionId,
+) -> Result<Vec<(Value, String)>, jazz::db::Error> {
+    let bytes = postcard::to_allocvec(&db.table("todos")).unwrap();
+    let rows = match block_on(db.all_serialized_query(&bytes, opts, Some(tx), None, None))? {
+        jazz::db::SerializedReadResult::Rows(rows) => rows,
+        other => panic!("{other:?}"),
+    };
+    let mut titles: Vec<(Value, String)> = rows
+        .iter()
+        .map(|row| {
+            let Some(Value::String(title)) = row.cell("title") else {
+                panic!("a title")
+            };
+            (row.cell("branch_id").expect("a branch"), title)
+        })
+        .collect();
+    titles.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(titles)
+}
+
+/// Alice reads through her draft inside a mergeable transaction: the read
+/// composes the draft over main, with the transaction's own staged writes,
+/// as it does outside one (jazz#5806). It used to read every branch-local
+/// row as stored instead.
+#[test]
+fn a_mergeable_transaction_reads_through_a_branch_view() {
+    let (db, _) = open_db();
+    let main = selector(0xa1);
+    let draft = selector(0xa2);
+    let draft_id = Value::Uuid(uuid::Uuid::from_bytes([0xa2; 16]));
+    let insert = |title: &str, branch: &BranchSelector| {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".into(), Value::String(title.into()))]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .row_uuid()
+    };
+    let intro = insert("Intro", &main);
+    insert("Outro", &main);
+
+    let tx = jazz::model::transaction::OpenTransactionId::new();
+    block_on(db.begin_mergeable(tx)).unwrap();
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::current(main.clone())));
+    // Before any staged write: main's rows, under the draft's coordinate.
+    assert_eq!(
+        titles_in_tx(&db, view.clone(), tx).unwrap(),
+        [
+            (draft_id.clone(), "Intro".to_owned()),
+            (draft_id.clone(), "Outro".to_owned())
+        ]
+    );
+    block_on(db.tx_ref(tx).update(
+        "todos",
+        intro,
+        BTreeMap::from([("title".into(), Value::String("Intro, drafted".into()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(BranchViewBase::current(main.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(db.tx_ref(tx).insert(
+        "todos",
+        BTreeMap::from([("title".into(), Value::String("Added".into()))]),
+        jazz::db::InsertOptions {
+            target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    // The staged writes show through the view, inside the transaction.
+    assert_eq!(
+        titles_in_tx(&db, view.clone(), tx).unwrap(),
+        [
+            (draft_id.clone(), "Added".to_owned()),
+            (draft_id.clone(), "Intro, drafted".to_owned()),
+            (draft_id.clone(), "Outro".to_owned())
+        ]
+    );
+    // The draft alone: only what the transaction staged into it.
+    assert_eq!(
+        titles_in_tx(
+            &db,
+            ReadOpts::default().branch_view(draft.clone(), None),
+            tx
+        )
+        .unwrap()
+        .len(),
+        2
+    );
+    // Outside the transaction nothing staged is visible yet.
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    assert_eq!(block_on(db.all(&query, view.clone())).unwrap().len(), 2);
+}
+
+/// A serializable transaction's read set is not recorded per branch view
+/// yet, so a branch read inside one is refused rather than validated wrong.
+#[test]
+fn a_serializable_transaction_refuses_a_branch_view_read() {
+    let (db, _) = open_db();
+    let tx = jazz::model::transaction::OpenTransactionId::new();
+    block_on(db.begin_serializable(tx)).unwrap();
+    let view = ReadOpts::default().branch_view(
+        selector(0xb2),
+        Some(BranchViewBase::current(selector(0xb1))),
+    );
+    let error = titles_in_tx(&db, view, tx).unwrap_err();
+    assert!(error.to_string().contains("not supported"), "{error}");
+    // A root read still works.
+    assert!(titles_in_tx(&db, ReadOpts::default(), tx).is_ok());
+}
+
+/// Alice drafts over main frozen at a captured snapshot, inside a mergeable
+/// transaction: the read sees main as it was, under the draft's
+/// coordinate, plus what the transaction staged through the frozen view.
+#[test]
+fn a_mergeable_transaction_reads_through_a_frozen_base() {
+    let (db, _) = open_db();
+    let main = selector(0xc1);
+    let draft = selector(0xc2);
+    let draft_id = Value::Uuid(uuid::Uuid::from_bytes([0xc2; 16]));
+    let row = db
+        .insert(
+            "todos",
+            BTreeMap::from([("title".into(), Value::String("Original".into()))]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .row_uuid();
+    let snapshot = captured_branch_snapshot(&db);
+    let set_title = |title: &str| BTreeMap::from([("title".into(), Value::String(title.into()))]);
+    db.update(
+        "todos",
+        row,
+        set_title("Changed"),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: main.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let frozen_base = BranchViewBase::snapshot(main.clone(), snapshot);
+    let frozen = ReadOpts::default().branch_view(draft.clone(), Some(frozen_base.clone()));
+
+    let tx = jazz::model::transaction::OpenTransactionId::new();
+    block_on(db.begin_mergeable(tx)).unwrap();
+    assert_eq!(
+        titles_in_tx(&db, frozen.clone(), tx).unwrap(),
+        [(draft_id.clone(), "Original".to_owned())]
+    );
+    block_on(db.tx_ref(tx).update(
+        "todos",
+        row,
+        set_title("Drafted"),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(frozen_base),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        titles_in_tx(&db, frozen.clone(), tx).unwrap(),
+        [(draft_id, "Drafted".to_owned())]
+    );
+    // Main itself, in the transaction: its live row.
+    assert_eq!(
+        titles_in_tx(&db, ReadOpts::default().branch_view(main, None), tx)
+            .unwrap()
+            .into_iter()
+            .map(|(_, title)| title)
+            .collect::<Vec<_>>(),
+        ["Changed"]
+    );
+    // Outside the transaction the draft is still empty.
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    assert_eq!(
+        block_on(db.all(&query, frozen)).unwrap()[0].cell("title"),
+        Some(Value::String("Original".into()))
+    );
+}

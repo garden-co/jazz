@@ -608,6 +608,13 @@ pub fn source_hash(file: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// The hex SHA-256 of `bytes`, for digests generators record (a TS
+/// module's output digest).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
 /// The engine's hash of a schema in its own JSON form (`{ "tables": … }`,
 /// what generated bindings embed per version), its policies dropped as a
 /// deployment drops them: the one schema-hash implementation every

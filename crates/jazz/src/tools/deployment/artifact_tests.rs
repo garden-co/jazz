@@ -2796,3 +2796,37 @@ fn a_relation_policy_reading_a_computed_outer_field_is_told_it_is_computed() {
         "{error}"
     );
 }
+
+/// An enum whose cases carry fields (accepted until 2.0.0-alpha.65) loads
+/// in an earlier version of `history` and in a migration dropping it, so
+/// such an app can migrate away; the current tables may not declare one.
+#[test]
+fn enum_cases_with_fields_load_in_history_and_are_refused_in_the_current_tables() {
+    let status = r#"{ "enum": { "open": {}, "done": { "at": "timestamp" } }, "optional": true }"#;
+    let app = format!(
+        r#"{{
+  "format": 1,
+  "tables": {{ "todos": {{ "columns": {{ "title": "string" }} }} }},
+  "history": {{
+    "v1": {{ "tables": {{ "todos": {{ "columns": {{ "title": "string", "status": {status} }} }} }} }}
+  }},
+  "migrations": [
+    {{ "from": "v1", "migrate": {{ "todos": {{ "status": {{ "drop": {{ "enum": {{ "open": {{}}, "done": {{ "at": "timestamp" }} }} }} }} }} }} }}
+  ]
+}}"#
+    );
+    let loaded = load(app.as_bytes(), br#"{ "format": 1 }"#).unwrap_or_else(|e| panic!("{e}"));
+    assert!(!loaded.deployment_body(false).is_null());
+
+    let current = format!(
+        r#"{{ "format": 1, "tables": {{ "todos": {{ "columns": {{ "title": "string", "status": {status} }} }} }} }}"#
+    );
+    let error = load(current.as_bytes(), br#"{ "format": 1 }"#)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("tables.todos.columns.status"), "{error}");
+    assert!(
+        error.contains("enum cases with fields are not supported"),
+        "{error}"
+    );
+}

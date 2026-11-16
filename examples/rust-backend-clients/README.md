@@ -9,6 +9,9 @@ This package runs each example's binary against a real main backend:
   - Scoped: a write, a read from a fresh client, and being kept out of another user's show.
   - Trusted: a system write and read, then `for_user` as A, and B kept out of A's show.
   - Refused tokens and the wrong kind of credential exit non-zero.
+- `tests/backend-client.test.ts`: jazz-app's backend-client contract through [`probe/`](probe), a small binary, against a main backend on a local core server (`startMainBackend(dir, { core: "server" })`), whose admin API revokes an identity.
+  - Trusted: `for_user` for a user with an account, `Error::NoAccount` for one without, `Error::Refused` (403 `identity_not_authorized`) for a revoked identity, then `close(CLOSE_TIMEOUT)`.
+  - Scoped: `for_user` is refused. Untrusted: opening is refused.
 - `tests/todo-servers.test.ts`: [`todo-server-rs`](../todo-server-rs) and [`docs/todo-server-rs`](../docs/todo-server-rs) as scoped clients. Writes made through their REST API reach the main backend, and the main backend's writes reach their API.
 
 The tests build the binaries with `cargo build`, so they need a Rust toolchain.
