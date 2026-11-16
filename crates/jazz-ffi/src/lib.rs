@@ -312,14 +312,43 @@ impl JazzHandle {
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
-        let tx = self
-            .core
-            .surface(self.core.tx_begin(true).and_then(|tx| core::parse_tx(&tx)))?;
-        Ok(Arc::new(Transaction {
-            handle: self,
-            tx,
-            open: std::sync::atomic::AtomicBool::new(true),
-        }))
+        self.begin_with(true)
+    }
+
+    /// Begins a mergeable transaction (TS's default `transaction`): its
+    /// reads see a snapshot and its own writes, its writes commit together
+    /// and merge with concurrent writes, so its commit is never refused as
+    /// a conflict.
+    pub fn begin_mergeable(self: Arc<Self>) -> Result<Arc<Transaction>> {
+        self.begin_with(false)
+    }
+
+    /// Leaves the server: local reads and writes go on, and sync resumes
+    /// with `reconnect` (TS's `disconnect`). Without a server it does
+    /// nothing.
+    pub fn disconnect(&self) -> Result<()> {
+        self.core.surface(self.core.disconnect())
+    }
+
+    /// Resumes sync after `disconnect` (TS's `reconnect`).
+    pub fn reconnect(&self) -> Result<()> {
+        self.core.surface(self.core.reconnect())
+    }
+
+    /// Closes the app and deletes its local store (TS's
+    /// `deleteClientStorage`): the next open starts empty and syncs again.
+    /// Writes the server hasn't accepted yet are lost. Refused while another
+    /// open app holds the same `dataDir`.
+    pub fn delete_client_storage(&self) -> Result<()> {
+        self.core.surface(self.core.delete_client_storage())
+    }
+
+    /// Calls `listener` with each write the server refused that no durable
+    /// wait (a `global` tier, `wait_for_sync`) reported, as TS's
+    /// `onMutationError`: `{"transaction", "message", "denied",
+    /// "serializable"}`. Refusals from before the first watch come first.
+    pub fn watch_mutation_errors(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        self.watch("mutationErrors", listener)
     }
 
     /// Subscribes to the query. The listener is called on a thread of the
@@ -387,11 +416,26 @@ impl JazzHandle {
 }
 
 impl JazzHandle {
-    fn watch(&self, what: &str, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
-        let inner = self.core.surface(
+    fn begin_with(self: Arc<Self>, serializable: bool) -> Result<Arc<Transaction>> {
+        let tx = self.core.surface(
             self.core
-                .watch(what, Box::new(move |state| listener.on_change(state))),
+                .tx_begin(serializable)
+                .and_then(|tx| core::parse_tx(&tx)),
         )?;
+        Ok(Arc::new(Transaction {
+            handle: self,
+            tx,
+            open: std::sync::atomic::AtomicBool::new(true),
+        }))
+    }
+
+    fn watch(&self, what: &str, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        let inner = self.core.surface(self.core.watch(
+            what,
+            Box::new(move |state| {
+                listener.on_change(state.unwrap_or_else(|| CLOSED_STATE.to_owned()))
+            }),
+        ))?;
         Ok(Arc::new(Watch { inner }))
     }
 
@@ -606,7 +650,12 @@ pub trait TokenProvider: Send + Sync {
     fn token(&self, reason: String) -> Result<Option<String>>;
 }
 
-/// What a session or sync watch calls with each state (JSON).
+/// A watch's last state when the app closes (signed out, closed, its store
+/// deleted): `{"kind": "closed"}`, after which no call comes.
+const CLOSED_STATE: &str = r#"{"kind":"closed","message":"the app is closed"}"#;
+
+/// What a watch calls with each state (JSON); when the app closes, a last
+/// `{"kind": "closed", "message"}`, after which no call comes.
 #[uniffi::export(with_foreign)]
 pub trait StateListener: Send + Sync {
     fn on_change(&self, state_json: String);
