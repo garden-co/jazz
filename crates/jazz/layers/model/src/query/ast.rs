@@ -2,7 +2,7 @@
 /// the variants after it keep their positional (postcard) tags. It has no
 /// values: nothing can build one, and decoding one is refused.
 ///
-/// Predicates held payload-enum matches here until 2.0.0-alpha.65, when
+/// Predicates held payload-enum matches here until 2.0.0-alpha.66, when
 /// enums with payloads were removed (jazz#5758).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RemovedVariant {}
@@ -16,7 +16,7 @@ impl serde::Serialize for RemovedVariant {
 impl<'de> serde::Deserialize<'de> for RemovedVariant {
     fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
         Err(serde::de::Error::custom(
-            "this variant was removed (payload-enum matches, removed in 2.0.0-alpha.65)",
+            "this variant was removed (payload-enum matches, removed in 2.0.0-alpha.66)",
         ))
     }
 }

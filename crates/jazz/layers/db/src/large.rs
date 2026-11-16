@@ -1785,7 +1785,14 @@ pub(crate) fn admit(
             visited.map_err(|e| rejected(format!("large value: {e}")))?;
             let mut validator =
                 lv::LogicalValueValidator::new(&base).map_err(|e| rejected(e.to_string()))?;
-            let mut offset = 0;
+            // A bytes value has no content rule beyond its tree, which the
+            // walk above proved node by node (object hash, logical hash,
+            // metrics); reading it back again would feed nothing.
+            let mut offset = if validator.reads_bytes() {
+                0
+            } else {
+                base.byte_length
+            };
             while offset < base.byte_length {
                 let end = (offset + WINDOW).min(base.byte_length);
                 let window = chunks.run_reading(

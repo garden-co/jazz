@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.64",
+  "version": "2.0.0-alpha.65",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
   "repository": {
@@ -232,6 +232,7 @@
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@scure/bip39": "2.0.1",
     "@standard-schema/spec": "^1.1.0",
+    "esbuild": "^0.27.0",
     "fs-native-extensions": "1.5.0",
     "jazz-wasm": "workspace:*",
     "jose": "^6.2.1",
@@ -254,11 +255,11 @@
     "@vue/server-renderer": "^3.5.22",
     "better-auth": "1.7.22",
     "effect": "4.0.0-rc.118",
-    "esbuild": "^0.27.0",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
     "libsodium": "0.8.3",
     "libsodium-wrappers": "0.8.3",
+    "prettier": "^3.9.5",
     "prosemirror-markdown": "^1.13.9",
     "prosemirror-model": "^1.25.4",
     "prosemirror-state": "^1.4.4",

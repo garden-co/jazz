@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# The Swift bindings on Linux: the StagePlan Swift example's app files are
-# byte-identical to StagePlan's, its committed JazzApp.swift is what the Swift
-# back end writes, and the Jazz Swift package and the example build and pass
-# their tests against libjazz_ffi built from this tree. The example's tests
-# start a jazz-tools server each; then the CLI demo runs against one.
+# The Swift bindings on Linux: the StagePlan Swift example's committed
+# JazzApp.swift is what the Swift back end writes from its jazz.app.json, and
+# the Jazz Swift package and the example build and pass their tests against
+# libjazz_ffi built from this tree. The example's tests start a jazz-tools
+# server each; then the CLI demo runs against one. Whether that JSON is current
+# with the example's schema.ts (a re-export of StagePlan's) is
+# dev/gates/example-bindings.mjs's `jazz-tools generate --check`.
 # Uses the swift on PATH if it is 6.0 or newer, else downloads a pinned one.
 set -euo pipefail
 
@@ -18,14 +20,6 @@ cleanup() {
 }
 trap cleanup EXIT
 example="$root/examples/stage-plan/apps/swift-cli"
-canonical="$root/examples/stage-plan/apps/react-localfirst"
-
-for file in jazz.app.json jazz.permissions.json; do
-  cmp "$canonical/$file" "$example/$file" || {
-    echo "examples/stage-plan/apps/swift-cli/$file differs from react-localfirst's: copy it, never edit it" >&2
-    exit 1
-  }
-done
 
 swift_major=$(swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9]*\)\..*/\1/p' | head -1 || true)
 if [[ -z "$swift_major" || "$swift_major" -lt 6 ]]; then
@@ -41,9 +35,10 @@ swift --version
 
 cd "$root"
 cargo test -q -p jazz-codegen --test golden -- swift
-cargo build -q -p jazz-cli --bin jazz-tools
+cargo build -q -p jazz-tools --bin jazz-tools
+"$root/target/debug/jazz-tools" generate --check --dir "$example"
 # The app endpoint the end-user tests sign in through.
-cargo build -q -p jazz-app --features test-relay --bin jazz-app-test-relay
+cargo build -q -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 # The committed UniFFI sources match what uniffi-bindgen generates from
 # this tree's jazz-ffi; then the library and its jazz_ffi.pc.
 "$root/packages/jazz-swift/scripts/build-ffi.sh" --debug --check
@@ -58,8 +53,8 @@ export CI="${CI:-1}"
 (cd "$example" && swift test)
 
 # The CLI as an end user: a sync server, and in front of it the app's
-# endpoint (the test relay standing in for a TS, Rust or Go backend's
-# handler), which publishes StagePlan's permissions.
+# endpoint (the test relay standing in for the TypeScript backend's
+# `createJazz` handler), which publishes StagePlan's permissions.
 app_id=00000000-0000-4000-8000-00000057a9e0
 export JAZZ_BACKEND_SECRET=gate-backend-secret
 export JAZZ_ADMIN_SECRET=gate-admin-secret

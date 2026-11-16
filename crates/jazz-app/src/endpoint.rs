@@ -20,7 +20,7 @@
 //!
 //! The endpoint is framework-neutral: the host's HTTP server passes requests
 //! to [`Endpoint::handle`], and the sockets it upgrades to
-//! [`Endpoint::serve_socket`]. With the `axum` feature, [`Endpoint::router`]
+//! [`Endpoint::serve_socket`]. With the `axum` feature, `Endpoint::router`
 //! does both.
 //!
 //! Not supported yet, as explicit answers: trusted backend clients (`backendClients`,
@@ -275,11 +275,11 @@ pub type AuthFuture = Pin<Box<dyn Future<Output = Result<Option<Answer>>> + Send
 /// Closures implement it:
 ///
 /// ```no_run
-/// use jazz_app::endpoint::{Answer, AuthUser, Request};
+/// use jazz_app_support::endpoint::{Answer, AuthUser, Request};
 /// let authenticate = |request: Request| async move {
 ///     Ok(request.bearer().map(|token| Answer::User(AuthUser::new(token, u64::MAX))))
 /// };
-/// # let _: &dyn jazz_app::endpoint::Authenticate = &authenticate;
+/// # let _: &dyn jazz_app_support::endpoint::Authenticate = &authenticate;
 /// ```
 pub trait Authenticate: Send + Sync + 'static {
     fn authenticate(&self, request: Request) -> AuthFuture;
@@ -333,8 +333,8 @@ impl Closed {
 ///   derived from it, so a guessable secret could be found offline.
 ///
 /// ```no_run
-/// # async fn serve(jazz: jazz_app::Jazz) -> jazz_app::Result<()> {
-/// use jazz_app::endpoint::{Answer, AuthUser, Endpoint, Request};
+/// # async fn serve(jazz: jazz_app_support::Jazz) -> jazz_app_support::Result<()> {
+/// use jazz_app_support::endpoint::{Answer, AuthUser, Endpoint, Request};
 /// let endpoint = Endpoint::new(&jazz, |request: Request| async move {
 ///     // The app's own sign-in, e.g. its session cookie.
 ///     Ok(request.cookie("session").map(|id| Answer::User(AuthUser::new(id, u64::MAX))))

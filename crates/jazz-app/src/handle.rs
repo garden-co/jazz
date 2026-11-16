@@ -37,12 +37,18 @@ type Job = Box<dyn FnOnce(JazzClient) -> Pin<Box<dyn Future<Output = ()>>> + Sen
 
 pub(crate) enum Command {
     Run(Job),
-    Shutdown(oneshot::Sender<Result<()>>),
+    /// Stop, giving the backend at most this long to answer the requests
+    /// that end the client's HTTP stream sessions (see [`STREAM_SESSION_END`]).
+    Shutdown(oneshot::Sender<Result<()>>, std::time::Duration),
 }
 
 /// How long [`Jazz::shutdown`] lets the calls already made run before it
 /// cancels them.
 const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long shutdown waits for the backend to answer the requests that end
+/// the client's HTTP stream sessions (see `HttpStreamFallbackConnector::settle`).
+const STREAM_SESSION_END: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The issuer `createJazz` names the users a backend acts as by.
 const BACKEND_ISSUER: &str = "jazz:backend";
@@ -90,6 +96,9 @@ pub(crate) struct Info {
     pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
     /// The store keeps nothing past the process.
     pub(crate) memory: bool,
+    /// Its [`crate::JazzSession`] replaced it: calls fail with
+    /// [`Error::Replaced`], not [`Error::Stopped`].
+    pub(crate) replaced: std::sync::atomic::AtomicBool,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -263,6 +272,7 @@ impl Jazz {
                 opened_with,
                 backend_client,
                 memory,
+                replaced: std::sync::atomic::AtomicBool::new(false),
             }),
             scope: None,
             for_user: false,
@@ -331,8 +341,24 @@ impl Jazz {
         });
         self.commands
             .send(Command::Run(job))
-            .map_err(|_| Error::Stopped)?;
-        answer.await.map_err(|_| Error::Stopped)?
+            .map_err(|_| self.stopped())?;
+        answer.await.map_err(|_| self.stopped())?
+    }
+
+    /// Why calls fail now that the client stopped.
+    fn stopped(&self) -> Error {
+        if self.info.replaced.load(std::sync::atomic::Ordering::SeqCst) {
+            Error::Replaced
+        } else {
+            Error::Stopped
+        }
+    }
+
+    /// Its [`crate::JazzSession`] is replacing it.
+    pub(crate) fn mark_replaced(&self) {
+        self.info
+            .replaced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Sends `job` to the client's thread without waiting for it: for
@@ -444,11 +470,6 @@ impl Jazz {
         opts: ReadOpts,
     ) -> Result<Subscription<T>> {
         let query = query.into_untyped()?;
-        if jazz::schema::history::is_history_table(&query.table) {
-            return Err(Error::Unsupported(
-                "subscribing to history; read it with Jazz::all".into(),
-            ));
-        }
         let (sender, receiver) = mpsc::unbounded_channel();
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
@@ -468,14 +489,31 @@ impl Jazz {
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
     ///
-    /// On a handle acting for a user (`Endpoint::for_user`) it does
-    /// nothing: `Endpoint::shutdown` stops the client it shares.
+    /// On a handle acting for a user ([`Jazz::for_user`], or
+    /// `Endpoint::for_user`) it does nothing: the client it shares stops
+    /// with the trusted client's own `shutdown` or `close`, or with
+    /// `Endpoint::shutdown`.
     pub async fn shutdown(&self) -> Result<()> {
         if self.for_user {
             return Ok(());
         }
+        self.shutdown_within(STREAM_SESSION_END).await
+    }
+
+    /// [`Self::shutdown`], giving the backend at most `session_end` to
+    /// answer the requests that end the client's HTTP stream sessions:
+    /// `close(timeout)` passes what is left of its `timeout`, and nothing
+    /// (no wait at all) for `Duration::ZERO`.
+    pub(crate) async fn shutdown_within(&self, session_end: std::time::Duration) -> Result<()> {
+        if self.for_user {
+            return Ok(());
+        }
         let (reply, done) = oneshot::channel();
-        if self.commands.send(Command::Shutdown(reply)).is_err() {
+        if self
+            .commands
+            .send(Command::Shutdown(reply, session_end))
+            .is_err()
+        {
             return Ok(());
         }
         done.await.unwrap_or(Ok(()))
@@ -605,7 +643,20 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     let stopped = local.block_on(&runtime, async move {
-        let (client, opened) = match connect(files, config, link, stopper).await {
+        // Clients of a main backend may sync over its HTTP stream, whose
+        // sessions end with a request on this runtime: shutdown waits for
+        // it (`settle`), before the runtime goes.
+        let endpoint_connector =
+            Arc::new(jazz_native_transport::HttpStreamFallbackConnector::new());
+        let (client, opened) = match connect(
+            files,
+            config,
+            link,
+            stopper,
+            Arc::clone(&endpoint_connector),
+        )
+        .await
+        {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
@@ -614,6 +665,7 @@ fn run(
         };
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
+            endpoint_connector.settle(STREAM_SESSION_END).await;
             return None;
         }
         // Refused writes no durable wait claimed go to `mutation_errors`.
@@ -626,14 +678,17 @@ fn run(
         // here: they end with the client.
         let mut jobs = tokio::task::JoinSet::new();
         let mut stopped = Vec::new();
+        // What the shutdown asked for, or the default when every handle went.
+        let mut session_end = STREAM_SESSION_END;
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(Command::Run(job)) => {
                         jobs.spawn_local(job(client.clone()));
                     }
-                    Some(Command::Shutdown(reply)) => {
+                    Some(Command::Shutdown(reply, budget)) => {
                         stopped.push(reply);
+                        session_end = budget;
                         break;
                     }
                     None => break,
@@ -652,7 +707,7 @@ fn run(
                     command = commands.recv(), if open => match command {
                         // Dropping the job drops its reply: `Stopped`.
                         Some(Command::Run(job)) => drop(job),
-                        Some(Command::Shutdown(reply)) => stopped.push(reply),
+                        Some(Command::Shutdown(reply, _)) => stopped.push(reply),
                         None => open = false,
                     },
                     joined = jobs.join_next() => {
@@ -673,6 +728,7 @@ fn run(
         // client runs, so none is dropped with the thread's locals.
         crate::transaction::roll_back_parked();
         let result = client.shutdown().await;
+        endpoint_connector.settle(session_end).await;
         Some((result, stopped))
     });
     // The store's connections close with the last clone of the client, and
@@ -722,6 +778,9 @@ async fn connect(
     config: Config,
     link_kind: Link,
     stopper: mpsc::WeakUnboundedSender<Command>,
+    // A main backend (TS `createJazz`) may not upgrade sockets where it is
+    // hosted: its clients fall back to its HTTP stream, as TS clients do.
+    endpoint_connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
 ) -> Result<(JazzClient, Opened)> {
     let mut loaded = files.load()?;
     // The endpoint's client evaluates the sessions it acts for locally too:
@@ -787,10 +846,19 @@ async fn connect(
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
     let memory = context.storage == ClientStorage::Memory;
     let mut backend_client = None;
+    // The permissions bundle this client's files make: a trusted backend
+    // client checks it against the one its main backend serves.
+    let own_bundle = loaded.backend.as_ref().map(|app| app.bundle().to_string());
     let (client, user) = match (config.user, &config.server_url) {
         (Some(Auth::Credential(credential)), Some(endpoint)) => {
-            let (client, user, credential, link) =
-                crate::backend_client::connect(context, connector, credential, endpoint).await?;
+            let (client, user, credential, link) = crate::backend_client::connect(
+                context,
+                endpoint_connector,
+                credential,
+                endpoint,
+                own_bundle,
+            )
+            .await?;
             if !user.account.is_system() {
                 admitted = Some(user.account);
             }
@@ -799,7 +867,7 @@ async fn connect(
         }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
-                connect_user(context, connector, auth, endpoint).await?;
+                connect_user(context, endpoint_connector, auth, endpoint).await?;
             admitted = Some(user.account);
             (client, Some((user, credential)))
         }
@@ -814,7 +882,7 @@ async fn connect(
         let stop = Box::new(move || {
             if let Some(commands) = stopper.upgrade() {
                 let (reply, _) = oneshot::channel();
-                let _ = commands.send(Command::Shutdown(reply));
+                let _ = commands.send(Command::Shutdown(reply, STREAM_SESSION_END));
             }
         });
         user_session::start(
@@ -846,7 +914,7 @@ async fn connect(
 /// the bearer on the upgrade, which the backend checks it against.
 async fn connect_user(
     mut context: AppContext,
-    connector: Arc<jazz_native_transport::NativeWebSocketConnector>,
+    connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     auth: Auth,
     endpoint: &str,
 ) -> Result<(JazzClient, User, Credential)> {

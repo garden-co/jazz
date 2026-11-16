@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "19e996961c4e36e9968cadc6034105839d347604654f7be7144a0600564dc375"
+  },
   "tables": {
     "invitations": {
       "read": { "anyOf": ["subject = session.user", "label = 'unmatched control branch'"] },

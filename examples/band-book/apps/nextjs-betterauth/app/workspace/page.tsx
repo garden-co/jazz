@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { BandBookApp } from "@/src/components/BandBookApp";
 import { StatusScreen } from "@/components/status-screen";
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb, useJazzSession } from "jazz-tools/react";
 import {
   confirmHomeWorkspace,
   ensureHomeWorkspace,
@@ -17,8 +17,8 @@ type Bootstrap =
 
 export default function WorkspacePage() {
   // The Jazz provider renders this page only once the account's client is ready.
-  const session = useSession();
-  const account = session?.user;
+  const session = useJazzSession();
+  const account = session.user?.accountId;
   const db = useDb();
   const [bootstrap, setBootstrap] = useState<Bootstrap>(() => {
     const remembered = account ? rememberedHomeWorkspace(account) : null;

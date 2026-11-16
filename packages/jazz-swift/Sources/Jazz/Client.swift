@@ -20,6 +20,11 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     case conflict(String)
     /// The calling task was cancelled.
     case cancelled
+    /// A `JazzSession`'s client kept past a change of user (or a sign-out):
+    /// get the current one with `session.client()`.
+    case replaced(String)
+    /// A `JazzSession` with no one signed in has no client.
+    case noUser(String)
 
     public var description: String {
         switch self {
@@ -31,6 +36,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .notSupported(let message): return "not supported yet: \(message)"
         case .conflict(let message): return "conflict: \(message)"
         case .cancelled: return "cancelled"
+        case .replaced(let message): return "replaced: \(message)"
+        case .noUser(let message): return "no user: \(message)"
         }
     }
 
@@ -55,6 +62,15 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .Permission(let message): return JazzError.permissionDenied(message)
         case .NotSupported(let message): return JazzError.notSupported(message)
         case .Conflict(let message): return JazzError.conflict(message)
+        // A backend client's (jazz-ffi's for_user and close with a
+        // timeout); a Swift app never opens one, but the switch is
+        // exhaustive.
+        case .NoAccount(_, let message): return JazzError.refused(message)
+        case .Unsynced(_, let message): return JazzError.io(message)
+        case .Replaced(let message): return JazzError.replaced(message)
+        case .NoUser(_, let message): return JazzError.noUser(message)
+        // A trusted backend client's: a Swift app never opens one.
+        case .BundleMismatch(_, _, let message): return JazzError.refused(message)
         }
     }
 }
@@ -70,8 +86,8 @@ public struct Config: Sendable {
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?
 
-    /// Swift apps are clients (`.client`, `.local`); backends run in TS,
-    /// Rust or Go.
+    /// Swift apps are clients (`.client`, `.local`); the app's backend runs
+    /// in TypeScript (`createJazz`).
     init(storage: Storage, appId: String? = nil, serverUrl: String? = nil, dataDir: String? = nil) {
         self.storage = storage
         self.appId = appId
@@ -303,15 +319,34 @@ public final class Client: Sendable {
         }
     }
 
-    /// Runs `body` in a serializable transaction: it commits when `body`
-    /// returns (waiting for `commit`'s tier, if given) and rolls back when it
-    /// throws, rethrowing that error. Inside, reads see the transaction's
-    /// own writes. Don't let `tx` escape `body`. A `JazzError.conflict`
-    /// means another write won: running the transaction again may succeed.
+    /// Runs `body` in a mergeable transaction (TS's `transaction`): it
+    /// commits when `body` returns (waiting for `commit`'s tier, if given)
+    /// and rolls back when it throws, rethrowing that error. Inside, reads
+    /// see the transaction's own writes. Its writes commit together and
+    /// merge with concurrent ones, so its commit is never a conflict; it
+    /// works offline. Don't let `tx` escape `body`.
     public func transaction<T: Sendable>(
         commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
     ) async throws -> T {
-        let ffi = try await Self.typed { try await Self.run { try self.handle.begin() } }
+        try await run(transaction: { try self.handle.beginMergeable() }, commit: tier, body)
+    }
+
+    /// Runs `body` in a serializable transaction (TS's
+    /// `serializableTransaction`), as `transaction` does, but the server
+    /// accepts it only if nothing it read changed meanwhile. A
+    /// `JazzError.conflict` means another write won: running the
+    /// transaction again may succeed.
+    public func serializableTransaction<T: Sendable>(
+        commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
+    ) async throws -> T {
+        try await run(transaction: { try self.handle.begin() }, commit: tier, body)
+    }
+
+    func run<T: Sendable>(
+        transaction begin: @escaping @Sendable () throws -> JazzFFI.Transaction,
+        commit tier: WriteTier?, _ body: (Transaction) async throws -> T
+    ) async throws -> T {
+        let ffi = try await Self.typed { try await Self.run(begin) }
         let tx = Transaction(ffi, implementations: implementations)
         let result: T
         do {
@@ -455,6 +490,8 @@ final class Listener: SubscriptionListener, @unchecked Sendable {
         case "permission": return .permissionDenied(message)
         case "notSupported": return .notSupported(message)
         case "conflict": return .conflict(message)
+        case "replaced": return .replaced(message)
+        case "noUser": return .noUser(message)
         default: return .io(message)
         }
     }

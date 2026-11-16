@@ -10,7 +10,7 @@ use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
 
 use crate::error::Result;
-use crate::include::{IntoInclude, Partial, Row, Selection, With};
+use crate::include::{IntoInclude, Partial, Row, Selection, Values, With};
 use crate::table::Table;
 use crate::untyped;
 use crate::value::{ColumnValue, Timestamp};
@@ -62,13 +62,17 @@ impl<T: Table> Query<T> {
 
     /// Reads only the `columns` (a stored column, or a tuple of up to
     /// twelve): each row as a [`Partial`] holding its id and their values,
-    /// in order. The id is always there: don't select [`id`].
+    /// in order. A column with a transform reads as its view value, as in
+    /// a full row. The id is always there: don't select [`id`].
     ///
     /// ```ignore
     /// // Query<Partial<Todo, (String, bool)>>
     /// todos::query().select((todos::title(), todos::done()))
     /// ```
-    pub fn select<S: Selection<T>>(self, columns: S) -> Query<Partial<T, S::Values>> {
+    pub fn select<S: Selection<T>>(
+        self,
+        columns: S,
+    ) -> Query<Partial<T, <S::Values as Values>::Out, S::Values>> {
         Query::wrap(self.inner.select(columns.names()))
     }
 }
@@ -134,7 +138,7 @@ impl<T: Row> Query<T> {
         )))
     }
 
-    pub fn order_by<V>(self, column: Column<T::Table, V>, order: Order) -> Self {
+    pub fn order_by<V, P>(self, column: Column<T::Table, V, P>, order: Order) -> Self {
         self.map(|inner| inner.order_by(column.name, order.direction()))
     }
 
@@ -204,26 +208,31 @@ impl<T> Condition<T> {
     }
 }
 
-/// Column `name` of `T`, holding values of `V`.
+/// Column `name` of `T`, holding values of `V` as stored: conditions
+/// compare them. `P` is what [`Query::select`] reads it as: `V` itself, or
+/// for a column with a transform, a generated [`crate::Pick`] that reads its view
+/// value through the app's transform.
 #[derive(Debug)]
-pub struct Column<T, V> {
+pub struct Column<T, V, P = V> {
     name: &'static str,
     types: PhantomData<fn() -> (T, V)>,
+    pick: PhantomData<fn() -> P>,
 }
 
-impl<T, V> Clone for Column<T, V> {
+impl<T, V, P> Clone for Column<T, V, P> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T, V> Copy for Column<T, V> {}
+impl<T, V, P> Copy for Column<T, V, P> {}
 
-impl<T, V: ColumnValue> Column<T, V> {
+impl<T, V: ColumnValue, P> Column<T, V, P> {
     /// Generated bindings name the column as `jazz.app.json` does.
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
             types: PhantomData,
+            pick: PhantomData,
         }
     }
 
@@ -298,21 +307,21 @@ pub fn deleted_at<T>() -> Column<T, Option<Timestamp>> {
     Column::new("$deletedAt")
 }
 
-impl<T> Column<T, String> {
+impl<T, P> Column<T, String, P> {
     /// The text contains `part`.
     pub fn contains(self, part: impl Into<String>) -> Condition<T> {
         contains(self.name, Value::Text(part.into()))
     }
 }
 
-impl<T> Column<T, Option<String>> {
+impl<T, P> Column<T, Option<String>, P> {
     /// The text is set and contains `part`.
     pub fn contains(self, part: impl Into<String>) -> Condition<T> {
         contains(self.name, Value::Text(part.into()))
     }
 }
 
-impl<T, V: ColumnValue> Column<T, Vec<V>> {
+impl<T, V: ColumnValue, P> Column<T, Vec<V>, P> {
     /// The array holds `element`.
     pub fn contains(self, element: impl Into<V>) -> Condition<T> {
         contains(self.name, element.into().into_value())
@@ -323,7 +332,7 @@ fn contains<T>(column: &'static str, value: Value) -> Condition<T> {
     Condition::new(q::contains(q::col(column), literal(value)))
 }
 
-impl<T, V: ColumnValue> Column<T, Option<V>> {
+impl<T, V: ColumnValue, P> Column<T, Option<V>, P> {
     pub fn is_null(self) -> Condition<T> {
         Condition::new(q::is_null(q::col(self.name)))
     }

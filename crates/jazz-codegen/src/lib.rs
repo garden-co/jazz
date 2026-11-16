@@ -15,6 +15,7 @@
 pub mod bindings;
 pub mod go;
 mod json_schema;
+pub mod kotlin;
 pub mod migrations;
 pub mod model;
 pub mod names;
@@ -83,6 +84,7 @@ pub enum Lang {
     Rust,
     Swift,
     Go,
+    Kotlin,
 }
 
 impl Lang {
@@ -91,26 +93,23 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
-            // The back end is here, but the runtime package isn't released
-            // yet: `swift` is switched on with it (add it to `ALL` too).
-            "swift" => Err(CodegenError::unsupported(
-                "generating Swift bindings is not available yet; supported: ts, rust",
-            )),
-            // Switched off until the Go runtime and docs ship with it.
-            "go" | "golang" => Err(CodegenError::unsupported(
-                "generating bindings in Go is not available yet; supported: ts, rust",
-            )),
+            "swift" => Ok(Lang::Swift),
+            "kotlin" | "kt" => Ok(Lang::Kotlin),
+            "go" | "golang" => Ok(Lang::Go),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift, kotlin, go"
             ))),
         }
     }
 
-    /// Every language `jazz-tools generate` handles, in that order. (Swift and
-    /// Go are not available yet: [`Lang::Swift`] and [`Lang::Go`] are
-    /// generated only by direct calls, so no `Package.swift` or `go.mod`
-    /// selects them.)
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
+    /// Every language `jazz-tools generate` handles, in that order.
+    pub const ALL: &'static [Lang] = &[
+        Lang::TypeScript,
+        Lang::Rust,
+        Lang::Swift,
+        Lang::Kotlin,
+        Lang::Go,
+    ];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -120,12 +119,13 @@ impl Lang {
             Lang::Rust => "Cargo.toml",
             Lang::Swift => "Package.swift",
             Lang::Go => "go.mod",
+            Lang::Kotlin => kotlin::MARKER,
         }
     }
 
     /// Whether the app in `dir` (the directory of its `jazz.app.json`) is
     /// written in this language: a TS app has a `package.json`; a Rust app
-    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app` (a
+    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app-support` (a
     /// workspace root or another crate beside a TS app's files is not
     /// one); a Go app a `go.mod` that requires the Go runtime module.
     /// Committed bindings say so too; the caller checks those.
@@ -144,6 +144,12 @@ impl Lang {
                             .and_then(|p| p.parent())
                             .is_some_and(|p| p.join(self.marker()).exists()))
             }
+            // Either build script, Kotlin DSL or Groovy.
+            Lang::Kotlin => [marker, dir.join(kotlin::GROOVY_MARKER)]
+                .iter()
+                .any(|script| {
+                    std::fs::read_to_string(script).is_ok_and(|build| kotlin::is_app_build(&build))
+                }),
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
             Lang::Swift => std::fs::read_to_string(marker)
@@ -161,6 +167,7 @@ impl Lang {
             Lang::Rust => rust::FORMAT,
             Lang::Swift => swift::FORMAT,
             Lang::Go => go::FORMAT,
+            Lang::Kotlin => kotlin::FORMAT,
         }
     }
 
@@ -171,6 +178,7 @@ impl Lang {
             Lang::Rust => rust::FILE,
             Lang::Swift => swift::FILE,
             Lang::Go => go::FILE,
+            Lang::Kotlin => kotlin::FILE,
         }
     }
 }
@@ -189,6 +197,7 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
         Lang::Rust => rust::generate(app),
         Lang::Swift => swift::generate(app),
         Lang::Go => go::generate(app),
+        Lang::Kotlin => kotlin::generate(app),
     }
 }
 
@@ -213,10 +222,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn swift_is_not_available_from_the_cli_yet() {
-        let error = Lang::parse("swift").unwrap_err();
-        assert!(error.is_unsupported());
-        assert!(error.message().contains("not available yet"), "{error}");
-        assert!(!Lang::ALL.contains(&Lang::Swift));
+    fn swift_is_available_from_the_cli() {
+        assert_eq!(Lang::parse("swift").unwrap(), Lang::Swift);
+        assert!(Lang::ALL.contains(&Lang::Swift));
     }
 }

@@ -334,9 +334,19 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_all(uint64_t ptr, RustBuffer que
 RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_all_at(uint64_t ptr, RustBuffer query_json, RustBuffer tier, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BACKEND_CLIENT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BACKEND_CLIENT
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_backend_client(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN
 uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_begin(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_begin_mergeable(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_BEGIN_UPLOAD
@@ -364,6 +374,16 @@ void uniffi_jazz_ffi_fn_method_jazzhandle_delete(uint64_t ptr, RustBuffer table,
 void uniffi_jazz_ffi_fn_method_jazzhandle_delete_at(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer tier, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+void uniffi_jazz_ffi_fn_method_jazzhandle_delete_client_storage(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DISCONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_DISCONNECT
+void uniffi_jazz_ffi_fn_method_jazzhandle_disconnect(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_EDIT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_EDIT
 void uniffi_jazz_ffi_fn_method_jazzhandle_edit(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer patch_json, RustBuffer edits_json, RustCallStatus *_Nonnull out_status
@@ -372,6 +392,11 @@ void uniffi_jazz_ffi_fn_method_jazzhandle_edit(uint64_t ptr, RustBuffer table, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_EDIT_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_EDIT_TEXT
 void uniffi_jazz_ffi_fn_method_jazzhandle_edit_text(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer column, RustBuffer edited_from, RustBuffer text, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_FOR_USER
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_FOR_USER
+uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_for_user(uint64_t ptr, RustBuffer user_id, RustBuffer claims_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_INSERT
@@ -399,6 +424,11 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_one(uint64_t ptr, RustBuffer que
 RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_one_at(uint64_t ptr, RustBuffer query_json, RustBuffer tier, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_RECONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_RECONNECT
+void uniffi_jazz_ffi_fn_method_jazzhandle_reconnect(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_REFRESH
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_REFRESH
 void uniffi_jazz_ffi_fn_method_jazzhandle_refresh(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -417,6 +447,11 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_session_state(uint64_t ptr, Rust
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_SHUTDOWN
 void uniffi_jazz_ffi_fn_method_jazzhandle_shutdown(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_SHUTDOWN_WITHIN
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_SHUTDOWN_WITHIN
+void uniffi_jazz_ffi_fn_method_jazzhandle_shutdown_within(uint64_t ptr, uint64_t timeout_ms, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_SIGN_OUT
@@ -459,6 +494,11 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_upsert(uint64_t ptr, RustBuffer 
 void uniffi_jazz_ffi_fn_method_jazzhandle_wait_for_sync(uint64_t ptr, RustBuffer tier, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_watch_mutation_errors(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_SESSION
 uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_watch_session(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
@@ -467,6 +507,81 @@ uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_watch_session(uint64_t ptr, uint64
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_SYNC
 uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_watch_sync(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CLONE_SESSION
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CLONE_SESSION
+uint64_t uniffi_jazz_ffi_fn_clone_session(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_FREE_SESSION
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_FREE_SESSION
+void uniffi_jazz_ffi_fn_free_session(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CONSTRUCTOR_SESSION_OPEN
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CONSTRUCTOR_SESSION_OPEN
+uint64_t uniffi_jazz_ffi_fn_constructor_session_open(RustBuffer config_json, RustBuffer tokens, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_CREATE_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_CREATE_DEVICE_ACCOUNT
+void uniffi_jazz_ffi_fn_method_session_create_device_account(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_EXPORT_DEVICE_KEY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_EXPORT_DEVICE_KEY
+RustBuffer uniffi_jazz_ffi_fn_method_session_export_device_key(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_JAZZ
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_JAZZ
+uint64_t uniffi_jazz_ffi_fn_method_session_jazz(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_LINK_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_LINK_DEVICE_ACCOUNT
+void uniffi_jazz_ffi_fn_method_session_link_device_account(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_REFRESH
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_REFRESH
+void uniffi_jazz_ffi_fn_method_session_refresh(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_REOPEN_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_REOPEN_DEVICE_ACCOUNT
+void uniffi_jazz_ffi_fn_method_session_reopen_device_account(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_RESTORE_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_RESTORE_DEVICE_ACCOUNT
+void uniffi_jazz_ffi_fn_method_session_restore_device_account(uint64_t ptr, RustBuffer device_key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_RETRY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_RETRY
+void uniffi_jazz_ffi_fn_method_session_retry(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_SHUTDOWN
+void uniffi_jazz_ffi_fn_method_session_shutdown(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_SIGN_OUT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_SIGN_OUT
+void uniffi_jazz_ffi_fn_method_session_sign_out(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_SNAPSHOT
+RustBuffer uniffi_jazz_ffi_fn_method_session_snapshot(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_WATCH
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_SESSION_WATCH
+uint64_t uniffi_jazz_ffi_fn_method_session_watch(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CLONE_STATELISTENER
@@ -944,9 +1059,21 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_all_at(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BACKEND_CLIENT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BACKEND_CLIENT
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_backend_client(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_begin(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_BEGIN_MERGEABLE
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_begin_mergeable(void
     
 );
 #endif
@@ -980,6 +1107,18 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_delete_at(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DELETE_CLIENT_STORAGE
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_delete_client_storage(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DISCONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_DISCONNECT
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_disconnect(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_EDIT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_EDIT
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_edit(void
@@ -989,6 +1128,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_edit(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_EDIT_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_EDIT_TEXT
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_edit_text(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_FOR_USER
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_FOR_USER
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_for_user(void
     
 );
 #endif
@@ -1022,6 +1167,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_one_at(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_RECONNECT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_RECONNECT
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_reconnect(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_REFRESH
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_REFRESH
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_refresh(void
@@ -1043,6 +1194,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_session_state(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_SHUTDOWN
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_SHUTDOWN_WITHIN
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_SHUTDOWN_WITHIN
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within(void
     
 );
 #endif
@@ -1094,6 +1251,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_wait_for_sync(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_MUTATION_ERRORS
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_watch_mutation_errors(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_SESSION
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_watch_session(void
@@ -1103,6 +1266,78 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_watch_session(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_SYNC
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_watch_sync(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_CREATE_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_CREATE_DEVICE_ACCOUNT
+uint16_t uniffi_jazz_ffi_checksum_method_session_create_device_account(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_EXPORT_DEVICE_KEY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_EXPORT_DEVICE_KEY
+uint16_t uniffi_jazz_ffi_checksum_method_session_export_device_key(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_JAZZ
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_JAZZ
+uint16_t uniffi_jazz_ffi_checksum_method_session_jazz(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_LINK_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_LINK_DEVICE_ACCOUNT
+uint16_t uniffi_jazz_ffi_checksum_method_session_link_device_account(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_REFRESH
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_REFRESH
+uint16_t uniffi_jazz_ffi_checksum_method_session_refresh(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_REOPEN_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_REOPEN_DEVICE_ACCOUNT
+uint16_t uniffi_jazz_ffi_checksum_method_session_reopen_device_account(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_RESTORE_DEVICE_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_RESTORE_DEVICE_ACCOUNT
+uint16_t uniffi_jazz_ffi_checksum_method_session_restore_device_account(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_RETRY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_RETRY
+uint16_t uniffi_jazz_ffi_checksum_method_session_retry(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_SHUTDOWN
+uint16_t uniffi_jazz_ffi_checksum_method_session_shutdown(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_SIGN_OUT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_SIGN_OUT
+uint16_t uniffi_jazz_ffi_checksum_method_session_sign_out(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_SNAPSHOT
+uint16_t uniffi_jazz_ffi_checksum_method_session_snapshot(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_WATCH
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_SESSION_WATCH
+uint16_t uniffi_jazz_ffi_checksum_method_session_watch(void
     
 );
 #endif
@@ -1235,6 +1470,12 @@ uint16_t uniffi_jazz_ffi_checksum_constructor_jazzhandle_open(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_JAZZHANDLE_OPEN_WITH_TOKENS
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_JAZZHANDLE_OPEN_WITH_TOKENS
 uint16_t uniffi_jazz_ffi_checksum_constructor_jazzhandle_open_with_tokens(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_SESSION_OPEN
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_SESSION_OPEN
+uint16_t uniffi_jazz_ffi_checksum_constructor_session_open(void
     
 );
 #endif

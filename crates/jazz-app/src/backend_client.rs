@@ -51,7 +51,15 @@ pub(crate) struct BackendClientLink {
     endpoint: String,
     app: AppId,
     credential: Bearer,
+    /// The bundle the main backend serves, and this client's own, when
+    /// they differ: a trusted client then acts for no user, since it
+    /// evaluates their reads by its own permissions (jazz#5808).
+    bundle_mismatch: Option<(String, String)>,
 }
+
+/// The header a main backend names the permissions bundle it serves by,
+/// on its `backend/admit` answer.
+const BUNDLE_HEADER: &str = "x-jazz-bundle";
 
 fn http() -> Result<reqwest::Client> {
     reqwest::Client::builder()
@@ -72,17 +80,27 @@ async fn token(credential: &Bearer, reason: TokenReason) -> Result<String> {
 }
 
 /// Whether the main backend admits `token` as a trusted machine
-/// (`backend/admit`): `false` when it does not (it may trust it as a user).
-async fn admits_as_trusted(endpoint: &str, app: AppId, token: &str) -> Result<bool> {
+/// (`backend/admit`): `None` when it does not (it may trust it as a user),
+/// otherwise the bundle it serves, when it says.
+async fn admits_as_trusted(
+    endpoint: &str,
+    app: AppId,
+    token: &str,
+) -> Result<Option<Option<String>>> {
     let response = http()?
         .post(app_url(endpoint, app, "backend/admit"))
         .bearer_auth(token)
         .send()
         .await
         .map_err(|error| Error::Server(format!("admitting the backend client: {error}")))?;
+    let bundle = response
+        .headers()
+        .get(BUNDLE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_ascii_lowercase());
     match response.status().as_u16() {
-        204 | 200 => Ok(true),
-        401 | 404 => Ok(false),
+        204 | 200 => Ok(Some(bundle)),
+        401 | 404 => Ok(None),
         status => Err(Error::Server(format!(
             "admitting the backend client: the main backend answered {status}"
         ))),
@@ -94,19 +112,25 @@ async fn admits_as_trusted(endpoint: &str, app: AppId, token: &str) -> Result<bo
 /// signs in as the user the main backend trusts the credential as.
 pub(crate) async fn connect(
     mut context: AppContext,
-    connector: std::sync::Arc<jazz_native_transport::NativeWebSocketConnector>,
+    connector: std::sync::Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     credential: Bearer,
     endpoint: &str,
+    own_bundle: Option<String>,
 ) -> Result<(JazzClient, User, Credential, BackendClientLink)> {
     let app = context.app_id;
     let first = token(&credential, TokenReason::Connect).await?;
-    let link = |kind| BackendClientLink {
+    let link = |kind, bundle_mismatch| BackendClientLink {
         kind,
         endpoint: endpoint.to_owned(),
         app,
         credential: credential.clone(),
+        bundle_mismatch,
     };
-    if admits_as_trusted(endpoint, app, &first).await? {
+    if let Some(served) = admits_as_trusted(endpoint, app, &first).await? {
+        let bundle_mismatch = match (served, own_bundle) {
+            (Some(served), Some(own)) if served != own.to_ascii_lowercase() => Some((served, own)),
+            _ => None,
+        };
         context.backend_secret = Some(STAND_IN_SECRET.to_owned());
         let client =
             JazzClient::connect_with_native_transport_bearer(context, connector, first.clone())
@@ -118,7 +142,7 @@ pub(crate) async fn connect(
             claims: json!({}),
             kind: UserKind::System,
         };
-        let link = link(BackendClientKind::Trusted);
+        let link = link(BackendClientKind::Trusted, bundle_mismatch);
         let credential = Credential::Bearer {
             provider: credential,
             token: first,
@@ -146,7 +170,7 @@ pub(crate) async fn connect(
         claims: signed_in.claims,
         kind: UserKind::Backend,
     };
-    let link = link(BackendClientKind::Scoped);
+    let link = link(BackendClientKind::Scoped, None);
     let credential = Credential::Bearer {
         provider: credential,
         token: first,
@@ -218,6 +242,14 @@ impl Jazz {
     /// exactly `claims` (`{}` for `Value::Null`). `user_id` is the id the
     /// main backend's `authenticate` names them by.
     ///
+    /// Their writes are checked by the core, against the permissions the
+    /// main backend serves. Their reads are evaluated by this client,
+    /// against the permissions it was opened with (as TS's): open it with
+    /// the app's published `jazz.permissions.json`. A main backend that
+    /// names the bundle it serves (`X-Jazz-Bundle` on `backend/admit`) is
+    /// checked: with other permissions, `for_user` fails with
+    /// [`Error::BundleMismatch`] naming both bundles (jazz#5808).
+    ///
     /// Never creates an account: a user who has none yet fails with
     /// [`Error::NoAccount`]; one the main backend refuses (revoked) with
     /// [`Error::Refused`]. Only a trusted client acts for users: a scoped
@@ -242,6 +274,14 @@ impl Jazz {
             return Err(Error::Config(
                 "for_user: pass the user's id, as the main backend's authenticate names it".into(),
             ));
+        }
+        if let Some((served, own)) = &link.bundle_mismatch {
+            // A user's reads are evaluated here, by this client's own
+            // permissions: refuse rather than read by stale ones.
+            return Err(Error::BundleMismatch {
+                own: own.clone(),
+                served: served.clone(),
+            });
         }
         // On the client's runtime, whatever the caller's executor.
         let (link, user) = (link.clone(), user_id.to_owned());
@@ -270,6 +310,7 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        let started = std::time::Instant::now();
         if !self.info.serverless && !timeout.is_zero() {
             // An outage, or the server refusing, ends the wait: what is still
             // pending then is counted below.
@@ -297,10 +338,40 @@ impl Jazz {
             .with_client(|client| async move { Ok(client.pending_uploads()) })
             .await
             .unwrap_or(0);
-        self.shutdown().await?;
+        // Ending the client's HTTP stream sessions gets what is left of
+        // `timeout`: nothing at all for `Duration::ZERO`.
+        self.shutdown_within(session_end_budget(timeout, started.elapsed()))
+            .await?;
         if pending > 0 && self.info.memory && !self.info.serverless && !timeout.is_zero() {
             return Err(Error::Unsynced { pending });
         }
         Ok(())
+    }
+}
+
+/// What `close(timeout)` leaves, after `spent`, for ending the client's HTTP
+/// stream sessions: zero for `Duration::ZERO`, or once `timeout` is spent.
+fn session_end_budget(timeout: Duration, spent: Duration) -> Duration {
+    timeout.saturating_sub(spent)
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    #[test]
+    fn close_passes_what_is_left_of_its_timeout_to_ending_stream_sessions() {
+        assert_eq!(
+            session_end_budget(Duration::ZERO, Duration::ZERO),
+            Duration::ZERO
+        );
+        assert_eq!(
+            session_end_budget(Duration::from_secs(10), Duration::from_secs(3)),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            session_end_budget(Duration::from_secs(10), Duration::from_secs(12)),
+            Duration::ZERO
+        );
     }
 }

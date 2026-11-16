@@ -127,25 +127,25 @@ unsafe extern "C" fn watch_cb(ctx: *mut c_void, kind: *const c_char, json: *cons
 
 struct App {
     server: jazz_server::JazzServer,
-    backend: jazz_app::Jazz,
+    backend: jazz_app_support::Jazz,
     _relay: relay::Relay,
     config: Box<dyn Fn(Value) -> String + Send + Sync>,
 }
 
 async fn app() -> App {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
         .await
         .unwrap();
-    let files = jazz_app::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
+    let files = jazz_app_support::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
         .with_permissions(STAGE_PLAN_PERMISSIONS.as_bytes().to_vec());
-    let backend = jazz_app::Jazz::open(
+    let backend = jazz_app_support::Jazz::open(
         files,
-        jazz_app::Config::new(app_id)
+        jazz_app_support::Config::new(app_id)
             .server(server.base_url())
-            .backend(jazz_app::Backend::new(
+            .backend(jazz_app_support::Backend::new(
                 server.backend_secret(),
                 server.admin_secret(),
                 "stage-plan",
@@ -302,6 +302,49 @@ async fn no_token_callback_runs_after_sign_out() {
             !host.after_close.load(Ordering::SeqCst),
             "the callback ran after close"
         );
+        drop(host);
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
+/// `deleteClientStorage` ends the app too: when it returns the token
+/// callback is not running (a slow fetch was in flight), and it is never
+/// called again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_token_callback_runs_after_deleting_the_store() {
+    let app = app().await;
+    let bearer = (app.config)(json!({ "bearer": true }));
+    let result = tokio::task::spawn_blocking(move || unsafe {
+        let host = Host::new(Some("offline"), Duration::from_millis(800));
+        let mut err = ptr::null_mut();
+        let alice = jazz_open_user(
+            c(&bearer).as_ptr(),
+            Some(token_cb),
+            &*host as *const Host as *mut c_void,
+            &mut err,
+        );
+        assert!(!alice.is_null());
+        let _ = call(alice, "refresh", json!({}));
+        let asked = host.calls.load(Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(host.calls.load(Ordering::SeqCst) > asked && host.running.load(Ordering::SeqCst)) {
+            assert!(std::time::Instant::now() < deadline, "no retry came");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        call(alice, "deleteClientStorage", json!({})).unwrap();
+        assert!(
+            !host.running.load(Ordering::SeqCst),
+            "deleting returned while the callback ran"
+        );
+        host.closed.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !host.after_close.load(Ordering::SeqCst),
+            "the callback ran after the store was deleted"
+        );
+        jazz_close(alice);
         drop(host);
     })
     .await;

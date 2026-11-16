@@ -1,6 +1,9 @@
 import { getContext, setContext } from "svelte";
-import { readable, type Readable } from "svelte/store";
+import { readable, toStore, type Readable } from "svelte/store";
+import { getOptionalJazzContext } from "./context.svelte.js";
 import {
+  clientOnlySessionActions,
+  clientOnlySnapshot,
   jazzSessionActions,
   type JazzSession,
   type JazzSessionSnapshot,
@@ -27,6 +30,15 @@ export function sessionState<Client>(session: JazzSession<Client>): JazzSessionS
   return { ...jazzSessionActions(session), subscribe: state.subscribe };
 }
 
+/**
+ * @internal A `<JazzSvelteClientProvider client>` hides an enclosing
+ * `<JazzProvider>`'s session from its children: they read that client,
+ * which is not the session's.
+ */
+export function hideJazzSession(): void {
+  setContext(SESSION_CONTEXT, undefined);
+}
+
 /** @internal */
 export function setJazzSession(session: JazzSession<JazzClient>): void {
   setContext(SESSION_CONTEXT, sessionState(session));
@@ -40,6 +52,22 @@ export function setJazzSession(session: JazzSession<JazzClient>): void {
  */
 export function getJazzSession(): JazzSessionState<JazzClient> {
   const session = getContext<JazzSessionState<JazzClient> | undefined>(SESSION_CONTEXT);
-  if (!session) throw new Error("getJazzSession must be used within <JazzProvider>");
-  return session;
+  if (session) return session;
+  // A client opened outside a session (`<JazzSvelteClientProvider client>`):
+  // its user, always ready, with operations that reject naming why.
+  const ctx = getOptionalJazzContext();
+  if (!ctx)
+    throw new Error(
+      "getJazzSession must be used within <JazzProvider> or <JazzSvelteClientProvider>",
+    );
+  const state = toStore<JazzSessionSnapshot<JazzClient>>(() =>
+    ctx.client ? clientOnlySnapshot(ctx.client as JazzClient, ctx.session) : STARTING_SNAPSHOT,
+  );
+  return { ...clientOnlySessionActions<JazzClient>(), subscribe: state.subscribe };
 }
+
+const STARTING_SNAPSHOT: JazzSessionSnapshot<never> = Object.freeze({
+  status: "starting",
+  user: null,
+  localFirst: false,
+});
