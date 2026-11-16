@@ -63,6 +63,13 @@ export const jazz = createJazz({
 
 A token from a listed issuer that fails any check is refused. It never reaches `authenticate`.
 
+<Callout type="warn" title="Keep workload and user tokens apart">
+  Workload tokens and your users' tokens must come from different issuers, or carry claims your
+  `backendClients` tell apart. A user's token from a listed workload issuer is checked as that
+  workload's: it doesn't match, so it's refused and never reaches `authenticate`, and the user just
+  appears signed out (`{ "user": null }`), with no error.
+</Callout>
+
 ## Connect from the machine
 
 On the machine, open a Jazz session against your main backend and pass a function that returns a
