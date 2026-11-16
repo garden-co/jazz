@@ -139,6 +139,14 @@ func (db *DB) awaitStreamsEnd(d time.Duration) {
 	}
 }
 
+// settleStreams ends the DB's streams once jazz-ffi has closed the app
+// (signOut, deleteClientStorage): first letting each take its last
+// states, then ending them, before Close frees the handle.
+func (db *DB) settleStreams() {
+	db.awaitStreamsEnd(2 * time.Second)
+	db.endStreams()
+}
+
 // endStreams ends the DB's subscriptions and watches (closing their
 // channels) before the handle closes.
 func (db *DB) endStreams() {

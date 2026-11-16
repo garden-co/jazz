@@ -262,21 +262,14 @@ func (db *DB) SignOut(ctx context.Context) error {
 	if err := db.call(ctx, "signOut", map[string]any{}, nil); err != nil {
 		return err
 	}
-	// The app is closed: let its streams take their last states first.
-	db.awaitStreamsEnd(2 * time.Second)
+	db.settleStreams()
 	return db.Close()
 }
 
 // OnSession is the session's states, the current one first, until ctx is
 // done.
 func (db *DB) OnSession(ctx context.Context) (<-chan SessionState, error) {
-	return watch(ctx, db, "session", func(e event) (SessionState, bool) {
-		var s SessionState
-		if e.kind == "error" || json.Unmarshal([]byte(e.json), &s) != nil {
-			return s, true
-		}
-		return s, false
-	})
+	return watch(ctx, db, "session", decodeSessionState)
 }
 
 // OnSyncStatus is the link's states, the current one first, until ctx is
@@ -291,18 +284,32 @@ func (db *DB) OnSyncStatus(ctx context.Context) (<-chan SyncStatus, error) {
 	})
 }
 
-// watch runs a jazz-ffi watch of what. decode's bool says the event isn't
-// a state (an error, or the watch closing): the channel then closes
-// without it.
-func watch[T any](ctx context.Context, db *DB, what string, decode func(event) (T, bool)) (<-chan T, error) {
-	states := func(e event) (T, bool, bool) {
+// decodeSessionState reads a session watch's state.
+func decodeSessionState(e event) (SessionState, bool) {
+	var s SessionState
+	if e.kind == "error" || json.Unmarshal([]byte(e.json), &s) != nil {
+		return s, true
+	}
+	return s, false
+}
+
+// watchStates is a watch's stream decoding: decode's bool says the event
+// isn't a state, which ends the stream without it.
+func watchStates[T any](decode func(event) (T, bool)) func(event) (T, bool, bool) {
+	return func(e event) (T, bool, bool) {
 		v, end := decode(e)
 		if end || e.kind == "closed" {
 			return v, true, true
 		}
 		return v, false, false
 	}
-	return stream(ctx, db, states, func(id uint64) (func(), error) {
+}
+
+// watch runs a jazz-ffi watch of what. decode's bool says the event isn't
+// a state (an error, or the watch closing): the channel then closes
+// without it.
+func watch[T any](ctx context.Context, db *DB, what string, decode func(event) (T, bool)) (<-chan T, error) {
+	return stream(ctx, db, watchStates(decode), func(id uint64) (func(), error) {
 		var cerr uintptr
 		w := ffi.watch(db.handle, cstr(what), ffi.subscriptionCallback, uintptr(id), &cerr)
 		if err := takeError(cerr); err != nil || w == 0 {

@@ -3,7 +3,6 @@ package jazz
 import (
 	"context"
 	"encoding/json"
-	"time"
 )
 
 // Disconnect leaves the server: local reads and writes go on, and sync
@@ -25,8 +24,7 @@ func (db *DB) DeleteClientStorage(ctx context.Context) error {
 	if err := db.call(ctx, "deleteClientStorage", map[string]any{}, nil); err != nil {
 		return err
 	}
-	// The app is closed: let its streams take their last states first.
-	db.awaitStreamsEnd(2 * time.Second)
+	db.settleStreams()
 	return db.Close()
 }
 
