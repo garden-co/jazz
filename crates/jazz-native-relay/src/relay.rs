@@ -2098,12 +2098,12 @@ fn foreground_command(
 fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadStatus {
     let own = binding.upload_status();
     let store = authority.upload_status();
-    let mut ids = binding.db.pending_upload_ids();
-    ids.extend(authority.db.pending_upload_ids());
-    ids.sort_unstable();
-    ids.dedup();
+    let pending = sorted_union_len(
+        &binding.db.pending_upload_ids(),
+        &authority.db.pending_upload_ids(),
+    );
     UploadStatus {
-        pending: ids.len(),
+        pending,
         oldest_pending_at: own
             .oldest_pending_at
             .into_iter()
@@ -2111,6 +2111,24 @@ fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadSta
             .min(),
         ..own
     }
+}
+
+/// How many distinct items two sorted, deduplicated slices hold together:
+/// a linear merge, no sort.
+fn sorted_union_len<T: Ord>(a: &[T], b: &[T]) -> usize {
+    let (mut i, mut j, mut len) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+        len += 1;
+    }
+    len + (a.len() - i) + (b.len() - j)
 }
 
 /// Wait for a write this foreground committed to reach `tier`. Unless
@@ -2927,5 +2945,19 @@ mod relay_config_tests {
         let config = relay_db_config(schema, identity, &Migrations::default());
         assert!(config.chunk_store.is_none());
         assert!(!config.host_chunk_io);
+    }
+}
+
+#[cfg(test)]
+mod sorted_union_len_tests {
+    use super::sorted_union_len;
+
+    #[test]
+    fn counts_each_shared_item_once() {
+        assert_eq!(sorted_union_len::<u8>(&[], &[]), 0);
+        assert_eq!(sorted_union_len(&[1, 2], &[]), 2);
+        assert_eq!(sorted_union_len(&[], &[1, 2]), 2);
+        assert_eq!(sorted_union_len(&[1, 3, 5], &[2, 3, 6, 7]), 6);
+        assert_eq!(sorted_union_len(&[1, 2, 3], &[1, 2, 3]), 3);
     }
 }
