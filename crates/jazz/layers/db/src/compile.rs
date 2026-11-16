@@ -2814,13 +2814,20 @@ impl<'a> Ctx<'a> {
             }
             // A bare string reads as the column's type, as the schema compile
             // reads it (`coerce_literal_for_column_type`): UUID-shaped text
-            // compared with a text column stays text. `json_value` alone would
-            // make it a UUID, which never equals text, so `!=` would admit
+            // compared with a text column stays text, and a UUID column's
+            // literal is a UUID in any spelling. `json_value` alone decides by
+            // shape, so a mismatch would never be equal and `!=` would admit
             // every row.
-            RelationValueRef::Literal(serde_json::Value::String(text))
-                if ty.is_some_and(|ty| *ty != ValueType::Uuid) =>
-            {
-                self.value_term(&Value::String(text.clone()))
+            RelationValueRef::Literal(serde_json::Value::String(text)) if ty.is_some() => {
+                let value = match ty {
+                    // Any spelling `Uuid::parse_str` reads (hyphenated,
+                    // simple, braced, urn), as the compile accepts it.
+                    Some(ValueType::Uuid) => uuid::Uuid::parse_str(text)
+                        .map(Value::Uuid)
+                        .unwrap_or_else(|_| Value::String(text.clone())),
+                    _ => Value::String(text.clone()),
+                };
+                self.value_term(&value)
             }
             value => self.rel_value(value, rel, scope),
         }
