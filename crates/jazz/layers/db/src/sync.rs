@@ -8502,16 +8502,6 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?;
             if inner.tx.is_some() {
-                // The claims a session write is staged with travel with it.
-                if inner.capture_claims.is_none()
-                    && let Some(author) = ops
-                        .iter()
-                        .find(|op| op.is_session())
-                        .and_then(StagedOp::author)
-                {
-                    inner.capture_claims =
-                        Some(inner.claims.get(&author).cloned().unwrap_or_default());
-                }
                 inner.capture.extend(ops);
                 return Ok(());
             }

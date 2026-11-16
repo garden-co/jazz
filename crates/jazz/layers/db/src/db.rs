@@ -859,10 +859,6 @@ struct Inner {
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
     /// Ops of the open local transaction, for upload, by stored names.
     pub(crate) capture: Vec<StagedOp>,
-    /// The claims the open local transaction's session writes were staged
-    /// with: its upload carries these, not whatever its author's claims
-    /// are by the time it commits.
-    pub(crate) capture_claims: Option<BTreeMap<String, Value>>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -2054,7 +2050,6 @@ impl Db {
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
-                capture_claims: None,
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
@@ -3727,10 +3722,7 @@ impl Db {
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
-            captured = (
-                std::mem::take(&mut inner.capture),
-                inner.capture_claims.take(),
-            );
+            captured = std::mem::take(&mut inner.capture);
             prior = inner.seq;
             match &result {
                 Ok(_) => {
@@ -3752,9 +3744,10 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        let (captured, claims) = captured;
-        let recorded =
-            self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, claims);
+        // A callback transaction writes as the database or attributed
+        // (`transaction_as`), never as a session, so no session claims
+        // travel with it.
+        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, None);
         if let Err(error) = recorded {
             guard.armed = false;
             self.inner().roll_back_callback_tx(Some(prior))?;
@@ -4731,7 +4724,6 @@ impl Inner {
     fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
         self.tx = None;
         self.capture.clear();
-        self.capture_claims = None;
         self.writer = None;
         self.clear_derived();
         if let Some(seq) = restore_seq {
