@@ -35,6 +35,8 @@ mod claims_change;
 mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
+#[path = "../column_operators.rs"]
+mod column_operators;
 #[path = "../commit_atomicity_frames.rs"]
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]

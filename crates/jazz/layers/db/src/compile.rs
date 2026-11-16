@@ -1500,12 +1500,16 @@ impl<'a> Ctx<'a> {
     /// per parent row, so without this a bad filter or order would pass
     /// `prepare` and fail at read time. For `prepare` only: reads don't run
     /// it.
-    pub fn validate_relations(mut self, query: &Query) -> Result<(), Error> {
-        // History reads (`history.<table>`) take no relations.
-        if query.array_subqueries.is_empty() {
+    ///
+    /// Also checks what each column's type supports beyond what compiling
+    /// it does ([`check_operators`]), at the root and in every relation.
+    pub fn validate_prepared(mut self, query: &Query) -> Result<(), Error> {
+        // History reads (`history.<table>`) have their own source and take
+        // no relations: compiling them checked them.
+        let Ok(table) = self.table(&query.table) else {
             return Ok(());
-        }
-        let table = self.table(&query.table)?;
+        };
+        check_operators(table, &query.filters, &query.order_by)?;
         for array in &query.array_subqueries {
             self.check_array(table, array)?;
         }
@@ -1521,6 +1525,7 @@ impl<'a> Ctx<'a> {
             self.predicate(filter, child, "c")?;
         }
         self.order_terms(child, "c", &array.order_by)?;
+        check_operators(child, &array.filters, &array.order_by)?;
         for nested in &array.nested_arrays {
             self.check_array(child, nested)?;
         }
@@ -3273,6 +3278,80 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
 }
 
 /// `contains` searches text, bytes or an array.
+/// What a column's type supports beyond what compiling a query checks: a
+/// JSON or bytes column takes no range comparison (`gt`, `gte`, `lt`,
+/// `lte`) and can't order a query, and a JSON column takes no `contains`.
+/// JSON is stored as text and bytes as a blob, so SQLite would compare
+/// them as such, which means nothing for either. Bytes keep `contains` (a
+/// byte subsequence, SPEC 19.5). Every other column type keeps what the
+/// engine supports. Run at `prepare` only ([`Ctx::validate_prepared`]).
+fn check_operators(
+    table: &Table,
+    filters: &[Predicate],
+    order_by: &[crate::query::OrderBy],
+) -> Result<(), Error> {
+    // `None`: the column supports everything; `Some(kind)`: it is one of
+    // the restricted kinds.
+    let restricted = |column: &str| {
+        let declared = table.column(column)?;
+        match type_kind(&declared.ty) {
+            Kind::Bytes => Some("bytes"),
+            Kind::Array => None,
+            _ if declared.json => Some("JSON"),
+            _ => None,
+        }
+    };
+    fn walk(
+        predicate: &Predicate,
+        restricted: &dyn Fn(&str) -> Option<&'static str>,
+    ) -> Result<(), Error> {
+        let (op, left, right) = match predicate {
+            Predicate::All(children) | Predicate::Any(children) => {
+                return children
+                    .iter()
+                    .try_for_each(|child| walk(child, restricted));
+            }
+            Predicate::Not(child) => return walk(child, restricted),
+            Predicate::Gt(l, r) => ("gt", l, r),
+            Predicate::Gte(l, r) => ("gte", l, r),
+            Predicate::Lt(l, r) => ("lt", l, r),
+            Predicate::Lte(l, r) => ("lte", l, r),
+            Predicate::Contains(l, r) => ("contains", l, r),
+            _ => return Ok(()),
+        };
+        for operand in [left, right] {
+            if let Operand::Column(column) = operand
+                && let Some(kind) = restricted(column)
+            {
+                if kind == "bytes" && op == "contains" {
+                    continue;
+                }
+                let supported = if kind == "bytes" {
+                    "eq, ne, in, notIn or contains"
+                } else {
+                    "eq, ne, in or notIn"
+                };
+                return Err(query_error(format!(
+                    "{kind} column \"{column}\" does not support \"{op}\"; use {supported}"
+                )));
+            }
+        }
+        Ok(())
+    }
+    for filter in filters {
+        walk(filter, &restricted)?;
+    }
+    for key in order_by {
+        if let Some(kind) = restricted(&key.column) {
+            return Err(query_error(format!(
+                "{kind} column \"{}\" cannot be used in orderBy",
+                key.column
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     let Some(declared) = table.column(column) else {
         return Ok(());

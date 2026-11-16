@@ -4,6 +4,7 @@ import { testApp } from "../testing/test-app.js";
 import type { RowOf } from "../typed-app.js";
 import { type Db, type DbSubscriptionUpdate } from "./db.js";
 import { createDb } from "./default-create-db.js";
+import { nativeCoreErrorCode } from "./native-runtime/native-error-code.js";
 
 const app = testApp({ tables: { notes: { columns: { title: "string", done: "boolean" } } } });
 type Note = RowOf<typeof app.notes>;
@@ -30,6 +31,24 @@ describe("createDb in-memory driver", () => {
   afterEach(async () => {
     await db?.shutdown();
     db = undefined;
+  });
+
+  it("leaves operator and orderBy checks to the engine, which refuses them by code", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-operator-checks-test")),
+      driver: { type: "memory" },
+    });
+    for (const query of [
+      largeValues.documents.where({ metadata: { gt: 1 } } as never),
+      largeValues.documents.orderBy("payload" as never),
+    ]) {
+      const refused = await db.all(query).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(nativeCoreErrorCode(refused), String(refused)).toBe("query");
+    }
+    await expect(db.all(largeValues.documents.orderBy("done"))).resolves.toEqual([]);
   });
 
   it("opens a native Db with the current ordinary-column schema layout", async () => {

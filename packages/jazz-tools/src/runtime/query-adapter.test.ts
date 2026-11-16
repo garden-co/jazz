@@ -612,12 +612,10 @@ describe("translateQuery", () => {
     ]);
   });
 
-  it("keeps recognized JSON operator maps on the existing validation path", () => {
-    expect(() =>
-      translateQuery(
-        scalarApp.filters.where({ metadata: { gt: 1 } } as never)._build(),
-        scalarApp.wasmSchema,
-      ),
-    ).toThrow('JSON column "metadata" only supports eq/ne/in/isNull operators.');
+  it("leaves operator checks on JSON operator maps to the engine", () => {
+    // The engine refuses `gt` on JSON at prepare (db.in-memory.test.ts).
+    expect(
+      translatedConditions(scalarApp.filters.where({ metadata: { gt: 1 } } as never)),
+    ).toHaveLength(1);
   });
 });
