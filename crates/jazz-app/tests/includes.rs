@@ -340,6 +340,9 @@ async fn included_rows_decode_every_column_type() {
         fn tasks_urgent(&self, score: i32, priority: TaskPriority) -> bool {
             score > 5 || priority == TaskPriority::High
         }
+        fn tasks_title_len(&self, title: String) -> i32 {
+            title.chars().count() as i32
+        }
         fn iso_date_view(&self, stored: jazz_app::Timestamp) -> String {
             format!("ms-{}", stored.0)
         }
@@ -509,6 +512,9 @@ struct NoComputed;
 impl task_bindings::Computed for NoComputed {
     fn tasks_urgent(&self, _: i32, _: task_bindings::TaskPriority) -> bool {
         false
+    }
+    fn tasks_title_len(&self, title: String) -> i32 {
+        title.chars().count() as i32
     }
     fn iso_date_view(&self, stored: jazz_app::Timestamp) -> String {
         stored.0.to_string()
