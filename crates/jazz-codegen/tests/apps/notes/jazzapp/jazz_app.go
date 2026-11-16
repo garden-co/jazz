@@ -7,7 +7,7 @@ package jazzapp
 import (
 	"context"
 
-	jazz "github.com/garden-co/jazz/packages/jazz-go"
+	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
 )
 
 // Source is the hash of the jazz.app.json these bindings were generated from.
@@ -55,7 +55,7 @@ const App = `{
 }
 `
 
-// Open opens this app: a client, or a backend when cfg.Permissions is set.
+// Open opens this app: locally, or as a client of cfg.ServerURL.
 func Open(ctx context.Context, cfg jazz.Config) (*jazz.DB, error) {
 	cfg.App = App
 	return jazz.Open(ctx, cfg)
@@ -63,8 +63,9 @@ func Open(ctx context.Context, cfg jazz.Config) (*jazz.DB, error) {
 
 // Folder is a row of `folders`.
 type Folder struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	NotesViaFolder []Note `json:"notesViaFolder,omitempty"`
 }
 
 // NewFolder is a row to insert into `folders`: nil fields are null, or take their default.
@@ -84,16 +85,18 @@ func (p FolderPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// foldersTable is the type of Folders: the columns of `folders`, to build conditions and orders from.
+// foldersTable is the type of Folders: the columns of `folders`, to build conditions and orders from, and its relations, to include.
 type foldersTable struct {
-	ID   jazz.Column[Folder, string]
-	Name jazz.Column[Folder, string]
+	ID             jazz.Column[Folder, string]
+	Name           jazz.Column[Folder, string]
+	NotesViaFolder jazz.Relation[Folder, Note]
 }
 
 // Folders is the table `folders`.
 var Folders = foldersTable{
-	ID:   jazz.NewColumn[Folder, string]("id"),
-	Name: jazz.NewColumn[Folder, string]("name"),
+	ID:             jazz.NewColumn[Folder, string]("id"),
+	Name:           jazz.NewColumn[Folder, string]("name"),
+	NotesViaFolder: jazz.NewRelation[Folder, Note]("notesViaFolder"),
 }
 
 // Query starts a query of `folders`.
@@ -102,18 +105,53 @@ func (foldersTable) Query() *jazz.Query[Folder] {
 }
 
 // Insert inserts a row into `folders` and returns it, with its id.
-func (foldersTable) Insert(ctx context.Context, db *jazz.DB, row NewFolder) (Folder, error) {
-	return jazz.Insert[NewFolder, Folder](ctx, db, "folders", row)
+func (foldersTable) Insert(ctx context.Context, db jazz.Querier, row NewFolder, opts ...jazz.WriteOption) (Folder, error) {
+	return jazz.Insert[NewFolder, Folder](ctx, db, "folders", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `folders` with id.
-func (foldersTable) Update(ctx context.Context, db *jazz.DB, id string, patch FolderPatch) error {
-	return db.Update(ctx, "folders", id, patch)
+func (foldersTable) Update(ctx context.Context, db jazz.Querier, id string, patch FolderPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "folders", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `folders` with id: inserted, or updated if it exists.
+func (foldersTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewFolder, opts ...jazz.WriteOption) (Folder, error) {
+	return jazz.Upsert[NewFolder, Folder](ctx, db, "folders", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `folders` with id.
+func (foldersTable) Restore(ctx context.Context, db jazz.Querier, id string) (Folder, error) {
+	return jazz.Restore[Folder](ctx, db, "folders", id, nil)
+}
+
+// History starts a query of `folders`'s history: every accepted version of its rows.
+func (foldersTable) History() *jazz.Query[jazz.HistoryRow[Folder]] {
+	return jazz.History(jazz.NewQuery[Folder]("folders"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `folders`.
+func (foldersTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "folders", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `folders`.
+func (foldersTable) CanInsert(ctx context.Context, db jazz.Querier, row NewFolder) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "folders", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `folders`.
+func (foldersTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch FolderPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "folders", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `folders`.
+func (foldersTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "folders", id)
 }
 
 // Delete deletes the row of `folders` with id.
-func (foldersTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "folders", id)
+func (foldersTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "folders", id, opts...)
 }
 
 // Note is a row of `notes`.
@@ -122,6 +160,7 @@ type Note struct {
 	Body     string  `json:"body"`
 	Pinned   bool    `json:"pinned"`
 	FolderID *string `json:"folderId"`
+	Folder   *Folder `json:"folder,omitempty"`
 }
 
 // NewNote is a row to insert into `notes`: nil fields are null, or take their default.
@@ -147,12 +186,13 @@ func (p NotePatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// notesTable is the type of Notes: the columns of `notes`, to build conditions and orders from.
+// notesTable is the type of Notes: the columns of `notes`, to build conditions and orders from, and its relations, to include.
 type notesTable struct {
 	ID       jazz.Column[Note, string]
 	Body     jazz.Column[Note, string]
 	Pinned   jazz.Column[Note, bool]
 	FolderID jazz.Column[Note, string]
+	Folder   jazz.Relation[Note, Folder]
 }
 
 // Notes is the table `notes`.
@@ -161,6 +201,7 @@ var Notes = notesTable{
 	Body:     jazz.NewColumn[Note, string]("body"),
 	Pinned:   jazz.NewColumn[Note, bool]("pinned"),
 	FolderID: jazz.NewColumn[Note, string]("folderId"),
+	Folder:   jazz.NewRelation[Note, Folder]("folder"),
 }
 
 // Query starts a query of `notes`.
@@ -169,16 +210,51 @@ func (notesTable) Query() *jazz.Query[Note] {
 }
 
 // Insert inserts a row into `notes` and returns it, with its id.
-func (notesTable) Insert(ctx context.Context, db *jazz.DB, row NewNote) (Note, error) {
-	return jazz.Insert[NewNote, Note](ctx, db, "notes", row)
+func (notesTable) Insert(ctx context.Context, db jazz.Querier, row NewNote, opts ...jazz.WriteOption) (Note, error) {
+	return jazz.Insert[NewNote, Note](ctx, db, "notes", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `notes` with id.
-func (notesTable) Update(ctx context.Context, db *jazz.DB, id string, patch NotePatch) error {
-	return db.Update(ctx, "notes", id, patch)
+func (notesTable) Update(ctx context.Context, db jazz.Querier, id string, patch NotePatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "notes", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `notes` with id: inserted, or updated if it exists.
+func (notesTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewNote, opts ...jazz.WriteOption) (Note, error) {
+	return jazz.Upsert[NewNote, Note](ctx, db, "notes", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `notes` with id.
+func (notesTable) Restore(ctx context.Context, db jazz.Querier, id string) (Note, error) {
+	return jazz.Restore[Note](ctx, db, "notes", id, nil)
+}
+
+// History starts a query of `notes`'s history: every accepted version of its rows.
+func (notesTable) History() *jazz.Query[jazz.HistoryRow[Note]] {
+	return jazz.History(jazz.NewQuery[Note]("notes"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `notes`.
+func (notesTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "notes", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `notes`.
+func (notesTable) CanInsert(ctx context.Context, db jazz.Querier, row NewNote) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "notes", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `notes`.
+func (notesTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch NotePatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "notes", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `notes`.
+func (notesTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "notes", id)
 }
 
 // Delete deletes the row of `notes` with id.
-func (notesTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "notes", id)
+func (notesTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "notes", id, opts...)
 }

@@ -2245,6 +2245,18 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Read data is scoped to this transaction.
    */
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    // The core's transaction read path does not apply a branch view yet: it
+    // would return rows outside the requested branch (jazz#5806). Refuse
+    // rather than silently answer from the wrong view. Branch writes inside a
+    // transaction are unaffected.
+    const candidate = options as { branch?: unknown; base?: unknown } | undefined;
+    if (candidate?.branch !== undefined || candidate?.base !== undefined) {
+      return Promise.reject(
+        new Error(
+          "Reading through a branch (`branch`/`base`) inside a transaction is not supported yet (jazz#5806). Read outside the transaction with db.all/db.one instead.",
+        ),
+      );
+    }
     const reading = this.readAll(query, options);
     this.pendingReads.add(reading);
     const settled = () => this.pendingReads.delete(reading);

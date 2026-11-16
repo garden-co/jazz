@@ -237,6 +237,56 @@ async fn hop_to_follows_forward_and_reverse_relations() {
     jazz.shutdown().await.unwrap();
 }
 
+/// As in TypeScript, a query has one order and window, applied to the rows
+/// it ends on: `order_by`, `limit` and `offset` before a hop order and
+/// window the rows the hop reaches, not the rows it starts from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn order_and_window_before_a_hop_apply_to_the_rows_it_reaches() {
+    let jazz = local().await;
+    let f = fixture(&jazz).await;
+
+    // The children of every todo are Skimmed and Low-fat. Ordered by title
+    // and limited to one, that's Low-fat (unordered, the store's order
+    // gives Skimmed). Applied to the todos the hop starts from, the order
+    // and limit would pick Buy bread, which has no children.
+    let first: Vec<Todo> = jazz
+        .all(
+            todos::query()
+                .order_by(todos::title(), Order::Asc)
+                .limit(1)
+                .hop_to(todos::todos_via_parent()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(titles(&first), ["Low-fat"]);
+
+    // The offset before the hop skips reached rows; a later order adds to
+    // the earlier one.
+    let second: Vec<Todo> = jazz
+        .all(
+            todos::query()
+                .offset(1)
+                .hop_to(todos::todos_via_parent())
+                .order_by(todos::title(), Order::Asc),
+        )
+        .await
+        .unwrap();
+    assert_eq!(titles(&second), ["Skimmed"]);
+
+    // A limit before a hop to another table limits the projects it reaches.
+    let projects: Vec<Project> = jazz
+        .all(
+            todos::query()
+                .filter(todos::done().eq(false))
+                .limit(1)
+                .hop_to(todos::project_relation()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(projects, std::slice::from_ref(&f.home));
+    jazz.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gather_walks_a_relation_up_to_a_depth() {
     let jazz = local().await;
@@ -467,16 +517,139 @@ async fn history_lists_a_rows_accepted_versions() {
         .unwrap();
     assert_eq!(until.len(), 3);
 
-    // A history read must be bounded to rows; subscribing is not supported.
+    // A history read must be bounded to rows.
     assert!(remote(&jazz, todos::history()).await.is_err());
-    let refused = jazz
-        .subscribe(todos::history().id(f.milk.id))
-        .await
-        .err()
-        .expect("subscribing to history is refused");
-    assert!(unsupported(refused).contains("history"));
     jazz.shutdown().await.unwrap();
     server.shutdown().await;
+}
+
+/// The rows a subscription holds, once `done` says they are complete.
+async fn until<T: Row + Clone>(
+    changes: &mut jazz_app::Subscription<T>,
+    rows: &mut Rows<T>,
+    done: impl Fn(&[T]) -> bool,
+) -> Vec<T> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !done(rows.as_slice()) {
+            rows.apply(
+                changes
+                    .next()
+                    .await
+                    .expect("the subscription runs")
+                    .unwrap(),
+            );
+        }
+    })
+    .await
+    .expect("the subscription reaches the expected rows");
+    rows.as_slice().to_vec()
+}
+
+/// A history subscription, as in TypeScript: each accepted version is a
+/// row of its own (every version shares the row's id), and a new version
+/// arrives as it is accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_subscriptions_follow_accepted_versions() {
+    let (server, config) = server().await;
+    let jazz = bindings::open(config()).await.unwrap();
+    let f = fixture(&jazz).await;
+    let rename = |title: &str| TodoUpdate {
+        title: Some(title.into()),
+        ..Default::default()
+    };
+    jazz.update(f.milk.id, rename("Buy oat milk"))
+        .await
+        .unwrap();
+
+    let mut changes = jazz
+        .subscribe_with(
+            todos::history()
+                .id(f.milk.id)
+                .order_by_accepted_at(Order::Asc),
+            jazz_app::ReadTier::Remote,
+        )
+        .await
+        .unwrap();
+    let mut rows = Rows::default();
+    let versions = until(&mut changes, &mut rows, |rows| rows.len() == 2).await;
+    let got: Vec<_> = versions.iter().map(|v| v.row.title.as_str()).collect();
+    assert_eq!(got, ["Buy milk", "Buy oat milk"]);
+
+    jazz.update(f.milk.id, rename("Buy soy milk"))
+        .await
+        .unwrap();
+    let versions = until(&mut changes, &mut rows, |rows| rows.len() == 3).await;
+    let got: Vec<_> = versions.iter().map(|v| v.row.title.as_str()).collect();
+    assert_eq!(got, ["Buy milk", "Buy oat milk", "Buy soy milk"]);
+    assert!(versions.iter().all(|v| v.row.id == f.milk.id));
+    drop(changes);
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// A live union holds a row once per arm that matches it, as in
+/// TypeScript; when it leaves one arm, only that arm's occurrence goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_union_keeps_each_arms_occurrence_of_a_row() {
+    let jazz = local().await;
+    let f = fixture(&jazz).await;
+    let mut changes = jazz
+        .subscribe(
+            Query::union_named([
+                ("open", todos::query().filter(todos::done().eq(false))),
+                ("milk", todos::query().id(f.milk.id)),
+            ])
+            .order_by(todos::title(), Order::Asc),
+        )
+        .await
+        .unwrap();
+    let mut rows = Rows::default();
+    let milk = |rows: &[Todo]| rows.iter().filter(|t| t.id == f.milk.id).count();
+    let held = until(&mut changes, &mut rows, |rows| milk(rows) == 2).await;
+    assert_eq!(milk(&held), 2, "{:?}", titles(&held));
+
+    // Renamed, milk changes in both arms: each occurrence takes the update.
+    jazz.update(
+        f.milk.id,
+        TodoUpdate {
+            title: Some("Buy whole milk".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let renamed = |rows: &[Todo]| {
+        rows.iter()
+            .filter(|t| t.id == f.milk.id && t.title == "Buy whole milk")
+            .count()
+    };
+    until(&mut changes, &mut rows, |rows| renamed(rows) >= 1).await;
+    // Let the other occurrence's update arrive too, if it comes apart.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    while let Some(Some(delta)) = futures::FutureExt::now_or_never(changes.next()) {
+        rows.apply(delta.unwrap());
+    }
+    let held = rows.as_slice().to_vec();
+    assert_eq!(milk(&held), 2, "{:?}", titles(&held));
+    assert_eq!(renamed(&held), 2, "{:?}", titles(&held));
+
+    // Done, milk leaves the open arm but stays in its own.
+    jazz.update(
+        f.milk.id,
+        TodoUpdate {
+            done: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let held = until(&mut changes, &mut rows, |rows| {
+        rows.iter().any(|t| t.id == f.milk.id && t.done) && milk(rows) < 2
+    })
+    .await;
+    assert_eq!(milk(&held), 1, "{:?}", titles(&held));
+    drop(changes);
+    jazz.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -504,6 +677,30 @@ async fn unsupported_combinations_are_refused_as_in_typescript() {
     assert!(reason.contains("include(...)"), "{reason}");
     let reason = unsupported(jazz.all(union().include_deleted()).await.unwrap_err());
     assert!(reason.contains("include_deleted()"), "{reason}");
+    // Part of a value can't be read through a union, a history read or a hop.
+    let part = || jazz_app::ValuePart::TextUtf16 { from: 0, to: 2 };
+    let reason = unsupported(
+        jazz.all(union().part(todos::title(), part()))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("part(...)"), "{reason}");
+    let reason = unsupported(
+        jazz.all(todos::history().id(f.milk.id).part(todos::title(), part()))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("part(...)"), "{reason}");
+    let reason = unsupported(
+        jazz.all(
+            todos::query()
+                .part(todos::title(), part())
+                .hop_to(todos::project_relation()),
+        )
+        .await
+        .unwrap_err(),
+    );
+    assert!(reason.contains("part(...)"), "{reason}");
     let reason = unsupported(
         jazz.all(union().gather(todos::parent_relation(), 3))
             .await
@@ -538,14 +735,6 @@ async fn unsupported_combinations_are_refused_as_in_typescript() {
         .unwrap_err(),
     );
     assert!(reason.contains("include(...)"), "{reason}");
-
-    // A hop windows what it reaches, not what it starts from.
-    let reason = unsupported(
-        jazz.all(todos::query().limit(1).hop_to(todos::project_relation()))
-            .await
-            .unwrap_err(),
-    );
-    assert!(reason.contains("hop_to(...)"), "{reason}");
 
     // An include's query does not hop.
     let reason = unsupported(
@@ -732,6 +921,9 @@ async fn hop_to_follows_an_array_relation() {
     impl task_bindings::Computed for NoComputed {
         fn tasks_urgent(&self, _: i32, _: task_bindings::TaskPriority) -> bool {
             false
+        }
+        fn tasks_title_len(&self, title: String) -> i32 {
+            title.chars().count() as i32
         }
         fn iso_date_view(&self, stored: Timestamp) -> String {
             stored.0.to_string()
