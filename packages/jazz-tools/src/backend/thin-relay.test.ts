@@ -19,8 +19,12 @@ const requestId = (frame: Uint8Array) => {
   return frame[1]!;
 };
 
-/** The core's answer to request `id`, as the client receives it. */
-const coreAnswer = (id: number) => new NapiThinRouter().refuse(id, "Ok", "answered")[0]!;
+/**
+ * The core's `Ok` answer to request `id`, as the client receives it: the
+ * ThinResponse frame (tag 5), the id and the `Ok` body (variant 0), in one
+ * batch. Ids here take one varint byte.
+ */
+const coreAnswer = (id: number) => encodeWebSocketFrameBatch([new Uint8Array([5, id, 0])]);
 
 /** An answer the session's client gives: a response frame. */
 const clientAnswer = (id: number) =>
@@ -240,5 +244,33 @@ describe("a request the core keeps waiting", () => {
     await settle();
     expect(h.served).toEqual([2, 3]);
     expect(decodeAll(h.toClient).map((answer) => answer.id)).toEqual([2, 3]);
+  });
+});
+
+describe("a socket that ends while its client serves a request", () => {
+  it("closes the client at once, even if the request never ends", async () => {
+    const h = harness({ serve: () => new Promise(() => {}), requestTimeoutMs: 20 });
+    await h.relay.fromClient(message([1, { type: "schema", schema: SCHEMA }]));
+    h.relay.fromCore(coreAnswer(1));
+    await h.relay.fromClient(
+      message([2, { type: "query", query: new Uint8Array(), options: {}, transaction: TX }]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    h.relay.end();
+    await settle();
+    expect(h.clientClosed()).toBe(true);
+  });
+
+  it("opens no client for a schema the core did not accept", async () => {
+    const h = harness();
+    await h.relay.fromClient(message([1, { type: "schema", schema: SCHEMA }]));
+    h.relay.fromCore(new NapiThinRouter().refuse(1, "SchemaNotDeployed", "not admitted")[0]!);
+    await h.relay.fromClient(message([2, { type: "begin", transaction: TX, kind: "mergeable" }]));
+    await settle();
+    expect(h.served).toEqual([]);
+    expect(decodeAll(h.toClient)[0]).toMatchObject({
+      id: 2,
+      body: { type: "error", code: "Argument" },
+    });
   });
 });

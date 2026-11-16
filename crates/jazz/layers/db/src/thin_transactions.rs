@@ -729,9 +729,11 @@ pub struct ThinRouter {
     /// backend's too, until the transaction ends.
     streams: BTreeMap<u64, String>,
     /// The public schema JSON the client bound the connection to (its
-    /// `Schema` request, which goes to the core): the session's client
-    /// opens with it.
+    /// `Schema` request, which goes to the core), once the core accepted
+    /// it: the session's client opens with it.
     schema: Option<Vec<u8>>,
+    /// A `Schema` request the core has not answered yet: its id and schema.
+    binding: Option<(u64, Vec<u8>)>,
     /// Routed, not released yet, in order.
     queue: VecDeque<Routed>,
     /// Requests released to the core it has not answered yet.
@@ -801,6 +803,16 @@ impl ThinRouter {
                 },
                 _ => continue,
             };
+            if let Some((id, _)) = &self.binding
+                && *id == answer.id
+            {
+                let (_, schema) = self.binding.take().expect("checked above");
+                // Only a version the core serves: one it refused (say, one
+                // it never admitted) binds nothing here either.
+                if answer.body == ThinBody::Ok {
+                    self.schema = Some(schema);
+                }
+            }
             answered |= self.core_pending.remove(&answer.id);
         }
         answered
@@ -853,8 +865,8 @@ impl ThinRouter {
         steps
     }
 
-    /// The public schema JSON the client bound the connection to, once its
-    /// `Schema` request was routed.
+    /// The public schema JSON the client bound the connection to, once the
+    /// core accepted its `Schema` request.
     pub fn schema(&self) -> Option<&[u8]> {
         self.schema.as_deref()
     }
@@ -865,7 +877,8 @@ impl ThinRouter {
             return;
         }
         if let ThinOp::Schema { schema } = &request.op {
-            self.schema = Some(schema.clone());
+            self.schema = None;
+            self.binding = Some((request.id, schema.clone()));
         }
         // A live query answers for as long as it is open, and closing one
         // is answered for the query: neither is waited on.

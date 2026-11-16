@@ -1064,19 +1064,42 @@ fn a_large_answer_travels_in_parts_the_client_joins() {
 }
 
 #[test]
-fn the_router_keeps_the_schema_the_client_bound() {
+fn the_router_keeps_the_schema_the_client_bound_once_the_core_accepted_it() {
     let mut router = ThinRouter::default();
     assert!(router.schema().is_none());
-    router
-        .from_client(vec![frame(
-            1,
+    let bind = |id: u64, schema: &[u8]| {
+        frame(
+            id,
             ThinOp::Schema {
-                schema: b"{}".to_vec(),
+                schema: schema.to_vec(),
             },
-        )])
-        .unwrap();
-    assert_eq!(router.schema(), Some(&b"{}"[..]));
+        )
+    };
+    router.from_client(vec![bind(1, b"{}")]).unwrap();
     assert_eq!(released(router.ready()), ["core:1"]);
+    assert!(router.schema().is_none(), "not before the core accepted it");
+    router.from_core(&[core_answer(1)]);
+    assert_eq!(router.schema(), Some(&b"{}"[..]));
+
+    // A version the core refuses binds nothing: not the earlier one either.
+    router
+        .from_client(vec![bind(2, b"{\"forged\":1}")])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["core:1"]);
+    assert!(router.schema().is_none());
+    router.from_core(&[
+        jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
+            jazz::thin::ThinResponse {
+                id: 2,
+                body: ThinBody::Error {
+                    code: "SchemaNotDeployed".to_owned(),
+                    message: "not admitted".to_owned(),
+                },
+            },
+        ))
+        .unwrap(),
+    ]);
+    assert!(router.schema().is_none());
 }
 
 #[test]

@@ -94,7 +94,11 @@ export class ThinRelay {
     clearTimeout(this.deadline);
     const client = this.client;
     this.client = undefined;
-    if (client) void this.serving.then(() => client.close()).catch(() => undefined);
+    // At once, not after the request it may be serving: one the core never
+    // answers would otherwise hold the client (and its place) for good.
+    // Closing drops that request, and the transactions it left open roll
+    // back with the client.
+    if (client) void client.close().catch(() => undefined);
   }
 
   /** An answer came: the wait for the next goes on from now. */

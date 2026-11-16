@@ -210,7 +210,7 @@ For example:
 A thin client (`jazz-tools/thin`) that connects through your app's backend (`createJazz`) runs its
 transactions there: the backend stages the writes as you make them and sends the finished
 transaction to the server when you commit, so the server checks it as a whole, as above. (A thin
-client connected to the server some other way has each write checked as it's staged, in order.)
+client connected straight to the server has each write checked as it's staged, in order.)
 Two things differ from a local-first client:
 
 - A staged write the backend refuses outright, such as one with invalid values or an update of a
