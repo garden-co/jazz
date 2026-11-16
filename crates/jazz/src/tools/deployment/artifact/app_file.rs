@@ -489,7 +489,7 @@ fn read_tables(
             if let Some((_, warnings)) = codegen.as_mut() {
                 warnings.push(format!(
                     "{path}.tsOnly: `tsOnly` (written before alpha.66) is ignored; \
-                     `jazz-tools upgrade` turns it into `computed` and `transforms`"
+                     declare those fields in schema.ts with `s.computed(…)` or `.transform(…)`"
                 ));
             }
             for (field, kind) in object(fields, &format!("{path}.tsOnly"))? {

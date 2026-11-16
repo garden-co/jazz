@@ -996,9 +996,9 @@ drop this one later). A reference to a table the same migration renames
 follows it.
 
 **Files from alpha.63.** A file's `slices` (schema slicing is gone in
-alpha.65) and a table's `tsOnly` load with a warning that they are ignored;
-`jazz-tools upgrade` turns `tsOnly` into `computed` and `transforms` and
-removes `slices`.
+alpha.65) and a table's `tsOnly` load with a warning that they are ignored.
+`jazz-tools upgrade` removes `slices`; the fields `tsOnly` held are declared
+in `schema.ts` with `s.computed(…)` or `.transform(…)`.
 
 #### `jazz.permissions.json`
 
