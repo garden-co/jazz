@@ -125,7 +125,7 @@ describe("generate in a Kotlin app", () => {
   it("writes src/main/kotlin/JazzApp.kt and no jazz.generated.ts, and --check passes on it", async () => {
     const { root } = await createWorkspace();
     const dir = join(root, "app");
-    await writeAppFiles(dir);
+    await writeTsApp(dir);
     await writeFile(join(dir, "build.gradle.kts"), KOTLIN_BUILD);
 
     const result = await generateApp({ cwd: dir });
