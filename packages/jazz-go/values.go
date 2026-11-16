@@ -89,3 +89,12 @@ func MarshalPatch(entries ...PatchEntry) ([]byte, error) {
 	}
 	return json.Marshal(object)
 }
+
+// PatchJSON is MarshalPatch's object, as a value to write.
+func PatchJSON(entries ...PatchEntry) (any, error) {
+	b, err := MarshalPatch(entries...)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(b), nil
+}

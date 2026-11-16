@@ -1,0 +1,211 @@
+---
+title: Swift
+description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from jazz.app.json."
+---
+
+For apps: run your backend in TypeScript, Rust or Go.
+
+A Swift app is an end-user client of your app. It opens the same `jazz.app.json` as every other
+language, with typed bindings generated from it, signs a user in, and syncs through your backend's
+Jazz endpoint. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
+`async`, and subscriptions are `AsyncSequence`s.
+
+CI builds and tests the Swift package on Linux only, with command-line tools and servers. It
+should work on macOS, but isn't tested there yet. iOS and macOS UI apps aren't built or tested yet
+(see [Not supported yet](#not-supported-yet)).
+
+## Install
+
+The Swift package is the Jazz repository itself: its root `Package.swift` has the `Jazz` product.
+The package doesn't ship the Jazz core, `libjazz_ffi`, a static library built from Rust, so build
+it once from a checkout at the same release tag (this needs Rust and Swift 6.0 or newer) and point
+pkg-config at it:
+
+```bash
+git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
+jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only   # builds libjazz_ffi.a and jazz_ffi.pc
+export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
+```
+
+Then depend on the package by URL at that tag (or by path, `.package(path: "../jazz")`, on the
+checkout), and build with `PKG_CONFIG_PATH` set:
+
+```swift title="Package.swift"
+dependencies: [
+    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65")
+],
+targets: [
+    .target(
+        name: "MyApp",
+        dependencies: [.product(name: "Jazz", package: "jazz")],
+        path: ".",
+        sources: ["JazzApp.swift", "Sources/MyApp"]
+    ),
+]
+```
+
+```bash
+swift build
+```
+
+If `swift build` warns "couldn't find pc file for jazz_ffi" and then fails to link, `PKG_CONFIG_PATH`
+isn't set. The library and the package must come from the same tag. Linux is built and tested in CI. macOS
+follows the same steps but isn't tested yet, and there are no prebuilt binaries or XCFrameworks yet
+(see [Not supported yet](#not-supported-yet)).
+
+## Generate the bindings
+
+With a `Package.swift` that uses the `Jazz` product beside `jazz.app.json`, `jazz-tools generate`
+writes `JazzApp.swift` next to them:
+
+```bash
+npx jazz-tools generate            # checks the files, writes JazzApp.swift
+npx jazz-tools generate --check    # in CI: fails if JazzApp.swift is stale
+```
+
+Commit `JazzApp.swift` and add it to your target's sources. Everything in it sits inside
+`public enum JazzApp`, so a table's names never hide Swift's own types: StagePlan's `tasks` table
+gives `JazzApp.Task`, not `Task`. For each table, it gives you:
+
+- a `Codable` row struct (`JazzApp.Task`), with lowerCamelCase properties;
+- `JazzApp.NewTask`, for inserts. Columns that may be left out are optional and default to `nil`;
+- `JazzApp.TaskPatch`, for updates. Each column is `.unchanged` or `.set(value)`;
+- a namespace (`JazzApp.tasks`) with `query()` and typed columns, for filters and `orderBy`;
+- a Swift enum for each enum column (`JazzApp.TaskStatus`).
+
+`JazzApp.open(_:)` opens the app from the `jazz.app.json` the file embeds.
+
+## Open the app
+
+The app syncs through your app's Jazz endpoint (its backend's `createJazz` handler, never the sync
+server itself), signed in with a device account or with your own sign-in's bearer tokens:
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-client
+</include>
+
+`jazz.session` yields `.signedIn(user)`, `.expired` or `.signedOut` each time the session changes.
+`jazz.syncStatus()` and `jazz.syncChanges` report the link (`.connected`, `.offline(reason:…)`, …),
+pending uploads and rejections, as TypeScript's `SyncStatus`. `refresh()` asks your token provider
+again, `link(bearer:)` links a device account to your sign-in, and `signOut()` signs out and closes
+the app. `.local()` opens a client without a server.
+
+Before the process exits, call `try await jazz.close()`. It ends every live `watch` and
+`subscribe` loop with `JazzError.closed`.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Swift
+tab for each example. `examples/stage-plan/apps/swift-cli` in the repository is a complete
+command-line client of StagePlan: it signs in with a device account, whose key it keeps in a file
+only its user can read, or with a bearer token, and creates a show, lists, adds and moves tasks.
+
+A device key is the account: keep it as a password in the Keychain on Apple platforms, and in a
+file only its user can read on Linux. The Jazz Swift package has no helper for either yet.
+
+## Computed fields and transforms
+
+If `jazz.app.json` declares computed fields or transforms, the bindings declare a
+`JazzApp.Computed` protocol. It has one method per computed field (`tasksPriority(score:)`) and a
+`View`/`Stored` pair per transform (`isoDateView(_:)`, `isoDateStored(_:)`).
+`JazzApp.open(_:computed:)` takes your implementation, so a missing method is a compile error:
+
+```swift
+struct AppComputed: JazzApp.Computed {
+    func tasksPriority(score: Int) -> JazzApp.TaskPriority { score > 5 ? .high : .low }
+    func isoDateView(_ stored: Date) -> String { ISO8601DateFormatter().string(from: stored) }
+    func isoDateStored(_ view: String) -> Date { ISO8601DateFormatter().date(from: view)! }
+}
+
+let jazz = try await JazzApp.open(config, computed: AppComputed())
+```
+
+Rows hold the computed values and the view form of transformed columns. Inserts and patches take
+the view form and write the stored one. Filters on a transformed column compare stored values.
+
+## SwiftUI and errors
+
+On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live result for a view, like
+`useAll` in TypeScript:
+
+```swift
+@State var tasks = JazzQuery(jazz, JazzApp.tasks.query().orderBy(JazzApp.tasks.rank))
+// tasks.rows, tasks.isLoading, tasks.error
+```
+
+Every call throws a `JazzError` (catch it with `catch let error as JazzError`). The cases are
+`refused` (validation, permissions or not supported yet), `io`, `closed`, `decoding`,
+`cancelled` (the calling task was cancelled), `permissionDenied` (your backend's permissions
+refused it, seen when waiting for the `global` tier), `notSupported` and `conflict` (a serializable
+transaction lost to another write: retry it).
+
+## Relations, transactions and tiers
+
+Each relation is a row property, filled when the query includes it and `nil` otherwise:
+`JazzApp.tasks.query().include(JazzApp.tasks.show)` fills `task.show`. A relation narrows like a
+query: `JazzApp.shows.tasks.orderBy(JazzApp.tasks.rank).limit(3)`, plus a nested `.include(…)` or
+`.required()`. `query.select(columns…)` reads only some columns into a `Decodable` type of yours,
+with `jazz.all(selection, as: MyType.self)`.
+
+`jazz.transaction(commit:) { tx in … }` runs a serializable transaction. It commits when the
+closure returns, rolls back when the closure throws, and rethrows that error. Reads take a
+`tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
+`jazz.waitForSync(.global)` waits until everything written so far has reached the server.
+
+## Mergeable text and permission advice
+
+A text-merge column (`"merge": "text"`, like StagePlan's `tasks.notes`) reads as a plain `String?`.
+To edit it so that concurrent edits merge instead of overwriting each other, use a `JazzText`
+handle:
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-mergeable-text-swift
+</include>
+
+`notes.changes` yields the merged text each time the row changes. Lower level, `jazz.edit(id,
+patch, edits: [.text(…), .splice(…), .jsonSet(…)])` makes several partial edits as one write.
+
+`jazz.canInsert(newRow)`, `canRead`, `canUpdate` and `canDelete` ask the app's permissions before
+you try. They return `true`, `false`, or `nil` when there's nothing to ask, such as no server.
+
+## Hops, history and uploads
+
+- `query.hopTo(JazzApp.tasks.show)` reads the rows a relation leads to. The hop takes its own
+  `where`, `orderBy`, `limit` and `offset`, and hops on with `.hopTo(…)`.
+- `query.gather(JazzApp.nodes.parent, maxDepth: 5)` reads rows along a relation of a table to
+  itself.
+- `Union(q1, q2)` reads every arm's rows; a row two arms match comes twice.
+- `query.history()`, read with `jazz.all`, gives every version the server accepted, as
+  `Version(row:transactionId:acceptedAt:)`.
+- `query.includeDeleted()` reads deleted rows too; `jazz.restore(T.self, id:)` brings one back.
+- `jazz.upsert(id, newRow)` writes a row with a given id.
+- `jazz.upload(newRow, column:, from: chunks)` streams a large text or bytes value in from an
+  `AsyncSequence<Data>`, and `select(parts: column.part(0..<4096, in: .bytes))` reads it back in
+  pages.
+
+## Not supported yet
+
+Not supported yet:
+
+- iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
+  or tested for them yet, and there are no prebuilt XCFrameworks.
+- Prebuilt `libjazz_ffi` and XCFrameworks: build the library from the release's source, as above.
+- A SwiftUI `Binding` for `JazzText`.
+- Running a backend in Swift (publishing permissions, acting for users) or serving the app's Jazz
+  endpoint: run your backend in TypeScript, Rust or Go.
+- Keychain (or file) storage for device keys: keep the key from `Jazz.generateDeviceKey()` with
+  your own code.
+- An `@Observable` session model for SwiftUI: follow `jazz.session`. (`JazzQuery` exists for Apple
+  platforms only, and CI, which runs on Linux, doesn't build or test it.)
+- Anonymous (guest) users, as in TypeScript.
+- Subscribing to history queries.
+- Parts of large values inside includes: parts are for root queries.
+- `offset` in an include, and `required` on reverse relations or optional references.
+- Payload enums, nested rows and other column types the bindings can't type: they're refused when
+  generating.
+- Non-finite floats (`NaN`, infinities) read back as `null`. In a `Double` column that fails to
+  decode. In a nullable `Double?` column, it silently reads as `nil`.
+- Positions in subscription deltas: `subscribe` deltas carry none, and `watch` re-sorts its rows
+  locally by the query's `orderBy`.
+
+A write that the server's permissions refuse doesn't throw by default. Writes are local-first, so
+it stays in the local store and never syncs. Write with `tier: .global` (or call
+`waitForSync(.global)`) to get `JazzError.permissionDenied` instead.

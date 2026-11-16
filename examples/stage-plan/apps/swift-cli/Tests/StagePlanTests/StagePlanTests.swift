@@ -7,8 +7,8 @@ final class StagePlanTests: XCTestCase {
     let user = "00000000-0000-4000-8000-0000000000aa"
 
     func testTheCliSlice() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Opening night")
         let me = try await app.jazz.account()
         XCTAssertEqual(show.chiefAccount, me)
@@ -26,8 +26,8 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testTheDocsSnippets() async throws {
-        let server = try await TestServer()
-        let jazz = try await DocsSnippets.openBackend(server: server.server, userId: user)
+        let relay = try await TestRelay()
+        let jazz = try await relay.user().jazz
         let app = StagePlanApp(jazz: jazz)
         let show = try await app.show(named: "Docs")
         let load = try await app.addTask("Load in", to: show)
@@ -55,8 +55,8 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testCloseEndsLiveWatches() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Closing")
         let watching = _Concurrency.Task { () -> Swift.Error? in
             do {
@@ -83,8 +83,8 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testIncludesAndSelect() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Includes")
         for title in ["Load in", "Sound check", "Doors", "Strike"] {
             try await app.addTask(title, to: show)
@@ -108,8 +108,8 @@ final class StagePlanTests: XCTestCase {
     struct Oops: Error {}
 
     func testTransactionsCommitAndRollBack() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Transactions")
         let task = try await DocsSnippets.transaction(app.jazz, show: show)
         let committed = try await app.tasks(of: show)
@@ -128,8 +128,8 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testDurabilityTiers() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Tiers")
         try await app.jazz.waitForSync(.global)
         let task = try await DocsSnippets.writeTier(app.jazz, show: show)
@@ -140,17 +140,16 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testAWriteThePermissionsRefuseFailsAtTheGlobalTier() async throws {
-        let server = try await TestServer()
-        let chief = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let chief = try await relay.user()
         let show = try await chief.show(named: "Private")
         try await chief.jazz.waitForSync(.global)
-        let stranger = try await StagePlanApp.open(
-            user: "00000000-0000-4000-8000-0000000000bb", server: server.server)
+        let stranger = try await relay.user("00000000-0000-4000-8000-0000000000bb")
         do {
             _ = try await stranger.jazz.insert(
                 JazzApp.NewTask(showId: show.id, title: "Sneaky", status: .todo, rank: 1), tier: .global)
             XCTFail("a stranger's task in someone else's show must be refused")
-        } catch {
+        } catch let error as JazzError {
             guard case .permissionDenied = error else { return XCTFail("\(error)") }
         }
         try await stranger.jazz.close()
@@ -158,8 +157,8 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testTextEditsMergeWithOthers() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Text")
         let task = try await app.jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "hello world", rank: 1))
@@ -190,8 +189,8 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testJazzTextEditsAndChanges() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Handle")
         let task = try await app.jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "a😀b", rank: 1))
@@ -200,7 +199,7 @@ final class StagePlanTests: XCTestCase {
         do {
             try await notes.insert("X", at: 2)
             XCTFail("an offset inside a surrogate pair must be refused")
-        } catch {
+        } catch let error as JazzError {
             guard case .refused = error else { return XCTFail("\(error)") }
         }
         try await notes.insert("X", at: 3)  // after the emoji
@@ -224,8 +223,8 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testTheTextSnippet() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Snippet")
         let task = try await app.jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "", rank: 1))
@@ -239,8 +238,8 @@ final class StagePlanTests: XCTestCase {
     /// An edit merged with someone else's change comes back as the merged
     /// text, never equal to what the handle wrote: it must become current.
     func testAMergedEchoBecomesCurrent() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Echo")
         let task = try await app.jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "Hello world", rank: 1))
@@ -258,13 +257,12 @@ final class StagePlanTests: XCTestCase {
     }
 
     func testPermissionAdvice() async throws {
-        let server = try await TestServer()
-        let chief = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let chief = try await relay.user()
         let show = try await chief.show(named: "Advice")
         let task = try await chief.addTask("Load in", to: show)
         try await chief.jazz.waitForSync(.global)
-        let stranger = try await StagePlanApp.open(
-            user: "00000000-0000-4000-8000-0000000000dd", server: server.server)
+        let stranger = try await relay.user("00000000-0000-4000-8000-0000000000dd")
         let newTask = JazzApp.NewTask(showId: show.id, title: "Sneaky", status: .todo, rank: 2)
         let chiefMay = try await chief.jazz.canInsert(newTask)
         let strangerMay = try await stranger.jazz.canInsert(newTask)
@@ -276,5 +274,52 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(strangerUpdates, false)
         try await stranger.jazz.close()
         try await chief.jazz.close()
+    }
+
+    func testUpsertRestoreBundleAndSyncStatus() async throws {
+        let relay = try await TestRelay()
+        let app = try await relay.user()
+        let show = try await app.show(named: "Upsert")
+        let id = UUID().uuidString.lowercased()
+        let first = try await app.jazz.upsert(id, JazzApp.NewTask(showId: show.id, title: "One", status: .todo, rank: 1))
+        XCTAssertEqual(first.id, id)
+        let second = try await app.jazz.upsert(id, JazzApp.NewTask(showId: show.id, title: "Two", status: .doing, rank: 1))
+        XCTAssertEqual(second.title, "Two")
+        try await app.jazz.delete(second)
+        let gone = try await app.tasks(of: show)
+        XCTAssertEqual(gone.count, 0)
+        let back = try await app.jazz.restore(JazzApp.Task.self, id: id)
+        XCTAssertEqual(back.title, "Two")
+
+        try await app.jazz.waitForSync(.global)
+        let status = try await app.jazz.syncStatus()
+        XCTAssertEqual(status.link, .connected)
+        let session = try await app.jazz.sessionState()
+        guard case .signedIn(let user)? = session else { return XCTFail("\(String(describing: session))") }
+        XCTAssertEqual(user.kind, .device)
+        XCTAssertTrue(try Jazz.generateDeviceKey().hasPrefix("jazz-auth-v1:"))
+        try await app.jazz.close()
+    }
+
+    /// The adopter gate's privacy check: B targets A's show by id, reads no
+    /// tasks and can't write into it.
+    func testAnotherUserCantReadOrWriteAShowById() async throws {
+        let relay = try await TestRelay()
+        let alice = try await relay.user("alice")
+        let show = try await alice.show(named: "Private")
+        try await alice.addTask("Secret", toShow: show.id)
+        let bob = try await relay.user("bob")
+        let seen = try await bob.tasks(ofShow: show.id)
+        XCTAssertEqual(seen.count, 0)
+        do {
+            try await bob.addTask("Sneaky", toShow: show.id)
+            XCTFail("bob must not write into alice's show")
+        } catch let error as JazzError {
+            guard case .permissionDenied = error else { return XCTFail("\(error)") }
+        }
+        let aliceSees = try await alice.tasks(ofShow: show.id)
+        XCTAssertEqual(aliceSees.map(\.title), ["Secret"])
+        try await bob.jazz.close()
+        try await alice.jazz.close()
     }
 }

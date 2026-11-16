@@ -86,21 +86,21 @@ public final class JazzText<R: Row>: @unchecked Sendable {
     public var current: String { lock.withLock { _current } }
 
     /// Sets the text to `text`, merged with others' changes since `current`.
-    public func set(_ text: String) async throws(JazzError) {
+    public func set(_ text: String) async throws {
         try await edit { _ in text }
     }
 
-    public func insert(_ text: String, at offset: Int) async throws(JazzError) {
+    public func insert(_ text: String, at offset: Int) async throws {
         try await replace(offset..<offset, with: text)
     }
 
-    public func delete(_ range: Range<Int>) async throws(JazzError) {
+    public func delete(_ range: Range<Int>) async throws {
         try await replace(range, with: "")
     }
 
     /// Replaces the UTF-16 range `range` of `current` with `text`.
-    public func replace(_ range: Range<Int>, with text: String) async throws(JazzError) {
-        try await edit { base throws(JazzError) in
+    public func replace(_ range: Range<Int>, with text: String) async throws {
+        try await edit { base throws in
             let utf16 = Array(base.utf16)
             guard range.lowerBound >= 0, range.upperBound <= utf16.count else {
                 throw JazzError.refused("range \(range) is outside the text (\(utf16.count) UTF-16 units)")
@@ -116,7 +116,7 @@ public final class JazzText<R: Row>: @unchecked Sendable {
     }
 
     /// One edit at a time, from `current`.
-    private func edit(_ make: (String) throws(JazzError) -> String) async throws(JazzError) {
+    private func edit(_ make: (String) throws -> String) async throws {
         await serial.lock()
         defer { serial.unlock() }
         let base = current
@@ -211,7 +211,7 @@ extension Client {
     /// `base`: changes others made since `base` are kept.
     public func editText<R: Row>(
         _ type: R.Type, id: Jazz.ID, column: String, from base: String, to text: String
-    ) async throws(JazzError) {
+    ) async throws {
         try await Self.typed {
             try await Self.run {
                 try self.handle.editText(table: R.table, id: id, column: column, editedFrom: base, text: text)
@@ -220,18 +220,18 @@ extension Client {
     }
 
     /// Partial edits of row `id` of `R`'s table, as one write.
-    public func edit<R: Row>(_ type: R.Type, id: Jazz.ID, edits: [Edit]) async throws(JazzError) {
+    public func edit<R: Row>(_ type: R.Type, id: Jazz.ID, edits: [Edit]) async throws {
         try await edit(R.table, id: id, patchJSON: nil, edits: edits)
     }
 
     /// Partial edits of row `id` with a whole-column `patch`, as one write.
-    public func edit<P: Patch>(_ id: Jazz.ID, _ patch: P, edits: [Edit]) async throws(JazzError) {
+    public func edit<P: Patch>(_ id: Jazz.ID, _ patch: P, edits: [Edit]) async throws {
         let patchJSON: String
         do { patchJSON = try Coding.json(patch, userInfo) } catch { throw JazzError.wrap(error) }
         try await edit(P.Row.table, id: id, patchJSON: patchJSON, edits: edits)
     }
 
-    func edit(_ table: String, id: Jazz.ID, patchJSON: String?, edits: [Edit]) async throws(JazzError) {
+    func edit(_ table: String, id: Jazz.ID, patchJSON: String?, edits: [Edit]) async throws {
         try await Self.typed {
             let editsJSON = try Coding.json(JSONValue.array(edits.map { $0.json() }))
             try await Self.run {
@@ -241,25 +241,33 @@ extension Client {
     }
 
     /// A handle editing text-merge `column` of `row` by merges.
-    public func text<R: Row>(_ row: R, _ column: Column<R, String?>) async throws(JazzError) -> JazzText<R> {
-        try await text(row, column.name)
+    public func text<R: Row>(_ row: R, _ column: Column<R, String?>) async throws -> JazzText<R> {
+        do {
+            return try await textHandle(row, column: column.name)
+        } catch {
+            throw JazzError.wrap(error)
+        }
     }
 
     /// A handle editing text-merge `column` of `row` by merges.
-    public func text<R: Row>(_ row: R, _ column: Column<R, String>) async throws(JazzError) -> JazzText<R> {
-        try await text(row, column.name)
+    public func text<R: Row>(_ row: R, _ column: Column<R, String>) async throws -> JazzText<R> {
+        do {
+            return try await textHandle(row, column: column.name)
+        } catch {
+            throw JazzError.wrap(error)
+        }
     }
 
-    func text<R: Row>(_ row: R, _ name: String) async throws(JazzError) -> JazzText<R> {
-        let current = try await Self.typed { () -> String in
-            let json = try Query<R>().where(Column<R, Jazz.ID>("id").eq(row.id)).json()
-            guard let found = try await Self.run({ try self.handle.one(queryJson: json) }) else {
-                throw JazzError.refused("no row \(row.id) in \(R.table)")
-            }
-            let object = try Coding.decode([String: JSONValue].self, found)
-            if case .string(let text)? = object[name] { return text }
-            return ""
+    // Untyped and named apart: Xcode 16's Swift (6.1) crashed emitting the
+    // typed-throws overloads calling a same-named generic helper.
+    func textHandle<R: Row>(_ row: R, column name: String) async throws -> JazzText<R> {
+        let json = try Query<R>().where(Column<R, Jazz.ID>("id").eq(row.id)).json()
+        guard let found = try await Self.run({ try self.handle.one(queryJson: json) }) else {
+            throw JazzError.refused("no row \(row.id) in \(R.table)")
         }
+        let object = try Coding.decode([String: JSONValue].self, found)
+        let current: String
+        if case .string(let text)? = object[name] { current = text } else { current = "" }
         return JazzText(jazz: self, id: row.id, column: name, current: current)
     }
 
@@ -290,7 +298,7 @@ extension Transaction {
     /// `Client.editText` inside the transaction.
     public func editText<R: Row>(
         _ type: R.Type, id: Jazz.ID, column: String, from base: String, to text: String
-    ) async throws(JazzError) {
+    ) async throws {
         try await Client.typed {
             try await Client.run {
                 try self.ffi.editText(table: R.table, id: id, column: column, editedFrom: base, text: text)
