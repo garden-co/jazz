@@ -232,6 +232,18 @@ class JazzTest {
     }
 
     @Test
+    fun a_refused_delete_client_storage_leaves_the_app_open(): Unit = runBlocking {
+        val fake = object : Native by FakeNative() {
+            override fun deleteClientStorage(): Unit = throw JazzException.Refused("another open app holds the store")
+        }
+        Jazz.opener = Native.Opener { fake }
+        val jazz = Jazz.open("{}", JazzConfig())
+        assertFailsWith<JazzException.Refused> { jazz.deleteClientStorage() }
+        jazz.insert(Items, ItemInsert(title = "still open", rank = 1.0, kind = ItemKind.C))
+        assertEquals(listOf("still open"), jazz.all(Items.query()).map { it.title })
+    }
+
+    @Test
     fun watch_keeps_results_with_the_same_id_apart_by_key(): Unit = runBlocking {
         // As a history or union subscription delivers them: one row id, two results.
         val native = object : Native by FakeNative() {

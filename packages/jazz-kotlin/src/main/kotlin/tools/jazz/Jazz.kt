@@ -124,9 +124,46 @@ public class Jazz internal constructor(
 
     private fun <T> stateFlow(sync: Boolean, initial: T, parse: (String) -> T): MutableStateFlow<T> {
         val flow = MutableStateFlow(initial)
-        watches += native.watch(sync) { json -> flow.value = parse(json) }
+        watches += native.watch(sync) { json ->
+            // A closing app ends each watch with {"kind":"closed"}: not a state.
+            if (!isClosedNotice(json)) flow.value = parse(json)
+        }
         return flow
     }
+
+    /** Stops syncing (TS's `disconnect`): reads and writes go on locally until [reconnect]. */
+    public suspend fun disconnect(): Unit = io { native.disconnect() }
+
+    /** Syncs again after [disconnect]. */
+    public suspend fun reconnect(): Unit = io { native.reconnect() }
+
+    /**
+     * Closes the app and deletes its local store (e.g. on sign-out from a
+     * shared device). Refused while another open app uses the same `dataDir`.
+     */
+    public suspend fun deleteClientStorage() {
+        io { native.deleteClientStorage() }
+        endWatches()
+    }
+
+    /**
+     * Each write the server refused that nobody waited on (a local-first
+     * write, not at [WriteTier.Global]), as TS's `onMutationError`.
+     * Collecting starts watching.
+     */
+    public val mutationErrors: Flow<MutationError> get() = callbackFlow {
+        val cancel = withContext(dispatcher) {
+            native.watchMutationErrors { json ->
+                // The app closing ends the watch: the Flow completes.
+                if (isClosedNotice(json)) close() else trySend(MutationError.parse(json))
+            }
+        }
+        awaitClose { cancel() }
+    }.buffer(Channel.UNLIMITED)
+
+    private fun isClosedNotice(json: String): Boolean =
+        json.contains("\"kind\"") &&
+            ((jazzJson.parseToJsonElement(json) as? JsonObject)?.get("kind") as? JsonPrimitive)?.content == "closed"
 
     /** Asks the [JazzAuth.Bearer] provider for a fresh token ([TokenReason.Refresh]), e.g. after an `Expired` session. */
     public suspend fun refreshSession(): Unit = io { native.refresh() }
@@ -282,7 +319,9 @@ public class Jazz internal constructor(
 
     /**
      * Runs [block] in a transaction: its reads see its own writes, and its
-     * writes apply together. It commits when [block] returns (at [tier]:
+     * writes apply together. By default (as TS's `transaction`) its writes
+     * merge with concurrent ones; with [serializable] a commit that conflicts
+     * with a concurrent one throws [JazzException.Conflict] instead. It commits when [block] returns (at [tier]:
      * with [WriteTier.Global] it returns once the server accepted it) and
      * rolls back when [block] throws, rethrowing. Returns [block]'s value.
      *
@@ -294,8 +333,12 @@ public class Jazz internal constructor(
      * }
      * ```
      */
-    public suspend fun <T> transaction(tier: WriteTier? = null, block: suspend (Transaction) -> T): T {
-        val native = io { native.begin() }
+    public suspend fun <T> transaction(
+        tier: WriteTier? = null,
+        serializable: Boolean = false,
+        block: suspend (Transaction) -> T,
+    ): T {
+        val native = io { if (serializable) native.begin() else native.beginMergeable() }
         val tx = Transaction(native)
         val result = try {
             block(tx)
@@ -477,9 +520,14 @@ public class Jazz internal constructor(
      * nothing, so `use {}` and an explicit `close()` mix.
      */
     override fun close() {
-        watches.forEach { runCatching { it() } }
         native.close()
-        // A closed handle has no session any more: an end user's reads as signed out.
+        endWatches()
+    }
+
+    /** The app closed: stop watching, and an end user's session reads as signed out. */
+    private fun endWatches() {
+        watches.forEach { runCatching { it() } }
+        watches.clear()
         sessionFlow?.let { flow -> if (flow.value != null) flow.value = SessionState.SignedOut }
     }
 

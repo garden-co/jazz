@@ -370,8 +370,8 @@ internal class HistoryRowSerializer<Row : Any>(private val base: KSerializer<Row
 
 /**
  * The versions of this query's rows the server accepted, oldest first
- * (sort by [JazzColumns.acceptedAt]): read them at [ReadTier.Remote]; they can't be
- * subscribed to yet.
+ * (sort by [JazzColumns.acceptedAt]): read them at [ReadTier.Remote]. With jazz-ffi's result keys, `watch` on
+ * them keeps each version.
  */
 public fun <Row : Any> Query<Row>.history(): Query<HistoryRow<Row>> =
     Query(table, HistoryRowSerializer(rowSerializer), conditions, orders, limit, offset, source = source, history = true, includeDeleted = includeDeleted)

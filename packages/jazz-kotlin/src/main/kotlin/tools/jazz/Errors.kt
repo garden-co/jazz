@@ -36,3 +36,23 @@ public sealed class JazzException(message: String) : Exception(message) {
         }
     }
 }
+
+/** A write the server refused that nobody waited on: see [Jazz.mutationErrors]. */
+public data class MutationError(
+    /** The refused transaction's id. */
+    val transaction: String,
+    val message: String,
+    /** Whether permissions denied it (else it failed otherwise, e.g. validation). */
+    val denied: Boolean,
+    /** Whether it was a serializable transaction that conflicted. */
+    val serializable: Boolean,
+) {
+    internal companion object {
+        fun parse(json: String): MutationError {
+            val o = jazzJson.parseToJsonElement(json) as kotlinx.serialization.json.JsonObject
+            fun str(k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: ""
+            fun bool(k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.content == "true"
+            return MutationError(str("transaction"), str("message"), bool("denied"), bool("serializable"))
+        }
+    }
+}
