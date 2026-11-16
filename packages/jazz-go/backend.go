@@ -123,10 +123,12 @@ func (db *DB) Shutdown(ctx context.Context) error {
 		defer cancel()
 		err := db.call(c, "waitForSync", map[string]any{}, nil)
 		db.Close()
-		if err != nil && c.Err() == nil {
-			return err
+		if c.Err() != nil {
+			// Timed out: some writes may not have reached the server (this
+			// libjazz_ffi can't count them).
+			return &Error{Kind: KindUnsynced, Message: "closed before every write reached the server"}
 		}
-		return nil
+		return err
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
