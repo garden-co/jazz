@@ -4,10 +4,12 @@ The documentation copy of [`examples/todo-server-rs`](../../todo-server-rs): the
 
 ## Files
 
-- `jazz.app.json`: the tables (and their history and migrations).
-- `jazz.permissions.json`: who may do what. The main backend serves it.
-- `src/jazz_app.rs`: the typed bindings `jazz-tools generate` generates from `jazz.app.json`. Do not edit it.
-- `src/main.rs`: opens the app with `jazz_app::open(config)` as a backend client and serves the router.
+- `schema.ts`: the app's tables and relations (`s.defineSchema`) and its permissions (`definePermissions`). This is the file you edit.
+- `migrations/`: the migrations between schema versions, and their snapshots, written by `npx jazz-tools migrations create`.
+- `jazz.app.json`: generated from `schema.ts` and `migrations/` by `npx jazz-tools generate`: the tables, with their history and migrations. The service reads it at runtime. Do not edit it.
+- `jazz.permissions.json`: generated from the permissions in `schema.ts`. The main backend serves it, and this service opens with it as a backend client. Do not edit it.
+- `src/jazz_app.rs`: the typed bindings, also written by `npx jazz-tools generate`. Do not edit it.
+- `src/main.rs`: opens the app as a backend client, with `Jazz::open(AppFiles::new(jazz_app::APP, None).with_permissions(…), config)`, and serves the router.
 - `src/credential.rs`: the machine credential, from `JAZZ_TOKEN`, `JAZZ_TOKEN_FILE` or `JAZZ_TOKEN_COMMAND`.
 - `src/routes.rs`: CRUD over `/todos` and the `/todos/live` SSE stream.
 - `src/docs_snippets.rs`: the snippets. The docs include each `// #region <name>` by name, so keep the names when you edit them.
@@ -20,7 +22,7 @@ Most snippets use the typed API: `jazz.all`, `one`, `get`, `insert`, `update`, `
 
 ## Schema
 
-From `jazz.app.json`:
+From `schema.ts`:
 
 - **projects**: name; `todos` (its todos)
 - **todos**: title, done, priority (optional), description (optional), parent (a todo, optional), project (optional); `children` (its sub-todos)
@@ -28,12 +30,12 @@ From `jazz.app.json`:
 ## Changing the schema
 
 ```bash
-# Edit the tables in jazz.app.json, then:
+# Edit schema.ts, then:
 npx jazz-tools migrations create --name <name>   # resolve any "TODO: …" it writes
-npx jazz-tools generate --lang rust              # checks the files, regenerates src/jazz_app.rs
+npx jazz-tools generate                          # writes jazz.app.json, jazz.permissions.json and src/jazz_app.rs
 ```
 
-Commit `jazz.app.json` and `src/jazz_app.rs`. The `bindings_are_current` test refuses stale bindings.
+`generate` finds `Cargo.toml` beside `schema.ts` and writes the Rust bindings; the crate needs no `package.json`. Commit `schema.ts`, `migrations/` and the generated files. The `bindings_are_current` test refuses stale bindings, and `npx jazz-tools generate --check` refuses stale files in CI.
 
 ## Running locally
 
