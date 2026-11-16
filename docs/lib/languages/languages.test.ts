@@ -5,9 +5,9 @@ import { disabledSetupPages, filterLanguageTabs, type Language, LANGUAGES } from
 import { expandBindingsExcerpts, extractSymbol, extractSymbols } from "./excerpt";
 
 const langs: Language[] = [
-  { label: "TypeScript", enabled: true },
-  { label: "Rust", setupPage: "setup/rust", enabled: true },
-  { label: "Swift", setupPage: "setup/swift", enabled: false },
+  { label: "TypeScript", backend: true, mainBackend: true, enabled: true },
+  { label: "Rust", setupPage: "setup/rust", backend: true, enabled: true },
+  { label: "Swift", setupPage: "setup/swift", backend: false, enabled: false },
 ];
 
 const page = `Intro
@@ -65,6 +65,19 @@ describe("filterLanguageTabs", () => {
     expect(() => filterLanguageTabs(tabs(["TypeScript"], ["TypeScript", "Rust"]), langs)).toThrow(
       /don't match/,
     );
+  });
+
+  it("refuses client-only languages on backend pages", () => {
+    const backend = `---\ntitle: X\nlanguageTabs: backend\n---\n\n<Tabs groupId="jazz-environment" items={["TypeScript", "Swift"]}>\n  <Tab value="TypeScript">t</Tab>\n  <Tab value="Swift">s</Tab>\n</Tabs>\n`;
+    expect(() => filterLanguageTabs(backend, langs)).toThrow(/backend-client page .* Swift/);
+    expect(() =>
+      filterLanguageTabs(backend.replace("languageTabs: backend\n", ""), langs),
+    ).not.toThrow();
+  });
+
+  it("keeps main-backend pages TypeScript-only", () => {
+    const main = `---\ntitle: X\nlanguageTabs: main-backend\n---\n\n<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]}>\n  <Tab value="TypeScript">t</Tab>\n  <Tab value="Rust">r</Tab>\n</Tabs>\n`;
+    expect(() => filterLanguageTabs(main, langs)).toThrow(/main-backend page .* Rust/);
   });
 
   it("lists switched-off setup pages", () => {
@@ -176,6 +189,14 @@ pub struct Task {
     );
     expect(extractSymbol("type ID string\n\nconst (\n\tOther = 1\n)\n", "ID")).toBe(
       "type ID string",
+    );
+  });
+
+  it("dedents a declaration nested in a namespace", () => {
+    const swift =
+      "public enum JazzApp {\n    /// A row.\n    public struct Task: Jazz.Row {\n        public let id: Jazz.ID\n    }\n}\n";
+    expect(extractSymbol(swift, "Task")).toBe(
+      "/// A row.\npublic struct Task: Jazz.Row {\n    public let id: Jazz.ID\n}",
     );
   });
 

@@ -76,7 +76,7 @@ describe("wasmSchemasEqual", () => {
   });
 
   it("compares Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
-    expect(structuralHashFixture.defaultCases.length).toBeGreaterThanOrEqual(22);
+    expect(structuralHashFixture.defaultCases.length).toBeGreaterThanOrEqual(21);
     for (const entry of structuralHashFixture.defaultCases) {
       // This corpus intentionally consumes Rust's human-JSON carriers, including
       // decimal-string bigint values and byte arrays, without changing their wire format.
@@ -166,10 +166,6 @@ describe("canonical witness default equality", () => {
       [
         '{ "type": "string", "optional": true, "default": null }',
         '{ "type": "string", "optional": true, "default": "value" }',
-      ],
-      [
-        '{ "enum": { "active": { "count": "int" } }, "default": { "active": { "count": 1 } } }',
-        '{ "enum": { "active": { "count": "int" } }, "default": { "active": { "count": 2 } } }',
       ],
     ] as const;
     for (const [before, after] of pairs) {

@@ -3,33 +3,127 @@
 use std::marker::PhantomData;
 
 use jazz::query::{self as q, OrderDirection, Predicate};
+
+/// What part of a large value a query reads: see [`Query::part`].
+pub use jazz::query::Part as ValuePart;
 use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
 
+use crate::error::Result;
+use crate::include::{IntoInclude, Partial, Row, Selection, With};
 use crate::table::Table;
+use crate::untyped;
 use crate::value::{ColumnValue, Timestamp};
 
-/// A query of rows of `T`.
-#[derive(Debug, Clone)]
+/// A query of rows of a table, yielding `T`s: the table's rows, or
+/// [`Partial`] rows of it, with the rows it includes after them. It is an
+/// [`untyped::Query`] with the type of what it yields.
+#[derive(Debug)]
 pub struct Query<T> {
-    query: q::Query,
+    pub(crate) inner: untyped::Query,
     row: PhantomData<fn() -> T>,
+}
+
+// Not derived: a query of `T` clones whether or not `T` does.
+impl<T> Clone for Query<T> {
+    fn clone(&self) -> Self {
+        Self::wrap(self.inner.clone())
+    }
+}
+
+impl<T> Query<T> {
+    pub(crate) fn wrap(inner: untyped::Query) -> Self {
+        Self {
+            inner,
+            row: PhantomData,
+        }
+    }
+
+    pub(crate) fn map(self, f: impl FnOnce(untyped::Query) -> untyped::Query) -> Self {
+        Self::wrap(f(self.inner))
+    }
+
+    /// The query by name, without its type.
+    pub fn into_inner(self) -> untyped::Query {
+        self.inner
+    }
+}
+
+/// `T`'s name and stored columns.
+pub(crate) fn table<T: Table>() -> untyped::Table {
+    untyped::Table::new(T::NAME, T::COLUMNS.iter().copied())
 }
 
 impl<T: Table> Query<T> {
     /// Every row of `T`.
     pub fn all() -> Self {
-        Self {
-            query: q::Query::from(T::NAME),
-            row: PhantomData,
+        Self::wrap(untyped::Query::table(table::<T>()))
+    }
+
+    /// Reads only the `columns` (a stored column, or a tuple of up to
+    /// twelve): each row as a [`Partial`] holding its id and their values,
+    /// in order. The id is always there: don't select [`id`].
+    ///
+    /// ```ignore
+    /// // Query<Partial<Todo, (String, bool)>>
+    /// todos::query().select((todos::title(), todos::done()))
+    /// ```
+    pub fn select<S: Selection<T>>(self, columns: S) -> Query<Partial<T, S::Values>> {
+        Query::wrap(self.inner.select(columns.names()))
+    }
+}
+
+impl<T: Row> Query<T> {
+    /// Reads `column` only in `part`: a byte range of a bytes column, a
+    /// UTF-8 or UTF-16 range of a text one, or the subtree at a JSON
+    /// pointer of a json one, as TS's partial select does. The row's value
+    /// for `column` holds that part, and only the chunks it covers are
+    /// read. On a transformed column, the view transform applies to the
+    /// part read. A column a computed field is computed from is read whole,
+    /// so the computed field is right (TS re-reads it in full). Inside an
+    /// include's query it reads the included rows' column in part.
+    ///
+    /// ```ignore
+    /// let head = jazz.one(tasks::query().id(id).part(tasks::attachment(), ValuePart::Bytes { from: 0, to: 1024 })).await?;
+    /// ```
+    pub fn part<V: ColumnValue>(
+        self,
+        column: Column<<T as Row>::Table, V>,
+        part: ValuePart,
+    ) -> Self {
+        // A computed field computes from the whole value: TS re-reads a
+        // partially read dependency in full, so it is read whole here.
+        if <<T as Row>::Table as Table>::COMPUTED_FROM.contains(&column.name()) {
+            return self;
         }
+        Query::wrap(self.inner.select_part(column.name(), part))
+    }
+
+    /// Includes the rows of a relation of the table with each row, after
+    /// what the row already has: `Todo` becomes `(Todo, Option<Project>)`,
+    /// `(Todo, Option<Project>)` becomes `(Todo, Option<Project>, Vec<Todo>)`.
+    /// See [`crate::Include`] for what each relation includes.
+    pub fn include<I>(self, relation: I) -> Query<<T as With<I::Output>>::Output>
+    where
+        I: IntoInclude<<T as Row>::Table>,
+        T: With<<I as IntoInclude<<T as Row>::Table>>::Output>,
+    {
+        let at = self.inner.query.array_subqueries.len();
+        let subquery = relation.into_include().into_subquery(at);
+        Query::wrap(self.inner.include(subquery))
     }
 
     /// Only rows matching `condition`. Conditions add up: a row must match
-    /// each.
-    pub fn filter(mut self, condition: Condition<T>) -> Self {
-        self.query.filters.push(condition.predicate);
-        self
+    /// each. After a [`Query::gather`], they narrow what it gathered.
+    pub fn filter(self, condition: Condition<T::Table>) -> Self {
+        self.map(|inner| inner.filter(condition.predicate))
+    }
+
+    /// Reads deleted rows too, as TypeScript's `includeDeleted()` does.
+    /// [`deleted_at`] tells them apart: it is `None` for a row that is not
+    /// deleted.
+    pub fn include_deleted(self) -> Self {
+        self.map(untyped::Query::include_deleted)
     }
 
     /// The row with this id.
@@ -40,30 +134,29 @@ impl<T: Table> Query<T> {
         )))
     }
 
-    pub fn order_by<V>(mut self, column: Column<T, V>, order: Order) -> Self {
-        self.query.order_by.push(q::OrderBy {
-            column: column.name.to_owned(),
-            direction: match order {
-                Order::Asc => OrderDirection::Asc,
-                Order::Desc => OrderDirection::Desc,
-            },
-        });
-        self
+    pub fn order_by<V>(self, column: Column<T::Table, V>, order: Order) -> Self {
+        self.map(|inner| inner.order_by(column.name, order.direction()))
     }
 
-    pub fn limit(mut self, limit: usize) -> Self {
-        self.query.limit = Some(limit);
-        self
+    pub fn limit(self, limit: usize) -> Self {
+        self.map(|inner| inner.limit(limit))
     }
 
-    pub fn offset(mut self, offset: usize) -> Self {
-        self.query.offset = offset;
-        self
+    pub fn offset(self, offset: usize) -> Self {
+        self.map(|inner| inner.offset(offset))
     }
 
-    /// The untyped query, for [`crate::Jazz::with_client`].
-    pub fn into_untyped(self) -> q::Query {
-        self.query
+    /// The untyped query, for [`crate::Jazz::with_client`]. Whether it
+    /// reads deleted rows is a read option: see [`Query::reads_deleted`].
+    ///
+    /// Fails when the query combines what is not supported yet.
+    pub fn into_untyped(self) -> Result<q::Query> {
+        self.inner.into_core()
+    }
+
+    /// Whether the query reads deleted rows too ([`Query::include_deleted`]).
+    pub fn reads_deleted(&self) -> bool {
+        self.inner.reads_deleted()
     }
 }
 
@@ -73,15 +166,24 @@ pub enum Order {
     Desc,
 }
 
+impl Order {
+    pub(crate) fn direction(self) -> OrderDirection {
+        match self {
+            Order::Asc => OrderDirection::Asc,
+            Order::Desc => OrderDirection::Desc,
+        }
+    }
+}
+
 /// A condition on rows of `T`.
 #[derive(Debug, Clone)]
 pub struct Condition<T> {
-    predicate: Predicate,
+    pub(crate) predicate: Predicate,
     row: PhantomData<fn() -> T>,
 }
 
 impl<T> Condition<T> {
-    fn new(predicate: Predicate) -> Self {
+    pub(crate) fn new(predicate: Predicate) -> Self {
         Self {
             predicate,
             row: PhantomData,
@@ -190,6 +292,12 @@ pub fn updated_at<T>() -> Column<T, Timestamp> {
     Column::new("$updatedAt")
 }
 
+/// When the row was deleted: `None` unless it is. Only a query that
+/// [`Query::include_deleted`] reads deleted rows.
+pub fn deleted_at<T>() -> Column<T, Option<Timestamp>> {
+    Column::new("$deletedAt")
+}
+
 impl<T> Column<T, String> {
     /// The text contains `part`.
     pub fn contains(self, part: impl Into<String>) -> Condition<T> {
@@ -225,25 +333,36 @@ impl<T, V: ColumnValue> Column<T, Option<V>> {
     }
 }
 
-/// A forward relation: `T`'s `column` references one row of `U`.
+/// A forward relation: `T`'s `column` references one row of `U`. `N` is
+/// whether the column may be null: [`NotNull`] or [`Nullable`].
 #[derive(Debug)]
-pub struct One<T, U> {
+pub struct One<T, U, N = NotNull> {
     column: &'static str,
     types: PhantomData<fn() -> (T, U)>,
+    nullability: PhantomData<N>,
 }
 
-impl<T, U> Clone for One<T, U> {
+/// A forward relation's column always holds a reference.
+#[derive(Debug, Clone, Copy)]
+pub enum NotNull {}
+
+/// A forward relation's column may be null.
+#[derive(Debug, Clone, Copy)]
+pub enum Nullable {}
+
+impl<T, U, N> Clone for One<T, U, N> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T, U> Copy for One<T, U> {}
+impl<T, U, N> Copy for One<T, U, N> {}
 
-impl<T: Table, U: Table> One<T, U> {
+impl<T: Table, U: Table, N> One<T, U, N> {
     pub const fn new(column: &'static str) -> Self {
         Self {
             column,
             types: PhantomData,
+            nullability: PhantomData,
         }
     }
 
@@ -260,6 +379,42 @@ impl<T: Table, U: Table> One<T, U> {
     /// Rows of `T` that reference the row of `U` with this id.
     pub fn referencing(self, id: ObjectId) -> Condition<T> {
         Condition::new(q::eq(q::col(self.column), literal(Value::Uuid(id))))
+    }
+}
+
+/// A forward relation over an array column: `T`'s `column` holds the ids
+/// of rows of `U`. `N` is whether the column may be null.
+#[derive(Debug)]
+pub struct Refs<T, U, N = NotNull> {
+    column: &'static str,
+    types: PhantomData<fn() -> (T, U)>,
+    nullability: PhantomData<N>,
+}
+
+impl<T, U, N> Clone for Refs<T, U, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T, U, N> Copy for Refs<T, U, N> {}
+
+impl<T: Table, U: Table, N> Refs<T, U, N> {
+    pub const fn new(column: &'static str) -> Self {
+        Self {
+            column,
+            types: PhantomData,
+            nullability: PhantomData,
+        }
+    }
+
+    /// The array column holding the references.
+    pub fn column(&self) -> &'static str {
+        self.column
+    }
+
+    /// Rows of `T` whose array references the row of `U` with this id.
+    pub fn referencing(self, id: ObjectId) -> Condition<T> {
+        Condition::new(q::contains(q::col(self.column), literal(Value::Uuid(id))))
     }
 }
 
@@ -286,6 +441,11 @@ impl<T: Table, U: Table> Many<T, U> {
         }
     }
 
+    /// `U`'s column holding the reference.
+    pub fn column(&self) -> &'static str {
+        self.column
+    }
+
     /// The rows of `U` referencing the row of `T` with this id.
     pub fn of(self, id: ObjectId) -> Query<U> {
         Query::all().filter(Condition::new(q::eq(
@@ -296,7 +456,7 @@ impl<T: Table, U: Table> Many<T, U> {
 }
 
 /// A literal operand for a value a [`ColumnValue`] produced.
-fn literal(value: Value) -> q::Operand {
+pub(crate) fn literal(value: Value) -> q::Operand {
     q::lit(core(value))
 }
 

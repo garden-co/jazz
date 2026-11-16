@@ -28,7 +28,7 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
   "--benches",
 ]);
 export const RUST_CI_FEATURES =
-  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test";
+  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/axum";
 
 // CI setup supplies this one coordination input. Every other JAZZ_* variable
 // is a test, fixture, benchmark, timeout, or assertion control and would make
@@ -44,8 +44,11 @@ export const ciPartitionJobs = Object.freeze({
   "storage-compat": "test-storage-compat",
   "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
+  "next-trace-decide": "test-next-trace",
+  "next-trace": "test-next-trace",
   "react-native": "test-react-native",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
+  go: "test-go",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -239,6 +242,17 @@ export const ciPartitions = Object.freeze({
       "dev/gates/example-bindings.mjs",
     ]),
   ]),
+  // Whether a ready PR runs the Next.js trace test (B65-1): it touches how a
+  // backend reaches jazz-napi. Writes `run=true|false` to $GITHUB_OUTPUT for
+  // the test-next-trace job's later steps; outside a PR it always says run.
+  "next-trace-decide": Object.freeze([
+    command("Next.js trace decision", "node", ["dev/gates/next-trace.mjs", "--decide"]),
+  ]),
+  // The Next.js trace test alone. The typescript partition runs it too,
+  // inside the jazz-tools package's `test`.
+  "next-trace": Object.freeze([
+    command("Next.js trace of a createJazz route", "node", ["dev/gates/next-trace.mjs"]),
+  ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be
     // separate from the ordinary TypeScript partition so its manifest proves
@@ -302,12 +316,17 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
-  // run against the library (needs a JDK and swiftc: the runner image).
+  // run against the library (needs a JDK and swiftc: the runner image); then
+  // the Jazz Swift package and the StagePlan Swift example on top of it.
   "jazz-ffi-bindings": Object.freeze([
     command("jazz-ffi Kotlin and Swift bindings", "bash", [
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
+    command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
   ]),
+  // The Go bindings and the StagePlan Go example (installs Go when the
+  // image has none).
+  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
 });
 
 export const focusedCommands = Object.freeze([

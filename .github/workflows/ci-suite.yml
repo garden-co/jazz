@@ -207,12 +207,12 @@ jobs:
   test-jazz-ffi-bindings:
     if: inputs.scope == 'full'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings
+      - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings, the Jazz Swift package and its example
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition jazz-ffi-bindings
 
   # Branch protection requires this stable check name. It aggregates the Rust
@@ -237,8 +237,7 @@ jobs:
           test "${JAZZ_FFI_BINDINGS_RESULT}" = success
 
   # The Go bindings (packages/jazz-go over crates/jazz-ffi's C ABI) and
-  # the StagePlan Go example: their bindings are current, and their tests
-  # (which open the app as a backend on a memory store) pass on Linux.
+  # the StagePlan Go example, on Linux: see dev/gates/go-bindings.sh.
   test-go:
     if: inputs.scope == 'full'
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -251,46 +250,10 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      GO_VERSION: "1.23.4"
-      GO_SHA256: 6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # The toolchain image has Rust; this job needs no pnpm install.
-      - name: Trust the checkout
-        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-      - name: Install Go
-        run: |
-          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
-          echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c -
-          tar -C /usr/local -xzf /tmp/go.tgz
-          echo /usr/local/go/bin >> "${GITHUB_PATH}"
-      - name: Build jazz-ffi and jazz-tools
-        run: |
-          cargo build -p jazz-ffi
-          cargo build -p jazz-cli --bin jazz-tools
-      - name: StagePlan Go bindings are current
-        run: cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings
-      - name: gofmt and go vet
-        run: |
-          test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
-          (cd packages/jazz-go && go vet ./...)
-          (cd examples/stage-plan/apps/go-cli && go vet ./...)
-      - name: go vet the jazz-codegen Go goldens
-        run: |
-          # Each committed golden, as the jazzapp package of a module of its own.
-          for dir in crates/jazz-codegen/tests/apps/*/jazzapp crates/jazz-codegen/tests/go-apps/*/jazzapp; do
-            [ -d "${dir}" ] || continue
-            module="$(mktemp -d)"
-            mkdir "${module}/jazzapp"
-            cp "${dir}/jazz_app.go" "${module}/jazzapp/"
-            printf 'module example.com/golden\n\ngo 1.22\n\nrequire github.com/garden-co/jazz/packages/jazz-go v0.0.0\n\nreplace github.com/garden-co/jazz/packages/jazz-go => %s/packages/jazz-go\n' "${GITHUB_WORKSPACE}" > "${module}/go.mod"
-            (cd "${module}" && go vet ./... && test -z "$(gofmt -l .)") || { echo "::error::${dir} fails go vet or gofmt"; exit 1; }
-          done
-      - name: Test the Go runtime and the StagePlan Go example
-        run: |
-          (cd packages/jazz-go && go test ./...)
-          (cd examples/stage-plan/apps/go-cli && go test -v ./...)
+      - name: Build and test the Go bindings and the StagePlan Go example
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition go
 
   test-ts:
     if: inputs.scope == 'full'
@@ -371,6 +334,75 @@ jobs:
           path: examples/band-chat/apps/nextjs-betterauth/tests/browser/__screenshots__/band-chat.test.tsx/*.png
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # The Next.js trace test (B65-1) on ready PRs that touch how a backend
+  # reaches jazz-napi (dev/gates/next-trace.mjs decides from the PR's diff and
+  # otherwise stops at once); the full scope runs it in test-ts. It builds the
+  # sealed native pair, packs jazz-tools/jazz-napi/jazz-wasm into a pnpm Next
+  # app and serves the route from its traced files only.
+  test-next-trace:
+    if: inputs.scope == 'fast'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # The PR's merge commit and its first parent, the base it merges into.
+          fetch-depth: 2
+      # Before any setup: a PR that touches nothing the trace guards stops here.
+      - name: Decide whether this PR runs the Next.js trace
+        id: decide
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition next-trace-decide
+      - name: Authenticate trusted sccache writer
+        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - name: Export trusted Turbo cache signing key
+        if: inputs.trusted-cache
+        env:
+          CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+        run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
+      - name: Set up signed Turbo Remote Cache
+        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache
+        uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
+        with:
+          team: garden-co
+          policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c
+          audience: https://github.com/garden-co
+      - uses: ./.github/actions/setup-blacksmith
+        if: steps.decide.outputs.run == 'true'
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
+
+      - name: Run Next.js trace partition
+        if: steps.decide.outputs.run == 'true'
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition next-trace
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
