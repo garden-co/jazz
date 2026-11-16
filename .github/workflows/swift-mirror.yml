@@ -182,6 +182,17 @@ jobs:
     permissions:
       contents: write
     steps:
+      # A token for garden-co/jazz-swift alone, minted per run by the
+      # jazz-swift-mirror GitHub App (contents: write); revoked when the job
+      # ends.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: mirror-token
+        with:
+          app-id: ${{ secrets.JAZZ_SWIFT_APP_ID }}
+          private-key: ${{ secrets.JAZZ_SWIFT_APP_PRIVATE_KEY }}
+          owner: garden-co
+          repositories: jazz-swift
+          permission-contents: write
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: JazzFFI.xcframework
@@ -193,14 +204,14 @@ jobs:
       - name: Refuse a version that's already published, or a moved tag
         env:
           GH_TOKEN: ${{ github.token }}
-          JAZZ_SWIFT_PUSH_TOKEN: ${{ secrets.JAZZ_SWIFT_PUSH_TOKEN }}
+          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
           SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           # The release tag still points where the build began.
           now=$(gh api "repos/${GITHUB_REPOSITORY}/commits/v$VERSION" -q .sha)
           [[ "$now" == "$SHA" ]] || { echo "::error::v$VERSION is at $now now, not $SHA, which was built"; exit 1; }
           # A published version's asset is pinned by checksum: never replace it.
-          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$JAZZ_SWIFT_PUSH_TOKEN"; }; f'
+          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$MIRROR_TOKEN"; }; f'
           if git ls-remote --exit-code --tags https://github.com/garden-co/jazz-swift.git "refs/tags/$VERSION" >/dev/null; then
             echo "::error::garden-co/jazz-swift already has tag $VERSION"; exit 1
           fi
@@ -217,10 +228,10 @@ jobs:
           echo "$(cat xcf/JazzFFI.xcframework.zip.checksum)  downloaded.zip" | sha256sum -c -
       - name: Push and tag the mirror
         env:
-          JAZZ_SWIFT_PUSH_TOKEN: ${{ secrets.JAZZ_SWIFT_PUSH_TOKEN }}
+          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
           SHA: ${{ needs.resolve.outputs.sha }}
         run: |
-          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$JAZZ_SWIFT_PUSH_TOKEN"; }; f'
+          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$MIRROR_TOKEN"; }; f'
           git clone https://github.com/garden-co/jazz-swift.git mirror
           cd mirror
           git rm -rq --ignore-unmatch . && cp -R ../jazz-swift/. .
