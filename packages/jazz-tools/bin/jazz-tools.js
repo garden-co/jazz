@@ -74,7 +74,7 @@ function printWrapperHelp() {
   );
   console.log("  migrations create     Record a schema change in jazz.app.json (--name <name>)");
   console.log(
-    "  upgrade               Convert an alpha.64 app to jazz.app.json and jazz.permissions.json",
+    "  upgrade               Convert an alpha.65 app to jazz.app.json and jazz.permissions.json",
   );
   console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",
