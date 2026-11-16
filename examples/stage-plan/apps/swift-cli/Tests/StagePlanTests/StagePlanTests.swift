@@ -229,16 +229,28 @@ final class StagePlanTests: XCTestCase {
         try await notes.replace(NSRange(location: 2, length: 1), with: "X")
         XCTAssertEqual(notes.current, "😀Xb")
 
-        var seen: [String] = []
-        for try await text in notes.changes {
-            seen.append(text)
-            if text == "😀Xb!" { break }
-            if seen.count == 1 {
-                // Someone else appends; `changes` delivers the merged text.
-                try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "😀Xb", to: "😀Xb!")
+        // A backspace on a decomposed accent removes the combining mark
+        // alone: a UTF-16 range inside a character, taken as it is.
+        let accent = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Accent", status: .todo, notes: "e\u{301}x", rank: 2))
+        let accentNotes = try await app.jazz.text(accent, JazzApp.tasks.notes)
+        try await accentNotes.replace(NSRange(location: 1, length: 1), with: "")
+        XCTAssertEqual(accentNotes.current, "ex")
+
+        // Bounded: a wrong edit fails here instead of waiting forever.
+        let jazz = app.jazz
+        try await within(seconds: 15) {
+            var seen: [String] = []
+            for try await text in notes.changes {
+                seen.append(text)
+                if text == "😀Xb!" { break }
+                if seen.count == 1 {
+                    // Someone else appends; `changes` delivers the merged text.
+                    try await jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "😀Xb", to: "😀Xb!")
+                }
             }
+            XCTAssertEqual(seen.first, "😀Xb")
         }
-        XCTAssertEqual(seen.first, "😀Xb")
         XCTAssertEqual(notes.current, "😀Xb!")
         let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
         XCTAssertEqual(stored?.notes, "😀Xb!")
@@ -270,7 +282,9 @@ final class StagePlanTests: XCTestCase {
         // Someone else's change is in the store before the handle edits.
         try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "Hello world", to: "Hello world!")
         try await notes.insert("brave ", at: notes.current.index(notes.current.startIndex, offsetBy: 6))
-        for try await text in notes.changes where text == "Hello brave world!" { break }
+        try await within(seconds: 15) {
+            for try await text in notes.changes where text == "Hello brave world!" { break }
+        }
         XCTAssertEqual(notes.current, "Hello brave world!")
         // An append at the delivered end works.
         try await notes.insert("?", at: notes.current.endIndex)
@@ -344,5 +358,20 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(aliceSees.map(\.title), ["Secret"])
         try await bob.jazz.close()
         try await alice.jazz.close()
+    }
+}
+
+struct TimedOutWaiting: Error {}
+
+/// Runs `body`, failing with `TimedOutWaiting` after `seconds`.
+func within(seconds: UInt64, _ body: @escaping @Sendable () async throws -> Void) async throws {
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask { try await body() }
+        group.addTask {
+            try await _Concurrency.Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            throw TimedOutWaiting()
+        }
+        defer { group.cancelAll() }
+        try await group.next()!
     }
 }

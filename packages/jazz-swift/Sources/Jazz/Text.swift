@@ -64,9 +64,12 @@ public struct Splice: Sendable {
 /// JazzApp.tasks.notes)`. Positions are `String.Index`es of `current`
 /// (take them just before the edit); `NSRange`s, as `UITextView` and
 /// `NSAttributedString` give them, are UTF-16, and `utf16:` takes raw
-/// UTF-16 offsets. A position inside a character (or a surrogate pair) is
-/// refused. Edits run one at a time. `current` is the text as last written here or, once this
-/// handle's own writes have come back, as `changes` last delivered it.
+/// UTF-16 offsets. A `String.Index` must come from `current` (another
+/// string's index is taken at its UTF-8 offset) and is refused inside a
+/// character; a UTF-16 position is refused only inside a surrogate pair.
+/// Edits run one at a time. `current` is the text as last written here or,
+/// once this handle's own writes have come back, as `changes` last
+/// delivered it.
 public final class JazzText<R: Row>: @unchecked Sendable {
     let jazz: Client
     public let id: Jazz.ID
@@ -121,22 +124,40 @@ public final class JazzText<R: Row>: @unchecked Sendable {
 
     /// Replaces the UTF-16 `range` (as `UITextView`'s `selectedRange` and
     /// `textView(_:shouldChangeTextIn:replacementText:)` give it) with `text`.
+    /// It may split a character (a backspace removes one combining mark);
+    /// only a position inside a surrogate pair is refused.
     public func replace(_ range: NSRange, with text: String) async throws {
         try await edit { base throws in
-            guard let range = Range(range, in: base) else {
-                throw JazzError.refused(
-                    "range \(range) is outside the text or inside a surrogate pair (\(base.utf16.count) UTF-16 units)")
-            }
-            var edited = base
-            edited.replaceSubrange(range, with: text)
-            return edited
+            var scalars = base.unicodeScalars
+            scalars.replaceSubrange(try Self.scalarRange(range, in: base), with: text.unicodeScalars)
+            return String(scalars)
         }
     }
 
-    /// Replaces the raw UTF-16 offsets `range` of `current` with `text`. An
-    /// offset inside a surrogate pair is refused.
+    /// Replaces the raw UTF-16 offsets `range` of `current` with `text`, as
+    /// `replace(_: NSRange, with:)`.
     public func replace(utf16 range: Range<Int>, with text: String) async throws {
         try await replace(NSRange(location: range.lowerBound, length: range.count), with: text)
+    }
+
+    /// `range`'s UTF-16 offsets as positions of `base`'s Unicode scalars.
+    static func scalarRange(_ range: NSRange, in base: String) throws -> Range<String.Index> {
+        let utf16 = base.utf16
+        guard range.location >= 0, range.length >= 0, range.location + range.length <= utf16.count else {
+            throw JazzError.refused("range \(range) is outside the text (\(utf16.count) UTF-16 units)")
+        }
+        let lower = utf16.index(utf16.startIndex, offsetBy: range.location)
+        let upper = utf16.index(lower, offsetBy: range.length)
+        for (offset, index) in [(range.location, lower), (range.location + range.length, upper)]
+        where index < utf16.endIndex && UTF16.isTrailSurrogate(utf16[index]) {
+            throw JazzError.refused("UTF-16 offset \(offset) is inside a surrogate pair")
+        }
+        guard let lower = lower.samePosition(in: base.unicodeScalars),
+            let upper = upper.samePosition(in: base.unicodeScalars)
+        else {
+            throw JazzError.refused("range \(range) isn't on Unicode scalar boundaries")
+        }
+        return lower..<upper
     }
 
     /// One edit at a time, from `current`.
