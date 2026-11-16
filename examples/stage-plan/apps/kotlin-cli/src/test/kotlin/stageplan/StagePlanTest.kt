@@ -393,4 +393,39 @@ class StagePlanTest {
         val left = dir.listFiles()?.filter { it.name != "jazz.lock" }.orEmpty()
         kotlin.test.assertTrue(left.isEmpty(), "$left")
     }
+
+    @Test
+    fun plain_transactions_merge_and_serializable_ones_conflict(): Unit = runBlocking {
+        open("user-9").use { jazz ->
+            val show = showNamed(jazz, "Concurrent")
+            val task = jazz.insert(Tasks, jazzapp.NewTask(showId = show.id, title = "Rig", status = TaskStatus.Todo, rank = 1.0))
+            // Two transactions both read the task and update it before either
+            // commits: their commits are concurrent.
+            suspend fun race(serializable: Boolean?): List<Result<Unit>> {
+                val wrote = List(2) { kotlinx.coroutines.CompletableDeferred<Unit>() }
+                return List(2) { i ->
+                    async {
+                        runCatching {
+                            val block: suspend (Jazz.Transaction) -> Unit = { tx ->
+                                tx.one(Tasks.where(Tasks.id eq task.id))
+                                tx.update(Tasks, task.id) { title("Rig $i") }
+                                wrote[i].complete(Unit)
+                                wrote[1 - i].await()
+                            }
+                            // null: no argument, so the test pins the default.
+                            if (serializable == null) jazz.transaction(block = block)
+                            else jazz.transaction(serializable = serializable, block = block)
+                        }
+                    }
+                }.map { it.await() }
+            }
+            // The default is mergeable (as TS's): both commit.
+            val merged = race(serializable = null)
+            assertEquals(listOf(true, true), merged.map { it.isSuccess }, "$merged")
+            // serializable = true: the second to commit conflicts.
+            val serial = race(serializable = true)
+            assertEquals(1, serial.count { it.isSuccess }, "$serial")
+            kotlin.test.assertIs<tools.jazz.JazzException.Conflict>(serial.single { it.isFailure }.exceptionOrNull())
+        }
+    }
 }
