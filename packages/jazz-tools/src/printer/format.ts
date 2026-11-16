@@ -176,7 +176,12 @@ function print(nodes: Node[], indent: number, column: number, rest = 0): string 
     const hugs = body.length === 1 && first?.kind === "group" && first.open === "{";
     if (head !== undefined && !hugs) {
       const pad = " ".repeat(indent + 2);
-      return `${head.trim()}\n${pad}${print(body, indent + 2, indent + 2, rest)}`;
+      // A head too long for its line breaks its parameters, as prettier does.
+      const headText =
+        column + head.trim().length > PRINT_WIDTH
+          ? print(nodes.slice(0, arrow), indent, column) + " =>"
+          : head.trim();
+      return `${headText}\n${pad}${print(body, indent + 2, indent + 2, rest)}`;
     }
   }
   const chain = memberChain(nodes, indent, rest);
