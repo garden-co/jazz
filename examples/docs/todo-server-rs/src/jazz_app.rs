@@ -1,7 +1,7 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
-#![allow(dead_code, clippy::all)]
+#![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
 pub const SOURCE: &str = "sha256:216aa1e42ad99c20ff335ba1d6525b15381752a751a374ba20b7b1fa1aa5e4c0";
@@ -37,6 +37,7 @@ pub struct ProjectUpdate {
 
 impl ::jazz_app::Table for Project {
     const NAME: &'static str = "projects";
+    const COLUMNS: &'static [&'static str] = &["name"];
     type New = NewProject;
     type Update = ProjectUpdate;
 
@@ -90,6 +91,11 @@ pub mod projects {
     /// Every row of `projects`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Project> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `projects`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Project>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -159,6 +165,7 @@ pub struct TodoUpdate {
 
 impl ::jazz_app::Table for Todo {
     const NAME: &'static str = "todos";
+    const COLUMNS: &'static [&'static str] = &["title", "done", "priority", "description", "parent", "project"];
     type New = NewTodo;
     type Update = TodoUpdate;
 
@@ -249,6 +256,11 @@ pub mod todos {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `todos`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Todo>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<Todo, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -290,12 +302,12 @@ pub mod todos {
     }
 
     /// Relation `parentRelation`: the `todos` row `parent` references.
-    pub fn parent_relation() -> ::jazz_app::One<Todo, Todo> {
+    pub fn parent_relation() -> ::jazz_app::One<Todo, Todo, ::jazz_app::Nullable> {
         ::jazz_app::One::new("parent")
     }
 
     /// Relation `projectRelation`: the `projects` row `project` references.
-    pub fn project_relation() -> ::jazz_app::One<Todo, Project> {
+    pub fn project_relation() -> ::jazz_app::One<Todo, Project, ::jazz_app::Nullable> {
         ::jazz_app::One::new("project")
     }
 }

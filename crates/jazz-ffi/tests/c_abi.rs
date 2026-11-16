@@ -175,7 +175,7 @@ fn errors_come_back_as_json_and_null_is_refused() {
     let error = call(
         h,
         "all",
-        json!({ "query": { "table": "shows", "include": {} } }),
+        json!({ "query": { "table": "shows", "include": [{ "relation": "tasks", "query": { "offset": 1 } }] } }),
     )
     .unwrap_err();
     assert_eq!(error["kind"], "refused");
@@ -266,6 +266,8 @@ async fn a_backend_through_the_c_abi() {
     let config = backend_config(&server, &app_id.to_string(), "carol");
     let result = tokio::task::spawn_blocking(move || {
         let h = open(&config).unwrap();
+        let bundle = call(h, "bundle", json!({})).unwrap();
+        assert!(bundle.as_str().is_some_and(|b| !b.is_empty()), "{bundle}");
         let account = call(h, "account", json!({})).unwrap();
         let account = account.as_str().expect("carol's account").to_owned();
         let show = call(
@@ -290,4 +292,137 @@ async fn a_backend_through_the_c_abi() {
     .await;
     server.shutdown().await;
     result.unwrap();
+}
+
+#[derive(Default)]
+struct Slow {
+    entered: std::sync::atomic::AtomicUsize,
+    finished: std::sync::atomic::AtomicUsize,
+}
+
+unsafe extern "C" fn slow(ctx: *mut c_void, _kind: *const c_char, _json: *const c_char) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let slow = unsafe { &*(ctx as *const Slow) };
+    slow.entered.fetch_add(1, SeqCst);
+    std::thread::sleep(Duration::from_millis(200));
+    slow.finished.fetch_add(1, SeqCst);
+}
+
+/// `jazz_unsubscribe` returns only once a callback already running has
+/// returned, so the host (Go's `cgo.Handle.Delete`) may free `ctx` right
+/// after:
+///
+/// ```
+/// delivery thread ──cb enters──────(sleeps)──────cb returns──┐
+/// host ──────────────────jazz_unsubscribe (waits)────────────┴─► free(ctx)
+/// ```
+#[test]
+fn unsubscribe_waits_for_a_running_callback() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = open(&client_config()).unwrap();
+    let slow_ctx = Box::new(Slow::default());
+    let mut err = ptr::null_mut();
+    let sub = unsafe {
+        jazz_subscribe(
+            h,
+            c"{\"table\":\"shows\"}".as_ptr(),
+            Some(slow),
+            &*slow_ctx as *const Slow as *mut c_void,
+            &mut err,
+        )
+    };
+    assert!(!sub.is_null());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while slow_ctx.entered.load(SeqCst) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(slow_ctx.entered.load(SeqCst), 1);
+    unsafe { jazz_unsubscribe(sub) };
+    assert_eq!(
+        slow_ctx.finished.load(SeqCst),
+        slow_ctx.entered.load(SeqCst)
+    );
+    drop(slow_ctx);
+    unsafe { jazz_close(h) };
+}
+
+struct SelfFreeing {
+    subscription: Mutex<*mut JazzSubscription>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+unsafe extern "C" fn unsubscribe_self(ctx: *mut c_void, _: *const c_char, _: *const c_char) {
+    let this = unsafe { &*(ctx as *const SelfFreeing) };
+    this.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let sub = std::mem::replace(&mut *this.subscription.lock().unwrap(), ptr::null_mut());
+    unsafe { jazz_unsubscribe(sub) };
+}
+
+/// A callback may free its own subscription: `jazz_unsubscribe` from the
+/// delivery thread doesn't wait for itself.
+#[test]
+fn a_callback_may_unsubscribe_itself() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = open(&client_config()).unwrap();
+    let this = Box::new(SelfFreeing {
+        subscription: Mutex::new(ptr::null_mut()),
+        calls: Default::default(),
+    });
+    // Held until the subscription is stored, so the callback finds it.
+    let mut guard = this.subscription.lock().unwrap();
+    let mut err = ptr::null_mut();
+    let sub = unsafe {
+        jazz_subscribe(
+            h,
+            c"{\"table\":\"shows\"}".as_ptr(),
+            Some(unsubscribe_self),
+            &*this as *const SelfFreeing as *mut c_void,
+            &mut err,
+        )
+    };
+    assert!(!sub.is_null());
+    *guard = sub;
+    drop(guard);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while this.calls.load(SeqCst) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    call(
+        h,
+        "insert",
+        json!({ "table": "shows", "row": parse(&show(nil_uuid())) }),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(this.calls.load(SeqCst), 1);
+    assert!(this.subscription.lock().unwrap().is_null());
+    unsafe { jazz_close(h) };
+}
+
+/// Closing the app ends each open subscription with a last `"error"` of
+/// kind `"closed"`; the subscription is still freed safely afterwards.
+#[test]
+fn close_ends_subscriptions_and_unsubscribe_may_follow() {
+    let h = open(&client_config()).unwrap();
+    let events = Box::new(Events::default());
+    let mut err = ptr::null_mut();
+    let sub = unsafe {
+        jazz_subscribe(
+            h,
+            c"{\"table\":\"shows\"}".as_ptr(),
+            Some(record),
+            &*events as *const Events as *mut c_void,
+            &mut err,
+        )
+    };
+    assert!(!sub.is_null());
+    wait_for(&events, 1);
+    unsafe { jazz_close(h) };
+    let seen = wait_for(&events, 2);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[1].0, "error");
+    assert_eq!(seen[1].1["kind"], "closed");
+    unsafe { jazz_unsubscribe(sub) };
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(events.0.lock().unwrap().len(), 2);
 }

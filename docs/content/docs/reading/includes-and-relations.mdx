@@ -32,8 +32,12 @@ Including a relation adds the resolved object alongside the foreign-key column&h
       }
     },
     "projects": {
-      "columns": { "name": "string" },
-      "relations": { "todos": { "reverse": "todos", "relation": "project" } }
+      "columns": {
+        "name": "string"
+      },
+      "relations": {
+        "todos": { "reverse": "todos", "relation": "project" }
+      }
     }
   }
 }
@@ -60,7 +64,7 @@ relation `"project": { "rel": "projects", "column": "projectId" }`, `projects` c
 The reverse relation returns matching source rows as an array. Its name is your choice;
 Jazz does not generate an inverse or infer names from UUID columns.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-reverse-relation-ts
@@ -76,6 +80,9 @@ Jazz does not generate an inverse or infer names from UUID columns.
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-reverse-relation-rust
     </include>
 
+  </Tab>
+  <Tab value="Go">
+    Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
   </Tab>
 </Tabs>
 
@@ -107,6 +114,12 @@ Text coordinates use JavaScript UTF-16 code units by default, so they match
 `String.prototype.slice`; use `fromUtf8` and `toUtf8` when interoperating with
 a byte-oriented protocol. Jazz rejects a range that would split a UTF-8 code
 point or UTF-16 surrogate pair rather than rounding it.
+
+A range past the end of the value is clamped to it, like
+`String.prototype.slice`: one that starts past the end returns an empty string
+or empty bytes, and one that runs past it returns what the value still covers.
+So a subscription to a window of a text keeps going when the text shrinks
+below it, and shows the window again as the text grows back.
 
 ```ts
 const [document] = await db.all(

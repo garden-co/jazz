@@ -4,6 +4,7 @@
 //! - [`model`]: the language-neutral [`App`] every back end reads.
 //! - [`ts`]: the TypeScript back end (`jazz.generated.ts`).
 //! - [`rust`]: the Rust back end (`src/jazz_app.rs`).
+//! - [`swift`]: the Swift back end (`JazzApp.swift`).
 //! - [`go`]: the Go back end (`jazzapp/jazz_app.go`).
 //! - [`migrations`]: `migrations create`, the schema diff and stub writer.
 //! - [`bindings`]: what committed bindings record, for staleness checks.
@@ -17,7 +18,9 @@ mod json_schema;
 pub mod migrations;
 pub mod model;
 pub mod names;
+pub mod project;
 pub mod rust;
+pub mod swift;
 pub mod ts;
 
 use jazz::tools::deployment::artifact::{ArtifactError, json};
@@ -78,6 +81,7 @@ impl CodegenError {
 pub enum Lang {
     TypeScript,
     Rust,
+    Swift,
     Go,
 }
 
@@ -87,6 +91,11 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
+            // The back end is here, but the runtime package isn't released
+            // yet: `swift` is switched on with it (add it to `ALL` too).
+            "swift" => Err(CodegenError::unsupported(
+                "generating Swift bindings is not available yet; supported: ts, rust",
+            )),
             // Switched off until the Go runtime and docs ship with it.
             "go" | "golang" => Err(CodegenError::unsupported(
                 "generating bindings in Go is not available yet; supported: ts, rust",
@@ -97,8 +106,10 @@ impl Lang {
         }
     }
 
-    /// Every language, in the order `jazz-tools generate` handles them. Go
-    /// isn't among them yet: it is switched off, so no `go.mod` selects it.
+    /// Every language `jazz-tools generate` handles, in that order. (Swift and
+    /// Go are not available yet: [`Lang::Swift`] and [`Lang::Go`] are
+    /// generated only by direct calls, so no `Package.swift` or `go.mod`
+    /// selects them.)
     pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
 
     /// The file whose presence beside `jazz.app.json` says the app is
@@ -107,6 +118,7 @@ impl Lang {
         match self {
             Lang::TypeScript => "package.json",
             Lang::Rust => "Cargo.toml",
+            Lang::Swift => "Package.swift",
             Lang::Go => "go.mod",
         }
     }
@@ -120,9 +132,22 @@ impl Lang {
     pub fn detected_in(self, dir: &std::path::Path) -> bool {
         let marker = dir.join(self.marker());
         match self {
-            Lang::TypeScript => marker.exists(),
+            // The files may sit in `src/` or `src/lib/` of the package, as
+            // the npm CLI finds them.
+            Lang::TypeScript => {
+                marker.exists()
+                    || (dir.ends_with("src")
+                        && dir.parent().is_some_and(|p| p.join(self.marker()).exists()))
+                    || (dir.ends_with("src/lib")
+                        && dir
+                            .parent()
+                            .and_then(|p| p.parent())
+                            .is_some_and(|p| p.join(self.marker()).exists()))
+            }
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
+            Lang::Swift => std::fs::read_to_string(marker)
+                .is_ok_and(|manifest| swift::is_app_manifest(&manifest)),
             Lang::Go => {
                 std::fs::read_to_string(marker).is_ok_and(|go_mod| go::is_app_module(&go_mod))
             }
@@ -134,6 +159,7 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FORMAT,
             Lang::Rust => rust::FORMAT,
+            Lang::Swift => swift::FORMAT,
             Lang::Go => go::FORMAT,
         }
     }
@@ -143,6 +169,7 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FILE,
             Lang::Rust => rust::FILE,
+            Lang::Swift => swift::FILE,
             Lang::Go => go::FILE,
         }
     }
@@ -160,6 +187,7 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
     match lang {
         Lang::TypeScript => ts::generate(app),
         Lang::Rust => rust::generate(app),
+        Lang::Swift => swift::generate(app),
         Lang::Go => go::generate(app),
     }
 }
@@ -177,5 +205,18 @@ fn refuse_stranded(app: &App) -> Result<(), CodegenError> {
     match app.stranded.as_slice() {
         [] => Ok(()),
         stranded => Err(CodegenError::new(stranded.join("\n"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swift_is_not_available_from_the_cli_yet() {
+        let error = Lang::parse("swift").unwrap_err();
+        assert!(error.is_unsupported());
+        assert!(error.message().contains("not available yet"), "{error}");
+        assert!(!Lang::ALL.contains(&Lang::Swift));
     }
 }

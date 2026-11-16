@@ -7,6 +7,7 @@
 //! in `*err`. Strings passed to a subscription's callback are only valid
 //! during the call.
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -14,7 +15,7 @@ use std::ptr;
 use serde_json::{Value as Json, json};
 
 use crate::JazzError;
-use crate::core::{Core, Event, SubscriptionCore};
+use crate::core::{Core, Event, Opts, SubscriptionCore, parse_tx, write_tier};
 use crate::error::{FfiError, refused};
 
 /// An open app (opaque to C).
@@ -29,12 +30,7 @@ pub type JazzCallback =
     Option<unsafe extern "C" fn(ctx: *mut c_void, kind: *const c_char, json: *const c_char)>;
 
 fn error_json(error: &JazzError) -> String {
-    let kind = match error {
-        JazzError::Refused { .. } => "refused",
-        JazzError::Io { .. } => "io",
-        JazzError::Closed => "closed",
-    };
-    json!({ "kind": kind, "message": error.to_string() }).to_string()
+    json!({ "kind": error.kind(), "message": error.to_string() }).to_string()
 }
 
 fn into_c(text: String) -> *mut c_char {
@@ -49,15 +45,21 @@ fn into_c(text: String) -> *mut c_char {
         .into_raw()
 }
 
-/// Runs `call`, turning errors and panics into NULL plus `*err`.
-fn guarded<T>(err: *mut *mut c_char, null: T, call: impl FnOnce() -> Result<T, FfiError>) -> T {
+/// Runs `call`, turning errors and panics into NULL plus `*err`, named as
+/// the contract version `call` sets (1 until it knows better).
+fn guarded<T>(
+    err: *mut *mut c_char,
+    null: T,
+    call: impl FnOnce(&Cell<u64>) -> Result<T, FfiError>,
+) -> T {
+    let contract = Cell::new(1);
     if !err.is_null() {
         // SAFETY: the caller passes NULL or a valid `char**`.
         unsafe { *err = ptr::null_mut() };
     }
-    let failure = match catch_unwind(AssertUnwindSafe(call)) {
+    let failure = match catch_unwind(AssertUnwindSafe(|| call(&contract))) {
         Ok(Ok(value)) => return value,
-        Ok(Err(error)) => JazzError::from(error),
+        Ok(Err(error)) => JazzError::from(error).for_contract(contract.get()),
         Err(_) => JazzError::Io {
             reason: "the call panicked".into(),
         },
@@ -99,18 +101,26 @@ pub unsafe extern "C" fn jazz_open(
     config_json: *const c_char,
     err: *mut *mut c_char,
 ) -> *mut JazzHandle {
-    guarded(err, ptr::null_mut(), || {
+    guarded(err, ptr::null_mut(), |contract| {
         // SAFETY: per the function's contract.
         let config = unsafe { text(config_json, "config_json") }?;
+        if let Some(version) = serde_json::from_str::<Json>(config)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(Json::as_u64))
+        {
+            contract.set(version);
+        }
         Ok(Box::into_raw(Box::new(JazzHandle(Core::open(config)?))))
     })
 }
 
-/// Calls `method` (`all`, `one`, `insert`, `update`, `delete`, `account`)
-/// with its arguments as JSON: `{query}`, `{query}`, `{table,row}`,
-/// `{table,id,patch}`, `{table,id}`, `{}`. Returns its result as JSON:
-/// rows, a row or `null`, the inserted row, `null`, `null`, the account id
-/// or `null`.
+/// Calls `method` (`all`, `one`, `insert`, `update`, `delete`, `account`,
+/// `txBegin`, `txCommit`, `txRollback`) with its arguments as JSON:
+/// `{query}`, `{query}`, `{table,row}`, `{table,id,patch}`, `{table,id}`,
+/// `{}`, `{serializable?}`, `{tx,tier?}`, `{tx}`. Reads and writes also take
+/// `"tx"` (run inside that transaction) and `"tier"`. Returns its result as
+/// JSON: rows, a row or `null`, the inserted row, `null`, `null`, the
+/// account id or `null`, `{tx}`, `null`, `null`.
 ///
 /// # Safety
 /// `handle` comes from `jazz_open` and is not closed; the strings are
@@ -122,7 +132,7 @@ pub unsafe extern "C" fn jazz_call(
     args_json: *const c_char,
     err: *mut *mut c_char,
 ) -> *mut c_char {
-    guarded(err, ptr::null_mut(), || {
+    guarded(err, ptr::null_mut(), |contract| {
         // SAFETY: per the function's contract.
         let (core, method, args) = unsafe {
             (
@@ -131,6 +141,7 @@ pub unsafe extern "C" fn jazz_call(
                 text(args_json, "args_json")?,
             )
         };
+        contract.set(core.contract);
         let args = if args.trim().is_empty() {
             Json::Object(Default::default())
         } else {
@@ -146,22 +157,190 @@ pub unsafe extern "C" fn jazz_call(
                 .map(str::to_owned)
                 .ok_or_else(|| refused(format!("args_json.{name} must be a string")))
         };
+        let opts = |read: bool| Opts::parse(args.get("tx"), args.get("tier"), read);
         let result = match method {
-            "all" => core.all(&field("query")?.to_string())?,
+            "all" => core.all(&field("query")?.to_string(), &opts(true)?)?,
             "one" => core
-                .one(&field("query")?.to_string())?
+                .one(&field("query")?.to_string(), &opts(true)?)?
                 .unwrap_or_else(|| "null".into()),
-            "insert" => core.insert(&string("table")?, &field("row")?.to_string())?,
+            "insert" => {
+                core.insert(&string("table")?, &field("row")?.to_string(), &opts(false)?)?
+            }
             "update" => {
                 core.update(
                     &string("table")?,
                     &string("id")?,
                     &field("patch")?.to_string(),
+                    &opts(false)?,
                 )?;
                 "null".into()
             }
             "delete" => {
-                core.delete(&string("table")?, &string("id")?)?;
+                core.delete(&string("table")?, &string("id")?, &opts(false)?)?;
+                "null".into()
+            }
+            "edit" => {
+                let patch = args
+                    .get("patch")
+                    .filter(|p| !p.is_null())
+                    .map(Json::to_string);
+                core.edit(
+                    &string("table")?,
+                    &string("id")?,
+                    patch.as_deref(),
+                    &field("edits")?.to_string(),
+                    &opts(false)?,
+                )?;
+                "null".into()
+            }
+            // Go's shape: splices over the whole current value.
+            "textEdit" => {
+                let edits = json!([{
+                    "kind": "splice",
+                    "column": string("column")?,
+                    "units": args.get("units").cloned().unwrap_or(json!("utf8")),
+                    "splices": field("edits")?
+                        .as_array()
+                        .ok_or_else(|| refused("args_json.edits must be an array"))?
+                        .iter()
+                        .map(|e| json!({ "at": e.get("pos"), "delete": e.get("delete"), "insert": e.get("insert") }))
+                        .collect::<Vec<_>>(),
+                }]);
+                core.edit(
+                    &string("table")?,
+                    &string("id")?,
+                    None,
+                    &edits.to_string(),
+                    &opts(false)?,
+                )?;
+                "null".into()
+            }
+            "editText" => {
+                let edits = json!([{
+                    "kind": "text",
+                    "column": string("column")?,
+                    "text": string("text")?,
+                    "editedFrom": string("editedFrom")?,
+                }]);
+                core.edit(
+                    &string("table")?,
+                    &string("id")?,
+                    None,
+                    &edits.to_string(),
+                    &opts(false)?,
+                )?;
+                "null".into()
+            }
+            "can" => {
+                let row = args
+                    .get("row")
+                    .filter(|r| !r.is_null())
+                    .map(Json::to_string);
+                let id = args.get("id").and_then(Json::as_str);
+                Json::from(core.can(&string("table")?, &string("op")?, id, row.as_deref())?)
+                    .to_string()
+            }
+            "session" => core.session_state()?.unwrap_or_else(|| "null".into()),
+            "syncStatus" => core.sync_status()?,
+            "refresh" => {
+                core.refresh()?;
+                "null".into()
+            }
+            "link" => core.link(&string("bearer")?)?,
+            "bundle" => Json::from(core.bundle()?).to_string(),
+            "signOut" => {
+                core.sign_out()?;
+                "null".into()
+            }
+            "upsert" => core.upsert(
+                &string("table")?,
+                &string("id")?,
+                &field("row")?.to_string(),
+                &opts(false)?,
+            )?,
+            "restore" => {
+                let patch = args
+                    .get("patch")
+                    .filter(|p| !p.is_null())
+                    .map(Json::to_string);
+                core.restore(
+                    &string("table")?,
+                    &string("id")?,
+                    patch.as_deref(),
+                    &opts(false)?,
+                )?
+            }
+            "uploadBegin" => {
+                // jazz-app streams outside transactions only: an upload
+                // that named one would escape it.
+                if args.get("tx").is_some_and(|tx| !tx.is_null()) {
+                    return Err(crate::error::unsupported(
+                        "streaming uploads inside a transaction",
+                    ));
+                }
+                let row = args
+                    .get("row")
+                    .filter(|r| !r.is_null())
+                    .map(Json::to_string);
+                let kind = args.get("kind").and_then(Json::as_str).unwrap_or("insert");
+                json!({ "upload": core.upload_begin(
+                    &string("table")?,
+                    &string("column")?,
+                    kind,
+                    args.get("id").and_then(Json::as_str),
+                    row.as_deref(),
+                )? })
+                .to_string()
+            }
+            "uploadPush" => {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(string("bytes")?)
+                    .map_err(|_| refused("args_json.bytes must be base64"))?;
+                core.upload_push(parse_tx(&string("upload")?)?, bytes)?;
+                "null".into()
+            }
+            "uploadFinish" => {
+                if args.get("tx").is_some_and(|tx| !tx.is_null()) {
+                    return Err(crate::error::unsupported(
+                        "streaming uploads inside a transaction",
+                    ));
+                }
+                core.upload_finish(parse_tx(&string("upload")?)?, &opts(false)?)?
+            }
+            "uploadAbort" => {
+                core.upload_abort(parse_tx(&string("upload")?)?)?;
+                "null".into()
+            }
+            "txBegin" => {
+                let serializable = match args.get("serializable") {
+                    None | Some(Json::Null) => true,
+                    Some(Json::Bool(serializable)) => *serializable,
+                    Some(_) => return Err(refused("args_json.serializable must be a boolean")),
+                };
+                json!({ "tx": core.tx_begin(serializable)? }).to_string()
+            }
+            "txCommit" => {
+                let tier = match args.get("tier").filter(|t| !t.is_null()) {
+                    Some(tier) => {
+                        Some(write_tier(tier.as_str().ok_or_else(|| {
+                            refused("args_json.tier must be a string")
+                        })?)?)
+                    }
+                    None => None,
+                };
+                core.tx_commit(parse_tx(&string("tx")?)?, tier)?;
+                "null".into()
+            }
+            "waitForSync" => {
+                let tier = args.get("tier").and_then(Json::as_str).ok_or_else(|| {
+                    refused("waitForSync needs \"tier\": \"local\" or \"global\"")
+                })?;
+                core.wait_for_sync(write_tier(tier)?)?;
+                "null".into()
+            }
+            "txRollback" => {
+                core.tx_rollback(parse_tx(&string("tx")?)?)?;
                 "null".into()
             }
             "account" => Json::from(core.account()?).to_string(),
@@ -191,20 +370,30 @@ pub unsafe extern "C" fn jazz_subscribe(
     ctx: *mut c_void,
     err: *mut *mut c_char,
 ) -> *mut JazzSubscription {
-    guarded(err, ptr::null_mut(), || {
+    guarded(err, ptr::null_mut(), |contract| {
         // SAFETY: per the function's contract.
         let (core, query) = unsafe { (handle(handle_ptr)?, text(query_json, "query_json")?) };
+        contract.set(core.contract);
+        let version = core.contract;
+        // `{ "query": Q, "tier"? }`, or the query itself.
+        let parsed = crate::convert::parse(query, "query_json")?;
+        let (query, opts) = match parsed.get("query") {
+            Some(inner) if parsed.get("table").is_none() => (
+                inner.to_string(),
+                Opts::parse(None, parsed.get("tier"), true)?,
+            ),
+            _ => (query.to_owned(), Opts::default()),
+        };
         let cb = cb.ok_or_else(|| refused("the callback is NULL"))?;
         let ctx = Context(ctx);
         let subscription = core.subscribe(
-            query,
+            &query,
+            &opts,
             Box::new(move |event| {
                 let ctx = &ctx;
                 let (kind, json) = match event {
                     Event::Delta(json) => (c"delta", json),
-                    Event::Error(message) => {
-                        (c"error", error_json(&JazzError::Io { reason: message }))
-                    }
+                    Event::Error(error) => (c"error", error_json(&error.for_contract(version))),
                 };
                 let json = CString::new(json).unwrap_or_default();
                 // SAFETY: per `jazz_subscribe`'s contract; the strings live
@@ -216,7 +405,10 @@ pub unsafe extern "C" fn jazz_subscribe(
     })
 }
 
-/// Ends and frees a subscription: no callback starts after it returns.
+/// Ends and frees a subscription. When it returns, no callback is running
+/// or will start, so `cb` and `ctx` may be freed; called from inside the
+/// callback, it returns without waiting for that callback. A subscription
+/// owns what it needs: it may be freed before or after `jazz_close`.
 ///
 /// # Safety
 /// `subscription` is NULL or from `jazz_subscribe`, and not yet freed.
@@ -228,12 +420,14 @@ pub unsafe extern "C" fn jazz_unsubscribe(subscription: *mut JazzSubscription) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: per the function's contract.
         let subscription = unsafe { Box::from_raw(subscription) };
-        subscription.0.cancel();
+        subscription.0.cancel_and_wait();
     }));
 }
 
-/// Closes the app and frees the handle. Subscriptions still open end; free
-/// them with `jazz_unsubscribe`.
+/// Closes the app and frees the handle. Each subscription still open gets a
+/// last `"error"` callback with kind `"closed"`; free them with
+/// `jazz_unsubscribe` (before or after this call). No other call on this
+/// handle may run concurrently with, or follow, this one.
 ///
 /// # Safety
 /// `handle` is NULL or from `jazz_open`, and not yet closed.
@@ -259,4 +453,162 @@ pub unsafe extern "C" fn jazz_string_free(text: *mut c_char) {
         // SAFETY: per the function's contract.
         drop(unsafe { CString::from_raw(text) });
     }
+}
+
+/// A host's token callback: called on a thread of its own (it may block)
+/// with `reason` (`"connect"`, `"renew"`, `"expired"`, `"refresh"`). Returns
+/// 0 with `*token` set to the token, a `malloc`ed string (Go's `C.CString`)
+/// jazz frees, or to NULL when no one is signed in (the app stops); or
+/// non-zero when the fetch failed (a network blip): the session stays and
+/// asks again, and `*token`, if set, is the failure's message (freed too).
+pub type JazzTokenCallback = Option<
+    unsafe extern "C" fn(ctx: *mut c_void, reason: *const c_char, token: *mut *mut c_char) -> i32,
+>;
+
+unsafe extern "C" {
+    fn free(pointer: *mut c_void);
+}
+
+/// A C host's token callback and its `ctx`, while its handle is open.
+type TokenGate = crate::gate::Gate<(
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32,
+    TokenRef,
+)>;
+
+/// A host's `ctx`, shared by the gated calls.
+#[derive(Clone, Copy)]
+struct TokenRef(*mut c_void);
+// SAFETY: the host promises `ctx` may be used from any thread (header).
+unsafe impl Send for TokenRef {}
+unsafe impl Sync for TokenRef {}
+
+/// Opens an app as an end user who signs in with the app's bearer
+/// (`"auth": {"bearer": true}`): `token_cb` gives it.
+///
+/// # Safety
+/// `config_json` is NUL-terminated; `token_cb` and `ctx` stay valid, from
+/// any thread, until `jazz_close` returns; `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_open_user(
+    config_json: *const c_char,
+    token_cb: JazzTokenCallback,
+    ctx: *mut c_void,
+    err: *mut *mut c_char,
+) -> *mut JazzHandle {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let config = unsafe { text(config_json, "config_json") }?;
+        if let Some(version) = serde_json::from_str::<Json>(config)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(Json::as_u64))
+        {
+            contract.set(version);
+        }
+        let cb = token_cb.ok_or_else(|| refused("the token callback is NULL"))?;
+        // The callback and its ctx while the handle is open: `jazz_close`
+        // waits for a fetch in progress and clears it, so no fetch calls
+        // the host after close returns (a late one fails, without signing
+        // anyone out).
+        let gate: std::sync::Arc<TokenGate> =
+            std::sync::Arc::new(crate::gate::Gate::new((cb, TokenRef(ctx))));
+        let calling = gate.clone();
+        let host = crate::core::HostTokens(std::sync::Arc::new(move |reason: &str| {
+            calling
+                .call(|&(cb, ctx)| {
+                    let reason = CString::new(reason).unwrap_or_default();
+                    let mut token: *mut c_char = ptr::null_mut();
+                    // SAFETY: per `jazz_open_user`'s contract, while the
+                    // handle (this gate) is open.
+                    let failed = unsafe { cb(ctx.0, reason.as_ptr(), &mut token) };
+                    let text = if token.is_null() {
+                        None
+                    } else {
+                        // SAFETY: the callback sets a NUL-terminated
+                        // `malloc`ed string.
+                        let text = unsafe { CStr::from_ptr(token) }
+                            .to_string_lossy()
+                            .into_owned();
+                        unsafe { free(token.cast()) };
+                        Some(text)
+                    };
+                    if failed != 0 {
+                        return Err(text.unwrap_or_else(|| "the token callback failed".into()));
+                    }
+                    Ok(text)
+                })
+                .unwrap_or_else(|| Err("the app is closed".into()))
+        }));
+        let core = Core::open_with_tokens(config, Some(std::sync::Arc::new(host)))?;
+        // Closing waits for fetches in progress (but its own, when closed
+        // from inside the callback); no fetch calls the host after.
+        core.on_close(Box::new(move || gate.close()));
+        Ok(Box::into_raw(Box::new(JazzHandle(core))))
+    })
+}
+
+/// A watch of session or sync states (opaque to C).
+pub struct JazzWatch(crate::core::Watch);
+
+/// Calls `cb` with kind `"session"` or `"sync"` and each state's JSON, the
+/// current one first, on a thread of its own, until `jazz_unwatch`.
+///
+/// # Safety
+/// `handle` comes from `jazz_open`/`jazz_open_user` and is not closed;
+/// `what` is NUL-terminated; `cb` and `ctx` stay valid, from any thread,
+/// until `jazz_unwatch` returns; `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_watch(
+    handle_ptr: *const JazzHandle,
+    what: *const c_char,
+    cb: JazzCallback,
+    ctx: *mut c_void,
+    err: *mut *mut c_char,
+) -> *mut JazzWatch {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let (core, what) = unsafe { (handle(handle_ptr)?, text(what, "what")?) };
+        contract.set(core.contract);
+        let cb = cb.ok_or_else(|| refused("the callback is NULL"))?;
+        let ctx = Context(ctx);
+        let kind = CString::new(what).unwrap_or_default();
+        let watch = core.watch(
+            what,
+            Box::new(move |state| {
+                let ctx = &ctx;
+                let json = CString::new(state).unwrap_or_default();
+                // SAFETY: per `jazz_watch`'s contract.
+                unsafe { cb(ctx.0, kind.as_ptr(), json.as_ptr()) };
+            }),
+        )?;
+        Ok(Box::into_raw(Box::new(JazzWatch(watch))))
+    })
+}
+
+/// Ends and frees a watch: when it returns no callback is running (unless
+/// called from one).
+///
+/// # Safety
+/// `watch` is NULL or from `jazz_watch`, and not yet freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_unwatch(watch: *mut JazzWatch) {
+    if watch.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: per the function's contract.
+        let watch = unsafe { Box::from_raw(watch) };
+        watch.0.cancel();
+    }));
+}
+
+/// A new device account's key as `jazz-auth-v1:…` text, for `"auth":
+/// {"deviceKey": …}`; free it with `jazz_string_free`.
+///
+/// # Safety
+/// `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_generate_device_key(err: *mut *mut c_char) -> *mut c_char {
+    guarded(err, ptr::null_mut(), |_| {
+        Ok(into_c(crate::core::generate_device_key()?))
+    })
 }
