@@ -9100,6 +9100,19 @@ impl Db {
             .map_or(0, |client| client.pending.len())
     }
 
+    /// The ids the pending commits upload under, sorted: a relayed commit
+    /// uploads under its session's id, so a host holding both a session and
+    /// the store that relays it counts each write once by this id.
+    pub fn pending_upload_ids(&self) -> Vec<TxId> {
+        let inner = self.inner.borrow();
+        let mut ids = inner.client.as_ref().map_or_else(Vec::new, |client| {
+            client.pending.iter().map(|pending| pending.id).collect()
+        });
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// This replica's uploads as its host reports them: what still awaits
     /// the upstream's verdict, since when, and what the upstream refused
     /// since the store opened. Refusals of the sessions it relays are

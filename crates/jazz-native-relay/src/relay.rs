@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, Migrations, RemoteLinkHint,
-    SubscriptionStream, block_on,
+    SubscriptionStream, UploadStatus, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::link::{
@@ -1940,11 +1940,14 @@ fn foreground_command(
             Response::SlowQueryThresholdSet
         }
         Request::PendingUploadCount => Response::PendingUploadCount {
-            count: binding.pending_upload_count() as u64,
+            count: foreground_upload_status(&binding, &client.authority).pending as u64,
         },
         Request::UploadStatus => Response::UploadStatus {
-            status_json: serde_json::to_string(&binding.upload_status())
-                .expect("an upload status serializes"),
+            status_json: serde_json::to_string(&foreground_upload_status(
+                &binding,
+                &client.authority,
+            ))
+            .expect("an upload status serializes"),
         },
         Request::BeginStreamingMutation {
             mutation,
@@ -2084,6 +2087,30 @@ fn foreground_command(
             return Err("host command reached the relay owner".into());
         }
     })
+}
+
+/// A foreground's uploads as its app sees them: its own commits and the
+/// ones the scope's store holds, which after a restart are the only copy of
+/// an earlier process's writes. A relayed commit uploads under its
+/// session's id, so the two count each write once. Refusals are the
+/// foreground's own: the store reports a relayed commit's refusal to its
+/// session, not as one of its own.
+fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadStatus {
+    let own = binding.upload_status();
+    let store = authority.upload_status();
+    let mut ids = binding.db.pending_upload_ids();
+    ids.extend(authority.db.pending_upload_ids());
+    ids.sort_unstable();
+    ids.dedup();
+    UploadStatus {
+        pending: ids.len(),
+        oldest_pending_at: own
+            .oldest_pending_at
+            .into_iter()
+            .chain(store.oldest_pending_at)
+            .min(),
+        ..own
+    }
 }
 
 /// Wait for a write this foreground committed to reach `tier`. Unless
