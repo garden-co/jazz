@@ -93,7 +93,7 @@ describe("migrations create", () => {
     expect(todo).toMatch(/Added required column "priority" needs an explicit default/);
 
     await expect(generateApp({ cwd: root })).rejects.toThrow(
-      /has 1 unresolved TODO left by `jazz-tools migrations create`: line \d+: Added required column "priority" needs an explicit default/,
+      /has 1 unresolved TODO left by `npx jazz-tools migrations create`: line \d+: Added required column "priority" needs an explicit default/,
     );
 
     const filled = stub

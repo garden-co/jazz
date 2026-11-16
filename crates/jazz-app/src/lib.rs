@@ -1,13 +1,21 @@
 //! A typed Rust client for a Jazz app, opened from its `jazz.app.json`.
 //!
-//! Bindings generated from `jazz.app.json` (`jazz-tools generate`, or
-//! `jazz_codegen` in a `build.rs`) give each table a row struct, an insert
+//! **Experimental: client only; backends are TypeScript.** See
+//! [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+//!
+//! The app is authored in TypeScript: `schema.ts` beside `Cargo.toml`
+//! declares its tables and permissions, and `npx jazz-tools generate` writes
+//! `jazz.app.json`, `jazz.permissions.json` and `src/jazz_app.rs` from it.
+//! At runtime this crate reads only those generated files.
+//!
+//! The generated bindings (`src/jazz_app.rs`, or `jazz_codegen::rust::build`
+//! in a `build.rs`) give each table a row struct, an insert
 //! struct, an update struct and a module of typed columns, relations and
 //! queries, and an `open` that embeds the app's schema. This crate is what
 //! they build on: the [`Jazz`] handle and the traits they implement.
 //!
 //! ```ignore
-//! let jazz = jazz_app_support::open(config).await?;            // generated
+//! let jazz = jazz_app::open(config).await?;                    // generated
 //! let open = jazz.all(todos::query().filter(todos::done().eq(false))).await?;
 //! let todo = jazz.insert(NewTodo { title: "Write docs".into(), ..Default::default() }).await?;
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
@@ -27,13 +35,11 @@
 //! [`Jazz::session`] follows it; [`Session::link`] carries a device account
 //! over to the user's provider sign-in.
 //!
-//! Unstable, behind the non-default `unstable-endpoint` feature and not
-//! part of a release yet: `Endpoint`, the app's `/jazz` handler served
-//! natively. Run an app's main backend with TS `createJazz`.
+//! [`Query::part`] reads part of a large value ([`ValuePart`]): a byte
+//! range, a text range or a JSON subtree.
 //!
-//! Not supported yet: partial reads of large values. A bearer session is
-//! renewed by reconnecting with a fresh bearer, as TypeScript's bearer
-//! clients do (in-place renewal is for cookie sessions).
+//! A bearer session is renewed by reconnecting with a fresh bearer, as
+//! TypeScript's bearer clients do (in-place renewal is for cookie sessions).
 
 mod advice;
 mod app;

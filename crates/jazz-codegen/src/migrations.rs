@@ -66,7 +66,7 @@ pub fn create(
     if bindings::differs_only_in_indexes(from, to) {
         return Ok(Created {
             note: Some(
-                "only single-column indexes changed: no migration needed; run `jazz-tools generate`".into(),
+                "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`".into(),
             ),
             ..unchanged()
         });

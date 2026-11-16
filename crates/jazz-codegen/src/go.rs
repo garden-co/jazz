@@ -986,7 +986,7 @@ fn type_label(ty: &ColumnType) -> &'static str {
 pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenError> {
     let refuse = |what: &str| {
         CodegenError::new(format!(
-            "{FILE}: {what}; regenerate it with `jazz-tools generate`"
+            "{FILE}: {what}; regenerate it with `npx jazz-tools generate`"
         ))
     };
     let bindings = bindings.replace("\r\n", "\n");
@@ -1031,7 +1031,7 @@ pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenE
     let unusable = |what: &str| {
         CodegenError::new(format!(
             "{FILE}: {what}. Restore it from version control; or delete it and run \
-             `jazz-tools generate` (an edit of `tables` since it was generated then \
+             `npx jazz-tools generate` (an edit of `tables` since it was generated then \
              has no recorded version to migrate from)"
         ))
     };

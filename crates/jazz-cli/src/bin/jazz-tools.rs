@@ -353,7 +353,8 @@ fn ts_schema(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 /// (`packages/jazz-tools/src/dev/ts-project.ts`).
 const JSON_ONLY_APP: &str = "TS is the source in alpha.66: this app has jazz.app.json but no \
      schema.ts. Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema \
-     hashes and bundle id), then `npx jazz-tools generate`.";
+     hashes and bundle id), then edit schema.ts beside your app's manifest (package.json, \
+     Cargo.toml, go.mod, Package.swift, build.gradle, …) and run `npx jazz-tools generate`.";
 
 /// Refuse to write an app's files: TypeScript is the only authoring source,
 /// so `jazz.app.json`, `jazz.permissions.json` and the bindings are written
@@ -487,7 +488,7 @@ async fn run() {
             std::process::exit(code);
         }
         Commands::Validate { .. } => finish_app_files(Err(
-            "`jazz-tools validate` is renamed to `jazz-tools generate` (`--check` for CI)".into(),
+            "`jazz-tools validate` is renamed to `jazz-tools generate`: run `npx jazz-tools generate` (`jazz-tools generate --check` for CI)".into(),
         )),
         Commands::Generate {
             dir,

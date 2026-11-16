@@ -44,6 +44,11 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+#[cfg(any(test, feature = "testing"))]
+pub use sync::{
+    FollowMemoStats, FollowReadHook, follow_memo_stats_for_test, set_follow_memo_oracle_for_test,
+    set_follow_read_hook_for_test,
+};
 pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 
 #[path = "shard.rs"]
@@ -624,6 +629,10 @@ struct Inner {
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
+    /// Pulls a replica sends that fail with a storage error before they
+    /// read anything (see `Db::fail_next_pulls_for_test`).
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) failing_pulls: usize,
     /// Staged writes replayed into a transaction overlay so far: what tests
     /// of staging cost count.
     #[cfg(any(test, feature = "testing"))]
@@ -755,6 +764,9 @@ struct Inner {
     commit_origin: Option<([u8; 16], u64)>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
+    /// When pulls the chunk store failed to answer at once are asked of it
+    /// again.
+    pub(crate) store_retry: sync::StoreRetry,
     /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
     /// unless a test lowers it).
     merge_budget: u64,
@@ -856,6 +868,20 @@ struct Inner {
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
+    /// While a server tick fans out to its sessions: the rows each
+    /// followed key found, read once for every session following it
+    /// (see `sync::FollowMemo`).
+    follow_memo: Rc<RefCell<Option<sync::FollowMemo>>>,
+    /// Whether `_jazz_pruned_txs` exists, as last read (see
+    /// `sync::has_pruned_txs`).
+    pruned_txs: std::cell::Cell<Option<sync::Known>>,
+}
+
+/// Whether a read decodes its rows' projected cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decode {
+    Cells,
+    Nothing,
 }
 
 /// Large-value nodes one tick may reclaim.
@@ -1936,6 +1962,8 @@ impl Db {
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 #[cfg(any(test, feature = "testing"))]
+                failing_pulls: 0,
+                #[cfg(any(test, feature = "testing"))]
                 overlay_replays: 0,
                 #[cfg(any(test, feature = "testing"))]
                 evidence_copies: std::cell::Cell::new(0),
@@ -1981,6 +2009,7 @@ impl Db {
                 next_origin: None,
                 commit_origin: None,
                 clock_for_test: None,
+                store_retry: sync::StoreRetry::default(),
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
@@ -2024,6 +2053,8 @@ impl Db {
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
+                follow_memo: Rc::default(),
+                pruned_txs: std::cell::Cell::new(None),
             })),
         };
         {
@@ -2792,6 +2823,15 @@ impl Db {
     #[doc(hidden)]
     pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = ErrorCode>) {
         self.inner().failing_ticks.extend(codes);
+    }
+
+    /// Fail the next `pulls` pulls replicas send this store with a storage
+    /// error before they read anything, as a store that cannot read its
+    /// file would.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fail_next_pulls_for_test(&self, pulls: usize) {
+        self.inner().failing_pulls = pulls;
     }
 
     /// Where the current schema stores `table`'s `column`: (stored table,
@@ -5082,12 +5122,53 @@ impl Inner {
         Ok(self.run_with_deps(prepared, identity, read)?.0)
     }
 
+    /// [`Inner::run`] for a caller that uses only each row's identity,
+    /// version, deletion, writer and joined rows, never its cells: the
+    /// projected cells are not decoded (each reads as `None`), so no chunk
+    /// of a large value is read. A partial selection is still refused where
+    /// the cell alone says so ([`Inner::check_part`]). A session's read at
+    /// the authority answers with stored images, not these rows.
+    pub(crate) fn run_without_cells(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let (compiled, _) = self.compile_visible(prepared, identity, read)?;
+        let mut run = crate::slow::Run::default();
+        let started = web_time::Instant::now();
+        let rows = self.execute_sql(
+            &compiled.sql,
+            &compiled,
+            &prepared.query.table,
+            &mut run,
+            None,
+            Decode::Nothing,
+        )?;
+        run.elapsed = started.elapsed();
+        self.record_slow(&compiled, &prepared.query.table, run, rows.len());
+        Ok(rows)
+    }
+
     fn run_with_deps(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
+        let (compiled, tables) = self.compile_visible(prepared, identity, read)?;
+        let rows = self.execute(&compiled, &prepared.query.table)?;
+        Ok((rows, tables))
+    }
+
+    /// `prepared` compiled for `read` as visible over its tables, and those
+    /// tables (its root's and its array relations').
+    fn compile_visible(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<(Compiled, BTreeSet<String>), Error> {
         let mut compiled = self.compile(prepared, identity, read)?;
         // Array relations are part of a subscription's dependencies, and
         // of the tables its cut is decided over.
@@ -5096,8 +5177,7 @@ impl Inner {
         if let std::borrow::Cow::Owned(visible) = &visible {
             compiled = self.compile(prepared, identity, visible)?;
         }
-        let rows = self.execute(&compiled, &prepared.query.table)?;
-        Ok((rows, tables))
+        Ok((compiled, tables))
     }
 
     /// `tables` (a compiled root's) and the stored tables of `prepared`'s
@@ -5140,11 +5220,30 @@ impl Inner {
     ) -> Result<Vec<CurrentRow>, Error> {
         let started = web_time::Instant::now();
         let mut run = crate::slow::Run::default();
-        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run, keys)?;
+        let rows = self.execute_sql(
+            &compiled.sql,
+            compiled,
+            table,
+            &mut run,
+            keys,
+            Decode::Cells,
+        )?;
         run.elapsed = started.elapsed();
+        self.record_slow(compiled, table, run, rows.len());
+        Ok(rows)
+    }
+
+    /// Note `run` of `compiled` in the slow-query log if it was slow.
+    fn record_slow(
+        &self,
+        compiled: &Compiled,
+        table: &str,
+        mut run: crate::slow::Run,
+        rows: usize,
+    ) {
         let mut slow = self.slow.borrow_mut();
         if slow.is_slow(run.elapsed) {
-            run.rows = rows.len() as u64;
+            run.rows = rows as u64;
             let schema_version = self
                 .conn
                 .query_row("PRAGMA schema_version", [], |r| r.get(0))
@@ -5154,7 +5253,6 @@ impl Inner {
                     .unwrap_or_else(|error| format!("(no plan: {error})"))
             });
         }
-        Ok(rows)
     }
 
     /// SQLite's plan for `sql`, one step per line.
@@ -5180,6 +5278,7 @@ impl Inner {
         table: &str,
         run: &mut crate::slow::Run,
         mut keys: Option<&mut Vec<i64>>,
+        decode: Decode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         // Cached statements keep counting across runs: start this one at 0.
@@ -5198,8 +5297,10 @@ impl Inner {
             .map_err(storage)?;
         let mut out = Vec::new();
         // A replica missing chunks reads on past the first blocked cell, so
-        // one round trip asks for every row's missing nodes.
-        let mut blocked = false;
+        // one round trip asks for every row's missing nodes. The first
+        // blocked cell's error is the read's: it says whether the chunks are
+        // on their way or were refused.
+        let mut blocked: Option<Error> = None;
         // A union's arm labels, shared by their rows.
         let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
@@ -5267,13 +5368,22 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty, tags))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
+                    if decode == Decode::Nothing {
+                        // A part the cell alone refuses (an inline value's
+                        // split, an inverted range) refuses the read all
+                        // the same; one past the end is clamped (#5502).
+                        if let Some(part) = compiled.partial.get(i).and_then(Option::as_ref) {
+                            self.check_part(ty, cell, part)?;
+                        }
+                        return Ok((name.clone(), None));
+                    }
                     let value = match compiled.partial.get(i).and_then(Option::as_ref) {
                         Some(part) => self.partial_cell(ty, cell, part),
                         None => cell_from_sql(ty, tags.as_ref(), cell, &self.chunks),
                     };
                     match value {
                         Err(error) if crate::large::is_missing(&error) => {
-                            blocked = true;
+                            blocked.get_or_insert(error);
                             Ok((name.clone(), None))
                         }
                         value => Ok((name.clone(), value?)),
@@ -5316,8 +5426,8 @@ impl Inner {
             let steps = statement.reset_status(rusqlite::StatementStatus::VmStep) as u64;
             VM_STEPS.with(|cell| cell.set(cell.get() + steps));
         }
-        if blocked {
-            return Err(crate::large::missing());
+        if let Some(error) = blocked {
+            return Err(error);
         }
         Ok(out)
     }

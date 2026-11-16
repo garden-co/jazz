@@ -65,7 +65,7 @@ pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
 fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
     let refuse = |what: &str| {
         CodegenError::new(format!(
-            "{}: {what}; regenerate it with `jazz-tools generate`",
+            "{}: {what}; regenerate it with `npx jazz-tools generate`",
             ts::FILE
         ))
     };
@@ -280,11 +280,11 @@ pub enum Staleness {
 impl Staleness {
     pub fn message(&self, lang: Lang) -> String {
         match self {
-            Staleness::Missing => format!("no {}: run `jazz-tools generate`", lang.file()),
+            Staleness::Missing => format!("no {}: run `npx jazz-tools generate`", lang.file()),
             Staleness::SchemaChanged => "the schema changed since the last version: run \
-                 `jazz-tools migrations create --name <name>`"
+                 `npx jazz-tools migrations create --name <name>`"
                 .into(),
-            Staleness::OutOfDate => "bindings out of date: run `jazz-tools generate`".into(),
+            Staleness::OutOfDate => "bindings out of date: run `npx jazz-tools generate`".into(),
             Staleness::Unreadable(why) => why.clone(),
         }
     }

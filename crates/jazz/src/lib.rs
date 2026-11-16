@@ -28,12 +28,16 @@ pub use jazz_db::catalogue;
 pub use jazz_db::chunk_store;
 pub use jazz_db::db;
 pub use jazz_db::format;
-#[cfg(feature = "testing")]
-pub use jazz_db::full_materializations_for_test;
 pub use jazz_db::host;
 pub use jazz_db::link;
+#[cfg(feature = "testing")]
+pub use jazz_db::pruned_txs_lookups_for_test;
 pub use jazz_db::result_tree;
 pub use jazz_db::slow;
+#[cfg(feature = "testing")]
+pub use jazz_db::{
+    cell_ranges_for_test, decode_session_read_cells_for_test, full_materializations_for_test,
+};
 pub use jazz_model::model;
 pub use jazz_model::query;
 pub use jazz_model::row_input;

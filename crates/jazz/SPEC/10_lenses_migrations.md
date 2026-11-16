@@ -871,10 +871,9 @@ generate` writes both files from it, and marks each with a top-level
 - Only `npx jazz-tools generate` and `npx jazz-tools migrations create`
   write an app's files, bindings and migrations, and only from `schema.ts`
   (in the app's directory, `src/` or `src/lib/`). An app with
-  `jazz.app.json` but no `schema.ts` is refused by both ("TS is the source
-  in alpha.66: this app has jazz.app.json but no schema.ts. Run `npx
-jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes
-  and bundle id), then `npx jazz-tools generate`."): editing the JSON is not
+  `jazz.app.json` but no `schema.ts` is refused by both, with a pointer to
+  `npx jazz-tools upgrade` (which writes `schema.ts` from the files,
+  keeping the schema hashes and bundle id): editing the JSON is not
   a second authoring path. The standalone `jazz-tools` binary can't read
   TypeScript, so it never writes: its `generate` and `migrations create`
   refuse, pointing to `npx jazz-tools …` (or, without `schema.ts`, to

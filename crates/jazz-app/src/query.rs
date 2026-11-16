@@ -210,7 +210,7 @@ impl<T> Condition<T> {
 
 /// Column `name` of `T`, holding values of `V` as stored: conditions
 /// compare them. `P` is what [`Query::select`] reads it as: `V` itself, or
-/// for a column with a transform, a generated [`Pick`] that reads its view
+/// for a column with a transform, a generated [`crate::Pick`] that reads its view
 /// value through the app's transform.
 #[derive(Debug)]
 pub struct Column<T, V, P = V> {

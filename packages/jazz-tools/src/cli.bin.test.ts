@@ -146,7 +146,9 @@ describe("bin integration", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(
         "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. " +
-          "Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), then `npx jazz-tools generate`.",
+          "Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), " +
+          "then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, Package.swift, build.gradle, …) " +
+          "and run `npx jazz-tools generate`.",
       );
       expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(before);
       expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
