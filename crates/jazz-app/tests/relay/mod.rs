@@ -43,6 +43,8 @@ pub struct Links {
     pub revoke: bool,
     /// Links attempted so far.
     pub attempts: usize,
+    /// Users whose next `backend-sign-in` fails (`503`), once each.
+    pub fail_sign_in: std::collections::HashSet<String>,
 }
 
 pub struct Relay {
@@ -282,8 +284,15 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
             },
         }
     } else if path.ends_with("/accounts/backend-sign-in") {
+        let failing = user
+            .as_ref()
+            .is_some_and(|user| backend.links.lock().unwrap().fail_sign_in.remove(user));
         match user {
             None => ("401 Unauthorized", "signed_out".to_owned()),
+            Some(_) if failing => (
+                "503 Service Unavailable",
+                "account_request_failed".to_owned(),
+            ),
             Some(user) => {
                 let account = account_of(&backend, &user).await;
                 let body = json!({
