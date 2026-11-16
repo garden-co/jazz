@@ -40,6 +40,9 @@ pub struct Relay {
     /// answers an unverified credential.
     pub refusing: Arc<Mutex<HashMap<String, String>>>,
     connections: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
+    /// While set, connections are dropped as they arrive: the backend is
+    /// unreachable.
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -48,6 +51,16 @@ impl Relay {
     pub fn kick(&self) {
         for connection in self.connections.lock().unwrap().drain(..) {
             connection.abort();
+        }
+    }
+
+    /// Makes the backend unreachable (`true`: open connections drop, new
+    /// ones are closed at once) or reachable again.
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.unreachable
+            .store(unreachable, std::sync::atomic::Ordering::SeqCst);
+        if unreachable {
+            self.kick();
         }
     }
 
@@ -85,12 +98,18 @@ pub async fn start(
     let admitted = Arc::new(Mutex::new(Vec::new()));
     let refusing = Arc::new(Mutex::new(HashMap::new()));
     let connections = Arc::new(Mutex::new(Vec::new()));
+    let unreachable = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (log, refused, open) = (admitted.clone(), refusing.clone(), connections.clone());
+    let down = unreachable.clone();
     let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            if down.load(std::sync::atomic::Ordering::SeqCst) {
+                drop(stream);
+                continue;
+            }
             let connection =
                 tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
             open.lock().unwrap().push(connection.abort_handle());
@@ -101,6 +120,7 @@ pub async fn start(
         admitted,
         refusing,
         connections,
+        unreachable,
         task,
     }
 }
