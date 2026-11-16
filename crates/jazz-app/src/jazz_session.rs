@@ -33,9 +33,10 @@ use crate::session::{SessionState, User};
 /// The file a device account's key is kept in, in the session's directory.
 const DEVICE_KEY_FILE: &str = "device.key";
 
-/// What a session is doing, as TypeScript's `JazzSessionSnapshot.status`.
+/// What a session is doing, as TypeScript's `JazzSessionSnapshot.status`
+/// (and spelled as it: `signed-out`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub enum SessionStatus {
     /// Opening; nothing to show yet.
     Starting,
@@ -58,7 +59,7 @@ impl std::fmt::Display for SessionStatus {
         f.write_str(match self {
             Self::Starting => "starting",
             Self::Ready => "ready",
-            Self::SignedOut => "signedOut",
+            Self::SignedOut => "signed-out",
             Self::Transitioning => "transitioning",
             Self::Error => "error",
             Self::Closed => "closed",
@@ -116,7 +117,10 @@ impl From<&Error> for SessionError {
 }
 
 /// Who is signed in and how the session stands, as TypeScript's
-/// `JazzSessionSnapshot`. Serializes camelCase.
+/// `JazzSessionSnapshot`. Serializes camelCase. Not here: TS's `client`
+/// (use [`JazzSession::jazz`], fetched again when `client_epoch` changes),
+/// `localFirst` (a session's client is always local-first: there is no
+/// thin client to upgrade) and `pending` (the operation under way).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
@@ -166,6 +170,11 @@ pub struct SessionConfig {
     pub initial: Initial,
     /// See [`Config::allow_insecure_http`].
     pub allow_insecure_http: bool,
+    /// When the backend names a user who has no account yet while a device
+    /// guest is signed in, link the guest to them, so it keeps its data (TS's
+    /// `linkGuest`, on by default). Off: sign them in on an account of
+    /// their own.
+    pub link_guest: bool,
 }
 
 impl SessionConfig {
@@ -177,6 +186,7 @@ impl SessionConfig {
             bearer: None,
             initial: Initial::Backend,
             allow_insecure_http: false,
+            link_guest: true,
         }
     }
 
@@ -190,7 +200,9 @@ impl SessionConfig {
         self
     }
 
-    /// The app's bearer, as [`Auth::bearer`] takes it.
+    /// The app's bearer, as [`Auth::bearer`] takes it. The session asks it
+    /// while it runs an operation, one at a time: a provider that calls back
+    /// into the same session (and awaits it) deadlocks.
     pub fn bearer(mut self, provider: impl TokenProvider + 'static) -> Self {
         let Auth::Bearer(bearer) = Auth::bearer(provider) else {
             unreachable!("Auth::bearer is a bearer")
@@ -208,10 +220,17 @@ impl SessionConfig {
         self.allow_insecure_http = true;
         self
     }
+
+    /// See [`SessionConfig::link_guest`].
+    pub fn link_guest(mut self, link: bool) -> Self {
+        self.link_guest = link;
+        self
+    }
 }
 
-/// The operation [`JazzSession::retry`] repeats.
-#[derive(Clone, Debug)]
+/// The operation [`JazzSession::retry`] repeats. Not `Debug`: a restore
+/// holds the raw key.
+#[derive(Clone)]
 enum Op {
     Follow,
     CreateDevice,
@@ -550,8 +569,10 @@ impl JazzSession {
             }
             Op::RestoreDevice(text) => {
                 let key: DeviceKey = text.parse()?;
-                self.keep_key(&key)?;
-                self.sign_in_device(key).await
+                // Kept only once it signed in: a failed restore leaves the
+                // device account kept before.
+                self.sign_in_device(key.clone()).await?;
+                self.keep_key(&key)
             }
             Op::ReopenDevice => {
                 let kept = {
@@ -567,7 +588,16 @@ impl JazzSession {
         }
     }
 
-    /// Follows the backend: whoever the bearer names now.
+    /// Follows the backend: whoever the bearer names now, as TypeScript's
+    /// backend watch (`session/backend-watch.ts`).
+    ///
+    /// - No one: a backend user signs out; a device guest is kept.
+    /// - A user who has no account yet, while a device guest is signed in:
+    ///   the guest is linked to them and keeps its data
+    ///   ([`SessionConfig::link_guest`], on by default).
+    /// - The user signed in now: the same client goes on.
+    /// - Anyone else: signed in (their account made if need be), with a
+    ///   client of their own.
     async fn follow(&self) -> Result<()> {
         let Some(bearer) = self.inner.config.bearer.clone() else {
             return Err(Error::Config(
@@ -575,26 +605,39 @@ impl JazzSession {
             ));
         };
         let endpoint = self.endpoint();
-        let Some(token) = bearer.token(TokenReason::Refresh).await? else {
-            self.replace(None, None, SessionStatus::SignedOut).await;
+        let app = self.inner.config.app_id;
+        let guest = self.lock().device.is_some();
+        let token = bearer.token(TokenReason::Refresh).await?;
+        let who = match &token {
+            Some(token) => crate::backend::backend_user(&endpoint, app, token).await?,
+            None => None,
+        };
+        let (Some(token), Some(who)) = (token, who) else {
+            if guest {
+                // A guest needs no backend user.
+                self.set(|snapshot| snapshot.status = SessionStatus::Ready);
+            } else {
+                self.replace(None, None, SessionStatus::SignedOut).await;
+            }
             return Ok(());
         };
-        let Some(signed_in) =
-            crate::backend::sign_in(&endpoint, self.inner.config.app_id, &token).await?
-        else {
-            self.replace(None, None, SessionStatus::SignedOut).await;
-            return Ok(());
-        };
+        if guest && who.account.is_none() && self.inner.config.link_guest {
+            return self.link_with(&token).await;
+        }
         let same = self.inner.state.borrow().user.as_ref().is_some_and(|user| {
-            user.issuer == signed_in.identity.issuer
-                && user.subject == signed_in.identity.subject
-                && user.account == signed_in.account
+            user.issuer == who.identity.issuer
+                && user.subject == who.identity.subject
+                && who.account.is_none_or(|account| account == user.account)
         }) && self.lock().jazz.is_some();
         if same {
             // The same user keeps the same client.
             self.set(|snapshot| snapshot.status = SessionStatus::Ready);
             return Ok(());
         }
+        let Some(signed_in) = crate::backend::sign_in(&endpoint, app, &token).await? else {
+            self.replace(None, None, SessionStatus::SignedOut).await;
+            return Ok(());
+        };
         self.transition();
         let config = self
             .user_config(signed_in.account)
@@ -631,10 +674,21 @@ impl JazzSession {
             .token(TokenReason::Refresh)
             .await?
             .ok_or(Error::SignedOut)?;
+        drop(jazz);
+        self.link_with(&token).await
+    }
+
+    /// Links the signed-in device account to the user `token` names.
+    async fn link_with(&self, token: &str) -> Result<()> {
+        let Some(jazz) = self.lock().jazz.clone() else {
+            return Err(Error::Config(
+                "link_device_account needs a signed-in device account".into(),
+            ));
+        };
         let session = jazz
             .session()
             .ok_or_else(|| Error::Config("the device account's client has no session".into()))?;
-        let user = session.link(&token).await?;
+        let user = session.link(token).await?;
         self.lock().device = None;
         self.set(|snapshot| {
             snapshot.user = Some(user);

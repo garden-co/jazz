@@ -233,3 +233,42 @@ pub(crate) async fn link(
         .await
         .map_err(|error| Error::Server(format!("linking the device account: {error}")))
 }
+
+/// Who the app's backend says the bearer names (`backend-user`), without
+/// assigning an account: `None` for no one; a user with `account: None`
+/// has none yet (a guest on this device may link to them).
+#[derive(Debug, Deserialize)]
+pub(crate) struct BackendUser {
+    pub account: Option<AccountId>,
+    pub identity: SignedInIdentity,
+}
+
+pub(crate) async fn backend_user(
+    endpoint: &str,
+    app_id: AppId,
+    bearer: &str,
+) -> Result<Option<BackendUser>> {
+    let response = http()?
+        .post(app_url(endpoint, app_id, "accounts/backend-user"))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))?;
+    // Older backends answer no one with a 401.
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(refusal("asking who is signed in", response).await);
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))?;
+    if body.get("identity").is_none() {
+        return Ok(None);
+    }
+    serde_json::from_value(body)
+        .map(Some)
+        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))
+}

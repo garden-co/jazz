@@ -185,6 +185,9 @@ impl DeviceKey {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let written = options.open(&temp).and_then(|mut file| {
+            // A stale temp file keeps its mode: set it whatever it was.
+            #[cfg(unix)]
+            file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
             std::io::Write::write_all(&mut file, self.to_string().as_bytes())?;
             file.sync_all()
         });
