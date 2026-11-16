@@ -81,7 +81,7 @@ describe("npm CLI flags and messages from the shared code", () => {
     await captureConsoleLogs(() => generate({ schemaDir: root, lang: ["rust"] }));
     expect(await fileExists(join(root, "src", "jazz_app.rs"))).toBe(true);
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
-    // No back end for it.
+    // No back end for it: refused whichever languages are switched on.
     for (const lang of ["cobol"]) {
       await expect(generate({ schemaDir: root, lang: [lang] })).rejects.toThrow(
         /not (supported|available) yet/,
@@ -131,5 +131,28 @@ describe("generate in a Swift app", () => {
     await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
     await writeFile(join(dir, "JazzApp.swift"), "// edited\n");
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/JazzApp\.swift/);
+  });
+});
+
+const KOTLIN_BUILD = `plugins { kotlin("jvm") version "2.2.21" }
+dependencies { implementation("tools.jazz:jazz-kotlin:2.0.0-alpha.66") }
+`;
+
+describe("generate in a Kotlin app", () => {
+  it("writes src/main/kotlin/JazzApp.kt and no jazz.generated.ts, and --check passes on it", async () => {
+    const { root } = await createWorkspace();
+    const dir = join(root, "app");
+    await writeAppFiles(dir);
+    await writeFile(join(dir, "build.gradle.kts"), KOTLIN_BUILD);
+
+    const result = await generateApp({ cwd: dir });
+
+    const bindings = join("src", "main", "kotlin", "JazzApp.kt");
+    expect(result.bindings).toEqual([bindings]);
+    expect(await fileExists(join(dir, bindings))).toBe(true);
+    expect(await fileExists(join(dir, "jazz.generated.ts"))).toBe(false);
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
+    await writeFile(join(dir, bindings), "// edited\n");
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/JazzApp\.kt/);
   });
 });
