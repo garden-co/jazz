@@ -101,9 +101,9 @@ fn approval_activates_a_device_that_then_obtains_the_key() {
     assert!(state.is_active(&phone.id));
     assert_eq!(state.approvals.len(), 1);
     assert_eq!(state.approvals[0].position, at);
-    assert_eq!(evidence.approvals.len(), 1);
-    assert!(evidence.approvals[0].delivery.is_some());
-    assert!(evidence.identity.is_some());
+    assert_eq!(evidence.approvals().len(), 1);
+    assert!(evidence.approvals()[0].delivery.is_some());
+    assert!(evidence.identity().is_some());
 
     let acquired = ledger.acquire(&env, &phone).unwrap();
     assert_eq!(*acquired.key(), key);
@@ -834,8 +834,8 @@ fn private_verification_drops_unverified_records() {
     let replay = ledger.replay(&env);
     let state = replay.current().unwrap().unwrap();
     let evidence = verify_private(&replay, &state, &tampered).unwrap();
-    assert!(evidence.identity.is_none());
-    assert!(evidence.approvals.is_empty());
+    assert!(evidence.identity().is_none());
+    assert!(evidence.approvals().is_empty());
     let keys = AccountKeyEvidence::new(&replay, &state, &evidence).unwrap();
     assert_eq!(
         keys.acquire(&phone.id, std::slice::from_ref(&phone.sealing))
@@ -1121,7 +1121,7 @@ fn private_evidence_is_bound_to_its_state() {
     let replay = ledger.replay(&env);
     let state = replay.current().unwrap().unwrap();
     let evidence = verify_private(&replay, &state, &ledger.private).unwrap();
-    assert_eq!(evidence.approvals.len(), 1);
+    assert_eq!(evidence.approvals().len(), 1);
     let earlier = replay.as_of(at).unwrap().unwrap();
     assert_eq!(
         verify_private(&replay, &earlier, &ledger.private).unwrap_err(),
@@ -1146,7 +1146,7 @@ fn private_evidence_is_bound_to_its_state() {
     let state = replay.current().unwrap().unwrap();
     assert!(state.is_active(&phone.id));
     let evidence = verify_private(&replay, &state, &ledger.private).unwrap();
-    assert!(evidence.approvals.is_empty());
+    assert!(evidence.approvals().is_empty());
 }
 
 /// Accepts a recovery approval of `device` with `recovery` in the current

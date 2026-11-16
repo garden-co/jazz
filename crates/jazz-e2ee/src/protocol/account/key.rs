@@ -168,7 +168,7 @@ impl AccountKeyEvidence<'_> {
                     None => None,
                     Some(public) => Some(
                         self.private
-                            .successors
+                            .successors()
                             .iter()
                             .find(|private| {
                                 private.row.id == public.row.id
@@ -207,8 +207,7 @@ impl AccountKeyEvidence<'_> {
             None => {
                 let identity = &self
                     .private
-                    .identity
-                    .as_ref()
+                    .identity()
                     .ok_or(ProtocolError::AccountKeyUnavailable)?
                     .row;
                 marker(
@@ -248,7 +247,7 @@ impl AccountKeyEvidence<'_> {
         let mut signers = epoch.members.clone();
         let mut before_batch = signers.clone();
         let mut batch = None;
-        let candidates = self.private.approvals.iter().filter(|candidate| {
+        let candidates = self.private.approvals().iter().filter(|candidate| {
             candidate.challenge.epoch_id == epoch.epoch_id
                 && candidate.approval.position > epoch.position
                 && before.is_none_or(|before| candidate.approval.position < before)
@@ -411,7 +410,7 @@ impl AccountKeyEvidence<'_> {
                 }
             }
             None => {
-                if let Some(identity) = &self.private.identity
+                if let Some(identity) = self.private.identity()
                     && identity.row.device_id == device_id
                 {
                     let context = identity_context(
@@ -430,7 +429,7 @@ impl AccountKeyEvidence<'_> {
                 }
             }
         }
-        for candidate in &self.private.approvals {
+        for candidate in self.private.approvals() {
             let (Some(delivery), true) = (
                 &candidate.delivery,
                 candidate.challenge.device_id == device_id

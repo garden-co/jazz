@@ -33,16 +33,16 @@ pub struct VerifiedApproval {
 }
 
 /// The authentic private records of an account at one cut, bound to the
-/// exact current state they were verified against.
+/// exact current state they were verified against. Only
+/// [`verify_private`] builds it, and nothing changes it afterwards, so the
+/// binding cannot be broken by editing the records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateEvidence {
     state: AccountState,
     through: Position,
-    /// The identity of the canonical root, if it matches it.
-    pub identity: Option<Accepted<AccountIdentity>>,
-    pub approvals: Vec<VerifiedApproval>,
-    /// Private successors matching the accepted public ones.
-    pub successors: Vec<Accepted<AccountSuccessor>>,
+    identity: Option<Accepted<AccountIdentity>>,
+    approvals: Vec<VerifiedApproval>,
+    successors: Vec<Accepted<AccountSuccessor>>,
 }
 
 fn index<T: Clone + super::super::position::RowId>(
@@ -78,6 +78,26 @@ impl Requests<'_> {
 }
 
 impl PrivateEvidence {
+    /// The identity of the canonical root, if it matches it.
+    pub fn identity(&self) -> Option<&Accepted<AccountIdentity>> {
+        self.identity.as_ref()
+    }
+
+    /// The verified private approvals, by position then ID.
+    pub fn approvals(&self) -> &[VerifiedApproval] {
+        &self.approvals
+    }
+
+    /// Private successors matching the accepted public ones.
+    pub fn successors(&self) -> &[Accepted<AccountSuccessor>] {
+        &self.successors
+    }
+
+    /// The cut the evidence was read at.
+    pub fn through(&self) -> Position {
+        self.through
+    }
+
     /// Whether this evidence was verified against exactly `state`, the
     /// current state of a read at `through`. A state as of a position, or
     /// of another read, is refused.
