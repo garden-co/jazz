@@ -360,6 +360,51 @@ fn every_app_generates_its_committed_swift_byte_for_byte() {
     assert!(generated_any);
 }
 
+/// The StagePlan Swift example commits its bindings (`jazz-tools generate`
+/// doesn't write Swift yet, so this test keeps them current).
+/// `JAZZ_UPDATE_FIXTURES=1` rewrites them.
+#[test]
+fn the_stage_plan_swift_example_commits_its_bindings() {
+    let dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stage-plan/apps/swift-cli");
+    let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+    let generated = generate(Lang::Swift, &app_json).unwrap();
+    let path = dir.join(jazz_codegen::swift::FILE);
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &generated).unwrap();
+        return;
+    }
+    let committed = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        generated,
+        committed,
+        "{} is stale: run with JAZZ_UPDATE_FIXTURES=1",
+        path.display()
+    );
+}
+
+/// StagePlan's Go example commits what the Go back end writes, byte for
+/// byte (checked here rather than with `jazz-tools generate --check`, so
+/// it holds while Go is switched off in the CLI).
+#[test]
+fn the_stage_plan_go_example_commits_current_bindings() {
+    let dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stage-plan/apps/go-cli");
+    let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+    let generated = generate(Lang::Go, &app_json).unwrap();
+    let path = dir.join(jazz_codegen::go::FILE);
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &generated).unwrap();
+        return;
+    }
+    assert_eq!(
+        generated,
+        std::fs::read_to_string(&path).unwrap(),
+        "{} is stale; run with JAZZ_UPDATE_FIXTURES=1",
+        path.display()
+    );
+}
+
 /// The Jazz Swift package's tests compile and run the bindings of
 /// `tests/apps/computed` (computed fields and transforms) from a copy.
 /// `JAZZ_UPDATE_FIXTURES=1` rewrites it.

@@ -53,6 +53,15 @@ impl JazzError {
     }
 }
 
+/// A foreign callback that failed in a way its signature doesn't name.
+impl From<uniffi::UnexpectedUniFFICallbackError> for JazzError {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::Io {
+            reason: error.reason,
+        }
+    }
+}
+
 pub(crate) type FfiError = JazzErrorKind;
 
 /// Internal shorthand, converted into [`JazzError`] at the surfaces.
@@ -131,7 +140,7 @@ impl From<jazz_app::Error> for JazzErrorKind {
         match error {
             E::Rejected(reason) => rejection(&reason, message),
             E::Unsupported(what) => unsupported(what),
-            E::App(_) | E::Config(_) | E::Decode { .. } => Self::Refused(message),
+            E::App(_) | E::Config(_) | E::Decode { .. } | E::Refused(_) => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
             E::Jazz(J::ChannelClosed) => Self::Closed,
