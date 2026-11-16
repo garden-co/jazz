@@ -1,25 +1,25 @@
 # jazz-ix-text/1 postings (SPEC 20.10.1). Per case: `analyzer`, one
-# `field <weight> <utf8 hex>` per field, then `posting <term utf8 hex> <impact>`
+# `field <weight> <length> <utf8 hex>` per field, then `posting <term utf8 hex> <impact>`
 # in term byte order.
 
 analyzer jazz-text/1:en
-field 1 6a617a7a  # "jazz"
+field 1 32 6a617a7a  # "jazz"
 posting 6a617a7a 26  # "jazz"
 
 analyzer jazz-text/1:en
-field 4 4a617a7a  # "Jazz"
-field 1 6a617a7a20616e6420626c756573  # "jazz and blues"
+field 4 32 4a617a7a  # "Jazz"
+field 1 32 6a617a7a20616e6420626c756573  # "jazz and blues"
 posting 616e64 25  # "and"
 posting 626c7565 25  # "blue"
 posting 6a617a7a 131  # "jazz"
 
 analyzer jazz-text/1:en
-field 15 6a617a7a206a617a7a206a617a7a  # "jazz jazz jazz"
-field 15 6a617a7a  # "jazz"
+field 15 32 6a617a7a206a617a7a206a617a7a  # "jazz jazz jazz"
+field 15 32 6a617a7a  # "jazz"
 posting 6a617a7a 255  # "jazz"
 
 analyzer jazz-text/1:en
-field 2 74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672074686520656e64  # "the quick brown fox jumps over the lazy dog the end"
+field 2 32 74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672074686520656e64  # "the quick brown fox jumps over the lazy dog the end"
 posting 62726f776e 43  # "brown"
 posting 646f67 43  # "dog"
 posting 656e64 43  # "end"
@@ -31,33 +31,52 @@ posting 717569636b 43  # "quick"
 posting 746865 58  # "the"
 
 analyzer jazz-text/1:en
-field 1   # ""
-field 3 f09f8eb7  # "🎷"
+field 1 32   # ""
+field 3 32 f09f8eb7  # "🎷"
 
 analyzer jazz-text/1:en
-field 1 52756e6e696e672072756e6e65722072756e732072616e  # "Running runner runs ran"
+field 1 32 52756e6e696e672072756e6e65722072756e732072616e  # "Running runner runs ran"
 posting 72616e 24  # "ran"
 posting 72756e 29  # "run"
 posting 72756e6e6572 24  # "runner"
 
+analyzer jazz-text/1:en
+field 4 16 4a617a7a20696e20746865207061726b  # "Jazz in the park"
+field 1 256 6a617a7a206a617a7a20616e642074686520626c7565732c20616c6c2073756d6d6572206c6f6e6720696e20746865207061726b  # "jazz jazz and the blues, all summer long in the park"
+posting 616c6c 26  # "all"
+posting 616e64 26  # "and"
+posting 626c7565 26  # "blue"
+posting 696e 118  # "in"
+posting 6a617a7a 122  # "jazz"
+posting 6c6f6e67 26  # "long"
+posting 7061726b 118  # "park"
+posting 73756d6d6572 26  # "summer"
+posting 746865 122  # "the"
+
+analyzer jazz-text/1:en
+field 1 1 6a617a7a20626c756573  # "jazz blues"
+field 1 4096 6a617a7a  # "jazz"
+posting 626c7565 11  # "blue"
+posting 6a617a7a 38  # "jazz"
+
 analyzer jazz-text/1:simple
-field 1 6a617a7a  # "jazz"
+field 1 32 6a617a7a  # "jazz"
 posting 6a617a7a 26  # "jazz"
 
 analyzer jazz-text/1:simple
-field 4 4a617a7a  # "Jazz"
-field 1 6a617a7a20616e6420626c756573  # "jazz and blues"
+field 4 32 4a617a7a  # "Jazz"
+field 1 32 6a617a7a20616e6420626c756573  # "jazz and blues"
 posting 616e64 25  # "and"
 posting 626c756573 25  # "blues"
 posting 6a617a7a 131  # "jazz"
 
 analyzer jazz-text/1:simple
-field 15 6a617a7a206a617a7a206a617a7a  # "jazz jazz jazz"
-field 15 6a617a7a  # "jazz"
+field 15 32 6a617a7a206a617a7a206a617a7a  # "jazz jazz jazz"
+field 15 32 6a617a7a  # "jazz"
 posting 6a617a7a 255  # "jazz"
 
 analyzer jazz-text/1:simple
-field 2 74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672074686520656e64  # "the quick brown fox jumps over the lazy dog the end"
+field 2 32 74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672074686520656e64  # "the quick brown fox jumps over the lazy dog the end"
 posting 62726f776e 43  # "brown"
 posting 646f67 43  # "dog"
 posting 656e64 43  # "end"
@@ -69,214 +88,1184 @@ posting 717569636b 43  # "quick"
 posting 746865 58  # "the"
 
 analyzer jazz-text/1:simple
-field 1   # ""
-field 3 f09f8eb7  # "🎷"
+field 1 32   # ""
+field 3 32 f09f8eb7  # "🎷"
 
 analyzer jazz-text/1:simple
-field 1 52756e6e696e672072756e6e65722072756e732072616e  # "Running runner runs ran"
+field 1 32 52756e6e696e672072756e6e65722072756e732072616e  # "Running runner runs ran"
 posting 72616e 24  # "ran"
 posting 72756e6e6572 24  # "runner"
 posting 72756e6e696e67 24  # "running"
 posting 72756e73 24  # "runs"
 
-# impact(w, f, L) over a grid: `impact <w> <f> <L> <impact>`.
-impact 1 1 1 26
-impact 1 1 2 25
-impact 1 1 8 23
-impact 1 1 31 16
-impact 1 1 32 16
-impact 1 1 33 15
-impact 1 1 100 8
-impact 1 1 1000 1
-impact 1 1 10000 0
-impact 1 2 2 29
-impact 1 2 8 27
-impact 1 2 31 22
-impact 1 2 32 22
-impact 1 2 33 21
-impact 1 2 100 13
-impact 1 2 1000 2
-impact 1 2 10000 0
-impact 1 3 8 29
-impact 1 3 31 25
-impact 1 3 32 25
-impact 1 3 33 24
-impact 1 3 100 17
-impact 1 3 1000 3
-impact 1 3 10000 0
-impact 1 5 8 31
-impact 1 5 31 28
-impact 1 5 32 28
-impact 1 5 33 28
-impact 1 5 100 21
-impact 1 5 1000 5
-impact 1 5 10000 0
-impact 1 10 31 31
-impact 1 10 32 31
-impact 1 10 33 31
-impact 1 10 100 26
-impact 1 10 1000 9
-impact 1 10 10000 1
-impact 1 100 100 34
-impact 1 100 1000 27
-impact 1 100 10000 9
-impact 2 1 1 53
-impact 2 1 2 51
-impact 2 1 8 46
-impact 2 1 31 32
-impact 2 1 32 32
-impact 2 1 33 31
-impact 2 1 100 17
-impact 2 1 1000 2
-impact 2 1 10000 0
-impact 2 2 2 59
-impact 2 2 8 55
-impact 2 2 31 44
-impact 2 2 32 44
-impact 2 2 33 43
-impact 2 2 100 27
-impact 2 2 1000 4
-impact 2 2 10000 0
-impact 2 3 8 59
-impact 2 3 31 50
-impact 2 3 32 50
-impact 2 3 33 49
-impact 2 3 100 34
-impact 2 3 1000 6
-impact 2 3 10000 0
-impact 2 5 8 63
-impact 2 5 31 57
-impact 2 5 32 56
-impact 2 5 33 56
-impact 2 5 100 43
-impact 2 5 1000 10
-impact 2 5 10000 1
-impact 2 10 31 63
-impact 2 10 32 62
-impact 2 10 33 62
-impact 2 10 100 53
-impact 2 10 1000 18
-impact 2 10 10000 2
-impact 2 100 100 68
-impact 2 100 1000 54
-impact 2 100 10000 18
-impact 4 1 1 106
-impact 4 1 2 103
-impact 4 1 8 92
-impact 4 1 31 64
-impact 4 1 32 64
-impact 4 1 33 63
-impact 4 1 100 34
-impact 4 1 1000 4
-impact 4 1 10000 0
-impact 4 2 2 119
-impact 4 2 8 111
-impact 4 2 31 88
-impact 4 2 32 88
-impact 4 2 33 87
-impact 4 2 100 55
-impact 4 2 1000 9
-impact 4 2 10000 0
-impact 4 3 8 119
-impact 4 3 31 101
-impact 4 3 32 100
-impact 4 3 33 99
-impact 4 3 100 69
-impact 4 3 1000 13
-impact 4 3 10000 1
-impact 4 5 8 127
-impact 4 5 31 114
-impact 4 5 32 113
-impact 4 5 33 113
-impact 4 5 100 86
-impact 4 5 1000 21
-impact 4 5 10000 2
-impact 4 10 31 126
-impact 4 10 32 125
-impact 4 10 33 125
-impact 4 10 100 107
-impact 4 10 1000 36
-impact 4 10 10000 4
-impact 4 100 100 136
-impact 4 100 1000 109
-impact 4 100 10000 36
-impact 8 1 1 212
-impact 8 1 2 207
-impact 8 1 8 184
-impact 8 1 31 129
-impact 8 1 32 128
-impact 8 1 33 126
-impact 8 1 100 68
-impact 8 1 1000 9
-impact 8 1 10000 0
-impact 8 2 2 239
-impact 8 2 8 223
-impact 8 2 31 177
-impact 8 2 32 176
-impact 8 2 33 174
-impact 8 2 100 110
-impact 8 2 1000 18
-impact 8 2 10000 1
-impact 8 3 8 239
-impact 8 3 31 202
-impact 8 3 32 201
-impact 8 3 33 199
-impact 8 3 100 138
-impact 8 3 1000 26
-impact 8 3 10000 2
-impact 8 5 8 254
-impact 8 5 31 228
-impact 8 5 32 227
-impact 8 5 33 226
-impact 8 5 100 173
-impact 8 5 1000 42
-impact 8 5 10000 4
-impact 8 10 31 252
-impact 8 10 32 251
-impact 8 10 33 250
-impact 8 10 100 214
-impact 8 10 1000 73
-impact 8 10 10000 9
-impact 8 100 100 255
-impact 8 100 1000 219
-impact 8 100 10000 73
-impact 15 1 1 255
-impact 15 1 2 255
-impact 15 1 8 255
-impact 15 1 31 243
-impact 15 1 32 239
-impact 15 1 33 236
-impact 15 1 100 128
-impact 15 1 1000 17
-impact 15 1 10000 1
-impact 15 2 2 255
-impact 15 2 8 255
-impact 15 2 31 255
-impact 15 2 32 255
-impact 15 2 33 255
-impact 15 2 100 206
-impact 15 2 1000 34
-impact 15 2 10000 3
-impact 15 3 8 255
-impact 15 3 31 255
-impact 15 3 32 255
-impact 15 3 33 255
-impact 15 3 100 255
-impact 15 3 1000 50
-impact 15 3 10000 5
-impact 15 5 8 255
-impact 15 5 31 255
-impact 15 5 32 255
-impact 15 5 33 255
-impact 15 5 100 255
-impact 15 5 1000 78
-impact 15 5 10000 9
-impact 15 10 31 255
-impact 15 10 32 255
-impact 15 10 33 255
-impact 15 10 100 255
-impact 15 10 1000 137
-impact 15 10 10000 18
-impact 15 100 100 255
-impact 15 100 1000 255
-impact 15 100 10000 138
+analyzer jazz-text/1:simple
+field 4 16 4a617a7a20696e20746865207061726b  # "Jazz in the park"
+field 1 256 6a617a7a206a617a7a20616e642074686520626c7565732c20616c6c2073756d6d6572206c6f6e6720696e20746865207061726b  # "jazz jazz and the blues, all summer long in the park"
+posting 616c6c 26  # "all"
+posting 616e64 26  # "and"
+posting 626c756573 26  # "blues"
+posting 696e 118  # "in"
+posting 6a617a7a 122  # "jazz"
+posting 6c6f6e67 26  # "long"
+posting 7061726b 118  # "park"
+posting 73756d6d6572 26  # "summer"
+posting 746865 122  # "the"
+
+analyzer jazz-text/1:simple
+field 1 1 6a617a7a20626c756573  # "jazz blues"
+field 1 4096 6a617a7a  # "jazz"
+posting 626c756573 11  # "blues"
+posting 6a617a7a 38  # "jazz"
+
+# impact(w, R, f, L) over a grid, R the field's reference length:
+# `impact <w> <R> <f> <L> <impact>`.
+impact 1 1 1 1 16
+impact 1 1 1 2 11
+impact 1 1 1 8 4
+impact 1 1 1 31 1
+impact 1 1 1 32 1
+impact 1 1 1 33 1
+impact 1 1 1 100 0
+impact 1 1 1 256 0
+impact 1 1 1 1000 0
+impact 1 1 1 10000 0
+impact 1 1 2 2 17
+impact 1 1 2 8 7
+impact 1 1 2 31 2
+impact 1 1 2 32 2
+impact 1 1 2 33 2
+impact 1 1 2 100 0
+impact 1 1 2 256 0
+impact 1 1 2 1000 0
+impact 1 1 2 10000 0
+impact 1 1 3 8 10
+impact 1 1 3 31 3
+impact 1 1 3 32 3
+impact 1 1 3 33 3
+impact 1 1 3 100 1
+impact 1 1 3 256 0
+impact 1 1 3 1000 0
+impact 1 1 3 10000 0
+impact 1 1 5 8 14
+impact 1 1 5 31 5
+impact 1 1 5 32 5
+impact 1 1 5 33 5
+impact 1 1 5 100 1
+impact 1 1 5 256 0
+impact 1 1 5 1000 0
+impact 1 1 5 10000 0
+impact 1 1 10 31 9
+impact 1 1 10 32 9
+impact 1 1 10 33 8
+impact 1 1 10 100 3
+impact 1 1 10 256 1
+impact 1 1 10 1000 0
+impact 1 1 10 10000 0
+impact 1 1 100 100 18
+impact 1 1 100 256 10
+impact 1 1 100 1000 3
+impact 1 1 100 10000 0
+impact 1 16 1 1 25
+impact 1 16 1 2 24
+impact 1 16 1 8 20
+impact 1 16 1 31 11
+impact 1 16 1 32 11
+impact 1 16 1 33 11
+impact 1 16 1 100 5
+impact 1 16 1 256 2
+impact 1 16 1 1000 0
+impact 1 16 1 10000 0
+impact 1 16 2 2 29
+impact 1 16 2 8 25
+impact 1 16 2 31 17
+impact 1 16 2 32 17
+impact 1 16 2 33 16
+impact 1 16 2 100 8
+impact 1 16 2 256 4
+impact 1 16 2 1000 1
+impact 1 16 2 10000 0
+impact 1 16 3 8 28
+impact 1 16 3 31 20
+impact 1 16 3 32 20
+impact 1 16 3 33 20
+impact 1 16 3 100 11
+impact 1 16 3 256 5
+impact 1 16 3 1000 1
+impact 1 16 3 10000 0
+impact 1 16 5 8 30
+impact 1 16 5 31 24
+impact 1 16 5 32 24
+impact 1 16 5 33 24
+impact 1 16 5 100 16
+impact 1 16 5 256 8
+impact 1 16 5 1000 2
+impact 1 16 5 10000 0
+impact 1 16 10 31 29
+impact 1 16 10 32 29
+impact 1 16 10 33 28
+impact 1 16 10 100 22
+impact 1 16 10 256 14
+impact 1 16 10 1000 5
+impact 1 16 10 10000 0
+impact 1 16 100 100 33
+impact 1 16 100 256 30
+impact 1 16 100 1000 22
+impact 1 16 100 10000 5
+impact 1 32 1 1 26
+impact 1 32 1 2 25
+impact 1 32 1 8 23
+impact 1 32 1 31 16
+impact 1 32 1 32 16
+impact 1 32 1 33 15
+impact 1 32 1 100 8
+impact 1 32 1 256 4
+impact 1 32 1 1000 1
+impact 1 32 1 10000 0
+impact 1 32 2 2 29
+impact 1 32 2 8 27
+impact 1 32 2 31 22
+impact 1 32 2 32 22
+impact 1 32 2 33 21
+impact 1 32 2 100 13
+impact 1 32 2 256 7
+impact 1 32 2 1000 2
+impact 1 32 2 10000 0
+impact 1 32 3 8 29
+impact 1 32 3 31 25
+impact 1 32 3 32 25
+impact 1 32 3 33 24
+impact 1 32 3 100 17
+impact 1 32 3 256 10
+impact 1 32 3 1000 3
+impact 1 32 3 10000 0
+impact 1 32 5 8 31
+impact 1 32 5 31 28
+impact 1 32 5 32 28
+impact 1 32 5 33 28
+impact 1 32 5 100 21
+impact 1 32 5 256 14
+impact 1 32 5 1000 5
+impact 1 32 5 10000 0
+impact 1 32 10 31 31
+impact 1 32 10 32 31
+impact 1 32 10 33 31
+impact 1 32 10 100 26
+impact 1 32 10 256 20
+impact 1 32 10 1000 9
+impact 1 32 10 10000 1
+impact 1 32 100 100 34
+impact 1 32 100 256 32
+impact 1 32 100 1000 27
+impact 1 32 100 10000 9
+impact 1 256 1 1 27
+impact 1 256 1 2 26
+impact 1 256 1 8 26
+impact 1 256 1 31 24
+impact 1 256 1 32 24
+impact 1 256 1 33 24
+impact 1 256 1 100 21
+impact 1 256 1 256 16
+impact 1 256 1 1000 7
+impact 1 256 1 10000 0
+impact 1 256 2 2 30
+impact 1 256 2 8 30
+impact 1 256 2 31 29
+impact 1 256 2 32 29
+impact 1 256 2 33 29
+impact 1 256 2 100 26
+impact 1 256 2 256 22
+impact 1 256 2 1000 12
+impact 1 256 2 10000 1
+impact 1 256 3 8 31
+impact 1 256 3 31 30
+impact 1 256 3 32 30
+impact 1 256 3 33 30
+impact 1 256 3 100 28
+impact 1 256 3 256 25
+impact 1 256 3 1000 15
+impact 1 256 3 10000 2
+impact 1 256 5 8 33
+impact 1 256 5 31 32
+impact 1 256 5 32 32
+impact 1 256 5 33 32
+impact 1 256 5 100 31
+impact 1 256 5 256 28
+impact 1 256 5 1000 19
+impact 1 256 5 10000 4
+impact 1 256 10 31 33
+impact 1 256 10 32 33
+impact 1 256 10 33 33
+impact 1 256 10 100 33
+impact 1 256 10 256 31
+impact 1 256 10 1000 25
+impact 1 256 10 10000 7
+impact 1 256 100 100 34
+impact 1 256 100 256 34
+impact 1 256 100 1000 33
+impact 1 256 100 10000 25
+impact 1 4096 1 1 27
+impact 1 4096 1 2 27
+impact 1 4096 1 8 27
+impact 1 4096 1 31 26
+impact 1 4096 1 32 26
+impact 1 4096 1 33 26
+impact 1 4096 1 100 26
+impact 1 4096 1 256 25
+impact 1 4096 1 1000 23
+impact 1 4096 1 10000 10
+impact 1 4096 2 2 30
+impact 1 4096 2 8 30
+impact 1 4096 2 31 30
+impact 1 4096 2 32 30
+impact 1 4096 2 33 30
+impact 1 4096 2 100 30
+impact 1 4096 2 256 29
+impact 1 4096 2 1000 27
+impact 1 4096 2 10000 15
+impact 1 4096 3 8 31
+impact 1 4096 3 31 31
+impact 1 4096 3 32 31
+impact 1 4096 3 33 31
+impact 1 4096 3 100 31
+impact 1 4096 3 256 31
+impact 1 4096 3 1000 30
+impact 1 4096 3 10000 19
+impact 1 4096 5 8 33
+impact 1 4096 5 31 33
+impact 1 4096 5 32 33
+impact 1 4096 5 33 33
+impact 1 4096 5 100 33
+impact 1 4096 5 256 32
+impact 1 4096 5 1000 31
+impact 1 4096 5 10000 23
+impact 1 4096 10 31 34
+impact 1 4096 10 32 34
+impact 1 4096 10 33 34
+impact 1 4096 10 100 34
+impact 1 4096 10 256 33
+impact 1 4096 10 1000 33
+impact 1 4096 10 10000 28
+impact 1 4096 100 100 35
+impact 1 4096 100 256 35
+impact 1 4096 100 1000 35
+impact 1 4096 100 10000 34
+impact 2 1 1 1 32
+impact 2 1 1 2 22
+impact 2 1 1 8 8
+impact 2 1 1 31 2
+impact 2 1 1 32 2
+impact 2 1 1 33 2
+impact 2 1 1 100 0
+impact 2 1 1 256 0
+impact 2 1 1 1000 0
+impact 2 1 1 10000 0
+impact 2 1 2 2 34
+impact 2 1 2 8 14
+impact 2 1 2 31 4
+impact 2 1 2 32 4
+impact 2 1 2 33 4
+impact 2 1 2 100 1
+impact 2 1 2 256 0
+impact 2 1 2 1000 0
+impact 2 1 2 10000 0
+impact 2 1 3 8 20
+impact 2 1 3 31 6
+impact 2 1 3 32 6
+impact 2 1 3 33 6
+impact 2 1 3 100 2
+impact 2 1 3 256 0
+impact 2 1 3 1000 0
+impact 2 1 3 10000 0
+impact 2 1 5 8 28
+impact 2 1 5 31 10
+impact 2 1 5 32 10
+impact 2 1 5 33 10
+impact 2 1 5 100 3
+impact 2 1 5 256 1
+impact 2 1 5 1000 0
+impact 2 1 5 10000 0
+impact 2 1 10 31 18
+impact 2 1 10 32 18
+impact 2 1 10 33 17
+impact 2 1 10 100 7
+impact 2 1 10 256 2
+impact 2 1 10 1000 0
+impact 2 1 10 10000 0
+impact 2 1 100 100 36
+impact 2 1 100 256 21
+impact 2 1 100 1000 7
+impact 2 1 100 10000 0
+impact 2 16 1 1 51
+impact 2 16 1 2 49
+impact 2 16 1 8 40
+impact 2 16 1 31 23
+impact 2 16 1 32 22
+impact 2 16 1 33 22
+impact 2 16 1 100 10
+impact 2 16 1 256 4
+impact 2 16 1 1000 1
+impact 2 16 1 10000 0
+impact 2 16 2 2 58
+impact 2 16 2 8 51
+impact 2 16 2 31 34
+impact 2 16 2 32 34
+impact 2 16 2 33 33
+impact 2 16 2 100 17
+impact 2 16 2 256 8
+impact 2 16 2 1000 2
+impact 2 16 2 10000 0
+impact 2 16 3 8 56
+impact 2 16 3 31 41
+impact 2 16 3 32 41
+impact 2 16 3 33 40
+impact 2 16 3 100 23
+impact 2 16 3 256 11
+impact 2 16 3 1000 3
+impact 2 16 3 10000 0
+impact 2 16 5 8 61
+impact 2 16 5 31 49
+impact 2 16 5 32 49
+impact 2 16 5 33 49
+impact 2 16 5 100 32
+impact 2 16 5 256 17
+impact 2 16 5 1000 5
+impact 2 16 5 10000 0
+impact 2 16 10 31 58
+impact 2 16 10 32 58
+impact 2 16 10 33 57
+impact 2 16 10 100 44
+impact 2 16 10 256 28
+impact 2 16 10 1000 10
+impact 2 16 10 10000 1
+impact 2 16 100 100 66
+impact 2 16 100 256 61
+impact 2 16 100 1000 44
+impact 2 16 100 10000 10
+impact 2 32 1 1 53
+impact 2 32 1 2 51
+impact 2 32 1 8 46
+impact 2 32 1 31 32
+impact 2 32 1 32 32
+impact 2 32 1 33 31
+impact 2 32 1 100 17
+impact 2 32 1 256 8
+impact 2 32 1 1000 2
+impact 2 32 1 10000 0
+impact 2 32 2 2 59
+impact 2 32 2 8 55
+impact 2 32 2 31 44
+impact 2 32 2 32 44
+impact 2 32 2 33 43
+impact 2 32 2 100 27
+impact 2 32 2 256 14
+impact 2 32 2 1000 4
+impact 2 32 2 10000 0
+impact 2 32 3 8 59
+impact 2 32 3 31 50
+impact 2 32 3 32 50
+impact 2 32 3 33 49
+impact 2 32 3 100 34
+impact 2 32 3 256 20
+impact 2 32 3 1000 6
+impact 2 32 3 10000 0
+impact 2 32 5 8 63
+impact 2 32 5 31 57
+impact 2 32 5 32 56
+impact 2 32 5 33 56
+impact 2 32 5 100 43
+impact 2 32 5 256 28
+impact 2 32 5 1000 10
+impact 2 32 5 10000 1
+impact 2 32 10 31 63
+impact 2 32 10 32 62
+impact 2 32 10 33 62
+impact 2 32 10 100 53
+impact 2 32 10 256 40
+impact 2 32 10 1000 18
+impact 2 32 10 10000 2
+impact 2 32 100 100 68
+impact 2 32 100 256 65
+impact 2 32 100 1000 54
+impact 2 32 100 10000 18
+impact 2 256 1 1 54
+impact 2 256 1 2 53
+impact 2 256 1 8 53
+impact 2 256 1 31 49
+impact 2 256 1 32 49
+impact 2 256 1 33 49
+impact 2 256 1 100 42
+impact 2 256 1 256 32
+impact 2 256 1 1000 14
+impact 2 256 1 10000 1
+impact 2 256 2 2 61
+impact 2 256 2 8 60
+impact 2 256 2 31 58
+impact 2 256 2 32 58
+impact 2 256 2 33 58
+impact 2 256 2 100 53
+impact 2 256 2 256 44
+impact 2 256 2 1000 24
+impact 2 256 2 10000 3
+impact 2 256 3 8 63
+impact 2 256 3 31 61
+impact 2 256 3 32 61
+impact 2 256 3 33 61
+impact 2 256 3 100 57
+impact 2 256 3 256 50
+impact 2 256 3 1000 30
+impact 2 256 3 10000 5
+impact 2 256 5 8 66
+impact 2 256 5 31 65
+impact 2 256 5 32 65
+impact 2 256 5 33 64
+impact 2 256 5 100 62
+impact 2 256 5 256 56
+impact 2 256 5 1000 39
+impact 2 256 5 10000 8
+impact 2 256 10 31 67
+impact 2 256 10 32 67
+impact 2 256 10 33 67
+impact 2 256 10 100 66
+impact 2 256 10 256 62
+impact 2 256 10 1000 50
+impact 2 256 10 10000 15
+impact 2 256 100 100 69
+impact 2 256 100 256 69
+impact 2 256 100 1000 67
+impact 2 256 100 10000 51
+impact 2 4096 1 1 54
+impact 2 4096 1 2 54
+impact 2 4096 1 8 54
+impact 2 4096 1 31 53
+impact 2 4096 1 32 53
+impact 2 4096 1 33 53
+impact 2 4096 1 100 53
+impact 2 4096 1 256 51
+impact 2 4096 1 1000 46
+impact 2 4096 1 10000 20
+impact 2 4096 2 2 61
+impact 2 4096 2 8 61
+impact 2 4096 2 31 61
+impact 2 4096 2 32 61
+impact 2 4096 2 33 61
+impact 2 4096 2 100 60
+impact 2 4096 2 256 59
+impact 2 4096 2 1000 55
+impact 2 4096 2 10000 31
+impact 2 4096 3 8 63
+impact 2 4096 3 31 63
+impact 2 4096 3 32 63
+impact 2 4096 3 33 63
+impact 2 4096 3 100 63
+impact 2 4096 3 256 62
+impact 2 4096 3 1000 60
+impact 2 4096 3 10000 38
+impact 2 4096 5 8 66
+impact 2 4096 5 31 66
+impact 2 4096 5 32 66
+impact 2 4096 5 33 66
+impact 2 4096 5 100 66
+impact 2 4096 5 256 65
+impact 2 4096 5 1000 63
+impact 2 4096 5 10000 46
+impact 2 4096 10 31 68
+impact 2 4096 10 32 68
+impact 2 4096 10 33 68
+impact 2 4096 10 100 68
+impact 2 4096 10 256 67
+impact 2 4096 10 1000 66
+impact 2 4096 10 10000 56
+impact 2 4096 100 100 70
+impact 2 4096 100 256 70
+impact 2 4096 100 1000 70
+impact 2 4096 100 10000 68
+impact 4 1 1 1 64
+impact 4 1 1 2 45
+impact 4 1 1 8 16
+impact 4 1 1 31 4
+impact 4 1 1 32 4
+impact 4 1 1 33 4
+impact 4 1 1 100 1
+impact 4 1 1 256 0
+impact 4 1 1 1000 0
+impact 4 1 1 10000 0
+impact 4 1 2 2 68
+impact 4 1 2 8 29
+impact 4 1 2 31 9
+impact 4 1 2 32 9
+impact 4 1 2 33 8
+impact 4 1 2 100 3
+impact 4 1 2 256 1
+impact 4 1 2 1000 0
+impact 4 1 2 10000 0
+impact 4 1 3 8 40
+impact 4 1 3 31 13
+impact 4 1 3 32 13
+impact 4 1 3 33 12
+impact 4 1 3 100 4
+impact 4 1 3 256 1
+impact 4 1 3 1000 0
+impact 4 1 3 10000 0
+impact 4 1 5 8 56
+impact 4 1 5 31 21
+impact 4 1 5 32 20
+impact 4 1 5 33 20
+impact 4 1 5 100 7
+impact 4 1 5 256 2
+impact 4 1 5 1000 0
+impact 4 1 5 10000 0
+impact 4 1 10 31 36
+impact 4 1 10 32 36
+impact 4 1 10 33 35
+impact 4 1 10 100 14
+impact 4 1 10 256 5
+impact 4 1 10 1000 1
+impact 4 1 10 10000 0
+impact 4 1 100 100 73
+impact 4 1 100 256 42
+impact 4 1 100 1000 14
+impact 4 1 100 10000 1
+impact 4 16 1 1 103
+impact 4 16 1 2 99
+impact 4 16 1 8 80
+impact 4 16 1 31 46
+impact 4 16 1 32 45
+impact 4 16 1 33 44
+impact 4 16 1 100 20
+impact 4 16 1 256 8
+impact 4 16 1 1000 2
+impact 4 16 1 10000 0
+impact 4 16 2 2 116
+impact 4 16 2 8 102
+impact 4 16 2 31 69
+impact 4 16 2 32 68
+impact 4 16 2 33 67
+impact 4 16 2 100 35
+impact 4 16 2 256 16
+impact 4 16 2 1000 4
+impact 4 16 2 10000 0
+impact 4 16 3 8 112
+impact 4 16 3 31 83
+impact 4 16 3 32 82
+impact 4 16 3 33 81
+impact 4 16 3 100 47
+impact 4 16 3 256 23
+impact 4 16 3 1000 7
+impact 4 16 3 10000 0
+impact 4 16 5 8 122
+impact 4 16 5 31 99
+impact 4 16 5 32 99
+impact 4 16 5 33 98
+impact 4 16 5 100 64
+impact 4 16 5 256 35
+impact 4 16 5 1000 11
+impact 4 16 5 10000 1
+impact 4 16 10 31 116
+impact 4 16 10 32 116
+impact 4 16 10 33 115
+impact 4 16 10 100 88
+impact 4 16 10 256 57
+impact 4 16 10 1000 21
+impact 4 16 10 10000 2
+impact 4 16 100 100 132
+impact 4 16 100 256 122
+impact 4 16 100 1000 89
+impact 4 16 100 10000 21
+impact 4 32 1 1 106
+impact 4 32 1 2 103
+impact 4 32 1 8 92
+impact 4 32 1 31 64
+impact 4 32 1 32 64
+impact 4 32 1 33 63
+impact 4 32 1 100 34
+impact 4 32 1 256 16
+impact 4 32 1 1000 4
+impact 4 32 1 10000 0
+impact 4 32 2 2 119
+impact 4 32 2 8 111
+impact 4 32 2 31 88
+impact 4 32 2 32 88
+impact 4 32 2 33 87
+impact 4 32 2 100 55
+impact 4 32 2 256 29
+impact 4 32 2 1000 9
+impact 4 32 2 10000 0
+impact 4 32 3 8 119
+impact 4 32 3 31 101
+impact 4 32 3 32 100
+impact 4 32 3 33 99
+impact 4 32 3 100 69
+impact 4 32 3 256 40
+impact 4 32 3 1000 13
+impact 4 32 3 10000 1
+impact 4 32 5 8 127
+impact 4 32 5 31 114
+impact 4 32 5 32 113
+impact 4 32 5 33 113
+impact 4 32 5 100 86
+impact 4 32 5 256 56
+impact 4 32 5 1000 21
+impact 4 32 5 10000 2
+impact 4 32 10 31 126
+impact 4 32 10 32 125
+impact 4 32 10 33 125
+impact 4 32 10 100 107
+impact 4 32 10 256 80
+impact 4 32 10 1000 36
+impact 4 32 10 10000 4
+impact 4 32 100 100 136
+impact 4 32 100 256 130
+impact 4 32 100 1000 109
+impact 4 32 100 10000 36
+impact 4 256 1 1 108
+impact 4 256 1 2 107
+impact 4 256 1 8 106
+impact 4 256 1 31 99
+impact 4 256 1 32 99
+impact 4 256 1 33 99
+impact 4 256 1 100 85
+impact 4 256 1 256 64
+impact 4 256 1 1000 29
+impact 4 256 1 10000 3
+impact 4 256 2 2 122
+impact 4 256 2 8 120
+impact 4 256 2 31 116
+impact 4 256 2 32 116
+impact 4 256 2 33 116
+impact 4 256 2 100 106
+impact 4 256 2 256 88
+impact 4 256 2 1000 48
+impact 4 256 2 10000 7
+impact 4 256 3 8 126
+impact 4 256 3 31 123
+impact 4 256 3 32 123
+impact 4 256 3 33 123
+impact 4 256 3 100 115
+impact 4 256 3 256 100
+impact 4 256 3 1000 61
+impact 4 256 3 10000 10
+impact 4 256 5 8 132
+impact 4 256 5 31 130
+impact 4 256 5 32 130
+impact 4 256 5 33 129
+impact 4 256 5 100 124
+impact 4 256 5 256 113
+impact 4 256 5 1000 79
+impact 4 256 5 10000 17
+impact 4 256 10 31 135
+impact 4 256 10 32 135
+impact 4 256 10 33 135
+impact 4 256 10 100 132
+impact 4 256 10 256 125
+impact 4 256 10 1000 101
+impact 4 256 10 10000 30
+impact 4 256 100 100 139
+impact 4 256 100 256 139
+impact 4 256 100 1000 135
+impact 4 256 100 10000 103
+impact 4 4096 1 1 108
+impact 4 4096 1 2 108
+impact 4 4096 1 8 108
+impact 4 4096 1 31 107
+impact 4 4096 1 32 107
+impact 4 4096 1 33 107
+impact 4 4096 1 100 106
+impact 4 4096 1 256 103
+impact 4 4096 1 1000 92
+impact 4 4096 1 10000 40
+impact 4 4096 2 2 122
+impact 4 4096 2 8 122
+impact 4 4096 2 31 122
+impact 4 4096 2 32 122
+impact 4 4096 2 33 122
+impact 4 4096 2 100 121
+impact 4 4096 2 256 119
+impact 4 4096 2 1000 111
+impact 4 4096 2 10000 62
+impact 4 4096 3 8 127
+impact 4 4096 3 31 127
+impact 4 4096 3 32 127
+impact 4 4096 3 33 127
+impact 4 4096 3 100 127
+impact 4 4096 3 256 125
+impact 4 4096 3 1000 120
+impact 4 4096 3 10000 76
+impact 4 4096 5 8 132
+impact 4 4096 5 31 132
+impact 4 4096 5 32 132
+impact 4 4096 5 33 132
+impact 4 4096 5 100 132
+impact 4 4096 5 256 131
+impact 4 4096 5 1000 127
+impact 4 4096 5 10000 93
+impact 4 4096 10 31 136
+impact 4 4096 10 32 136
+impact 4 4096 10 33 136
+impact 4 4096 10 100 136
+impact 4 4096 10 256 135
+impact 4 4096 10 1000 133
+impact 4 4096 10 10000 112
+impact 4 4096 100 100 140
+impact 4 4096 100 256 140
+impact 4 4096 100 1000 140
+impact 4 4096 100 10000 137
+impact 8 1 1 1 128
+impact 8 1 1 2 90
+impact 8 1 1 8 33
+impact 8 1 1 31 9
+impact 8 1 1 32 9
+impact 8 1 1 33 9
+impact 8 1 1 100 3
+impact 8 1 1 256 1
+impact 8 1 1 1000 0
+impact 8 1 1 10000 0
+impact 8 1 2 2 137
+impact 8 1 2 8 59
+impact 8 1 2 31 18
+impact 8 1 2 32 18
+impact 8 1 2 33 17
+impact 8 1 2 100 6
+impact 8 1 2 256 2
+impact 8 1 2 1000 0
+impact 8 1 2 10000 0
+impact 8 1 3 8 80
+impact 8 1 3 31 27
+impact 8 1 3 32 26
+impact 8 1 3 33 25
+impact 8 1 3 100 9
+impact 8 1 3 256 3
+impact 8 1 3 1000 0
+impact 8 1 3 10000 0
+impact 8 1 5 8 112
+impact 8 1 5 31 42
+impact 8 1 5 32 41
+impact 8 1 5 33 40
+impact 8 1 5 100 14
+impact 8 1 5 256 5
+impact 8 1 5 1000 1
+impact 8 1 5 10000 0
+impact 8 1 10 31 73
+impact 8 1 10 32 72
+impact 8 1 10 33 70
+impact 8 1 10 100 28
+impact 8 1 10 256 11
+impact 8 1 10 1000 3
+impact 8 1 10 10000 0
+impact 8 1 100 100 147
+impact 8 1 100 256 85
+impact 8 1 100 1000 28
+impact 8 1 100 10000 3
+impact 8 16 1 1 207
+impact 8 16 1 2 199
+impact 8 16 1 8 160
+impact 8 16 1 31 92
+impact 8 16 1 32 90
+impact 8 16 1 33 89
+impact 8 16 1 100 40
+impact 8 16 1 256 17
+impact 8 16 1 1000 4
+impact 8 16 1 10000 0
+impact 8 16 2 2 233
+impact 8 16 2 8 204
+impact 8 16 2 31 139
+impact 8 16 2 32 137
+impact 8 16 2 33 135
+impact 8 16 2 100 71
+impact 8 16 2 256 33
+impact 8 16 2 1000 9
+impact 8 16 2 10000 0
+impact 8 16 3 8 225
+impact 8 16 3 31 167
+impact 8 16 3 32 165
+impact 8 16 3 33 163
+impact 8 16 3 100 94
+impact 8 16 3 256 47
+impact 8 16 3 1000 14
+impact 8 16 3 10000 1
+impact 8 16 5 8 244
+impact 8 16 5 31 199
+impact 8 16 5 32 198
+impact 8 16 5 33 196
+impact 8 16 5 100 128
+impact 8 16 5 256 71
+impact 8 16 5 1000 22
+impact 8 16 5 10000 2
+impact 8 16 10 31 233
+impact 8 16 10 32 232
+impact 8 16 10 33 231
+impact 8 16 10 100 176
+impact 8 16 10 256 114
+impact 8 16 10 1000 42
+impact 8 16 10 10000 4
+impact 8 16 100 100 255
+impact 8 16 100 256 245
+impact 8 16 100 1000 179
+impact 8 16 100 10000 42
+impact 8 32 1 1 212
+impact 8 32 1 2 207
+impact 8 32 1 8 184
+impact 8 32 1 31 129
+impact 8 32 1 32 128
+impact 8 32 1 33 126
+impact 8 32 1 100 68
+impact 8 32 1 256 33
+impact 8 32 1 1000 9
+impact 8 32 1 10000 0
+impact 8 32 2 2 239
+impact 8 32 2 8 223
+impact 8 32 2 31 177
+impact 8 32 2 32 176
+impact 8 32 2 33 174
+impact 8 32 2 100 110
+impact 8 32 2 256 59
+impact 8 32 2 1000 18
+impact 8 32 2 10000 1
+impact 8 32 3 8 239
+impact 8 32 3 31 202
+impact 8 32 3 32 201
+impact 8 32 3 33 199
+impact 8 32 3 100 138
+impact 8 32 3 256 80
+impact 8 32 3 1000 26
+impact 8 32 3 10000 2
+impact 8 32 5 8 254
+impact 8 32 5 31 228
+impact 8 32 5 32 227
+impact 8 32 5 33 226
+impact 8 32 5 100 173
+impact 8 32 5 256 112
+impact 8 32 5 1000 42
+impact 8 32 5 10000 4
+impact 8 32 10 31 252
+impact 8 32 10 32 251
+impact 8 32 10 33 250
+impact 8 32 10 100 214
+impact 8 32 10 256 160
+impact 8 32 10 1000 73
+impact 8 32 10 10000 9
+impact 8 32 100 100 255
+impact 8 32 100 256 255
+impact 8 32 100 1000 219
+impact 8 32 100 10000 73
+impact 8 256 1 1 216
+impact 8 256 1 2 215
+impact 8 256 1 8 212
+impact 8 256 1 31 199
+impact 8 256 1 32 199
+impact 8 256 1 33 198
+impact 8 256 1 100 170
+impact 8 256 1 256 128
+impact 8 256 1 1000 58
+impact 8 256 1 10000 7
+impact 8 256 2 2 244
+impact 8 256 2 8 241
+impact 8 256 2 31 233
+impact 8 256 2 32 233
+impact 8 256 2 33 233
+impact 8 256 2 100 212
+impact 8 256 2 256 176
+impact 8 256 2 1000 96
+impact 8 256 2 10000 15
+impact 8 256 3 8 253
+impact 8 256 3 31 247
+impact 8 256 3 32 247
+impact 8 256 3 33 247
+impact 8 256 3 100 231
+impact 8 256 3 256 201
+impact 8 256 3 1000 123
+impact 8 256 3 10000 21
+impact 8 256 5 8 255
+impact 8 256 5 31 255
+impact 8 256 5 32 255
+impact 8 256 5 33 255
+impact 8 256 5 100 249
+impact 8 256 5 256 227
+impact 8 256 5 1000 159
+impact 8 256 5 10000 34
+impact 8 256 10 31 255
+impact 8 256 10 32 255
+impact 8 256 10 33 255
+impact 8 256 10 100 255
+impact 8 256 10 256 251
+impact 8 256 10 1000 203
+impact 8 256 10 10000 61
+impact 8 256 100 100 255
+impact 8 256 100 256 255
+impact 8 256 100 1000 255
+impact 8 256 100 10000 207
+impact 8 4096 1 1 216
+impact 8 4096 1 2 216
+impact 8 4096 1 8 216
+impact 8 4096 1 31 215
+impact 8 4096 1 32 215
+impact 8 4096 1 33 215
+impact 8 4096 1 100 213
+impact 8 4096 1 256 207
+impact 8 4096 1 1000 185
+impact 8 4096 1 10000 80
+impact 8 4096 2 2 244
+impact 8 4096 2 8 244
+impact 8 4096 2 31 244
+impact 8 4096 2 32 244
+impact 8 4096 2 33 244
+impact 8 4096 2 100 242
+impact 8 4096 2 256 239
+impact 8 4096 2 1000 223
+impact 8 4096 2 10000 125
+impact 8 4096 3 8 255
+impact 8 4096 3 31 255
+impact 8 4096 3 32 255
+impact 8 4096 3 33 255
+impact 8 4096 3 100 254
+impact 8 4096 3 256 251
+impact 8 4096 3 1000 240
+impact 8 4096 3 10000 153
+impact 8 4096 5 8 255
+impact 8 4096 5 31 255
+impact 8 4096 5 32 255
+impact 8 4096 5 33 255
+impact 8 4096 5 100 255
+impact 8 4096 5 256 255
+impact 8 4096 5 1000 255
+impact 8 4096 5 10000 187
+impact 8 4096 10 31 255
+impact 8 4096 10 32 255
+impact 8 4096 10 33 255
+impact 8 4096 10 100 255
+impact 8 4096 10 256 255
+impact 8 4096 10 1000 255
+impact 8 4096 10 10000 225
+impact 8 4096 100 100 255
+impact 8 4096 100 256 255
+impact 8 4096 100 1000 255
+impact 8 4096 100 10000 255
+impact 15 1 1 1 239
+impact 15 1 1 2 170
+impact 15 1 1 8 62
+impact 15 1 1 31 18
+impact 15 1 1 32 17
+impact 15 1 1 33 17
+impact 15 1 1 100 5
+impact 15 1 1 256 2
+impact 15 1 1 1000 0
+impact 15 1 1 10000 0
+impact 15 1 2 2 255
+impact 15 1 2 8 111
+impact 15 1 2 31 34
+impact 15 1 2 32 33
+impact 15 1 2 33 33
+impact 15 1 2 100 11
+impact 15 1 2 256 4
+impact 15 1 2 1000 1
+impact 15 1 2 10000 0
+impact 15 1 3 8 150
+impact 15 1 3 31 50
+impact 15 1 3 32 49
+impact 15 1 3 33 48
+impact 15 1 3 100 16
+impact 15 1 3 256 6
+impact 15 1 3 1000 1
+impact 15 1 3 10000 0
+impact 15 1 5 8 211
+impact 15 1 5 31 79
+impact 15 1 5 32 77
+impact 15 1 5 33 75
+impact 15 1 5 100 27
+impact 15 1 5 256 11
+impact 15 1 5 1000 2
+impact 15 1 5 10000 0
+impact 15 1 10 31 138
+impact 15 1 10 32 135
+impact 15 1 10 33 132
+impact 15 1 10 100 52
+impact 15 1 10 256 21
+impact 15 1 10 1000 5
+impact 15 1 10 10000 0
+impact 15 1 100 100 255
+impact 15 1 100 256 159
+impact 15 1 100 1000 52
+impact 15 1 100 10000 5
+impact 15 16 1 1 255
+impact 15 16 1 2 255
+impact 15 16 1 8 255
+impact 15 16 1 31 173
+impact 15 16 1 32 170
+impact 15 16 1 33 167
+impact 15 16 1 100 76
+impact 15 16 1 256 33
+impact 15 16 1 1000 9
+impact 15 16 1 10000 0
+impact 15 16 2 2 255
+impact 15 16 2 8 255
+impact 15 16 2 31 255
+impact 15 16 2 32 255
+impact 15 16 2 33 254
+impact 15 16 2 100 133
+impact 15 16 2 256 63
+impact 15 16 2 1000 18
+impact 15 16 2 10000 1
+impact 15 16 3 8 255
+impact 15 16 3 31 255
+impact 15 16 3 32 255
+impact 15 16 3 33 255
+impact 15 16 3 100 177
+impact 15 16 3 256 89
+impact 15 16 3 1000 26
+impact 15 16 3 10000 2
+impact 15 16 5 8 255
+impact 15 16 5 31 255
+impact 15 16 5 32 255
+impact 15 16 5 33 255
+impact 15 16 5 100 241
+impact 15 16 5 256 134
+impact 15 16 5 1000 42
+impact 15 16 5 10000 4
+impact 15 16 10 31 255
+impact 15 16 10 32 255
+impact 15 16 10 33 255
+impact 15 16 10 100 255
+impact 15 16 10 256 213
+impact 15 16 10 1000 79
+impact 15 16 10 10000 9
+impact 15 16 100 100 255
+impact 15 16 100 256 255
+impact 15 16 100 1000 255
+impact 15 16 100 10000 79
+impact 15 32 1 1 255
+impact 15 32 1 2 255
+impact 15 32 1 8 255
+impact 15 32 1 31 243
+impact 15 32 1 32 239
+impact 15 32 1 33 236
+impact 15 32 1 100 128
+impact 15 32 1 256 62
+impact 15 32 1 1000 17
+impact 15 32 1 10000 1
+impact 15 32 2 2 255
+impact 15 32 2 8 255
+impact 15 32 2 31 255
+impact 15 32 2 32 255
+impact 15 32 2 33 255
+impact 15 32 2 100 206
+impact 15 32 2 256 111
+impact 15 32 2 1000 34
+impact 15 32 2 10000 3
+impact 15 32 3 8 255
+impact 15 32 3 31 255
+impact 15 32 3 32 255
+impact 15 32 3 33 255
+impact 15 32 3 100 255
+impact 15 32 3 256 150
+impact 15 32 3 1000 50
+impact 15 32 3 10000 5
+impact 15 32 5 8 255
+impact 15 32 5 31 255
+impact 15 32 5 32 255
+impact 15 32 5 33 255
+impact 15 32 5 100 255
+impact 15 32 5 256 211
+impact 15 32 5 1000 78
+impact 15 32 5 10000 9
+impact 15 32 10 31 255
+impact 15 32 10 32 255
+impact 15 32 10 33 255
+impact 15 32 10 100 255
+impact 15 32 10 256 255
+impact 15 32 10 1000 137
+impact 15 32 10 10000 18
+impact 15 32 100 100 255
+impact 15 32 100 256 255
+impact 15 32 100 1000 255
+impact 15 32 100 10000 138
+impact 15 256 1 1 255
+impact 15 256 1 2 255
+impact 15 256 1 8 255
+impact 15 256 1 31 255
+impact 15 256 1 32 255
+impact 15 256 1 33 255
+impact 15 256 1 100 255
+impact 15 256 1 256 239
+impact 15 256 1 1000 109
+impact 15 256 1 10000 14
+impact 15 256 2 2 255
+impact 15 256 2 8 255
+impact 15 256 2 31 255
+impact 15 256 2 32 255
+impact 15 256 2 33 255
+impact 15 256 2 100 255
+impact 15 256 2 256 255
+impact 15 256 2 1000 181
+impact 15 256 2 10000 28
+impact 15 256 3 8 255
+impact 15 256 3 31 255
+impact 15 256 3 32 255
+impact 15 256 3 33 255
+impact 15 256 3 100 255
+impact 15 256 3 256 255
+impact 15 256 3 1000 232
+impact 15 256 3 10000 41
+impact 15 256 5 8 255
+impact 15 256 5 31 255
+impact 15 256 5 32 255
+impact 15 256 5 33 255
+impact 15 256 5 100 255
+impact 15 256 5 256 255
+impact 15 256 5 1000 255
+impact 15 256 5 10000 65
+impact 15 256 10 31 255
+impact 15 256 10 32 255
+impact 15 256 10 33 255
+impact 15 256 10 100 255
+impact 15 256 10 256 255
+impact 15 256 10 1000 255
+impact 15 256 10 10000 116
+impact 15 256 100 100 255
+impact 15 256 100 256 255
+impact 15 256 100 1000 255
+impact 15 256 100 10000 255
+impact 15 4096 1 1 255
+impact 15 4096 1 2 255
+impact 15 4096 1 8 255
+impact 15 4096 1 31 255
+impact 15 4096 1 32 255
+impact 15 4096 1 33 255
+impact 15 4096 1 100 255
+impact 15 4096 1 256 255
+impact 15 4096 1 1000 255
+impact 15 4096 1 10000 150
+impact 15 4096 2 2 255
+impact 15 4096 2 8 255
+impact 15 4096 2 31 255
+impact 15 4096 2 32 255
+impact 15 4096 2 33 255
+impact 15 4096 2 100 255
+impact 15 4096 2 256 255
+impact 15 4096 2 1000 255
+impact 15 4096 2 10000 234
+impact 15 4096 3 8 255
+impact 15 4096 3 31 255
+impact 15 4096 3 32 255
+impact 15 4096 3 33 255
+impact 15 4096 3 100 255
+impact 15 4096 3 256 255
+impact 15 4096 3 1000 255
+impact 15 4096 3 10000 255
+impact 15 4096 5 8 255
+impact 15 4096 5 31 255
+impact 15 4096 5 32 255
+impact 15 4096 5 33 255
+impact 15 4096 5 100 255
+impact 15 4096 5 256 255
+impact 15 4096 5 1000 255
+impact 15 4096 5 10000 255
+impact 15 4096 10 31 255
+impact 15 4096 10 32 255
+impact 15 4096 10 33 255
+impact 15 4096 10 100 255
+impact 15 4096 10 256 255
+impact 15 4096 10 1000 255
+impact 15 4096 10 10000 255
+impact 15 4096 100 100 255
+impact 15 4096 100 256 255
+impact 15 4096 100 1000 255
+impact 15 4096 100 10000 255

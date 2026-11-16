@@ -180,14 +180,22 @@ impl Analyzer {
     }
 }
 
+/// The reference length of a text field that declares none (SPEC 20.1).
+pub const DEFAULT_FIELD_LENGTH: u16 = 32;
+
+/// The largest reference length a text field may declare (SPEC 20.1).
+pub const MAX_FIELD_LENGTH: u16 = 4096;
+
 /// A row's postings: for each term of its fields, the sum over the fields
 /// of the term's impact there, capped at 255 (SPEC 20.10.1). `fields` are
-/// `(weight, value)`, weight 1–15 as declared; null fields are left out.
-pub fn row_impacts(analyzer: &Analyzer, fields: &[(u8, &str)]) -> BTreeMap<String, u8> {
+/// `(weight, length, value)` as declared: weight 1–15, reference length
+/// 1–[`MAX_FIELD_LENGTH`] ([`DEFAULT_FIELD_LENGTH`] when the declaration
+/// gives none). Null fields are left out.
+pub fn row_impacts(analyzer: &Analyzer, fields: &[(u8, u16, &str)]) -> BTreeMap<String, u8> {
     // Impacts are non-negative, so saturating at 255 as they add up is the
     // capped sum.
     let mut row: BTreeMap<String, u8> = BTreeMap::new();
-    for &(weight, value) in fields {
+    for &(weight, reference, value) in fields {
         let terms = analyzer.terms(value);
         let length = terms.len();
         let mut freq: BTreeMap<String, usize> = BTreeMap::new();
@@ -196,21 +204,22 @@ pub fn row_impacts(analyzer: &Analyzer, fields: &[(u8, &str)]) -> BTreeMap<Strin
         }
         for (term, f) in freq {
             let sum = row.entry(term).or_default();
-            *sum = sum.saturating_add(impact(weight, f, length));
+            *sum = sum.saturating_add(impact(weight, reference, f, length));
         }
     }
     row
 }
 
-/// The impact of a term with frequency `f` in a field of `length` terms and
-/// weight `weight`, in binary64 in exactly this order (SPEC 20.10.1).
-/// Rust never fuses these operations, and each is correctly rounded on
-/// every target.
-pub fn impact(weight: u8, f: usize, length: usize) -> u8 {
+/// The impact of a term with frequency `f` in a field of `length` terms,
+/// declared with `weight` and reference length `reference`, in binary64 in
+/// exactly this order (SPEC 20.10.1). Rust never fuses these operations,
+/// and each is correctly rounded on every target.
+pub fn impact(weight: u8, reference: u16, f: usize, length: usize) -> u8 {
     let w = f64::from(weight);
+    let r = f64::from(reference);
     let f = f as f64;
     let l = length as f64;
-    let x = w * 16.0 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * l / 32.0));
+    let x = w * 16.0 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * l / r));
     x.floor().min(255.0) as u8
 }
 
