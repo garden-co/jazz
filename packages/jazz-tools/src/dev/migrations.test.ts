@@ -63,9 +63,40 @@ describe("snapshots", () => {
     const snapshot = JSON.parse(
       await readFile(join(FIXTURE, "snapshots", "8acd8a85eef5.json"), "utf8"),
     );
-    const version = snapshotToVersion(snapshot);
+    const version = await snapshotToVersion(snapshot);
     const back = await snapshotFromVersion(version.tables);
     expect(back.hash.slice(0, 12)).toBe("8acd8a85eef5");
+  });
+
+  // A history version is written by Rust's `versionTables`, as
+  // `jazz.app.json`'s writer prints one: every column option, index,
+  // branchBy and retention comes back as written and hashes the same.
+  it("writes a history version as jazz.app.json's writer does", async () => {
+    const tables = {
+      todos: {
+        columns: {
+          title: { type: "string", default: "x" },
+          big: { type: "bigint", default: "1234" },
+          when: { type: "timestamp", default: 5 },
+          blob: { type: "bytes", default: "AAE=" },
+          meta: { json: { type: "object" }, default: { a: 1 } },
+          tags: { array: "string", default: ["a"] },
+          views: { type: "int", default: 0, merge: "counter" },
+          owner: { type: "uuid", optional: true, references: "users" },
+          status: { enum: ["a", "b"], default: "a" },
+          ratio: { type: "float", default: 1.5 },
+          flag: "boolean?",
+          branch: { type: "string", default: "main" },
+        },
+        indexes: ["title", ["title", "when"]],
+        branchBy: ["branch"],
+      },
+      users: { columns: { name: "string" }, history: "latest" },
+    } as unknown as Parameters<typeof snapshotFromVersion>[0];
+    const snapshot = await snapshotFromVersion(tables);
+    const version = await snapshotToVersion(snapshot.schema);
+    expect(version.tables).toEqual(tables);
+    expect((await snapshotFromVersion(version.tables)).hash).toBe(snapshot.hash);
   });
 
   it("hashes the current tables as main's jazz.app.json does", async () => {
