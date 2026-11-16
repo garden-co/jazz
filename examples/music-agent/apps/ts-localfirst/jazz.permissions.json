@@ -1,5 +1,6 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
   "tables": {
     "attachments": { "read": "true", "insert": "true", "update": "true" },
     "conversations": { "read": "true", "insert": "true", "update": "true" },

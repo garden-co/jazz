@@ -1,4 +1,5 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
   "tables": { "invitations": { "columns": { "subject": "uuid", "label": "string" } } }
 }

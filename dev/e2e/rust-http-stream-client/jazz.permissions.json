@@ -1,5 +1,5 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "format": 1,
   "tables": {
     "todos": { "read": "true", "insert": "true" }
   }

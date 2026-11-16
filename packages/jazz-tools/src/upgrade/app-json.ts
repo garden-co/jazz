@@ -286,7 +286,7 @@ const LEGACY_PERMISSIONS_SCHEMA_URL = "https://jazz.tools/schemas/jazz.permissio
 /**
  * A pre-alpha.66 jazz.permissions.json's text in the versioned form, edited in place
  * so the rest keeps its bytes; the text unchanged when it is versioned already
- * or laid out unlike a tool-written file (`jazz-tools generate` rewrites it).
+ * or laid out unlike a tool-written file (it still loads).
  */
 export function versionedPermissionsText(text: string): string {
   let out = text.replace(/\n  "format": 1,\n/, "\n");

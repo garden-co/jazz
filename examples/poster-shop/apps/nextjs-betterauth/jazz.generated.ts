@@ -1,5 +1,5 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Output e4b8cbe2f8862935. Formatters may reformat this file, except `app` below.
+// Bindings format 1. Output 2ddf059c2fd7a584. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type JsonValue } from "jazz-tools";
 
 export type CanvasInviteRole = "viewer" | "editor";
@@ -450,7 +450,7 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:2ccca5d40ca189d094678dafadcbdbc58d1c3695a44c63962718bc4da8be4902",
+  "source": "sha256:b16aa52dd8fb48f4cddec68b9189a9fe98a45380c3bb4ada21d473476843e34c",
   "schema": {
     "current": "c2c80e4c3ecf667af8dd57d937fd72d5b6198e85d36753987ba3047838fb9fd9",
     "schemas": [

@@ -1,4 +1,5 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
   "tables": { "receipts": { "read": "true", "insert": "true" } }
 }

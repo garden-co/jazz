@@ -1,5 +1,5 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "format": 1,
   "tables": {
     "counters": { "columns": { "count": { "type": "int", "merge": "counter" } } },
     "todos": {

@@ -20,8 +20,7 @@ refused. A `$comment` string is allowed in every object. Each file starts with a
 JSON Schema and so its version (`https://jazz.tools/schemas/jazz.app.v1.json`, resp.
 `https://jazz.tools/schemas/jazz.permissions.v1.json`); it also points your editor at the schema.
 Jazz refuses a file written by a newer version. Files written before alpha.66 carry `"format": 1`
-and an unversioned `…/jazz.app.schema.json` URL instead: they still load, and `jazz-tools generate`
-rewrites them. `migrations create` writes `jazz.app.json` back in a canonical
+and an unversioned `…/jazz.app.schema.json` URL instead: they still load as version 1. `migrations create` writes `jazz.app.json` back in a canonical
 layout. The bindings record a hash of `jazz.app.json`'s text, so reformatting it makes them out of
 date until the next `generate`: add `jazz.app.json` to `.prettierignore` (or your formatter's
 ignore file) to keep the two in step.

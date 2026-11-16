@@ -8,8 +8,6 @@ use std::process::Command;
 
 mod support;
 
-// In the versioned form: `generate` rewrites a legacy (`format`) file first,
-// which would change the source the bindings hash.
 const APP: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json", "tables": { "todos": { "columns": { "title": "string" } } } }"#;
 const PERMISSIONS: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": { "todos": { "read": "true" } } }"#;
 

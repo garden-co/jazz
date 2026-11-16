@@ -4,7 +4,7 @@
 #![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:4c01f392f781327515b022e8eefd10156aa0658ecb8208111382de93a226f466";
+pub const SOURCE: &str = "sha256:2585de3597efe8dff21e520492a7377766afd44796c9f71d84782cf16729a6ff";
 
 /// A row of `notes`.
 #[derive(Debug, Clone, PartialEq)]
@@ -128,7 +128,8 @@ pub mod notes {
 /// The app's `jazz.app.json`: its schema, every earlier version and the
 /// migrations between them.
 pub const APP: &str = r#"{
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
   "tables": {
     "notes": { "columns": { "owner": "uuid", "body": "string" } }
   }

@@ -4,7 +4,7 @@
 #![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:bf26855a278ef390c6bb85976bfd1253a6968a1bbfbab3134607314aab6118be";
+pub const SOURCE: &str = "sha256:1adfb9c805c18f17655799f7003dd9ac6f75950914995d9c25b0fbcaad7a545f";
 
 /// The values of column `activity.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1390,7 +1390,8 @@ pub mod tasks {
 /// The app's `jazz.app.json`: its schema, every earlier version and the
 /// migrations between them.
 pub const APP: &str = r#"{
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
   "tables": {
     "activity": {
       "columns": {

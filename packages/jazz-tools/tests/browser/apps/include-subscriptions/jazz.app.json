@@ -1,5 +1,6 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
   "tables": {
     "check_notes": {
       "columns": { "body": "string", "org_id": "uuid", "user_check_id": "uuid" },

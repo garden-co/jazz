@@ -780,45 +780,7 @@ fn legacy_files_load_as_version_1() {
 }
 
 #[test]
-fn generate_rewrites_legacy_files_byte_for_byte() {
-    let written = write(shared_todos()).unwrap();
-    for (file, text, url, legacy_url) in [
-        (
-            APP_FILE,
-            &written.app,
-            APP_SCHEMA_URL,
-            LEGACY_APP_SCHEMA_URL,
-        ),
-        (
-            PERMISSIONS_FILE,
-            &written.permissions,
-            PERMISSIONS_SCHEMA_URL,
-            LEGACY_PERMISSIONS_SCHEMA_URL,
-        ),
-    ] {
-        assert_eq!(upgrade_legacy(file, text).unwrap(), None, "{file}");
-        let versioned = format!("\"$schema\": \"{url}\",\n");
-        // What Jazz before alpha.66 wrote, and `format` alone.
-        for legacy in [
-            text.replacen(
-                &versioned,
-                &format!("\"$schema\": \"{legacy_url}\",\n  \"format\": 1,\n"),
-                1,
-            ),
-            text.replacen(&versioned, "\"format\": 1,\n", 1),
-        ] {
-            assert_ne!(&legacy, text);
-            assert_eq!(
-                upgrade_legacy(file, &legacy).unwrap().as_ref(),
-                Some(text),
-                "{legacy}"
-            );
-        }
-    }
-}
-
-#[test]
-fn a_legacy_format_takes_any_schema_and_generate_replaces_it() {
+fn a_legacy_format_takes_any_schema() {
     let written = write(shared_todos()).unwrap();
     let versioned = format!("\"$schema\": \"{APP_SCHEMA_URL}\",\n");
     for schema in [
@@ -833,11 +795,6 @@ fn a_legacy_format_takes_any_schema_and_generate_replaces_it() {
         );
         load(legacy.as_bytes(), written.permissions.as_bytes())
             .unwrap_or_else(|e| panic!("{schema}: {e}"));
-        assert_eq!(
-            upgrade_legacy(APP_FILE, &legacy).unwrap().as_ref(),
-            Some(&written.app),
-            "{schema}"
-        );
     }
     // Without `format`, `$schema` is the version and must be Jazz's.
     let error = edited_app(|v| v["$schema"] = "./jazz.app.schema.json".into());
@@ -849,19 +806,6 @@ fn a_legacy_format_takes_any_schema_and_generate_replaces_it() {
     assert!(error.contains("version 0 is not supported"), "{error}");
     let error = edited_app(|v| v["$schema"] = "https://jazz.tools/schemas/jazz.app.v0.json".into());
     assert!(error.contains("version 0 is not supported"), "{error}");
-}
-
-#[test]
-fn generate_rewrites_a_compact_legacy_file_in_the_canonical_layout() {
-    let compact = r#"{"format":1,"tables":{"todos":{"columns":{"title":"string"}}}}"#;
-    let upgraded = upgrade_legacy(APP_FILE, compact).unwrap().unwrap();
-    assert!(
-        upgraded.starts_with(&format!("{{\n  \"$schema\": \"{APP_SCHEMA_URL}\",\n")),
-        "{upgraded}"
-    );
-    assert!(!upgraded.contains("format"), "{upgraded}");
-    load_app(upgraded.as_bytes()).unwrap();
-    assert_eq!(upgrade_legacy(APP_FILE, &upgraded).unwrap(), None);
 }
 
 #[test]

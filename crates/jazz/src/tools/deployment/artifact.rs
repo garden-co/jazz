@@ -51,7 +51,7 @@ pub const PERMISSIONS_FILE: &str = "jazz.permissions.json";
 pub const APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.v1.json";
 pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permissions.v1.json";
 /// The unversioned URLs Jazz before alpha.66 wrote, next to `"format": 1`. Such files
-/// still load, as version 1; `jazz-tools generate` rewrites them.
+/// still load, as version 1.
 pub const LEGACY_APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.schema.json";
 pub const LEGACY_PERMISSIONS_SCHEMA_URL: &str =
     "https://jazz.tools/schemas/jazz.permissions.schema.json";
@@ -846,103 +846,6 @@ fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> 
             json::print(other).trim_end()
         ))),
     }
-}
-
-/// A legacy (pre-alpha.66) `jazz.app.json` or `jazz.permissions.json` rewritten in
-/// the versioned form: `"format": 1` dropped and `$schema` set to the
-/// versioned URL, first. `Ok(None)` when the file isn't legacy. The edit is
-/// textual, so the rest of the file keeps its bytes (and a tool-written file
-/// stays canonical); a layout it can't edit safely is refused, to fix by hand.
-pub fn upgrade_legacy(file: &'static str, text: &str) -> Result<Option<String>, ArtifactError> {
-    let refuse = |message: String| ArtifactError::in_file(file, message);
-    let root = read_version(file, text.as_bytes())?;
-    let (url, legacy_url) = if file == APP_FILE {
-        (APP_SCHEMA_URL, LEGACY_APP_SCHEMA_URL)
-    } else {
-        (PERMISSIONS_SCHEMA_URL, LEGACY_PERMISSIONS_SCHEMA_URL)
-    };
-    let object = root.as_object().expect("read_version checks the object");
-    let get = |key: &str| object.iter().find(|(k, _)| k == key).map(|(_, v)| v);
-    let has_format = get("format").is_some();
-    let schema = get("$schema").cloned();
-    if !has_format && schema == Some(Json::string(url)) {
-        return Ok(None);
-    }
-    let schema_entry = format!(
-        "\"$schema\": {}",
-        json::print(&Json::string(url)).trim_end()
-    );
-    let mut out = text.to_string();
-    let mut edit = |from: &str, to: &str| -> bool {
-        match out.matches(from).count() {
-            1 => {
-                out = out.replacen(from, to, 1);
-                true
-            }
-            _ => false,
-        }
-    };
-    let ok = (!has_format
-        || edit("\n  \"format\": 1,\n", "\n")
-        || edit("\"format\": 1, ", "")
-        || edit(", \"format\": 1", ""))
-        && match &schema {
-            Some(s) if *s == Json::string(url) => true,
-            // The old URL, or whatever a legacy file named (a relative
-            // path, another URL, null): replaced.
-            Some(s) => edit(
-                &format!("\"$schema\": {}", json::print(s).trim_end()),
-                &schema_entry,
-            ),
-            None => {
-                if out.starts_with("{\n  ") {
-                    out = format!("{{\n  {schema_entry},\n  {}", &out[4..]);
-                    true
-                } else if out.starts_with("{ ") {
-                    out = format!("{{ {schema_entry}, {}", &out[2..]);
-                    true
-                } else {
-                    false
-                }
-            }
-        };
-    // Read it back: the same file, but versioned.
-    let check = || -> Option<()> {
-        let upgraded = read_version(file, out.as_bytes()).ok()?;
-        let mut a = object.to_vec();
-        let mut b = upgraded.as_object()?.to_vec();
-        if b.iter().any(|(k, _)| k == "format") {
-            return None;
-        }
-        a.retain(|(k, _)| k != "format" && k != "$schema");
-        let first = b.first()?;
-        if first.0 != "$schema" || first.1 != Json::string(url) {
-            return None;
-        }
-        b.remove(0);
-        (a == b).then_some(())
-    };
-    if ok && check().is_some() {
-        return Ok(Some(out));
-    }
-    // A layout the textual edit doesn't know (e.g. compact JSON): print the
-    // whole file in the canonical layout instead.
-    let mut entries = vec![("$schema".to_string(), Json::string(url))];
-    entries.extend(
-        object
-            .iter()
-            .filter(|(k, _)| k != "format" && k != "$schema")
-            .cloned(),
-    );
-    let printed = json::print(&Json::Object(entries));
-    if read_version(file, printed.as_bytes()).is_err() {
-        return Err(refuse(format!(
-            "is in the legacy form (`\"format\": 1` and/or `$schema` \"{legacy_url}\") and \
-             couldn't be rewritten automatically: drop `format` and start the file with \
-             {{ \"$schema\": \"{url}\", … }}"
-        )));
-    }
-    Ok(Some(printed))
 }
 
 /// What [`load`] and [`load_client`] check of the app file's history: its

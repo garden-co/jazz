@@ -1,5 +1,6 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
   "tables": {
     "attachments": { "read": "allowedTo.read(conversation)" },
     "conversations": { "read": "$createdBy = session.user", "insert": "true" },

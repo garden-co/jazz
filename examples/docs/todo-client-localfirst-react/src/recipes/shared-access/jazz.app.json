@@ -1,5 +1,6 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
   "tables": {
     "todoShares": {
       "columns": { "todoId": "uuid", "user_id": "uuid", "can_edit": "boolean" },

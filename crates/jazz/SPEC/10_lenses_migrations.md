@@ -821,9 +821,10 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   `https://jazz.tools/schemas/jazz.app.schema.json`, resp.
   `jazz.permissions.schema.json`. A file carrying `"format": 1` and/or the
   unversioned URL still loads, as version 1 (another `format` is refused like
-  an unknown version). `jazz-tools generate` (and `upgrade`) rewrite such
-  files in the versioned form. Both unversioned JSON Schemas stay published
-  for editors.
+  an unknown version). Any `$schema` next to `"format": 1` is accepted: it
+  was only an editor hint then. `jazz-tools upgrade` writes the versioned
+  form; tools that write the files whole write it too. Both unversioned JSON
+  Schemas stay published for editors.
 - Column and table names are identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Object key order is significant only for `columns` (declared order, which
   the schema hash covers) and `history` (oldest first). The writer lists

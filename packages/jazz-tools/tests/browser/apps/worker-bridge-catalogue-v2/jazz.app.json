@@ -1,5 +1,6 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
   "tables": {
     "todos": { "columns": { "title": "string", "completed": "boolean", "description": "string?" } }
   },
