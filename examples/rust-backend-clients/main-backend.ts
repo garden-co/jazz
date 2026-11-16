@@ -49,10 +49,10 @@ export interface MainBackend {
     options?: { audience?: string; ttlSeconds?: number },
   ): string;
   /**
-   * Gives `userId` an account at the core and revokes their identity there:
-   * the main backend then answers 403 `identity_not_authorized` for them.
-   * For a user this main backend has not met. Only
-   * with `{ core: "server" }`, whose core takes admin requests.
+   * Gives `userId`, an identity the main backend hasn't met yet, an account
+   * at the core and revokes it there: the main backend then answers 403
+   * `identity_not_authorized` for them. Only with `{ core: "server" }`, whose
+   * core takes admin requests.
    */
   revokeIdentity(userId: string): Promise<void>;
   close(): Promise<void>;
@@ -180,8 +180,8 @@ export async function startMainBackend(
     async revokeIdentity(userId) {
       if (!core) throw new Error('revokeIdentity needs startMainBackend(dir, { core: "server" })');
       // The main backend names its users `jazz:backend/<userId>`.
-      // Registered and revoked at the core, as TS's own backend-client test
-      // does: the main backend has not met the user, so it asks the core.
+      // An identity the main backend hasn't met yet, registered and revoked
+      // at the core, as TS's own backend-client test does.
       const identity = { issuer: "jazz:backend", subject: userId };
       const admin = (operation: string, body: unknown) =>
         fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
