@@ -978,7 +978,7 @@ async fn a_server_with_another_history_is_reported_as_authority_changed() {
     assert_eq!(
         stopped.link,
         Link::Offline {
-            reason: jazz_app::Offline::AuthorityChanged,
+            reason: jazz_app_support::Offline::AuthorityChanged,
             retrying: false,
             auth: None,
         },
@@ -986,7 +986,7 @@ async fn a_server_with_another_history_is_reported_as_authority_changed() {
     );
     assert!(matches!(
         stopped.last_error,
-        Some(jazz_app::SyncError::AuthorityChanged { .. })
+        Some(jazz_app_support::SyncError::AuthorityChanged { .. })
     ));
     let json = serde_json::to_value(&stopped).unwrap();
     assert_eq!(json["link"]["reason"], "authority-changed");
@@ -1002,7 +1002,7 @@ async fn a_server_with_another_history_is_reported_as_authority_changed() {
         matches!(
             status.link,
             Link::Offline {
-                reason: jazz_app::Offline::AuthorityChanged,
+                reason: jazz_app_support::Offline::AuthorityChanged,
                 ..
             }
         )
