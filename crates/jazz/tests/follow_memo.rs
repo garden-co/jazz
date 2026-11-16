@@ -283,13 +283,23 @@ fn a_row_changed_inside_the_fan_out_drops_the_follow_memo() {
 fn one_value_followed_through_two_columns_is_two_keys() {
     let query = Query::from("messages")
         .include("senderId")
-        .array_subquery(ArraySubquery::new("referred", "users", "referrer", "senderId"));
+        .array_subquery(ArraySubquery::new(
+            "referred", "users", "referrer", "senderId",
+        ));
     let (server, clients, _streams) = setup_reading(1, query);
     move_to_cy(&server);
     pump(&server, &clients);
     let held = users(&clients[0], ReadTier::LocalOnly);
-    assert_eq!(held.get(&id(1, 3)).map(String::as_str), Some("cy"), "the new sender: {held:?}");
-    assert_eq!(held.get(&id(1, 4)).map(String::as_str), Some("dee"), "whom it referred: {held:?}");
+    assert_eq!(
+        held.get(&id(1, 3)).map(String::as_str),
+        Some("cy"),
+        "the new sender: {held:?}"
+    );
+    assert_eq!(
+        held.get(&id(1, 4)).map(String::as_str),
+        Some("dee"),
+        "whom it referred: {held:?}"
+    );
 }
 
 /// M3. A rollback changes rows back without counting as a change. Here

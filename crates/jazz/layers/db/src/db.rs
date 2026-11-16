@@ -44,12 +44,12 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
-pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 #[cfg(any(test, feature = "testing"))]
 pub use sync::{
     FollowMemoStats, FollowReadHook, follow_memo_stats_for_test, set_follow_memo_oracle_for_test,
     set_follow_read_hook_for_test,
 };
+pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 
 #[path = "shard.rs"]
 pub mod shard;
