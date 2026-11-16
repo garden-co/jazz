@@ -746,11 +746,11 @@ impl ThinRouter {
                         .map_err(|error| format!("undecodable joined frame: {error}"))?
                     {
                         WireFrame::ThinRequest(request) => self.route(request, parts),
-                        _ => self.to_core(parts, None),
+                        _ => self.queue_for_core(parts, None),
                     }
                 }
                 WireFrame::ThinRequest(request) => self.route(request, vec![frame]),
-                _ => self.to_core(vec![frame], None),
+                _ => self.queue_for_core(vec![frame], None),
             }
         }
         Ok(())
@@ -828,10 +828,10 @@ impl ThinRouter {
             ThinOp::Subscribe { .. } | ThinOp::Unsubscribe { .. } => None,
             _ => Some(request.id),
         };
-        self.to_core(frames, answered);
+        self.queue_for_core(frames, answered);
     }
 
-    fn to_core(&mut self, frames: Vec<Vec<u8>>, answered: Option<u64>) {
+    fn queue_for_core(&mut self, frames: Vec<Vec<u8>>, answered: Option<u64>) {
         if let Some(Routed::Core {
             frames: queued,
             answered: ids,
