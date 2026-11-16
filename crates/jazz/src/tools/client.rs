@@ -1961,6 +1961,37 @@ impl JazzClient {
         Ok(true)
     }
 
+    /// The transactions of the thin session this client stands in for
+    /// (SPEC 8.14): a client a thin session's backend opened in memory,
+    /// linked to the core as that session, serves the session's
+    /// transaction requests ([`crate::thin_transactions`]).
+    pub fn thin_transactions(&self) -> crate::thin_transactions::ThinTransactions {
+        crate::thin_transactions::ThinTransactions::new(self.shared.identity.author)
+    }
+
+    /// Serve one of the thin session's transaction requests: a commit
+    /// answers once the core accepted its upload.
+    pub async fn serve_thin_transaction(
+        &self,
+        transactions: &mut crate::thin_transactions::ThinTransactions,
+        request: &crate::thin::ThinRequest,
+    ) -> Result<crate::thin::ThinBody> {
+        let db = self.db()?;
+        self.shared
+            .settle(transactions.serve(db, request.id, &request.op))
+            .await
+    }
+
+    /// End the thin session's open transactions and uploads: nothing of
+    /// them reached the core.
+    pub async fn release_thin_transactions(
+        &self,
+        transactions: crate::thin_transactions::ThinTransactions,
+    ) -> Result<()> {
+        let db = self.db()?;
+        self.shared.settle(transactions.release(db)).await
+    }
+
     /// How many of this client's commits await the server's verdict.
     pub fn pending_uploads(&self) -> usize {
         self.shared.db.pending_upload_count()

@@ -689,6 +689,10 @@ pub struct ThinRouter {
     /// Uploads begun in a transaction, by the id of the request that began
     /// them: their chunks, finish and abort are the backend's too.
     streams: BTreeSet<u64>,
+    /// The public schema JSON the client bound the connection to (its
+    /// `Schema` request, which still goes to the core): the session's
+    /// client opens with it.
+    schema: Option<Vec<u8>>,
 }
 
 /// Where a batch of client frames goes.
@@ -731,6 +735,12 @@ impl ThinRouter {
         Ok(routed)
     }
 
+    /// The public schema JSON the client bound the connection to, once its
+    /// `Schema` request passed.
+    pub fn schema(&self) -> Option<&[u8]> {
+        self.schema.as_deref()
+    }
+
     /// Whether the backend serves `request`, noting the uploads it begins
     /// (whatever the backend answers: a refused one's chunks are refused
     /// there too) or ends.
@@ -746,6 +756,10 @@ impl ThinRouter {
             } => {
                 self.streams.insert(request.id);
                 true
+            }
+            ThinOp::Schema { schema } => {
+                self.schema = Some(schema.clone());
+                false
             }
             op => names_transaction(op),
         }
