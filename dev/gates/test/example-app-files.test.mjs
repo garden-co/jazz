@@ -1,6 +1,6 @@
 // Every example app is written in TS (alpha.66): its schema.ts is the source,
 // and `jazz-tools generate` writes jazz.app.json, jazz.permissions.json and
-// the bindings from it, all committed. Stress-test apps stay JSON-only.
+// the bindings from it, all committed (dev/stress-tests too).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
