@@ -13,7 +13,7 @@
         struct TimedOut: Error {}
 
         /// Waits until `done` holds, as a view would see it.
-        func until(_ what: String, _ done: () -> Bool) async throws {
+        func until(_ what: String, _ done: @escaping () -> Bool) async throws {
             for _ in 0..<200 {
                 if done() { return }
                 try await _Concurrency.Task.sleep(nanoseconds: 25_000_000)
