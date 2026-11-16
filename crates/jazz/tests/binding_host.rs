@@ -530,6 +530,45 @@ fn comment(note: RowUuid, body: &str) -> Vec<u8> {
     jazz::binding_codec::encode_named_cells(&record).unwrap()
 }
 
+/// An optional relation's filter and order are checked when the read is
+/// prepared, as a required one's are, not only when a parent row is read
+/// (which a read with no parent rows never does). A client reading through
+/// the binding gets the refusal at once, with no rows needed.
+///
+/// ```text
+/// client ──all(notes + comments filtered on `nope`)──► binding ──✗ prepare
+/// ```
+#[test]
+fn an_optional_relations_filter_and_order_are_checked_at_prepare() {
+    let db = open(0xa2);
+    let read = |subquery: ArraySubquery| {
+        let query = Query::from("notes").array_subquery(subquery);
+        db.all(
+            postcard::to_allocvec(&query).unwrap(),
+            &json!({ "tier": "local-only" }),
+            None,
+            None,
+            None,
+        )
+        .and_then(|read| block_on(read).map_err(HostError::from))
+        .map(|_| ())
+    };
+    let comments = || ArraySubquery::new("comments", "comments", "note", "id");
+    for refused in [
+        read(comments().filter(jazz::query::eq(
+            jazz::query::col("nope"),
+            jazz::query::lit(jazz::records::Value::String("x".into())),
+        ))),
+        read(comments().order_by("nope", jazz::query::OrderDirection::Asc)),
+    ] {
+        match refused {
+            Err(HostError::Engine(error)) => assert_eq!(error.code, ErrorCode::Query, "{error}"),
+            other => panic!("expected a query refusal at prepare, got {other:?}"),
+        }
+    }
+    assert!(read(comments().order_by("body", jazz::query::OrderDirection::Asc)).is_ok());
+}
+
 #[test]
 fn a_relation_read_nests_each_relation_in_its_parents_cells() {
     let db = open(0xa1);
