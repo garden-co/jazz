@@ -1314,13 +1314,20 @@ impl JazzClient {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
-            self.reject_branch("a read inside a transaction")?;
             let prepared = self.prepare(&read)?;
             let db = self.db()?;
             // A client's serializable read hydrates from the authority,
-            // which needs ticks to answer.
+            // which needs ticks to answer. A branch view composes over the
+            // staged writes of a mergeable transaction; a serializable one
+            // refuses it (its read set is the root view's alone).
             self.shared
-                .settle(db.tx_ref(transaction_id).all_prepared(&prepared))
+                .settle(db.tx_ref(transaction_id).all_prepared_in(
+                    &prepared,
+                    false,
+                    None,
+                    ReadTier::LocalFirst,
+                    &opts.read_view.source,
+                ))
                 .await?
                 .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
@@ -2155,7 +2162,7 @@ impl JazzClient {
     /// values of the table's `branchBy` columns (an unbranched table's rows
     /// are shared by every branch, so they land in the root).
     ///
-    /// Build the selectors with [`JazzClient::branch_selector`]. Reads inside a transaction,
+    /// Build the selectors with [`JazzClient::branch_selector`]. Reads inside a serializable transaction,
     /// streaming inserts and byte-range reads through a branch are not
     /// supported yet, and fail.
     pub fn on_branch(&self, head: BranchSelector, base: Option<BranchViewBase>) -> JazzClient {

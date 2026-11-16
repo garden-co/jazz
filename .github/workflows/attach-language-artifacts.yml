@@ -30,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release to attach to, e.g. 2.0.0-alpha.65 (tag v<version>). It must still be a draft unless dry-run."
+        description: "Release to attach to, e.g. 2.0.0-alpha.66 (tag v<version>). It must still be a draft unless dry-run."
         required: true
         type: string
       ref:

@@ -257,6 +257,21 @@ fn hash_cstr(hasher: &mut jazz_types::sha256::Hasher, value: &str) {
     hasher.update(&[0]);
 }
 
+/// A legacy payload enum's cases, encoded as 2.0.0-alpha.64 encoded them,
+/// so a stored schema that declared one still hashes to its key.
+fn hash_legacy_enum_cases(hasher: &mut jazz_types::sha256::Hasher, cases: &[LegacyEnumCase]) {
+    hasher.update(&(cases.len() as u64).to_le_bytes());
+    for case in cases {
+        hash_cstr(hasher, &case.name);
+        hasher.update(&(case.fields.len() as u64).to_le_bytes());
+        for field in &case.fields {
+            hash_cstr(hasher, field.name.as_str());
+            hash_column_type(hasher, &field.column_type);
+            hasher.update(&[u8::from(field.nullable)]);
+        }
+    }
+}
+
 /// Hash a ColumnType recursively (for Array and Row types).
 fn hash_column_type(hasher: &mut jazz_types::sha256::Hasher, col_type: &ColumnType) {
     match col_type {
@@ -291,6 +306,11 @@ fn hash_column_type(hasher: &mut jazz_types::sha256::Hasher, col_type: &ColumnTy
             for variant in variants {
                 hash_cstr(hasher, variant);
             }
+        }
+        // Tag 13, as `EnumPayload` was (15 was the catalogue-native form).
+        ColumnType::LegacyEnumPayload { cases } => {
+            hasher.update(&[13]);
+            hash_legacy_enum_cases(hasher, cases);
         }
         ColumnType::Timestamp => {
             hasher.update(&[5]);

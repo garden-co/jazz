@@ -22,7 +22,7 @@ public final class Transaction: @unchecked Sendable {
     }
 
     /// Every row `query` matches, with the transaction's own writes.
-    public func all<R>(_ query: Query<R>) async throws(JazzError) -> [R] {
+    public func all<R>(_ query: Query<R>) async throws -> [R] {
         try await Client.typed {
             let json = try query.json()
             let rows = try await Client.run { try self.ffi.all(queryJson: json) }
@@ -30,7 +30,7 @@ public final class Transaction: @unchecked Sendable {
         }
     }
 
-    public func one<R>(_ query: Query<R>) async throws(JazzError) -> R? {
+    public func one<R>(_ query: Query<R>) async throws -> R? {
         try await Client.typed {
             let json = try query.json()
             guard let row = try await Client.run({ try self.ffi.one(queryJson: json) }) else {
@@ -41,7 +41,7 @@ public final class Transaction: @unchecked Sendable {
     }
 
     @discardableResult
-    public func insert<I: Insert>(_ row: I) async throws(JazzError) -> I.Row {
+    public func insert<I: Insert>(_ row: I) async throws -> I.Row {
         try await Client.typed {
             let json = try Coding.json(row, userInfo)
             let inserted = try await Client.run { try self.ffi.insert(table: I.Row.table, rowJson: json) }
@@ -49,24 +49,24 @@ public final class Transaction: @unchecked Sendable {
         }
     }
 
-    public func update<P: Patch>(_ id: Jazz.ID, _ patch: P) async throws(JazzError) {
+    public func update<P: Patch>(_ id: Jazz.ID, _ patch: P) async throws {
         try await Client.typed {
             let json = try Coding.json(patch, userInfo)
             try await Client.run { try self.ffi.update(table: P.Row.table, id: id, patchJson: json) }
         }
     }
 
-    public func update<P: Patch>(_ row: P.Row, _ patch: P) async throws(JazzError) {
+    public func update<P: Patch>(_ row: P.Row, _ patch: P) async throws {
         try await update(row.id, patch)
     }
 
-    public func delete<R: Row>(_ type: R.Type, id: Jazz.ID) async throws(JazzError) {
+    public func delete<R: Row>(_ type: R.Type, id: Jazz.ID) async throws {
         try await Client.typed {
             try await Client.run { try self.ffi.delete(table: R.table, id: id) }
         }
     }
 
-    public func delete<R: Row>(_ row: R) async throws(JazzError) {
+    public func delete<R: Row>(_ row: R) async throws {
         try await delete(R.self, id: row.id)
     }
 }

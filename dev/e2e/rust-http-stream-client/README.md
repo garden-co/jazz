@@ -10,7 +10,13 @@ for 50 s (past the socket's 45 s silence deadline), writes again and closes.
 The test checks that both rows reached the main backend, that the stream was
 used (and no socket got through), and that the link never dropped.
 
-The test is skipped unless `RUST_CLIENT` is set.
+A second test gives the client 90 s tokens through a token file (`TOKEN_FILE`,
+rewritten every 2 s) and keeps it idle for 150 s. It checks that the client
+asks for a fresh token ahead of expiry and reconnects with it as a new stream
+session, so no send ever goes with an expired token, and that writes after the
+first token's expiry still reach the backend.
+
+The tests are skipped unless `RUST_CLIENT` is set.
 
 ## Run
 
