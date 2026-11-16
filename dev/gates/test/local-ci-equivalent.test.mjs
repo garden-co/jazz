@@ -195,16 +195,31 @@ test("crate publication selector tests are a reachable lint partition contract",
   );
 });
 
-test("CI lint runs jazz-app-support's rustdoc with warnings denied, with and without the endpoint", () => {
+test("CI lint runs the published crates' rustdoc with warnings denied, and jazz-app-support's endpoint", () => {
   const lint = planFor({ partition: "lint" });
   const rustdoc = lint.filter(
     ({ executable, args }) => executable === "cargo" && args[0] === "doc",
   );
   assert.deepEqual(rustdoc, [
     {
-      label: "jazz-app-support rustdoc",
+      label: "Rust API rustdoc",
       executable: "cargo",
-      args: ["doc", "-p", "jazz-app-support", "--no-deps"],
+      args: [
+        "doc",
+        "--no-deps",
+        "-p",
+        "jazz-app-support",
+        "-p",
+        "jazz-codegen",
+        "-p",
+        "jazz-ffi",
+        "-p",
+        "jazz-native-transport",
+        "-p",
+        "jazz-core",
+        "-p",
+        "jazz-server",
+      ],
       env: { RUSTDOCFLAGS: "-D warnings" },
     },
     {

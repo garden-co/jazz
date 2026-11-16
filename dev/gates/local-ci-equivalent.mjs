@@ -54,6 +54,16 @@ export const ciPartitionJobs = Object.freeze({
   "kotlin-android": "test-kotlin-android",
 });
 
+/** The crates whose docs CI builds with warnings denied (`Rust API rustdoc`). */
+export const RUSTDOC_PACKAGES = Object.freeze([
+  "jazz-app-support",
+  "jazz-codegen",
+  "jazz-ffi",
+  "jazz-native-transport",
+  "jazz-core",
+  "jazz-server",
+]);
+
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 
@@ -123,14 +133,19 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
-    // jazz-app-support's docs are its Rust API reference: broken intra-doc
-    // links (a gated `Endpoint` linked from the default build) only show in
-    // rustdoc, which nothing else runs. Both the default build and the
-    // feature-gated endpoint, the two docs.rs and contributors see.
+    // The published crates' docs are their Rust API reference: broken
+    // intra-doc links (a feature-gated item linked from the default build,
+    // a private item linked from a public one) only show in rustdoc, which
+    // nothing else runs. One invocation for the default builds, and
+    // jazz-app-support again with its feature-gated endpoint.
     command(
-      "jazz-app-support rustdoc",
+      "Rust API rustdoc",
       "cargo",
-      ["doc", "-p", "jazz-app-support", "--no-deps"],
+      [
+        "doc",
+        "--no-deps",
+        ...RUSTDOC_PACKAGES.flatMap((name) => ["-p", name]),
+      ],
       { env: { RUSTDOCFLAGS: "-D warnings" } },
     ),
     command(
