@@ -39,7 +39,7 @@ pub enum Error {
     SignedOut,
 
     /// The user has no Jazz account yet: they get one when they sign in
-    /// from a client, or with [`crate::Endpoint::create_account_for`].
+    /// from a client, or with `Endpoint::create_account_for` (feature `unstable-endpoint`).
     #[error("user {0:?} has no Jazz account yet")]
     NoAccount(String),
 
