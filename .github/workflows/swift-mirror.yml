@@ -53,6 +53,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate the inputs
+        run: |
+          # Plain semver (SwiftPM reads only those tags), and a tag or a commit.
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::version '$VERSION' isn't semver"; exit 1; }
+          [[ "$REF" =~ ^(v[0-9][0-9A-Za-z.-]*|[0-9a-f]{40})$ ]] || { echo "::error::ref '$REF' isn't a v-tag or a commit SHA"; exit 1; }
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ env.REF }}
@@ -136,15 +141,33 @@ jobs:
         with:
           name: jazz-swift-mirror
           path: jazz-swift
+      - name: Refuse a version that's already published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JAZZ_SWIFT_PUSH_TOKEN: ${{ secrets.JAZZ_SWIFT_PUSH_TOKEN }}
+        run: |
+          # A published version's asset is pinned by checksum: never replace it.
+          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$JAZZ_SWIFT_PUSH_TOKEN"; }; f'
+          if git ls-remote --exit-code --tags https://github.com/garden-co/jazz-swift.git "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::garden-co/jazz-swift already has tag $VERSION"; exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx JazzFFI.xcframework.zip; then
+            echo "::error::release v$VERSION already has JazzFFI.xcframework.zip"; exit 1
+          fi
       - name: Attach the XCFramework to release v${{ env.VERSION }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "v$VERSION" xcf/JazzFFI.xcframework.zip --repo "$GITHUB_REPOSITORY" --clobber
+        run: |
+          gh release upload "v$VERSION" xcf/JazzFFI.xcframework.zip --repo "$GITHUB_REPOSITORY"
+          # What consumers will download must match the checksum the mirror pins.
+          curl -sSfL -o downloaded.zip "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/JazzFFI.xcframework.zip"
+          echo "$(cat xcf/JazzFFI.xcframework.zip.checksum)  downloaded.zip" | sha256sum -c -
       - name: Push and tag the mirror
         env:
           JAZZ_SWIFT_PUSH_TOKEN: ${{ secrets.JAZZ_SWIFT_PUSH_TOKEN }}
         run: |
-          git clone "https://x-access-token:${JAZZ_SWIFT_PUSH_TOKEN}@github.com/garden-co/jazz-swift.git" mirror
+          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$JAZZ_SWIFT_PUSH_TOKEN"; }; f'
+          git clone https://github.com/garden-co/jazz-swift.git mirror
           cd mirror
           git rm -rq --ignore-unmatch . && cp -R ../jazz-swift/. .
           git add -A
