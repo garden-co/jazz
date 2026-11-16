@@ -6,10 +6,13 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { createRequire } from "node:module";
 
 const repo = new URL("../../", import.meta.url).pathname;
 const content = join(repo, "docs/content");
-const out = join(repo, "packages/jazz-tools/.doc-snippets");
+// JAZZ_TOOLS_DIR checks against another checkout's jazz-tools (e.g. a worktree of a newer core).
+const toolsDir = process.env.JAZZ_TOOLS_DIR ?? join(repo, "packages/jazz-tools");
+const out = join(toolsDir, ".doc-snippets");
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
@@ -64,7 +67,7 @@ for (const file of files) {
     }
     code = code.replace(/from "jazz-tools"/g, 'from "../src/authoring.js"');
     if (!/export const permissions/.test(code)) code += "\nconst permissions = undefined;\n";
-    code += `\nimport { readablePermissions as __rp } from "../src/permissions/dsl.js";\nexport const __readable = permissions === undefined ? undefined : __rp(permissions);\n`;
+    code += `\nimport { readablePermissions as __rp } from "../src/permissions/dsl.js";\nimport { readableSchema as __rs } from "../src/schema-dsl/define-schema.js";\nexport const __readable = permissions === undefined ? undefined : __rp(permissions);\nexport const __schema = __rs(schema);\n`;
     const name = `${relative(content, file).replace(/[/.]/g, "_")}_${line}.ts`;
     writeFileSync(join(out, name), code);
     last = { file: relative(repo, file), line, name };
@@ -77,7 +80,7 @@ writeFileSync(
 );
 let tscOut = "";
 try {
-  execFileSync("npx", ["tsc", "-p", join(out, "tsconfig.json")], { cwd: join(repo, "packages/jazz-tools"), stdio: "pipe" });
+  execFileSync("npx", ["tsc", "-p", join(out, "tsconfig.json")], { cwd: toolsDir, stdio: "pipe" });
 } catch (e: any) {
   tscOut = String(e.stdout);
 }
@@ -91,14 +94,25 @@ for (const s of snippets) {
   console.log(`${errs.length ? "FAIL" : "ok  "} ${s.file}:${s.line}`);
   for (const e of errs) console.log(`     ${e}`);
 }
-if (process.argv.includes("--json")) {
+// --canonical <jazz-napi .node>: print what `generate` writes (the Rust writer's canonical text).
+const napiPath = process.argv[process.argv.indexOf("--canonical") + 1];
+const napi = process.argv.includes("--canonical") ? createRequire(import.meta.url)(napiPath) : undefined;
+if (process.argv.includes("--json") || napi) {
   for (const s of snippets) {
     let readable: unknown;
     try {
       const mod = await import(join(out, s.name));
       readable = mod.__readable;
+      if (napi && readable) {
+        const written = napi.writeAppFiles(
+          JSON.stringify({ $schema: "https://jazz.tools/schemas/jazz.app.v1.json", ...mod.__schema, format: undefined }),
+          JSON.stringify({ $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json", ...(readable as object), format: undefined }),
+          {},
+        );
+        readable = JSON.parse(written.permissions);
+      }
     } catch (e: any) {
-      readable = `ERROR ${e.message}`;
+      readable = `ERROR ${String(e.message).split("\n").slice(0, 4).join(" | ")}`;
     }
     console.log(`\n=== ${s.file}:${s.line}\n--- compiled:\n${JSON.stringify(readable, null, 2)}${s.json ? `\n--- page:\n${s.json}` : ""}`);
   }

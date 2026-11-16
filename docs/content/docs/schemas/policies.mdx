@@ -96,8 +96,7 @@ export const permissions = definePermissions({
       "insert": "owner_id = session.user",
       "update": "owner_id = session.user",
       "delete": "owner_id = session.user"
-    },
-    "todoShares": {}
+    }
   }
 }
 ```
@@ -192,7 +191,9 @@ export const permissions = definePermissions({
       "read": "owner_id = session.user",
       "insert": "owner_id = session.user",
       "update": {
-        "old": "owner_id = session.user and done = false",
+        "old": {
+          "allOf": ["owner_id = session.user", "done = false"]
+        },
         "new": "owner_id = session.user"
       },
       "delete": "owner_id = session.user"
@@ -366,7 +367,14 @@ export const permissions = definePermissions({
       "read": "owner_id = session.user"
     },
     "todos": {
-      "read": "owner_id = session.user or done = false and allowedTo.read(project)"
+      "read": {
+        "anyOf": [
+          "owner_id = session.user",
+          {
+            "allOf": ["done = false", "allowedTo.read(project)"]
+          }
+        ]
+      }
     }
   }
 }
@@ -413,14 +421,24 @@ export const permissions = definePermissions({
 ```json title="jazz.permissions.json"
 {
   "tables": {
+    "todoShares": {
+      "read": {
+        "anyOf": [
+          "user_id = session.user",
+          "exists todos(id = this.todoId, owner_id = session.user)"
+        ]
+      },
+      "insert": "exists todos(id = this.todoId, owner_id = session.user)"
+    },
     "todos": {
-      "read": "owner_id = session.user or exists todoShares(todoId = this.id, user_id = session.user, can_read = true)",
+      "read": {
+        "anyOf": [
+          "owner_id = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user, can_read = true)"
+        ]
+      },
       "update": "owner_id = session.user",
       "delete": "owner_id = session.user"
-    },
-    "todoShares": {
-      "read": "user_id = session.user or exists todos(id = this.todoId, owner_id = session.user)",
-      "insert": "exists todos(id = this.todoId, owner_id = session.user)"
     }
   }
 }
@@ -461,7 +479,9 @@ export const permissions = definePermissions({
 {
   "tables": {
     "todos": {
-      "read": "owner_id = session.user or session.claims.role = 'manager'"
+      "read": {
+        "anyOf": ["owner_id = session.user", "session.claims.role = 'manager'"]
+      }
     }
   }
 }
@@ -543,9 +563,13 @@ export const permissions = definePermissions({
       "update": "owner_id = session.user"
     },
     "todos": {
-      "read": "done = false or allowedTo.read(project)",
+      "read": {
+        "anyOf": ["done = false", "allowedTo.read(project)"]
+      },
       "update": {
-        "old": "allowedTo.update(project) and done = false",
+        "old": {
+          "allOf": ["allowedTo.update(project)", "done = false"]
+        },
         "new": "allowedTo.update(project)"
       }
     }
@@ -587,7 +611,12 @@ export const permissions = definePermissions({
 {
   "tables": {
     "todos": {
-      "read": "owner_id = session.user or exists todoShares(todoId = this.id, user_id = session.user, can_read = true)"
+      "read": {
+        "anyOf": [
+          "owner_id = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user, can_read = true)"
+        ]
+      }
     }
   }
 }
@@ -688,14 +717,14 @@ export const permissions = definePermissions({
 ```json title="jazz.permissions.json"
 {
   "tables": {
+    "appointments": {
+      "read": "exists doctors(id = this.doctorId, userId = session.identity.subject)"
+    },
     "doctors": {
       "read": "userId = session.identity.subject"
     },
     "patients": {
       "read": "exists appointments(patientId = this.id).doctor(userId = session.identity.subject)"
-    },
-    "appointments": {
-      "read": "exists doctors(id = this.doctorId, userId = session.identity.subject)"
     }
   }
 }
@@ -821,7 +850,17 @@ export const permissions = definePermissions({
     "todos": {
       "update": {
         "old": "owner_id = session.user",
-        "new": "owner_id = session.user and exists todos(id = this.id, parentId = this.parentId) and exists todos(id = this.id, projectId = this.projectId)"
+        "new": {
+          "allOf": [
+            "owner_id = session.user",
+            {
+              "allOf": [
+                "exists todos(id = this.id, parentId = this.parentId)",
+                "exists todos(id = this.id, projectId = this.projectId)"
+              ]
+            }
+          ]
+        }
       }
     }
   }
@@ -847,8 +886,8 @@ above. For the rest, such as a path of several hops, a join, or a walk up a tree
   joins another, and `.where({ "alias.col": value })` filters;
 - `.select({ id: "a.id" })`, `.distinctOn(...)`, `.orderBy(...)`, `.limit(n)` and `.offset(n)`
   shape the result;
-- `union({ label: query, … })` combines queries, and `recursive({ seed, step, frontier, dedupe,
-maxDepth })` repeats a step from a starting set, up to `maxDepth` times or `"fixpoint"`;
+- `union({ label: query, … })` combines queries, and `from(recursive({ seed, step, frontier, dedupe,
+maxDepth }))` repeats a step from a starting set, up to `maxDepth` times or `"fixpoint"`;
 - inside them, `outer("col")` is a column of the row being checked, `frontier("col")` one of the
   rows a recursive step starts from, and `rowId("row")` a row's identity.
 
@@ -857,12 +896,7 @@ them; `generate` does. For example, with folders and files:
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  folders: s.table(
-    { name: s.string(), ownerId: s.uuid(), parentId: s.uuid().optional() },
-    {
-      parent: s.rel("folders", "parentId"),
-    },
-  ),
+  folders: s.table({ name: s.string(), ownerId: s.uuid() }),
   files: s.table(
     { name: s.string(), folderId: s.uuid() },
     {
@@ -872,14 +906,13 @@ export const schema = s.defineSchema({
 });
 ```
 
-a user may read a file in a folder they own, and a folder when they own it or any folder above it:
+a user may read a file in a folder they own:
 
 <Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
 <Tab value="schema.ts">
 
 ```ts title="schema.ts"
-const { definePermissions, session, anyOf, exists, from, recursive, outer, frontier, rowId } =
-  schema;
+const { definePermissions, session, exists, from } = schema;
 
 export const permissions = definePermissions({
   files: {
@@ -892,20 +925,7 @@ export const permissions = definePermissions({
     ),
   },
   folders: {
-    read: anyOf(
-      { ownerId: session.user },
-      exists(
-        from(
-          recursive({
-            seed: from.folders().where({ id: outer("parentId") }),
-            step: from.folders().where({ id: frontier("parentId") }),
-            frontier: "parentId",
-            dedupe: [rowId("row")],
-            maxDepth: "fixpoint",
-          }),
-        ).where({ ownerId: session.user }),
-      ),
-    ),
+    read: { ownerId: session.user },
   },
 });
 ```
@@ -920,7 +940,7 @@ export const permissions = definePermissions({
       "read": "exists (from files join folders as f on files.folderId = f.id where f.ownerId = session.user select files.id as id)"
     },
     "folders": {
-      "read": "ownerId = session.user or exists (from recursive(seed: from folders where id = outer.parentId, step: from folders where id = frontier.parentId, frontier: parentId, dedupe: (id(row)), maxDepth: fixpoint) where ownerId = session.user)"
+      "read": "ownerId = session.user"
     }
   }
 }
@@ -928,6 +948,11 @@ export const permissions = definePermissions({
 
 </Tab>
 </Tabs>
+
+(The same rule is shorter as `file.folder.where({ ownerId: session.user })`; the query form is for
+what the shorter forms can't say.) The engine supports recursive queries in policies only when they
+walk from the row being checked; to inherit access up a tree, use
+[`allowedTo` with `maxDepth`](#inherited-access-allowedto) instead.
 
 Values in policies are plain JavaScript values, typed by the column they meet. Where a value has no
 column to take its type from, `typed.int(5)`, `typed.text("5")`, `typed.uuid(…)`,
@@ -1045,10 +1070,10 @@ export const permissions = definePermissions({
 {
   "tables": {
     "todos": {
-      "read": "$createdBy.account = session.user",
-      "insert": "$createdBy.account = session.user",
-      "update": "$createdBy.account = session.user",
-      "delete": "$createdBy.account = session.user"
+      "read": "$createdBy = session.user",
+      "insert": "$createdBy = session.user",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
     }
   }
 }
@@ -1078,7 +1103,9 @@ export const permissions = definePermissions({
 {
   "tables": {
     "todos": {
-      "read": "$createdBy.account = session.user or done = true"
+      "read": {
+        "anyOf": ["$createdBy = session.user", "done = true"]
+      }
     }
   }
 }
