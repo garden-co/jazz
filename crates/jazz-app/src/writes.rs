@@ -14,13 +14,33 @@ pub(crate) struct Settler {
 }
 
 impl Settler {
+    /// A settler that only commits locally.
+    pub(crate) fn local() -> Settler {
+        Settler { durability: None }
+    }
+
     pub(crate) async fn settle(
         &self,
         client: &JazzClient,
         written: Option<TransactionId>,
     ) -> Result<()> {
         match (self.durability, written) {
-            (Some(tier), Some(written)) => Ok(client.wait_for_transaction(written, tier).await?),
+            (Some(tier), Some(written)) => {
+                // This wait handles the write's refusal: it isn't also a
+                // mutation error.
+                crate::lifecycle::claim(written);
+                let waited = client.wait_for_transaction(written, tier).await;
+                // Only a refusal is the reporter's to drop: a wait that
+                // ended otherwise (the driver stopped, the write unknown)
+                // handled nothing, so a later refusal is a mutation error.
+                if !waited
+                    .as_ref()
+                    .is_err_and(|error| error.is_transaction_rejection())
+                {
+                    crate::lifecycle::unclaim(written);
+                }
+                Ok(waited?)
+            }
             _ => Ok(()),
         }
     }
@@ -112,7 +132,7 @@ pub(crate) async fn read_back<T: Table>(
     id: ObjectId,
     implementations: &crate::table::Implementations,
 ) -> Result<T> {
-    let query = crate::query::Query::<T>::all().id(id).into_untyped();
+    let query = crate::query::Query::<T>::all().id(id).into_untyped()?;
     let row = client
         .query(query, jazz::tools::ReadTier::LocalFirst)
         .await?

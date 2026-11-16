@@ -1,3 +1,6 @@
+//! **Unstable** (feature `unstable-endpoint`, off by default, not part of a
+//! release yet): run an app's main backend with TS `createJazz`.
+//!
 //! The app's Jazz endpoint, served by its backend: what `createJazz`'s
 //! handler at `/jazz` does for the app's users (`packages/jazz-tools/src/
 //! backend/create-jazz.ts`), so a Rust backend fronts its users' browser and
@@ -552,8 +555,11 @@ impl Endpoint {
         let path = request.path_only();
         let inner = path.strip_prefix(self.inner.base_path.as_str())?;
         let rest = inner.strip_prefix("/apps/")?;
+        // Whatever app id the client names (a TS client derives one from
+        // its endpoint URL), the endpoint serves its own, as `createJazz`
+        // does: every route acts on the backend's app.
         let (app, rest) = rest.split_once('/')?;
-        if app != self.inner.core.app_id.to_string() {
+        if app.is_empty() {
             return None;
         }
         Some(match rest {
