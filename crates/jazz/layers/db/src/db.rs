@@ -7,7 +7,7 @@
 // Db or invoke application callbacks that borrow the same state.
 #![allow(clippy::await_holding_refcell_ref)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -539,8 +539,6 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: crate::host::DbConnection,
-    /// One-way, owner-wide fence for new application mutations during close.
-    mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
     /// them, by table and column: only an import of rows another store
     /// kept sets any ([`Db::keep_variants_for_import`]).
@@ -588,7 +586,7 @@ struct Inner {
     pub(crate) possession: Option<crate::large::Possession>,
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
-    staging: LargeValueStagingPolicy,
+    staging: Rc<Cell<LargeValueStagingPolicy>>,
     /// Dropped uploads queue cleanup without recursively borrowing the owner.
     upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
     /// `conn.total_changes()` after the last large-value reclaim pass that
@@ -635,7 +633,7 @@ struct Inner {
     bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
-    identity: DbIdentity,
+    identity: Rc<DbIdentity>,
     /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
     system_node: crate::ids::NodeUuid,
     /// The commit seq and time of the last local stamp: writes of one commit
@@ -668,7 +666,7 @@ struct Inner {
     /// While a replica stores a message's images: their rows' current
     /// images, read at once (see `Inner::begin_current_batch`).
     current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
-    ids: Box<dyn RowIdSource>,
+    ids: Rc<RefCell<Box<dyn RowIdSource>>>,
     /// The newest commit seq handed out: the authority's seq, or on a
     /// replica its own commit counter (its commits' tx).
     seq: u64,
@@ -712,13 +710,10 @@ struct Inner {
     /// `Db::echo_probes`).
     pub(crate) echo_probes: u64,
     /// The global authority: what it settles is durable at `Global`.
-    authority: bool,
+    authority: Rc<Cell<bool>>,
     /// Every session but SYSTEM's must be pinned to a published bundle
     /// (see [`Db::require_session_pins`]).
-    pub(crate) pins_required: bool,
-    /// Uploads the authority refused, by commit seq, kept for a host that
-    /// reports them (see [`Db::track_upstream_rejections`]).
-    upstream_rejections: Option<Vec<UpstreamRejection>>,
+    pub(crate) pins_required: Rc<Cell<bool>>,
     /// The upstream's refusals of this store's own commits, counted for
     /// [`Db::upload_status`].
     refusals: sync::Refusals,
@@ -731,17 +726,12 @@ struct Inner {
     /// Each stored table's column positions, the codes authored-column
     /// bitmasks use (SPEC 4 §4.6), read on first use.
     column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
-    /// Sessions the server ended, with why, until the host takes them
-    /// ([`Db::take_closed_subscribers`]). Kept only for a host that does
-    /// ([`Db::track_closed_subscribers`]), so that one which never takes
-    /// them does not accumulate them.
-    closed: Option<Vec<(sync::SubscriberId, Error)>>,
     /// Query statements that ran slow, until the host takes them
     /// ([`Db::take_slow_queries`]).
-    slow: RefCell<crate::slow::SlowLog>,
+    slow: Rc<RefCell<crate::slow::SlowLog>>,
     /// Text merges that ran past their work budget since the host last
     /// took them ([`Db::take_merge_fallbacks`]).
-    merge_fallbacks: RefCell<MergeFallbacks>,
+    merge_fallbacks: Rc<RefCell<MergeFallbacks>>,
     /// Subscribers accepted so far (each one's generation).
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
@@ -1655,7 +1645,6 @@ impl Db {
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
-                mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
@@ -1671,7 +1660,7 @@ impl Db {
                 overlay: None,
                 derived: Vec::new(),
                 possession: None,
-                staging: LargeValueStagingPolicy::default(),
+                staging: Rc::new(Cell::new(LargeValueStagingPolicy::default())),
                 upload_cleanup: Rc::default(),
                 reclaimed_at: None,
                 reclaim_passes: 0,
@@ -1694,7 +1683,7 @@ impl Db {
                 bundle_views: RefCell::default(),
                 batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
-                identity: config.identity,
+                identity: Rc::new(config.identity),
                 last_stamp: (0, 0),
                 hlc_last: 0,
                 own_order: HashMap::new(),
@@ -1704,9 +1693,11 @@ impl Db {
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),
-                ids: config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
+                ids: Rc::new(RefCell::new(
+                    config
+                        .id_source
+                        .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
+                )),
                 seq: 0,
                 me: 0,
                 shard: shard::ShardState::new(
@@ -1727,16 +1718,14 @@ impl Db {
                 as_written_mismatches: 0,
                 replayed_commits: 0,
                 echo_probes: 0,
-                authority: false,
-                pins_required: false,
-                upstream_rejections: None,
+                authority: Rc::new(Cell::new(false)),
+                pins_required: Rc::new(Cell::new(false)),
                 refusals: sync::Refusals::default(),
                 sessions: Vec::new(),
                 held_acks: None,
                 column_codes: RefCell::default(),
-                closed: None,
-                slow: RefCell::default(),
-                merge_fallbacks: RefCell::default(),
+                slow: Rc::default(),
+                merge_fallbacks: Rc::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
@@ -1793,8 +1782,10 @@ impl Db {
     /// until [`Db::discard_rejected_transaction`]; a reopened store that
     /// still holds some tracks again and reports them anew.
     pub fn track_upstream_rejections(&self) {
-        let mut inner = self.inner.metadata_mut();
-        inner.upstream_rejections.get_or_insert_with(Vec::new);
+        self.inner
+            .upstream_rejections
+            .borrow_mut()
+            .get_or_insert_with(Vec::new);
     }
 
     /// Report again, through [`Db::take_upstream_rejections`], each refused
@@ -1802,13 +1793,14 @@ impl Db {
     /// to be taken: for a host that could not deliver it before (no
     /// listener yet). Does nothing unless refusals are tracked.
     pub async fn requeue_rejected_transactions(&self) -> Result<(), Error> {
-        let mut inner = self.inner.acquire().await;
-        if inner.upstream_rejections.is_none() {
+        let inner = self.inner.acquire().await;
+        if self.inner.upstream_rejections.borrow().is_none() {
             return Ok(());
         }
         let writer = *inner.identity.node.as_bytes();
         let retained = inner.rejected_transactions().await?;
-        let queued = inner.upstream_rejections.as_mut().expect("tracked");
+        let mut rejections = self.inner.upstream_rejections.borrow_mut();
+        let queued = rejections.as_mut().expect("tracked");
         for rejected in retained {
             if !queued
                 .iter()
@@ -1842,8 +1834,8 @@ impl Db {
     /// wrote it) (empty unless [`Db::track_upstream_rejections`] was called).
     pub fn take_upstream_rejections(&self) -> Vec<UpstreamRejection> {
         self.inner
-            .metadata_mut()
             .upstream_rejections
+            .borrow_mut()
             .as_mut()
             .map(std::mem::take)
             .unwrap_or_default()
@@ -1859,8 +1851,8 @@ impl Db {
     /// still follow it once it is restored. A store that cannot write it
     /// now mints it when it first serves its catalogue, as before.
     pub async fn set_authority(&self) {
-        let mut inner = self.inner.sql_borrow_mut().await;
-        inner.authority = true;
+        let inner = self.inner.sql_borrow_mut().await;
+        inner.authority.set(true);
         if inner.publishes_catalogue() {
             // A storage failure here surfaces again, with its error, from
             // the first catalogue it serves, which mints it then.
@@ -1873,7 +1865,7 @@ impl Db {
     /// each session it opens, so no session is governed by this store's
     /// own permissions.
     pub fn require_session_pins(&self) {
-        self.inner.metadata_mut().pins_required = true;
+        self.inner.pins_required.set(true);
     }
 
     /// Run `write`, one standalone write, under a thin client's own id for
@@ -1915,7 +1907,7 @@ impl Db {
 
     /// Whether this store is the global authority.
     pub fn is_authority(&self) -> bool {
-        self.inner.metadata().authority
+        self.inner.authority.get()
     }
 
     /// The identity of table `table` of this handle's schema: the same
@@ -2613,19 +2605,6 @@ impl Db {
         self.tick().await
     }
 
-    /// Permanently stop admitting application row mutations in this runtime
-    /// and all its schema views. New transactions, further staging, stream
-    /// pushes and commits return a storage error, including a callback
-    /// transaction that was still running when this fence was set.
-    ///
-    /// Reads, transaction abandonment, stream aborts and ordinary sync/cleanup
-    /// ticks remain available so already committed writes can settle. This is
-    /// an in-memory shutdown phase, not a stored policy or storage retirement;
-    /// a new storage owner starts with mutation admission open.
-    pub fn stop_mutation_admission(&self) {
-        self.metadata().mutation_admission_closed = true;
-    }
-
     // ---- preparation ----------------------------------------------------
 
     /// Diagnostics: the compiled SQL of a read and SQLite's query plan for
@@ -2748,8 +2727,7 @@ impl Db {
     /// how many more there were than the list keeps. Hosts call it after
     /// ticking and report them.
     pub fn take_merge_fallbacks(&self) -> (Vec<MergeFallback>, u64) {
-        let inner = self.inner.metadata();
-        let mut fallbacks = inner.merge_fallbacks.borrow_mut();
+        let mut fallbacks = self.inner.merge_fallbacks.borrow_mut();
         (
             std::mem::take(&mut fallbacks.kept),
             std::mem::take(&mut fallbacks.dropped),
@@ -2760,7 +2738,7 @@ impl Db {
     /// the last call, slowest total first, and how many further shapes the
     /// window had no room for. See [`crate::slow`].
     pub fn take_slow_queries(&self) -> (Vec<crate::slow::SlowQuery>, u64) {
-        self.inner.metadata().slow.borrow_mut().take()
+        self.inner.slow.borrow_mut().take()
     }
 
     /// The slow-query report due now: one line per shape that ran slow
@@ -2778,17 +2756,13 @@ impl Db {
     /// [`Db::take_slow_query_report`] times it), for a host that reports
     /// the shapes itself; `None` in between.
     pub fn take_due_slow_queries(&self) -> Option<(Vec<crate::slow::SlowQuery>, u64)> {
-        self.inner.metadata().slow.borrow_mut().take_due()
+        self.inner.slow.borrow_mut().take_due()
     }
 
     /// Record query runs taking at least `threshold` (`None`: none).
     /// Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
     pub fn set_slow_query_threshold(&self, threshold: Option<std::time::Duration>) {
-        self.inner
-            .metadata()
-            .slow
-            .borrow_mut()
-            .set_threshold(threshold);
+        self.inner.slow.borrow_mut().set_threshold(threshold);
     }
 
     /// Diagnostics: SQLite's query plan for the INSERT check a commit
@@ -3010,7 +2984,7 @@ impl Db {
                 sync::SettledBy::Remote(answered.clone(), global.clone())
             }
             (None, true) => sync::SettledBy::Never,
-            (None, false) => sync::SettledBy::Always(self.inner().await.authority),
+            (None, false) => sync::SettledBy::Always(self.inner().await.authority.get()),
         };
         let gate = match (&remote, self.link_hint()) {
             (Some((answered, _, global)), Some(hint)) => {
@@ -3168,7 +3142,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         if opts.row_id.is_none() {
             let _operation = self.inner.operation.lock().await;
-            opts.row_id = Some(self.inner().await.ids.next_row_id());
+            opts.row_id = Some(self.next_row_id());
         }
         let who = who(opts.identity);
         let op = StagedOp::Insert(table.to_owned(), cells, opts);
@@ -3236,7 +3210,6 @@ impl Db {
     }
 
     async fn write_prepared(&self, mut op: PreparedWrite, who: Who) -> Result<WriteHandle, Error> {
-        self.inner().await.require_mutation_admission()?;
         self.with_upload(async || {
             let table = op.layout.source.name.clone();
             let (prior, mark) = {
@@ -3413,7 +3386,6 @@ impl Db {
     ) -> Result<(T, TxReceipt), Error> {
         {
             let mut inner = self.inner().await;
-            inner.require_mutation_admission()?;
             if inner.tx.is_some() {
                 return Err(unsupported("nested transactions"));
             }
@@ -3423,10 +3395,7 @@ impl Db {
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
-        let result = callback(&mut tx).await.and_then(|value| {
-            self.metadata().require_mutation_admission()?;
-            Ok(value)
-        });
+        let result = callback(&mut tx).await;
         let captured;
         let prior;
         let changed = {
@@ -4375,16 +4344,6 @@ impl Drop for Inner {
 }
 
 impl Inner {
-    fn require_mutation_admission(&self) -> Result<(), Error> {
-        if self.mutation_admission_closed {
-            return Err(Error::new(
-                ErrorCode::Storage,
-                "database is closing or closed",
-            ));
-        }
-        Ok(())
-    }
-
     /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
     /// first, so no subscriber hears of them whatever happens next.
     async fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
@@ -7425,7 +7384,7 @@ impl Inner {
             }
         }
         let key = table.row_branch_key(&cells);
-        let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
+        let row = row_id.unwrap_or_else(|| self.ids.borrow_mut().next_row_id());
         let cells = self.merged_cells(table, row, None, None, cells).await?;
         self.refuse_withheld(table, row, &key).await?;
         match self.existing(&table.stored, row, &key).await? {
@@ -8479,7 +8438,6 @@ impl WriteTable {
 
 impl Db {
     pub async fn mergeable_tx(&self) -> Result<MergeableTxHandle<'_>, Error> {
-        self.inner().await.require_mutation_admission()?;
         Ok(MergeableTxHandle {
             db: self,
             identity: WriteIdentity::Database,
@@ -8493,7 +8451,6 @@ impl Db {
         &self,
         author: AuthorSubject,
     ) -> Result<MergeableTxHandle<'_>, Error> {
-        self.inner().await.require_mutation_admission()?;
         Ok(MergeableTxHandle {
             db: self,
             identity: WriteIdentity::Attribution(author),
@@ -8595,10 +8552,9 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         mut opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.inner().await.require_mutation_admission()?;
         let row = match opts.row_id {
             Some(row) => row,
-            None => self.db.inner().await.ids.next_row_id(),
+            None => self.db.next_row_id(),
         };
         opts.row_id = Some(row);
         self.ops
@@ -8621,7 +8577,6 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpdateOptions,
     ) -> Result<(), Error> {
-        self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(
@@ -8638,7 +8593,6 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<(), Error> {
-        self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(self.db.prepare_write(StagedOp::Upsert(
@@ -8657,7 +8611,6 @@ impl MergeableTxHandle<'_> {
         row: RowUuid,
         opts: DeleteOptions,
     ) -> Result<(), Error> {
-        self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(
@@ -8674,7 +8627,6 @@ impl MergeableTxHandle<'_> {
         content: Option<BTreeMap<String, Value>>,
         opts: RestoreOptions,
     ) -> Result<(), Error> {
-        self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(self.db.prepare_write(StagedOp::Restore(
@@ -8695,7 +8647,6 @@ impl MergeableTxHandle<'_> {
         destination: BranchSelector,
         row: RowUuid,
     ) -> Result<(), Error> {
-        self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(self.db.prepare_write(StagedOp::Move(
@@ -8852,7 +8803,7 @@ impl Db {
     /// offloaded nodes ([`Self::deferring_chunk_fetches`]) is worth trying
     /// again only once this changed.
     pub fn chunk_fetches_answered(&self) -> u64 {
-        self.inner.staging().chunks.answered()
+        self.inner.chunks.answered()
     }
 
     /// This handle, but a read or write that waits on offloaded nodes of a
@@ -9023,6 +8974,22 @@ pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
 /// State-only borrows never run SQL. Storage borrows await rollback of a
 /// transaction handle's cached overlay; only staging may retain that overlay.
 struct Store {
+    // One shared value per runtime setting; reads never borrow execution state.
+    authority: Rc<Cell<bool>>,
+    pins_required: Rc<Cell<bool>>,
+    staging_policy: Rc<Cell<LargeValueStagingPolicy>>,
+    // Opt-in host notifications; no queue borrow spans SQL or an await.
+    upstream_rejections: RefCell<Option<Vec<UpstreamRejection>>>,
+    closed: RefCell<Option<Vec<(sync::SubscriberId, Error)>>>,
+    // Immutable identity and the independently synchronized chunk owner remain
+    // accessible while SQL holds the execution-state borrow.
+    identity: Rc<DbIdentity>,
+    chunks: Arc<crate::large::Chunks>,
+    // All handles and insert paths draw from one source, independently of SQL.
+    ids: Rc<RefCell<Box<dyn RowIdSource>>>,
+    // Diagnostic producers and consumers borrow these only synchronously.
+    slow: Rc<RefCell<crate::slow::SlowLog>>,
+    merge_fallbacks: Rc<RefCell<MergeFallbacks>>,
     inner: RefCell<Inner>,
     operation: futures::lock::Mutex<()>,
 }
@@ -9050,6 +9017,16 @@ impl std::ops::DerefMut for StoreOperation<'_> {
 impl Store {
     fn new(inner: Inner) -> Self {
         Self {
+            upstream_rejections: RefCell::new(None),
+            closed: RefCell::new(None),
+            authority: inner.authority.clone(),
+            pins_required: inner.pins_required.clone(),
+            staging_policy: inner.staging.clone(),
+            identity: inner.identity.clone(),
+            chunks: inner.chunks.clone(),
+            ids: inner.ids.clone(),
+            slow: inner.slow.clone(),
+            merge_fallbacks: inner.merge_fallbacks.clone(),
             inner: RefCell::new(inner),
             operation: futures::lock::Mutex::new(()),
         }
@@ -9744,7 +9721,6 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.metadata_mut();
-        inner.require_mutation_admission()?;
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
@@ -9764,9 +9740,10 @@ impl Db {
     /// A fresh row id from this database's id source. Drawing one leaves
     /// an open transaction's overlay applied: a host draws one per staged
     /// insert, and undoing the overlay would make each stage replay the
-    /// batch.
+    /// batch. Allocation also remains available while storage is suspended;
+    /// every handle and insert path shares the same source.
     pub fn next_row_id(&self) -> RowUuid {
-        self.inner.staging().ids.next_row_id()
+        self.inner.ids.borrow_mut().next_row_id()
     }
 
     /// How many staged writes have been replayed into transaction overlays:
@@ -9803,7 +9780,6 @@ impl Db {
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
-        self.metadata().require_mutation_admission()?;
         self.inner
             .metadata_mut()
             .batches
@@ -9995,7 +9971,6 @@ impl Db {
     }
 
     async fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
-        self.inner().await.require_mutation_admission()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner().await;
@@ -10346,7 +10321,6 @@ impl Db {
             .await?;
         let marks = {
             let mut inner = self.inner.staging();
-            inner.require_mutation_admission()?;
             edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -10457,7 +10431,7 @@ impl TxRef<'_> {
         let row = match opts.row_id {
             Some(row) => row,
             // Drawing an id leaves the batch's overlay applied.
-            None => self.db.inner.staging().ids.next_row_id(),
+            None => self.db.next_row_id(),
         };
         opts.row_id = Some(row);
         self.stage(StagedOp::Insert(table.to_owned(), cells, opts))

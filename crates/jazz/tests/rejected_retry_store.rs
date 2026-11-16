@@ -394,3 +394,66 @@ fn failed_acknowledgement_keeps_the_complete_payload() {
     block_on(client.discard_rejected_transaction(seq)).unwrap();
     assert!(block_on(client.rejected_transactions()).unwrap().is_empty());
 }
+
+/// Alice's host can drain committed refusals while Bob's unrelated storage
+/// operation is suspended. Cancelling that operation neither restores consumed
+/// notifications nor loses the durable payload needed for explicit redelivery.
+#[test]
+fn committed_refusals_can_be_drained_during_suspended_storage() {
+    use jazz::host::HostTable;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let server = authority();
+    let client = block_on(Db::open(DbConfig::new(schema(), identity(0xa1, alice())))).unwrap();
+    client.track_upstream_rejections();
+    connect(&client, &server);
+    let seq = refused_note(&client, RowUuid::from_bytes([0x71; 16]));
+    pump(&client, &server);
+    let mut write = Box::pin(client.host_put_then_wait_for_test(
+        HostTable::new("notification_probe"),
+        b"pending",
+        b"bob",
+        std::future::pending(),
+    ));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    client.track_upstream_rejections();
+    let reported = client.take_upstream_rejections();
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].seq, seq);
+    assert!(client.take_upstream_rejections().is_empty());
+    drop(write);
+    block_on(client.requeue_rejected_transactions()).unwrap();
+    assert_eq!(client.take_upstream_rejections()[0].seq, seq);
+    block_on(client.discard_rejected_transaction(seq)).unwrap();
+    block_on(client.requeue_rejected_transactions()).unwrap();
+    assert!(client.take_upstream_rejections().is_empty());
+}
+
+/// Alice's refusal must not reach the host if applying it fails. A SQL trigger
+/// injects failure after retry-payload retention, which public APIs cannot do;
+/// the tick must roll back that payload and publish no notification.
+#[test]
+fn a_failed_refusal_tick_publishes_no_notification() {
+    use jazz::host::HostTables;
+    let server = authority();
+    let client = block_on(Db::open(DbConfig::new(schema(), identity(0xa1, alice())))).unwrap();
+    client.track_upstream_rejections();
+    connect(&client, &server);
+    pump(&client, &server);
+    refused_note(&client, RowUuid::from_bytes([0x72; 16]));
+    block_on(client.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    block_on(client.host_sql(&mut |conn| {
+        conn.execute_batch("CREATE TEMP TRIGGER fail_pending_delete BEFORE DELETE ON _jazz_pending BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")
+            .map_err(|error| jazz::db::Error::new(jazz::db::ErrorCode::Storage, error.to_string()))
+    })).unwrap();
+    assert!(block_on(client.tick()).is_err());
+    assert!(client.take_upstream_rejections().is_empty());
+    assert!(block_on(client.rejected_transactions()).unwrap().is_empty());
+}

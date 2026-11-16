@@ -19,6 +19,132 @@ use crate::common::{allow_all_policies, compile_schema};
 const CATALOGUE: HostTable = HostTable::new("catalogue");
 const JOURNAL: HostTable = HostTable::new("journal");
 
+/// Alice and Bob share one deterministic ID sequence across schema handles.
+/// IDs drawn during a suspended host write stay consumed even if it is cancelled;
+/// the next insert continues that same sequence.
+/// alice -> suspend storage -> alice/bob allocate -> cancel -> bob inserts
+#[test]
+fn row_ids_share_one_sequence_during_suspended_storage() {
+    use jazz::db::{RowIdSource, SeededRowIdSource};
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let mut expected = SeededRowIdSource::new(42);
+    let db = block_on(Db::open(config().with_id_source(expected.clone()))).unwrap();
+    let other = block_on(db.register_schema_view(schema())).unwrap();
+    assert_eq!(db.next_row_id(), expected.next_row_id());
+    let mut write = Box::pin(db.host_put_then_wait_for_test(
+        JOURNAL,
+        b"pending",
+        b"alice",
+        std::future::pending(),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(write.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(other.next_row_id(), expected.next_row_id());
+    assert_eq!(db.next_row_id(), expected.next_row_id());
+    drop(write);
+
+    let cells = || BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]);
+    let inserted = block_on(other.insert("notes", cells(), InsertOptions::default())).unwrap();
+    assert_eq!(inserted.row_uuid(), expected.next_row_id());
+    let transaction = block_on(db.mergeable_tx()).unwrap();
+    let staged = block_on(transaction.insert("notes", cells(), InsertOptions::default())).unwrap();
+    assert_eq!(staged.row_uuid(), expected.next_row_id());
+    block_on(transaction.commit()).unwrap();
+    assert_eq!(other.next_row_id(), expected.next_row_id());
+    let query = other.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(other.read(&query)).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|row| row.row_uuid() == inserted.row_uuid()));
+    assert!(rows.iter().any(|row| row.row_uuid() == staged.row_uuid()));
+}
+
+/// Alice's completed read is reported once while Bob's host write is paused.
+/// Changing the diagnostic threshold during that pause applies to later reads.
+/// alice -> query -> bob suspends -> host drains diagnostics -> bob resumes
+#[test]
+fn diagnostics_remain_available_during_suspended_storage() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    use std::time::Duration;
+
+    let db = block_on(Db::open(config())).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    db.set_slow_query_threshold(Some(Duration::ZERO));
+    block_on(db.read(&query)).unwrap();
+    let (resume, wait) = futures::channel::oneshot::channel();
+    let mut write = Box::pin(
+        db.host_put_then_wait_for_test(JOURNAL, b"pending", b"bob", async { wait.await.unwrap() }),
+    );
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(write.as_mut().poll(&mut cx).is_pending());
+
+    let (queries, dropped) = db.take_due_slow_queries().expect("completed slow read");
+    assert_eq!(dropped, 0);
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].runs, 1);
+    assert_eq!(db.take_slow_queries(), (Vec::new(), 0));
+    assert!(db.take_slow_query_report(None).is_empty());
+    assert_eq!(db.take_merge_fallbacks(), (Vec::new(), 0));
+    db.set_slow_query_threshold(None);
+
+    resume.send(()).unwrap();
+    block_on(write).unwrap();
+    block_on(db.read(&query)).unwrap();
+    assert!(db.take_slow_queries().0.is_empty());
+    db.set_slow_query_threshold(Some(Duration::ZERO));
+    block_on(db.read(&query)).unwrap();
+    assert_eq!(db.take_slow_queries().0.len(), 1);
+}
+
+/// Alice's host write suspends while owning the store borrow. Another handle
+/// can still check Alice/Bob admission and chunk progress without waiting.
+/// The suspension hook models a pending SQL operation on the normal host path.
+/// alice -> host write -> suspend -> sync checks -> resume -> committed read
+#[test]
+fn identity_and_chunk_progress_remain_available_during_suspended_storage() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let alice = AuthorSubject::for_test_bytes([1; 16]);
+    let bob = AuthorSubject::for_test_bytes([2; 16]);
+    for author in [alice, AuthorSubject::SYSTEM] {
+        let mut config = config();
+        config.identity.author = author;
+        let db = block_on(Db::open(config)).unwrap();
+        let other = block_on(db.register_schema_view(schema())).unwrap();
+        let answered = other.chunk_fetches_answered();
+        let (resume, wait) = futures::channel::oneshot::channel();
+        let mut write = Box::pin(db.host_put_then_wait_for_test(
+            JOURNAL,
+            b"pending",
+            b"alice",
+            async { wait.await.unwrap() },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+
+        assert_eq!(other.chunk_fetches_answered(), answered);
+        other.check_serves(alice).unwrap();
+        if author == AuthorSubject::SYSTEM {
+            other.check_serves(bob).unwrap();
+        } else {
+            assert_eq!(
+                other.check_serves(bob).unwrap_err().reason,
+                Some(jazz::db::Reason::IdentityMismatch),
+            );
+        }
+
+        resume.send(()).unwrap();
+        block_on(write).unwrap();
+        assert_eq!(
+            block_on(other.host_get(JOURNAL, b"pending")).unwrap(),
+            Some(b"alice".to_vec()),
+        );
+    }
+}
+
 /// Alice stores a large host value through the shared async algorithm; Bob
 /// sees her existing value. The native future completes inline, and an outer rollback also undoes the shared operation's insert.
 /// alice -> inline conditional insert -> outer rollback -> bob reads no claim

@@ -948,7 +948,6 @@ impl Db {
         let column = &prepared.column.name;
         let value = {
             let mut inner = self.inner().await;
-            inner.require_mutation_admission()?;
             let edited = (async {
                 let (col, cell) = inner
                     .physical_cell(prepared, identity_of(opts.identity))
@@ -1009,7 +1008,6 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let lowered = {
             let mut inner = self.inner().await;
-            inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
             inner
                 .lower_large_mutations(&mut patch, mutations, identity)
@@ -1041,7 +1039,7 @@ impl Db {
         column: &str,
         reader: R,
     ) -> Result<WriteHandle, Error> {
-        let row = self.inner().await.ids.next_row_id();
+        let row = self.next_row_id();
         self.insert_streaming_value_with_id(table, row, cells, column, reader)
             .await
     }
@@ -1130,7 +1128,6 @@ impl Db {
         cells: &BTreeMap<String, Value>,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
-        self.metadata().require_mutation_admission()?;
         let col = streaming_column(self.operation_schema().table(table)?, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
@@ -1180,7 +1177,6 @@ impl Db {
     ) -> Result<(), Error> {
         self.check_streaming_upload(upload)?;
         let inner = self.inner().await;
-        inner.require_mutation_admission()?;
         let now = streaming_now_ms();
         if upload.preparation.is_none() {
             return Err(closed());
@@ -1332,7 +1328,6 @@ impl Db {
         column: &str,
     ) -> Result<Option<lv::LargeValueRef>, Error> {
         let active_schema = self.operation_schema();
-        self.inner().await.require_mutation_admission()?;
         self.check_streaming_upload(upload)?;
         if upload.table != table || upload.column != column {
             return Err(schema_error(
@@ -1402,7 +1397,7 @@ impl Db {
 
     /// Replace the limits on local streaming uploads.
     pub fn set_large_value_staging_policy(&self, policy: LargeValueStagingPolicy) {
-        self.metadata().staging = policy;
+        self.inner.staging_policy.set(policy);
     }
 
     /// End every streaming upload left untouched past the staging policy's
@@ -1411,7 +1406,7 @@ impl Db {
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         let inner = self.inner().await;
         let now = streaming_now_ms();
-        let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+        let max_age = i64::try_from(inner.staging.get().max_age_ms).unwrap_or(i64::MAX);
         inner.release_dropped_uploads().await?;
         crate::large::expire_receipts(&mut inner.conn.sql(), now).await?;
         crate::large::expire_uploads(&mut inner.conn.sql(), now.saturating_sub(max_age)).await
@@ -1528,7 +1523,7 @@ fn admit_ingress(inner: &Inner, staged: &[lv::StagedChunk], now: i64) -> Result<
     if bytes == 0 {
         return Ok(());
     }
-    let policy = inner.staging;
+    let policy = inner.staging.get();
     let mut window = inner.ingress.borrow_mut();
     let now = now.max(0) as u64;
     if now.saturating_sub(window.0) >= policy.window_ms {
@@ -1879,7 +1874,6 @@ impl TxRef<'_> {
     ) -> Result<WriteHandle, Error> {
         let mutations =
             prepare_mutations(self.db.operation_schema(), table, row, &patch, mutations)?;
-        self.db.inner().await.require_mutation_admission()?;
         let edits = self
             .db
             .in_overlay(self.id, None, async |inner, _| {

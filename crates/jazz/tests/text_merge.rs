@@ -883,6 +883,9 @@ fn a_chain_that_clears_then_writes_lands_its_last_write() {
 /// which row, so it can say so.
 #[test]
 fn a_merge_past_its_budget_is_reported_to_the_host() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
     let mut net = Net::new(2);
     let row = net.seed(0, &[("body", "The cat sat.")]);
     net.core.set_merge_budget_for_test(1);
@@ -896,6 +899,15 @@ fn a_merge_past_its_budget_is_reported_to_the_host() {
     net.online(1);
     net.settle(1, bob);
     net.assert_everywhere(row, "body", "The cat slept.");
+    // Draining diagnostics must also work while unrelated storage is pending.
+    let mut pending = Box::pin(net.core.host_put_then_wait_for_test(
+        jazz::host::HostTable::new("diagnostic_pause"),
+        b"pending",
+        b"write",
+        std::future::pending(),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(pending.as_mut().poll(&mut cx).is_pending());
     let (fallbacks, dropped) = net.core.take_merge_fallbacks();
     assert_eq!(dropped, 0);
     assert_eq!(fallbacks.len(), 1, "{fallbacks:?}");
@@ -907,4 +919,5 @@ fn a_merge_past_its_budget_is_reported_to_the_host() {
         (Vec::new(), 0),
         "taken once"
     );
+    drop(pending);
 }

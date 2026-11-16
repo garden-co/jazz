@@ -1042,3 +1042,85 @@ fn an_unpinned_trusted_link_may_not_act_for_a_user_once_bundles_are_served() {
         "pinned, it acts for alice"
     );
 }
+
+/// Alice's host drains Bob's closed-session notification during an unrelated
+/// suspended write. Taking it is once-only and leaves tracking enabled.
+#[test]
+fn closed_sessions_can_be_drained_during_suspended_storage() {
+    use jazz::host::HostTable;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let server = server();
+    let close_bad_session = || {
+        let (_, transport, inbound, _) = pipe();
+        let subscriber = block_on(server.accept_subscriber(transport, user(9))).unwrap();
+        inbound.borrow_mut().push_back(SyncMessage::Rows {
+            images: Vec::new(),
+            tx_ids: Vec::new(),
+        });
+        block_on(server.tick()).unwrap();
+        subscriber
+    };
+    let first = close_bad_session();
+    let (resume, wait) = futures::channel::oneshot::channel();
+    let mut write = Box::pin(server.host_put_then_wait_for_test(
+        HostTable::new("notification_probe"),
+        b"pending",
+        b"alice",
+        async { wait.await.unwrap() },
+    ));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    server.track_closed_subscribers();
+    let closed = server.take_closed_subscribers();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, first);
+    assert!(server.take_closed_subscribers().is_empty());
+    resume.send(()).unwrap();
+    block_on(write).unwrap();
+    let second = close_bad_session();
+    let closed = server.take_closed_subscribers();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, second);
+}
+
+/// Alice reads the authority role and requires pinned sessions while Bob's
+/// unrelated SQL operation is suspended. Both schema handles share the settings;
+/// after cancellation, an unpinned user is refused but SYSTEM is still admitted.
+#[test]
+fn runtime_flags_remain_available_during_suspended_storage() {
+    use jazz::host::HostTable;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    for authority in [false, true] {
+        let db = block_on(Db::open(config(0, AuthorSubject::SYSTEM))).unwrap();
+        if authority {
+            block_on(db.set_authority());
+        }
+        let view = block_on(db.register_schema_view(schema())).unwrap();
+        let mut write = Box::pin(db.host_put_then_wait_for_test(
+            HostTable::new("settings_probe"),
+            b"pending",
+            b"bob",
+            std::future::pending(),
+        ));
+        assert!(
+            write
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(db.is_authority(), authority);
+        assert_eq!(view.is_authority(), authority);
+        view.require_session_pins();
+        drop(write);
+        let (_, user_transport, _, _) = pipe();
+        assert!(block_on(db.accept_subscriber(user_transport, user(1))).is_err());
+        let (_, system_transport, _, _) = pipe();
+        block_on(db.accept_subscriber(system_transport, AuthorSubject::SYSTEM)).unwrap();
+    }
+}

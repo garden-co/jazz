@@ -431,3 +431,44 @@ fn explicit_streaming_abort_releases_the_pending_upload_immediately() {
         "abort already removed the persisted pending claim"
     );
 }
+
+/// Alice lowers the upload limit during Bob's suspended storage operation.
+/// The next ingress check uses the new limit even though Bob's write rolls back;
+/// restoring the limit allows a subsequent upload to stage normally.
+#[test]
+fn staging_policy_can_change_during_suspended_storage() {
+    use jazz::host::HostTable;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let db = open_db();
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .unwrap();
+    let mut write = Box::pin(db.host_put_then_wait_for_test(
+        HostTable::new("settings_probe"),
+        b"pending",
+        b"bob",
+        std::future::pending(),
+    ));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 1,
+        ..Default::default()
+    });
+    drop(write);
+    let data = vec![b'x'; LEAF_MAX_BYTES + 1];
+    let error = jazz::block_on(db.push_streaming_value_upload(&mut upload, &data)).unwrap_err();
+    assert!(error.to_string().contains("ingress rate limit"), "{error}");
+    db.set_large_value_staging_policy(LargeValueStagingPolicy::default());
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .unwrap();
+    jazz::block_on(db.push_streaming_value_upload(&mut upload, &data)).unwrap();
+    jazz::block_on(db.abort_streaming_value_upload(upload)).unwrap();
+}

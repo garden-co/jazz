@@ -91,8 +91,6 @@ mod local_first_server_wait;
 mod maybe_conflicting;
 #[path = "../mirrored_lens_defaults.rs"]
 mod mirrored_lens_defaults;
-#[path = "../mutation_admission.rs"]
-mod mutation_admission;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
