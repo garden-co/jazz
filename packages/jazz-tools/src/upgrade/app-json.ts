@@ -1,5 +1,5 @@
 /**
- * Editing `jazz.app.json` for `jazz-tools upgrade`: the .64 file's `tsOnly`
+ * Editing `jazz.app.json` for `jazz-tools upgrade`: the .65 file's `tsOnly`
  * markers and `slices` go, the `computed` fields and `transforms` the
  * conversion found come in. Printed as Jazz's Rust writer prints the file
  * (an object or array stays on one line while it fits in 100 columns), so
@@ -22,7 +22,7 @@ export interface TransformDecl {
   view: TypeSpec;
 }
 
-/** The `tsOnly` markers of a .64 file: per table, field → kind. */
+/** The `tsOnly` markers of a .65 file: per table, field → kind. */
 export type TsOnlyMarkers = Record<string, Record<string, "computed" | "transform">>;
 
 const WIDTH = 100;

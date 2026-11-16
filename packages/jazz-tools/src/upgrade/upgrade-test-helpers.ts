@@ -2,7 +2,7 @@
  * Fixture apps for `jazz-tools upgrade`'s tests. Each is a .64-era app
  * (schema.ts, permissions.ts, migrations/, and the jazz.app.json /
  * jazz.permissions.json the old validate wrote) read with the published
- * jazz-tools@2.0.0-alpha.63, which has the same DSL surface as alpha.64.
+ * jazz-tools@2.0.0-alpha.63, which has the same DSL surface as alpha.65.
  * The tests never touch the workspace DSL: each fixture runs in a scratch
  * copy whose node_modules is an npm install of tests/upgrade/legacy-package.json.
  */

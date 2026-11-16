@@ -63,7 +63,7 @@ function thrownBy(run: () => unknown): unknown {
   return undefined;
 }
 
-describe("the schema DSL alpha.65 removed", () => {
+describe("the schema DSL alpha.66 removed", () => {
   it("is still exported from the package root under its old names", () => {
     for (const name of [...TOP_LEVEL, "schema", "migration"] as const) {
       expect(root, name).toHaveProperty(name);
@@ -88,7 +88,7 @@ describe("the schema DSL alpha.65 removed", () => {
       expect(thrown, name).toMatchObject({ code: "JAZZ_API_REMOVED" });
       const { message } = thrown as Error;
       expect(
-        message.startsWith(`[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.65`),
+        message.startsWith(`[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.66`),
       ).toBe(true);
       expect(message).toContain("`npx jazz-tools upgrade`");
       expect(message).toContain(UPGRADE_FROM_ALPHA_64_URL);
@@ -97,7 +97,7 @@ describe("the schema DSL alpha.65 removed", () => {
 
   it("throws when constructed", () => {
     expect(() => new (root.defineApp as unknown as new () => unknown)()).toThrow(
-      /\[JAZZ_API_REMOVED\] defineApp was removed in jazz-tools alpha\.65/,
+      /\[JAZZ_API_REMOVED\] defineApp was removed in jazz-tools alpha\.66/,
     );
     expect(() => new (root.schema.table as unknown as new () => unknown)()).toThrow(
       /\[JAZZ_API_REMOVED\] schema\.table was removed/,

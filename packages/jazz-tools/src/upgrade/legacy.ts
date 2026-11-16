@@ -1,6 +1,6 @@
 /**
  * Step 1 of `jazz-tools upgrade`: the jazz-tools the app was written for
- * (≤ alpha.64, with the schema DSL) must confirm that jazz.app.json and
+ * (≤ alpha.65, with the schema DSL) must confirm that jazz.app.json and
  * jazz.permissions.json are what schema.ts, permissions.ts and migrations/
  * make. upgrade converts from those files, so a stale one would lose
  * whatever it doesn't say.
@@ -20,7 +20,7 @@ import {
 } from "./project.js";
 
 /** The last release with the schema DSL. */
-export const LAST_DSL_ALPHA = 64;
+export const LAST_DSL_ALPHA = 65;
 const LAST_DSL_VERSION = `2.0.0-alpha.${LAST_DSL_ALPHA}`;
 
 export interface LegacyJazzTools {
@@ -68,7 +68,7 @@ export function findLegacyJazzTools(project: Project): LegacyJazzTools {
  * The environment for the app's own jazz-tools: everything but what points
  * Jazz at other native or WASM builds. jazz-napi and jazz-tools honour
  * `JAZZ_CORRECTNESS_*` (the monorepo's sealed test artifacts) and napi-rs
- * `NAPI_RS_*` overrides; inherited, they would run alpha.64's validate on
+ * `NAPI_RS_*` overrides; inherited, they would run alpha.65's validate on
  * this release's engine, which writes different files (no `slices`).
  */
 export function legacyEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

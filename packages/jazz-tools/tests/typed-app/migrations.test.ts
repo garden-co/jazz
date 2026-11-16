@@ -248,7 +248,7 @@ describe("migration lenses from jazz.app.json", () => {
   });
 });
 
-// What `defineMigration`'s types refused before alpha.65 (the removed
+// What `defineMigration`'s types refused before alpha.66 (the removed
 // "typechecks migrate coverage and op shapes"): a migration in jazz.app.json
 // has no TS types, so the loader refuses each shape when the app loads. Each
 // test also loads the corrected migration, so it fails if the loader

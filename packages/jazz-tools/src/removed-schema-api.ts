@@ -1,27 +1,27 @@
 /**
- * The TypeScript schema, permissions and migrations DSL that alpha.65
+ * The TypeScript schema, permissions and migrations DSL that alpha.66
  * removed: `jazz.app.json` and `jazz.permissions.json` are now an app's only
  * source, and `jazz.generated.ts` (written by `jazz-tools generate`) its
  * typed bindings. The names stay for one release as stubs that throw when
- * used, pointing at `jazz-tools upgrade`, which converts an alpha.64 app.
+ * used, pointing at `jazz-tools upgrade`, which converts an alpha.65 app.
  * Without them a bundler's "not exported" error would guess a similarly
  * named export.
  */
 import { type RemovedApi } from "./removed-api.js";
 
-/** Where the alpha.64 → alpha.65 changes are written up. */
+/** Where the alpha.65 → alpha.66 changes are written up. */
 export const UPGRADE_FROM_ALPHA_64_URL =
   "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha64";
 
 const FILES_AS_SOURCE =
   "jazz.app.json and jazz.permissions.json are now the app's schema, migrations and permissions, " +
-  "with typed bindings in jazz.generated.ts. Run `npx jazz-tools upgrade` to convert an alpha.64 app";
+  "with typed bindings in jazz.generated.ts. Run `npx jazz-tools upgrade` to convert an alpha.65 app";
 
 /** The error a removed DSL export throws. `code` is `JAZZ_API_REMOVED`. */
 export function removedSchemaApiError(name: string): Error {
   return Object.assign(
     new Error(
-      `[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.65: ${FILES_AS_SOURCE}. See ${UPGRADE_FROM_ALPHA_64_URL}`,
+      `[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.66: ${FILES_AS_SOURCE}. See ${UPGRADE_FROM_ALPHA_64_URL}`,
     ),
     { code: "JAZZ_API_REMOVED" },
   );
@@ -72,7 +72,7 @@ function removedNamespace<const TMembers extends readonly string[]>(
 }
 
 /**
- * @deprecated Removed in alpha.65, and throws when used: jazz.app.json is the
+ * @deprecated Removed in alpha.66, and throws when used: jazz.app.json is the
  * app's schema, jazz.permissions.json its permissions. Run `npx jazz-tools upgrade`.
  */
 export const schema = /*#__PURE__*/ removedNamespace("schema", [
@@ -99,7 +99,7 @@ export const schema = /*#__PURE__*/ removedNamespace("schema", [
 ] as const);
 
 /**
- * @deprecated Removed in alpha.65, and throws when used: migrations live in
+ * @deprecated Removed in alpha.66, and throws when used: migrations live in
  * jazz.app.json, written by `jazz-tools migrations create`. Run `npx jazz-tools upgrade`.
  */
 export const migration = /*#__PURE__*/ removedNamespace("migration", [
@@ -110,23 +110,23 @@ export const migration = /*#__PURE__*/ removedNamespace("migration", [
   "renameTableFrom",
 ] as const);
 
-/** @deprecated Removed in alpha.65, and throws when used: import `app` from ./jazz.generated. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: import `app` from ./jazz.generated. Run `npx jazz-tools upgrade`. */
 export const defineApp: RemovedApi = /*#__PURE__*/ removedSchemaApi("defineApp");
-/** @deprecated Removed in alpha.65, and throws when used: jazz.app.json is the app's schema. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: jazz.app.json is the app's schema. Run `npx jazz-tools upgrade`. */
 export const defineSchema: RemovedApi = /*#__PURE__*/ removedSchemaApi("defineSchema");
-/** @deprecated Removed in alpha.65, and throws when used: schema slicing is gone; use the generated `app`. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: schema slicing is gone; use the generated `app`. Run `npx jazz-tools upgrade`. */
 export const defineSliceableApp: RemovedApi = /*#__PURE__*/ removedSchemaApi("defineSliceableApp");
-/** @deprecated Removed in alpha.65, and throws when used: jazz.permissions.json holds the permissions. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: jazz.permissions.json holds the permissions. Run `npx jazz-tools upgrade`. */
 export const definePermissions: RemovedApi = /*#__PURE__*/ removedSchemaApi("definePermissions");
-/** @deprecated Removed in alpha.65, and throws when used: migrations live in jazz.app.json. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: migrations live in jazz.app.json. Run `npx jazz-tools upgrade`. */
 export const defineMigration: RemovedApi = /*#__PURE__*/ removedSchemaApi("defineMigration");
-/** @deprecated Removed in alpha.65, and throws when used: migrations live in jazz.app.json. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: migrations live in jazz.app.json. Run `npx jazz-tools upgrade`. */
 export const renameTableFrom: RemovedApi = /*#__PURE__*/ removedSchemaApi("renameTableFrom");
-/** @deprecated Removed in alpha.65, and throws when used: jazz.generated.ts embeds the compiled schema. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: jazz.generated.ts embeds the compiled schema. Run `npx jazz-tools upgrade`. */
 export const schemaToWasm: RemovedApi = /*#__PURE__*/ removedSchemaApi("schemaToWasm");
-/** @deprecated Removed in alpha.65, and throws when used: jazz.app.json is the app's schema. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: jazz.app.json is the app's schema. Run `npx jazz-tools upgrade`. */
 export const table: RemovedApi = /*#__PURE__*/ removedSchemaApi("table");
-/** @deprecated Removed in alpha.65, and throws when used: permissions are written in jazz.permissions.json. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: permissions are written in jazz.permissions.json. Run `npx jazz-tools upgrade`. */
 export const anyOf: RemovedApi = /*#__PURE__*/ removedSchemaApi("anyOf");
-/** @deprecated Removed in alpha.65, and throws when used: permissions are written in jazz.permissions.json. Run `npx jazz-tools upgrade`. */
+/** @deprecated Removed in alpha.66, and throws when used: permissions are written in jazz.permissions.json. Run `npx jazz-tools upgrade`. */
 export const allOf: RemovedApi = /*#__PURE__*/ removedSchemaApi("allOf");

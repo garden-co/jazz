@@ -1,5 +1,5 @@
 /**
- * `jazz-tools upgrade` end to end, on fixture apps written for alpha.64's
+ * `jazz-tools upgrade` end to end, on fixture apps written for alpha.65's
  * DSL (read with the published alpha.63, which has the same surface).
  *
  * Golden tests compare every file of the converted app, and the printed
@@ -278,7 +278,7 @@ describe("jazz-tools upgrade: refusals", () => {
     await refused(dir, /`validate --check` refused the app files/);
   });
 
-  it("refuses permissions that read the environment (alpha.64 baked an unset value in as `true`)", async () => {
+  it("refuses permissions that read the environment (alpha.65 baked an unset value in as `true`)", async () => {
     await refused(
       fixture("env-permissions"),
       /read the environment[\s\S]*permissions\.ts:5: reads `process\.env\.UPGRADE_FIXTURE_ROOM`/,
@@ -318,7 +318,7 @@ describe("jazz-tools upgrade: refusals", () => {
           "const migrations = { schemas: [], migrations: [] };",
         ),
     );
-    // alpha.64's validate writes the files for it and only warns that the app ships none of its versions.
+    // alpha.65's validate writes the files for it and only warns that the app ships none of its versions.
     execFileSync(
       process.execPath,
       [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
@@ -333,7 +333,7 @@ describe("jazz-tools upgrade: refusals", () => {
     );
   });
 
-  it("refuses enum columns with cases, which alpha.65 removed, naming each", async () => {
+  it("refuses enum columns with cases, which alpha.66 removed, naming each", async () => {
     await refused(
       fixture("enum-cases"),
       /column "issues\.kind" declares an enum whose cases carry fields, which Jazz no longer supports \(see https:\/\/github\.com\/garden-co\/jazz\/issues\/5758/,
@@ -360,10 +360,10 @@ describe("jazz-tools upgrade: refusals", () => {
     );
     writeFileSync(
       join(dir, "node_modules", "jazz-tools", "package.json"),
-      '{ "name": "jazz-tools", "version": "2.0.0-alpha.65" }',
+      '{ "name": "jazz-tools", "version": "2.0.0-alpha.66" }',
     );
     await expect(upgrade(dir)).rejects.toThrow(
-      /the app's jazz-tools is 2\.0\.0-alpha\.65\. Install jazz-tools@2\.0\.0-alpha\.64/,
+      /the app's jazz-tools is 2\.0\.0-alpha\.66\. Install jazz-tools@2\.0\.0-alpha\.65/,
     );
     expect(existsSync(join(dir, "schema.ts"))).toBe(true);
   });

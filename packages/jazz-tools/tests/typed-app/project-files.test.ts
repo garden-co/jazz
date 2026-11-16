@@ -83,11 +83,11 @@ describe("generate", () => {
     );
   });
 
-  it("points an alpha.64 project at upgrade", async () => {
+  it("points an alpha.65 project at upgrade", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-legacy-"));
     await writeFile(join(dir, "schema.ts"), "export {};\n");
     await expect(generateApp({ cwd: dir })).rejects.toThrow(
-      "schema.ts is an alpha.64 schema: jazz.app.json is now the app's schema. Run `npx jazz-tools upgrade` to convert the app.",
+      "schema.ts is an alpha.65 schema: jazz.app.json is now the app's schema. Run `npx jazz-tools upgrade` to convert the app.",
     );
   });
 });

@@ -46,7 +46,7 @@ const SERVER_REMOVED =
   "Jazz Cloud is deprecated for new apps.";
 
 export const VALIDATE_RENAMED =
-  "`jazz-tools validate` was renamed to `jazz-tools generate` in alpha.65: it checks jazz.app.json and " +
+  "`jazz-tools validate` was renamed to `jazz-tools generate` in alpha.66: it checks jazz.app.json and " +
   "jazz.permissions.json and writes jazz.generated.ts. Use `jazz-tools generate --check` in CI.";
 
 const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
@@ -407,7 +407,7 @@ function printHelp(): void {
   console.log("  migrations create     Record a schema change in jazz.app.json (--name <name>)");
   console.log("  migrations graph      Visualize the full migration graph");
   console.log(
-    "  upgrade               Convert an alpha.64 app (schema.ts, permissions.ts, migrations/) to the files",
+    "  upgrade               Convert an alpha.65 app (schema.ts, permissions.ts, migrations/) to the files",
   );
   console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",

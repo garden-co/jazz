@@ -1,10 +1,10 @@
 /**
- * Fail closed on permissions alpha.64 compiled from values that aren't in
- * the source. alpha.64's DSL ran permissions.ts when validate ran, so a
+ * Fail closed on permissions alpha.65 compiled from values that aren't in
+ * the source. alpha.65's DSL ran permissions.ts when validate ran, so a
  * `process.env` read became whatever it was then, and a `where({ col:
  * undefined })` compiled to no condition at all: `"true"`. A policy that
  * allows more than its author wrote must not survive into the files, which
- * from alpha.65 are the only source.
+ * from alpha.66 are the only source.
  */
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
@@ -46,9 +46,9 @@ export function refuseEnvironmentReads(project: Project, files: string[]): void 
   if (found.length === 0) return;
   throw new UpgradeRefusal(
     `the schema or permissions read the environment, which jazz.app.json and jazz.permissions.json can't:\n${found.map((f) => `  ${f}`).join("\n")}\n` +
-      "alpha.64 compiled each read with the value it had when validate ran, and an unset one compiled to no condition, so a policy " +
+      "alpha.65 compiled each read with the value it had when validate ran, and an unset one compiled to no condition, so a policy " +
       "can allow more than it says. Write the values as literals (or move the check out of the permissions), run " +
-      "`npx jazz-tools validate` with the app's alpha.64, review jazz.permissions.json, then upgrade again.",
+      "`npx jazz-tools validate` with the app's alpha.65, review jazz.permissions.json, then upgrade again.",
   );
 }
 
@@ -79,10 +79,10 @@ export function refuseDroppedConditions(project: Project): void {
   }
   if (found.length === 0) return;
   throw new UpgradeRefusal(
-    `jazz.permissions.json has \`true\` inside anyOf/allOf at ${found.join(", ")}. alpha.64 writes that for a condition that ` +
+    `jazz.permissions.json has \`true\` inside anyOf/allOf at ${found.join(", ")}. alpha.65 writes that for a condition that ` +
       "compiled to nothing, typically `where({ column: value })` with `value` undefined when validate ran, so the policy " +
       "allows more than permissions.ts says. Fix the condition in permissions.ts (or, if the policy really is unconditional, " +
-      "write it as `.always()` alone), run `npx jazz-tools validate` with the app's alpha.64, then upgrade again.",
+      "write it as `.always()` alone), run `npx jazz-tools validate` with the app's alpha.65, then upgrade again.",
     relative(project.root, project.permissionsJsonFile),
   );
 }

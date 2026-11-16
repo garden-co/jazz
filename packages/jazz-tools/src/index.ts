@@ -17,7 +17,7 @@ export {
   Profile,
 } from "./classic-api.js";
 
-// Removed in alpha.65 (files as source): stubs that throw, pointing at `jazz-tools upgrade`.
+// Removed in alpha.66 (files as source): stubs that throw, pointing at `jazz-tools upgrade`.
 export {
   schema,
   migration,

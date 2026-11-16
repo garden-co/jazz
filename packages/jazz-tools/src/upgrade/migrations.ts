@@ -1,6 +1,6 @@
 /**
  * Step 3 of `jazz-tools upgrade`: jazz.app.json must already carry every
- * schema version and migration that migrations/ holds (the .64 writer puts
+ * schema version and migration that migrations/ holds (the .65 writer puts
  * them there), since upgrade deletes migrations/.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -15,7 +15,7 @@ export interface MigrationsCheck {
   unshipped: string[];
 }
 
-/** Short hashes (12 hex) of migrations/snapshots, by either .64 naming. */
+/** Short hashes (12 hex) of migrations/snapshots, by either .65 naming. */
 function snapshotHashes(migrationsDir: string): string[] {
   const dir = join(migrationsDir, "snapshots");
   if (!existsSync(dir)) return [];
@@ -100,14 +100,14 @@ export function checkMigrations(
   if (missing.length > 0) {
     throw new UpgradeRefusal(
       `jazz.app.json doesn't carry everything in migrations/, which upgrade deletes:\n${missing.map((m) => `  - ${m}`).join("\n")}\n` +
-        "Run `npx jazz-tools validate` with the app's jazz-tools ≤ alpha.64 so it writes them into jazz.app.json, then upgrade again.",
+        "Run `npx jazz-tools validate` with the app's jazz-tools ≤ alpha.65 so it writes them into jazz.app.json, then upgrade again.",
     );
   }
   return { versions: history.length + 1, migrations: entries.length, unshipped };
 }
 
 /**
- * Snapshot files of this app's versions outside its migrations/: alpha.64's
+ * Snapshot files of this app's versions outside its migrations/: alpha.65's
  * `migrations create --schema-dir <elsewhere>` writes them under the
  * directory it ran in. They go with migrations/; others stay.
  */

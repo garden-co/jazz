@@ -210,7 +210,7 @@ function rewriteModule(
         imported === "migration"
       ) {
         manual.push(
-          `${at(element)}: uses \`${imported}\` from ${from}, which alpha.65 removes; move this code to jazz.app.json / jazz.permissions.json`,
+          `${at(element)}: uses \`${imported}\` from ${from}, which alpha.66 removes; move this code to jazz.app.json / jazz.permissions.json`,
         );
       }
     }
@@ -350,7 +350,7 @@ function rewriteModule(
       ? first.parent.getText(source)
       : first.getText(source);
     manual.push(
-      `${at(first)}: still builds with the schema DSL (\`${usage.replace(/\s+/g, " ").slice(0, 60)}\`), which alpha.65 removes; upgrade converts schema.ts only, so move this to app files by hand`,
+      `${at(first)}: still builds with the schema DSL (\`${usage.replace(/\s+/g, " ").slice(0, 60)}\`), which alpha.66 removes; upgrade converts schema.ts only, so move this to app files by hand`,
     );
   } else {
     for (const { decl, element } of dslImports) {

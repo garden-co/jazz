@@ -150,7 +150,8 @@ describe("scripts", () => {
   it("know which versions have the DSL", () => {
     expect(dslAlpha("2.0.0-alpha.63")).toBe(63);
     expect(dslAlpha("2.0.0-alpha.64")).toBe(64);
-    expect(dslAlpha("2.0.0-alpha.65")).toBeNull();
+    expect(dslAlpha("2.0.0-alpha.65")).toBe(65);
+    expect(dslAlpha("2.0.0-alpha.66")).toBeNull();
     expect(dslAlpha("2.0.0")).toBeNull();
   });
 });

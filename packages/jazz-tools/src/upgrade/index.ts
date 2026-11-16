@@ -1,9 +1,9 @@
 /**
- * `jazz-tools upgrade`: convert an alpha.64 app (schema.ts, permissions.ts,
- * migrations/) to alpha.65, where jazz.app.json and jazz.permissions.json
+ * `jazz-tools upgrade`: convert an alpha.65 app (schema.ts, permissions.ts,
+ * migrations/) to alpha.66, where jazz.app.json and jazz.permissions.json
  * are the only source and jazz.generated.ts holds the typed bindings.
  *
- * 1. The app's own jazz-tools (≤ alpha.64) must find its app files current.
+ * 1. The app's own jazz-tools (≤ alpha.65) must find its app files current.
  * 2. TS-only columns become `computed` fields and `transforms`, their
  *    callbacks moved unchanged into jazz.computed.ts.
  * 3. jazz.app.json must already carry migrations/'s history and migrations.
@@ -106,14 +106,14 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   const legacy = findLegacyJazzTools(project);
   notes.push(...checkLegacyFiles(project, legacy));
   const scan = scanImports(project);
-  // Fail closed on policies alpha.64 compiled from values the source doesn't hold.
+  // Fail closed on policies alpha.65 compiled from values the source doesn't hold.
   refuseEnvironmentReads(project, schemaSources(project, scan));
   refuseDroppedConditions(project);
 
   const appText = readFileSync(project.appFile, "utf8");
   const app = parseAppJson(appText);
   const tables = appTables(app);
-  // Enum columns with cases are gone in alpha.65; refuse before anything is written.
+  // Enum columns with cases are gone in alpha.66; refuse before anything is written.
   refusePayloadEnums(app);
   const markers = tsOnlyMarkers(app);
 
@@ -588,7 +588,7 @@ function escape(text: string): string {
 
 /**
  * package.json: scripts calling `jazz-tools validate` call `generate` (its
- * alpha.65 name), and a pinned alpha jazz-tools / jazz-napi moves to this one.
+ * alpha.66 name), and a pinned alpha jazz-tools / jazz-napi moves to this one.
  */
 function manifestEdit(
   project: Project,

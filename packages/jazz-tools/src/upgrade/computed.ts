@@ -1,10 +1,10 @@
 /**
- * Step 2 of `jazz-tools upgrade`: turn a .64 app's TS-only columns into the
+ * Step 2 of `jazz-tools upgrade`: turn a .65 app's TS-only columns into the
  * `computed` fields and `transforms` jazz.app.json declares, and move their
  * callbacks, unchanged, into `jazz.computed.ts`.
  *
  * schema.ts is read with the TypeScript checker against the DSL types of the
- * project's jazz-tools (≤ alpha.64), never run: `s.computed` return types
+ * project's jazz-tools (≤ alpha.65), never run: `s.computed` return types
  * give the declared types, the callbacks' parameter use gives `from`, and
  * the callbacks' source text moves as it is, with the top-level helpers and
  * imports it uses.
@@ -338,7 +338,7 @@ class Context {
     return symbol !== undefined && this.dslBindings.has(symbol);
   }
 
-  /** `s.<member>(...)`, with `s` the DSL namespace (a .63 object or a .64 ES namespace). */
+  /** `s.<member>(...)`, with `s` the DSL namespace (a .63 object, or the frozen ES namespace of .64 and later). */
   isDslCall(node: TS.CallExpression, member?: string): boolean {
     const callee = node.expression;
     return (
