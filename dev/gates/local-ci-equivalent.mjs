@@ -127,12 +127,9 @@ export const ciPartitions = Object.freeze({
     // links (a gated `Endpoint` linked from the default build) only show in
     // rustdoc, which nothing else runs. Both the default build and the
     // feature-gated endpoint, the two docs.rs and contributors see.
-    command(
-      "jazz-app-support rustdoc",
-      "cargo",
-      ["doc", "-p", "jazz-app-support", "--no-deps"],
-      { env: { RUSTDOCFLAGS: "-D warnings" } },
-    ),
+    command("jazz-app-support rustdoc", "cargo", ["doc", "-p", "jazz-app-support", "--no-deps"], {
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    }),
     command(
       "jazz-app-support rustdoc (unstable-endpoint)",
       "cargo",
