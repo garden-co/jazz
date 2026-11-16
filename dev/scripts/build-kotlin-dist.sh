@@ -23,7 +23,8 @@ android="${3:-}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
-version=2.0.0-alpha.66
+# Lockstep: jazz-tools' version, as the Gradle builds read it.
+version="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' packages/jazz-tools/package.json)"
 found=0
 for dir in "$natives"/*/; do
   ls "$dir" | grep -Eq '^(lib)?jazz_ffi\.(so|dylib|dll)$' || {
@@ -34,8 +35,11 @@ for dir in "$natives"/*/; do
 done
 [ "$found" -gt 0 ] || { echo "$natives holds no platform directories" >&2; exit 1; }
 
-# A JDK and Gradle as the Kotlin partition gets them (pinned, checksummed).
+# The pinned, checksummed JDK and Gradle 8.14.3, whatever PATH has: a runner's
+# Gradle 9 breaks AGP 8.13. test-kotlin-android.sh (--android) inherits it.
+export KOTLIN_TOOLCHAIN=pinned
 source dev/scripts/kotlin-toolchain.sh
+gradle --version | grep -q '^Gradle 8\.14\.3$' || { gradle --version >&2; echo "not the pinned Gradle 8.14.3" >&2; exit 1; }
 
 # The bindings are generated from this platform's build of the same sources.
 gradle --no-daemon --console=plain -p packages/jazz-kotlin \
