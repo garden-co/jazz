@@ -8,15 +8,15 @@
 //! Rows, queries and deltas are plain JSON typed by the app's schema; see
 //! the crate's README for the shapes. Not supported yet (refused with
 //! `JazzError::Refused`): includes, connecting to a sync server as an end
-//! user with a JWT, writing enums with payloads, reads inside transactions
+//! user with a JWT, reads inside transactions
 //! (and transactions altogether), computed columns and transforms (the
 //! language's bindings implement them over the stored values).
 
 pub mod c_abi;
 mod convert;
 mod core;
-mod endpoint;
 mod error;
+mod gate;
 mod relational;
 
 use std::sync::Arc;
@@ -264,8 +264,9 @@ impl JazzHandle {
         })())
     }
 
-    /// Writes the row with this id: inserts it, or replaces its columns.
-    /// `row_json` is a whole row, as for an insert. Returns the row.
+    /// Writes the row with this id: a new id inserts (`row_json` then holds
+    /// every required column), an existing one sets the columns `row_json`
+    /// names. Returns the row.
     pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
         self.core.surface(
             self.core
@@ -303,31 +304,7 @@ impl JazzHandle {
         Ok(Arc::new(Upload {
             handle: self,
             upload,
-        }))
-    }
-
-    /// The `/jazz` endpoint of this backend (opened with `permissions`),
-    /// at `base_path` (default `/jazz`), with the host's sign-in deciding
-    /// who each request's user is.
-    pub fn endpoint(
-        &self,
-        authenticator: Arc<dyn Authenticator>,
-        base_path: Option<String>,
-        session_ttl_secs: Option<u64>,
-        max_sockets: Option<u32>,
-    ) -> Result<Arc<Endpoint>> {
-        let auth: Arc<endpoint::HostAuthFn> =
-            Arc::new(move |request: &str| authenticator.authenticate(request.to_owned()));
-        let inner = self.core.surface(endpoint::EndpointCore::new(
-            &self.core,
-            auth,
-            base_path.as_deref(),
-            session_ttl_secs,
-            max_sockets.map(|max| max as usize),
-        ))?;
-        Ok(Arc::new(Endpoint {
-            inner,
-            contract: self.core.contract,
+            open: std::sync::atomic::AtomicBool::new(true),
         }))
     }
 
@@ -619,6 +596,16 @@ impl Watch {
 pub struct Upload {
     handle: Arc<JazzHandle>,
     upload: u64,
+    /// Not yet finished or aborted: dropped, it aborts.
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        if self.open.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let _ = self.handle.core.upload_abort(self.upload);
+        }
+    }
 }
 
 #[uniffi::export]
@@ -631,6 +618,7 @@ impl Upload {
 
     /// Commits the row with its value; returns the row.
     pub fn finish(&self) -> Result<String> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
         self.handle.core.surface(
             self.handle
                 .core
@@ -639,107 +627,10 @@ impl Upload {
     }
 
     pub fn abort(&self) -> Result<()> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
         self.handle
             .core
             .surface(self.handle.core.upload_abort(self.upload))
-    }
-}
-
-/// A backend app's answer to "who is this request's user", from the host's
-/// own sign-in: called on a thread of its own (it may block) with the
-/// request's JSON (`{"method", "path", "headers": [[name, value], …],
-/// "body": base64}`); returns `{"kind": "user", "userId", "claims"?,
-/// "expiresAt": unix seconds}`, `{"kind": "deviceAccount"}`, or `None` for
-/// no one.
-#[uniffi::export(with_foreign)]
-pub trait Authenticator: Send + Sync {
-    fn authenticate(&self, request_json: String) -> Option<String>;
-}
-
-/// What a served socket calls: each binary message for the client, then
-/// once the code and reason to close it with.
-#[uniffi::export(with_foreign)]
-pub trait SocketListener: Send + Sync {
-    fn on_message(&self, message: Vec<u8>);
-    fn on_close(&self, code: u16, reason: String);
-}
-
-/// A backend's `/jazz` endpoint (TS `createJazz`'s handler), served by the
-/// host's own HTTP server.
-#[derive(uniffi::Object)]
-pub struct Endpoint {
-    inner: endpoint::EndpointCore,
-    contract: u64,
-}
-
-#[uniffi::export]
-impl Endpoint {
-    /// Whether `path` is the socket path: upgrade it to a WebSocket and
-    /// serve it with `socket`.
-    pub fn is_socket(&self, path: String) -> bool {
-        self.inner.is_socket(&path)
-    }
-
-    /// Answers an HTTP request: `{"status", "headers", "body": base64}`.
-    pub fn handle(&self, request_json: String) -> Result<String> {
-        self.inner
-            .handle(&request_json)
-            .map_err(|e| JazzError::from(e).for_contract(self.contract))
-    }
-
-    /// Stops the client the endpoint acts as its users with.
-    pub fn shutdown(&self) -> Result<()> {
-        self.inner
-            .shutdown()
-            .map_err(|e| JazzError::from(e).for_contract(self.contract))
-    }
-
-    /// A handle acting as the request's user (TS `forReqUser`).
-    pub fn for_user(&self, request_json: String) -> Result<Arc<JazzHandle>> {
-        let core = self
-            .inner
-            .for_user(&request_json)
-            .map_err(|e| JazzError::from(e).for_contract(self.contract))?;
-        Ok(Arc::new(JazzHandle { core }))
-    }
-
-    /// Serves an upgraded socket (`upgrade_json`: the upgrade request).
-    pub fn socket(
-        &self,
-        upgrade_json: String,
-        listener: Arc<dyn SocketListener>,
-    ) -> Result<Arc<Socket>> {
-        let closing = listener.clone();
-        let inner = self
-            .inner
-            .socket(
-                &upgrade_json,
-                Box::new(move |message| listener.on_message(message)),
-                Box::new(move |code, reason| closing.on_close(code, reason)),
-            )
-            .map_err(|e| JazzError::from(e).for_contract(self.contract))?;
-        Ok(Arc::new(Socket { inner }))
-    }
-}
-
-/// A socket being served.
-#[derive(uniffi::Object)]
-pub struct Socket {
-    inner: endpoint::SocketCore,
-}
-
-#[uniffi::export]
-impl Socket {
-    /// A message from the client: every data message, binary or text (TS
-    /// sends its prelude as text), as its bytes.
-    pub fn push(&self, message: Vec<u8>) -> Result<()> {
-        self.inner.push(message).map_err(JazzError::from)
-    }
-
-    /// The client's socket closed; `on_close` follows. Named `end`, not
-    /// `close`, which would clash with Kotlin's `AutoCloseable.close`.
-    pub fn end(&self) {
-        self.inner.close();
     }
 }
 

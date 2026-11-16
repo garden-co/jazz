@@ -636,6 +636,27 @@ async fn a_device_account_links_to_the_users_provider_account() {
         Err(Error::SignedOut)
     ));
 
+    // Dave already has an account of his own: the backend refuses to link
+    // him to another device's, for good, not as a server failure.
+    let dave = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-dave".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    let other = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .unwrap();
+    let refused = other.session().unwrap().link("token-dave").await;
+    assert!(matches!(refused, Err(Error::Refused(_))), "{refused:?}");
+    other.shutdown().await.unwrap();
+    dave.shutdown().await.unwrap();
+
     // Signed in with her bearer elsewhere, she reaches the same account.
     let laptop = Jazz::open(
         client_files(),

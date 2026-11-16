@@ -6,6 +6,8 @@ mod common;
 use common::*;
 use jazz_ffi::{JazzError, JazzHandle};
 use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn rows(jazz: &JazzHandle, query: Value) -> Vec<Value> {
     parse(&jazz.all(query.to_string()).unwrap())
@@ -236,4 +238,121 @@ fn hops_over_uuid_arrays_reach_every_named_row() {
     let _ = cy;
     let members = rows(&jazz, json!({ "table": "teams", "hopTo": "memberRows" }));
     assert_eq!(names(&members, "name"), ["Ada", "Bo"]);
+}
+
+/// Review cases: `one` on hop, union and gather queries; a hop read inside a
+/// transaction; a subscription to a hop; the C ABI path; a non-boolean
+/// `history` refused by name.
+#[test]
+fn one_transactions_subscriptions_and_the_c_abi_on_relational_queries() {
+    use std::sync::mpsc;
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    let mut row = parse(&show(nil_uuid()));
+    row["name"] = json!("Gala");
+    let gala = parse(&jazz.insert("shows".into(), row.to_string()).unwrap())["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    jazz.insert("tasks".into(), task(&gala, "Rig", 1.0))
+        .unwrap();
+    jazz.insert("tasks".into(), task(&gala, "Doors", 2.0))
+        .unwrap();
+
+    let hop = json!({ "table": "tasks", "hopTo": "show" });
+    let one = |query: &Value| parse(&jazz.one(query.to_string()).unwrap().expect("a row"));
+    assert_eq!(one(&hop)["name"], "Gala");
+    let union = json!({ "union": [{ "table": "tasks" }], "orderBy": [{ "column": "title" }] });
+    assert_eq!(one(&union)["title"], "Doors");
+    let tasks_of_gala = json!({ "table": "shows", "hopTo": ["tasks"], "after": { "orderBy": [{ "column": "rank" }], "limit": 5 } });
+    assert_eq!(one(&tasks_of_gala)["title"], "Rig");
+
+    let tx = jazz.clone().begin().unwrap();
+    assert_eq!(
+        names(
+            parse(&tx.all(hop.to_string()).unwrap()).as_array().unwrap(),
+            "name"
+        ),
+        ["Gala"]
+    );
+    tx.rollback().unwrap();
+
+    struct Collect(Mutex<mpsc::Sender<Value>>);
+    impl jazz_ffi::SubscriptionListener for Collect {
+        fn on_delta(&self, delta: String) {
+            let _ = self.0.lock().unwrap().send(parse(&delta));
+        }
+        fn on_error(&self, _: String, _: String) {}
+    }
+    let (sender, deltas) = mpsc::channel();
+    let subscription = jazz
+        .subscribe(
+            tasks_of_gala.to_string(),
+            Arc::new(Collect(Mutex::new(sender))),
+        )
+        .unwrap();
+    let reset = deltas.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        names(reset["added"].as_array().unwrap(), "title"),
+        ["Doors", "Rig"]
+    );
+    jazz.insert("tasks".into(), task(&gala, "Tent", 3.0))
+        .unwrap();
+    let added = deltas.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(names(added["added"].as_array().unwrap(), "title"), ["Tent"]);
+    subscription.cancel();
+
+    match jazz.all(json!({ "table": "tasks", "history": "yes" }).to_string()) {
+        Err(JazzError::Refused { reason }) => assert!(reason.contains("history"), "{reason}"),
+        other => panic!("expected Refused, got {other:?}"),
+    }
+    jazz.shutdown().unwrap();
+
+    use jazz_ffi::c_abi::{jazz_call, jazz_close, jazz_open, jazz_string_free};
+    use std::ffi::{CStr, CString};
+    let config = CString::new(client_config()).unwrap();
+    let mut err = std::ptr::null_mut();
+    let h = unsafe { jazz_open(config.as_ptr(), &mut err) };
+    let call = |method: &str, args: Value| -> Value {
+        let (method, args) = (
+            CString::new(method).unwrap(),
+            CString::new(args.to_string()).unwrap(),
+        );
+        let mut err = std::ptr::null_mut();
+        let out = unsafe { jazz_call(h, method.as_ptr(), args.as_ptr(), &mut err) };
+        assert!(
+            !out.is_null(),
+            "{}",
+            unsafe { CStr::from_ptr(err) }.to_str().unwrap()
+        );
+        let text = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_owned();
+        unsafe { jazz_string_free(out) };
+        parse(&text)
+    };
+    let id = call(
+        "insert",
+        json!({ "table": "shows", "row": parse(&show(nil_uuid())) }),
+    )["id"]
+        .clone();
+    call(
+        "insert",
+        json!({ "table": "tasks", "row": parse(&task(id.as_str().unwrap(), "C", 1.0)) }),
+    );
+    assert_eq!(
+        call(
+            "one",
+            json!({ "query": { "table": "tasks", "hopTo": "show" } })
+        )["id"],
+        id
+    );
+    assert_eq!(
+        call(
+            "all",
+            json!({ "query": { "union": [{ "table": "tasks" }] } })
+        )
+        .as_array()
+        .unwrap()
+        .len(),
+        1
+    );
+    unsafe { jazz_close(h) };
 }
