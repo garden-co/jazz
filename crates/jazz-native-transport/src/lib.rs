@@ -645,6 +645,10 @@ impl WireTransport for WebSocketTransport {
         let frame = inbound.try_recv().ok();
         frame.map(|frame| frame.bytes)
     }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.features
+    }
 }
 
 #[derive(serde::Serialize)]

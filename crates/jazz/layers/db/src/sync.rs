@@ -59,7 +59,7 @@ use std::rc::Rc;
 use std::task::Poll;
 use web_time::Instant;
 
-use crate::protocol::SnapshotRef;
+use crate::protocol::{ReadViewSourceSpec, SnapshotRef};
 use crate::tx::TxId;
 use jazz_protocol::protocol::{PermissionAdvice, PermissionAdviceAction};
 use jazz_types::large_values::chunks::ChunkRequest;
@@ -297,6 +297,12 @@ pub trait Transport {
     fn flush(&mut self) -> Result<(), TransportError> {
         Ok(())
     }
+    /// The optional wire features negotiated with the peer, as far as this
+    /// transport knows them; it may learn them after it was attached (a
+    /// host's link learns them from the peer's `Hello`). None by default.
+    fn features(&self) -> crate::wire::WireFeatures {
+        crate::wire::FEATURE_NONE
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -314,6 +320,11 @@ impl Transport for InProcess {
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
+    }
+
+    /// Both ends run this build.
+    fn features(&self) -> crate::wire::WireFeatures {
+        crate::wire::current_wire_features()
     }
 }
 
@@ -549,6 +560,10 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
 
     fn take_failure(&mut self) -> Option<TransportError> {
         self.failed.as_mut().and_then(Option::take)
+    }
+
+    fn features(&self) -> crate::wire::WireFeatures {
+        self.wire.features()
     }
 }
 
@@ -1200,9 +1215,21 @@ pub struct WireRead {
     /// its (node, tx): the sender's own, or one a relay names for its
     /// upstream.
     pub rows: Vec<([u8; 16], Option<[u8; 16]>, u64)>,
+    /// The view the read went through: the root view (`Current`), or a
+    /// branch view (jazz#5806). Not part of this struct's encoding: a
+    /// [`WireKind`] with a branch read travels as its `SerializableViews`
+    /// form, which carries the views beside the reads.
+    #[serde(skip)]
+    pub view: ReadViewSourceSpec,
 }
 
+/// A commit's kind. It travels as [`WireKindRepr`]: a serializable commit
+/// whose reads all went through the root view encodes as `Serializable`,
+/// as before; one with a branch read as `SerializableViews`, which only a
+/// link that negotiated [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`]
+/// carries.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(from = "WireKindRepr", into = "WireKindRepr")]
 pub enum WireKind {
     Mergeable,
     /// `own`: the sender's own commits (by local seq) that were unsettled
@@ -1211,11 +1238,102 @@ pub enum WireKind {
     /// `snapshot`: the authority seq it read at, as the sender's server
     /// served it when it pinned it.
     Serializable {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+    },
+}
+
+impl WireKind {
+    /// It names a read through a branch view, so it needs a link that
+    /// negotiated [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`].
+    pub fn reads_branch_views(&self) -> bool {
+        matches!(self, WireKind::Serializable { reads, .. }
+            if reads.iter().any(|read| read.view != ReadViewSourceSpec::Current))
+    }
+}
+
+/// [`WireKind`]'s encoding. Variants are only ever appended.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum WireKindRepr {
+    Mergeable,
+    Serializable {
         #[serde(deserialize_with = "accepted_seq")]
         snapshot: u64,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
+    /// A serializable commit with a read through a branch view: `views`
+    /// holds each read's view, in order.
+    SerializableViews {
+        #[serde(deserialize_with = "accepted_seq")]
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+        views: Vec<ReadViewSourceSpec>,
+    },
+}
+
+impl From<WireKind> for WireKindRepr {
+    fn from(kind: WireKind) -> Self {
+        let viewed = kind.reads_branch_views();
+        match kind {
+            WireKind::Mergeable => Self::Mergeable,
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } if viewed => Self::SerializableViews {
+                snapshot,
+                views: reads.iter().map(|read| read.view.clone()).collect(),
+                reads,
+                own,
+            },
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } => Self::Serializable {
+                snapshot,
+                reads,
+                own,
+            },
+        }
+    }
+}
+
+impl From<WireKindRepr> for WireKind {
+    fn from(repr: WireKindRepr) -> Self {
+        match repr {
+            WireKindRepr::Mergeable => Self::Mergeable,
+            WireKindRepr::Serializable {
+                snapshot,
+                reads,
+                own,
+            } => Self::Serializable {
+                snapshot,
+                reads,
+                own,
+            },
+            // A view list shorter than the reads leaves the rest `Current`;
+            // the authority validates each read through the view it names.
+            WireKindRepr::SerializableViews {
+                snapshot,
+                mut reads,
+                own,
+                views,
+            } => {
+                for (read, view) in reads.iter_mut().zip(views) {
+                    read.view = view;
+                }
+                Self::Serializable {
+                    snapshot,
+                    reads,
+                    own,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2170,8 +2288,21 @@ pub struct RejectedTransaction {
 #[derive(Debug)]
 pub struct Upstream(u64);
 
+impl Client {
+    /// The upstream's negotiated wire features: the live link's, or (while
+    /// detached) the last link's.
+    pub(crate) fn upstream_features(&mut self) -> crate::wire::WireFeatures {
+        if let Some(transport) = &self.transport {
+            self.last_features = transport.features();
+        }
+        self.last_features
+    }
+}
+
 pub(crate) struct Client {
     transport: Option<Box<dyn Transport>>,
+    /// The wire features the last link negotiated, kept while detached.
+    last_features: crate::wire::WireFeatures,
     /// A new link came up: the versions the last upstream held unsettled
     /// are dropped before anything it sends applies (see
     /// [`Inner::forget_upstream_band`]).
@@ -7599,6 +7730,7 @@ impl Client {
             connection: 0,
             sent: SentCommits::default(),
             transport: None,
+            last_features: crate::wire::FEATURE_NONE,
             forget_upstream: false,
             hint: Rc::new(StdCell::new(Link {
                 hint: RemoteLinkHint::NoServer,
@@ -9948,6 +10080,35 @@ impl Db {
                                         "a commit of {size} bytes is over the {limit} bytes one \
                                          message may carry: not supported yet"
                                     ),
+                                },
+                            },
+                            global: false,
+                        });
+                    }
+                    _ => kept.push((commit, push)),
+                }
+            }
+            (commits, pushes) = kept.into_iter().unzip();
+        }
+        // A commit with a read through a branch view is checked against
+        // that view only by an upstream that negotiated it: this link's
+        // (an older server, reached after the commit was made) would check
+        // it as a root read. It is refused here, for good, as a rejected
+        // fate (jazz#5806).
+        if client.upstream_features() & crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS == 0 {
+            let mut kept = Vec::with_capacity(commits.len());
+            for (commit, push) in commits.into_iter().zip(pushes) {
+                match &commit {
+                    SyncMessage::Commit { id, kind, .. } if kind.reads_branch_views() => {
+                        client.refused.push(SyncMessage::Fate {
+                            id: *id,
+                            outcome: Outcome::Refused {
+                                through: client.known,
+                                error: WireError::Rejected {
+                                    reason: None,
+                                    message: "a serializable transaction that read through a \
+                                              branch view: not supported yet by this server"
+                                        .to_owned(),
                                 },
                             },
                             global: false,
@@ -14315,8 +14476,36 @@ impl Db {
                     request_claims: None,
                     schema: Some(schema),
                 };
+                // A branch read is evaluated through its view (jazz#5806):
+                // the head's rows, or the base's it inherits. A snapshot (a
+                // historic read) is never a transaction's read.
+                let view = match &read.view {
+                    ReadViewSourceSpec::Current => None,
+                    ReadViewSourceSpec::Snapshot { .. } => {
+                        return Err((
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "a serializable read names a snapshot view",
+                            ),
+                            Vec::new(),
+                        ));
+                    }
+                    source @ ReadViewSourceSpec::BranchView { .. } => {
+                        let opts = ReadOpts {
+                            read_view: crate::protocol::ReadViewSpec {
+                                source: source.clone(),
+                                include_deleted: read.include_deleted,
+                            },
+                            ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
+                        };
+                        ReadSpec::of(&opts, &inner)
+                            .map_err(|e| (e, Vec::new()))?
+                            .view
+                    }
+                };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
+                    view,
                     ..ReadSpec::default()
                 };
                 let now: Vec<([u8; 16], Option<Pos>)> = inner
@@ -15214,6 +15403,97 @@ mod tests {
     }
 
     use super::*;
+
+    /// A serializable commit's reads, at a branch view or not.
+    fn serializable(view: ReadViewSourceSpec) -> WireKind {
+        WireKind::Serializable {
+            snapshot: 7,
+            reads: vec![WireRead {
+                version: [1; 16],
+                query: Query::from("todos"),
+                binding: BTreeMap::new(),
+                include_deleted: false,
+                rows: vec![([2; 16], None, 5)],
+                view,
+            }],
+            own: vec![3],
+        }
+    }
+
+    fn draft_over_main() -> ReadViewSourceSpec {
+        let branch = |byte: u8| {
+            crate::protocol::BranchSelector::new([(
+                "branch_id",
+                Value::Uuid(uuid::Uuid::from_bytes([byte; 16])),
+            )])
+        };
+        ReadViewSourceSpec::BranchView {
+            head: branch(2),
+            base: Some(crate::protocol::BranchViewBase::current(branch(1))),
+        }
+    }
+
+    /// `WireKind` as it was encoded before branch reads (jazz#5806).
+    #[derive(Serialize, Deserialize)]
+    enum OldWireKind {
+        Mergeable,
+        Serializable {
+            snapshot: u64,
+            reads: Vec<OldWireRead>,
+            own: Vec<u64>,
+        },
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldWireRead {
+        version: [u8; 16],
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        rows: Vec<([u8; 16], Option<[u8; 16]>, u64)>,
+    }
+
+    /// A serializable commit whose reads all went through the root view
+    /// encodes exactly as before, so a peer without
+    /// `FEATURE_SERIALIZABLE_BRANCH_READS` takes it; one with a branch read
+    /// travels as the appended `SerializableViews`, which keeps each read's
+    /// view and which such a peer cannot decode (hence the feature gate).
+    #[test]
+    fn a_branch_read_commit_travels_as_serializable_views() {
+        let old = OldWireKind::Serializable {
+            snapshot: 7,
+            reads: vec![OldWireRead {
+                version: [1; 16],
+                query: Query::from("todos"),
+                binding: BTreeMap::new(),
+                include_deleted: false,
+                rows: vec![([2; 16], None, 5)],
+            }],
+            own: vec![3],
+        };
+        let root = serializable(ReadViewSourceSpec::Current);
+        assert!(!root.reads_branch_views());
+        assert_eq!(
+            postcard::to_allocvec(&root).unwrap(),
+            postcard::to_allocvec(&old).unwrap()
+        );
+        assert!(matches!(
+            postcard::to_allocvec(&WireKind::Mergeable)
+                .unwrap()
+                .as_slice(),
+            [0]
+        ));
+
+        let viewed = serializable(draft_over_main());
+        assert!(viewed.reads_branch_views());
+        let bytes = postcard::to_allocvec(&viewed).unwrap();
+        assert_eq!(bytes[0], 2, "the appended SerializableViews variant");
+        let WireKind::Serializable { reads, .. } = postcard::from_bytes(&bytes).unwrap() else {
+            panic!("not serializable");
+        };
+        assert_eq!(reads[0].view, draft_over_main());
+        assert!(postcard::from_bytes::<OldWireKind>(&bytes).is_err());
+    }
 
     fn holds(message: &SyncMessage) -> (u64, Vec<[u8; 16]>, Vec<[u8; 16]>) {
         let SyncMessage::Holds { id, added, removed } = message else {
