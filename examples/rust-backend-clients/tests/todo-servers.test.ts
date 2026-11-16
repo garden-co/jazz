@@ -101,12 +101,7 @@ describe.each([
     expect(row).toMatchObject({ title: "Written in Rust", done: false });
   });
 
-  // TODO(.66): a row the main backend writes (todos read: "true") never
-  // shows in the scoped client's `jazz.all(todos::query())`, even after
-  // `wait({ tier: "global" })`. Found while switching the examples to
-  // backend clients; skipped for .65 until jazz-app's scoped read path is
-  // fixed.
-  it.skip("sees the main backend's writes through its REST API", async () => {
+  it("sees the main backend's writes through its REST API", async () => {
     const bin = cargoBin(pkg, pkg);
     const backend = await startMainBackend(join(examples, dir));
     cleanups.push(() => backend.close());
