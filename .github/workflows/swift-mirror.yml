@@ -29,6 +29,7 @@ on:
       - "crates/jazz-ffi/**"
       - "dev/scripts/build-swift-xcframework.sh"
       - "dev/scripts/assemble-swift-mirror.sh"
+      - "examples/stage-plan/apps/swiftui/**"
       - ".github/workflows/swift-mirror.yml"
   workflow_dispatch:
     inputs:
@@ -180,7 +181,19 @@ jobs:
           devices = [d for runtime, ds in json.load(sys.stdin)["devices"].items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")]
           print(devices[-1]["udid"])')
           echo "iOS simulator: $udid"
+          echo "SIMULATOR=$udid" >> "$GITHUB_ENV"
           (cd "$verify" && xcodebuild test -scheme jazz-swift -destination "platform=iOS Simulator,id=$udid" -quiet)
+      - name: Build the SwiftUI example for macOS, and run its UI test on the iOS simulator
+        run: |
+          # examples/stage-plan/apps/swiftui depends on garden-co/jazz-swift;
+          # before publishing, that's the local copy of the mirror.
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          example=examples/stage-plan/apps/swiftui
+          perl -0pi -e "s|    url: https://github.com/garden-co/jazz-swift\n    exactVersion: [^\n]*|    path: $RUNNER_TEMP/verify|" "$example/project.yml"
+          grep -n -A1 "^  Jazz:" "$example/project.yml"
+          (cd "$example" && xcodegen generate)
+          (cd "$example" && xcodebuild build -scheme StagePlanUI -destination 'platform=macOS' -quiet CODE_SIGNING_ALLOWED=NO)
+          (cd "$example" && xcodebuild test -scheme StagePlanUI -destination "platform=iOS Simulator,id=$SIMULATOR" -quiet CODE_SIGNING_ALLOWED=NO)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-swift-mirror
