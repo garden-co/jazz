@@ -430,10 +430,12 @@ impl JazzHandle {
     }
 
     fn watch(&self, what: &str, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
-        let inner = self.core.surface(
-            self.core
-                .watch(what, Box::new(move |state| listener.on_change(state))),
-        )?;
+        let inner = self.core.surface(self.core.watch(
+            what,
+            Box::new(move |state| {
+                listener.on_change(state.unwrap_or_else(|| CLOSED_STATE.to_owned()))
+            }),
+        ))?;
         Ok(Arc::new(Watch { inner }))
     }
 
@@ -648,7 +650,12 @@ pub trait TokenProvider: Send + Sync {
     fn token(&self, reason: String) -> Result<Option<String>>;
 }
 
-/// What a session or sync watch calls with each state (JSON).
+/// A watch's last state when the app closes (signed out, closed, its store
+/// deleted): `{"kind": "closed"}`, after which no call comes.
+const CLOSED_STATE: &str = r#"{"kind":"closed","message":"the app is closed"}"#;
+
+/// What a watch calls with each state (JSON); when the app closes, a last
+/// `{"kind": "closed", "message"}`, after which no call comes.
 #[uniffi::export(with_foreign)]
 pub trait StateListener: Send + Sync {
     fn on_change(&self, state_json: String);
