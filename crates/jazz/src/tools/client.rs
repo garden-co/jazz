@@ -786,6 +786,7 @@ fn link_failure(error: NativeTransportError) -> LinkFailure {
         },
         NativeTransportError::Terminal(message) => LinkFailure::Refused(message),
         NativeTransportError::Retryable(message) => LinkFailure::Network(message),
+        NativeTransportError::Wire(error) => LinkFailure::from_wire_error(&error, false),
     }
 }
 
@@ -795,6 +796,9 @@ fn terminal_failure(stopped: NativeTransportTerminal) -> LinkFailure {
     match stopped {
         NativeTransportTerminal::Failed(error @ NativeTransportError::AuthRejected(_)) => {
             link_failure(error)
+        }
+        NativeTransportTerminal::Failed(NativeTransportError::Wire(error)) => {
+            LinkFailure::from_wire_error(&error, true)
         }
         NativeTransportTerminal::Failed(
             NativeTransportError::Terminal(message) | NativeTransportError::Retryable(message),
@@ -984,13 +988,10 @@ impl JazzClient {
                     keeper.live = Some((attempt, link.terminal));
                     keeper.handle(LinkInput::Admitted(attempt));
                 }
-                Err(
-                    NativeTransportError::Terminal(error)
-                    | NativeTransportError::AuthRejected(error),
-                ) => {
-                    return Err(JazzError::Connection(error));
+                Err(error) if !error.is_retryable() => {
+                    return Err(JazzError::Connection(error.to_string()));
                 }
-                Err(error @ NativeTransportError::Retryable(_)) => {
+                Err(error) => {
                     tracing::debug!(%error, "jazz client starts offline");
                     keeper.handle(LinkInput::Ended(attempt, link_failure(error)));
                 }

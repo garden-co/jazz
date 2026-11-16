@@ -2716,6 +2716,11 @@ async fn connect_and_bridge(
                 "native relay socket connect failed: {error}"
             )));
         }
+        // The server answered before its hello: the shared link decides
+        // what its answer means, as it does for every host.
+        Err(NativeTransportError::Wire(error)) => {
+            return LinkEnd::Lost(LinkFailure::from_wire_error(&error, false));
+        }
         // Retrying the same request with the same credential cannot
         // succeed (#4248).
         Err(NativeTransportError::AuthRejected(error)) => {
@@ -2780,6 +2785,9 @@ async fn bridge_connection(
                     reason: AuthFailureReason::from_message(&error),
                     message: format!("native relay socket terminated: {error}"),
                 }
+            }
+            NativeTransportTerminal::Failed(NativeTransportError::Wire(error)) => {
+                LinkFailure::from_wire_error(&error, true)
             }
             NativeTransportTerminal::Failed(
                 NativeTransportError::Terminal(error) | NativeTransportError::Retryable(error),

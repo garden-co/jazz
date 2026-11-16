@@ -35,6 +35,7 @@
 use std::collections::VecDeque;
 
 use crate::options::RemoteLinkHint;
+use crate::wire::{WireError, WireErrorCode, WireRetry};
 
 pub mod host;
 
@@ -174,6 +175,53 @@ impl LinkFailure {
             | Self::Fatal(message)
             | Self::Reauthenticate(message) => message,
         }
+    }
+}
+
+/// How the app's backend starts the message of a planned re-authentication:
+/// an `auth_failed` error with `after_resume` retry that asks the client to
+/// connect again before its session's expiry.
+pub const REAUTHENTICATE_MESSAGE_PREFIX: &str = "reauthenticate:";
+
+impl LinkFailure {
+    /// Classify the [`WireError`] a server ended a connection with. Every host
+    /// decides this here, so a server's answer moves every client's link the
+    /// same way.
+    ///
+    /// `admitted` says whether the server had sent its hello on this
+    /// connection. Decided by `code`, never by `retry` alone: a malformed
+    /// frame or a refused credential can carry `later`, and retrying those
+    /// cannot succeed. The message decides only what the wire has no field
+    /// for yet: a planned re-authentication and the refusal's reason.
+    ///
+    /// | error                                   | before hello     | after hello |
+    /// |-----------------------------------------|------------------|-------------|
+    /// | `auth_failed`, reauthenticate message   | Reauthenticate   | Reauthenticate |
+    /// | `auth_failed`, anything else            | AuthRejected     | AuthRejected |
+    /// | `not_ready` + `later`                   | ServerNotReady   | Network     |
+    /// | `backpressure` + `later`                | Refused          | Network     |
+    /// | anything else                           | Fatal            | Fatal       |
+    pub fn from_wire_error(error: &WireError, admitted: bool) -> Self {
+        let message = error.message.clone();
+        if error.code == WireErrorCode::AuthFailed {
+            if error.retry == WireRetry::AfterResume
+                && error.message.starts_with(REAUTHENTICATE_MESSAGE_PREFIX)
+            {
+                return Self::Reauthenticate(message);
+            }
+            return Self::AuthRejected {
+                reason: AuthFailureReason::from_message(&error.message),
+                message,
+            };
+        }
+        if error.asks_reconnect_later() {
+            return match (admitted, error.code) {
+                (true, _) => Self::Network(message),
+                (false, WireErrorCode::NotReady) => Self::ServerNotReady(message),
+                (false, _) => Self::Refused(message),
+            };
+        }
+        Self::Fatal(message)
     }
 }
 
