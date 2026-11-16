@@ -36,14 +36,16 @@ func TestAppFilesAreStagePlans(t *testing.T) {
 	}
 }
 
-// testServer is a `jazz-tools server` on a memory store for the test
-// (JAZZ_TOOLS names the binary; by default the repository's debug build).
 // testServer is a Jazz core (`jazz-tools server`, JAZZ_TOOLS) on a memory
 // store, and in front of it jazz-app's test relay (JAZZ_TEST_RELAY), the
 // stand-in for a TS main backend's /jazz: it publishes StagePlan's files and
-// signs "Bearer token-<user>" in as <user>.
+// signs "Bearer token-<user>" in as <user>. With JAZZ_MAIN_BACKEND=ts it
+// is a real TS main backend instead (tsMainBackend).
 func testServer(t *testing.T) server {
 	t.Helper()
+	if os.Getenv("JAZZ_MAIN_BACKEND") == "ts" {
+		return tsMainBackend(t)
+	}
 	tools := os.Getenv("JAZZ_TOOLS")
 	if tools == "" {
 		tools = "../../../../target/debug/jazz-tools"

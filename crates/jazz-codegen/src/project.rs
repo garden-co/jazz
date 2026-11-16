@@ -79,7 +79,8 @@ impl From<Lang> for Selected {
 
 /// The languages `dir`'s app is written in: those given, or else each that
 /// [`Lang::detected_in`] finds there (a `package.json`; a `Cargo.toml` of
-/// a crate depending on `jazz-app`; a `go.mod` requiring `jazz-go`) or
+/// a crate depending on `jazz-app`; a `Package.swift` depending on Jazz;
+/// a `go.mod` requiring `jazz-go`) or
 /// whose bindings are committed there.
 pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
     languages_or(dir, given, None)
@@ -137,7 +138,7 @@ pub fn languages_or(
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, the Cargo.toml of a crate depending on jazz-app, a build.gradle.kts depending on jazz-kotlin, or a go.mod requiring jazz-go); pass --lang",
+             (a package.json, the Cargo.toml of a crate depending on jazz-app, a Package.swift depending on Jazz (jazz-swift), a build.gradle.kts depending on jazz-kotlin, or a go.mod requiring jazz-go); pass --lang",
             shown(&dir),
         ));
     }
