@@ -1,2 +1,2 @@
 {"name":"t1-migrations","private":true,"type":"module","imports":{"#app":"./schema.ts","#permissions":"./permissions.ts"},
-"dependencies":{"jazz-tools":"2.0.0-alpha.64","jazz-wasm":"2.0.0-alpha.64","jazz-napi":"2.0.0-alpha.64","hono":"^4","@hono/node-server":"^1","tsx":"^4","ws":"^8","typescript":"^5"}}
+"dependencies":{"jazz-tools":"2.0.0-alpha.65","jazz-wasm":"2.0.0-alpha.65","jazz-napi":"2.0.0-alpha.65","hono":"^4","@hono/node-server":"^1","tsx":"^4","ws":"^8","typescript":"^5"}}
