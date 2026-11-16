@@ -179,8 +179,8 @@ wait on the transaction result.
 ## Know when permissions are checked
 
 Jazz doesn't check a transaction's writes one by one as you make them. It checks them all when the
-transaction is decided: by the authority when the committed transaction reaches it, or locally for
-an app without a sync server. If any write isn't allowed, the whole transaction is rejected, not
+transaction is decided: by the server (the authority) when the committed transaction reaches it, or
+locally for an app without a sync server. If any write isn't allowed, the whole transaction is rejected, not
 just that write, and `wait(...)` rejects as described in [Handle errors](#handle-errors).
 
 Each write is checked against the state the transaction leaves behind:
@@ -195,9 +195,8 @@ Each write is checked against the state the transaction leaves behind:
 
 For example:
 
-- **A task inserted with the show it needs.** If a task's insert policy requires its show to exist
-  (for example, `policy.shows.exists.where({ id: task.showId })`), you can create the show and the
-  task in one transaction, in either order. Checked alone, the task insert would be refused,
+- **A task inserted with the show it needs.** If a task's insert policy requires its show to
+  exist, you can create the show and the task in one transaction, in either order. Checked alone, the task insert would be refused,
   because the show doesn't exist yet; checked with the rest of the transaction, it's allowed. The
   show insert itself still has to be allowed by its own policy: rows a transaction writes can't
   grant each other access in a cycle.
