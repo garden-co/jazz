@@ -37,16 +37,13 @@ public enum DocsSnippets {
         // until your sign-in names a user, who takes the guest's account
         // over if they have none yet. Call `session.refresh()` when your
         // sign-in changes.
-        let session = try await JazzSession.open(
-            app: JazzApp.app, appId: appId, serverUrl: endpoint,
+        let session = JazzApp.session(
+            appId: appId, serverUrl: endpoint,
             bearer: { _ in try await MySignIn.currentToken() },  // nil while signed out
             start: .device, dataDir: dataDir)
-        for try await snapshot in session.snapshots where snapshot.status == .ready {
-            print("signed in as", snapshot.user?.account ?? "-")
-            break
-        }
-        // The client for the user signed in now. Get it again when
-        // `clientEpoch` changes: one kept from before throws `.replaced`.
+        // The signed-in user's client, once the session is ready (it throws
+        // .noUser if no one is). `session.clients` gives the next one each
+        // time the user changes, and nil on sign-out.
         let jazz = try await session.client()
         // #endregion context-setup-swift-session
         return (session, jazz)
