@@ -67,8 +67,11 @@ backend decides what the client is, reported by `backend_client()` /
   returns a handle acting as one of the app's users, under their
   permissions. That never creates an account: `NoAccount` (kind
   `"noAccount"`, with `userId`) when the user has none yet, `Permission`
-  when the main backend refuses the identity (its 403). Closing such a
-  handle leaves its parent open.
+  when the main backend refuses the identity (its 403), and
+  `BundleMismatch` (kind `"bundleMismatch"`, with `own` and `served`, the
+  two bundle ids) when the client's `permissions` aren't the ones the main
+  backend serves: reopen it with the app's published
+  `jazz.permissions.json`. Closing such a handle leaves its parent open.
 - `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
   kind `"refused"`), as on a `for_user` handle or any other app.
 

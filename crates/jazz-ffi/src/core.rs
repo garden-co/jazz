@@ -1916,6 +1916,19 @@ mod tests {
             matches!(&refused, FfiError::Permission(m) if m.contains("alice") && m.contains("identity_not_authorized")),
             "{refused:?}"
         );
+        // A bundle mismatch is its own kind, a refusal: never retryable I/O.
+        let mismatch = JazzError::from(for_user_error(
+            "alice",
+            jazz_app::Error::BundleMismatch {
+                own: "aa".into(),
+                served: "bb".into(),
+            },
+        ));
+        assert_eq!(mismatch.kind(), "bundleMismatch");
+        assert!(
+            matches!(&mismatch, JazzError::BundleMismatch { own, served, .. } if own == "aa" && served == "bb")
+        );
+        assert_eq!(mismatch.clone().for_contract(1).kind(), "refused");
         assert!(matches!(
             for_user_error("alice", jazz_app::Error::NoAccount("alice".into())),
             FfiError::NoAccount { user_id, .. } if user_id == "alice"
