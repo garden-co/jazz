@@ -33,6 +33,12 @@ pub enum Error {
     #[error("subscription rejected: {0}")]
     Rejected(String),
 
+    /// The app's backend refused the request for good: retrying it as it is
+    /// will not help (e.g. linking a device account to a user who already
+    /// has another account).
+    #[error("refused: {0}")]
+    Refused(String),
+
     /// No one is signed in: the token provider gave no bearer, or the app's
     /// backend named no user from it.
     #[error("signed out")]
