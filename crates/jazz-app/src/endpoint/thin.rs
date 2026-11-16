@@ -88,17 +88,23 @@ pub(crate) struct SessionClient {
 impl SessionClient {
     /// Start serving: the client connects on the first request, with
     /// `schema` (the public schema JSON the thin client bound).
+    /// `slot` is held for as long as the client runs: the endpoint counts
+    /// its session clients by it.
     pub fn start(
         target: SessionTarget,
         schema: Vec<u8>,
         answers: mpsc::UnboundedSender<ThinResponse>,
+        slot: Box<dyn Send>,
     ) -> Self {
         let (requests, receiver) = mpsc::unbounded_channel();
         let spawned = std::thread::Builder::new()
             .name("jazz-thin-session".into())
             .spawn({
                 let answers = answers.clone();
-                move || run(target, schema, receiver, answers)
+                move || {
+                    run(target, schema, receiver, answers);
+                    drop(slot);
+                }
             });
         if let Err(error) = spawned {
             // Its receiver is gone with the closure: every request is
@@ -196,31 +202,12 @@ fn run(
             // requests forever. A commit that times out may still reach the
             // core: the client is told its fate is unknown, not that it
             // failed.
-            let served = tokio::time::timeout(
+            let body = within(
                 REQUEST_TIMEOUT,
+                &request.op,
                 client.serve_thin_transaction(&mut transactions, &request),
             )
             .await;
-            let body = match served {
-                Ok(Ok(body)) => body,
-                Ok(Err(error)) => ThinBody::Error {
-                    code: "storage".to_owned(),
-                    message: error.to_string(),
-                },
-                Err(_) => ThinBody::Error {
-                    code: "not_observed".to_owned(),
-                    message: match request.op {
-                        ThinOp::Commit { .. } => format!(
-                            "the core did not confirm the commit within {}s: it may still apply",
-                            REQUEST_TIMEOUT.as_secs()
-                        ),
-                        _ => format!(
-                            "the core did not answer within {}s",
-                            REQUEST_TIMEOUT.as_secs()
-                        ),
-                    },
-                },
-            };
             if answers
                 .send(ThinResponse {
                     id: request.id,
@@ -245,5 +232,69 @@ fn refuse_all(
     requests.close();
     while let Ok(request) = requests.try_recv() {
         let _ = answers.send(refused(request.id, "storage", message));
+    }
+}
+
+/// The answer to request `op` that `serving` gives within `timeout`. One
+/// the core keeps waiting must not hold the session's later requests
+/// forever. A commit that times out may still reach the core: its outcome
+/// is unknown ([`COMMIT_OUTCOME_UNKNOWN`]), not a failure the client may
+/// retry; any other request is `not_observed`, nothing of it published.
+async fn within(
+    timeout: Duration,
+    op: &ThinOp,
+    serving: impl std::future::Future<Output = jazz::tools::Result<ThinBody>>,
+) -> ThinBody {
+    match tokio::time::timeout(timeout, serving).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => ThinBody::Error {
+            code: "storage".to_owned(),
+            message: error.to_string(),
+        },
+        Err(_) if matches!(op, ThinOp::Commit { .. }) => ThinBody::Error {
+            code: COMMIT_OUTCOME_UNKNOWN.to_owned(),
+            message: format!(
+                "the core did not confirm the commit within {}s: it may have applied, or may still",
+                timeout.as_secs()
+            ),
+        },
+        Err(_) => ThinBody::Error {
+            code: "not_observed".to_owned(),
+            message: format!("the core did not answer within {}s", timeout.as_secs()),
+        },
+    }
+}
+
+/// The code of a commit whose outcome the backend could not learn: it may
+/// have applied (SPEC 8.14). A thin client reports it as such, never as a
+/// failure to retry.
+pub const COMMIT_OUTCOME_UNKNOWN: &str = "commit_outcome_unknown";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_the_core_never_answers_is_answered_after_the_timeout() {
+        let commit = ThinOp::Commit {
+            transaction: "0190f3e4000070008000000000000007".to_owned(),
+        };
+        let never = std::future::pending::<jazz::tools::Result<ThinBody>>();
+        let body = within(REQUEST_TIMEOUT, &commit, never).await;
+        assert!(
+            matches!(&body, ThinBody::Error { code, .. } if code == COMMIT_OUTCOME_UNKNOWN),
+            "{body:?}"
+        );
+        let read = ThinOp::Rollback {
+            transaction: "0190f3e4000070008000000000000007".to_owned(),
+        };
+        let never = std::future::pending::<jazz::tools::Result<ThinBody>>();
+        let body = within(REQUEST_TIMEOUT, &read, never).await;
+        assert!(
+            matches!(&body, ThinBody::Error { code, .. } if code == "not_observed"),
+            "{body:?}"
+        );
+        let answered = within(REQUEST_TIMEOUT, &commit, async { Ok(ThinBody::Ok) }).await;
+        assert_eq!(answered, ThinBody::Ok);
     }
 }

@@ -138,6 +138,10 @@ struct App {
 
 impl App {
     async fn start() -> Self {
+        Self::start_with(|endpoint| endpoint).await
+    }
+
+    async fn start_with(configure: impl FnOnce(Endpoint) -> Endpoint) -> Self {
         let app_id = AppId::random();
         let server = JazzServer::builder()
             .with_app_id(app_id)
@@ -156,7 +160,7 @@ impl App {
         )
         .await
         .expect("open the app's backend");
-        let endpoint = Endpoint::new(&backend, authenticate).unwrap();
+        let endpoint = configure(Endpoint::new(&backend, authenticate).unwrap());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/jazz", listener.local_addr().unwrap());
         let admitted = Arc::new(Mutex::new(Vec::new()));
@@ -1757,6 +1761,67 @@ async fn a_thin_clients_pipelined_requests_keep_their_order() {
         after[0].rows[0].cells["title"],
         text("in the transaction"),
         "the read after the commit sees it"
+    );
+    app.stop().await;
+}
+
+/// A thin session's transaction client ends with its socket, rolling back
+/// what it left open, and only so many run at once: past the cap, a
+/// transaction is refused with `backpressure`, to try again later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_sessions_transaction_client_ends_with_its_socket_and_is_capped() {
+    use jazz_app_support::jazz::thin::{ThinBody, ThinOp};
+    let app = App::start_with(|endpoint| endpoint.max_transaction_clients(1)).await;
+    let begin = |tx: &str| ThinOp::Begin {
+        transaction: tx.to_owned(),
+        kind: "mergeable".into(),
+    };
+    let todo = |tx: &str, title: &str| ThinOp::Insert {
+        table: "todos".into(),
+        cells: cells(&[
+            ("title", text(title)),
+            ("done", jazz_app_support::jazz::records::Value::Bool(false)),
+        ]),
+        options: Vec::new(),
+        transaction: Some(tx.to_owned()),
+    };
+    let new_tx = || jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+
+    let mut frank = ThinSocket::open(&app, "token-frank", "frank").await;
+    let franks = new_tx();
+    assert_eq!(frank.call(begin(&franks)).await, ThinBody::Ok);
+    let staged = frank.call(todo(&franks, "left open")).await;
+    assert!(matches!(staged, ThinBody::Staged { .. }), "{staged:?}");
+    assert_eq!(app.endpoint.transaction_clients(), 1);
+
+    let mut gina = ThinSocket::open(&app, "token-gina", "gina").await;
+    let ginas = new_tx();
+    let refused = gina.call(begin(&ginas)).await;
+    assert!(
+        matches!(&refused, ThinBody::Error { code, .. } if code == "backpressure"),
+        "{refused:?}"
+    );
+
+    // Frank goes away mid-transaction: his client ends, and nothing of the
+    // transaction reaches the core.
+    frank.socket.close(None).await.unwrap();
+    drop(frank);
+    eventually(async || (app.endpoint.transaction_clients() == 0).then_some(())).await;
+    let todos_now = app
+        .backend
+        .all_with(todos::query(), ReadTier::Remote)
+        .await
+        .unwrap();
+    assert!(todos_now.iter().all(|todo| todo.title != "left open"));
+
+    // Room again: gina's transaction goes through.
+    let ginas = new_tx();
+    assert_eq!(gina.call(begin(&ginas)).await, ThinBody::Ok);
+    gina.call(todo(&ginas, "gina's")).await;
+    let committed = gina.call(ThinOp::Commit { transaction: ginas }).await;
+    assert!(
+        matches!(committed, ThinBody::Written { .. }),
+        "{committed:?}"
     );
     app.stop().await;
 }
