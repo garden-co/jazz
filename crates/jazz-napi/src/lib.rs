@@ -264,6 +264,20 @@ pub fn schema_hash(engine_schema_json: String) -> js::Result<String> {
         .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
 }
 
+/// Whether rows pass unchanged between two schemas in the engine's JSON form
+/// (`{ "tables": … }`), so a deployment connects them without a migration:
+/// the rule `migrations create` follows to decide whether to write one.
+/// Indexes, history retention, merge strategies, column order and defaults
+/// of columns outside `branchBy` don't count; everything else does.
+#[napi(js_name = "schemasAreCompatible")]
+pub fn schemas_are_compatible(left_json: String, right_json: String) -> js::Result<bool> {
+    jazz::tools::deployment::artifact::schemas_are_compatible(
+        left_json.as_bytes(),
+        right_json.as_bytes(),
+    )
+    .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
 /// What `migrationsCreate` wrote.
 #[napi(object)]
 pub struct CreatedMigration {

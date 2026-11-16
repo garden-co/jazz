@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
+    schemas_are_compatible,
 };
 use jazz::tools::{
     ColumnType, HistoryRetention, Lens, LensOp, LensTransform, PolicyExpr, Schema, SchemaBuilder,
@@ -605,6 +606,51 @@ fn an_empty_migration_may_add_enum_variants_but_not_drop_them() {
             "{refused}"
         );
     }
+}
+
+/// What `schemas_are_compatible` (and so `migrations create`) counts as a
+/// change: a deployment over a store on `v1` needs a migration to each of
+/// these, even an empty one, or `v1` is left disconnected.
+///
+/// ```
+/// v1 status(todo, done)            ──none──► status(todo, done, blocked)   ✗ disconnected
+/// v1 notes                         ──none──► notes branched by `branch`    ✗ disconnected
+/// v1 branched, branch default "a"  ──none──► branch default "b"            ✗ disconnected
+/// ```
+#[test]
+fn enum_additions_and_branch_changes_need_a_migration() {
+    let branched = |branch_by: bool, default: &str| {
+        let mut table = TableSchema::builder("notes")
+            .column("title", ColumnType::Text)
+            .column_with_default("branch", ColumnType::Text, Value::Text(default.into()));
+        if branch_by {
+            table = table.branch_by("branch");
+        }
+        SchemaBuilder::new().table(table).build()
+    };
+    let cases = [
+        (
+            tasks(&["todo", "done"], &["bug"]),
+            tasks(&["todo", "done", "blocked"], &["bug"]),
+        ),
+        (branched(false, "a"), branched(true, "a")),
+        (branched(true, "a"), branched(true, "b")),
+    ];
+    for (v1, v2) in cases {
+        assert!(!schemas_are_compatible(&v1, &v2));
+        let stored = DeploymentCatalogue {
+            schemas: vec![v1.clone()],
+            admitted_schema_hashes: vec![SchemaHash::compute(&v1)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            prepare_deployment(&stored, request(&v2, std::slice::from_ref(&v2), vec![])),
+            Err(DeploymentError::DisconnectedGraph { .. })
+        ));
+    }
+    // A default outside `branchBy` is not a change.
+    let (plain_a, plain_b) = (branched(false, "a"), branched(false, "b"));
+    assert!(schemas_are_compatible(&plain_a, &plain_b));
 }
 
 #[test]

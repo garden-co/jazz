@@ -44,6 +44,7 @@ export const {
   resolveTextAnchor,
   resolveTextRange,
   schemaHash,
+  schemasAreCompatible,
   schemaSourceHash,
   validateBindings,
   validateSchema,
