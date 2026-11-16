@@ -31,7 +31,7 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use ::jazz_app::{AppId, CLOSE_TIMEOUT, Config, Storage};
+use ::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use futures_util::FutureExt;
 use todo_server_docs::{credential::Credential, jazz_app, router_until};
 use tower_http::cors::CorsLayer;
@@ -91,8 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .storage(Storage::Dir(data_dir.into()))
         .credential(credential.provider());
 
-    // `open` is generated from jazz.app.json: it embeds the app's schema.
-    let jazz = jazz_app::open(config).await?;
+    // The app's files: the schema the bindings embed, and the permissions,
+    // which a backend client checks the users it acts for by (as TS
+    // createJazzClient requires `permissions`).
+    let files = AppFiles::new(jazz_app::APP, None)
+        .with_permissions(include_bytes!("../jazz.permissions.json").as_slice());
+    let jazz = Jazz::open(files, config).await?;
     // #endregion context-setup-rust-backend-client
     info!(
         "Connected to {server_url} as a {:?} backend client",

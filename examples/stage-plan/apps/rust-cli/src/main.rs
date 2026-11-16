@@ -202,7 +202,11 @@ impl Target {
         if std::env::var("JAZZ_ALLOW_INSECURE_HTTP").as_deref() == Ok("1") {
             config = config.allow_insecure_http();
         }
-        let jazz = jazz_app::open(config).await?;
+        // A backend client checks the users it acts for by the app's
+        // permissions, so it opens with them (as TS createJazzClient does).
+        let files = ::jazz_app::AppFiles::new(jazz_app::APP, None)
+            .with_permissions(include_bytes!("../jazz.permissions.json").as_slice());
+        let jazz = Jazz::open(files, config).await?;
         let expected = match self.mode {
             Mode::Scoped => BackendClientKind::Scoped,
             Mode::Trusted => BackendClientKind::Trusted,

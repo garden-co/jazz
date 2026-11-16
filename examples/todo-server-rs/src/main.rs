@@ -25,7 +25,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::net::SocketAddr;
 
-use ::jazz_app::{AppId, CLOSE_TIMEOUT, Config, Storage};
+use ::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use std::future::IntoFuture;
 use std::time::Duration;
 
@@ -87,7 +87,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .credential(credential.provider());
 
     info!("Opening the todo app on {server_url}");
-    let jazz = jazz_app::open(config).await?;
+    // The app's files: the schema the bindings embed, and the permissions,
+    // which a backend client checks the users it acts for by (as TS
+    // createJazzClient requires `permissions`).
+    let files = AppFiles::new(jazz_app::APP, None)
+        .with_permissions(include_bytes!("../jazz.permissions.json").as_slice());
+    let jazz = Jazz::open(files, config).await?;
     info!("Connected as a {:?} backend client", jazz.backend_client());
 
     // Ctrl-C or SIGTERM: stop accepting, end the live streams, let the
