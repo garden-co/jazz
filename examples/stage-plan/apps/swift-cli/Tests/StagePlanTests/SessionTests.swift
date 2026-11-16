@@ -166,6 +166,53 @@ final class SessionTests: XCTestCase {
         try await session.close()
     }
 
+    func testClientWaitsWhileTheSessionStarts() async throws {
+        let relay = try await TestRelay()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stage-plan-session-\(UUID().uuidString)").path
+        dirs.append(dir)
+        // No waiting for `.ready` first: client() does.
+        let session = JazzApp.session(appId: relay.appId, serverUrl: relay.endpoint, start: .device, dataDir: dir)
+        let jazz = try await session.client()
+        let account = try await jazz.account()
+        let snapshot = try await session.snapshot()
+        XCTAssertEqual(snapshot.status, .ready)
+        XCTAssertEqual(account, snapshot.user?.account)
+        try await session.close()
+    }
+
+    func testClientWhileSignedOutThrowsNoUser() async throws {
+        let relay = try await TestRelay()
+        let session = try await open(relay, start: .signedOut)
+        do {
+            _ = try await session.client()
+            XCTFail("no client while signed out")
+        } catch let error as JazzError {
+            guard case .noUser = error else { return XCTFail("\(error)") }
+        }
+        try await session.close()
+    }
+
+    func testClientsFollowEachUser() async throws {
+        let relay = try await TestRelay()
+        let token = Token("token-alice")
+        let session = try await open(relay, token: token)
+        var clients = session.clients.makeAsyncIterator()
+        let first = try await clients.next()
+        let alice = try XCTUnwrap(first)
+        let aliceAccount = try await alice.account()
+        token.current = "token-bob"
+        try await session.refresh()
+        let second = try await clients.next()
+        let bob = try XCTUnwrap(second)
+        let bobAccount = try await bob.account()
+        XCTAssertNotEqual(aliceAccount, bobAccount)
+        let snapshot = try await session.snapshot()
+        XCTAssertEqual(snapshot.user?.subject, "bob")
+        XCTAssertEqual(bobAccount, snapshot.user?.account)
+        try await session.close()
+    }
+
     func testSnapshotsFailClosedWhenTheSessionCloses() async throws {
         let relay = try await TestRelay()
         let session = try await open(relay)
