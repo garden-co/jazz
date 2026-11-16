@@ -1,0 +1,11 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "notes": {
+      "read": "$createdBy = session.user",
+      "insert": "true",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
+    }
+  }
+}

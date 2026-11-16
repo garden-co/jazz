@@ -9,7 +9,7 @@ import type { AccountStore, Db } from "jazz-tools";
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { SessionOverrides } from "../../src/account.js";
 

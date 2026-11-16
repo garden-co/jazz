@@ -1,0 +1,1119 @@
+// JazzApp.swift: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
+// Bindings format 1. Regenerate it after changing jazz.app.json.
+// swift-format-ignore-file
+
+import Foundation
+import Jazz
+
+/// The app: its `jazz.app.json`, opening it, and a type per table and enum,
+/// all inside this namespace so table names never hide Swift's own types
+/// (`JazzApp.Task`, not `Task`).
+public enum JazzApp {
+    /// `sha256:…` of the `jazz.app.json` these bindings were generated from.
+    public static let source = "sha256:1adfb9c805c18f17655799f7003dd9ac6f75950914995d9c25b0fbcaad7a545f"
+
+    /// The app's `jazz.app.json`: its schema, every earlier version and the
+    /// migrations between them.
+    public static let app = #"""
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "activity": {
+      "columns": {
+        "showId": "uuid",
+        "taskId": "uuid",
+        "actorId": "uuid",
+        "kind": { "enum": ["created", "moved", "assigned", "renamed", "commented", "deleted"] },
+        "detail": "string?"
+      },
+      "relations": {
+        "actor": { "rel": "crew", "column": "actorId" },
+        "show": { "rel": "shows", "column": "showId" },
+        "task": { "rel": "tasks", "column": "taskId" }
+      }
+    },
+    "checklistItems": {
+      "columns": { "title": "string", "done": "boolean", "ownerAccount": "uuid" }
+    },
+    "comments": {
+      "columns": { "taskId": "uuid", "authorId": "uuid", "body": "string" },
+      "relations": {
+        "author": { "rel": "crew", "column": "authorId" },
+        "task": { "rel": "tasks", "column": "taskId" }
+      }
+    },
+    "crew": {
+      "columns": { "account": "uuid", "name": "string" },
+      "relations": {
+        "assignedTasks": { "reverse": "tasks", "relation": "assignee" },
+        "memberships": { "reverse": "showCrew", "relation": "crew" }
+      }
+    },
+    "showCrew": {
+      "columns": {
+        "showId": "uuid",
+        "crewId": "uuid",
+        "account": "uuid",
+        "role": { "enum": ["chief", "crew"] },
+        "inviteCode": "string?"
+      },
+      "relations": {
+        "crew": { "rel": "crew", "column": "crewId" },
+        "show": { "rel": "shows", "column": "showId" }
+      }
+    },
+    "showInvites": {
+      "columns": { "showId": "uuid", "code": "string" },
+      "relations": { "show": { "rel": "shows", "column": "showId" } }
+    },
+    "shows": {
+      "columns": {
+        "name": "string",
+        "venue": "string",
+        "date": "string",
+        "doors": "string",
+        "chiefAccount": "uuid"
+      },
+      "relations": {
+        "activity": { "reverse": "activity", "relation": "show" },
+        "crew": { "reverse": "showCrew", "relation": "show" },
+        "invites": { "reverse": "showInvites", "relation": "show" },
+        "tasks": { "reverse": "tasks", "relation": "show" }
+      }
+    },
+    "tasks": {
+      "columns": {
+        "showId": "uuid",
+        "title": "string",
+        "status": { "enum": ["todo", "doing", "done", "blocked"] },
+        "assigneeId": "uuid?",
+        "notes": { "type": "string", "optional": true, "merge": "text" },
+        "rank": "float"
+      },
+      "relations": {
+        "activity": { "reverse": "activity", "relation": "task" },
+        "assignee": { "rel": "crew", "column": "assigneeId" },
+        "comments": { "reverse": "comments", "relation": "task" },
+        "show": { "rel": "shows", "column": "showId" }
+      }
+    }
+  }
+}
+"""#
+
+    /// Opens the app as an end-user client (`.client(…)`, signed in through
+    /// the app's Jazz endpoint) or a local one (`.local()`).
+    public static func open(_ config: Jazz.Config) async throws -> Jazz.Client {
+        try await Jazz.Client.open(app: app, config: config)
+    }
+
+    /// The values of column `activity.kind`.
+    public enum ActivityKind: Swift.String, Swift.Codable, Swift.Sendable, Swift.Hashable, Swift.CaseIterable {
+        case created = "created"
+        case moved = "moved"
+        case assigned = "assigned"
+        case renamed = "renamed"
+        case commented = "commented"
+        case deleted = "deleted"
+    }
+
+    /// The values of column `showCrew.role`.
+    public enum ShowCrewRole: Swift.String, Swift.Codable, Swift.Sendable, Swift.Hashable, Swift.CaseIterable {
+        case chief = "chief"
+        case crew = "crew"
+    }
+
+    /// The values of column `tasks.status`.
+    public enum TaskStatus: Swift.String, Swift.Codable, Swift.Sendable, Swift.Hashable, Swift.CaseIterable {
+        case todo = "todo"
+        case doing = "doing"
+        case done = "done"
+        case blocked = "blocked"
+    }
+
+    /// A row of `activity`.
+    public struct Activity: Jazz.Row {
+        public static let table = "activity"
+        public let id: Jazz.ID
+        public var showId: Jazz.ID
+        public var taskId: Jazz.ID
+        public var actorId: Jazz.ID
+        public var kind: ActivityKind
+        public var detail: Swift.String?
+        /// Relation `actor`: the `Crew` row, when the query includes it (and it exists).
+        public var actor: Crew? {
+            get { _actor?.value }
+            set { _actor = newValue.map { Jazz.Included($0) } }
+        }
+        private var _actor: Jazz.Included<Crew>? = nil
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
+        /// Relation `task`: the `Task` row, when the query includes it (and it exists).
+        public var task: Task? {
+            get { _task?.value }
+            set { _task = newValue.map { Jazz.Included($0) } }
+        }
+        private var _task: Jazz.Included<Task>? = nil
+
+        public init(id: Jazz.ID, showId: Jazz.ID, taskId: Jazz.ID, actorId: Jazz.ID, kind: ActivityKind, detail: Swift.String?) {
+            self.id = id
+            self.showId = showId
+            self.taskId = taskId
+            self.actorId = actorId
+            self.kind = kind
+            self.detail = detail
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.taskId == b.taskId && a.actorId == b.actorId && a.kind == b.kind && a.detail == b.detail
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(taskId)
+            hasher.combine(actorId)
+            hasher.combine(kind)
+            hasher.combine(detail)
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case showId = "showId"
+            case taskId = "taskId"
+            case actorId = "actorId"
+            case kind = "kind"
+            case detail = "detail"
+            case _actor = "actor"
+            case _show = "show"
+            case _task = "task"
+        }
+    }
+
+    /// A new row of `activity`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewActivity: Jazz.Insert {
+        public typealias Row = Activity
+        public var showId: Jazz.ID
+        public var taskId: Jazz.ID
+        public var actorId: Jazz.ID
+        public var kind: ActivityKind
+        public var detail: Swift.String?
+
+        public init(showId: Jazz.ID, taskId: Jazz.ID, actorId: Jazz.ID, kind: ActivityKind, detail: Swift.String? = nil) {
+            self.showId = showId
+            self.taskId = taskId
+            self.actorId = actorId
+            self.kind = kind
+            self.detail = detail
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case taskId = "taskId"
+            case actorId = "actorId"
+            case kind = "kind"
+            case detail = "detail"
+        }
+    }
+
+    /// A change to a row of `activity`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct ActivityPatch: Jazz.Patch {
+        public typealias Row = Activity
+        public var showId: Jazz.Change<Jazz.ID>
+        public var taskId: Jazz.Change<Jazz.ID>
+        public var actorId: Jazz.Change<Jazz.ID>
+        public var kind: Jazz.Change<ActivityKind>
+        public var detail: Jazz.Change<Swift.String?>
+
+        public init(showId: Jazz.Change<Jazz.ID> = .unchanged, taskId: Jazz.Change<Jazz.ID> = .unchanged, actorId: Jazz.Change<Jazz.ID> = .unchanged, kind: Jazz.Change<ActivityKind> = .unchanged, detail: Jazz.Change<Swift.String?> = .unchanged) {
+            self.showId = showId
+            self.taskId = taskId
+            self.actorId = actorId
+            self.kind = kind
+            self.detail = detail
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case taskId = "taskId"
+            case actorId = "actorId"
+            case kind = "kind"
+            case detail = "detail"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.showId, forKey: .showId)
+            try container.encodeChange(self.taskId, forKey: .taskId)
+            try container.encodeChange(self.actorId, forKey: .actorId)
+            try container.encodeChange(self.kind, forKey: .kind)
+            try container.encodeChange(self.detail, forKey: .detail)
+        }
+    }
+
+    /// Queries of `activity` and its columns.
+    public enum activity {
+        /// Every row of `activity`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<Activity> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<Activity, Jazz.ID>("id")
+        /// Column `showId`.
+        public static let showId = Jazz.Column<Activity, Jazz.ID>("showId")
+        /// Column `taskId`.
+        public static let taskId = Jazz.Column<Activity, Jazz.ID>("taskId")
+        /// Column `actorId`.
+        public static let actorId = Jazz.Column<Activity, Jazz.ID>("actorId")
+        /// Column `kind`.
+        public static let kind = Jazz.Column<Activity, ActivityKind>("kind")
+        /// Column `detail`.
+        public static let detail = Jazz.Column<Activity, Swift.String?>("detail")
+        /// Relation `actor`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let actor = Jazz.Relation<Activity, Crew>("actor")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<Activity, Show>("show")
+        /// Relation `task`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let task = Jazz.Relation<Activity, Task>("task")
+    }
+
+    /// A row of `checklistItems`.
+    public struct ChecklistItem: Jazz.Row {
+        public static let table = "checklistItems"
+        public let id: Jazz.ID
+        public var title: Swift.String
+        public var done: Swift.Bool
+        public var ownerAccount: Jazz.ID
+
+        public init(id: Jazz.ID, title: Swift.String, done: Swift.Bool, ownerAccount: Jazz.ID) {
+            self.id = id
+            self.title = title
+            self.done = done
+            self.ownerAccount = ownerAccount
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case title = "title"
+            case done = "done"
+            case ownerAccount = "ownerAccount"
+        }
+    }
+
+    /// A new row of `checklistItems`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewChecklistItem: Jazz.Insert {
+        public typealias Row = ChecklistItem
+        public var title: Swift.String
+        public var done: Swift.Bool
+        public var ownerAccount: Jazz.ID
+
+        public init(title: Swift.String, done: Swift.Bool, ownerAccount: Jazz.ID) {
+            self.title = title
+            self.done = done
+            self.ownerAccount = ownerAccount
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case title = "title"
+            case done = "done"
+            case ownerAccount = "ownerAccount"
+        }
+    }
+
+    /// A change to a row of `checklistItems`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct ChecklistItemPatch: Jazz.Patch {
+        public typealias Row = ChecklistItem
+        public var title: Jazz.Change<Swift.String>
+        public var done: Jazz.Change<Swift.Bool>
+        public var ownerAccount: Jazz.Change<Jazz.ID>
+
+        public init(title: Jazz.Change<Swift.String> = .unchanged, done: Jazz.Change<Swift.Bool> = .unchanged, ownerAccount: Jazz.Change<Jazz.ID> = .unchanged) {
+            self.title = title
+            self.done = done
+            self.ownerAccount = ownerAccount
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case title = "title"
+            case done = "done"
+            case ownerAccount = "ownerAccount"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.title, forKey: .title)
+            try container.encodeChange(self.done, forKey: .done)
+            try container.encodeChange(self.ownerAccount, forKey: .ownerAccount)
+        }
+    }
+
+    /// Queries of `checklistItems` and its columns.
+    public enum checklistItems {
+        /// Every row of `checklistItems`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<ChecklistItem> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<ChecklistItem, Jazz.ID>("id")
+        /// Column `title`.
+        public static let title = Jazz.Column<ChecklistItem, Swift.String>("title")
+        /// Column `done`.
+        public static let done = Jazz.Column<ChecklistItem, Swift.Bool>("done")
+        /// Column `ownerAccount`.
+        public static let ownerAccount = Jazz.Column<ChecklistItem, Jazz.ID>("ownerAccount")
+    }
+
+    /// A row of `comments`.
+    public struct Comment: Jazz.Row {
+        public static let table = "comments"
+        public let id: Jazz.ID
+        public var taskId: Jazz.ID
+        public var authorId: Jazz.ID
+        public var body: Swift.String
+        /// Relation `author`: the `Crew` row, when the query includes it (and it exists).
+        public var author: Crew? {
+            get { _author?.value }
+            set { _author = newValue.map { Jazz.Included($0) } }
+        }
+        private var _author: Jazz.Included<Crew>? = nil
+        /// Relation `task`: the `Task` row, when the query includes it (and it exists).
+        public var task: Task? {
+            get { _task?.value }
+            set { _task = newValue.map { Jazz.Included($0) } }
+        }
+        private var _task: Jazz.Included<Task>? = nil
+
+        public init(id: Jazz.ID, taskId: Jazz.ID, authorId: Jazz.ID, body: Swift.String) {
+            self.id = id
+            self.taskId = taskId
+            self.authorId = authorId
+            self.body = body
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.taskId == b.taskId && a.authorId == b.authorId && a.body == b.body
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(taskId)
+            hasher.combine(authorId)
+            hasher.combine(body)
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case taskId = "taskId"
+            case authorId = "authorId"
+            case body = "body"
+            case _author = "author"
+            case _task = "task"
+        }
+    }
+
+    /// A new row of `comments`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewComment: Jazz.Insert {
+        public typealias Row = Comment
+        public var taskId: Jazz.ID
+        public var authorId: Jazz.ID
+        public var body: Swift.String
+
+        public init(taskId: Jazz.ID, authorId: Jazz.ID, body: Swift.String) {
+            self.taskId = taskId
+            self.authorId = authorId
+            self.body = body
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case taskId = "taskId"
+            case authorId = "authorId"
+            case body = "body"
+        }
+    }
+
+    /// A change to a row of `comments`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct CommentPatch: Jazz.Patch {
+        public typealias Row = Comment
+        public var taskId: Jazz.Change<Jazz.ID>
+        public var authorId: Jazz.Change<Jazz.ID>
+        public var body: Jazz.Change<Swift.String>
+
+        public init(taskId: Jazz.Change<Jazz.ID> = .unchanged, authorId: Jazz.Change<Jazz.ID> = .unchanged, body: Jazz.Change<Swift.String> = .unchanged) {
+            self.taskId = taskId
+            self.authorId = authorId
+            self.body = body
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case taskId = "taskId"
+            case authorId = "authorId"
+            case body = "body"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.taskId, forKey: .taskId)
+            try container.encodeChange(self.authorId, forKey: .authorId)
+            try container.encodeChange(self.body, forKey: .body)
+        }
+    }
+
+    /// Queries of `comments` and its columns.
+    public enum comments {
+        /// Every row of `comments`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<Comment> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<Comment, Jazz.ID>("id")
+        /// Column `taskId`.
+        public static let taskId = Jazz.Column<Comment, Jazz.ID>("taskId")
+        /// Column `authorId`.
+        public static let authorId = Jazz.Column<Comment, Jazz.ID>("authorId")
+        /// Column `body`.
+        public static let body = Jazz.Column<Comment, Swift.String>("body")
+        /// Relation `author`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let author = Jazz.Relation<Comment, Crew>("author")
+        /// Relation `task`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let task = Jazz.Relation<Comment, Task>("task")
+    }
+
+    /// A row of `crew`.
+    public struct Crew: Jazz.Row {
+        public static let table = "crew"
+        public let id: Jazz.ID
+        public var account: Jazz.ID
+        public var name: Swift.String
+        /// Relation `assignedTasks`: the `Task` rows, when the query includes them.
+        public var assignedTasks: [Task]? = nil
+        /// Relation `memberships`: the `ShowCrew` rows, when the query includes them.
+        public var memberships: [ShowCrew]? = nil
+
+        public init(id: Jazz.ID, account: Jazz.ID, name: Swift.String) {
+            self.id = id
+            self.account = account
+            self.name = name
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.account == b.account && a.name == b.name
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(account)
+            hasher.combine(name)
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case account = "account"
+            case name = "name"
+            case assignedTasks = "assignedTasks"
+            case memberships = "memberships"
+        }
+    }
+
+    /// A new row of `crew`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewCrew: Jazz.Insert {
+        public typealias Row = Crew
+        public var account: Jazz.ID
+        public var name: Swift.String
+
+        public init(account: Jazz.ID, name: Swift.String) {
+            self.account = account
+            self.name = name
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case account = "account"
+            case name = "name"
+        }
+    }
+
+    /// A change to a row of `crew`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct CrewPatch: Jazz.Patch {
+        public typealias Row = Crew
+        public var account: Jazz.Change<Jazz.ID>
+        public var name: Jazz.Change<Swift.String>
+
+        public init(account: Jazz.Change<Jazz.ID> = .unchanged, name: Jazz.Change<Swift.String> = .unchanged) {
+            self.account = account
+            self.name = name
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case account = "account"
+            case name = "name"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.account, forKey: .account)
+            try container.encodeChange(self.name, forKey: .name)
+        }
+    }
+
+    /// Queries of `crew` and its columns.
+    public enum crew {
+        /// Every row of `crew`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<Crew> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<Crew, Jazz.ID>("id")
+        /// Column `account`.
+        public static let account = Jazz.Column<Crew, Jazz.ID>("account")
+        /// Column `name`.
+        public static let name = Jazz.Column<Crew, Swift.String>("name")
+        /// Relation `assignedTasks`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let assignedTasks = Jazz.Relation<Crew, Task>("assignedTasks")
+        /// Relation `memberships`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let memberships = Jazz.Relation<Crew, ShowCrew>("memberships")
+    }
+
+    /// A row of `showCrew`.
+    public struct ShowCrew: Jazz.Row {
+        public static let table = "showCrew"
+        public let id: Jazz.ID
+        public var showId: Jazz.ID
+        public var crewId: Jazz.ID
+        public var account: Jazz.ID
+        public var role: ShowCrewRole
+        public var inviteCode: Swift.String?
+        /// Relation `crew`: the `Crew` row, when the query includes it (and it exists).
+        public var crew: Crew? {
+            get { _crew?.value }
+            set { _crew = newValue.map { Jazz.Included($0) } }
+        }
+        private var _crew: Jazz.Included<Crew>? = nil
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
+
+        public init(id: Jazz.ID, showId: Jazz.ID, crewId: Jazz.ID, account: Jazz.ID, role: ShowCrewRole, inviteCode: Swift.String?) {
+            self.id = id
+            self.showId = showId
+            self.crewId = crewId
+            self.account = account
+            self.role = role
+            self.inviteCode = inviteCode
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.crewId == b.crewId && a.account == b.account && a.role == b.role && a.inviteCode == b.inviteCode
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(crewId)
+            hasher.combine(account)
+            hasher.combine(role)
+            hasher.combine(inviteCode)
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case showId = "showId"
+            case crewId = "crewId"
+            case account = "account"
+            case role = "role"
+            case inviteCode = "inviteCode"
+            case _crew = "crew"
+            case _show = "show"
+        }
+    }
+
+    /// A new row of `showCrew`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewShowCrew: Jazz.Insert {
+        public typealias Row = ShowCrew
+        public var showId: Jazz.ID
+        public var crewId: Jazz.ID
+        public var account: Jazz.ID
+        public var role: ShowCrewRole
+        public var inviteCode: Swift.String?
+
+        public init(showId: Jazz.ID, crewId: Jazz.ID, account: Jazz.ID, role: ShowCrewRole, inviteCode: Swift.String? = nil) {
+            self.showId = showId
+            self.crewId = crewId
+            self.account = account
+            self.role = role
+            self.inviteCode = inviteCode
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case crewId = "crewId"
+            case account = "account"
+            case role = "role"
+            case inviteCode = "inviteCode"
+        }
+    }
+
+    /// A change to a row of `showCrew`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct ShowCrewPatch: Jazz.Patch {
+        public typealias Row = ShowCrew
+        public var showId: Jazz.Change<Jazz.ID>
+        public var crewId: Jazz.Change<Jazz.ID>
+        public var account: Jazz.Change<Jazz.ID>
+        public var role: Jazz.Change<ShowCrewRole>
+        public var inviteCode: Jazz.Change<Swift.String?>
+
+        public init(showId: Jazz.Change<Jazz.ID> = .unchanged, crewId: Jazz.Change<Jazz.ID> = .unchanged, account: Jazz.Change<Jazz.ID> = .unchanged, role: Jazz.Change<ShowCrewRole> = .unchanged, inviteCode: Jazz.Change<Swift.String?> = .unchanged) {
+            self.showId = showId
+            self.crewId = crewId
+            self.account = account
+            self.role = role
+            self.inviteCode = inviteCode
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case crewId = "crewId"
+            case account = "account"
+            case role = "role"
+            case inviteCode = "inviteCode"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.showId, forKey: .showId)
+            try container.encodeChange(self.crewId, forKey: .crewId)
+            try container.encodeChange(self.account, forKey: .account)
+            try container.encodeChange(self.role, forKey: .role)
+            try container.encodeChange(self.inviteCode, forKey: .inviteCode)
+        }
+    }
+
+    /// Queries of `showCrew` and its columns.
+    public enum showCrew {
+        /// Every row of `showCrew`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<ShowCrew> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<ShowCrew, Jazz.ID>("id")
+        /// Column `showId`.
+        public static let showId = Jazz.Column<ShowCrew, Jazz.ID>("showId")
+        /// Column `crewId`.
+        public static let crewId = Jazz.Column<ShowCrew, Jazz.ID>("crewId")
+        /// Column `account`.
+        public static let account = Jazz.Column<ShowCrew, Jazz.ID>("account")
+        /// Column `role`.
+        public static let role = Jazz.Column<ShowCrew, ShowCrewRole>("role")
+        /// Column `inviteCode`.
+        public static let inviteCode = Jazz.Column<ShowCrew, Swift.String?>("inviteCode")
+        /// Relation `crew`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let crew = Jazz.Relation<ShowCrew, Crew>("crew")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<ShowCrew, Show>("show")
+    }
+
+    /// A row of `showInvites`.
+    public struct ShowInvite: Jazz.Row {
+        public static let table = "showInvites"
+        public let id: Jazz.ID
+        public var showId: Jazz.ID
+        public var code: Swift.String
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
+
+        public init(id: Jazz.ID, showId: Jazz.ID, code: Swift.String) {
+            self.id = id
+            self.showId = showId
+            self.code = code
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.code == b.code
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(code)
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case showId = "showId"
+            case code = "code"
+            case _show = "show"
+        }
+    }
+
+    /// A new row of `showInvites`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewShowInvite: Jazz.Insert {
+        public typealias Row = ShowInvite
+        public var showId: Jazz.ID
+        public var code: Swift.String
+
+        public init(showId: Jazz.ID, code: Swift.String) {
+            self.showId = showId
+            self.code = code
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case code = "code"
+        }
+    }
+
+    /// A change to a row of `showInvites`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct ShowInvitePatch: Jazz.Patch {
+        public typealias Row = ShowInvite
+        public var showId: Jazz.Change<Jazz.ID>
+        public var code: Jazz.Change<Swift.String>
+
+        public init(showId: Jazz.Change<Jazz.ID> = .unchanged, code: Jazz.Change<Swift.String> = .unchanged) {
+            self.showId = showId
+            self.code = code
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case code = "code"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.showId, forKey: .showId)
+            try container.encodeChange(self.code, forKey: .code)
+        }
+    }
+
+    /// Queries of `showInvites` and its columns.
+    public enum showInvites {
+        /// Every row of `showInvites`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<ShowInvite> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<ShowInvite, Jazz.ID>("id")
+        /// Column `showId`.
+        public static let showId = Jazz.Column<ShowInvite, Jazz.ID>("showId")
+        /// Column `code`.
+        public static let code = Jazz.Column<ShowInvite, Swift.String>("code")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<ShowInvite, Show>("show")
+    }
+
+    /// A row of `shows`.
+    public struct Show: Jazz.Row {
+        public static let table = "shows"
+        public let id: Jazz.ID
+        public var name: Swift.String
+        public var venue: Swift.String
+        public var date: Swift.String
+        public var doors: Swift.String
+        public var chiefAccount: Jazz.ID
+        /// Relation `activity`: the `Activity` rows, when the query includes them.
+        public var activity: [Activity]? = nil
+        /// Relation `crew`: the `ShowCrew` rows, when the query includes them.
+        public var crew: [ShowCrew]? = nil
+        /// Relation `invites`: the `ShowInvite` rows, when the query includes them.
+        public var invites: [ShowInvite]? = nil
+        /// Relation `tasks`: the `Task` rows, when the query includes them.
+        public var tasks: [Task]? = nil
+
+        public init(id: Jazz.ID, name: Swift.String, venue: Swift.String, date: Swift.String, doors: Swift.String, chiefAccount: Jazz.ID) {
+            self.id = id
+            self.name = name
+            self.venue = venue
+            self.date = date
+            self.doors = doors
+            self.chiefAccount = chiefAccount
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.name == b.name && a.venue == b.venue && a.date == b.date && a.doors == b.doors && a.chiefAccount == b.chiefAccount
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(name)
+            hasher.combine(venue)
+            hasher.combine(date)
+            hasher.combine(doors)
+            hasher.combine(chiefAccount)
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case name = "name"
+            case venue = "venue"
+            case date = "date"
+            case doors = "doors"
+            case chiefAccount = "chiefAccount"
+            case activity = "activity"
+            case crew = "crew"
+            case invites = "invites"
+            case tasks = "tasks"
+        }
+    }
+
+    /// A new row of `shows`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewShow: Jazz.Insert {
+        public typealias Row = Show
+        public var name: Swift.String
+        public var venue: Swift.String
+        public var date: Swift.String
+        public var doors: Swift.String
+        public var chiefAccount: Jazz.ID
+
+        public init(name: Swift.String, venue: Swift.String, date: Swift.String, doors: Swift.String, chiefAccount: Jazz.ID) {
+            self.name = name
+            self.venue = venue
+            self.date = date
+            self.doors = doors
+            self.chiefAccount = chiefAccount
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case name = "name"
+            case venue = "venue"
+            case date = "date"
+            case doors = "doors"
+            case chiefAccount = "chiefAccount"
+        }
+    }
+
+    /// A change to a row of `shows`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct ShowPatch: Jazz.Patch {
+        public typealias Row = Show
+        public var name: Jazz.Change<Swift.String>
+        public var venue: Jazz.Change<Swift.String>
+        public var date: Jazz.Change<Swift.String>
+        public var doors: Jazz.Change<Swift.String>
+        public var chiefAccount: Jazz.Change<Jazz.ID>
+
+        public init(name: Jazz.Change<Swift.String> = .unchanged, venue: Jazz.Change<Swift.String> = .unchanged, date: Jazz.Change<Swift.String> = .unchanged, doors: Jazz.Change<Swift.String> = .unchanged, chiefAccount: Jazz.Change<Jazz.ID> = .unchanged) {
+            self.name = name
+            self.venue = venue
+            self.date = date
+            self.doors = doors
+            self.chiefAccount = chiefAccount
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case name = "name"
+            case venue = "venue"
+            case date = "date"
+            case doors = "doors"
+            case chiefAccount = "chiefAccount"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.name, forKey: .name)
+            try container.encodeChange(self.venue, forKey: .venue)
+            try container.encodeChange(self.date, forKey: .date)
+            try container.encodeChange(self.doors, forKey: .doors)
+            try container.encodeChange(self.chiefAccount, forKey: .chiefAccount)
+        }
+    }
+
+    /// Queries of `shows` and its columns.
+    public enum shows {
+        /// Every row of `shows`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<Show> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<Show, Jazz.ID>("id")
+        /// Column `name`.
+        public static let name = Jazz.Column<Show, Swift.String>("name")
+        /// Column `venue`.
+        public static let venue = Jazz.Column<Show, Swift.String>("venue")
+        /// Column `date`.
+        public static let date = Jazz.Column<Show, Swift.String>("date")
+        /// Column `doors`.
+        public static let doors = Jazz.Column<Show, Swift.String>("doors")
+        /// Column `chiefAccount`.
+        public static let chiefAccount = Jazz.Column<Show, Jazz.ID>("chiefAccount")
+        /// Relation `activity`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let activity = Jazz.Relation<Show, Activity>("activity")
+        /// Relation `crew`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let crew = Jazz.Relation<Show, ShowCrew>("crew")
+        /// Relation `invites`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let invites = Jazz.Relation<Show, ShowInvite>("invites")
+        /// Relation `tasks`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let tasks = Jazz.Relation<Show, Task>("tasks")
+    }
+
+    /// A row of `tasks`.
+    public struct Task: Jazz.Row {
+        public static let table = "tasks"
+        public let id: Jazz.ID
+        public var showId: Jazz.ID
+        public var title: Swift.String
+        public var status: TaskStatus
+        public var assigneeId: Jazz.ID?
+        public var notes: Swift.String?
+        public var rank: Swift.Double
+        /// Relation `activity`: the `Activity` rows, when the query includes them.
+        public var activity: [Activity]? = nil
+        /// Relation `assignee`: the `Crew` row, when the query includes it (and it exists).
+        public var assignee: Crew? {
+            get { _assignee?.value }
+            set { _assignee = newValue.map { Jazz.Included($0) } }
+        }
+        private var _assignee: Jazz.Included<Crew>? = nil
+        /// Relation `comments`: the `Comment` rows, when the query includes them.
+        public var comments: [Comment]? = nil
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
+
+        public init(id: Jazz.ID, showId: Jazz.ID, title: Swift.String, status: TaskStatus, assigneeId: Jazz.ID?, notes: Swift.String?, rank: Swift.Double) {
+            self.id = id
+            self.showId = showId
+            self.title = title
+            self.status = status
+            self.assigneeId = assigneeId
+            self.notes = notes
+            self.rank = rank
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.title == b.title && a.status == b.status && a.assigneeId == b.assigneeId && a.notes == b.notes && a.rank == b.rank
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(title)
+            hasher.combine(status)
+            hasher.combine(assigneeId)
+            hasher.combine(notes)
+            hasher.combine(rank)
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case showId = "showId"
+            case title = "title"
+            case status = "status"
+            case assigneeId = "assigneeId"
+            case notes = "notes"
+            case rank = "rank"
+            case activity = "activity"
+            case _assignee = "assignee"
+            case comments = "comments"
+            case _show = "show"
+        }
+    }
+
+    /// A new row of `tasks`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewTask: Jazz.Insert {
+        public typealias Row = Task
+        public var showId: Jazz.ID
+        public var title: Swift.String
+        public var status: TaskStatus
+        public var assigneeId: Jazz.ID?
+        public var notes: Swift.String?
+        public var rank: Swift.Double
+
+        public init(showId: Jazz.ID, title: Swift.String, status: TaskStatus, assigneeId: Jazz.ID? = nil, notes: Swift.String? = nil, rank: Swift.Double) {
+            self.showId = showId
+            self.title = title
+            self.status = status
+            self.assigneeId = assigneeId
+            self.notes = notes
+            self.rank = rank
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case title = "title"
+            case status = "status"
+            case assigneeId = "assigneeId"
+            case notes = "notes"
+            case rank = "rank"
+        }
+    }
+
+    /// A change to a row of `tasks`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct TaskPatch: Jazz.Patch {
+        public typealias Row = Task
+        public var showId: Jazz.Change<Jazz.ID>
+        public var title: Jazz.Change<Swift.String>
+        public var status: Jazz.Change<TaskStatus>
+        public var assigneeId: Jazz.Change<Jazz.ID?>
+        public var notes: Jazz.Change<Swift.String?>
+        public var rank: Jazz.Change<Swift.Double>
+
+        public init(showId: Jazz.Change<Jazz.ID> = .unchanged, title: Jazz.Change<Swift.String> = .unchanged, status: Jazz.Change<TaskStatus> = .unchanged, assigneeId: Jazz.Change<Jazz.ID?> = .unchanged, notes: Jazz.Change<Swift.String?> = .unchanged, rank: Jazz.Change<Swift.Double> = .unchanged) {
+            self.showId = showId
+            self.title = title
+            self.status = status
+            self.assigneeId = assigneeId
+            self.notes = notes
+            self.rank = rank
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case showId = "showId"
+            case title = "title"
+            case status = "status"
+            case assigneeId = "assigneeId"
+            case notes = "notes"
+            case rank = "rank"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.showId, forKey: .showId)
+            try container.encodeChange(self.title, forKey: .title)
+            try container.encodeChange(self.status, forKey: .status)
+            try container.encodeChange(self.assigneeId, forKey: .assigneeId)
+            try container.encodeChange(self.notes, forKey: .notes)
+            try container.encodeChange(self.rank, forKey: .rank)
+        }
+    }
+
+    /// Queries of `tasks` and its columns.
+    public enum tasks {
+        /// Every row of `tasks`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<Task> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<Task, Jazz.ID>("id")
+        /// Column `showId`.
+        public static let showId = Jazz.Column<Task, Jazz.ID>("showId")
+        /// Column `title`.
+        public static let title = Jazz.Column<Task, Swift.String>("title")
+        /// Column `status`.
+        public static let status = Jazz.Column<Task, TaskStatus>("status")
+        /// Column `assigneeId`.
+        public static let assigneeId = Jazz.Column<Task, Jazz.ID?>("assigneeId")
+        /// Column `notes`.
+        public static let notes = Jazz.Column<Task, Swift.String?>("notes")
+        /// Column `rank`.
+        public static let rank = Jazz.Column<Task, Swift.Double>("rank")
+        /// Relation `activity`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let activity = Jazz.Relation<Task, Activity>("activity")
+        /// Relation `assignee`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let assignee = Jazz.Relation<Task, Crew>("assignee")
+        /// Relation `comments`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let comments = Jazz.Relation<Task, Comment>("comments")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<Task, Show>("show")
+    }
+}

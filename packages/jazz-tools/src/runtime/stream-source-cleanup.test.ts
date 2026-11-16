@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import type { StreamingValueSource } from "./client.js";
 import {
   createNapiNativeRuntimeAdapter,
@@ -7,7 +7,7 @@ import {
 } from "./testing/napi-runtime-test-utils.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp({ files: s.table({ data: s.bytes() }, {}) }, { migrations: "none" });
+const app = testApp({ tables: { files: { columns: { data: "bytes" } } } });
 
 function deferred() {
   let resolve!: () => void;

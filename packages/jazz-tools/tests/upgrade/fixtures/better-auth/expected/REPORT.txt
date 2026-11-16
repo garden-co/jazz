@@ -1,0 +1,19 @@
+Wrote:
+  jazz.app.json
+  jazz.permissions.json
+  jazz.generated.ts
+  auth-generate.ts
+  tsconfig.json
+  package.json
+Deleted:
+  migrations/index.ts
+  permissions.ts
+  schema-better-auth/schema.ts
+  schema.ts
+Rewrote:
+  auth-generate.ts:11: Better Auth generation config: jazzAdapter's schema: s.defineApp({}, { migrations: "none" }).wasmSchema → {}
+  auth-generate.ts:3: dropped the schema DSL import
+  tsconfig.json: include "schema.ts" → "jazz.generated.ts"
+  tsconfig.json: dropped "permissions.ts" from include
+  package.json: script "auth:generate": the Better Auth CLI now writes its tables into jazz.app.json
+  package.json: script "build": `jazz-tools validate` → `jazz-tools generate`

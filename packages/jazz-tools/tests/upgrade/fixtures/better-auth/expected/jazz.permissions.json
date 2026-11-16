@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "better_auth_session": { "read": "false" },
+    "better_auth_user": { "read": "false" },
+    "messages": { "read": "true" }
+  }
+}

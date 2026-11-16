@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2Icon } from "lucide-react";
-import { useDb, useAll, useSession } from "jazz-tools/react";
+import { useDb, useAll, useJazzSession } from "jazz-tools/react";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { ChatHeader } from "@/components/chat-view/ChatHeader";
 import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { fireAndReport, waitForWrite } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { type DurabilityTier } from "jazz-tools";
 
 const INITIAL_MESSAGES_TO_SHOW = 20;
@@ -19,8 +19,8 @@ interface ChatViewProps {
 
 export const ChatView = ({ chatId }: ChatViewProps) => {
   const db = useDb();
-  const session = useSession();
-  const userId = session?.user ?? null;
+  const session = useJazzSession();
+  const userId = session.user?.accountId ?? null;
   const myProfile = useMyProfile();
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
     () => ({ tier: db.getConfig().serverUrl ? "global" : "local" }),

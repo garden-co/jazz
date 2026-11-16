@@ -71,7 +71,7 @@ Every framework provides a hook to access the database handle, and query hooks r
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
@@ -82,6 +82,30 @@ Mutations are methods on the database handle. All three take a table as their fi
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-crud-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-crud-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-crud-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-crud-go
+    </include>
+
+  </Tab>
 </Tabs>
 
 ### Upsert with a known ID
@@ -90,7 +114,7 @@ Use `upsert(...)` when your app already knows the row ID and wants to create tha
 not exist, or update it if it does. Like `insert`, `update`, and `delete`, it returns a
 `MutationResult<void>` that can be awaited for durability.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
@@ -101,6 +125,12 @@ not exist, or update it if it does. Like `insert`, `update`, and `delete`, it re
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-upsert-effect
     </include>
   </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-upsert-kotlin
+    </include>
+
+  </Tab>
 </Tabs>
 
 ### Restore a deleted row
@@ -110,7 +140,16 @@ Trying to insert, update or delete an already deleted row will fail. Use `restor
 Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
 row before restoring it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+`restore` is only for a deleted row: on a live one it fails with `row not deleted`. When you don't
+know which it is, check `$deletedAt`, which a query with `includeDeleted()` can select:
+
+```ts
+const existing = await db.one(app.todos.where({ id }).includeDeleted().select("$deletedAt"));
+if (existing?.$deletedAt) db.restore(app.todos, id, values);
+else db.update(app.todos, id, values);
+```
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
@@ -121,6 +160,12 @@ row before restoring it.
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-restore-effect
     </include>
   </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-restore-kotlin
+    </include>
+
+  </Tab>
 </Tabs>
 
 ### Partial updates and nullable fields
@@ -130,7 +175,7 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
@@ -140,6 +185,30 @@ Required fields cannot be set to `null`.
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-nullable-update-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-nullable-update-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-nullable-update-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-nullable-update-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -230,16 +299,20 @@ into a long value stays cheap however long it grows.
 
 Store a file in a `bytes` column next to its metadata:
 
-```ts title="schema.ts"
-files: s.table(
-  {
-    name: s.string(),
-    type: s.string(),
-    size: s.int(),
-    content: s.bytes(),
-  },
-  {},
-),
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "files": {
+      "columns": {
+        "name": "string",
+        "type": "string",
+        "size": "int",
+        "content": "bytes"
+      }
+    }
+  }
+}
 ```
 
 Upload from the browser with `insertStreaming`, which streams the bytes into the row instead of
@@ -316,7 +389,7 @@ try {
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
@@ -326,6 +399,37 @@ try {
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-durability-tier-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-durability-tier-swift
+    </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-crud-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-nullable-update-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-durability-tier-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-durability-tier-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -422,7 +526,7 @@ A mutation can fail when you call it or while you wait:
   `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
   `WriteRejected`) on the thin client.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -432,6 +536,18 @@ A mutation can fail when you call it or while you wait:
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-mutation-errors-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-mutation-errors-go
+    </include>
+
   </Tab>
 </Tabs>
 

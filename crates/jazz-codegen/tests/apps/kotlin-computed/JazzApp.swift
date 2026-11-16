@@ -1,0 +1,299 @@
+// JazzApp.swift: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
+// Bindings format 1. Regenerate it after changing jazz.app.json.
+// swift-format-ignore-file
+
+import Foundation
+import Jazz
+
+/// The app: its `jazz.app.json`, opening it, and a type per table and enum,
+/// all inside this namespace so table names never hide Swift's own types
+/// (`JazzApp.Task`, not `Task`).
+public enum JazzApp {
+    /// `sha256:…` of the `jazz.app.json` these bindings were generated from.
+    public static let source = "sha256:4587bb8b3c405a2df2cdfaa9ad19e3bcaf0d60aa8f66a474f1d2952f750ee113"
+
+    /// The app's `jazz.app.json`: its schema, every earlier version and the
+    /// migrations between them.
+    public static let app = #"""
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "tasks": {
+      "columns": {
+        "title": "string",
+        "score": { "type": "int", "default": 0 },
+        "dueAt": { "type": "timestamp", "optional": true, "transform": "isoDate" }
+      },
+      "computed": {
+        "priority": { "type": { "enum": ["low", "high"] }, "from": ["score"] },
+        "label": { "type": "string?", "from": ["title", "dueAt"] }
+      }
+    },
+    "people": {
+      "columns": { "name": "string", "email": { "type": "string", "transform": "lowercase" } }
+    }
+  },
+  "transforms": {
+    "isoDate": { "stored": "timestamp", "view": "string" },
+    "lowercase": { "stored": "string", "view": "string" }
+  }
+}
+"""#
+
+    /// Opens the app as an end-user client (`.client(…)`, signed in through
+    /// the app's Jazz endpoint) or a local one (`.local()`).
+    public static func open(_ config: Jazz.Config, computed: some Computed) async throws -> Jazz.Client {
+        try await Jazz.Client.open(app: app, config: config, implementations: computed)
+    }
+
+    /// The values of computed field `tasks.priority`.
+    public enum TaskPriority: Swift.String, Swift.Codable, Swift.Sendable, Swift.Hashable, Swift.CaseIterable {
+        case low = "low"
+        case high = "high"
+    }
+
+    /// A row of `people`.
+    public struct Person: Jazz.Row {
+        public static let table = "people"
+        public let id: Jazz.ID
+        public var name: Swift.String
+        public var email: Swift.String
+
+        public init(id: Jazz.ID, name: Swift.String, email: Swift.String) {
+            self.id = id
+            self.name = name
+            self.email = email
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case name = "name"
+            case email = "email"
+        }
+
+        public init(from decoder: any Swift.Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: decoder.userInfo)
+            self.id = try container.decode(Jazz.ID.self, forKey: .id)
+            self.name = try container.decode(Swift.String.self, forKey: .name)
+            self.email = computed.lowercaseView(try container.decode(Swift.String.self, forKey: .email))
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)
+            try container.encode(self.id, forKey: .id)
+            try container.encode(self.name, forKey: .name)
+            try container.encode(computed.lowercaseStored(self.email), forKey: .email)
+            _ = computed
+        }
+    }
+
+    /// A new row of `people`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewPerson: Jazz.Insert {
+        public typealias Row = Person
+        public var name: Swift.String
+        public var email: Swift.String
+
+        public init(name: Swift.String, email: Swift.String) {
+            self.name = name
+            self.email = email
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case name = "name"
+            case email = "email"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)
+            try container.encode(self.name, forKey: .name)
+            try container.encode(computed.lowercaseStored(self.email), forKey: .email)
+            _ = computed
+        }
+    }
+
+    /// A change to a row of `people`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct PersonPatch: Jazz.Patch {
+        public typealias Row = Person
+        public var name: Jazz.Change<Swift.String>
+        public var email: Jazz.Change<Swift.String>
+
+        public init(name: Jazz.Change<Swift.String> = .unchanged, email: Jazz.Change<Swift.String> = .unchanged) {
+            self.name = name
+            self.email = email
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case name = "name"
+            case email = "email"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)
+            try container.encodeChange(self.name, forKey: .name)
+            try container.encodeChange(self.email.map { computed.lowercaseStored($0) }, forKey: .email)
+        }
+    }
+
+    /// Queries of `people` and its columns.
+    public enum people {
+        /// Every row of `people`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<Person> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<Person, Jazz.ID>("id")
+        /// Column `name`.
+        public static let name = Jazz.Column<Person, Swift.String>("name")
+        /// Column `email`, as stored: filters compare stored values.
+        public static let email = Jazz.Column<Person, Swift.String>("email")
+    }
+
+    /// A row of `tasks`.
+    public struct Task: Jazz.Row {
+        public static let table = "tasks"
+        public let id: Jazz.ID
+        public var title: Swift.String
+        public var score: Swift.Int
+        public var dueAt: Swift.String?
+        /// Computed from `score` by `JazzApp.Computed.tasksPriority`.
+        public internal(set) var priority: TaskPriority
+        /// Computed from `title`, `dueAt` by `JazzApp.Computed.tasksLabel`.
+        public internal(set) var label: Swift.String?
+
+        public init(id: Jazz.ID, title: Swift.String, score: Swift.Int, dueAt: Swift.String?, priority: TaskPriority, label: Swift.String?) {
+            self.id = id
+            self.title = title
+            self.score = score
+            self.dueAt = dueAt
+            self.priority = priority
+            self.label = label
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case title = "title"
+            case score = "score"
+            case dueAt = "dueAt"
+        }
+
+        public init(from decoder: any Swift.Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: decoder.userInfo)
+            self.id = try container.decode(Jazz.ID.self, forKey: .id)
+            self.title = try container.decode(Swift.String.self, forKey: .title)
+            self.score = try container.decode(Swift.Int.self, forKey: .score)
+            self.dueAt = (try container.decodeIfPresent(Foundation.Date.self, forKey: .dueAt)).map { computed.isoDateView($0) }
+            self.priority = computed.tasksPriority(score: self.score)
+            self.label = computed.tasksLabel(title: self.title, dueAt: self.dueAt)
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)
+            try container.encode(self.id, forKey: .id)
+            try container.encode(self.title, forKey: .title)
+            try container.encode(self.score, forKey: .score)
+            try container.encodeIfPresent(self.dueAt.map { computed.isoDateStored($0) }, forKey: .dueAt)
+            _ = computed
+        }
+    }
+
+    /// A new row of `tasks`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewTask: Jazz.Insert {
+        public typealias Row = Task
+        public var title: Swift.String
+        public var score: Swift.Int?
+        public var dueAt: Swift.String?
+
+        public init(title: Swift.String, score: Swift.Int? = nil, dueAt: Swift.String? = nil) {
+            self.title = title
+            self.score = score
+            self.dueAt = dueAt
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case title = "title"
+            case score = "score"
+            case dueAt = "dueAt"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)
+            try container.encode(self.title, forKey: .title)
+            try container.encodeIfPresent(self.score, forKey: .score)
+            try container.encodeIfPresent(self.dueAt.map { computed.isoDateStored($0) }, forKey: .dueAt)
+            _ = computed
+        }
+    }
+
+    /// A change to a row of `tasks`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct TaskPatch: Jazz.Patch {
+        public typealias Row = Task
+        public var title: Jazz.Change<Swift.String>
+        public var score: Jazz.Change<Swift.Int>
+        public var dueAt: Jazz.Change<Swift.String?>
+
+        public init(title: Jazz.Change<Swift.String> = .unchanged, score: Jazz.Change<Swift.Int> = .unchanged, dueAt: Jazz.Change<Swift.String?> = .unchanged) {
+            self.title = title
+            self.score = score
+            self.dueAt = dueAt
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case title = "title"
+            case score = "score"
+            case dueAt = "dueAt"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)
+            try container.encodeChange(self.title, forKey: .title)
+            try container.encodeChange(self.score, forKey: .score)
+            try container.encodeChange(self.dueAt.map { $0.map { computed.isoDateStored($0) } }, forKey: .dueAt)
+        }
+    }
+
+    /// Queries of `tasks` and its columns.
+    public enum tasks {
+        /// Every row of `tasks`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<Task> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<Task, Jazz.ID>("id")
+        /// Column `title`.
+        public static let title = Jazz.Column<Task, Swift.String>("title")
+        /// Column `score`.
+        public static let score = Jazz.Column<Task, Swift.Int>("score")
+        /// Column `dueAt`, as stored: filters compare stored values.
+        public static let dueAt = Jazz.Column<Task, Foundation.Date?>("dueAt")
+    }
+
+    /// What the app's code computes: each computed field `jazz.app.json`
+    /// declares, and each transform both ways. `JazzApp.open(_:computed:)` takes an
+    /// implementation; a missing method is a compile error.
+    public protocol Computed: Swift.Sendable {
+        /// `tasks.priority`.
+        func tasksPriority(score: Swift.Int) -> TaskPriority
+
+        /// `tasks.label`.
+        func tasksLabel(title: Swift.String, dueAt: Swift.String?) -> Swift.String?
+
+        /// Transform `isoDate`: a stored value, as the app reads it.
+        func isoDateView(_ stored: Foundation.Date) -> Swift.String
+
+        /// Transform `isoDate`: a value the app writes, as stored.
+        func isoDateStored(_ view: Swift.String) -> Foundation.Date
+
+        /// Transform `lowercase`: a stored value, as the app reads it.
+        func lowercaseView(_ stored: Swift.String) -> Swift.String
+
+        /// Transform `lowercase`: a value the app writes, as stored.
+        func lowercaseStored(_ view: Swift.String) -> Swift.String
+    }
+}

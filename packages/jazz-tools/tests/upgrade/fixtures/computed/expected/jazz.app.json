@@ -1,0 +1,33 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "tasks": {
+      "columns": {
+        "title": "string",
+        "score": "int",
+        "weight": "float",
+        "dueAt": { "type": "timestamp", "transform": "isoDate" },
+        "tags": { "type": "string", "transform": "tasksTags" }
+      },
+      "computed": {
+        "priority": { "type": { "enum": ["low", "medium", "high"] }, "from": ["score"] },
+        "label": { "type": "string", "from": ["title", "score"] },
+        "done": { "type": "boolean", "from": ["score"] },
+        "doubled": { "type": "int", "from": ["score"] },
+        "ratio": { "type": "float", "from": ["weight"] },
+        "bounded": {
+          "type": { "json": "TODO: tasks.bounded returns a number; make this \"int\" or \"float\"" },
+          "from": ["score"]
+        },
+        "createdDay": { "type": "timestamp", "from": ["id"] }
+      }
+    }
+  },
+  "transforms": {
+    "isoDate": { "stored": "timestamp", "view": "string" },
+    "tasksTags": {
+      "stored": "string",
+      "view": { "json": { "type": "array", "items": { "type": "string" } } }
+    }
+  }
+}

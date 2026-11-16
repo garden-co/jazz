@@ -1,0 +1,24 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "comments": {
+      "read": "allowedTo.read(task)",
+      "insert": "allowedTo.read(task)",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
+    },
+    "projects": {
+      "read": "$createdBy = session.user",
+      "insert": "true",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
+    },
+    "tasks": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)",
+      "update": "allowedTo.update(project)",
+      "delete": "allowedTo.delete(project)"
+    }
+  }
+}

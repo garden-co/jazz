@@ -597,7 +597,17 @@ app.things.where({ id: thingId }).select({
 Ranges are half-open `[from, to)`. Byte ranges apply only to bytes; `{from,to}`
 on text is in UTF-16 code units; `{fromUtf8,toUtf8}` opts into UTF-8 bytes.
 `{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results are an
-ordinary `Uint8Array`, `string`, or decoded JSON subtree. Selecting a field by
+ordinary `Uint8Array`, `string`, or decoded JSON subtree.
+
+A range is clamped to the value it reads, in one-shot reads and
+subscriptions alike: `[min(from, end), end)` with `end = min(to, len)`, so a
+range that starts past the end reads as empty and one that runs past it
+reads what the value covers. A subscribed range thus outlives the value
+shrinking below it and follows it as it grows back. Clamping never rounds:
+an inverted range (`from > to`) fails, and so do clamped bounds that split a
+UTF-8 code point or a UTF-16 surrogate pair. The direct native range read
+(`Db::read_value_range`) names exact bytes and fails past the end, and so do
+`applyDiffs` pages (below). Selecting a field by
 name (or omitting `select`) materializes the complete value. Object-form
 partial selections apply to the root query only; in an include builder they
 fail explicitly rather than returning the complete value.
@@ -624,8 +634,9 @@ fetch a leaf (no chunk store, or one whose lookups always answer at once,
 including that a leaf is not there) it does not decode the cells of the
 rows it ships. Errors of a partial selection's shape and bounds are
 decided from the cell and its descriptor's lengths, and the authority
-refuses the read with them: a range past the value's end, and any error
-of a partial selection on an inline value. An error that only a chunked
+refuses the read with them: any error of a partial selection on an
+inline value. A range past the value's end is clamped, not refused, on
+either path. An error that only a chunked
 value's content decides (a UTF-8 or UTF-16 range that splits a
 character, a JSON pointer that is not there) is reported by the reader:
 the authority sends the row and settles the read, and the reader's own

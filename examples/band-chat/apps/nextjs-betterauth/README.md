@@ -74,7 +74,7 @@ product slice, not another generic Todo tutorial.
   reads its bytes once it scrolls near the viewport, and any other file only
   when it is downloaded. The picker accepts images, audio, text
   and PDF up to 10 MB. That limit is client-side UX validation only, not a Jazz
-  authorization, security, or storage limit: `s.bytes()` has no size
+  authorization, security, or storage limit: a `bytes?` column has no size
   constraint, so an actor otherwise allowed to insert a message can write a
   different-sized value directly.
 - **Sketches.** A message can carry a canvas; every finished stroke is one row,
@@ -102,7 +102,7 @@ listed in `.env.example`, or it refuses to start (`src/lib/config.mjs`,
 `tests/config.test.ts`).
 
 By default the backend stores data in SQLite next to the app. To sync through
-Jazz Cloud or your own sync server instead, set `JAZZ_SERVER_URL`,
+Jazz Cloud (deprecated) or your own sync server instead, set `JAZZ_SERVER_URL`,
 and the app's admin secret in `JAZZ_ADMIN_SECRET`; the backend then uses `remote()`.
 Browsers still talk only to `/jazz` and never see these values.
 
@@ -141,6 +141,6 @@ bearer capability; secure, revocable invite capabilities belong to
 
 - A creator cannot add someone they already share another room with unless
   that person asks to join. The policy for that would use
-  `allowedTo.read("memberProfile")`, which on INSERT currently requires UPDATE
+  `allowedTo.read(memberProfile)`, which on INSERT currently requires UPDATE
   authority on the profile rather than READ
   ([#1900](https://github.com/garden-co/jazz/issues/1900)).

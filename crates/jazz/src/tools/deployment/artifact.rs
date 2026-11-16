@@ -37,17 +37,25 @@ use super::published::{
 use super::{DeploymentRequest, structural};
 use json::Json;
 
-/// The `format` of both files this version of Jazz reads and writes.
-pub const FORMAT: u32 = 1;
+/// The version of both files this version of Jazz reads and writes. A file
+/// names its version in `$schema`, the URL of its JSON Schema
+/// ([`APP_SCHEMA_URL`], [`PERMISSIONS_SCHEMA_URL`]).
+pub const VERSION: u32 = 1;
 
 /// The app's file: tables, relations, history and migrations.
 pub const APP_FILE: &str = "jazz.app.json";
 /// The backend's file: the current version's permissions.
 pub const PERMISSIONS_FILE: &str = "jazz.permissions.json";
 
-/// The JSON Schemas the files name in `$schema`.
-pub const APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.schema.json";
-pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permissions.schema.json";
+/// The JSON Schemas the files name in `$schema`, which carries their version.
+pub const APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.v1.json";
+pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permissions.v1.json";
+/// The unversioned URLs Jazz before alpha.66 wrote, next to `"format": 1`. Such files
+/// still load, as version 1.
+pub const LEGACY_APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.schema.json";
+pub const LEGACY_PERMISSIONS_SCHEMA_URL: &str =
+    "https://jazz.tools/schemas/jazz.permissions.schema.json";
+const SCHEMA_URL_BASE: &str = "https://jazz.tools/schemas/";
 
 /// Why a `jazz.app.json` or `jazz.permissions.json` was refused. Every
 /// message names the file and the JSON path, and inside an expression the
@@ -340,11 +348,24 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
         .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
     check_codegen(&app_file.codegen, history.current_schema())?;
     let relations = app_file.codegen.relations();
-    let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
-    let permissions =
-        permissions_file::read(&permissions_json, history.current_schema(), &relations)
-            .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
-    let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    let computed: expr::ComputedNames = app_file
+        .codegen
+        .tables
+        .iter()
+        .map(|(table, t)| {
+            let names = t.computed.iter().map(|f| f.name.clone()).collect();
+            (table.clone(), names)
+        })
+        .collect();
+    let permissions_json = read_version(PERMISSIONS_FILE, permissions)?;
+    let permissions = permissions_file::read(
+        &permissions_json,
+        history.current_schema(),
+        &relations,
+        &computed,
+    )
+    .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
+    let bundle = compute_bundle(history.current_schema(), &permissions, &computed)?;
     let stranded = history.stranded.clone();
     Ok(LoadedApp {
         history,
@@ -382,7 +403,6 @@ struct BoundSchema {
     migrations: Vec<PublishMigrationRequest>,
     // The runtime's: which columns computed callbacks and transforms take.
     #[serde(default)]
-    #[allow(dead_code)]
     computed: Option<serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)]
@@ -451,11 +471,34 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
     check_codegen(&codegen, history.current_schema())
         .map_err(|e| refuse(e.message().to_string()))?;
     let relations = codegen.relations();
-    let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
-    let permissions =
-        permissions_file::read(&permissions_json, history.current_schema(), &relations)
-            .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
-    let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    // The bindings' `computed`: table → field → the columns it reads.
+    let computed: expr::ComputedNames = bound
+        .schema
+        .computed
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .map(|tables| {
+            tables
+                .iter()
+                .map(|(table, fields)| {
+                    let names = fields
+                        .as_object()
+                        .map(|f| f.keys().cloned().collect())
+                        .unwrap_or_default();
+                    (table.clone(), names)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let permissions_json = read_version(PERMISSIONS_FILE, permissions)?;
+    let permissions = permissions_file::read(
+        &permissions_json,
+        history.current_schema(),
+        &relations,
+        &computed,
+    )
+    .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
+    let bundle = compute_bundle(history.current_schema(), &permissions, &computed)?;
     Ok(LoadedApp {
         history,
         bundle,
@@ -565,6 +608,153 @@ pub fn source_hash(file: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// The top-level key of the marker a tool writes into the files it
+/// generates from TypeScript: `{"by": "<text>", "sha256": "<hex>"}`.
+pub const GENERATED_KEY: &str = "$generated";
+
+/// The `by` of the marker `npx jazz-tools generate` writes.
+pub const GENERATED_BY_TS: &str =
+    "jazz-tools generate from schema.ts — edit the TypeScript, not this file";
+
+/// A file's `$generated` marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedMarker {
+    /// What wrote the file, for people reading it.
+    pub by: String,
+    /// The hex SHA-256 of the file's canonical text without the marker
+    /// ([`generated_digest`]) when it was written.
+    pub sha256: String,
+}
+
+/// What [`verify_generated`] found in a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedCheck {
+    /// No `$generated`: written by hand (or by an older tool).
+    Unmarked,
+    /// The marker's digest matches: the file is as its tool wrote it, give
+    /// or take formatting.
+    Matches(GeneratedMarker),
+    /// The marker's digest doesn't match: the file was edited since.
+    Mismatch {
+        marker: GeneratedMarker,
+        /// The digest of the file as it is.
+        actual: String,
+    },
+}
+
+/// The `$generated` marker of a parsed file, checked: `None` when there is
+/// none, a refusal (at `$generated`) when it isn't
+/// `{"by": "<text>", "sha256": "<64 lowercase hex>"}`.
+fn generated_marker(root: &Json) -> Result<Option<GeneratedMarker>, String> {
+    const SHAPE: &str =
+        "must be { \"by\": \"<text>\", \"sha256\": \"<64 lowercase hex characters>\" }";
+    let Some(value) = root.get(GENERATED_KEY) else {
+        return Ok(None);
+    };
+    let refuse = |what: String| format!("{GENERATED_KEY}: {what}");
+    let entries = value
+        .as_object()
+        .ok_or_else(|| refuse(format!("{SHAPE}, not {}", value.kind())))?;
+    for (key, _) in entries {
+        if key != "by" && key != "sha256" {
+            return Err(refuse(format!("unknown key `{key}`; {SHAPE}")));
+        }
+    }
+    let by = value.get("by").and_then(Json::as_str);
+    let sha256 = value.get("sha256").and_then(Json::as_str);
+    match (by, sha256) {
+        (Some(by), Some(sha256))
+            if sha256.len() == 64
+                && sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            Ok(Some(GeneratedMarker {
+                by: by.to_string(),
+                sha256: sha256.to_string(),
+            }))
+        }
+        _ => Err(refuse(SHAPE.to_string())),
+    }
+}
+
+/// The digest a `$generated` marker records: the hex SHA-256 of the file's
+/// canonical text ([`json::print`], the writer's) with the `$generated`
+/// member removed, i.e. of exactly what the writer produces without the
+/// marker.
+pub fn generated_digest(root: &Json) -> String {
+    let unmarked = match root {
+        Json::Object(entries) => Json::Object(
+            entries
+                .iter()
+                .filter(|(key, _)| key != GENERATED_KEY)
+                .cloned()
+                .collect(),
+        ),
+        other => other.clone(),
+    };
+    sha256_hex(json::print(&unmarked).as_bytes())
+}
+
+fn parse_file_text(file: &[u8]) -> Result<Json, String> {
+    let file = file.strip_prefix("\u{feff}".as_bytes()).unwrap_or(file);
+    let root = json::parse(file)?;
+    if root.as_object().is_none() {
+        return Err(format!("must be a JSON object, not {}", root.kind()));
+    }
+    Ok(root)
+}
+
+/// `file` (a `jazz.app.json` or `jazz.permissions.json` text) printed
+/// canonically with a `$generated` marker saying it was written `by`, first
+/// after `$schema` (first of all when there is no `$schema`); an existing
+/// marker is replaced.
+pub fn mark_generated(file: &[u8], by: &str) -> Result<String, String> {
+    let root = parse_file_text(file)?;
+    let digest = generated_digest(&root);
+    let Json::Object(mut entries) = root else {
+        unreachable!("checked by parse_file_text");
+    };
+    entries.retain(|(key, _)| key != GENERATED_KEY);
+    let at = usize::from(entries.first().is_some_and(|(key, _)| key == "$schema"));
+    entries.insert(
+        at,
+        (
+            GENERATED_KEY.to_string(),
+            Json::object(vec![
+                ("by", Json::string(by)),
+                ("sha256", Json::string(digest)),
+            ]),
+        ),
+    );
+    Ok(json::print(&Json::Object(entries)))
+}
+
+/// Whether `file` (a `jazz.app.json` or `jazz.permissions.json` text) is as
+/// the tool its `$generated` marker names wrote it: no marker, a matching
+/// digest, or a mismatch (it was edited since). Formatting alone (indent,
+/// line ends, a BOM) doesn't count as an edit. A file that isn't a JSON
+/// object, or whose marker is malformed, is refused.
+pub fn verify_generated(file: &[u8]) -> Result<GeneratedCheck, String> {
+    let root = parse_file_text(file)?;
+    let Some(marker) = generated_marker(&root)? else {
+        return Ok(GeneratedCheck::Unmarked);
+    };
+    let actual = generated_digest(&root);
+    Ok(if actual == marker.sha256 {
+        GeneratedCheck::Matches(marker)
+    } else {
+        GeneratedCheck::Mismatch { marker, actual }
+    })
+}
+
+/// The hex SHA-256 of `bytes`, for digests generators record (a TS
+/// module's output digest).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
 /// The engine's hash of a schema in its own JSON form (`{ "tables": … }`,
 /// what generated bindings embed per version), its policies dropped as a
 /// deployment drops them: the one schema-hash implementation every
@@ -602,7 +792,7 @@ pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations
 }
 
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
-    let root = read_format(APP_FILE, json)?;
+    let root = read_version(APP_FILE, json)?;
     refuse_todos(&root)?;
     app_file::read(&root).map_err(|refusal| ArtifactError::at(APP_FILE, refusal))
 }
@@ -707,10 +897,14 @@ fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
     )))
 }
 
-/// The file as JSON, once its `format` is one this version reads. The
-/// format comes first, so a file from a newer Jazz is refused for what it is
-/// rather than for the fields this version doesn't know.
-fn read_format(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
+/// The file as JSON, once its version is one this version reads. The version
+/// comes first, so a file from a newer Jazz is refused for what it is rather
+/// than for the fields this version doesn't know.
+///
+/// `$schema` carries the version: `https://jazz.tools/schemas/<file>.v<N>.json`.
+/// Legacy files (before alpha.66) carry `"format": 1` and/or the unversioned
+/// `<file>.schema.json` URL instead; they read as version 1.
+fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
     let refuse = |message: String| ArtifactError::in_file(file, message);
     let root = json::parse(json).map_err(refuse)?;
     let Some(object) = root.as_object() else {
@@ -719,16 +913,78 @@ fn read_format(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
             root.kind()
         )));
     };
-    match object.iter().find(|(k, _)| k == "format").map(|(_, v)| v) {
+    // Ignored on load, but well-formed.
+    generated_marker(&root).map_err(refuse)?;
+    let (url, legacy_url) = if file == APP_FILE {
+        (APP_SCHEMA_URL, LEGACY_APP_SCHEMA_URL)
+    } else {
+        (PERMISSIONS_SCHEMA_URL, LEGACY_PERMISSIONS_SCHEMA_URL)
+    };
+    let newer = |version: &str| {
+        refuse(format!(
+            "version {version} was written by a newer Jazz; this version of Jazz reads version \
+             {VERSION}. Upgrade jazz-tools"
+        ))
+    };
+    let get = |key: &str| object.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let format = match get("format") {
+        None => None,
+        Some(Json::Number(n)) if n == &VERSION.to_string() => Some(VERSION),
+        Some(Json::Number(n)) if n.parse::<u64>().is_ok_and(|n| n > u64::from(VERSION)) => {
+            return Err(newer(n));
+        }
+        Some(Json::Number(n)) if n.parse::<u64>().is_ok() => {
+            return Err(refuse(format!(
+                "version {n} is not supported; this version of Jazz reads version {VERSION}"
+            )));
+        }
+        Some(other) => {
+            return Err(refuse(format!(
+                "the legacy `format` must be the integer {VERSION}, not {}; drop it and name \
+                 \"$schema\": \"{url}\"",
+                json::print(other).trim_end()
+            )));
+        }
+    };
+    let file_stem = file.trim_end_matches(".json");
+    let versioned = |s: &str| -> Option<String> {
+        s.strip_prefix(SCHEMA_URL_BASE)
+            .and_then(|rest| rest.strip_prefix(file_stem))
+            .and_then(|rest| rest.strip_prefix(".v"))
+            .and_then(|rest| rest.strip_suffix(".json"))
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .map(str::to_string)
+    };
+    match get("$schema") {
+        // A legacy file: before alpha.66 `$schema` was only an editor hint, so any
+        // value (a relative path, another URL, null) loaded next to `format`.
+        // Only a versioned URL naming another version contradicts it.
+        Some(Json::String(s)) if format.is_some() && versioned(s).is_none() => Ok(root),
+        Some(other) if format.is_some() && !matches!(other, Json::String(_)) => Ok(root),
+        None if format.is_some() => Ok(root),
         None => Err(refuse(format!(
-            "no `format`; the file starts {{ \"format\": {FORMAT}, … }}"
+            "no `$schema`; the file starts {{ \"$schema\": \"{url}\", … }}. Run `jazz-tools \
+             generate` to write it"
         ))),
-        Some(Json::Number(n)) if n == &FORMAT.to_string() => Ok(root),
-        Some(Json::Number(n)) if n.parse::<u64>().is_ok() => Err(refuse(format!(
-            "format {n} is not supported by this version of Jazz, which reads format {FORMAT}"
-        ))),
+        Some(Json::String(s)) if s == legacy_url => Ok(root),
+        Some(Json::String(s)) => match versioned(s) {
+            Some(v) if v == VERSION.to_string() => Ok(root),
+            Some(v)
+                if format.is_none() && v.parse::<u64>().is_ok_and(|n| n > u64::from(VERSION)) =>
+            {
+                Err(newer(&v))
+            }
+            Some(v) if format.is_none() => Err(refuse(format!(
+                "version {v} is not supported; this version of Jazz reads version {VERSION}"
+            ))),
+            Some(v) => Err(refuse(format!(
+                "`$schema` names version {v} but the legacy `format` is {VERSION}; drop \
+                     `format`"
+            ))),
+            None => Err(refuse(format!("`$schema` must be \"{url}\", not \"{s}\""))),
+        },
         Some(other) => Err(refuse(format!(
-            "`format` must be the integer {FORMAT}, not {}",
+            "`$schema` must be the string \"{url}\", not {}",
             json::print(other).trim_end()
         ))),
     }
@@ -1025,7 +1281,11 @@ fn identity_lenses(from: &Schema, to: &Schema) -> Vec<super::published::PublishT
 /// The bundle id the server computes when this backend publishes: the
 /// permissions are compiled against the current schema (refusing those
 /// that don't compile), then hashed as the catalogue hashes them.
-fn compute_bundle(current: &Schema, permissions: &Permissions) -> Result<BundleId, ArtifactError> {
+fn compute_bundle(
+    current: &Schema,
+    permissions: &Permissions,
+    computed: &expr::ComputedNames,
+) -> Result<BundleId, ArtifactError> {
     let mut target = current.clone();
     for (name, policies) in permissions {
         target
@@ -1034,8 +1294,21 @@ fn compute_bundle(current: &Schema, permissions: &Permissions) -> Result<BundleI
             .policies = policies.clone();
     }
     let refuse = |error: String| ArtifactError::in_file(PERMISSIONS_FILE, error);
-    let compiled =
-        JazzSchema::new(&target).map_err(|error| refuse(format!("permissions: {error}")))?;
+    let compiled = JazzSchema::new(&target).map_err(|error| {
+        let mut message = format!("permissions: {error}");
+        // The engine checks a relation's `outer.` columns, which the loader
+        // can't place; say so when the one it misses is a computed field.
+        if let Some((_, field)) = error
+            .unknown_column()
+            .filter(|(table, field)| computed.get(*table).is_some_and(|f| f.contains(*field)))
+        {
+            message.push_str(&format!(
+                ": `{field}` is a computed field, which isn't stored, so a permission can't \
+                 read it; write the policy over the columns it's computed from"
+            ));
+        }
+        refuse(message)
+    })?;
     bundle_id(
         &SchemaHash::compute(&structural(compiled.public_schema().clone())),
         &permissions_of(compiled.public_schema()),
@@ -1071,9 +1344,15 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
                     column,
                 } => {
                     table(&path, other)?;
-                    if !has_column(schema, column) {
+                    let Some(stored) = column_of(schema, column) else {
                         return Err(ArtifactError::new(format!(
                             "{path}: table {name} has no column {column}"
+                        )));
+                    };
+                    if let Some(target) = stored.references.filter(|t| t.as_str() != other) {
+                        return Err(ArtifactError::new(format!(
+                            "{path}: column {column} references {target}, so a relation over it \
+                             leads to {target}, not {other}"
                         )));
                     }
                 }
@@ -1363,6 +1642,85 @@ pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
         return Err(round_trip("a migration"));
     }
     Ok(written)
+}
+
+/// [`write`], each file marked as generated `by` a tool (see
+/// [`mark_generated`]): what `npx jazz-tools generate` writes from the TS.
+pub fn write_generated(input: ArtifactInput, by: &str) -> Result<WrittenApp, ArtifactError> {
+    let written = write(input)?;
+    let mark = |file: &'static str, text: &str| {
+        mark_generated(text.as_bytes(), by).map_err(|error| ArtifactError::in_file(file, error))
+    };
+    Ok(WrittenApp {
+        app: mark(APP_FILE, &written.app)?,
+        permissions: mark(PERMISSIONS_FILE, &written.permissions)?,
+    })
+}
+
+/// An app's two readable files (`app`, `permissions`, as people, agents or
+/// the TS tooling write them) checked as [`load`] checks them and
+/// re-rendered by [`write`]: the canonical text, which reads back to
+/// exactly the same engine input. With `generated_by`, each file carries a
+/// `$generated` marker ([`mark_generated`]). Migration `name`s are kept;
+/// `$comment`s, a version's own name (the writer names a version by its
+/// short schema hash) and what loads only with a warning are not.
+/// Idempotent: rewriting its output gives the same text.
+pub fn rewrite(
+    app: &[u8],
+    permissions: &[u8],
+    generated_by: Option<&str>,
+) -> Result<WrittenApp, ArtifactError> {
+    let loaded = load(app, permissions)?;
+    let input = ArtifactInput {
+        current: loaded.current_hash().to_string(),
+        schemas: loaded.schemas().iter().map(|(_, s)| s.clone()).collect(),
+        migrations: loaded.migrations().to_vec(),
+        permissions: loaded.permissions().clone(),
+        codegen: loaded.codegen().clone(),
+    };
+    let mut written = write(input)?;
+    written.app = keep_migration_names(app, &written.app);
+    if let Some(by) = generated_by {
+        let mark = |file: &'static str, text: &str| {
+            mark_generated(text.as_bytes(), by).map_err(|error| ArtifactError::in_file(file, error))
+        };
+        written = WrittenApp {
+            app: mark(APP_FILE, &written.app)?,
+            permissions: mark(PERMISSIONS_FILE, &written.permissions)?,
+        };
+    }
+    Ok(written)
+}
+
+/// `written` (the writer's `jazz.app.json`) with the migration `name`s of
+/// `source`, the file it was loaded from: the writer has no names, and the
+/// file's migrations come first, in order, in what loading it gives.
+fn keep_migration_names(source: &[u8], written: &str) -> String {
+    let source = source.strip_prefix("\u{feff}".as_bytes()).unwrap_or(source);
+    let (Ok(source), Ok(Json::Object(mut top))) =
+        (json::parse(source), json::parse(written.as_bytes()))
+    else {
+        return written.to_string();
+    };
+    let Some(Json::Array(named)) = source.get("migrations") else {
+        return written.to_string();
+    };
+    let Some((_, Json::Array(migrations))) = top.iter_mut().find(|(k, _)| k == "migrations") else {
+        return written.to_string();
+    };
+    let mut changed = false;
+    for (from, to) in named.iter().zip(migrations.iter_mut()) {
+        if let (Some(name), Json::Object(entries)) = (from.get("name"), to) {
+            entries.retain(|(k, _)| k != "name");
+            entries.insert(0, ("name".to_string(), name.clone()));
+            changed = true;
+        }
+    }
+    if changed {
+        json::print(&Json::Object(top))
+    } else {
+        written.to_string()
+    }
 }
 
 /// `file` with `$schema` first.

@@ -1,0 +1,156 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
+// Bindings format 1. Output 6e75660dc39ca62c. Formatters may reformat this file, except `app` below.
+import { bindApp, type AppTypes } from "jazz-tools";
+
+export type Project = {
+  readonly id: string;
+  name: string;
+};
+
+export type ProjectInsert = {
+  name: string;
+};
+
+export type Todo = {
+  readonly id: string;
+  title: string;
+  done: boolean;
+  tags: string[];
+  projectId: string;
+  ownerId: string | null;
+  assigneesIds: string[];
+};
+
+export type TodoInsert = {
+  title: string;
+  done?: boolean;
+  tags?: string[];
+  projectId: string;
+  ownerId?: string | null;
+  assigneesIds?: string[];
+};
+
+export type User = {
+  readonly id: string;
+  name: string;
+};
+
+export type UserInsert = {
+  name: string;
+};
+
+interface Types extends AppTypes {
+  projects: {
+    row: Project;
+    insert: ProjectInsert;
+    columns: {
+      name: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {
+      todosViaProject: { many: "todos" };
+    };
+  };
+  todos: {
+    row: Todo;
+    insert: TodoInsert;
+    columns: {
+      title: { kind: "string"; nullable: false; value: string };
+      done: { kind: "boolean"; nullable: false; value: boolean };
+      tags: { kind: "array"; nullable: false; value: string[] };
+      projectId: { kind: "uuid"; nullable: false; value: string };
+      ownerId: { kind: "uuid"; nullable: true; value: string };
+      assigneesIds: { kind: "array"; nullable: false; value: string[] };
+    };
+    relations: {
+      assignees: { many: "users"; nullable: false };
+      ownerRelation: { one: "users"; nullable: true };
+      projectRelation: { one: "projects"; nullable: false };
+    };
+  };
+  users: {
+    row: User;
+    insert: UserInsert;
+    columns: {
+      name: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {
+      todosViaAssignees: { many: "todos" };
+      todosViaOwner: { many: "todos" };
+    };
+  };
+}
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types>({
+  "source": "sha256:ae7d09973ee5cf1e17b0a8f3471ab4f7619dd9c374be78eb25b5cff473b20f60",
+  "schema": {
+    "current": "5be8ad3c0b1840a06e2bdb59b36c60ab4ea17265e742593402088e775ef3cb7a",
+    "schemas": [
+      {
+        "hash": "5be8ad3c0b1840a06e2bdb59b36c60ab4ea17265e742593402088e775ef3cb7a",
+        "schema": {
+          "tables": {
+            "projects": {
+              "columns": [{ "column_type": { "type": "Text" }, "name": "name", "nullable": false }],
+            },
+            "todos": {
+              "columns": [
+                { "column_type": { "type": "Text" }, "name": "title", "nullable": false },
+                {
+                  "column_type": { "type": "Boolean" },
+                  "default": { "type": "Boolean", "value": false },
+                  "name": "done",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "element": { "type": "Text" }, "type": "Array" },
+                  "default": { "type": "Array", "value": [] },
+                  "name": "tags",
+                  "nullable": false,
+                },
+                {
+                  "column_type": { "type": "Uuid" },
+                  "name": "projectId",
+                  "nullable": false,
+                  "references": "projects",
+                },
+                {
+                  "column_type": { "type": "Uuid" },
+                  "default": { "type": "Null" },
+                  "name": "ownerId",
+                  "nullable": true,
+                  "references": "users",
+                },
+                {
+                  "column_type": { "element": { "type": "Uuid" }, "type": "Array" },
+                  "default": { "type": "Array", "value": [] },
+                  "name": "assigneesIds",
+                  "nullable": false,
+                  "references": "users",
+                },
+              ],
+            },
+            "users": {
+              "columns": [{ "column_type": { "type": "Text" }, "name": "name", "nullable": false }],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+  },
+  "relations": {
+    "projects": { "todosViaProject": { "many": "todos", "relation": "projectRelation" } },
+    "todos": {
+      "assignees": { "one": "users", "column": "assigneesIds" },
+      "ownerRelation": { "one": "users", "column": "ownerId" },
+      "projectRelation": { "one": "projects", "column": "projectId" },
+    },
+    "users": {
+      "todosViaAssignees": { "many": "todos", "relation": "assignees" },
+      "todosViaOwner": { "many": "todos", "relation": "ownerRelation" },
+    },
+  },
+});

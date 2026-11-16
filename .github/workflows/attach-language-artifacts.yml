@@ -1,0 +1,366 @@
+name: Attach language artifacts
+
+# Builds jazz-ffi (the core the Swift, Kotlin and Go bindings link) for each
+# platform and attaches it to a GitHub release, next to the UniFFI-generated
+# Swift and Kotlin sources, so the language packages can download a
+# prebuilt library instead of building Rust. Dispatched with the exporter
+# for the release, after the npm publish pushes the tag and while the
+# release is still a draft (assets are never replaced once it is
+# published). `dry-run` builds and uploads workflow artifacts only; a pull
+# request changing this file runs it so.
+#
+# Assets, per platform (linux-x86_64, linux-aarch64, darwin-aarch64,
+# darwin-x86_64, windows-x86_64):
+#   libjazz_ffi-<os>-<arch>.tar.gz, holding at its root
+#     the static library: libjazz_ffi.a (jazz_ffi.lib on Windows),
+#     the shared library: libjazz_ffi.so, libjazz_ffi.dylib or jazz_ffi.dll
+#       (with its import library jazz_ffi.dll.lib on Windows),
+#     include/jazz_ffi.h,
+#     LINK_FLAGS (the native libraries the static library needs, from rustc)
+# The names are stable: new platforms (iOS as an XCFramework, Android ABIs)
+# add assets of their own and leave these unchanged.
+# and once: jazz-ffi-bindings.tar.gz (swift/, kotlin/),
+# jazz-kotlin-<version>.jar (every platform's library inside, for JNA),
+# jazz-kotlin-android-<version>.aar, and SHA256SUMS over all of them.
+on:
+  # A change to this workflow proves itself: a dry run of the PR's head.
+  pull_request:
+    paths:
+      - .github/workflows/attach-language-artifacts.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to attach to, e.g. 2.0.0-alpha.66 (tag v<version>). It must still be a draft unless dry-run."
+        required: true
+        type: string
+      ref:
+        description: "Commit or tag to build. Empty means the release tag."
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        description: "Build only: upload workflow artifacts, attach nothing."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: attach-language-artifacts-${{ inputs.version || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  # A pull_request run has no inputs: a dry run under a placeholder version.
+  VERSION: ${{ inputs.version || '2.0.0-alpha.0' }}
+  DRY_RUN: ${{ github.event_name == 'pull_request' || inputs.dry-run }}
+
+jobs:
+  build:
+    name: Build jazz-ffi (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 for its older glibc (2.35), so the library links on
+          # more systems.
+          # jna: the directory JNA loads the library from inside the Kotlin
+          # jar (dev/scripts/build-kotlin-dist.sh).
+          # static/shared: the libraries shipped (on Windows also
+          # jazz_ffi.dll.lib, the DLL's import library).
+          - os: blacksmith-4vcpu-ubuntu-2204
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            static: libjazz_ffi.a
+            shared: libjazz_ffi.so
+            jna: linux-x86-64
+          - os: blacksmith-4vcpu-ubuntu-2204-arm
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            static: libjazz_ffi.a
+            shared: libjazz_ffi.so
+            jna: linux-aarch64
+          - os: blacksmith-6vcpu-macos-15
+            platform: darwin-aarch64
+            target: aarch64-apple-darwin
+            static: libjazz_ffi.a
+            shared: libjazz_ffi.dylib
+            jna: darwin-aarch64
+          # Cross-built on Apple silicon; its smoke test runs under Rosetta.
+          - os: blacksmith-6vcpu-macos-15
+            platform: darwin-x86_64
+            target: x86_64-apple-darwin
+            static: libjazz_ffi.a
+            shared: libjazz_ffi.dylib
+            jna: darwin-x86-64
+          - os: blacksmith-2vcpu-windows-2025
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            static: jazz_ffi.lib
+            shared: jazz_ffi.dll
+            jna: win32-x86-64
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      OUT: target/${{ matrix.target }}/release
+      # The oldest macOS the darwin libraries load on (ignored elsewhere).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: Validate inputs
+        run: |
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+            exit 1
+          fi
+
+      # The header ships with LF line endings from every platform.
+      - name: Keep LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
+
+      # A real run attaches to v<version> only what v<version> holds: `ref`
+      # may only name that commit.
+      - name: Check the ref is the release tag
+        if: env.DRY_RUN != 'true'
+        run: |
+          git fetch --depth=1 origin "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "v${VERSION}^{commit}")" ]; then
+            echo "::error::ref must be empty or name v${VERSION}'s commit for a real run"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+          rust-targets: ${{ matrix.target }}
+
+      # The staticlib's native link flags, as rustc reports them: shipped as
+      # LINK_FLAGS for hosts linking libjazz_ffi.a (cgo's LDFLAGS).
+      - name: Build
+        run: |
+          cargo build --release -p jazz-ffi --lib --target "${TARGET}"
+          cargo rustc --color never --release -p jazz-ffi --lib --target "${TARGET}" --crate-type staticlib -- --print native-static-libs 2> "${RUNNER_TEMP}/rustc.txt" || { cat "${RUNNER_TEMP}/rustc.txt"; exit 1; }
+          sed -n 's/^note: native-static-libs: //p' "${RUNNER_TEMP}/rustc.txt" | tail -1 > "${RUNNER_TEMP}/LINK_FLAGS"
+          test -s "${RUNNER_TEMP}/LINK_FLAGS"
+          cat "${RUNNER_TEMP}/LINK_FLAGS"
+
+      # The same C program CI links against the staticlib (dev/gates/jazz-ffi.sh).
+      - name: Smoke test the C ABI
+        if: runner.os != 'Windows'
+        run: |
+          arch=()
+          if [ "${TARGET}" = x86_64-apple-darwin ]; then
+            arch=(-arch x86_64)
+            arch -x86_64 /usr/bin/true 2> /dev/null ||
+              softwareupdate --install-rosetta --agree-to-license
+          fi
+          cc "${arch[@]}" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Werror \
+            -Icrates/jazz-ffi/include crates/jazz-ffi/tests/c/jazz_ffi_test.c \
+            "${OUT}/libjazz_ffi.a" $(cat "${RUNNER_TEMP}/LINK_FLAGS") \
+            -o "${RUNNER_TEMP}/jazz-ffi-c-test"
+          "${RUNNER_TEMP}/jazz-ffi-c-test"
+
+      # jazz_ffi_test.c needs POSIX threads: Windows runs the portable smoke
+      # program, linked with MSVC's linker against the static library (/MD:
+      # Rust's msvc targets use the DLL C runtime).
+      - name: Smoke test the C ABI (Windows)
+        if: runner.os == 'Windows'
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          clang-cl -MD -W3 -WX -Icrates/jazz-ffi/include \
+            crates/jazz-ffi/tests/c/jazz_ffi_smoke.c \
+            "-Fe${RUNNER_TEMP}/jazz-ffi-c-test.exe" \
+            -link "${OUT}/jazz_ffi.lib" $(cat "${RUNNER_TEMP}/LINK_FLAGS")
+          "${RUNNER_TEMP}/jazz-ffi-c-test.exe"
+          # And the shipped DLL, through its import library.
+          mkdir -p "${RUNNER_TEMP}/dll"
+          clang-cl -MD -W3 -WX -Icrates/jazz-ffi/include \
+            crates/jazz-ffi/tests/c/jazz_ffi_smoke.c \
+            "-Fe${RUNNER_TEMP}/dll/jazz-ffi-c-test.exe" \
+            -link "${OUT}/jazz_ffi.dll.lib"
+          cp "${OUT}/jazz_ffi.dll" "${RUNNER_TEMP}/dll/"
+          "${RUNNER_TEMP}/dll/jazz-ffi-c-test.exe"
+
+      - name: Stage
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          STATIC: ${{ matrix.static }}
+          SHARED: ${{ matrix.shared }}
+          JNA: ${{ matrix.jna }}
+        run: |
+          stage="${RUNNER_TEMP}/libjazz_ffi-${PLATFORM}"
+          mkdir -p "${stage}/include" dist
+          cp "${OUT}/${STATIC}" "${OUT}/${SHARED}" "${stage}/"
+          if [ "${PLATFORM}" = windows-x86_64 ]; then
+            cp "${OUT}/jazz_ffi.dll.lib" "${stage}/"
+          fi
+          cp crates/jazz-ffi/include/jazz_ffi.h "${stage}/include/"
+          cp "${RUNNER_TEMP}/LINK_FLAGS" "${stage}/LINK_FLAGS"
+          # Packed (reproducibly) on Linux by the checksums job.
+          mv "${stage}" "dist/libjazz_ffi-${PLATFORM}"
+          git rev-parse HEAD > "dist/source-${PLATFORM}.txt"
+          # The Kotlin jar's copy, stripped, where JNA looks for it.
+          mkdir -p "natives/${JNA}"
+          cp "${OUT}/${SHARED}" "natives/${JNA}/"
+          case "${PLATFORM}" in
+            linux-*) strip --strip-debug "natives/${JNA}/${SHARED}" ;;
+            darwin-*) strip -x "natives/${JNA}/${SHARED}" ;;
+          esac
+
+      # The UniFFI-generated sources are the same on every platform: once.
+      - name: Generate Swift and Kotlin sources
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          cargo build --release -p jazz-ffi --features bindgen --bin uniffi-bindgen
+          for language in swift kotlin; do
+            target/release/uniffi-bindgen generate \
+              --library "${OUT}/libjazz_ffi.so" \
+              --language "${language}" --no-format \
+              --out-dir "dist/jazz-ffi-bindings/${language}"
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-ffi-${{ matrix.platform }}
+          path: dist
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: natives-${{ matrix.platform }}
+          path: natives
+          if-no-files-found: error
+
+  # The Kotlin/JVM jar (every platform's library inside, for JNA) and the
+  # Android aar, by the Kotlin package's own script.
+  kotlin:
+    name: Build the Kotlin jar and aar
+    needs: build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: natives-*
+          merge-multiple: true
+          path: natives
+
+      - name: Assemble
+        run: |
+          ls -R natives
+          mkdir -p kotlin-dist
+          # A release without the Kotlin package ships the other assets.
+          if [ ! -f dev/scripts/build-kotlin-dist.sh ]; then
+            echo "::warning::No dev/scripts/build-kotlin-dist.sh at this ref: no Kotlin jar or aar."
+            exit 0
+          fi
+          bash dev/scripts/build-kotlin-dist.sh natives kotlin-dist --android
+          # Its own checksums join the release's SHA256SUMS.
+          rm -f kotlin-dist/SHA256SUMS
+          ls -l kotlin-dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-kotlin-dist
+          path: kotlin-dist/*
+          # `error` once dev/scripts/build-kotlin-dist.sh is on main.
+          if-no-files-found: warn
+
+  # Read-only: packs the assets reproducibly and checksums them, for the
+  # attach job (a real run) or as the dry run's result.
+  pack:
+    name: Pack and checksum
+    needs: [build, kotlin]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-*
+          merge-multiple: true
+          path: built
+
+      - name: Pack, check sources, checksum
+        run: |
+          set -euo pipefail
+          for source in built/source-*.txt; do
+            cmp "${source}" built/source-linux-x86_64.txt
+          done
+          mkdir -p dist
+          # Reproducible: sorted, no owners, one fixed mtime.
+          pack() {
+            tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
+              -C "$1" -cf - . | gzip -n > "$2"
+          }
+          for dir in built/libjazz_ffi-*/; do
+            name="$(basename "${dir}")"
+            pack "${dir}" "dist/${name}.tar.gz"
+          done
+          pack built/jazz-ffi-bindings dist/jazz-ffi-bindings.tar.gz
+          shopt -s nullglob
+          kotlin=(built/jazz-kotlin-*.jar built/jazz-kotlin-*.aar)
+          if [ "${#kotlin[@]}" -gt 0 ]; then
+            cp "${kotlin[@]}" dist/
+          fi
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: language-artifacts
+          path: dist/*
+          if-no-files-found: error
+
+  # The only job with a write token: a dispatched, non-dry run.
+  attach:
+    name: Attach to v${{ inputs.version }}
+    needs: pack
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry-run
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: language-artifacts
+          path: dist
+
+      # Checked right before uploading: replacing assets is safe only on a
+      # draft.
+      - name: Upload to the draft release
+        run: |
+          if ! is_draft=$(gh release view "v${VERSION}" --json isDraft --jq .isDraft); then
+            echo "::error::No release v${VERSION}; create its draft with the GitHub release workflow first."
+            exit 1
+          fi
+          if [ "${is_draft}" != true ]; then
+            echo "::error::v${VERSION} is published; its language assets are never replaced."
+            exit 1
+          fi
+          gh release upload "v${VERSION}" dist/* --clobber

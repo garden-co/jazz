@@ -1,12 +1,19 @@
-Validate your schema and permissions locally:
+Check your app files and regenerate the bindings:
 
-`npx jazz-tools validate`
+`npx jazz-tools generate`
 
-This validates `schema.ts` and `permissions.ts`, then compiles them into Jazz's
-internal schema representation.
+This checks `jazz.app.json` and `jazz.permissions.json` with the same loader your backend runs,
+then writes `jazz.generated.ts`. Errors name the file, the JSON path and, inside an expression, the
+exact spot, with a suggestion. In CI, `npx jazz-tools generate --check` writes nothing and fails
+when `jazz.generated.ts` is missing or out of date.
 
-When Jazz reports a difference between the old and new schema hashes after changing `schema.ts`, and your app already has data, create a migration as described in [Migrations](/docs/schemas/migrations), then restart your main backend (locally) or deploy it as usual: on start, `createJazz` publishes the new schema, permissions and migrations:
+When you change `tables` after the bindings were generated, `generate` refuses until the change has
+a migration:
 
-```bash
-npx jazz-tools migrations create <appId> --fromHash <fromHash> --toHash <toHash>
+```text
+the schema changed since the last version: run `jazz-tools migrations create --name <name>`
 ```
+
+Run it as it says, review the migration it writes into `jazz.app.json`, and see
+[Migrations](/docs/schemas/migrations). Then restart your main backend (locally) or deploy it as
+usual: on start, `createJazz` publishes the new schema, permissions and migrations.

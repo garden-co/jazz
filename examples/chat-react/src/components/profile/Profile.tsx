@@ -17,7 +17,7 @@ import {
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { fireAndReport } from "@/lib/db-write";
 import { logOut } from "@/lib/utils";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 
 interface ProfileProps {
   onClose: () => void;

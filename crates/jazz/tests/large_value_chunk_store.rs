@@ -2366,12 +2366,6 @@ fn a_part_a_chunked_values_content_refuses_is_reported_by_the_readers_own_read()
                 Some((ErrorCode::Query, "JSON pointer path does not exist")),
                 decode,
             ),
-            (
-                "utf-16 past the end",
-                part(Part::TextUtf16 { from: 0, to: past }),
-                None,
-                true,
-            ),
         ] {
             *sent.borrow_mut() = (false, false);
             let read = read_watching(&[&server], &sub.alice, &query, ReadTier::Remote, watch);
@@ -2392,8 +2386,11 @@ fn a_part_a_chunked_values_content_refuses_is_reported_by_the_readers_own_read()
                 "decode {decode}, {label}: refused by the authority, settled"
             );
         }
-        // Ranges and a pointer that split nothing read.
+        // Ranges and a pointer that split nothing read, and so does a
+        // range past the end: a query's part is clamped to its value
+        // (#5502).
         for (label, query) in [
+            ("utf-16 past the end", part(Part::TextUtf16 { from: 0, to: past })),
             ("utf-8", body(split + 1, split + 41)),
             (
                 "utf-16",

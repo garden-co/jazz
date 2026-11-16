@@ -60,7 +60,7 @@ export function readInspectorHostSchema(): WasmSchema | null {
     return host.handle.getWasmSchema();
   } catch {
     // getWasmSchema throws while no schema exists anywhere yet (no client and
-    // no defineApp) — treat that as "not ready" and let the poll retry.
+    // no generated app bound yet) — treat that as "not ready" and let the poll retry.
     return null;
   }
 }

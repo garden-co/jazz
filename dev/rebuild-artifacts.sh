@@ -64,7 +64,7 @@ for layer in "${layers[@]}"; do
       run_layer tools pnpm --filter jazz-tools build
       ;;
     server)
-      run_layer server cargo build -p jazz-cli --bin jazz-tools
+      run_layer server cargo build -p jazz-tools --bin jazz-tools
       ;;
     napi)
       run_layer napi pnpm --filter jazz-napi build:debug

@@ -1,5 +1,5 @@
 //! The Rust back end: `src/jazz_app.rs`, typed bindings over the
-//! `jazz-app` crate.
+//! `jazz-app-support` crate.
 //!
 //! Per table: a row struct (`Todo`), a new-row struct (`NewTodo`) and an
 //! update struct (`TodoUpdate`), with snake_case fields mapped to the
@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The version of the bindings' shape this generator writes: the second
 /// line records it.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 5;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
@@ -42,9 +42,9 @@ const APP_PREFIX: &str = "pub const APP: &str = r";
 /// How the recorded source starts.
 const SOURCE_PREFIX: &str = "pub const SOURCE: &str = ";
 
-/// The runtime crate, as an absolute path: the bindings' own module is
-/// usually named `jazz_app` too.
-const RT: &str = "::jazz_app";
+/// The runtime crate, as an absolute path. The bindings' own module is
+/// `jazz_app` (`src/jazz_app.rs`), so the crate has a different name.
+const RT: &str = "::jazz_app_support";
 
 /// Type names the bindings declare themselves.
 const RESERVED: &[&str] = &["Computed", "Implementations", "Self"];
@@ -190,7 +190,7 @@ impl<'a> Writer<'a> {
         // `generate --check` doesn't find it stale. (Stable Rust takes
         // rustfmt's skip only in this form.)
         out.push_str("#![cfg_attr(rustfmt, rustfmt_skip)]\n");
-        out.push_str("#![allow(dead_code, clippy::all)]\n\n");
+        out.push_str("#![allow(dead_code, unused_variables, clippy::all)]\n\n");
         out.push_str("/// The `jazz.app.json` these bindings were generated from.\n");
         let _ = writeln!(out, "{SOURCE_PREFIX}{:?};\n", self.app.source);
         for (name, (variants, what)) in &self.enums {
@@ -335,8 +335,14 @@ impl<'a> Writer<'a> {
         out.push_str("}\n\n");
 
         // New rows.
-        let defaultable = fields.iter().all(|field| field.insert_has_default());
-        let _ = writeln!(out, "/// A new row of `{}`.", table.name);
+        // `Default` only when every column may be left out: a required
+        // column is never filled in silently. `new` takes the required ones.
+        let defaultable = fields.iter().all(Field::optional_on_insert);
+        let _ = writeln!(
+            out,
+            "/// A new row of `{}`: [`{new}::new`] takes the columns it requires.",
+            table.name
+        );
         let _ = writeln!(
             out,
             "#[derive(Debug, Clone, PartialEq{})]",
@@ -351,6 +357,36 @@ impl<'a> Writer<'a> {
             let _ = writeln!(out, "    pub {}: {},", field.ident, field.insert_type());
         }
         out.push_str("}\n\n");
+        let required: Vec<&Field> = fields.iter().filter(|f| !f.optional_on_insert()).collect();
+        let _ = writeln!(out, "impl {new} {{");
+        // Positional, so the doc names them: several bools read poorly.
+        let names = if required.is_empty() {
+            "none".to_owned()
+        } else {
+            required
+                .iter()
+                .map(|f| format!("`{}`", f.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let _ = writeln!(
+            out,
+            "    /// A new row with the columns it requires, in this order: {names}. The others\n    /// are left out; set them with `{new} {{ column: …, ..{new}::new(…) }}`."
+        );
+        let params = required
+            .iter()
+            .map(|f| format!("{}: impl ::std::convert::Into<{}>", f.ident, f.view))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "    pub fn new({params}) -> Self {{\n        Self {{");
+        for field in &fields {
+            if field.optional_on_insert() {
+                let _ = writeln!(out, "            {}: {NONE},", field.ident);
+            } else {
+                let _ = writeln!(out, "            {0}: {0}.into(),", field.ident);
+            }
+        }
+        out.push_str("        }\n    }\n}\n\n");
 
         // Updates.
         let _ = writeln!(
@@ -371,6 +407,34 @@ impl<'a> Writer<'a> {
         // Table.
         let _ = writeln!(out, "impl {RT}::Table for {row} {{");
         let _ = writeln!(out, "    const NAME: &'static str = {:?};", table.name);
+        let _ = writeln!(
+            out,
+            "    const COLUMNS: &'static [&'static str] = &[{}];",
+            fields
+                .iter()
+                .map(|f| format!("{:?}", f.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut computed_from: Vec<&str> = table
+            .computed
+            .iter()
+            .flat_map(|c| c.from.iter().map(String::as_str))
+            .filter(|from| *from != "id")
+            .collect();
+        computed_from.sort_unstable();
+        computed_from.dedup();
+        if !computed_from.is_empty() {
+            let _ = writeln!(
+                out,
+                "    const COMPUTED_FROM: &'static [&'static str] = &[{}];",
+                computed_from
+                    .iter()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         let _ = writeln!(out, "    type New = {new};");
         let _ = writeln!(out, "    type Update = {update};\n");
         let _ = writeln!(
@@ -488,25 +552,64 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(out, "pub mod {module} {{");
         out.push_str("    #[allow(unused_imports)]\n    use super::*;\n\n");
-        let mut fns = BTreeSet::from(["query".to_owned()]);
+        let mut fns = BTreeSet::from(["query".to_owned(), "id".to_owned(), "history".to_owned()]);
         let _ = writeln!(
             out,
             "    /// Every row of `{}`; narrow it with `filter`.\n    pub fn query() -> {RT}::Query<{row}> {{\n        {RT}::Query::all()\n    }}",
             table.name
         );
+        let _ = writeln!(
+            out,
+            "\n    /// Every accepted version of `{}`'s rows; bound it to rows with `id` or `id().is_in`.\n    pub fn history() -> {RT}::Query<{RT}::Version<{row}>> {{\n        {RT}::Query::history()\n    }}",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "\n    /// The row's id. (`{RT}::created_at()` and `updated_at()` are columns of every table too.)\n    pub fn id() -> {RT}::Column<{row}, {RT}::ObjectId> {{\n        {RT}::id()\n    }}"
+        );
+        let mut picks = BTreeSet::new();
         for field in &fields {
-            if !fns.insert(field.ident.clone()) {
-                return Err(clash(table, &field.name, &field.ident));
-            }
-            let note = if field.transform.is_some() {
-                " Compared as stored, before its transform."
+            // A column named as the module's own `query`, `id` or `history` gets
+            // `_column` after it.
+            let ident = if fns.contains(&field.ident) {
+                format!("{}_column", field.ident.trim_start_matches("r#"))
             } else {
-                ""
+                field.ident.clone()
+            };
+            if !fns.insert(ident.clone()) {
+                return Err(clash(table, &field.name, &ident));
+            }
+            let Some(transform) = &field.transform else {
+                let _ = writeln!(
+                    out,
+                    "\n    /// Column `{}`.\n    pub fn {ident}() -> {RT}::Column<{row}, {}> {{\n        {RT}::Column::new({:?})\n    }}",
+                    field.name, field.stored, field.name
+                );
+                continue;
+            };
+            // `select` reads a transformed column as its view value, through
+            // the app's transform, as a row does.
+            let pick = format!("{}View", pascal(&field.name));
+            if !picks.insert(pick.clone()) {
+                return Err(clash(table, &field.name, &pick));
+            }
+            let view = if field.nullable {
+                format!(
+                    "row.take_next::<{}>()?.map(|stored| computed.{transform}_view(stored))",
+                    field.stored
+                )
+            } else {
+                format!(
+                    "computed.{transform}_view(row.take_next::<{}>()?)",
+                    field.stored
+                )
             };
             let _ = writeln!(
                 out,
-                "\n    /// Column `{}`.{note}\n    pub fn {}() -> {RT}::Column<{row}, {}> {{\n        {RT}::Column::new({:?})\n    }}",
-                field.name, field.ident, field.stored, field.name
+                "\n    /// Column `{name}`. Compared as stored, before its transform; selected as viewed, through it.\n    pub fn {ident}() -> {RT}::Column<{row}, {stored}, {pick}> {{\n        {RT}::Column::new({name:?})\n    }}\n\n    /// How `select` reads column `{name}`: as viewed, through its transform.\n    #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n    pub struct {pick};\n\n    impl {RT}::Pick for {pick} {{\n        type Value = {view_ty};\n\n        fn pick(row: &mut {RT}::Fields<'_>) -> {RT}::Result<Self::Value> {{\n            let computed = &row.implementations().get::<Implementations>()?.0;\n            ::std::result::Result::Ok({view})\n        }}\n    }}",
+                name = field.name,
+                stored = field.stored,
+                view_ty = field.view,
             );
         }
         for relation in &table.relations {
@@ -543,10 +646,29 @@ impl<'a> Writer<'a> {
                 ))
             })?;
         Ok(match &relation.kind {
-            RelationKind::One { column, .. } => format!(
-                "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}> {{\n        {RT}::One::new({column:?})\n    }}\n",
-                relation.name, relation.target
-            ),
+            RelationKind::One { column, nullable } => {
+                let nullable = if *nullable {
+                    format!(", {RT}::Nullable")
+                } else {
+                    String::new()
+                };
+                // A relation over a uuid array references several rows.
+                let array = table
+                    .columns
+                    .iter()
+                    .any(|c| &c.name == column && matches!(c.ty.ty, ColumnType::Array { .. }));
+                if array {
+                    format!(
+                        "\n    /// Relation `{}`: the `{}` rows `{column}` references.\n    pub fn {ident}() -> {RT}::Refs<{row}, {target}{nullable}> {{\n        {RT}::Refs::new({column:?})\n    }}\n",
+                        relation.name, relation.target
+                    )
+                } else {
+                    format!(
+                        "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}{nullable}> {{\n        {RT}::One::new({column:?})\n    }}\n",
+                        relation.name, relation.target
+                    )
+                }
+            }
             RelationKind::Many { relation: forward } => {
                 let column = self
                     .app
@@ -750,8 +872,9 @@ impl Field {
         }
     }
 
-    fn insert_has_default(&self) -> bool {
-        self.has_default() || self.nullable || type_has_default(&self.view)
+    /// An insert may leave it out: it is nullable or has a default.
+    fn optional_on_insert(&self) -> bool {
+        self.has_default() || self.nullable
     }
 
     fn doc(&self, out: &mut String) {
@@ -771,13 +894,6 @@ impl Field {
         };
         format!("{RT}::ColumnValue::into_value({converted})")
     }
-}
-
-fn type_has_default(ty: &str) -> bool {
-    ty.starts_with(OPTION)
-        || ty.starts_with(VEC)
-        || ty == STRING
-        || matches!(ty, "i32" | "i64" | "bool" | "f64")
 }
 
 fn computed_fn(table: &Table, computed: &Computed) -> Result<String, CodegenError> {
@@ -800,9 +916,6 @@ fn type_label(ty: &ColumnType) -> &'static str {
     match ty {
         ColumnType::TransactionId => "transaction id",
         ColumnType::Row { .. } => "nested row",
-        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
-            "enum-with-payload"
-        }
         ColumnType::ScalarEnum { .. } => "catalogue enum",
         _ => "these",
     }
@@ -812,8 +925,8 @@ fn longest_hash_run(text: &str) -> usize {
     text.split(|c| c != '#').map(str::len).max().unwrap_or(0)
 }
 
-/// Whether `manifest` (a `Cargo.toml`) is a crate that uses `jazz-app`: a
-/// `[package]` with `jazz-app` among its dependencies of any kind.
+/// Whether `manifest` (a `Cargo.toml`) is a crate that uses `jazz-app-support`: a
+/// `[package]` with `jazz-app-support` among its dependencies of any kind.
 pub fn is_app_manifest(manifest: &str) -> bool {
     let mut package = false;
     let mut depends = false;
@@ -823,22 +936,46 @@ pub fn is_app_manifest(manifest: &str) -> bool {
         if let Some(header) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             section = header.trim().trim_matches(['[', ']']).trim().to_owned();
             package |= section == "package";
-            // `[dependencies.jazz-app]`, `[target.'…'.dev-dependencies.jazz-app]`
-            depends |= section.ends_with("dependencies.jazz-app")
-                || section.ends_with("dependencies.\"jazz-app\"");
+            // `[dependencies.jazz-app-support]`, `[target.'…'.dependencies.jazz-app-support]`
+            depends |= section
+                .strip_suffix(".jazz-app-support")
+                .or_else(|| section.strip_suffix(".\"jazz-app-support\""))
+                .is_some_and(is_runtime_dependencies);
             continue;
         }
-        if section.ends_with("dependencies") {
+        // A renamed dependency: `app = { package = "jazz-app-support", … }` in a
+        // dependencies table, or `package = "jazz-app-support"` in its own table.
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        let renamed = compact.contains("package=\"jazz-app-support\"")
+            || compact.contains("package='jazz-app-support'");
+        if renamed
+            && (is_runtime_dependencies(&section)
+                || section
+                    .rsplit_once('.')
+                    .is_some_and(|(table, _)| is_runtime_dependencies(table)))
+        {
+            depends = true;
+        }
+        if is_runtime_dependencies(&section) {
             let key = line
                 .split(['=', '.'])
                 .next()
                 .unwrap_or("")
                 .trim()
                 .trim_matches('"');
-            depends |= key == "jazz-app";
+            depends |= key == "jazz-app-support";
         }
     }
     package && depends
+}
+
+/// `[dependencies]` or `[target.'…'.dependencies]`: what the crate's code
+/// links. A workspace's `[workspace.dependencies]` only declares versions
+/// for its members; dev- and build-dependencies don't make the crate use
+/// the app.
+fn is_runtime_dependencies(section: &str) -> bool {
+    section == "dependencies"
+        || (section.starts_with("target.") && section.ends_with(".dependencies"))
 }
 
 // ---- reading back ------------------------------------------------------------
@@ -979,28 +1116,54 @@ mod tests {
 
     #[test]
     fn app_manifests_depend_on_jazz_app() {
-        let app =
-            "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app = { path = \"../jazz-app\" }\n";
+        let app = "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app-support = { path = \"../jazz-app-support\" }\n";
         assert!(is_app_manifest(app));
+        // Under another name.
         assert!(is_app_manifest(
-            "[package]\nname = \"x\"\n[dependencies]\njazz-app.workspace = true\n"
+            "[package]\nname = \"a\"\n[dependencies]\njazz = { package = \"jazz-app-support\", version = \"0.1\" }\n"
         ));
         assert!(is_app_manifest(
-            "[package]\nname = \"x\"\n[dependencies.jazz-app]\nversion = \"1\"\n"
+            "[package]\nname = \"a\"\n[dependencies.jazz]\npackage = \"jazz-app-support\"\nversion = \"0.1\"\n"
         ));
-        // A workspace root, a crate without jazz-app, a commented-out one.
         assert!(!is_app_manifest(
-            "[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\njazz-app = \"1\"\n"
+            "[package]\nname = \"a\"\n[dev-dependencies]\njazz = { package = \"jazz-app-support\" }\n"
+        ));
+        assert!(is_app_manifest(
+            "[package]\nname = \"x\"\n[dependencies]\njazz-app-support.workspace = true\n"
+        ));
+        assert!(is_app_manifest(
+            "[package]\nname = \"x\"\n[dependencies.jazz-app-support]\nversion = \"1\"\n"
+        ));
+        // A workspace root, a crate without jazz-app-support, a commented-out one.
+        assert!(!is_app_manifest(
+            "[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\njazz-app-support = \"1\"\n"
         ));
         assert!(!is_app_manifest(
             "[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n"
         ));
         assert!(!is_app_manifest(
-            "[package]\nname = \"x\"\n[dependencies]\n# jazz-app = \"1\"\n"
+            "[package]\nname = \"x\"\n[dependencies]\n# jazz-app-support = \"1\"\n"
         ));
         assert!(!is_app_manifest(
             "[package]\nname = \"x\"\n[dependencies]\njazz-application = \"1\"\n"
         ));
+        assert!(is_app_manifest(
+            "[package]\nname = \"x\"\n[target.'cfg(unix)'.dependencies]\njazz-app-support = \"1\"\n"
+        ));
+        // A root that is also a package only declares it for its members;
+        // dev- and build-dependencies don't count.
+        for section in [
+            "workspace.dependencies",
+            "dev-dependencies",
+            "build-dependencies",
+        ] {
+            let manifest =
+                format!("[package]\nname = \"x\"\n[{section}]\njazz-app-support = \"1\"\n");
+            assert!(!is_app_manifest(&manifest), "{section}");
+            let table =
+                format!("[package]\nname = \"x\"\n[{section}.jazz-app-support]\nversion = \"1\"\n");
+            assert!(!is_app_manifest(&table), "{section}.jazz-app-support");
+        }
     }
 
     #[test]

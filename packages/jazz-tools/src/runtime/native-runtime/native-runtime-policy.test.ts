@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { PolicyExpr, WasmSchema } from "../../drivers/types.js";
-import { definePermissions } from "../../permissions/index.js";
-import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
+import { writeAppArtifact } from "jazz-napi";
+import { runtimeSchemaJsonReplacer } from "../../drivers/schema-wire.js";
+import { boundApp } from "../../typed-app.js";
+import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../../schema-permissions.js";
 import { encodeSchema } from "./schema-codec.js";
+import { testApp, testPermissions } from "../../testing/test-app.js";
 
 type EncodedSchemaSource = {
   tables: WasmSchema;
@@ -10,6 +16,23 @@ type EncodedSchemaSource = {
 
 function decode(bytes: Uint8Array): EncodedSchemaSource {
   return JSON.parse(new TextDecoder().decode(bytes)) as EncodedSchemaSource;
+}
+
+/**
+ * `permissions` as Jazz's Rust writer renders them in jazz.permissions.json.
+ * `schema` is a bound app's (testApp's), which carries its hash.
+ */
+async function permissionsFileOf(
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+): Promise<string> {
+  const tables = mergePermissionsIntoWasmSchema(schema, {});
+  const input = {
+    current: boundApp(schema)!.schema.current,
+    schemas: [{ tables }],
+    permissions,
+  };
+  return writeAppArtifact(JSON.stringify(input, runtimeSchemaJsonReplacer)).permissions;
 }
 
 describe("NativeRuntimeAdapter policy source encoding", () => {
@@ -90,68 +113,78 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
     ]);
   });
 
-  it("encodes authored inherited permissions identically to their source form", () => {
-    const baseSchema: WasmSchema = {
-      resources: {
-        relations: {
-          entriesViaResource: {
-            kind: "reverse" as const,
-            table: "entries",
-            relation: "resourceRelation",
+  it("encodes authored inherited permissions identically to their source form", async () => {
+    const app = testApp({
+      tables: {
+        resources: {
+          columns: { label: "string" },
+          relations: {
+            entriesViaResource: { reverse: "entries", relation: "resourceRelation" },
           },
         },
-        columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
-        policies: { select: { using: { type: "True" } } },
-      },
-      entries: {
-        relations: {
-          resourceRelation: { kind: "forward" as const, table: "resources", column: "resource" },
+        entries: {
+          columns: { resource: "uuid" },
+          relations: { resourceRelation: { rel: "resources", column: "resource" } },
         },
-        columns: [
-          {
-            name: "resource",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "resources",
-          },
-        ],
       },
-    };
-    const app = {
-      wasmSchema: baseSchema,
-      resources: { _rowType: {} as never, where: (_input: unknown) => undefined },
-      entries: { _rowType: {} as never, where: (_input: unknown) => undefined },
-    };
-    const permissions = definePermissions(app, ({ policy, allowedTo }) => {
-      policy.resources.allowRead.always();
-      policy.entries.allowRead.where(allowedTo.read("resourceRelation"));
     });
+    const baseSchema: WasmSchema = app.wasmSchema;
+    const permissions = testPermissions(app, {
+      tables: {
+        resources: { read: "true" },
+        entries: { read: "allowedTo.read(resourceRelation)" },
+      },
+    });
+    // The engine's form, as Jazz's Rust loader writes it: an absent side is
+    // `null`, and keys are in serde (alphabetical) order.
+    const absent = { using: null, with_check: null };
     const authored: WasmSchema = {
       ...baseSchema,
       resources: {
         ...baseSchema.resources,
         policies: {
-          select: { using: { type: "True" } },
-          insert: {},
-          update: {},
-          delete: {},
-        },
+          delete: absent,
+          insert: absent,
+          select: { using: { type: "True" }, with_check: null },
+          update: absent,
+        } as never,
       },
       entries: {
         ...baseSchema.entries,
         policies: {
+          delete: absent,
+          insert: absent,
           select: {
-            using: { type: "Inherits", operation: "Select", via_column: "resource" },
+            using: {
+              max_depth: null,
+              operation: "Select",
+              type: "Inherits",
+              via_column: "resource",
+            },
+            with_check: null,
           },
-          insert: {},
-          update: {},
-          delete: {},
-        },
+          update: absent,
+        } as never,
       },
     };
 
     expect(encodeSchema(mergePermissionsIntoWasmSchema(baseSchema, permissions))).toEqual(
       encodeSchema(authored),
+    );
+
+    // `null` and an absent field are the same policy to the engine: the
+    // Rust writer renders both as the same jazz.permissions.json.
+    const omitted: CompiledPermissionsMap = {
+      resources: { select: { using: { type: "True" } }, insert: {}, update: {}, delete: {} },
+      entries: {
+        select: { using: { type: "Inherits", operation: "Select", via_column: "resource" } },
+        insert: {},
+        update: {},
+        delete: {},
+      },
+    };
+    expect(await permissionsFileOf(baseSchema, omitted)).toBe(
+      await permissionsFileOf(baseSchema, permissions),
     );
   });
 });

@@ -1,4 +1,4 @@
-import type { Instrument } from "@/schema";
+import type { TrackInstrument as Instrument } from "@/jazz.generated";
 import { absoluteStepAt, stepStartMs, wrapStep, type TransportState } from "./transport";
 
 /**

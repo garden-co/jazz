@@ -1,0 +1,23 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "notes": {
+      "columns": {
+        "title": "string",
+        "body": "string",
+        "pinned": { "type": "boolean", "default": false }
+      }
+    }
+  },
+  "history": {
+    "ee20b38fcdbe": {
+      "tables": { "notes": { "columns": { "title": "string", "body": "string" } } }
+    }
+  },
+  "migrations": [
+    {
+      "from": "ee20b38fcdbe",
+      "migrate": { "notes": { "pinned": { "add": "boolean", "default": false } } }
+    }
+  ]
+}

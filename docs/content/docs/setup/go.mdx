@@ -1,0 +1,100 @@
+---
+title: Go
+description: "Use Jazz from a Go app: sign in as an end user and sync through your main backend, with typed bindings generated from jazz.app.json."
+---
+
+For apps: run your backend in TypeScript. A Go program is a client of your app, like a browser or a
+mobile app: it signs in as one of your users and syncs through your main backend's `/jazz`, the
+route `createJazz` serves. It opens the app from the same `jazz.app.json` as every other language,
+with typed bindings generated from it.
+
+The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, needs no cgo; its only dependency
+is purego. It uses `context` for every call and channels for subscriptions.
+
+## Install
+
+Add the module. Its versions are Jazz's: each release tags it as `packages/jazz-go/v<version>`, so
+its path ends in `/v2`:
+
+```bash
+go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.66
+go build ./...
+```
+
+## Generate the bindings
+
+With a `go.mod` that requires `jazz-go/v2` beside `jazz.app.json`, `jazz-tools generate` writes the
+`jazzapp` package to `jazzapp/jazz_app.go`:
+
+```bash
+npx jazz-tools generate            # checks the files, writes jazzapp/jazz_app.go
+npx jazz-tools generate --check    # in CI: fails if jazzapp/jazz_app.go is stale
+```
+
+Commit `jazzapp/jazz_app.go` and import it as `<your module>/jazzapp`. Per table it gives you:
+
+- a row struct (`Task`), with `json` tags of the column names. Nullable columns are pointers;
+- `NewTask`, the row to insert. Nullable and defaulted columns are pointers you may leave nil;
+- `TaskPatch`, whose fields change a column only when you set them with `jazz.Set(…)`;
+- a string type with constants for each enum column (`TaskStatus`, `TaskStatusTodo`, …);
+- the table's relations as optional fields of the row (`Task.Show *Show`), filled when a query
+  includes them: `q.Include(jazzapp.Tasks.Show)`;
+- a table value (`jazzapp.Tasks`) with typed columns (`jazzapp.Tasks.Status.Eq(…)`), relations,
+  `Query()`, `Insert`, `Update` and `Delete`. Writes and reads take a `jazz.Querier`: the `*jazz.DB`,
+  or a `*jazz.Tx` inside `db.Tx(ctx, func(tx *jazz.Tx) error { … })`. A `db.Tx` is mergeable, as
+  TypeScript's `db.transaction`; pass `jazz.Serializable()` for a
+  [serializable transaction](/docs/writing/transactions#use-a-serializable-transaction-to-reject-conflicts).
+
+If your app declares computed fields or transforms, the bindings also declare a `jazzapp.Computed`
+interface. `jazzapp.Open(ctx, cfg, computed)` takes your implementation, so a missing method is a
+compile error.
+
+## Open the app as an end user
+
+Sign in with a token from your auth provider. Jazz asks your function for a fresh one whenever it
+needs it:
+
+<include cwd lang="go" meta='title="main.go"'>
+  ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#context-setup-go-client
+</include>
+
+Or use a local-first account kept on this device, created on first open:
+
+```go
+db, err := jazzapp.Open(ctx, jazz.Config{
+	AppID:     appID,
+	ServerURL: "https://my-app.com/jazz",
+	Storage:   jazz.StoragePersistent,
+	DataDir:   "./jazz-data",
+	Auth:      jazz.DeviceAccount(jazz.FileStore("./jazz-data/device-key")),
+})
+```
+
+Keep a device key like a password: `jazz.FileStore` keeps it in a file only its owner can read;
+implement `jazz.SecretStore` to keep it in the OS keychain. `db.Session(ctx)` is who is signed in,
+`db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of their changes, and `db.Refresh(ctx)`
+and `db.SignOut(ctx)` do what they say.
+
+Writes are local-first: a write your permissions refuse returns no error. It is never synced, and
+other users never see it.
+
+Errors match their kind with `errors.Is`: `jazz.ErrPermission`, `jazz.ErrRefused`,
+`jazz.ErrNotSupported`, `jazz.ErrConflict`, `jazz.ErrIO` and `jazz.ErrClosed`. Use `errors.As` with a
+`*jazz.Error` for the details.
+
+A `*jazz.DB` is safe for concurrent use. Every call takes a `context.Context`. A cancelled context
+returns at once, but the call still runs to its end, so a write may still apply. Before the process
+exits, call `db.Close()`.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Go tab
+for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan
+command-line app.
+
+## Not supported yet
+
+- running your main backend in Go (publishing permissions, serving `/jazz`): run it in TypeScript
+  with `createJazz`;
+- connecting as a backend client with a machine credential (trusted or scoped, `forUser`): see
+  [Backend Client](/docs/setup/backend-client);
+- non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column reads
+  them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the column.

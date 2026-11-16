@@ -139,6 +139,17 @@ fn check_range(range: &std::ops::Range<u64>, len: u64) -> Result<(), Error> {
     Ok(())
 }
 
+/// `range` clamped to `len` units (SPEC 19.12): the part of the range the
+/// value covers, empty at the end when the range starts past it. An
+/// inverted range still fails.
+fn clamp_range(range: std::ops::Range<u64>, len: u64) -> Result<std::ops::Range<u64>, Error> {
+    if range.start > range.end {
+        return Err(query("value range is out of bounds"));
+    }
+    let end = range.end.min(len);
+    Ok(range.start.min(end)..end)
+}
+
 /// The byte offset of UTF-16 position `at` in `text`, or `None` inside a
 /// surrogate pair or past the end.
 fn utf16_byte(text: &str, at: u64) -> Option<usize> {
@@ -250,7 +261,7 @@ impl Inner {
         if utf16 && crate::large::kind(&col) == lv::LargeValueKind::Bytes {
             return Err(not_large(table, column));
         }
-        self.cell_range(cell.as_ref(), range, utf16)
+        self.cell_range(cell.as_ref(), range, utf16, false)
     }
 
     /// `delta(a, b)` (SPEC 19.6) between the values `column` of `row` holds
@@ -391,20 +402,30 @@ impl Inner {
     }
 
     /// `range` of a cell's logical value (UTF-16 code units when `utf16`,
-    /// else bytes), reading only the chunks it covers.
+    /// else bytes), reading only the chunks it covers. With `clamp`, a range
+    /// past the value's end reads the part the value covers (a query's
+    /// partial selection, SPEC 19.12); otherwise it fails.
     pub(crate) fn cell_range(
         &self,
         cell: ValueRef<'_>,
         range: std::ops::Range<u64>,
         utf16: bool,
+        clamp: bool,
     ) -> Result<Vec<u8>, Error> {
         #[cfg(feature = "testing")]
         crate::large::CELL_RANGES.with(|count| count.set(count.get() + 1));
+        let fit = |range: std::ops::Range<u64>, len: u64| {
+            if clamp {
+                clamp_range(range, len)
+            } else {
+                check_range(&range, len).map(|()| range)
+            }
+        };
         match self.chunks.logical(cell)? {
             Logical::Inline(bytes) if utf16 => {
                 let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
                 let len = text.encode_utf16().count() as u64;
-                check_range(&range, len)?;
+                let range = fit(range, len)?;
                 let (Some(start), Some(end)) =
                     (utf16_byte(text, range.start), utf16_byte(text, range.end))
                 else {
@@ -413,7 +434,7 @@ impl Inner {
                 Ok(bytes[start..end].to_vec())
             }
             Logical::Inline(bytes) => {
-                check_range(&range, bytes.len() as u64)?;
+                let range = fit(range, bytes.len() as u64)?;
                 Ok(bytes[range.start as usize..range.end as usize].to_vec())
             }
             Logical::Chunked(value) => {
@@ -422,7 +443,7 @@ impl Inner {
                 } else {
                     value.byte_length
                 };
-                check_range(&range, len)?;
+                let range = fit(range, len)?;
                 if utf16 {
                     // A UTF-16 code unit is one to three UTF-8 bytes, so
                     // these bytes hold the range: the pull asks for them.
@@ -463,12 +484,14 @@ impl Inner {
             Logical::Inline(_) => return self.partial_cell(ty, cell, part).map(drop),
             Logical::Chunked(value) => value,
         };
+        // A query's partial selection is clamped to the value
+        // ([`Inner::partial_cell`]): only an inverted range refuses.
         match part {
             Part::Bytes { from, to } | Part::TextUtf8 { from, to } => {
-                check_range(&(*from..*to), value.byte_length)
+                clamp_range(*from..*to, value.byte_length).map(drop)
             }
             Part::TextUtf16 { from, to } => {
-                check_range(&(*from..*to), value.utf16_length.unwrap_or(0))
+                clamp_range(*from..*to, value.utf16_length.unwrap_or(0)).map(drop)
             }
             Part::JsonPointer(_) => Ok(()),
         }
@@ -495,13 +518,15 @@ impl Inner {
                 .map_err(|_| query(split))
         };
         Ok(Some(match part {
-            Part::Bytes { from, to } => Value::Bytes(self.cell_range(cell, *from..*to, false)?),
+            Part::Bytes { from, to } => {
+                Value::Bytes(self.cell_range(cell, *from..*to, false, true)?)
+            }
             Part::TextUtf16 { from, to } => text(
-                self.cell_range(cell, *from..*to, true)?,
+                self.cell_range(cell, *from..*to, true, true)?,
                 "UTF-16 range splits a surrogate pair",
             )?,
             Part::TextUtf8 { from, to } => text(
-                self.cell_range(cell, *from..*to, false)?,
+                self.cell_range(cell, *from..*to, false, true)?,
                 "UTF-8 range splits a code point",
             )?,
             Part::JsonPointer(pointer) => {
