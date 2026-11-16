@@ -295,7 +295,8 @@ pub trait StreamReader: Send {
 
 /// The mechanism a sender uses for each role. A plain value the core
 /// integration passes in from the application's configuration; readers
-/// accept any registered mechanism regardless.
+/// accept any mechanism of their (allow-listed, [`MechanismAllowList`])
+/// registry regardless.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MechanismConfig {
     pub cell: MechanismId,
@@ -317,6 +318,36 @@ impl Default for MechanismConfig {
             signature: signature::MECHANISM.into(),
             equality: equality::MECHANISM.into(),
             stream: stream::MECHANISM.into(),
+        }
+    }
+}
+
+/// The mechanisms a reader accepts, per role: the application's allow-list.
+/// An envelope of a mechanism that is not listed is refused as
+/// [`Error::UnsupportedFormat`] even if its implementation is compiled in, so
+/// retiring a mechanism (for example after a weakness) is removing it from
+/// the list. Defaults to the built-ins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MechanismAllowList {
+    pub cell: Vec<MechanismId>,
+    pub key_wrap: Vec<MechanismId>,
+    pub key_seal: Vec<MechanismId>,
+    pub signature: Vec<MechanismId>,
+    pub equality: Vec<MechanismId>,
+    pub stream: Vec<MechanismId>,
+}
+
+impl Default for MechanismAllowList {
+    /// The built-in mechanism of every role.
+    fn default() -> Self {
+        let builtins = MechanismConfig::default();
+        Self {
+            cell: vec![builtins.cell],
+            key_wrap: vec![builtins.key_wrap],
+            key_seal: vec![builtins.key_seal],
+            signature: vec![builtins.signature],
+            equality: vec![builtins.equality],
+            stream: vec![builtins.stream],
         }
     }
 }

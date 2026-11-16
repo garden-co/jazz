@@ -83,8 +83,29 @@ protocol:
   configuration selects for the role. Sealing to a recipient that advertises
   no key of the selected mechanism fails with "recipient unsupported"; there
   is no fallback to another mechanism.
-- Readers route by each envelope's mechanism and accept any registered one, so
-  records written under an earlier selection stay readable.
+- Readers route by each envelope's mechanism and accept a registered
+  mechanism only if the application's **allow-list** names it for that role
+  (`encryption.mechanisms.allowed` in `jazz.app.json`, per role; default:
+  the built-ins). An envelope of any other mechanism is `unsupported-format`
+  (§4.3, §7), never decrypted, opened or verified, even if its
+  implementation is compiled in. Records written under an earlier selection
+  stay readable while their mechanism stays listed. **Retiring** a mechanism
+  (for example after a weakness is found) is removing it from the list;
+  records that use only it then report `unsupported-format`, so a retirement
+  follows the rotations that replace them. Writers can select only listed
+  mechanisms.
+- **No delivery can be downgraded.** Every delivered key is bound by its
+  sender to the bytes of its envelope, or authenticated before use by a
+  marker only a holder of the key can make, so nobody without the key (the
+  server included) can substitute an envelope sealed under another
+  mechanism: account successor deliveries are covered by the successor's
+  signature (§2.8); approval deliveries by the delivery-verification marker
+  over the envelope (§2.5); identity envelopes and account recovery
+  deliveries yield a key that is accepted only after it authenticates the
+  epoch marker and the chain (§2.7); space and group deliveries (key-request
+  answers included) and their recovery deliveries are signed by their
+  author over their envelopes (§3.1, §3.4). A key holder could seal under any listed mechanism, but it
+  could also disclose the key.
 - Migration: ship the new mechanism to every client, then switch the
   configuration. Each client then enrols a new device identity of the new
   mechanism and removes its old one; recovery secrets register their second

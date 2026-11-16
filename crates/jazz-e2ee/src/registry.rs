@@ -12,8 +12,8 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use crate::agility::{
-    CellCipher, EqualityTagger, KeyPair, KeySealer, KeyWrapper, MechanismConfig, MechanismId,
-    MechanismImpl, PublicKey, Signer, StreamCipher, is_custom_id,
+    CellCipher, EqualityTagger, KeyPair, KeySealer, KeyWrapper, MechanismAllowList,
+    MechanismConfig, MechanismId, MechanismImpl, PublicKey, Signer, StreamCipher, is_custom_id,
 };
 use crate::envelope::{self, Mechanism};
 use crate::error::{Error, Result};
@@ -65,6 +65,23 @@ fn configured<'r, T: MechanismImpl + ?Sized>(
     id: &MechanismId,
 ) -> Result<&'r T> {
     find(list, id.as_mechanism()).ok_or(Error::UnknownMechanism)
+}
+
+/// The registered mechanisms of `list` that `allowed` names; naming an
+/// unregistered mechanism is [`Error::UnknownMechanism`].
+fn allowed<T: MechanismImpl + ?Sized>(
+    list: &[Arc<T>],
+    allowed: &[MechanismId],
+) -> Result<Vec<Arc<T>>> {
+    allowed
+        .iter()
+        .map(|id| {
+            list.iter()
+                .find(|item| item.mechanism() == id.as_mechanism())
+                .cloned()
+                .ok_or(Error::UnknownMechanism)
+        })
+        .collect()
 }
 
 /// The registered mechanism an envelope names.
@@ -180,6 +197,21 @@ impl Registry {
         "stream cipher"
     );
 
+    /// This registry restricted to the application's allow-list: readers
+    /// route only listed mechanisms (anything else is
+    /// [`Error::UnsupportedFormat`]) and writers can select only listed ones.
+    /// Naming an unregistered mechanism is [`Error::UnknownMechanism`].
+    pub fn allowing(&self, list: &MechanismAllowList) -> Result<Self> {
+        Ok(Self {
+            cells: allowed(&self.cells, &list.cell)?,
+            wrappers: allowed(&self.wrappers, &list.key_wrap)?,
+            sealers: allowed(&self.sealers, &list.key_seal)?,
+            signers: allowed(&self.signers, &list.signature)?,
+            taggers: allowed(&self.taggers, &list.equality)?,
+            streams: allowed(&self.streams, &list.stream)?,
+        })
+    }
+
     /// Whether a signer of `id` is registered at any version.
     pub(crate) fn has_signer_id(&self, id: &str) -> bool {
         self.signers
@@ -199,9 +231,13 @@ impl Registry {
         })
     }
 
-    /// Opens a sealed key with whichever of `keys` belongs to the envelope's
-    /// mechanism. An unregistered mechanism is [`Error::UnsupportedFormat`];
-    /// holding no key pair of it is [`Error::NoKeyForMechanism`].
+    /// Opens a sealed key with the key pairs of `keys` that belong to the
+    /// envelope's mechanism, trying each in turn: the first that
+    /// authenticates wins, and only when every one of them provably fails is
+    /// the result [`Error::InvalidCiphertext`]. Any other failure (a provider
+    /// failure) stops at once. An unregistered mechanism is
+    /// [`Error::UnsupportedFormat`]; holding no key pair of it is
+    /// [`Error::NoKeyForMechanism`].
     pub fn open_sealed(
         &self,
         keys: &[KeyPair],
@@ -210,13 +246,23 @@ impl Registry {
     ) -> Result<Zeroizing<[u8; 32]>> {
         let sealer = self.key_sealer_for(envelope)?;
         let mechanism = sealer.mechanism();
-        let pair = keys
+        let mut candidates = keys
             .iter()
-            .find(|pair| pair.public.mechanism == mechanism)
-            .ok_or(Error::NoKeyForMechanism)?;
-        sealer
-            .open(pair, context, envelope)
-            .map_err(Error::after_routing)
+            .filter(|pair| pair.public.mechanism == mechanism)
+            .peekable();
+        if candidates.peek().is_none() {
+            return Err(Error::NoKeyForMechanism);
+        }
+        for pair in candidates {
+            match sealer
+                .open(pair, context, envelope)
+                .map_err(Error::after_routing)
+            {
+                Err(Error::InvalidCiphertext) => continue,
+                other => return other,
+            }
+        }
+        Err(Error::InvalidCiphertext)
     }
 
     /// Verifies a signature with the signer the public key names. A key of

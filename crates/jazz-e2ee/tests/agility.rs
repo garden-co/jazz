@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use common::{array, hex, vectors as v};
 use jazz_e2ee::agility::{
-    CellCipher, EqualityTagger, KeyPair, KeySealer, KeyWrapper, MechanismConfig, MechanismId,
-    MechanismImpl, PublicKey, Signer, StreamCipher, StreamReader, StreamWriter, is_custom_id,
+    CellCipher, EqualityTagger, KeyPair, KeySealer, KeyWrapper, MechanismAllowList,
+    MechanismConfig, MechanismId, MechanismImpl, PublicKey, Signer, StreamCipher, StreamReader,
+    StreamWriter, is_custom_id,
 };
 use jazz_e2ee::conformance::{self, FixedRandom};
 use jazz_e2ee::envelope::Mechanism;
@@ -332,6 +333,76 @@ fn readers_route_by_envelope_and_writers_by_config() {
         Registry::builtin()
             .select(&MechanismConfig::default())
             .is_ok()
+    );
+}
+
+/// The application's allow-list restricts readers and writers: a
+/// registered mechanism that is not listed is an unsupported format to
+/// readers and cannot be selected, and listing an unregistered one is
+/// refused.
+#[test]
+fn the_allow_list_retires_mechanisms() {
+    let mut registry = Registry::builtin();
+    registry
+        .register_cell_cipher(Arc::new(UnboundCell))
+        .unwrap();
+    let key = [3u8; 32];
+    let mut rng = FixedRandom(vec![9; 1024]);
+    let custom =
+        records::encrypt_cell_value(&UnboundCell, &key, &IDENTITY, b"{}", b"value", &mut rng)
+            .unwrap();
+    let builtins = registry.allowing(&MechanismAllowList::default()).unwrap();
+    assert_eq!(
+        records::decrypt_cell_value(&builtins, &key, &IDENTITY, b"{}", &custom).map(|_| ()),
+        Err(Error::UnsupportedFormat)
+    );
+    let config = MechanismConfig {
+        cell: MechanismId::new("org.example.unbound", 1),
+        ..MechanismConfig::default()
+    };
+    assert!(matches!(
+        builtins.select(&config),
+        Err(Error::UnknownMechanism)
+    ));
+    let both = MechanismAllowList {
+        cell: vec![
+            cell::MECHANISM.into(),
+            MechanismId::new("org.example.unbound", 1),
+        ],
+        ..MechanismAllowList::default()
+    };
+    let listed = registry.allowing(&both).unwrap();
+    assert!(records::decrypt_cell_value(&listed, &key, &IDENTITY, b"{}", &custom).is_ok());
+    let missing = MechanismAllowList {
+        stream: vec![MechanismId::new("org.example.missing", 1)],
+        ..MechanismAllowList::default()
+    };
+    assert!(matches!(
+        registry.allowing(&missing),
+        Err(Error::UnknownMechanism)
+    ));
+}
+
+/// Opening a sealed key tries every key pair of the envelope's mechanism,
+/// not only the first.
+#[test]
+fn open_sealed_tries_every_key_of_the_mechanism() {
+    let registry = Registry::builtin();
+    let mut rng = FixedRandom((0..=255).cycle().take(4096).collect());
+    let old = key_seal::Builtin.generate_key_pair(&mut rng).unwrap();
+    let new = key_seal::Builtin.generate_key_pair(&mut rng).unwrap();
+    let sealed = key_seal::Builtin
+        .seal(&new.public, b"context", &[5; 32], &mut rng)
+        .unwrap();
+    let opened = registry
+        .open_sealed(&[old.clone(), new.clone()], b"context", &sealed)
+        .unwrap();
+    assert_eq!(*opened, [5; 32]);
+    assert_eq!(
+        registry
+            .open_sealed(core::slice::from_ref(&old), b"context", &sealed)
+            .map(|_| ()),
+        Err(Error::InvalidCiphertext)
     );
 }
 

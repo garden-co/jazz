@@ -222,8 +222,11 @@ are the default implementations.
   `com.example.kem`. A new incompatible format is a new version or ID, never
   a reinterpretation of an existing one.
 - **Routing.** Readers look the header's ID and version up in a registry of
-  compiled-in mechanisms. An unregistered mechanism is `unsupported-format`,
-  never `invalid-ciphertext`.
+  compiled-in mechanisms, restricted to the application's per-role
+  allow-list (`MechanismAllowList`, default: the built-ins;
+  `Registry::allowing`). An unregistered or unlisted mechanism is
+  `unsupported-format`, never `invalid-ciphertext`; retiring a mechanism is
+  removing it from the list.
 - **Advertisement.** Public keys carry their mechanism: the advertised form
   is `env(mechanism, publicKey)`. Each identity (a device, a recovery root, a
   group epoch) has exactly one sealing key and one signing key, fixed at
@@ -232,8 +235,8 @@ are the default implementations.
 - **Selection.** The application configuration selects one mechanism per role
   for writing. A sender seals only to a recipient key of the selected
   mechanism and otherwise fails with "recipient unsupported"; there is no
-  silent fallback. A configuration naming an unregistered mechanism is
-  rejected.
+  silent fallback. A configuration naming an unregistered or unlisted
+  mechanism is rejected.
 - **Migration.** Ship the mechanism in every client, switch the
   configuration, let recipients create identities of the new mechanism, and
   let the next key rotation seal and wrap the new epoch key with it. Old
