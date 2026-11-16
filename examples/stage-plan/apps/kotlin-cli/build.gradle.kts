@@ -32,7 +32,7 @@ tasks.test {
     useJUnitPlatform()
     systemProperty("jna.library.path", ffiLibDir.path)
     // The tests' StagePlan backend, a test harness: a Jazz server and the test
-    // stand-in for a backend's Jazz endpoint (cargo build -p jazz-cli --bin
+    // stand-in for a backend's Jazz endpoint (cargo build -p jazz-tools --bin
     // jazz-tools; cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay).
     environment("JAZZ_TOOLS", System.getenv("JAZZ_TOOLS") ?: repo.resolve("target/debug/jazz-tools").path)
     environment(
