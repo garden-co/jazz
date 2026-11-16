@@ -289,7 +289,7 @@ pub unsafe extern "C" fn jazz_call(
                 )?
             }
             "uploadBegin" => {
-                // jazz-app streams outside transactions only: an upload
+                // jazz-app-support streams outside transactions only: an upload
                 // that named one would escape it.
                 if args.get("tx").is_some_and(|tx| !tx.is_null()) {
                     return Err(crate::error::unsupported(

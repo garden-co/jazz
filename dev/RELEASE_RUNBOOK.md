@@ -193,13 +193,13 @@ Jazz's Rust crates are versioned in lockstep with the jazz-tools npm package.
 module's `packages/jazz-go/version.go` (once it exists) in CI's lint partition.
 Run it on the Version Packages PR head before merging.
 
-The published crates are exactly the dependency closure of `jazz-app`,
+The published crates are exactly the dependency closure of `jazz-app-support`,
 `jazz-tools`, `jazz-codegen` and `jazz-ffi` (`dev/scripts/rust-crates.mjs`).
 `node dev/scripts/publish-crates.mjs --list` prints them in publish order:
 
 ```
 jazz-alpha59-alpha60-dump  jazz-ruzstd  jazz-compression  jazz-text  jazz-types
-jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app
+jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app-support
 jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
 ```
 
@@ -249,7 +249,7 @@ crates are published with a short-lived token the first time:
    secret of the `publish` environment (Settings → Environments → publish).
    Don't paste it anywhere else. The new crates are: jazz-alpha59-alpha60-dump,
    jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
-   jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app,
+   jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app-support,
    jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
 3. **Publish:** let `publish-jazz-crates-alpha.yml` run after the npm publish, or
    dispatch it with `mode: publish`, `tag: v<version>`. The summary at the

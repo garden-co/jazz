@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ::jazz_app::{Error, TokenProvider, TokenReason};
+use ::jazz_app_support::{Error, TokenProvider, TokenReason};
 
 /// Where the token comes from. It is looked up again for every token the
 /// client asks for, so a short-lived token that a file or a command renews

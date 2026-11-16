@@ -44,7 +44,7 @@ cargo test -q -p jazz-codegen --test golden -- swift
 cargo build -q -p jazz-tools --bin jazz-tools
 "$root/target/debug/jazz-tools" generate --check --dir "$example"
 # The app endpoint the end-user tests sign in through.
-cargo build -q -p jazz-app --features test-relay --bin jazz-app-test-relay
+cargo build -q -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 # The committed UniFFI sources match what uniffi-bindgen generates from
 # this tree's jazz-ffi; then the library and its jazz_ffi.pc.
 "$root/packages/jazz-swift/scripts/build-ffi.sh" --debug --check

@@ -41,11 +41,11 @@ function workspace(version = V) {
       ["jazz-ruzstd", "=0.8.3"],
     ]),
     pkg("jazz-codegen", V, [["jazz-core", `=${V}`]]),
-    pkg("jazz-app", V, [
+    pkg("jazz-app-support", V, [
       ["jazz-core", `=${V}`],
       ["jazz-codegen", "*", "dev"],
     ]),
-    pkg("jazz-ffi", V, [["jazz-app", `=${V}`]]),
+    pkg("jazz-ffi", V, [["jazz-app-support", `=${V}`]]),
     pkg("jazz-tools", version, [
       ["jazz-core", `=${V}`],
       ["jazz-codegen", `=${V}`],
@@ -78,8 +78,8 @@ test("orders the closure so every crate follows its dependencies", () => {
   for (const [before, after] of [
     ["jazz-types", "jazz-core"],
     ["jazz-ruzstd", "jazz-core"],
-    ["jazz-core", "jazz-app"],
-    ["jazz-app", "jazz-ffi"],
+    ["jazz-core", "jazz-app-support"],
+    ["jazz-app-support", "jazz-ffi"],
     ["jazz-codegen", "jazz-tools"],
   ])
     assert.ok(plan.order.indexOf(before) < plan.order.indexOf(after), `${before} < ${after}`);
@@ -118,7 +118,9 @@ test("reports crates behind a bumped npm version, and the Go constant", () => {
   );
   const { problems } = checkLockstep({ root, metadata: metadata(workspace()) });
   assert.ok(problems.includes(`crate jazz-core is ${V}, expected 2.0.0-alpha.8`));
-  assert.ok(problems.includes(`crate jazz-app requires jazz-core =${V}, expected =2.0.0-alpha.8`));
+  assert.ok(
+    problems.includes(`crate jazz-app-support requires jazz-core =${V}, expected =2.0.0-alpha.8`),
+  );
   assert.ok(problems.some((p) => p.startsWith("Go packages/jazz-go/version.go")));
   assert.ok(!problems.some((p) => p.includes("jazz-ruzstd is")));
 });
