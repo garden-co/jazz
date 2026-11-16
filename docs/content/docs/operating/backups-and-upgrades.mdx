@@ -117,7 +117,7 @@ directory, `src` or `src/lib`, `--dry-run` to see everything it would do without
 6. Runs `generate`.
 7. Checks that the schema hashes and the bundle id are the same as before, so the converted app
    deploys exactly as the old one did. If they differ, or `generate` fails, it puts every file back
-   and stops.
+   byte for byte, bindings included, removes any `migrations/` it created, and stops.
 8. Typechecks your `.ts` and `.tsx` files, reporting each error as `file:line:col`. It doesn't roll
    anything back for these: fix what it reports. For `.svelte` and `.vue` files, run `svelte-check`
    or `vue-tsc` yourself.
@@ -169,18 +169,20 @@ was. Each says what to do, with `file:line` where there is one:
   [Column Types](/docs/schemas/column-types#computed-columns)); `jazz.computed.ts` stays as it is.
   An app without `schema.ts` is converted with them.
 - **Permissions the new DSL can't express yet**, listed with the policy and the reason.
-- **A `true` inside `anyOf`/`allOf`** in `jazz.permissions.json`. alpha.65 compiled a condition
-  whose value was unset to nothing, so the policy allows more than `permissions.ts` says. Fix the
-  condition and run `validate` first.
+- **Permissions that read the environment, when a policy in `jazz.permissions.json` is a bare
+  `"true"`** (on its own or inside `anyOf`/`allOf`). alpha.65 compiled a condition on an unset
+  variable to `true`, so the policy may allow more than `permissions.ts` says. `upgrade` names each
+  `table.operation` and each variable read: set those variables and re-run alpha.65's
+  `npx jazz-tools validate`, or fix `permissions.ts`, then upgrade again.
 - **A `schema.ts` it can't read:** two apps, no `s.defineApp(…)`, no `schema` import from
   `jazz-tools`, or a DSL-built export other files import.
 - **Imports it can't rewrite:** such as a re-export of anything but `permissions.ts`'s default
   export.
 - **Files it would overwrite:** an existing `app-extras.ts`.
 
-Permissions that read the environment (`process.env.X`) aren't refused: the printed policy uses the
-value alpha.65's `validate` resolved, under a `// TODO` comment naming the variable, and the report
-warns about it. Make the value explicit, or compute it in a helper. `defs` in an app with
+Other permissions that read the environment (`process.env.X`) aren't refused: the printed policy
+uses the value alpha.65's `validate` resolved, under a `// TODO` comment naming the variable, and the
+report lists each read under "Left for you". Make the value explicit, or compute it in a helper. `defs` in an app with
 `schema.ts` aren't refused either: step 1 compares what alpha.65 writes with the expanded files by
 schema hashes and bundle id.
 
