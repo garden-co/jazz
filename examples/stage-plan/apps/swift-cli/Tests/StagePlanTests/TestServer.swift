@@ -65,7 +65,7 @@ struct TestServerError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
-/// The app's Jazz endpoint for end users, as a TS, Rust or Go backend's
+/// The app's Jazz endpoint for end users, as the TypeScript backend's
 /// `createJazz` handler serves it: a `jazz-app-test-relay` (`cargo build -p
 /// jazz-app --features test-relay --bin jazz-app-test-relay`, or
 /// `$JAZZ_TEST_RELAY_BIN`) in front of its own `TestServer`, publishing the
