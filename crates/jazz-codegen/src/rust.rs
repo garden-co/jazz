@@ -64,7 +64,9 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
 }
 
 /// Generates the bindings in a build script, from `jazz.app.json` beside
-/// `Cargo.toml` into `$OUT_DIR/jazz_app.rs`:
+/// `Cargo.toml` into `$OUT_DIR/jazz_app.rs`. `jazz.app.json` is generated:
+/// edit `schema.ts` and run `npx jazz-tools generate`, which writes it (a
+/// build script doesn't run the TypeScript):
 ///
 /// ```ignore
 /// // build.rs
