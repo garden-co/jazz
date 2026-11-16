@@ -131,10 +131,11 @@ On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live resu
 // tasks.rows, tasks.isLoading, tasks.error
 ```
 
-Every call `throws(JazzError)`. The cases are `refused` (validation, permissions or not supported
-yet), `io`, `closed`, `decoding`, `cancelled` (the calling task was cancelled),
-`permissionDenied` (your backend's permissions refused it, seen when waiting for the `global` tier),
-`notSupported` and `conflict` (a serializable transaction lost to another write: retry it).
+Every call throws a `JazzError` (catch it with `catch let error as JazzError`). The cases are
+`refused` (validation, permissions or not supported yet), `io`, `closed`, `decoding`,
+`cancelled` (the calling task was cancelled), `permissionDenied` (your backend's permissions
+refused it, seen when waiting for the `global` tier), `notSupported` and `conflict` (a serializable
+transaction lost to another write: retry it).
 
 ## Relations, transactions and tiers
 
