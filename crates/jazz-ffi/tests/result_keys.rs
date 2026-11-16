@@ -114,7 +114,7 @@ fn a_union_s_occurrences_are_applied_by_key() {
 /// result, with its `$history` and a key of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_subscriptions_follow_accepted_versions() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()

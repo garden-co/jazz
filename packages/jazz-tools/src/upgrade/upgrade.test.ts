@@ -54,10 +54,19 @@ function printed(report: UpgradeReport, dir: string): string {
   return `${formatReport(report).split(dir).join("<app>")}\n`;
 }
 
-function expectGolden(name: string, dir: string, report: UpgradeReport): void {
+function expectGolden(
+  name: string,
+  dir: string,
+  report: UpgradeReport,
+  options: { generated?: boolean } = {},
+): void {
   const files = projectFiles(dir);
   const generated = files["jazz.generated.ts"];
   delete files["jazz.generated.ts"];
+  // Rust bindings are jazz-codegen's output too.
+  const rust = files["src/jazz_app.rs"];
+  delete files["src/jazz_app.rs"];
+  if (options.generated === false) expect(rust, "src/jazz_app.rs").toContain("jazz");
   files["REPORT.txt"] = printed(report, dir);
   const expectedDir = join(FIXTURES, name, "expected");
   if (process.env.UPDATE_GOLDEN) {
@@ -71,7 +80,7 @@ function expectGolden(name: string, dir: string, report: UpgradeReport): void {
   for (const [path, text] of Object.entries(files)) {
     expect(text, path).toBe(readFileSync(join(expectedDir, path), "utf8"));
   }
-  expect(generated, "jazz.generated.ts").toBeDefined();
+  if (options.generated !== false) expect(generated, "jazz.generated.ts").toBeDefined();
 }
 
 async function identityOf(dir: string) {
@@ -136,6 +145,20 @@ describe("jazz-tools upgrade: conversions", () => {
     expect(schema).toContain('eq(session.claims.role, "admin")');
     expect(schema).toContain('isIn(session.claims.role, ["admin", "member"])');
     expectGolden("claims", dir, report);
+  });
+
+  it("converts a Rust app, writing its Rust bindings instead of jazz.generated.ts's", async () => {
+    const dir = fixture("rust");
+    const before = await identityOf(dir);
+    const report = await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(before);
+    expect(report.written).toContain("src/jazz_app.rs");
+    expect(report.notes.join("\n")).toContain("run `cargo check`");
+    expect(readFileSync(join(dir, "schema.ts"), "utf8")).toContain(
+      "export const permissions = definePermissions({",
+    );
+    rmSync(join(dir, "jazz.generated.ts"), { force: true });
+    expectGolden("rust", dir, report, { generated: false });
   });
 
   it("writes nothing on a dry run", async () => {

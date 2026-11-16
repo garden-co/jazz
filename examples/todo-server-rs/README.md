@@ -1,12 +1,12 @@
 # todo-server-rs
 
-An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app` crate. It is a **backend client** of the app's TypeScript main backend (`createJazz`): it syncs through the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. It uses SQLite storage and the native WebSocket transport, with no Node, NAPI or WASM.
+An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app-support` crate. It is a **backend client** of the app's TypeScript main backend (`createJazz`): it syncs through the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. It uses SQLite storage and the native WebSocket transport, with no Node, NAPI or WASM.
 
 ## What it demonstrates
 
 - **The app is its files.** `jazz.app.json` declares the tables (and their history and migrations), and `jazz.permissions.json` declares who may do what. `src/jazz_app.rs` holds the typed bindings that `jazz-tools generate` generates from `jazz.app.json`. All three are committed, and there is no schema code to run.
 - **Typed bindings.** `jazz_app::Todo`, `NewTodo` and `TodoUpdate`, plus `todos::query()`, `todos::done().eq(false)` and `todos::todos_via_parent().of(id)`.
-- **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app::Jazz`. The handle lives directly in Axum's router state, while the client runs on a thread of its own.
+- **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app_support::Jazz`. The handle lives directly in Axum's router state, while the client runs on a thread of its own.
 - **Running as a backend client**, as TypeScript's `createJazzClient` does:
   - It connects to the main backend's `/jazz` with `Config::credential`.
   - The main backend decides what the credential is trusted as. A **scoped** client acts as one user, under the app's permissions. A **trusted** client acts as the system.

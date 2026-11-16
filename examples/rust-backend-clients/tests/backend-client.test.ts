@@ -1,4 +1,4 @@
-// jazz-app's backend-client contract against a stock TypeScript `createJazz`
+// jazz-app-support's backend-client contract against a stock TypeScript `createJazz`
 // (../main-backend.ts, on a local core server so identities can be
 // revoked), through the `rust-backend-client-probe` binary: what the
 // stage-plan gate does not cover. A trusted client acting for a user with no

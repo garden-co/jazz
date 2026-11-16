@@ -85,7 +85,7 @@ fn a_serializable_conflict_is_its_own_kind() {
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_the_permissions_refuse_is_permission() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()

@@ -2,7 +2,7 @@
 name = "jazz-ffi"
 version.workspace = true
 edition = "2024"
-description = "JSON-in/JSON-out bindings of jazz-app for Swift and Kotlin (UniFFI) and Go (C ABI)"
+description = "JSON-in/JSON-out bindings of jazz-app-support for Swift and Kotlin (UniFFI) and Go (C ABI)"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -24,7 +24,7 @@ required-features = ["bindgen"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-jazz-app.workspace = true
+jazz-app-support.workspace = true
 base64 = "0.22"
 futures-executor = "0.3"
 futures-util = "0.3"

@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-**Rust (`jazz-app`): durability, upsert, restore and transactions that read.**
+**Rust (`jazz-app-support`): durability, upsert, restore and transactions that read.**
 
 - **`jazz.durable(DurabilityTier::GlobalServer)`** gives a handle whose writes (`insert`, `update`, `delete`, `upsert`, `restore`, `transaction`) return only once the server accepted them, and fail if it refused them. Without a server, they are refused before anything is written.
 - **`jazz.wait_for_sync()`** waits until every write committed so far reached the server and fails if the server rejected one, like TS's `waitForSync` (`JazzClient::wait_for_sync`).

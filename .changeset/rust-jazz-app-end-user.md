@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-**Rust (`jazz-app`): end-user clients, signed in with a device account or the app's bearer.**
+**Rust (`jazz-app-support`): end-user clients, signed in with a device account or the app's bearer.**
 
 - **Connecting:** an end user's client opens with `Config::new(app_id).server("https://app.example/jazz").user(auth)`. It syncs through the app backend's `createJazz` endpoint, as a browser does.
 - **Device accounts:** `Auth::Device(DeviceKey::generate()?)`, or `DeviceKey::load_or_create(path)` on a host without a keychain.
