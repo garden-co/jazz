@@ -108,6 +108,19 @@ impl Stream for MutationErrors {
 }
 
 impl Jazz {
+    /// A handle acting for a user ([`crate::Endpoint::for_user`]) shares the
+    /// backend's trusted client with every other user: its link, store and
+    /// refusals are the backend's, not this user's to manage or see.
+    fn refuse_for_user(&self, what: &str) -> Result<()> {
+        if self.for_user {
+            return Err(Error::Unsupported(format!(
+                "{what} on a handle acting for a user (Endpoint::for_user): \
+                 it shares the backend's client; call it on the backend's own handle"
+            )));
+        }
+        Ok(())
+    }
+
     /// The writes the server refused that no [`Jazz::durable`] wait handled,
     /// as TS's `onMutationError` reports them: a plain write returns once
     /// it is committed locally, so its refusal comes here. Refusals that
@@ -117,7 +130,11 @@ impl Jazz {
     ///
     /// Each stream holds up to 1024 unread refusals; past that, newer ones
     /// are dropped for it, with a `tracing` warning. Read it, or drop it.
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle acting for a user
+    /// ([`crate::Endpoint::for_user`]): the refusals are every user's.
     pub async fn mutation_errors(&self) -> Result<MutationErrors> {
+        self.refuse_for_user("mutation_errors")?;
         let (sender, receiver) = mpsc::channel(LISTENER_MAX);
         self.with_client(move |_| async move {
             REPORTS.with(|reports| {
@@ -140,7 +157,11 @@ impl Jazz {
     /// Leaves the server: local reads and writes go on, and sync resumes
     /// with [`Jazz::reconnect`] (TS's `disconnect`). Without a server it
     /// does nothing.
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle acting for a user
+    /// ([`crate::Endpoint::for_user`]), whose link every user shares.
     pub async fn disconnect(&self) -> Result<()> {
+        self.refuse_for_user("disconnect")?;
         self.with_client(|client| async move {
             client.disconnect();
             Ok(())
@@ -151,7 +172,10 @@ impl Jazz {
     /// Resumes sync after [`Jazz::disconnect`], once the link is attached
     /// (TS's `reconnect`). Without a server it does nothing, and returns at
     /// once.
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle acting for a user.
     pub async fn reconnect(&self) -> Result<()> {
+        self.refuse_for_user("reconnect")?;
         self.with_client(|client| async move {
             client.reconnect().await?;
             Ok(())
@@ -170,7 +194,11 @@ impl Jazz {
     /// a check passes, opening the directory fails until the files are
     /// gone. Another process is seen only after this client has stopped,
     /// so there the refusal comes with this client stopped.
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle acting for a user
+    /// ([`crate::Endpoint::for_user`]): it has no store of its own.
     pub async fn delete_client_storage(&self) -> Result<()> {
+        self.refuse_for_user("delete_client_storage")?;
         let Some(dir) = &self.info.storage_dir else {
             self.shutdown().await?;
             return Ok(());

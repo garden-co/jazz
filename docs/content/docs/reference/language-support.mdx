@@ -17,9 +17,8 @@ lists what that language doesn't support yet, compared with TypeScript.
 
     - connecting as a trusted machine (`as: "backend"`), and `forUser(userId)` on such a client:
       Rust connects as a scoped one, a machine your main backend trusts as a user;
-    - includes, `select` and recursive queries (use `jazz.with_client(…)` for the low-level client);
-    - payload enums;
-    - `linkIdentity`.
+    - subscribing to history reads, and partial reads of large values (use `jazz.with_client(…)` for
+      the low-level client).
 
   </Tab>
   <Tab value="Go">
