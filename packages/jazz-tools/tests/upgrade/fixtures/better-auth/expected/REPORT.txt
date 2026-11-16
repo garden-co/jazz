@@ -1,17 +1,23 @@
 Wrote:
-  jazz.generated.ts
-  auth-generate.ts
-  tsconfig.json
+  schema.ts
+  schema-better-auth/schema.ts
+  permissions.ts
+  src/lib/jazz.server.ts
   package.json
+  jazz.app.json
+  jazz.permissions.json
+  jazz.generated.ts
 Deleted:
   migrations/index.ts
-  permissions.ts
-  schema-better-auth/schema.ts
-  schema.ts
 Rewrote:
-  auth-generate.ts:11: Better Auth generation config: jazzAdapter's schema: s.defineApp({}, { migrations: "none" }).wasmSchema → {}
-  auth-generate.ts:3: dropped the schema DSL import
-  tsconfig.json: include "schema.ts" → "jazz.generated.ts"
-  tsconfig.json: dropped "permissions.ts" from include
-  package.json: script "auth:generate": the Better Auth CLI now writes its tables into jazz.app.json
+  schema.ts:139: `s.defineApp(…)` → `export const schema = s.defineSchema({…})`
+  schema.ts:3: dropped the import of migrations/index.ts
+  schema.ts:2: imports `tables` (the module's new name for its tables)
+  schema-better-auth/schema.ts: exports `tables` and `permissions`
+  src/lib/jazz.server.ts:1: ../../schema → ../../jazz.generated
+  src/lib/jazz.server.ts:2: permissions now come from jazz.permissions.json
   package.json: script "build": `jazz-tools validate` → `jazz-tools generate`
+Notes:
+  permissions.ts was long: the printed permissions stay in their own file.
+  The permissions were printed from jazz.permissions.json: repeated conditions became helpers (`isChatMember`, `rule1`, …). Rename them, and bring back what the old permissions.ts said in comments or constants.
+  The schema hashes and the bundle id (d9d479106062) are unchanged.

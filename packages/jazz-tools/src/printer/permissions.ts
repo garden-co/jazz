@@ -73,8 +73,8 @@ const OP_FN: Record<Exclude<CmpOp, "=">, string> = {
   ">": "gt",
   ">=": "gte",
 };
-const PLACEHOLDER = (i: number) => `\u0000${i}\u0000`;
-const PLACEHOLDER_RE = /\u0000(\d+)\u0000/g;
+const PLACEHOLDER = (i: number) => `\uE000${i}\uE000`;
+const PLACEHOLDER_RE = /\uE000(\d+)\uE000/g;
 
 class Unprintable extends Error {
   constructor(
@@ -226,7 +226,7 @@ function printHelper({ name, shape }: Helper): string {
   let body = shape.body;
   // `{ chatId: chatId }` → `{ chatId }`
   body = body.replace(
-    /([A-Za-z_$][A-Za-z0-9_$]*): \u0000(\d+)\u0000/g,
+    /([A-Za-z_$][A-Za-z0-9_$]*): \uE000(\d+)\uE000/g,
     (all, key: string, i: string) => (names[Number(i)] === key ? key : all),
   );
   body = body.replace(PLACEHOLDER_RE, (_, i: string) => names[Number(i)]!);
@@ -553,7 +553,7 @@ class Printer {
   private paramKinds(body: string, n: number, table: string): { name?: string; kind?: string }[] {
     const params: { name?: string; kind?: string }[] = Array.from({ length: n }, () => ({}));
     for (const m of body.matchAll(
-      /([A-Za-z_$][A-Za-z0-9_$]*|"[^"]*"): (?:[a-z]+\()?\u0000(\d+)\u0000/g,
+      /([A-Za-z_$][A-Za-z0-9_$]*|"[^"]*"): (?:[a-z]+\()?\uE000(\d+)\uE000/g,
     )) {
       const key = m[1]!.replace(/^"|"$/g, "");
       params[Number(m[2])] = { name: key, kind: this.kindOfName(key, table) };
@@ -874,15 +874,25 @@ class Printer {
       if (left.kind !== "session") return undefined;
       const value = plain(right);
       if (!value || value.args.length) return undefined;
-      return `${this.fn(op === "=" ? "eq" : OP_FN[op], `${this.sessionText(left.path)}, ${value.text}`)}`;
+      const text = this.fn(
+        op === "=" ? "eq" : OP_FN[op],
+        `${this.sessionText(left.path)}, ${value.text}`,
+      );
+      const name = camel(left.path[left.path.length - 1]!);
+      const hint =
+        op === "=" ? `${name}Is${pascal(value.text.replace(/"/g, "")) || "Set"}` : `${name}Check`;
+      return this.shaped({ key: `const:${text}`, body: text, params: [], hint }, []);
     }
     if (ast.kind === "inList" && ast.left.kind === "session") {
       const values = ast.values.map(plain);
       if (values.some((v) => !v || v.args.length)) return undefined;
-      return this.fn(
+      const text = this.fn(
         "isIn",
         `${this.sessionText(ast.left.path)}, [${values.map((v) => v!.text).join(", ")}]`,
       );
+      const name = camel(ast.left.path[ast.left.path.length - 1]!);
+      const hint = `${name}In${values.map((v) => pascal(v!.text.replace(/"/g, ""))).join("Or")}`;
+      return this.shaped({ key: `const:${text}`, body: text, params: [], hint }, []);
     }
     if (ast.kind === "contains" && ast.left.kind === "session") {
       const value = plain(ast.right);

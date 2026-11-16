@@ -6,7 +6,7 @@
 import type { AppJson, ColumnJson, MigrateOpJson, MigrationJson, TableJson } from "./app-json.js";
 import { member, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
-import { printDefault, printTable } from "./schema.js";
+import { printColumn, printDefault, printTable } from "./schema.js";
 
 /** A version's engine snapshot: its full schema hash and the JSON `migrations create` writes. */
 export interface Snapshot {
@@ -181,9 +181,33 @@ function witnesses(
   return [pick(from, (n) => renamedFrom.get(n) ?? n), pick(to, (n) => n)];
 }
 
+/** A table as the engine stores it: no relations, computed fields or transforms (a witness is stored types). */
 function stripRelations(table: TableJson): TableJson {
-  const { relations: _relations, computed: _computed, ...rest } = table;
-  return rest;
+  const { relations, computed: _computed, ...rest } = table;
+  // A forward relation's column references its table: say so, as a version without relations does.
+  const references = new Map<string, string>();
+  for (const relation of Object.values(relations ?? {})) {
+    if ("rel" in relation) references.set(relation.column, relation.rel);
+  }
+  const columns = Object.fromEntries(
+    Object.entries(rest.columns).map(([name, column]): [string, ColumnJson] => {
+      let stored: ColumnJson = column;
+      if (typeof stored === "object" && stored.transform !== undefined) {
+        const { transform: _transform, ...plain } = stored;
+        stored = plain;
+      }
+      const target = references.get(name);
+      if (target !== undefined) {
+        if (typeof stored === "string") {
+          const optional = stored.endsWith("?");
+          stored = { type: stored.replace(/\?$/, ""), ...(optional ? { optional: true } : {}) };
+        }
+        if (stored.array === undefined) stored = { ...stored, references: target };
+      }
+      return [name, stored];
+    }),
+  );
+  return { ...rest, columns };
 }
 
 function printOp(op: MigrateOpJson, path: string, unsupported: Unsupported[]): string {
@@ -226,10 +250,7 @@ function printTypedOp(
       : `${fn}.json({ ${def}, schema: ${JSON.stringify(type.json)} })`;
   }
   if (type.array !== undefined) {
-    const of = printTable(
-      { columns: { x: type.array } },
-      { relations: false, path, unsupported },
-    ).match(/x: (.*),\n/)?.[1];
+    const of = printColumn(type.array, { relations: false, path, unsupported });
     return `${fn}.array({ of: ${of}, ${def} })`;
   }
   unsupported.push({

@@ -74,7 +74,7 @@ export function refuseDroppedConditions(project: Project): void {
   };
   if (isObject(permissions)) {
     for (const [key, value] of entriesOf(permissions)) {
-      if (key === "tables" || key === "defs") walk(value, key, false);
+      if (key === "tables") walk(value, key, false);
     }
   }
   if (found.length === 0) return;
