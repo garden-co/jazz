@@ -17,8 +17,9 @@
 //! }
 //! ```
 //!
-//! History reads cannot include, hop, gather or union, as in TypeScript;
-//! subscribing to them is not supported yet.
+//! History reads cannot include, hop, gather or union, as in TypeScript.
+//! Subscribed, each version is a result of its own (keyed by
+//! [`crate::Added::key`]), and a new version arrives as it is accepted.
 
 use std::ops::{Bound, RangeBounds};
 

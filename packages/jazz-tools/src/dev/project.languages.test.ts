@@ -81,8 +81,8 @@ describe("npm CLI flags and messages from the shared code", () => {
     await captureConsoleLogs(() => generate({ schemaDir: root, lang: ["rust"] }));
     expect(await fileExists(join(root, "src", "jazz_app.rs"))).toBe(true);
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
-    // Go isn't switched on yet (Swift is with #5704, and Kotlin is: both tested below).
-    for (const lang of ["go"]) {
+    // No back end for it: refused whichever languages are switched on.
+    for (const lang of ["cobol"]) {
       await expect(generate({ schemaDir: root, lang: [lang] })).rejects.toThrow(
         /not (supported|available) yet/,
       );

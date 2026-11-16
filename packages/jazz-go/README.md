@@ -10,6 +10,10 @@ a `jazzapp` package, beside a `go.mod` that requires this module. See
 [examples/stage-plan/apps/go-cli](../../examples/stage-plan/apps/go-cli)
 and the [Go setup page](https://jazz.tools/docs/setup/go).
 
-Building needs `cargo build -p jazz-ffi` (or `--release`) from the repository root.
-cgo finds the library in `target/release` (or `target/debug`); anywhere
-else, set `CGO_LDFLAGS=-L<dir>`.
+Install it with `go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65`
+and build as usual. Its versions are Jazz's, in lockstep (each release tags
+`packages/jazz-go/v<version>`).
+
+Inside this repository, jazz-go uses the core `cargo build -p jazz-ffi`
+builds. `include/jazz_ffi.h` is a copy of `crates/jazz-ffi/include/jazz_ffi.h`;
+a test and the `go` CI partition check that it stays the same.
