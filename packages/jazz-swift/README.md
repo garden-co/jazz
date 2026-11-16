@@ -26,32 +26,31 @@ writes `jazz.app.json`, `jazz.permissions.json` and `JazzApp.swift` there
 (`--check` in CI fails when any of them is stale). See
 docs/content/docs/setup/swift.mdx.
 
-The package's manifest is the repository's root `Package.swift` (SwiftPM
-takes a package by URL only from a repository root); its sources are here.
-The UniFFI sources over jazz-ffi (`Sources/JazzFFI/jazz_ffi.swift`,
+Apps depend on `garden-co/jazz-swift`, the package each release publishes
+(`.github/workflows/swift-mirror.yml` builds it from here, with the Jazz core
+prebuilt as an XCFramework for Apple platforms). In this repository,
+the root `Package.swift` is the same package built from source: the UniFFI
+sources over jazz-ffi (`Sources/JazzFFI/jazz_ffi.swift`,
 `Sources/jazz_ffiFFI/jazz_ffiFFI.h`) are committed, and `libjazz_ffi` is a
 system library found through pkg-config.
 
 ## Use it in an app
 
-Build `libjazz_ffi` from a checkout at the release tag (needs Rust), and
-point pkg-config at it:
+```swift
+.package(url: "https://github.com/garden-co/jazz-swift", exact: "2.0.0-alpha.66"),
+// in your target:
+.product(name: "Jazz", package: "jazz-swift"),
+```
+
+On macOS and iOS that's all: the Jazz core comes prebuilt. On Linux, build
+`libjazz_ffi` from the same release (needs Rust) and point pkg-config at it
+before `swift build`:
 
 ```bash
-git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
+git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
 jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only
 export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
 ```
-
-Then depend on the package by URL (or by path, `.package(path: "jazz")`):
-
-```swift
-.package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65"),
-// in your target:
-.product(name: "Jazz", package: "jazz"),
-```
-
-and `swift build` with `PKG_CONFIG_PATH` set.
 
 ## Work on it
 
