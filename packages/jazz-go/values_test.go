@@ -62,15 +62,15 @@ type floatRow struct {
 
 func TestNullInANonPointerFieldIsRefused(t *testing.T) {
 	var row floatRow
-	err := decodeRow("tasks", json.RawMessage(`{"id":"a","rank":null}`), &row)
+	err := decodeRow(nil, "tasks", json.RawMessage(`{"id":"a","rank":null}`), &row)
 	var jerr *Error
 	if !errors.As(err, &jerr) || jerr.Kind != "refused" || !strings.Contains(jerr.Message, "tasks.rank") {
 		t.Fatalf("null rank: %v", err)
 	}
-	if err := decodeRow("tasks", json.RawMessage(`{"id":"a","rank":1.5,"opt":null,"tags":null}`), &row); err != nil || row.Rank != 1.5 || row.Opt != nil {
+	if err := decodeRow(nil, "tasks", json.RawMessage(`{"id":"a","rank":1.5,"opt":null,"tags":null}`), &row); err != nil || row.Rank != 1.5 || row.Opt != nil {
 		t.Fatalf("nullable fields: %+v %v", row, err)
 	}
-	d, err := decodeDelta[floatRow]("tasks", `{"added":[],"updated":[{"id":"a","rank":null}],"removed":[],"reset":false}`)
+	d, err := decodeDelta[floatRow](nil, "tasks", `{"added":[],"updated":[{"id":"a","rank":null}],"removed":[],"reset":false}`)
 	if err == nil {
 		t.Fatalf("a delta with a null rank: %+v", d)
 	}

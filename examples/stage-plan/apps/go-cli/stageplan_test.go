@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -9,10 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	jazz "github.com/garden-co/jazz/packages/jazz-go"
+	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
 
 	"github.com/garden-co/jazz/examples/stage-plan/apps/go-cli/jazzapp"
 )
@@ -36,11 +38,19 @@ func TestAppFilesAreStagePlans(t *testing.T) {
 
 // testServer is a `jazz-tools server` on a memory store for the test
 // (JAZZ_TOOLS names the binary; by default the repository's debug build).
+// testServer is a Jazz core (`jazz-tools server`, JAZZ_TOOLS) on a memory
+// store, and in front of it jazz-app's test relay (JAZZ_TEST_RELAY), the
+// stand-in for a TS main backend's /jazz: it publishes StagePlan's files and
+// signs "Bearer token-<user>" in as <user>.
 func testServer(t *testing.T) server {
 	t.Helper()
 	tools := os.Getenv("JAZZ_TOOLS")
 	if tools == "" {
 		tools = "../../../../target/debug/jazz-tools"
+	}
+	relay := os.Getenv("JAZZ_TEST_RELAY")
+	if relay == "" {
+		relay = "../../../../target/debug/jazz-app-test-relay"
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -48,32 +58,42 @@ func testServer(t *testing.T) server {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
-	srv := server{
-		appID:         randomUUID(t),
-		url:           fmt.Sprintf("http://127.0.0.1:%d", port),
-		backendSecret: "go-cli-test-backend-secret",
-		adminSecret:   "go-cli-test-admin-secret",
-	}
-	cmd := exec.Command(tools, "server", srv.appID, "--in-memory",
-		"--port", strconv.Itoa(port),
-		"--backend-secret", srv.backendSecret, "--admin-secret", srv.adminSecret)
+	appID := randomUUID(t)
+	core := fmt.Sprintf("http://127.0.0.1:%d", port)
+	const backendSecret, adminSecret = "go-cli-test-backend-secret", "go-cli-test-admin-secret"
+	cmd := exec.Command(tools, "server", appID, "--in-memory", "--port", strconv.Itoa(port),
+		"--backend-secret", backendSecret, "--admin-secret", adminSecret)
 	cmd.Env = append(os.Environ(), "RUST_LOG=warn")
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting %s (build it with cargo build -p jazz-cli): %v", tools, err)
 	}
 	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
-	for deadline := time.Now().Add(30 * time.Second); ; {
-		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err == nil {
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
 			conn.Close()
-			return srv
+			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the server didn't listen: %v", err)
+			t.Fatal("the core didn't listen")
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
+	r := exec.Command(relay, "--core", core, "--app-id", appID, "--app", "jazz.app.json", "--permissions", "jazz.permissions.json")
+	r.Env = append(os.Environ(), "RUST_LOG=warn", "JAZZ_BACKEND_SECRET="+backendSecret, "JAZZ_ADMIN_SECRET="+adminSecret)
+	r.Stderr = os.Stderr
+	out, err := r.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("starting %s (cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay): %v", relay, err)
+	}
+	t.Cleanup(func() { r.Process.Signal(os.Interrupt); r.Wait() })
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil {
+		t.Fatalf("the relay printed no endpoint: %v", err)
+	}
+	return server{appID: appID, url: strings.TrimSpace(line)}
 }
 
 func randomUUID(t *testing.T) string {
@@ -90,7 +110,7 @@ func openTest(t *testing.T, srv server, user string) *jazz.DB {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	db, err := openBackend(ctx, srv, user, "")
+	db, err := openUser(ctx, srv, "token-"+user, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,4 +159,53 @@ func TestBoard(t *testing.T) {
 	if err != nil || moved == nil || moved.Status != jazzapp.TaskStatusDoing {
 		t.Fatalf("moved: %+v, %v", moved, err)
 	}
+}
+
+func TestLiveBoardFollowsRank(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Live Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := addTask(ctx, db, show.ID, "Load-in")
+	b, _ := addTask(ctx, db, show.ID, "Line check")
+	live, err := jazzapp.Tasks.Query().
+		Where(jazzapp.Tasks.ShowID.Eq(show.ID)).
+		OrderBy(jazzapp.Tasks.Rank.Asc()).
+		Live(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-live.Ready()
+	order := func() []string {
+		var out []string
+		for _, task := range live.Rows() {
+			out = append(out, task.Title)
+		}
+		return out
+	}
+	if got := order(); len(got) != 2 || got[0] != a.Title {
+		t.Fatalf("first result: %v", got)
+	}
+	// Moving Line check to the top re-sorts the live rows.
+	if err := jazzapp.Tasks.Update(ctx, db, b.ID, jazzapp.TaskPatch{Rank: jazz.Set(0.5)}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if got := order(); got[0] == b.Title {
+			break
+		}
+		select {
+		case <-live.Changes():
+		case <-live.Done():
+			t.Fatal(live.Err())
+		case <-ctx.Done():
+			t.Fatalf("never re-sorted: %v", order())
+		}
+	}
+	cancel()
+	<-live.Done()
 }

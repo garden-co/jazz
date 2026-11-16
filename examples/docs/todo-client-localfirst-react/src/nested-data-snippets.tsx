@@ -1,4 +1,4 @@
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useDb } from "jazz-tools/react";
 import { app } from "./recipes/nested-data/jazz.generated.js";
 
 // #region nested-query
@@ -25,7 +25,6 @@ export function ProjectTasks({ projectId }: { projectId: string }) {
 // #region nested-insert
 export function CreateProject() {
   const db = useDb();
-  const session = useSession();
 
   async function handleCreate() {
     const { value: project } = await db.insert(app.projects, {

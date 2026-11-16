@@ -83,3 +83,8 @@ packages/jazz-tools/.vitest-browser-bench/
 /crates/jazz-rn/npm/*/JazzNativeRelay.xcframework/
 
 /crates/jazz-rn/ios-payload/
+
+# SwiftPM (the root Package.swift is the Jazz Swift package).
+/.build/
+/.swiftpm/
+/Package.resolved

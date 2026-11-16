@@ -217,16 +217,7 @@ fn every_go_app_generates_its_committed_go_byte_for_byte() {
 }
 
 #[test]
-fn go_bindings_refuse_computed_fields_and_read_back_backquotes() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
-    let error = generate(Lang::Go, &std::fs::read(dir.join("jazz.app.json")).unwrap()).unwrap_err();
-    assert!(error.is_unsupported(), "{error}");
-    assert!(
-        error
-            .to_string()
-            .contains("not supported in Go bindings yet"),
-        "{error}"
-    );
+fn go_bindings_read_back_backquotes() {
     // A backquote in the file survives the raw string it is embedded in.
     let app_json = "{ \"format\": 1, \"tables\": { \"notes\": { \"columns\": { \"body\": { \"enum\": [\"a`b\", \"c\"] } } } } }\n";
     let generated = generate(Lang::Go, app_json.as_bytes()).unwrap();
@@ -301,11 +292,10 @@ fn go_names_never_shadow_the_bindings_or_go() {
 }
 
 #[test]
-fn go_is_switched_off_in_the_cli() {
-    let error = Lang::parse("go").unwrap_err();
-    assert!(error.is_unsupported(), "{error}");
-    assert!(error.to_string().contains("not available yet"), "{error}");
-    assert!(!Lang::ALL.contains(&Lang::Go));
+fn go_is_a_language_the_cli_selects() {
+    assert_eq!(Lang::parse("go").unwrap(), Lang::Go);
+    assert!(Lang::ALL.contains(&Lang::Go));
+    assert_eq!(Lang::Go.marker(), "go.mod");
 }
 
 /// Each app's Swift bindings, committed beside it as `JazzApp.swift`; an
@@ -403,6 +393,30 @@ fn the_stage_plan_go_example_commits_current_bindings() {
         "{} is stale; run with JAZZ_UPDATE_FIXTURES=1",
         path.display()
     );
+}
+
+/// Computed fields and transforms run in Go: a generated `Computed`
+/// interface the app implements, which `Open` takes.
+#[test]
+fn go_computed_fields_and_transforms_are_an_interface() {
+    let generated = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/go-apps/computed/jazzapp/jazz_app.go"),
+    )
+    .unwrap();
+    for expected in [
+        "func Open(ctx context.Context, cfg jazz.Config, computed Computed) (*jazz.DB, error) {",
+        "\tTaskPriority(score int32, status TaskStatus) TaskPriority",
+        "\tTaskLabel(title string, dueAt *string) *string",
+        "\tIsoDateView(stored jazz.Timestamp) (string, error)",
+        "\tIsoDateStored(view string) (jazz.Timestamp, error)",
+        "\tLowercaseView(stored string) (string, error)",
+        "func (r *Task) JazzDecode(app any, fields map[string]json.RawMessage) error {",
+        "func (r NewTask) JazzEncode(app any) (any, error) {",
+        "func (p TaskPatch) JazzEncode(app any) (any, error) {",
+    ] {
+        assert!(generated.contains(expected), "{expected:?} in\n{generated}");
+    }
 }
 
 /// The Jazz Swift package's tests compile and run the bindings of
