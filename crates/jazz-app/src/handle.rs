@@ -168,6 +168,14 @@ impl Jazz {
                 "a backend needs the sync server's URL (Config::server)".into(),
             ));
         }
+        if matches!(config.user, Some(Auth::Credential(_))) && !files.has_permissions() {
+            return Err(Error::App(
+                "a backend client needs the app's jazz.permissions.json (AppFiles::read, or \
+                 AppFiles::with_permissions), as createJazzClient takes its permissions: it \
+                 checks the users it acts for by them"
+                    .into(),
+            ));
+        }
         if config.backend.is_some() && !files.has_permissions() {
             return Err(Error::App(
                 "a backend needs the app's jazz.permissions.json".into(),
@@ -655,7 +663,12 @@ async fn connect(
     // its schema carries the permissions the backend publishes, as
     // `createJazz`'s backend session compiles them. Policies are not part
     // of the schema's hash.
-    if let (Link::TrustedForUsers, Some(app)) = (link_kind, &loaded.backend) {
+    // So does a backend client, for the users it acts for (`for_user`), and
+    // a scoped one for its own user: TS `createJazzClient` takes the app's
+    // permissions for the same reason.
+    let backend_client = matches!(config.user, Some(Auth::Credential(_)));
+    let folds_permissions = link_kind == Link::TrustedForUsers || backend_client;
+    if let (true, Some(app)) = (folds_permissions, &loaded.backend) {
         for (table, policies) in app.permissions().iter() {
             if let Some(schema) = loaded.schema.get_mut(table) {
                 schema.policies = policies.clone();
