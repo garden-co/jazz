@@ -106,5 +106,9 @@ A Go service can also connect to your main backend as a backend client, with a m
 
 - running your main backend in Go (publishing permissions, serving `/jazz`): run it in TypeScript
   with `createJazz`;
+- guest (anonymous) users: a Go app signs in with your app's own sign-in (`jazz.Token`) or a device
+  account (`jazz.DeviceAccount`), and has no guest mode;
+- nested rows, catalogue enums and transaction-id columns: `npx jazz-tools generate` refuses Go
+  bindings for an app that declares them;
 - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column reads
   them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the column.
