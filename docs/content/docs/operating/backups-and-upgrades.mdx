@@ -104,7 +104,9 @@ directory, `src` or `src/lib`, `--dry-run` to see everything it would do without
    rename them, and bring back what the old `permissions.ts` said in comments or constants. A large
    `permissions.ts` (over 150 lines) keeps its own file, rewritten to import `schema` from
    `./schema`. A tables module `schema.ts` spreads, such as Better Auth's
-   `schema-better-auth/schema.ts`, now exports `tables` and `permissions`.
+   `schema-better-auth/schema.ts`, now exports `tables` and `permissions`. Hand-written `defs` in
+   `jazz.permissions.json` are expanded where they are called, and the checks they named become
+   helper functions again; the report lists them.
 4. Rewrites imports and code, listing each change as `file:line`: `./schema` becomes
    `./jazz.generated` (and `./app-extras`), backends import
    `import permissions from "./jazz.permissions.json" with { type: "json" }`, `app.slice(…)`
@@ -172,10 +174,17 @@ was. Each says what to do, with `file:line` where there is one:
   `user?.kind`: `"backend"` for `"external"`, `"device"` for `"local-first"`, and `user === null`
   for `"anonymous"`. In Vue read `snapshot.value.user`, in Solid `snapshot().user`. The old hooks
   still work for this release and warn once.
-- **Removed:** `s.defineApp` (use `s.defineSchema`), the callback `s.definePermissions` (use
-  `schema.definePermissions`), `migrations/index.ts`, `appMigrations`, `defineShippedApp` and
-  `{ migrations: "none" }`. Their names still exist for this release and throw an error pointing
-  here.
+- **`defs` are gone** from `jazz.permissions.json`. alpha.66 refuses a file that has them, with a
+  hint to inline each definition or write the app in `schema.ts`; `upgrade` does both. In
+  `schema.ts`, a repeated condition is a plain TypeScript function or constant.
+- **Condition objects in the new permissions DSL.** An array value means "one of":
+  `{ role: ["admin", "editor"] }` is `role in ['admin', 'editor']`, and a one-item array such as
+  `{ role: ["admin"] }` is still `in`. A key whose value is `undefined` throws: leave the key out, or
+  use `null` to check for an empty column.
+- **Removed:** `s.defineApp` (use `s.defineSchema`), the callback `s.definePermissions` and
+  `definePermissions(app, …)` (use `const { definePermissions } = schema`), `migrations/index.ts`,
+  `appMigrations`, `defineShippedApp` and `{ migrations: "none" }`. Their names still exist for this
+  release and throw an error pointing to `npx jazz-tools upgrade`.
 
 ## Upgrading from alpha.61
 

@@ -853,12 +853,7 @@ export const permissions = definePermissions({
         "new": {
           "allOf": [
             "owner_id = session.user",
-            {
-              "allOf": [
-                "exists todos(id = this.id, parentId = this.parentId)",
-                "exists todos(id = this.id, projectId = this.projectId)"
-              ]
-            }
+            "exists todos(id = this.id, parentId = this.parentId, projectId = this.projectId)"
           ]
         }
       }
@@ -871,10 +866,10 @@ export const permissions = definePermissions({
 </Tabs>
 
 `old` works in direct comparisons with the row's own columns: `{ status: old.status }`,
-`{ ownerId: ne(old.ownerId) }`, `{ version: gt(old.version) }`. As the generated JSON shows, each
-comparison becomes an `exists` on the same table: while the update is checked, the stored row is still the
-old version, also inside a transaction that wrote the row before. `old` can't be used inside
-another `exists`, and TypeScript rejects it there.
+`{ ownerId: ne(old.ownerId) }`, `{ version: gt(old.version) }`. As the generated JSON shows, the
+comparisons of one object become one `exists` on the same table: while the update is checked, the
+stored row is still the old version, also inside a transaction that wrote the row before. `old`
+can't be used inside another `exists`, and TypeScript rejects it there.
 
 ## Relation queries
 
