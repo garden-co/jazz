@@ -76,8 +76,12 @@ or none (signed out). `session_state()` / `"session"` gives
 subject, claims, kind}}`; `sync_status()` / `"syncStatus"` gives `{"link":
 …}`; `watch_session` / `watch_sync` (C `jazz_watch(h, "session"|"sync", …)`,
 `jazz_unwatch`) call back with each state, the current one first;
-`refresh()` asks for a fresh token; `sign_out()` signs out and closes the
-app. Anonymous users are not supported (as in TS).
+`refresh()` asks for a fresh token; `link(bearer)` / `"link"` links a
+device account to the app's own sign-in (the session becomes that user's, on
+the device's account); `sign_out()` signs out and closes the app. The sync
+status is TS's `SyncStatus` (`{link, pendingUploads, oldestPendingAt,
+rejected, lastError, synced}`). A backend's `bundle()` / `"bundle"` is the
+permissions bundle it published. Anonymous users are not supported (as in TS).
 
 Without `permissions` or `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
