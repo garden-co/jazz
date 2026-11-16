@@ -1,11 +1,18 @@
 # E2EE cryptographic formats
 
-This companion specifies the standalone context/envelope codecs and browser/native
-cryptographic adapters. Byte-level fixtures pin the encoding independently of
-the implementation's serializer. Table writes and lifecycle records are not
-part of this layer. The [stream format](E2EE_LARGE_VALUE_FORMAT.md) specifies
-the bounded large-value cipher. Test descriptions below identify carried
-coverage, not a validation receipt for this extraction.
+> **Status.** The normative reference implementation of these formats is the
+> pure-Rust crate `crates/jazz-e2ee`, with the independent generator
+> `fixtures/e2ee-vectors.c`; the protocol on top is
+> [E2EE protocol](E2EE_PROTOCOL.md). The earlier TypeScript implementation
+> and the libsodium N-API primitives (`crates/jazz-napi/src/e2ee_crypto.rs`)
+> are historical and not normative. Sections marked _historical_ describe that
+> implementation and its qualification only.
+
+This companion specifies the context and envelope codecs and the built-in
+mechanisms. Byte-level fixtures pin the encoding independently of the
+implementation's serializer. Table writes and lifecycle records are specified
+by the protocol. The [stream format](E2EE_LARGE_VALUE_FORMAT.md) specifies the
+bounded large-value cipher.
 
 ## Common envelope, version 1
 
@@ -64,96 +71,221 @@ layer will supply the full application/policy/space/row/table/column/epoch conte
 the adapter does not resolve those identities. Derived key buffers are cleared
 after use; this is best-effort lifetime reduction, not guaranteed VM erasure.
 
-## Built-in key envelope v1
+### Cell record, version 1
 
-Mechanism `jazz.sodium.key`, version 1, carries exactly one 32-byte key. The
-first payload byte identifies the operation: 1 for symmetric wrapping, 2 for a
-device sealed box. Readers reject other operations and incompatible lengths.
-The interface is independent of CellCipher; custom key envelopes do not change
-cell encryption or common context semantics.
+A stored encrypted cell wraps the cell cipher's output in a routing record
+that names its space epoch. The record mechanism is `jazz.e2ee.cell-record`,
+version 1, in the common envelope:
 
-For symmetric wrapping, associated data is the common envelope header, byte 1,
-then canonical context. Derive a 32-byte key with keyed BLAKE2b using the wrapping
-key and input `UTF8("jazz.e2ee.wrap-key.v1") || 0x00 || associatedData`.
-The separator is one zero byte. The payload is byte 1, a fresh 24-byte
-nonce, and XChaCha20-Poly1305-IETF ciphertext with its appended 16-byte tag.
-Its length is exactly 73 bytes. This purpose label separates wrapping from cells.
+| Field         | Encoding                                                                 |
+| ------------- | ------------------------------------------------------------------------ |
+| Header        | Common envelope header, mechanism `jazz.e2ee.cell-record`, version 1     |
+| Epoch         | Exactly 36 ASCII bytes: the space epoch's lowercase UUID                 |
+| Cipher output | Remaining bytes: the cell cipher's own common envelope (header, payload) |
 
-For device envelopes, generate a libsodium crypto_box keypair. The payload is
-byte 2 followed by a libsodium sealed box. Its authenticated plaintext is the
-common envelope header, byte 2, uint32 big-endian context byte length, context,
-and the 32-byte key. On opening, verify the entire prefix and exact length before
-returning any key bytes. This binds context despite sealed boxes lacking a
-separate associated-data input. A sealed box authenticates its contents to the
-recipient, not a sender identity; ordinary Jazz authorisation remains required.
+The payload (epoch plus cipher output) is at least 47 bytes. The epoch is
+routing metadata in clear; it is also authenticated, because the cell
+cipher's context names the same epoch. That context is
+`frame[C, T]`, where `frame` is u32be-length-prefixed concatenation, `C` is
+the canonical context with application = the shared application domain,
+policy `jazz.e2ee.cell-record.v1`, scope = the space table's catalogue
+identity, identifier = the space identifier, table, row and column = the
+catalogue table identity, row UUID and catalogue column identity, epoch = the
+epoch UUID and empty recipient, and `T` is the UTF-8 canonical JSON (sorted
+keys, no whitespace) of `{column_type, nullable}` for the logical column. The
+plaintext is Jazz's native row encoding of the single value.
 
-Browser and native adapters implement both operations; both-direction exchanges
-and direct Rust input checks are tested. `fixtures/e2ee-vectors.c` independently
-constructs the framing and derivation inputs against libsodium 1.0.22. Its stored
-vectors cover context, cell encryption, symmetric wrapping and device envelopes in
-Node and Chromium. Browser tests additionally check writer output against the
-independent derivation inputs and reject a flipped bit at every envelope position.
-This is independent protocol framing, not an independent crypto implementation or
-security audit. Sealed-box generation is random; its stored fixture is fixed.
-The generator must be compiled with assertions enabled; `NDEBUG` is rejected.
+Readers reject a record whose mechanism is another (reported as
+`unsupported-format`, which lets a reader try the
+[stream record](E2EE_LARGE_VALUE_FORMAT.md#stream-record-version-1)), a payload
+under 47 bytes, an epoch that is not a lowercase UUID, an epoch other than the
+key's, and cipher output that is not an envelope of the installed cell
+mechanism (`invalid-ciphertext`, or `unsupported-format` for an unknown
+mechanism).
+
+Framing example (not a decryptable value): epoch
+`00000000-0000-4000-8000-000000000000` and, as cipher output, the `test`
+fixture above:
+`4a45324501156a617a7a2e653265652e63656c6c2d7265636f72640000000130303030303030302d303030302d343030302d383030302d3030303030303030303030304a45324501047465737400000001aa`.
+This example is pinned by this document and asserted by the `jazz-e2ee`
+vector tests.
+
+## Built-in key wrapping, version 1
+
+Mechanism `jazz.wrap.xchacha20poly1305`, version 1, wraps exactly one 32-byte key under a
+32-byte symmetric wrapping key. The first payload byte is the operation, 1;
+readers reject any other operation byte and any other length. (Operation 2,
+the earlier libsodium sealed box, is replaced by
+[HPKE key sealing](#built-in-key-sealing-hpke-version-1); it was never
+released and is not read.) The interface is independent of CellCipher; custom
+key envelopes do not change cell encryption or common context semantics.
+
+Associated data is the common envelope header, byte 1, then canonical context.
+Derive a 32-byte key with keyed BLAKE2b using the wrapping key and input
+`UTF8("jazz.e2ee.wrap-key.v1") || 0x00 || associatedData`. The separator is
+one zero byte. The payload is byte 1, a fresh 24-byte nonce, and
+XChaCha20-Poly1305-IETF ciphertext with its appended 16-byte tag. Its length
+is exactly 73 bytes. This purpose label separates wrapping from cells. (The
+mechanism was earlier named `jazz.sodium.key`; that ID was never released and
+is not read.)
+
+Fixture (generator key `00`–`1f`, the context fixture, nonce `00`–`17`,
+wrapped key bytes `20`–`3f`): `wrapDerived` is
+`a725b648e755974ef9a69b5acb03be13d561547dc2b4d1d380033b9119d4dc23`,
+`wrapAad` is
+`4a453245011b6a617a7a2e777261702e786368616368613230706f6c793133303500000001014a45324301000000016100000001700000000173000000016900000001740000000172000000016300000001650000000164`
+and the envelope is
+`4a453245011b6a617a7a2e777261702e786368616368613230706f6c79313330350000000101000102030405060708090a0b0c0d0e0f10111213141516175f4e9275e4e56d266c7621949e0aae0329cbef65778ca9d4498c602e7e280296eed23822869f2300f7907e08149f0669`.
+The `jazz-e2ee` vector tests assert all three. These three values are the
+crate's own output after the mechanism rename: `fixtures/e2ee-vectors.c` has
+been updated to the new ID but not yet rerun, so they are not independently
+generated until the generator is compiled against libsodium and reproduces
+them.
+
+## Built-in key sealing (HPKE), version 1
+
+Mechanism `jazz.wrap.hpke-x25519`, version 1, seals exactly one 32-byte key
+to a recipient public key (a device, a group epoch or a recovery root) with
+HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180)) in base mode,
+single-shot, suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 /
+ChaCha20Poly1305 (KEM `0x0020`, KDF `0x0001`, AEAD `0x0003`). ChaCha20Poly1305
+is chosen over AES-GCM because it is constant-time in portable software
+(WASM and phones without AES instructions) and matches the rest of the format.
+
+Let `H` be this mechanism's common envelope header with no payload and `C` the
+canonical operation context. HPKE `info` is `H`, which binds the mechanism and
+version into the key schedule; HPKE `aad` is `C`, the context bytes unchanged.
+The plaintext is the 32-byte key. The payload is the 32-byte encapsulated key
+`enc` followed by the 48-byte ciphertext and tag, exactly 80 bytes; readers
+reject any other length. A small-order recipient key fails sealing. Sealing
+authenticates the contents to the recipient, not a sender identity; ordinary
+Jazz authorisation remains required. Sealing to a small-order recipient key
+fails with `InvalidInput`, not a provider failure.
+
+Recipient key pairs come from HPKE `DeriveKeyPair` (RFC 9180 §7.1.3): a new
+device uses 32 fresh random bytes as input keying material, and a group epoch
+derives its input keying material from the epoch key (see the protocol). The
+public key is the 32-byte X25519 public key; implementations may store the
+secret key clamped.
+
+## Fixtures
+
+`fixtures/e2ee-vectors.c` independently constructs the framing and derivation
+inputs against libsodium 1.0.22, including HPKE assembled from libsodium's
+X25519, HKDF-SHA256 and ChaCha20-Poly1305. It first reproduces RFC 9180
+appendix A.2.1 (sequence 0), then seals the generator's key (bytes `20`–`3f`)
+for the context fixture to the recipient derived from input keying material
+`2a`–`49`, with ephemeral input keying material `60`–`7f`. The recipient public
+key is `46b25ef1bf15f25cc4f52403375de884edb39be47f6871666d3debabfa179b4c` and
+the envelope is
+`4a45324501156a617a7a2e777261702e68706b652d78323535313900000001bad762e098446cbcc58b30c7e804f82847b8b911185996582af9f27bfd4e875fe4ae0a4407d26ccd2db3ecc953f3f7920e52778aa67b3514be1978fc6b72a56e9952881f202c3001a9af1cf161de2986`.
+Every fixture field is deterministic. The `jazz-e2ee` vector tests assert the
+RFC vector, this envelope and the other stored vectors, and reject a flipped
+bit at every envelope position. This is independent protocol framing, not an
+independent security audit. The generator must be compiled with assertions
+enabled; `NDEBUG` is rejected.
 
 ## Built-in device signatures, version 1
 
-Mechanism `jazz.sodium.sign`, version 1, uses libsodium's single-part detached
-Ed25519 signatures, not Ed25519ph. Let `H` be its common envelope header with
-no payload and `R` the common layer's canonical lifecycle-record bytes. Sign
-exactly `H || R`; store the 64-byte detached signature as the envelope payload.
-Verification checks the exact mechanism/version, payload length and signature.
-The fixed header domain-separates signatures from other protocol messages.
+Mechanism `jazz.sodium.sign`, version 1, is single-part detached Ed25519
+(RFC 8032), not Ed25519ph, byte-compatible with libsodium's. Let `H` be its
+common envelope header with no payload and `R` the protocol's canonical
+signed-record bytes (pinned per record in the [protocol](E2EE_PROTOCOL.md)).
+Sign exactly `H || R`; store the 64-byte detached signature as the envelope
+payload. Verification checks the exact mechanism/version, payload length and
+signature. The fixed header domain-separates signatures from other protocol
+messages.
 
-Public keys contain 32 bytes. Private keys use libsodium's 64-byte seed/public-key
+Public keys contain 32 bytes. Private keys use the 64-byte seed/public-key
 representation. Signing reconstructs the keypair from its seed and rejects an
-inconsistent public-key half; it clears that temporary private-key buffer without
-modifying the caller's key. New signing keys use independent secure randomness.
+inconsistent public-key half; it clears that temporary private-key buffer
+without modifying the caller's key. New signing keys use independent secure
+randomness.
 
-`DeviceSigner` exposes `createKeyPair()`, `sign(privateKey, record)` and
-`verify(publicKey, record, signature)` as asynchronous methods. Verification
-returns false for invalid inputs/signatures; signing rejects malformed keys.
-This adapter authenticates bytes, not signer eligibility or accepted membership.
-The lifecycle's canonical signed-record layout and durable enrolment format
-remain to be implemented and pinned before persistence.
+In `jazz-e2ee` this is the `Signer` trait (below): `verify` returns
+`Ok(true)` for a valid signature, `Ok(false)` for an invalid signature or
+malformed input, and `Err(CryptoFailure)` only for a provider failure; signing
+rejects malformed keys. This mechanism authenticates bytes, not signer
+eligibility or accepted membership.
 
-The browser and native factories are implemented. A Node-hosted test uses the RFC 8032 test-one
-key with Node/OpenSSL to independently verify the framing and signature, and
-checks altered envelopes, records and keys. Native/browser exchanges verify both
-directions with keys generated by each implementation. Direct NAPI checks cover
-malformed seeds, secret keys, public keys and signatures, plus empty messages.
-Independent default/override selection is tested on both platforms; Chromium
-also verifies a fixed OpenSSL signature and rejects a changed signature.
-Device-lifecycle integration remains unqualified. Native coverage is on macOS
-arm64, not every native platform.
-This receipt is not a protocol audit or a completed revocation implementation.
+## Mechanism agility
 
-## Adapter selection
+Each cryptographic role is a small synchronous trait in `jazz-e2ee`
+(`jazz_e2ee::agility`): `CellCipher`, `KeyWrapper`, `KeySealer` (the KEM
+role, shaped after HPKE so a hybrid KEM such as X-Wing is a drop-in),
+`Signer`, `EqualityTagger` and `StreamCipher`. The built-in mechanisms above
+are the default implementations.
 
-`JazzCrypto` independently overrides `cellCipher`, `keyEnvelope`, `deviceSigner`,
-`equalityIndex` and `largeValueCipher`. Browser and native factories initialise
-only omitted platform defaults. The browser dependency is loaded lazily. Selection validates
-mechanism IDs and versions; this does not validate an adapter's cryptographic
-strength. Import interfaces and context/envelope codecs from `jazz-tools/e2ee`.
-Platform factories are explicit: `jazz-tools/e2ee/browser` and
-`jazz-tools/e2ee/native`. Packed public imports, declaration resolution and
-browser/native exchange have executable coverage; Chromium also reads fixtures
-through the built browser bundle. After building correctness artifacts, run
-`pnpm --filter jazz-tools build:runtime` then
-`pnpm --filter jazz-tools test:crypto-package`.
+- **IDs and versions.** Every envelope names its mechanism ID and version in
+  the common header. Built-in IDs live in the reserved `jazz.` namespace;
+  custom mechanisms use a reverse-DNS ID of at least two labels, such as
+  `com.example.kem`. A new incompatible format is a new version or ID, never
+  a reinterpretation of an existing one.
+- **Routing.** Readers look the header's ID and version up in a registry of
+  compiled-in mechanisms. An unregistered mechanism is `unsupported-format`,
+  never `invalid-ciphertext`.
+- **Advertisement.** Public keys carry their mechanism: the advertised form
+  is `env(mechanism, publicKey)`. Each identity (a device, a recovery root, a
+  group epoch) has exactly one sealing key and one signing key, fixed at
+  creation; a recipient that supports a new mechanism creates a new identity
+  for it (see the protocol's mechanism agility rules).
+- **Selection.** The application configuration selects one mechanism per role
+  for writing. A sender seals only to a recipient key of the selected
+  mechanism and otherwise fails with "recipient unsupported"; there is no
+  silent fallback. A configuration naming an unregistered mechanism is
+  rejected.
+- **Migration.** Ship the mechanism in every client, switch the
+  configuration, let recipients create identities of the new mechanism, and
+  let the next key rotation seal and wrap the new epoch key with it. Old
+  records keep their mechanism and stay readable while it remains
+  registered.
+- **Errors.** Every role keeps these outcomes apart, and no layer above may
+  merge them:
+  - `InvalidCiphertext` (an authentication failure, or malformed or truncated
+    input to a decryption, unwrap or open) and, for verification, `Ok(false)`;
+  - `UnsupportedFormat` (no registered mechanism has the header's ID and
+    version);
+  - `NoKeyForMechanism` (the mechanism is registered, but the reader holds no
+    key pair of it), distinct from an unsupported format;
+  - `InvalidInput` (the caller supplied an unusable argument, such as a
+    small-order recipient key for sealing);
+  - `CryptoFailure` (the provider failed: a hardware-backed key, a host
+    callback, randomness). It is never reported as invalid ciphertext or as a
+    false verification. `Signer::verify` therefore returns `Result<bool>`, and
+    the record helpers (`decrypt_cell_value`, `decrypt_stream_value` and the
+    stream update and finish steps) propagate `CryptoFailure` unchanged
+    instead of mapping every post-routing error to `InvalidCiphertext`.
+- **Compiled in.** Mechanisms are Rust code linked into every binding. There
+  are no runtime crypto callbacks from other languages. A host may provide
+  the device-key operations of a mechanism (for hardware-backed keys, where
+  the secret key bytes are a key reference), still behind the same traits.
 
-`LargeValueCipher.encrypt/decrypt` transform `AsyncIterable<Uint8Array>` with key
-bytes, canonical context and an optional abort signal. Pulling respects
-backpressure; implementations bound memory, return owned output chunks and
-propagate cancellation and errors. Successful iteration to the end requires
-final authentication; consumed prefixes alone do not establish whole-stream
-success. Both platform factories supply the built-in
-[version-one stream mechanism](E2EE_LARGE_VALUE_FORMAT.md) by default.
-An explicitly supplied adapter bypasses that platform default; there is no
-plaintext or whole-buffer fallback.
+A mechanism is accepted once it passes the conformance kit
+(`jazz_e2ee::conformance`, feature `conformance`): round trips, key and
+context binding, rejection of tampered, truncated and extended input
+(streams also of reordered, duplicated and dropped segments), routing by its
+own header, exact reproduction of the vectors it declares, and, per role,
+provider failure: a mechanism whose provider fails must surface
+`CryptoFailure` through the registry and the record helpers, never
+`InvalidCiphertext` or a false verification. The crate's
+`custom_mechanism` example registers, checks and selects a toy KEM.
 
-## Dependency qualification and limits
+## Adapter selection (historical)
+
+The TypeScript implementation let applications override each adapter
+(`JazzCrypto` with `cellCipher`, `keyEnvelope`, `deviceSigner`,
+`equalityIndex`, `largeValueCipher`) through asynchronous JavaScript
+factories in `jazz-tools/e2ee`, `jazz-tools/e2ee/browser` and
+`jazz-tools/e2ee/native`. None of this applies to the Rust implementation:
+mechanisms are compiled in and selected by configuration (above), with no
+runtime callbacks from other languages.
+
+## Dependency qualification and limits (historical)
+
+This section records the qualification of the earlier libsodium-based
+implementation. The Rust implementation uses pure-Rust primitives, checked
+for libsodium byte compatibility by the vectors above; its own dependency
+qualification is not recorded here.
 
 The published [Cryptography Engineering assessment](https://www.privateinternetaccess.com/blog/wp-content/uploads/2017/08/libsodium.pdf)
 reviews libsodium 1.0.12 and 1.0.13, including XChaCha20-Poly1305 and sealed

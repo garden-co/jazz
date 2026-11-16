@@ -1,6 +1,11 @@
 # E2EE equality-token format
 
-This companion specifies the standalone built-in equality adapter. Table
+> **Status.** The normative reference implementation of this format is the
+> pure-Rust crate `crates/jazz-e2ee`, with the independent generator
+> `fixtures/e2ee-vectors.c`. The earlier TypeScript implementation
+> and the libsodium N-API primitives are historical and not normative.
+
+This companion specifies the built-in equality mechanism. Table
 contexts, logical-value encoding and encrypted query integration are separate
 contracts and are not supplied by this layer. The common envelope and context encodings are defined in
 [E2EE cryptographic formats](E2EE_CRYPTO_FORMAT.md).
@@ -33,11 +38,10 @@ lifetime but does not guarantee erasure in JavaScript runtimes.
 `fixtures/e2ee-vectors.c` constructs the envelope and derivation input without
 Jazz TypeScript helpers and links against the pinned libsodium 1.0.22 archive.
 Assertions must remain enabled. It emits `equalityContext`, `equalityDerived`
-and `equality`; the stored literals are in the TypeScript crypto fixture.
+and `equality`; the `jazz-e2ee` vector tests assert them.
 Its public test inputs are a key containing bytes `00` through `1f`, the
 existing context fixture, and UTF-8 `hello` as `V`.
 
-Browser and native adapter tests compare the token against the same literal.
 This is an independent framing check, not an independent cryptographic
 implementation or security audit. The generic fixture context tests the
 adapter boundary; it is not a real application's table context.
@@ -49,8 +53,10 @@ opt in before persisting searchable indexes. A token match identifies a candidat
 must decrypt and compare candidates before applying logical limits or counts.
 Jazz permissions remain authoritative for reads and writes.
 
-BYOC adapters retain their own explicit mechanism ID and version. They receive
-the common layer's context and value bytes; they cannot change logical
-comparison semantics. Changes to the derivation, framing or value encoding
+Custom equality mechanisms (registered as in the crypto format's mechanism
+agility rules) carry their own mechanism ID and version. They receive the
+common layer's context and value bytes; they cannot change logical
+comparison semantics. A provider failure is `CryptoFailure`, never a
+non-matching token. Changes to the derivation, framing or value encoding
 require an explicit compatibility decision before persisted indexes can use
 them. There is no implicit reindexing or migration in this version.
