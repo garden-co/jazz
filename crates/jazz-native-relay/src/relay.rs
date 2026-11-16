@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, Migrations, RemoteLinkHint,
-    SubscriptionStream, block_on,
+    SubscriptionStream, UploadStatus, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::link::{
@@ -1940,11 +1940,14 @@ fn foreground_command(
             Response::SlowQueryThresholdSet
         }
         Request::PendingUploadCount => Response::PendingUploadCount {
-            count: binding.pending_upload_count() as u64,
+            count: foreground_upload_status(&binding, &client.authority).pending as u64,
         },
         Request::UploadStatus => Response::UploadStatus {
-            status_json: serde_json::to_string(&binding.upload_status())
-                .expect("an upload status serializes"),
+            status_json: serde_json::to_string(&foreground_upload_status(
+                &binding,
+                &client.authority,
+            ))
+            .expect("an upload status serializes"),
         },
         Request::BeginStreamingMutation {
             mutation,
@@ -2084,6 +2087,48 @@ fn foreground_command(
             return Err("host command reached the relay owner".into());
         }
     })
+}
+
+/// A foreground's uploads as its app sees them: its own commits and the
+/// ones the scope's store holds, which after a restart are the only copy of
+/// an earlier process's writes. A relayed commit uploads under its
+/// session's id, so the two count each write once. Refusals are the
+/// foreground's own: the store reports a relayed commit's refusal to its
+/// session, not as one of its own.
+fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadStatus {
+    let own = binding.upload_status();
+    let store = authority.upload_status();
+    let pending = sorted_union_len(
+        &binding.db.pending_upload_ids(),
+        &authority.db.pending_upload_ids(),
+    );
+    UploadStatus {
+        pending,
+        oldest_pending_at: own
+            .oldest_pending_at
+            .into_iter()
+            .chain(store.oldest_pending_at)
+            .min(),
+        ..own
+    }
+}
+
+/// How many distinct items two sorted, deduplicated slices hold together:
+/// a linear merge, no sort.
+fn sorted_union_len<T: Ord>(a: &[T], b: &[T]) -> usize {
+    let (mut i, mut j, mut len) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+        len += 1;
+    }
+    len + (a.len() - i) + (b.len() - j)
 }
 
 /// Wait for a write this foreground committed to reach `tier`. Unless
@@ -2900,5 +2945,19 @@ mod relay_config_tests {
         let config = relay_db_config(schema, identity, &Migrations::default());
         assert!(config.chunk_store.is_none());
         assert!(!config.host_chunk_io);
+    }
+}
+
+#[cfg(test)]
+mod sorted_union_len_tests {
+    use super::sorted_union_len;
+
+    #[test]
+    fn counts_each_shared_item_once() {
+        assert_eq!(sorted_union_len::<u8>(&[], &[]), 0);
+        assert_eq!(sorted_union_len(&[1, 2], &[]), 2);
+        assert_eq!(sorted_union_len(&[], &[1, 2]), 2);
+        assert_eq!(sorted_union_len(&[1, 3, 5], &[2, 3, 6, 7]), 6);
+        assert_eq!(sorted_union_len(&[1, 2, 3], &[1, 2, 3]), 3);
     }
 }
