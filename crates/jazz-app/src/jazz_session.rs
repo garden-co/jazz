@@ -108,6 +108,10 @@ impl From<&Error> for SessionError {
             Error::StoreHeld(_) => "storeHeld",
             Error::Stopped => "stopped",
             Error::Jazz(_) => "jazz",
+            // Variants added later (a trusted client's `bundle_mismatch`,
+            // jazz#5867): named by their message until listed here.
+            #[allow(unreachable_patterns)]
+            _ => "other",
         };
         Self {
             kind: kind.to_owned(),
