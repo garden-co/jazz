@@ -15,7 +15,7 @@ import {
 } from "@astryxdesign/core";
 import { useAll, useJazzSession, useSession } from "jazz-tools/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { AssetShelf } from "@/src/components/AssetShelf";
 import { CanvasSurface } from "@/src/components/CanvasSurface";
 import { CheckpointShelf } from "@/src/components/CheckpointShelf";

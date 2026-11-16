@@ -112,7 +112,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useAll, useDb, useSession } from "jazz-tools/vue";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { MapController } from "./lib/map-controller";
 import { findNearestStop } from "./lib/nearest-stop";
 import { useRoute } from "./lib/routes";

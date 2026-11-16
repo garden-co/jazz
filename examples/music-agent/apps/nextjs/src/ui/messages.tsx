@@ -17,7 +17,8 @@ import { Spinner } from "@astryxdesign/core/Spinner";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
-import type { TimedTurn as Turn, ToolCall } from "@/schema";
+import type { ToolCall } from "@/jazz.generated";
+import type { TimedTurn as Turn } from "@/app-extras";
 import { AttachmentPlayer, type AttachmentSummary } from "./attachment-player";
 
 export function UserMessage({

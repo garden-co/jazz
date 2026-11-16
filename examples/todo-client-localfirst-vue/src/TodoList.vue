@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { useAll, useSession } from "jazz-tools/vue";
 import { toast } from "vue-sonner";
-import { app } from "./lib/schema.js";
+import { app } from "./lib/jazz.generated.js";
 
 // #region reading-reactive-vue
 const { data: todos, db } = useAll(app.todos);

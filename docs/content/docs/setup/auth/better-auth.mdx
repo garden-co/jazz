@@ -9,7 +9,7 @@ backend as Jazz, so `authenticate` asks it directly who the request's session co
 <Callout type="info" title="Jazz can be Better Auth's database">
   You don't need a separate PostgreSQL or other database for Better Auth. With the Jazz adapter,
   Better Auth keeps its users, sessions and accounts in Jazz, next to your app's data:
-  `database: jazzAdapter({ db: async () => jazz.db, schema: app.wasmSchema })`. See
+  `database: jazzAdapter({ db: async () => jazz.db, schema: app })`. See
   [Store Better Auth's tables in Jazz](#store-better-auths-tables-in-jazz), the
   [Next.js, Better Auth and Vercel](/docs/setup/nextjs-better-auth) guide, and the
   [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
@@ -23,8 +23,8 @@ backend as Jazz, so `authenticate` asks it directly who the request's session co
 ```ts title="jazz.server.ts"
 import { betterAuth } from "better-auth";
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const auth = betterAuth({
   // database: your own, or Jazz itself (see "Store Better Auth's tables in Jazz" below)
@@ -66,7 +66,7 @@ In a route handler, act as the signed-in user with `jazz.forReqUser(request)`, w
 
 ```ts title="messages.ts"
 import { jazz } from "./jazz.server";
-import { app } from "./schema";
+import { app } from "./jazz.generated";
 
 export async function messages(request: Request) {
   const db = await jazz.forReqUser(request);
@@ -147,7 +147,8 @@ handlers, client, plugins), see the [Better Auth documentation](https://www.bett
 
 ### Generate the tables
 
-Better Auth tables live in a generated `schema-better-auth/` module that your app schema spreads into its own table map. This keeps Better Auth's tables in the same Jazz app as your own data, so a single backend context handles both.
+The Better Auth CLI writes Better Auth's tables into your app's `jazz.app.json`, next to your own
+tables, so a single backend context handles both.
 
 Start with shared Better Auth options.
 
@@ -161,11 +162,10 @@ export const authOptions = {
 
 Set `BETTER_AUTH_URL` to your application server's origin and `BETTER_AUTH_SECRET` to a private Better Auth secret. Keep plugins, additional fields, and model customizations in these shared options so generation and runtime use the same configuration.
 
-Create a separate configuration for generation. It does not import your app schema or open a Jazz session, so it works before either the generated file or Jazz exists. The CLI only requests schema generation; the database callback is deliberately unavailable.
+Create a separate configuration for generation. It does not import `jazz.generated.ts` or open a Jazz session, so it works before either the bindings or Jazz exist. The CLI only requests schema generation; the database callback is deliberately unavailable.
 
 ```ts title="auth-generate.ts"
 import { betterAuth } from "better-auth";
-import { schema as s } from "jazz-tools";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { authOptions } from "./auth-options";
 
@@ -175,81 +175,189 @@ export const auth = betterAuth({
     db: async () => {
       throw new Error("The generation config cannot query the database");
     },
-    schema: s.defineApp({}, { migrations: "none" }).wasmSchema,
+    schema: {},
   }),
 });
 ```
 
-Generate with the current [Better Auth CLI](https://www.better-auth.com/docs/concepts/cli):
+Generate with the [Better Auth CLI](https://www.better-auth.com/docs/concepts/cli):
 
 ```bash
-npx auth@latest generate \
-  --config ./auth-generate.ts \
-  --output ./schema-better-auth/schema.ts \
-  --yes
+npx @better-auth/cli generate --config ./auth-generate.ts --yes
 ```
 
-`--yes` writes the output without an interactive confirmation. Review the generated diff when regenerating an existing module.
+It writes to `./jazz.app.json`; pass `--output <path>` for an app file elsewhere, relative to
+the directory you run it in. Don't combine it with `--cwd` or an absolute path: the adapter reads
+the file relative to the current directory, the CLI writes it relative to `--cwd`. Each Better
+Auth table is replaced as a whole, and every other table keeps its exact text, as do `history`
+and `migrations`. Relations you added to a Better Auth table stay as long as their column does,
+and a Better Auth table the CLI no longer generates (say, from a removed plugin) is kept.
+Without `--yes`, the CLI asks before overwriting the file, after the adapter's notes on what to do
+next. Review the diff when you regenerate.
 
-Import the generated tables in your app's `schema.ts` and merge them into the app definition:
+A new reference column gets a forward relation named `<column>Relation` (`userIdRelation`).
+Reverse relations aren't generated: add the ones your app reads. Table and column names must be
+identifiers (`[A-Za-z_][A-Za-z0-9_]*`), so a `modelName` or `fieldName` with a hyphen is refused,
+with a message saying to rename it.
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
-import { schema as betterauthSchema } from "./schema-better-auth/schema";
+The generation config passes `schema: {}` because it only generates tables. The adapter in your
+running app takes the generated `app` (see [Use Jazz as the database](#use-jazz-as-the-database)):
+with `{}` there, it would find no tables.
 
-const schema = {
-  ...betterauthSchema,
-  messages: s.table(
-    {
-      author_name: s.string(),
-      chat_id: s.string(),
-      text: s.string(),
-      sent_at: s.timestamp(),
+The result is one app file with both sets of tables. For a chat app, your own `messages` table sits
+next to the `better_auth_*` tables the Better Auth CLI wrote:
+
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "accessToken": "string?",
+        "refreshToken": "string?",
+        "idToken": "string?",
+        "accessTokenExpiresAt": "timestamp?",
+        "refreshTokenExpiresAt": "timestamp?",
+        "scope": "string?",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
     },
-    {},
-  ),
-  // ...your own tables
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid",
+        "impersonatedBy": "string?"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "role": "string?",
+        "banned": "boolean?",
+        "banReason": "string?",
+        "banExpires": "timestamp?"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "messages": {
+      "columns": {
+        "author_name": "string",
+        "chat_id": "string",
+        "text": "string",
+        "sent_at": "timestamp"
+      }
+    }
+  }
+}
 ```
 
-The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `jazz.db`, which has backend permissions.
+The Better Auth CLI writes nothing to `jazz.permissions.json`. A table or operation without a policy is
+denied, so regular client sessions can't read or write Better Auth rows; the adapter itself uses
+`jazz.db`, which has backend authority. To silence the "no policies" warning `createJazz` logs for
+those tables, deny everything on each of them explicitly, next to your own policies. The
+adapter prints one line per table to paste under `"tables"`. Never add allow rules for these
+tables: client sessions have no business reading them.
 
-```ts title="permissions.ts"
-import { schema as s } from "jazz-tools";
-import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
-import { app } from "./schema";
-
-const appPermissions = s.definePermissions(app, ({ policy }) => {
-  // Define policies for your own tables.
-  policy.messages.allowRead.always();
-});
-
-export default {
-  ...betterAuthPermissions,
-  ...appPermissions,
-};
+```json title="jazz.permissions.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "messages": { "read": "true" }
+  }
+}
 ```
 
-After adding both files, validate the merged schema and permissions:
+Then check both files and write the bindings:
 
 ```bash
-npx jazz-tools validate
+npx jazz-tools generate
 ```
+
+If the Better Auth CLI changed tables a version you already shipped has, `jazz-tools generate` asks for a migration
+first: run `npx jazz-tools migrations create --name <name>`, fill in any `"TODO: …"` it leaves, and
+run `npx jazz-tools generate` again. See [Migrations](/docs/schemas/migrations).
 
 ### Use Jazz as the database
 
-Create Jazz in your backend ([Main Backend](/docs/setup/deployment/own-server)), then pass `jazz.db` to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app`, not at the generated module directly, so Better Auth and your own tables share a single Jazz app. `authenticate` asks the same Better Auth instance who a request's session cookie belongs to.
+Create Jazz in your backend ([Main Backend](/docs/setup/deployment/own-server)), then pass `jazz.db` to `jazzAdapter(...)` as the `database` in your Better Auth config. Pass the `app` from `jazz.generated.ts` as `schema`, so Better Auth and your own tables share a single Jazz app. `authenticate` asks the same Better Auth instance who a request's session cookie belongs to.
 
 ```ts title="auth.ts"
 import { betterAuth } from "better-auth";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 import { authOptions } from "./auth-options";
 
 export const jazz = createJazz({
@@ -270,18 +378,18 @@ export const auth = betterAuth({
   ...authOptions,
   database: jazzAdapter({
     db: async () => jazz.db,
-    schema: app.wasmSchema,
+    schema: app,
   }),
 });
 ```
 
-| Option      | Description                                                                                          |
-| ----------- | ---------------------------------------------------------------------------------------------------- |
-| `db`        | A function returning `Db` or `Promise<Db>`, such as `jazz.db`. Use the merged app, not `authSchema`. |
-| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                  |
-| `debugLogs` | Better Auth adapter debug logging controls.                                                          |
-| `usePlural` | Whether Better Auth model names should use plural table names.                                       |
-| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                    |
+| Option      | Description                                                    |
+| ----------- | -------------------------------------------------------------- |
+| `db`        | A function returning `Db` or `Promise<Db>`, such as `jazz.db`. |
+| `schema`    | `app`, from `jazz.generated.ts`.                               |
+| `debugLogs` | Better Auth adapter debug logging controls.                    |
+| `usePlural` | Whether Better Auth model names should use plural table names. |
+| `prefix`    | Table name prefix (defaults to `"better_auth_"`).              |
 
 <Callout title="Leave Better Auth joins disabled">
   The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
@@ -295,8 +403,8 @@ The adapter is currently aligned with Better Auth `1.7.22`, and accepts later 1.
 Upgrading from Better Auth 1.7.0–1.7.2 changes the auth schema. Before the new version serves traffic:
 
 1. Duplicate `better_auth_account` rows that share a `(providerId, accountId)` pair can only exist in rare setups, where one OIDC `providerId` was used with several issuers under Better Auth 1.7.0–1.7.2. The adapter keeps account identity unique on that pair, so writes to such accounts would fail with `Unique constraint violated`. If you see that error after upgrading, reach out to us rather than deleting rows yourself.
-2. Regenerate `schema-better-auth/schema.ts` as shown in [Generate the tables](#generate-the-tables). The account table no longer has a required `issuer` column.
-3. Run `npx jazz-tools migrations create --name remove-better-auth-issuer`, set `issuer: m.drop.string({ backwardsDefault: "" })` in the generated migration, and run `npx jazz-tools validate`.
+2. Regenerate the tables in `jazz.app.json` as shown in [Generate the tables](#generate-the-tables). The account table no longer has a required `issuer` column.
+3. Run `npx jazz-tools migrations create --name remove-better-auth-issuer`. Check that the migration it writes in `jazz.app.json` drops the column, `"better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }`, replace any `"TODO: …"` left in it, and run `npx jazz-tools generate`.
 4. Deploy the backend with that migration in the same release as the Better Auth upgrade. Against the old schema, sign-ups and account links fail because `issuer` is still required.
 
 The adapter catches the most common mistakes: it throws when it starts if your schema still requires `issuer`, and on the first account write it logs any `(providerId, accountId)` pairs shared by more than one row.
@@ -312,5 +420,6 @@ See the [Better Auth 1.7 upgrade guide](https://www.better-auth.com/docs/guides/
 <Callout title="Compatibility scope">
   This section reflects the adapter behavior currently covered by this repo's Better Auth
   integration and tests. If you add plugins that introduce extra tables or custom schema fields,
-  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
+  regenerate the tables and run `npx jazz-tools generate` again (with a migration if it asks for
+  one).
 </Callout>

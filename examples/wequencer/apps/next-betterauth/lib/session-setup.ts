@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import {
   INSTRUMENTS,
   MAX_STEPS,

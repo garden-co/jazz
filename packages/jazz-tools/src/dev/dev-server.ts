@@ -12,6 +12,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { shippedMigrations } from "../runtime/client-migrations.js";
 import { deployApp } from "./catalogue.js";
+import { enginePermissions, isPermissionsFile, type PermissionsFile } from "./codegen-napi.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -46,7 +47,11 @@ interface LocalJazzServerOptions {
 
 export type StartLocalJazzServerOptions = LocalJazzServerOptions &
   (
-    | { schema: SchemaSourceInput; permissions: CompiledPermissionsMap }
+    | {
+        schema: SchemaSourceInput;
+        /** The app's `jazz.permissions.json` (or the engine's policies a load returned). */
+        permissions: PermissionsFile | CompiledPermissionsMap;
+      }
     | { schema?: undefined; permissions?: undefined }
   );
 
@@ -70,8 +75,8 @@ async function createOwnedDataDir(): Promise<string> {
  * Start a local Jazz sync server.
  *
  * To initialize an app, pass its schema and permissions. Omit both to deploy later.
- * An app that ships migrations (`defineApp(schema, { migrations })`) is
- * published with all of them, as `createJazz` publishes it.
+ * The app (its generated bindings, or `testApp`'s) is published with every
+ * schema version and migration it ships, as `createJazz` publishes it.
  *
  * When no port is provided, an available localhost port is chosen automatically.
  * When no data directory is provided, the server owns a temporary directory and
@@ -93,7 +98,7 @@ export async function startLocalJazzServer(
   }
   if (options.schema !== undefined && options.permissions == null) {
     throw new Error(
-      "startLocalJazzServer requires permissions when schema is provided. Pass {} to deny all access.",
+      'startLocalJazzServer requires permissions when schema is provided: the app\'s jazz.permissions.json (`{ "format": 1, "tables": {} }` denies all access).',
     );
   }
   const host = validateServerHost(options.host);
@@ -103,7 +108,7 @@ export async function startLocalJazzServer(
       : {
           source: options.schema,
           schema: resolveSchemaSource(options.schema),
-          permissions: options.permissions,
+          permissions: await enginePermissions(options.schema, options.permissions!),
         };
   // An app that ships migrations is published as createJazz publishes it
   // (deployApp): every schema version and lens it ships. Started with only
@@ -112,6 +117,11 @@ export async function startLocalJazzServer(
   // its lenses.
   const shipsMigrations =
     declared !== undefined && (shippedMigrations(declared.schema)?.migrations.length ?? 0) > 0;
+  if (shipsMigrations && !isPermissionsFile(options.permissions)) {
+    throw new Error(
+      "startLocalJazzServer: an app that ships migrations is published as createJazz publishes it, which takes the app's jazz.permissions.json, not compiled policies.",
+    );
+  }
   if (shipsMigrations && options.trustedWorkload !== undefined) {
     throw new Error(
       "startLocalJazzServer: an app that ships migrations is not supported with trustedWorkload yet; start without schema and deploy the app with its admin secret.",
@@ -173,7 +183,7 @@ export async function startLocalJazzServer(
         serverUrl: server.url,
         adminSecret: server.adminSecret,
         app: declared.source,
-        permissions: declared.permissions,
+        permissions: options.permissions as PermissionsFile,
       });
     } catch (error) {
       await server.stop().catch(() => undefined);

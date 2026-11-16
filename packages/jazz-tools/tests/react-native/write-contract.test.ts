@@ -8,7 +8,7 @@ import {
 } from "../shared/write-contract-scenarios.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-// Same scenarios as tests/ts-dsl (NAPI) and tests/browser (WASM): #3273 parity.
+// Same scenarios as tests/typed-app (NAPI) and tests/browser (WASM): #3273 parity.
 describe("RN foreground write contract through the real native relay", () => {
   for (const [name, scenario] of [
     [

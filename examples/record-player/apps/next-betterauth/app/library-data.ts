@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import { JazzRecordPlayerStore } from "../src/record-player";
 
 export function useStore(): JazzRecordPlayerStore {

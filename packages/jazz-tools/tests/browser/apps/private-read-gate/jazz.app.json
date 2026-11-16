@@ -1,0 +1,22 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "announcements": { "columns": { "title": "string" } },
+    "chat_members": {
+      "columns": { "chat_id": "uuid", "user_id": "uuid" },
+      "relations": { "chat": { "rel": "chats", "column": "chat_id" } }
+    },
+    "chats": {
+      "columns": { "title": "string", "visibility": "string", "owner_id": "uuid" },
+      "relations": {
+        "chat_membersViaChat": { "reverse": "chat_members", "relation": "chat" },
+        "messagesViaChat": { "reverse": "messages", "relation": "chat" }
+      }
+    },
+    "messages": {
+      "columns": { "chat_id": "uuid", "body": "string", "author_id": "uuid", "owner_id": "uuid" },
+      "relations": { "chat": { "rel": "chats", "column": "chat_id" } }
+    }
+  }
+}

@@ -1,587 +1,124 @@
 import type { TxId } from "./runtime/client.js";
 import { historyTableName, resolveQueryTable } from "./runtime/history-relation.js";
-import { assertRelationshipDeclaration } from "./relationships.js";
 import { resolveQueryOutputTable } from "./runtime/query-output-table.js";
-import {
-  columnTransformDependencies,
-  validateTransformDependencies,
-} from "./runtime/column-transforms.js";
-import type {
-  Relationships,
-  ForwardRelationship,
-  ReverseRelationship,
-  Relationship,
-} from "./relationships.js";
-import type {
-  AnyColumnDefinition,
-  ComputedColumn,
-  ColumnBuilderHasDefault,
-  ColumnBuilderOptional,
-  ColumnBuilderSqlType,
-  ColumnBuilderValue,
-  ColumnBuilderInitValue,
-  ColumnTransform,
-} from "./dsl.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
-import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
-import { shipMigrations, type ClientMigrations } from "./runtime/client-migrations.js";
-import {
-  magicColumnType,
-  type ProvenanceMagicColumn,
-  type RowAuthor,
-  type NoExplicitIdColumn,
-  assertUserTableColumnNameAllowed,
-} from "./magic-columns.js";
+import { magicColumnType, type ProvenanceMagicColumn, type RowAuthor } from "./magic-columns.js";
 import { assertSchemaNameAllowed } from "./schema-name.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
-import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
-export type TableDefinition = Record<string, AnyColumnDefinition> & NoExplicitIdColumn;
-type StoredColumnKeys<C extends TableDefinition> = {
-  [K in keyof C & string]: C[K] extends ComputedColumn ? never : K;
-}[keyof C & string];
+// ============================================================================
+// The generated type map
+// ============================================================================
 
 /**
- * Provenance timestamps every row carries. A composite index may use them,
- * so a list's newest page (`roomId = ? ORDER BY $createdAt DESC`) is served
- * from the index instead of sorting the whole list.
+ * How a stored column is kept, as `jazz.app.json` names it. It decides which
+ * `where` operators, streaming writes and partial reads the column takes.
  */
-const PROVENANCE_INDEX_COLUMNS = ["$createdAt", "$updatedAt"] as const;
-type ProvenanceIndexColumn = (typeof PROVENANCE_INDEX_COLUMNS)[number];
-type CompositeIndexColumn<C extends TableDefinition> = StoredColumnKeys<C> | ProvenanceIndexColumn;
+export type ColumnKind =
+  | "string"
+  | "uuid"
+  | "boolean"
+  | "int"
+  | "float"
+  | "bigint"
+  | "timestamp"
+  | "bytes"
+  | "json"
+  | "enum"
+  | "array";
 
-// Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
-// without changing the column-level schema representation the runtime uses today.
-export class DefinedTable<
-  TColumns extends TableDefinition = TableDefinition,
-  TRelations extends Relationships = Relationships,
-> {
-  public readonly __jazzTableDefinition = true as const;
-
-  constructor(
-    public readonly columns: TColumns,
-    public readonly relations: TRelations,
-    public readonly indexedColumns?: readonly (keyof TColumns & string)[],
-    public readonly branchColumns?: readonly (keyof TColumns & string)[],
-    public readonly compositeIndexes?: readonly (readonly (
-      | (keyof TColumns & string)
-      | ProvenanceIndexColumn
-    )[])[],
-    public readonly historyRetention?: "latest",
-  ) {
-    validateTransformDependencies(columns);
-    for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
-  }
-
-  indexOnly<
-    const TColumnsForIndex extends readonly [
-      StoredColumnKeys<TColumns>,
-      ...StoredColumnKeys<TColumns>[],
-    ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = [...columns];
-    for (const column of normalizedColumns) {
-      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
-        throw new Error(`table.indexOnly(...) references unknown column "${column}".`);
-      }
-    }
-
-    return new DefinedTable(
-      this.columns,
-      this.relations,
-      normalizedColumns,
-      this.branchColumns,
-      this.compositeIndexes,
-      this.historyRetention,
-    );
-  }
-
-  /**
-   * An ordered index over two or more columns, e.g. `["roomId", "$createdAt"]`
-   * for a room's messages newest first. Columns are declared, stored columns
-   * or the provenance timestamps `$createdAt` and `$updatedAt`.
-   */
-  compositeIndex<
-    const TColumnsForIndex extends readonly [
-      CompositeIndexColumn<TColumns>,
-      CompositeIndexColumn<TColumns>,
-      ...CompositeIndexColumn<TColumns>[],
-    ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
-    const indexable = (column: string) =>
-      (PROVENANCE_INDEX_COLUMNS as readonly string[]).includes(column) ||
-      (column in this.columns && !isComputedColumn(this.columns[column]!));
-    if (new Set(columns).size !== columns.length || !columns.every(indexable)) {
-      throw new Error(
-        "table.compositeIndex(...) requires distinct declared columns or provenance timestamps ($createdAt, $updatedAt).",
-      );
-    }
-    const key = JSON.stringify(columns);
-    if ((this.compositeIndexes ?? []).some((existing) => JSON.stringify(existing) === key)) {
-      throw new Error("table.compositeIndex(...) declares the same index twice.");
-    }
-    return new DefinedTable(
-      this.columns,
-      this.relations,
-      this.indexedColumns,
-      this.branchColumns,
-      [...(this.compositeIndexes ?? []), [...columns]],
-      this.historyRetention,
-    );
-  }
-
-  branchBy<const TBranchColumn extends StoredColumnKeys<TColumns>>(
-    column: TBranchColumn,
-  ): DefinedTable<TColumns, TRelations>;
-  branchBy<
-    const TBranchColumns extends readonly [
-      StoredColumnKeys<TColumns>,
-      ...StoredColumnKeys<TColumns>[],
-    ],
-  >(columns: TBranchColumns): DefinedTable<TColumns, TRelations>;
-  branchBy(
-    columns:
-      | Extract<keyof TColumns, string>
-      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
-  ): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
-      keyof TColumns,
-      string
-    >[];
-    for (const column of normalizedColumns) {
-      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
-        throw new Error(`table.branchBy(...) references unknown column "${column}".`);
-      }
-    }
-
-    return new DefinedTable(
-      this.columns,
-      this.relations,
-      this.indexedColumns,
-      normalizedColumns,
-      this.compositeIndexes,
-      this.historyRetention,
-    );
-  }
-
-  /**
-   * Keep only each row's latest version, for state that is overwritten
-   * often, like cursors and presence. Older versions are dropped, so the
-   * table cannot be read through history, snapshots or branches, and it
-   * cannot have text-merging columns.
-   */
-  history(retention: "latest"): DefinedTable<TColumns, TRelations> {
-    if (retention !== "latest") {
-      throw new Error(
-        `table.history(...) supports only "latest", not ${JSON.stringify(retention)}.`,
-      );
-    }
-    return new DefinedTable(
-      this.columns,
-      this.relations,
-      this.indexedColumns,
-      this.branchColumns,
-      this.compositeIndexes,
-      retention,
-    );
-  }
+/** One stored column in the generated type map. */
+export interface ColumnTypes {
+  readonly kind: ColumnKind;
+  readonly nullable: boolean;
+  /** The stored value's TS type (for a transformed column, before its transform). */
+  readonly value: unknown;
 }
 
 /**
- * Define a table with the given columns.
- *
- * @example
- * ```typescript
- * const schema = {
- *   todos: s.table({
- *     title: s.string(),
- *     done: s.boolean(),
- *   }),
- * });
- * type AppSchema = s.Schema<typeof schema>;
- * // The module `jazz-tools` generates beside schema.ts.
- * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
- * ```
+ * One relation in the generated type map: `one` for a reference column,
+ * `many` for a reverse relation or a reference array.
  */
-declare const tableRelationsBrand: unique symbol;
-type RelationColumns<T extends TableDefinition> = {
-  [K in StoredColumnKeys<T>]: ColumnBuilderSqlType<T[K]> extends
-    | "UUID"
-    | { kind: "ARRAY"; element: "UUID" }
-    ? K
-    : never;
-}[StoredColumnKeys<T>];
-type ConflictingTargets<R extends Relationships, C extends string, T extends string> = {
-  [N in keyof R]: R[N] extends ForwardRelationship<infer OtherTarget, C>
-    ? OtherTarget extends T
-      ? never
-      : N
-    : never;
-}[keyof R];
-type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> = {
-  [K in keyof R]: K extends
-    | keyof C
-    | "id"
-    | "__proto__"
-    | "constructor"
-    | "prototype"
-    | ""
-    | `$${string}`
-    ? never
-    : R[K] extends ForwardRelationship<infer Target, infer Col>
-      ? Col extends RelationColumns<C>
-        ? [ConflictingTargets<R, Col, Target>] extends [never]
-          ? R[K]
-          : never
-        : never
-      : R[K];
-};
-export function defineTable<
-  const TColumns extends TableDefinition,
-  const TFields extends Record<
-    string,
-    Relationship | ComputedField<ComputedRow<TColumns>, unknown>
-  >,
->(
-  columns: TColumns & ValidateTransformContexts<TColumns>,
-  fields: TFields,
-  ..._validation: [TFields] extends [
-    ValidateLocalRelations<TColumns, TableRelations<TFields>> & {
-      [K in keyof TFields]: K extends keyof TColumns | "id" ? never : TFields[K];
-    },
-  ]
-    ? []
-    : [invalidFields: never]
-): DefinedTable<TColumns & ComputedColumns<TFields>, TableRelations<TFields>> {
-  if (!fields || typeof fields !== "object" || Array.isArray(fields))
-    throw new Error(
-      "s.table(columns, fields) requires a relationship map, optionally containing computed fields; use {} for no fields.",
-    );
-  let completeColumns: Record<string, AnyColumnDefinition> = columns;
-  const relations: Relationships = {};
-  const targets = new Map<string, string>();
-  for (const [name, relation] of Object.entries(fields)) {
-    const computed = relation && typeof relation === "object" && "_computed" in relation;
-    if (
-      !name ||
-      ["__proto__", "constructor", "prototype"].includes(name) ||
-      name.startsWith("$") ||
-      name === "id" ||
-      Object.hasOwn(columns, name)
-    )
-      throw new Error(
-        `${computed ? "Computed field" : "Relationship"} "${name}" collides with a column.`,
-      );
-    if (computed) {
-      assertUserTableColumnNameAllowed(name);
-      if (completeColumns === columns) completeColumns = { ...columns };
-      completeColumns[name] = {
-        _computed: {
-          ...relation._computed,
-          rowColumns: Object.freeze(["id", ...Object.keys(columns)]),
-        },
-      } as ComputedColumn;
-      continue;
-    }
-    assertRelationshipDeclaration(relation, name);
-    relations[name] = relation;
-    if (relation.kind === "forward") {
-      const previous = targets.get(relation.column);
-      if (previous && previous !== relation.table)
-        throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
-      targets.set(relation.column, relation.table);
-      const builder = columns[relation.column];
-      const column =
-        Object.hasOwn(columns, relation.column) && builder && !isComputedColumn(builder)
-          ? builder._build(relation.column)
-          : undefined;
-      if (!column)
-        throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
-      if (
-        typeof column.sqlType === "object" &&
-        column.sqlType.kind === "ARRAY" &&
-        typeof column.sqlType.element === "object" &&
-        column.sqlType.element.kind === "ARRAY"
-      )
-        throw new Error(
-          `Relationship "${name}" cannot use a nested reference array column; "${relation.column}" must be a UUID or UUID[] column.`,
-        );
-      if (
-        column.sqlType !== "UUID" &&
-        !(
-          typeof column.sqlType === "object" &&
-          column.sqlType.kind === "ARRAY" &&
-          column.sqlType.element === "UUID"
-        )
-      )
-        throw new Error(
-          `Relationship "${name}" requires a UUID or UUID[] column; "${relation.column}" is not one.`,
-        );
-    }
-  }
-  return new DefinedTable(
-    completeColumns as TColumns & ComputedColumns<TFields>,
-    relations as TableRelations<TFields>,
-  );
-}
+export type RelationTypes =
+  | { readonly one: string; readonly nullable: boolean }
+  | { readonly many: string; readonly nullable?: boolean };
 
-type ComputedRow<C extends TableDefinition> = { readonly id: string } & {
-  readonly [K in keyof C & string]: ReturnedColumnValue<C[K]>;
-};
-export type ComputedField<R, V> = {
-  readonly _computed: {
-    readonly compute: (row: Readonly<R>) => V;
+/** One table in the generated type map. */
+export interface TableTypes {
+  /** The row as queries return it, `id` included. */
+  readonly row: { readonly id: string };
+  /** What `db.insert` takes. */
+  readonly insert: object;
+  /** Every stored column, computed fields excluded. */
+  readonly columns: { readonly [column: string]: ColumnTypes };
+  readonly relations: { readonly [relation: string]: RelationTypes };
+  /** Fields the app computes from other columns of the row (`jazz.computed.ts`). */
+  readonly computed?: {
+    readonly [field: string]: { readonly from: object; readonly value: unknown };
   };
-};
-type ComputedColumns<F> = [F] extends [never]
-  ? {}
-  : {
-      [K in keyof F as F[K] extends ComputedField<never, unknown>
-        ? K
-        : never]: F[K] extends ComputedField<never, infer V> ? ComputedColumn<V> : never;
-    };
-type TableRelations<F> = [F] extends [never]
-  ? never
-  : {
-      [K in keyof F as F[K] extends Relationship ? K : never]: Extract<F[K], Relationship>;
-    };
-
-/** Declare a virtual, read-only field in s.table's second argument. */
-export function defineComputed<R, V>(compute: (row: Readonly<R>) => V): ComputedField<R, V> {
-  if (typeof compute !== "function")
-    throw new TypeError("s.computed(...) requires a synchronous callback.");
-  return Object.freeze({ _computed: Object.freeze({ compute }) });
+  /** Columns stored through a named transform: column → transform name. */
+  readonly transforms?: { readonly [column: string]: string };
 }
 
-type StoredDependencyValue<C extends AnyColumnDefinition> =
-  ColumnBuilderOptional<C> extends true
-    ? TSTypeFromSqlType<ColumnBuilderSqlType<C>> | null
-    : TSTypeFromSqlType<ColumnBuilderSqlType<C>>;
-type DependencyValues<C extends TableDefinition, D extends string, Stored extends boolean> = {
-  readonly [K in D]: K extends "id"
-    ? string
-    : K extends keyof C
-      ? Stored extends true
-        ? StoredDependencyValue<C[K]>
-        : ColumnBuilderOptional<C[K]> extends true
-          ? ColumnBuilderInitValue<C[K]> | null
-          : ColumnBuilderInitValue<C[K]>
-      : never;
-};
-type ValidDependencyContext<
-  C extends TableDefinition,
-  D extends string,
-  Context,
-  Stored extends boolean,
-> =
-  Exclude<keyof Context, D> extends never
-    ? DependencyValues<C, D, Stored> extends Context
-      ? true
-      : false
-    : false;
-type ValidateTransformContexts<C extends TableDefinition> = {
-  [K in keyof C]: C[K] extends {
-    readonly __jazzDependencies: readonly (infer D extends string)[];
-    readonly __jazzStoredDependencies: infer S;
-    readonly __jazzInputDependencies: infer I;
-  }
-    ? string extends D
-      ? C[K]
-      : Exclude<D, StoredColumnKeys<C> | "id"> extends never
-        ? K extends D
-          ? never
-          : ValidDependencyContext<C, D, S, true> extends true
-            ? ValidDependencyContext<C, D, I, false> extends true
-              ? C[K]
-              : never
-            : never
-        : never
-    : C[K];
-};
-type ValidateSchemaTransformContexts<S extends SchemaDefinition> = {
-  [K in keyof S]: S[K] extends TableDefinition ? ValidateTransformContexts<S[K]> : S[K];
-};
+/**
+ * The type map `jazz-tools generate` generates from `jazz.app.json` into
+ * `jazz.generated.ts` (`interface Types extends AppTypes { … }`): one
+ * {@link TableTypes} per table. The typed query builder, the hooks and
+ * `db.insert` read an app's types from it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface AppTypes {}
 
-type TableSource<TColumns extends TableDefinition = any> = TColumns | DefinedTable<TColumns>;
-type ExplicitColumnTarget<R extends Relationships, C extends string> = {
-  [N in keyof R]: R[N] extends ForwardRelationship<infer T, C> ? T : never;
-}[keyof R];
-type ColumnsWithReferences<C extends TableDefinition, R extends Relationships> = {
-  [K in keyof C]: K extends string
-    ? [ExplicitColumnTarget<R, K>] extends [never]
-      ? C[K]
-      : Omit<C[K], "__jazzReferences"> & { readonly __jazzReferences: ExplicitColumnTarget<R, K> }
-    : C[K];
-};
-type NormalizeTableDefinition<TTable extends TableSource> =
-  TTable extends DefinedTable<infer TColumns, infer TRelations>
-    ? Simplify<
-        ColumnsWithReferences<TColumns, TRelations> & { readonly [tableRelationsBrand]: TRelations }
-      >
-    : TTable extends TableDefinition
-      ? Simplify<TTable>
-      : never;
+/** The transforms an app declares (`interface Transforms` in `jazz.generated.ts`). */
+// An object type, not an index signature, so the generated interface satisfies it.
+export type TransformTypes = object;
 
-export type SchemaDefinition = Record<string, TableSource>;
+/** Kept for code that is generic over an app's types. */
+export type SchemaLike = AppTypes;
 
-type ValidateSchemaColumnNames<TSchema extends SchemaDefinition> = {
-  [TTable in keyof TSchema]: TSchema[TTable] extends DefinedTable ? unknown : NoExplicitIdColumn;
-};
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
-export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
-  [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
-}>;
 
-declare const definedSchemaBrand: unique symbol;
-export interface Schema<TSchema extends SchemaDefinition = SchemaDefinition> {
-  readonly [definedSchemaBrand]: CompactSchema<TSchema>;
-}
-
-export type DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> = Schema<TSchema>;
-
-type SchemaLike = SchemaDefinition | Schema<any>;
-type SourceRelations<T> =
-  T extends DefinedTable<any, infer R>
-    ? R
-    : T extends { readonly [tableRelationsBrand]: infer R extends Relationships }
-      ? R
-      : {};
-type InvalidRelationshipEntries<S extends SchemaDefinition> = {
-  [T in keyof S & string]: {
-    [N in keyof SourceRelations<S[T]> & string]: SourceRelations<S[T]>[N] extends infer R extends
-      Relationships[string]
-      ? R["table"] extends keyof S
-        ? R extends ReverseRelationship<infer Target, infer Forward>
-          ? Forward extends keyof SourceRelations<S[Target]>
-            ? SourceRelations<S[Target]>[Forward] extends ForwardRelationship<T, string>
-              ? never
-              : {
-                  table: T;
-                  relation: N;
-                  error: "Reverse must name a forward relation targeting this table";
-                }
-            : { table: T; relation: N; error: "Unknown forward relation" }
-          : never
-        : { table: T; relation: N; error: "Unknown target table" }
-      : never;
-  }[keyof SourceRelations<S[T]> & string];
-}[keyof S & string];
-type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
-  InvalidRelationshipEntries<TSchema>,
-] extends [never]
-  ? unknown
-  : {
-      readonly __relationshipValidationError__: InvalidRelationshipEntries<TSchema>;
-    };
-
-type NormalizedSchema<TSchema extends SchemaLike> =
-  TSchema extends Schema<infer TDefinition>
-    ? CompactSchema<TDefinition>
-    : TSchema extends SchemaDefinition
-      ? CompactSchema<TSchema>
-      : never;
-
-type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
-type ColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Extract<
-  keyof NormalizedSchema<TSchema>[TTable],
+type TableName<TSchema extends SchemaLike> = Extract<keyof TSchema, string>;
+type TableTypesOf<TSchema extends SchemaLike, TTable extends string> = TTable extends keyof TSchema
+  ? Extract<TSchema[TTable], TableTypes>
+  : never;
+type ColumnsOf<TSchema extends SchemaLike, TTable extends string> = TableTypesOf<
+  TSchema,
+  TTable
+>["columns"];
+type StoredColumnName<TSchema extends SchemaLike, TTable extends string> = Extract<
+  keyof ColumnsOf<TSchema, TTable>,
   string
 >;
+type ColumnOf<
+  TSchema extends SchemaLike,
+  TTable extends string,
+  TColumn extends StoredColumnName<TSchema, TTable>,
+> = Extract<ColumnsOf<TSchema, TTable>[TColumn], ColumnTypes>;
 
-type BuilderForColumn<
+// Simplified, so the generated interfaces read as plain object types.
+export type TableRow<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
-  TColumn extends ColumnName<TSchema, TTable>,
-> = NormalizedSchema<TSchema>[TTable][TColumn];
-
-type ColumnValue<TBuilder extends AnyColumnDefinition> = ColumnBuilderValue<TBuilder>;
-type StoredColumnValue<TBuilder extends AnyColumnDefinition> = TSTypeFromSqlType<
-  ColumnBuilderSqlType<TBuilder>
->;
-type ReturnedColumnValue<TBuilder extends AnyColumnDefinition> =
-  ColumnBuilderOptional<TBuilder> extends true
-    ? ColumnValue<TBuilder> | null
-    : ColumnValue<TBuilder>;
-type InsertColumnValue<TBuilder extends AnyColumnDefinition> =
-  ColumnBuilderOptional<TBuilder> extends true
-    ? ColumnBuilderInitValue<TBuilder> | null
-    : ColumnBuilderInitValue<TBuilder>;
-
-type OptionalColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderOptional<
-    BuilderForColumn<TSchema, TTable, TColumn>
-  > extends true
-    ? TColumn
-    : never;
-}[ColumnName<TSchema, TTable>];
-
-type RequiredColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Exclude<
-  StoredColumnName<TSchema, TTable>,
-  OptionalColumnName<TSchema, TTable>
->;
-type DefaultedColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderHasDefault<
-    BuilderForColumn<TSchema, TTable, TColumn>
-  > extends true
-    ? TColumn
-    : never;
-}[ColumnName<TSchema, TTable>];
-type OptionalInsertColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
-  | OptionalColumnName<TSchema, TTable>
-  | DefaultedColumnName<TSchema, TTable>;
-type RequiredInsertColumnName<
-  TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
-> = Exclude<StoredColumnName<TSchema, TTable>, OptionalInsertColumnName<TSchema, TTable>>;
-
-type ComputedColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [K in ColumnName<TSchema, TTable>]: BuilderForColumn<TSchema, TTable, K> extends ComputedColumn
-    ? K
-    : never;
-}[ColumnName<TSchema, TTable>];
-type StoredColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Exclude<
-  ColumnName<TSchema, TTable>,
-  ComputedColumnName<TSchema, TTable>
->;
-
-export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
-  {
-    id: string;
-  } & {
-    readonly [TColumn in ComputedColumnName<TSchema, TTable>]: ColumnValue<
-      BuilderForColumn<TSchema, TTable, TColumn>
-    >;
-  } & {
-    [TColumn in RequiredColumnName<TSchema, TTable>]: ColumnValue<
-      BuilderForColumn<TSchema, TTable, TColumn>
-    >;
-  } & {
-    [TColumn in OptionalColumnName<TSchema, TTable>]: ReturnedColumnValue<
-      BuilderForColumn<TSchema, TTable, TColumn>
-    >;
-  }
->;
+> = string extends keyof TableTypesOf<TSchema, TTable>["row"]
+  ? // An index-signature row (a test's loose app): simplifying would drop `id`.
+    TableTypesOf<TSchema, TTable>["row"] & { id: string }
+  : Simplify<TableTypesOf<TSchema, TTable>["row"] & { id: string }>;
 
 export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
-  {
-    [TColumn in RequiredInsertColumnName<TSchema, TTable>]: InsertColumnValue<
-      BuilderForColumn<TSchema, TTable, TColumn>
-    >;
-  } & {
-    [TColumn in OptionalInsertColumnName<TSchema, TTable>]?: InsertColumnValue<
-      BuilderForColumn<TSchema, TTable, TColumn>
-    >;
-  }
+  TableTypesOf<TSchema, TTable>["insert"]
 >;
 
-type StreamingColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TColumn in StoredColumnName<TSchema, TTable>]-?: ColumnBuilderSqlType<
-    BuilderForColumn<TSchema, TTable, TColumn>
-  > extends "TEXT" | "BYTEA" | { kind: "JSON" }
+type StreamingColumnName<TSchema extends SchemaLike, TTable extends string> = {
+  [TColumn in StoredColumnName<TSchema, TTable>]-?: ColumnOf<
+    TSchema,
+    TTable,
+    TColumn
+  >["kind"] extends "string" | "bytes" | "json"
     ? TColumn
     : never;
 }[StoredColumnName<TSchema, TTable>];
@@ -591,7 +128,13 @@ type StreamingColumnName<TSchema extends SchemaLike, TTable extends TableName<TS
  * replaced by an asynchronous source; every other column retains its ordinary
  * insert type and required/defaulted status.
  */
-export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  // A test's loose app: any column may be the streamed one.
+  string extends StreamingColumnName<TSchema, TTable>
+    ? TableInit<TSchema, TTable>
+    : StrictTableStreamingInit<TSchema, TTable>;
+
+type StrictTableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
     Omit<TableInit<TSchema, TTable>, TColumn> & {
       [TStreamed in TColumn]-?: StreamingValueSource;
@@ -600,7 +143,12 @@ export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableN
 }[StreamingColumnName<TSchema, TTable>];
 
 /** Streaming update/upsert input with one required streamed scalar. */
-export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  string extends StreamingColumnName<TSchema, TTable>
+    ? Partial<TableInit<TSchema, TTable>>
+    : StrictTableStreamingUpdate<TSchema, TTable>;
+
+type StrictTableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
     Partial<Omit<TableInit<TSchema, TTable>, TColumn>> & {
       [TStreamed in TColumn]-?: StreamingValueSource;
@@ -637,54 +185,35 @@ type UuidWhere<TOptional extends boolean> = WhereEqNe<string, TOptional, Members
 type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
   ? { type: Case; where?: Partial<Omit<T, "type">> }
   : never;
+type ArrayElement<T> = T extends readonly (infer E)[] ? E : never;
 
-type WhereInputForBuilder<TBuilder extends AnyColumnDefinition> =
-  ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string } & Membership<string>>
-    : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
-      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, Membership<boolean>>
-      : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
-        ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
-        : ColumnBuilderSqlType<TBuilder> extends "BIGINT"
-          ? NumberWhere<bigint, ColumnBuilderOptional<TBuilder>>
-          : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
-            ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
-            : ColumnBuilderSqlType<TBuilder> extends "UUID"
-              ? UuidWhere<ColumnBuilderOptional<TBuilder>>
-              : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-                ? WhereEqNe<
-                    Uint8Array,
-                    ColumnBuilderOptional<TBuilder>,
-                    Membership<Uint8Array | number[]>
-                  >
-                : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
-                  ? WhereEqNe<
-                      StoredColumnValue<TBuilder>,
-                      ColumnBuilderOptional<TBuilder>,
-                      Membership<StoredColumnValue<TBuilder>>
-                    >
-                  : ColumnBuilderSqlType<TBuilder> extends {
-                        kind: "ENUM";
-                        variants: readonly (infer TVariant extends string)[];
-                      }
-                    ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
-                    : ColumnBuilderSqlType<TBuilder> extends {
-                          kind: "ENUM";
-                          cases: readonly unknown[];
-                        }
-                      ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
-                      : ColumnBuilderSqlType<TBuilder> extends {
-                            kind: "ARRAY";
-                            element: infer TElementSql extends SqlType;
-                          }
-                        ? WhereEqNe<
-                            StoredColumnValue<TBuilder>,
-                            ColumnBuilderOptional<TBuilder>,
-                            { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
-                              StoredColumnValue<TBuilder>
-                            >
-                          >
-                        : never;
+type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
+  ? WhereEqNe<string, C["nullable"], { contains?: string } & Membership<string>>
+  : C["kind"] extends "boolean"
+    ? WhereEqNe<boolean, C["nullable"], Membership<boolean>>
+    : C["kind"] extends "int" | "float"
+      ? NumberWhere<number, C["nullable"]>
+      : C["kind"] extends "bigint"
+        ? NumberWhere<bigint, C["nullable"]>
+        : C["kind"] extends "timestamp"
+          ? TimestampWhere<C["nullable"]>
+          : C["kind"] extends "uuid"
+            ? UuidWhere<C["nullable"]>
+            : C["kind"] extends "bytes"
+              ? WhereEqNe<Uint8Array, C["nullable"], Membership<Uint8Array | number[]>>
+              : C["kind"] extends "json"
+                ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
+                : C["kind"] extends "enum"
+                  ? [C["value"]] extends [string]
+                    ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
+                    : { match?: PayloadEnumMatch<C["value"]> }
+                  : C["kind"] extends "array"
+                    ? WhereEqNe<
+                        C["value"],
+                        C["nullable"],
+                        { contains?: ArrayElement<C["value"]> } & Membership<C["value"]>
+                      >
+                    : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,
@@ -693,8 +222,8 @@ export type TableWhereInput<
   {
     id?: string | ({ eq?: string; ne?: string } & Membership<string>);
   } & {
-    [TColumn in StoredColumnName<TSchema, TTable>]?: WhereInputForBuilder<
-      BuilderForColumn<TSchema, TTable, TColumn>
+    [TColumn in StoredColumnName<TSchema, TTable>]?: WhereInputForColumn<
+      ColumnOf<TSchema, TTable, TColumn>
     >;
   } & {
     [TColumn in ProvenanceMagicColumn]?: ProvenanceMagicColumns[TColumn] extends Date
@@ -725,100 +254,39 @@ type DefaultSelection<
   TTable extends TableName<TSchema>,
 > = BaseColumnName<TSchema, TTable>;
 
-type IsArrayRelation<TBuilder extends AnyColumnDefinition> =
-  ColumnBuilderSqlType<TBuilder> extends {
-    kind: "ARRAY";
-    element: "UUID";
-  }
-    ? true
-    : false;
-
-type DeclaredRelations<
-  TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
-> = NormalizedSchema<TSchema>[TTable] extends {
-  readonly [tableRelationsBrand]: infer R extends Relationships;
-}
-  ? R
-  : {};
-type ForwardRelationEntries<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [N in keyof DeclaredRelations<TSchema, TTable> & string]: DeclaredRelations<
-    TSchema,
-    TTable
-  >[N] extends ForwardRelationship<infer Target, infer Col>
-    ? Target extends TableName<TSchema>
-      ? Col extends ColumnName<TSchema, TTable>
-        ? {
-            name: N;
-            toTable: Target;
-            isArray: IsArrayRelation<BuilderForColumn<TSchema, TTable, Col>>;
-            nullable: ColumnBuilderOptional<BuilderForColumn<TSchema, TTable, Col>>;
-          }
-        : never
-      : never
-    : never;
-}[keyof DeclaredRelations<TSchema, TTable> & string];
-type ReverseRelationEntryUnion<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [N in keyof DeclaredRelations<TSchema, TTable> & string]: DeclaredRelations<
-    TSchema,
-    TTable
-  >[N] extends ReverseRelationship<infer Target, string>
-    ? Target extends TableName<TSchema>
-      ? { name: N; toTable: Target; isArray: true; nullable: false }
-      : never
-    : never;
-}[keyof DeclaredRelations<TSchema, TTable> & string];
-
-type ForwardRelationMap<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TRelation in ForwardRelationEntries<TSchema, TTable> as TRelation["name"]]: Omit<
-    TRelation,
-    "name"
-  >;
-};
-
-type ReverseRelationMap<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TRelation in ReverseRelationEntryUnion<TSchema, TTable> as TRelation["name"]]: Omit<
-    TRelation,
-    "name"
-  >;
-};
-
-type RelationMap<
-  TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
-> = ForwardRelationMap<TSchema, TTable> & ReverseRelationMap<TSchema, TTable>;
-
-type RelationName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Extract<
-  keyof RelationMap<TSchema, TTable>,
+type RelationsOf<TSchema extends SchemaLike, TTable extends string> = TableTypesOf<
+  TSchema,
+  TTable
+>["relations"];
+type RelationName<TSchema extends SchemaLike, TTable extends string> = Extract<
+  keyof RelationsOf<TSchema, TTable>,
   string
 >;
-
-type RelationInfo<
+type RelationOf<
   TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
+  TTable extends string,
   TRelation extends RelationName<TSchema, TTable>,
-> = Extract<
-  ForwardRelationEntries<TSchema, TTable> | ReverseRelationEntryUnion<TSchema, TTable>,
-  { name: TRelation }
->;
-
+> = Extract<RelationsOf<TSchema, TTable>[TRelation], RelationTypes>;
 type RelationTargetTable<
   TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
+  TTable extends string,
   TRelation extends RelationName<TSchema, TTable>,
-> = RelationInfo<TSchema, TTable, TRelation>["toTable"];
-
+> =
+  RelationOf<TSchema, TTable, TRelation> extends { readonly one: infer T extends string }
+    ? Extract<T, TableName<TSchema>>
+    : RelationOf<TSchema, TTable, TRelation> extends { readonly many: infer T extends string }
+      ? Extract<T, TableName<TSchema>>
+      : never;
 type RelationIsArray<
   TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
+  TTable extends string,
   TRelation extends RelationName<TSchema, TTable>,
-> = RelationInfo<TSchema, TTable, TRelation>["isArray"];
-
+> = RelationOf<TSchema, TTable, TRelation> extends { readonly many: string } ? true : false;
 type RelationNullable<
   TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
+  TTable extends string,
   TRelation extends RelationName<TSchema, TTable>,
-> = RelationInfo<TSchema, TTable, TRelation>["nullable"];
+> = RelationOf<TSchema, TTable, TRelation> extends { readonly nullable: true } ? true : false;
 
 type QueryBuilderShape<
   TSchema extends SchemaLike,
@@ -888,13 +356,21 @@ type DeletedWhere<TDeleted extends boolean> = TDeleted extends true
   : {};
 
 /** Shared projection typing for ordinary and history rows. */
-type SelectedRow<TRow, TSelection> = Simplify<
-  ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
-    Pick<
-      ProvenanceMagicColumns & DeletionMagicColumns,
-      Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns>
-    >
->;
+type SelectedRow<TRow, TSelection> = string extends keyof TRow
+  ? // An index-signature row (a test's loose app): every column, `id` kept.
+    TRow
+  : Simplify<
+      ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
+        Pick<
+          ProvenanceMagicColumns & DeletionMagicColumns,
+          Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns>
+        >
+    >;
+
+/** A selected row with its included relations in place of same-named columns. */
+type WithIncluded<TSelected, TIncluded> = string extends keyof TSelected
+  ? TSelected & TIncluded
+  : Simplify<Omit<TSelected, Extract<keyof TIncluded, keyof TSelected>> & TIncluded>;
 
 type ApplyRelationCardinality<
   TValue,
@@ -978,12 +454,9 @@ export type TableSelectedWithIncludes<
   TInclude extends TableInclude<TSchema, TTable> = {},
   TSelection extends TableSelectableColumn<TSchema, TTable> = DefaultSelection<TSchema, TTable>,
   TRequired extends boolean = false,
-> = Simplify<
-  Omit<
-    TableSelected<TSchema, TTable, TSelection>,
-    Extract<keyof TInclude, keyof TableSelected<TSchema, TTable, TSelection>>
-  > &
-    IncludedRelations<TSchema, TTable, TRequired, TInclude>
+> = WithIncluded<
+  TableSelected<TSchema, TTable, TSelection>,
+  IncludedRelations<TSchema, TTable, TRequired, TInclude>
 >;
 
 export interface TableRelation<
@@ -1132,40 +605,38 @@ export interface JsonSetValueUpdate {
   edits: readonly { op: "set"; at: string; value: unknown }[];
 }
 
-type LargeValueUpdateForBuilder<TBuilder extends AnyColumnDefinition> =
-  ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-    ? ByteValueUpdate
-    : ColumnBuilderSqlType<TBuilder> extends "TEXT"
-      ? TextValueUpdate | Utf8TextValueUpdate
-      : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
-        ? JsonSetValueUpdate
-        : never;
+type LargeValueUpdateForColumn<C extends ColumnTypes> = C["kind"] extends "bytes"
+  ? ByteValueUpdate
+  : C["kind"] extends "string"
+    ? TextValueUpdate | Utf8TextValueUpdate
+    : C["kind"] extends "json"
+      ? JsonSetValueUpdate
+      : never;
 
 /** Typed diff map accepted by the `applyDiffs` option of `Db.update`. */
 export type TableLargeValueUpdate<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
 > = Simplify<{
-  [TColumn in StoredColumnName<TSchema, TTable>]?: LargeValueUpdateForBuilder<
-    BuilderForColumn<TSchema, TTable, TColumn>
+  [TColumn in StoredColumnName<TSchema, TTable>]?: LargeValueUpdateForColumn<
+    ColumnOf<TSchema, TTable, TColumn>
   >;
 }>;
 
-type PageForBuilder<TBuilder extends AnyColumnDefinition> =
-  ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-    ? BytePage
-    : ColumnBuilderSqlType<TBuilder> extends "TEXT"
-      ? TextPage | Utf8TextPage
-      : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
-        ? JsonPointer
-        : never;
+type PageForColumn<C extends ColumnTypes> = C["kind"] extends "bytes"
+  ? BytePage
+  : C["kind"] extends "string"
+    ? TextPage | Utf8TextPage
+    : C["kind"] extends "json"
+      ? JsonPointer
+      : never;
 
 type TableLargeValueSelection<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
 > = Simplify<{
-  [TColumn in StoredColumnName<TSchema, TTable>]?: PageForBuilder<
-    BuilderForColumn<TSchema, TTable, TColumn>
+  [TColumn in StoredColumnName<TSchema, TTable>]?: PageForColumn<
+    ColumnOf<TSchema, TTable, TColumn>
   >;
 }>;
 
@@ -1332,12 +803,9 @@ type SelectedWithIncludesFromMeta<
   TInclude extends BuilderInclude<TMeta> = {},
   TSelection = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
-> = Simplify<
-  Omit<
-    SelectedFromMeta<TMeta, TSelection>,
-    Extract<keyof TInclude, keyof SelectedFromMeta<TMeta, TSelection>>
-  > &
-    IncludedRelationsFromMeta<TMeta, TRequired, TInclude>
+> = WithIncluded<
+  SelectedFromMeta<TMeta, TSelection>,
+  IncludedRelationsFromMeta<TMeta, TRequired, TInclude>
 >;
 
 type BuiltCondition = { column: string; op: string; value: unknown };
@@ -1949,24 +1417,10 @@ export type App<TSchema extends SchemaLike> = Simplify<
       false
     >;
     wasmSchema: WasmSchema;
-    /** Authoring metadata retained for local tooling; not a runtime contract. */
-    schemaAst?: SchemaAst;
   }
 >;
 
 export type TypedApp<TSchema extends SchemaLike> = App<TSchema>;
-
-type SchemaSlice<
-  TSchema extends SchemaLike,
-  TTables extends readonly TableName<TSchema>[],
-> = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>>;
-
-export interface SliceableApp<TSchema extends SchemaLike> {
-  readonly wasmSchema: WasmSchema;
-  slice<const TTables extends readonly [TableName<TSchema>, ...TableName<TSchema>[]]>(
-    ...tables: TTables
-  ): App<SchemaSlice<TSchema, TTables>>;
-}
 
 export type RowOf<TTable> = TTable extends { readonly _rowType: infer TRow } ? TRow : never;
 export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit } ? TInit : never;
@@ -1997,396 +1451,337 @@ export type TableMetaOf<TTable> =
 export type WhereOf<TQuery> = TQuery extends { where(input: infer TWhere): unknown }
   ? TWhere
   : never;
+import { shipMigrations, type ClientMigrations } from "./runtime/client-migrations.js";
 
-export function unwrapTableDefinition<const TColumns extends TableDefinition>(
-  definition: TColumns | DefinedTable<TColumns>,
-): TColumns {
-  if (definition instanceof DefinedTable) {
-    return definition.columns;
-  }
-
-  if (typeof definition === "object" && definition !== null) {
-    const maybeDefinedTable = definition as {
-      __jazzTableDefinition?: unknown;
-      columns?: TColumns;
-    };
-    if (maybeDefinedTable.__jazzTableDefinition === true && maybeDefinedTable.columns) {
-      return maybeDefinedTable.columns;
-    }
-  }
-
-  return definition;
-}
-
-function tableIndexedColumns(
-  definition: TableDefinition | DefinedTable<TableDefinition>,
-): string[] | undefined {
-  if (definition instanceof DefinedTable) {
-    return definition.indexedColumns ? [...definition.indexedColumns] : undefined;
-  }
-
-  if (typeof definition === "object" && definition !== null) {
-    const maybeDefinedTable = definition as {
-      __jazzTableDefinition?: unknown;
-      indexedColumns?: readonly string[];
-    };
-    if (maybeDefinedTable.__jazzTableDefinition === true) {
-      return maybeDefinedTable.indexedColumns ? [...maybeDefinedTable.indexedColumns] : undefined;
-    }
-  }
-
-  return undefined;
-}
-
-function tableCompositeIndexes(
-  definition: TableDefinition | DefinedTable<TableDefinition>,
-): string[][] | undefined {
-  if (
-    typeof definition === "object" &&
-    definition !== null &&
-    definition.__jazzTableDefinition === true
-  ) {
-    const indexes = (definition as DefinedTable).compositeIndexes;
-    return indexes?.map((columns) => [...columns]);
-  }
-  return undefined;
-}
-
-function tableBranchColumns(
-  definition: TableDefinition | DefinedTable<TableDefinition>,
-): string[] | undefined {
-  if (definition instanceof DefinedTable) {
-    return definition.branchColumns ? [...definition.branchColumns] : undefined;
-  }
-
-  if (typeof definition === "object" && definition !== null) {
-    const maybeDefinedTable = definition as {
-      __jazzTableDefinition?: unknown;
-      branchColumns?: readonly string[];
-    };
-    if (maybeDefinedTable.__jazzTableDefinition === true) {
-      return maybeDefinedTable.branchColumns ? [...maybeDefinedTable.branchColumns] : undefined;
-    }
-  }
-
-  return undefined;
-}
-
-function tableHistory(
-  definition: TableDefinition | DefinedTable<TableDefinition>,
-): "latest" | undefined {
-  if (typeof definition === "object" && definition !== null) {
-    const maybeDefinedTable = definition as {
-      __jazzTableDefinition?: unknown;
-      historyRetention?: "latest";
-    };
-    if (maybeDefinedTable.__jazzTableDefinition === true) {
-      return maybeDefinedTable.historyRetention;
-    }
-  }
-  return undefined;
-}
-
-function tableRelationships(
-  definition: TableDefinition | DefinedTable<TableDefinition>,
-): Relationships {
-  if (
-    typeof definition === "object" &&
-    definition !== null &&
-    definition.__jazzTableDefinition === true
-  ) {
-    const relations = (definition as DefinedTable).relations;
-    if (!relations || typeof relations !== "object" || Array.isArray(relations))
-      throw new Error(
-        "s.table(columns, relations) requires a relationship map; use {} for no relationships.",
-      );
-    return relations;
-  }
-  return {};
-}
-
-function definitionToColumns(
-  definition: TableDefinition | DefinedTable<TableDefinition>,
-): Column[] {
-  const columnsDefinition = unwrapTableDefinition(definition);
-  const columns: Column[] = [];
-  for (const [columnName, builder] of Object.entries(columnsDefinition)) {
-    assertUserTableColumnNameAllowed(columnName);
-    if (isComputedColumn(builder)) continue;
-    const column = builder._build(columnName);
-    if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
-    columns.push(column);
-  }
-  for (const [name, relation] of Object.entries(tableRelationships(definition))) {
-    if (relation.kind !== "forward") continue;
-    const column = columns.find((candidate) => candidate.name === relation.column);
-    if (!column)
-      throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
-    if (column.references && column.references !== relation.table)
-      throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
-    column.references = relation.table;
-  }
-  return columns;
-}
-
-function columnTransformsForTable(
-  definition: TableDefinition | DefinedTable<TableDefinition> | undefined,
-): ColumnTransformMap | undefined {
-  if (!definition) {
-    return undefined;
-  }
-
-  const columnsDefinition = unwrapTableDefinition(definition);
-  const transforms: ColumnTransformMap = Object.create(null);
-  validateTransformDependencies(columnsDefinition);
-  for (const [columnName, builder] of Object.entries(columnsDefinition)) {
-    if (isComputedColumn(builder)) {
-      transforms[columnName] = {
-        computed: true,
-        rowColumns: builder._computed.rowColumns,
-        from: (_value, dependencies) => builder._computed.compute(dependencies),
-        to: () => {
-          throw new TypeError(`Computed field "${columnName}" is read-only.`);
-        },
-      };
-    } else if (builder._transform) {
-      transforms[columnName] = {
-        ...builder._transform,
-        ...(builder._transform.dependsOn
-          ? { dependsOn: Object.freeze([...builder._transform.dependsOn]) }
-          : {}),
-      } as ColumnTransform;
-    }
-  }
-  if (Object.keys(transforms).length === 0) return undefined;
-  columnTransformDependencies(transforms);
-  return transforms;
-}
-
-function columnTransformsForSchema(
-  definition: SchemaDefinition,
-): ColumnTransformRegistry | undefined {
-  let registry: ColumnTransformRegistry | undefined;
-  for (const [tableName, tableDefinition] of Object.entries(definition)) {
-    const transforms = columnTransformsForTable(tableDefinition);
-    if (transforms) (registry ??= Object.create(null))[tableName] = transforms;
-  }
-  return registry;
-}
+// ============================================================================
+// bindApp: the generated module's entry point
+// ============================================================================
 
 /**
- * The columns of each table whose values only TypeScript computes, for
- * `jazz.app.json`'s codegen section: `s.computed` fields (not stored) and
- * `.transform` columns (stored, transformed in TypeScript). Other languages
- * see the stored column of a transform and nothing of a computed field.
+ * The compiled schema `jazz-tools generate` embeds in `jazz.generated.ts`:
+ * what Jazz's Rust loader makes of `jazz.app.json`, so the runtime never
+ * reads the file itself.
  */
-export type TsOnlyColumns = Record<
-  string,
-  Array<{ type: "Computed" | "Transform"; column: string }>
+export interface CompiledAppSchema {
+  /** The current schema's hash. */
+  readonly current: string;
+  /** The current schema, relations included. */
+  readonly tables?: WasmSchema;
+  /** Every version the app ships, oldest first, the current one last. */
+  readonly schemas: ClientMigrations["schemas"];
+  readonly migrations: ClientMigrations["migrations"];
+  /** Computed fields: table → field → the columns it is computed from. */
+  readonly computed?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
+  /** Transformed columns: table → column → transform name. */
+  readonly transforms?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+}
+
+/** Relations as the generator may emit them beside `schema`. */
+type CompiledRelations = Readonly<
+  Record<
+    string,
+    Readonly<
+      Record<
+        string,
+        | { readonly one: string; readonly column: string }
+        | { readonly many: string; readonly relation?: string; readonly column?: string }
+      >
+    >
+  >
 >;
 
-export function tsOnlyColumns(definition: SchemaDefinition): TsOnlyColumns {
-  const columns: TsOnlyColumns = {};
-  for (const [tableName, transforms] of Object.entries(
-    columnTransformsForSchema(definition) ?? {},
-  )) {
-    columns[tableName] = Object.entries(transforms ?? {}).map(([column, transform]) => ({
-      type: transform.computed ? "Computed" : "Transform",
-      column,
-    }));
+type TablesWithComputed<TTypes extends SchemaLike> = {
+  [TTable in TableName<TTypes>]: TableTypesOf<TTypes, TTable> extends {
+    readonly computed: infer C;
   }
-  return columns;
+    ? keyof C extends never
+      ? never
+      : TTable
+    : never;
+}[TableName<TTypes>];
+
+/**
+ * The computed fields an app implements (in `jazz.computed.ts`): per table,
+ * one function per field from the columns `jazz.app.json` names to the value.
+ */
+export type ComputedImpl<TTypes extends SchemaLike> = {
+  readonly [TTable in TablesWithComputed<TTypes>]: TableTypesOf<TTypes, TTable> extends {
+    readonly computed: infer C extends Record<string, { from: object; value: unknown }>;
+  }
+    ? { readonly [TField in keyof C]: (row: Readonly<C[TField]["from"]>) => C[TField]["value"] }
+    : never;
+};
+
+/**
+ * The transforms an app implements (in `jazz.computed.ts`): per name, `from`
+ * turns a stored value into the value the app sees, `to` turns it back.
+ *
+ * Null passes through: Jazz never calls a transform with null, so a null
+ * branch is never reached. Either may still return null, so an alpha.64
+ * transform on an optional column, which handled null itself and which
+ * `jazz-tools upgrade` moves here unchanged, keeps typechecking.
+ */
+/**
+ * Whether every column stored through the transform `TName` is nullable: only
+ * then may its callbacks return `null` (an alpha.64 transform on an optional
+ * column that handled null itself). Jazz never calls a transform with null.
+ */
+type TransformColumnsNullable<TTypes extends SchemaLike, TName> = false extends {
+  [TTable in TableName<TTypes>]: TableTypesOf<TTypes, TTable> extends {
+    readonly transforms: infer TColumns extends Record<string, string>;
+  }
+    ? {
+        [TColumn in keyof TColumns]: TColumns[TColumn] extends TName
+          ? TColumn extends StoredColumnName<TTypes, TTable>
+            ? ColumnOf<TTypes, TTable, TColumn>["nullable"]
+            : never
+          : never;
+      }[keyof TColumns]
+    : never;
+}[TableName<TTypes>]
+  ? false
+  : true;
+
+/**
+ * The transforms an app implements (in `jazz.computed.ts`): per name, `from`
+ * turns a stored value into the value the app sees, `to` turns it back.
+ * Jazz passes `null` through without calling either. With the app's types
+ * (`TTypes`), a callback may return `null` only when every column stored
+ * through it is nullable; without them, `null` is allowed and `bindApp`, which
+ * has the types, checks it.
+ */
+export type TransformImpl<TTransforms extends TransformTypes, TTypes extends SchemaLike = never> = {
+  readonly [TName in keyof TTransforms]: TTransforms[TName] extends {
+    readonly stored: infer TStored;
+    readonly view: infer TView;
+  }
+    ? [TTypes] extends [never]
+      ? { from(stored: TStored): TView | null; to(view: TView): TStored | null }
+      : TransformColumnsNullable<TTypes, TName> extends true
+        ? { from(stored: TStored): TView | null; to(view: TView): TStored | null }
+        : { from(stored: TStored): TView; to(view: TView): TStored }
+    : never;
+};
+
+type ComputedOption<TTypes extends SchemaLike> = [TablesWithComputed<TTypes>] extends [never]
+  ? { readonly computed?: undefined }
+  : { readonly computed: ComputedImpl<TTypes> };
+type TransformsOption<TTypes extends SchemaLike, TTransforms extends TransformTypes> = [
+  keyof TTransforms,
+] extends [never]
+  ? { readonly transforms?: undefined }
+  : { readonly transforms: TransformImpl<TTransforms, TTypes> };
+
+/** What `jazz.generated.ts` passes to {@link bindApp}. */
+export type BindAppOptions<TTypes extends SchemaLike, TTransforms extends TransformTypes = {}> = {
+  /** `"sha256:<hex>"` of the `jazz.app.json` the bindings were generated from. */
+  readonly source: string;
+  readonly schema: CompiledAppSchema;
+  readonly relations?: CompiledRelations;
+} & ComputedOption<TTypes> &
+  TransformsOption<TTypes, TTransforms>;
+
+/**
+ * Where `bindApp` records what the bindings passed it on the app's schema,
+ * read across copies of jazz-tools (a bundler may load the generated module
+ * and the backend's as separate copies). Not enumerable: the schema's JSON,
+ * and so its hash, stay as they are.
+ */
+const BOUND = Symbol.for("jazz-tools.boundApp");
+
+/** What the bindings that made an app's schema passed to `bindApp`. */
+export interface BoundApp {
+  /** `"sha256:<hex>"` of the `jazz.app.json` they were generated from. */
+  readonly source: string;
+  readonly schema: CompiledAppSchema;
+  readonly relations?: CompiledRelations;
 }
 
-/** Where `defineApp` records {@link tsOnlyColumns}, read across copies of jazz-tools. */
-const TS_ONLY = Symbol.for("jazz-tools.tsOnlyColumns");
-/** Where a slice records which app it is of and its tables. */
-const SLICE = Symbol.for("jazz-tools.slice");
-
-function recordTsOnlyColumns(wasmSchema: WasmSchema, definition: SchemaDefinition): void {
-  Object.defineProperty(wasmSchema, TS_ONLY, {
-    value: tsOnlyColumns(definition),
-    enumerable: false,
-    configurable: true,
-  });
+/** What the bindings that made `wasmSchema` passed to `bindApp`, if `bindApp` made it. */
+export function boundApp(wasmSchema: WasmSchema): BoundApp | undefined {
+  return (wasmSchema as { [BOUND]?: BoundApp })[BOUND];
 }
 
-/** The TS-only columns of the app `defineApp` made `wasmSchema` for, if it did. */
-export function recordedTsOnlyColumns(wasmSchema: WasmSchema): TsOnlyColumns | undefined {
-  return (wasmSchema as { [TS_ONLY]?: TsOnlyColumns })[TS_ONLY];
+const REGENERATE = "run `npx jazz-tools generate` to regenerate jazz.generated.ts";
+
+/**
+ * Bind an app's generated types to its compiled schema and the computed
+ * fields and transforms it implements. Called by `jazz.generated.ts`, which
+ * `jazz-tools generate` writes from `jazz.app.json`; apps import `app` from
+ * there instead of calling this.
+ */
+export function bindApp<TTypes extends SchemaLike, TTransforms extends TransformTypes = {}>(
+  options: BindAppOptions<TTypes, TTransforms>,
+): App<TTypes> {
+  if (!options || typeof options !== "object" || !options.schema) {
+    throw new TypeError(`bindApp: expected the options jazz.generated.ts passes; ${REGENERATE}.`);
+  }
+  const { source, schema } = options;
+  if (typeof source !== "string" || !/^sha256:[0-9a-f]{64}$/.test(source)) {
+    throw new TypeError(`bindApp: \`source\` must be "sha256:<hex>"; ${REGENERATE}.`);
+  }
+  const wasmSchema = currentTables(schema, options.relations);
+  shipMigrations(wasmSchema, { schemas: schema.schemas, migrations: schema.migrations });
+  const bound: BoundApp = Object.freeze({ source, schema, relations: options.relations });
+  Object.defineProperty(wasmSchema, BOUND, { value: bound, enumerable: false });
+  const transforms = columnTransforms(
+    wasmSchema,
+    schema,
+    options.computed as Record<string, Record<string, (row: unknown) => unknown>> | undefined,
+    options.transforms as
+      | Record<string, { from(value: unknown): unknown; to(value: unknown): unknown }>
+      | undefined,
+  );
+  return createAppForTables(
+    Object.keys(wasmSchema),
+    wasmSchema,
+    transforms,
+  ) as unknown as App<TTypes>;
 }
 
-/** The tables of `value`, if it is a slice of the app whose schema is `wasmSchema`. */
-export function sliceTables(value: unknown, wasmSchema: WasmSchema): string[] | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const slice = (value as { [SLICE]?: { of: WasmSchema; tables: string[] } })[SLICE];
-  return slice?.of === wasmSchema ? [...slice.tables] : undefined;
+/** The current schema, with its relations, checked against the versions the bindings ship. */
+function currentTables(
+  schema: CompiledAppSchema,
+  relations: CompiledRelations | undefined,
+): WasmSchema {
+  if (typeof schema.current !== "string" || !Array.isArray(schema.schemas)) {
+    throw new TypeError(`bindApp: the compiled schema is malformed; ${REGENERATE}.`);
+  }
+  const current = schema.schemas.find((version) => version.hash === schema.current);
+  if (!current) {
+    throw new Error(
+      `bindApp: jazz.generated.ts ships no schema for its current version ${schema.current}; ${REGENERATE}.`,
+    );
+  }
+  // A version's schema is the engine's serde form, `{ tables }`.
+  const engine = current.schema as { tables?: WasmSchema };
+  const tables: WasmSchema = structuredClone(
+    schema.tables ?? engine.tables ?? (engine as WasmSchema),
+  );
+  for (const [table, entries] of Object.entries(relations ?? {})) {
+    const tableSchema = tables[table];
+    if (!tableSchema) {
+      throw new Error(`bindApp: relations name unknown table "${table}"; ${REGENERATE}.`);
+    }
+    const declared: NonNullable<WasmSchema[string]["relations"]> = {};
+    for (const [name, relation] of Object.entries(entries)) {
+      if ("one" in relation) {
+        declared[name] = { kind: "forward", table: relation.one, column: relation.column };
+      } else if (relation.relation !== undefined) {
+        declared[name] = { kind: "reverse", table: relation.many, relation: relation.relation };
+      } else if (relation.column !== undefined) {
+        declared[name] = { kind: "forward", table: relation.many, column: relation.column };
+      } else {
+        throw new Error(`bindApp: relation ${table}.${name} is malformed; ${REGENERATE}.`);
+      }
+    }
+    // Stored schemas carry no relations; only a table with some gets the key.
+    if (Object.keys(declared).length > 0) tableSchema.relations = declared;
+  }
+  for (const table of Object.keys(tables)) assertSchemaNameAllowed(table);
+  return tables;
 }
 
-export function definitionToSchema<TSchema extends SchemaDefinition>(
-  definition: TSchema,
-): SchemaAst {
-  return {
-    tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
-      assertSchemaNameAllowed(tableName);
-      const indexedColumns = tableIndexedColumns(tableDefinition);
-      const compositeIndexes = tableCompositeIndexes(tableDefinition);
-      const branchColumns = tableBranchColumns(tableDefinition);
-      const history = tableHistory(tableDefinition);
-      return {
-        name: tableName,
-        columns: definitionToColumns(tableDefinition),
-        relations: tableRelationships(tableDefinition),
-        ...(indexedColumns ? { indexedColumns } : {}),
-        ...(compositeIndexes ? { compositeIndexes } : {}),
-        ...(branchColumns ? { branchBy: branchColumns } : {}),
-        ...(history ? { history } : {}),
+/** The runtime transforms for the computed fields and transformed columns the schema declares. */
+function columnTransforms(
+  wasmSchema: WasmSchema,
+  schema: CompiledAppSchema,
+  computed: Record<string, Record<string, (row: unknown) => unknown>> | undefined,
+  transforms:
+    | Record<string, { from(value: unknown): unknown; to(value: unknown): unknown }>
+    | undefined,
+): ColumnTransformRegistry | undefined {
+  const registry: ColumnTransformRegistry = Object.create(null);
+  const tableTransforms = (table: string): ColumnTransformMap =>
+    (registry[table] ??= Object.create(null) as ColumnTransformMap);
+
+  const declaredComputed = schema.computed ?? {};
+  for (const [table, fields] of Object.entries(declaredComputed)) {
+    if (!wasmSchema[table]) {
+      throw new Error(`bindApp: computed fields name unknown table "${table}"; ${REGENERATE}.`);
+    }
+    for (const [field, from] of Object.entries(fields)) {
+      const compute = computed?.[table]?.[field];
+      if (typeof compute !== "function") {
+        throw new Error(
+          `jazz.app.json declares the computed field ${table}.${field}, but jazz.computed.ts doesn't implement it: export it from \`computed.${table}.${field}\`.`,
+        );
+      }
+      tableTransforms(table)[field] = {
+        computed: true,
+        rowColumns: Object.freeze([...from]),
+        from: (_value, row) => compute(row),
+        to: () => {
+          throw new TypeError(`Computed field "${field}" is read-only.`);
+        },
       };
-    }),
-  };
-}
-
-export function defineSchema<const TSchema extends SchemaDefinition>(
-  definition: TSchema &
-    ValidateSchemaRefs<TSchema> &
-    ValidateSchemaColumnNames<TSchema> &
-    ValidateSchemaTransformContexts<TSchema>,
-): Schema<TSchema> {
-  for (const [tableName, tableDefinition] of Object.entries(definition)) {
-    assertSchemaNameAllowed(tableName);
-    for (const column of Object.keys(unwrapTableDefinition(tableDefinition))) {
-      assertUserTableColumnNameAllowed(column);
     }
   }
-  schemaToWasm(definitionToSchema(definition));
-  return definition as unknown as Schema<TSchema>;
-}
-
-/**
- * Create an app from a schema definition.
- *
- * @example
- * ```typescript
- * const schema = {
- *   todos: s.table({
- *     title: s.string(),
- *     done: s.boolean(),
- *   }),
- * });
- * type AppSchema = s.Schema<typeof schema>;
- * // The module `jazz-tools` generates beside schema.ts.
- * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
- * ```
- */
-/**
- * What an app's clients ship besides its schema.
- */
-export interface DefineAppOptions {
-  /**
-   * The app's schema versions and migrations, from the module `jazz-tools`
-   * generates beside schema.ts (`import { migrations } from "./migrations"`),
-   * even while the app has a single version. `"none"` is for an app defined
-   * in code that has no other versions and runs on a `memory()` store, such
-   * as a test's: `createJazz` refuses it with `sqlite()`, `vercel()` or
-   * `remote()`, which would keep its data past its first schema change.
-   */
-  migrations: ClientMigrations | "none";
-}
-
-export function defineApp<const TSchema extends Schema<any>>(
-  definition: TSchema,
-  options: DefineAppOptions,
-): App<TSchema>;
-export function defineApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema &
-    ValidateSchemaRefs<TSchema> &
-    ValidateSchemaColumnNames<TSchema> &
-    ValidateSchemaTransformContexts<TSchema>,
-  options: DefineAppOptions,
-): App<Schema<TSchema>>;
-export function defineApp(
-  definition: SchemaDefinition | Schema<any>,
-  options: DefineAppOptions,
-): App<Schema<SchemaDefinition>> {
-  const normalizedDefinition = definition as unknown as SchemaDefinition;
-  const schema = definitionToSchema(normalizedDefinition);
-  const wasmSchema = schemaToWasm(schema);
-  shipMigrations(wasmSchema, options?.migrations);
-  recordTsOnlyColumns(wasmSchema, normalizedDefinition);
-  return createAppForTables(
-    Object.keys(normalizedDefinition),
-    wasmSchema,
-    normalizedDefinition,
-    schema,
-  );
-}
-
-/**
- * Create a sliceable app from a full schema definition.
- *
- * The full schema is compiled for runtime hashing, migrations, validation, and query planning,
- * while each `.slice(...)` call exposes a smaller typed app surface backed by that same runtime
- * schema.
- *
- * @example
- * ```typescript
- * const app = s.defineSliceableApp(schema, { migrations });
- * export const orgApp = app.slice("teams", "projects", "members");
- * ```
- */
-export function defineSliceableApp<const TSchema extends Schema<any>>(
-  definition: TSchema,
-  options: DefineAppOptions,
-): SliceableApp<TSchema>;
-export function defineSliceableApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema &
-    ValidateSchemaRefs<TSchema> &
-    ValidateSchemaColumnNames<TSchema> &
-    ValidateSchemaTransformContexts<TSchema>,
-  options: DefineAppOptions,
-): SliceableApp<Schema<TSchema>>;
-export function defineSliceableApp(
-  definition: SchemaDefinition | Schema<any>,
-  options: DefineAppOptions,
-): SliceableApp<Schema<SchemaDefinition>> {
-  const normalizedDefinition = definition as unknown as SchemaDefinition;
-  const schema = definitionToSchema(normalizedDefinition);
-  const wasmSchema = schemaToWasm(schema);
-  shipMigrations(wasmSchema, options?.migrations);
-  recordTsOnlyColumns(wasmSchema, normalizedDefinition);
-
-  return {
-    wasmSchema,
-    slice(...tableNames: string[]) {
-      if (tableNames.length === 0) {
-        throw new Error("slice(...) requires at least one table name.");
+  for (const [table, fields] of Object.entries(computed ?? {})) {
+    for (const field of Object.keys(fields ?? {})) {
+      if (!declaredComputed[table]?.[field]) {
+        throw new Error(
+          `jazz.computed.ts implements the computed field ${table}.${field}, which jazz.app.json doesn't declare: declare it under tables.${table}.computed, or remove it.`,
+        );
       }
+    }
+  }
 
-      for (const tableName of tableNames) {
-        assertSchemaNameAllowed(tableName);
-        if (!(tableName in normalizedDefinition)) {
-          throw new Error(`slice(...) references unknown table "${tableName}".`);
+  const used = new Set<string>();
+  for (const [table, columns] of Object.entries(schema.transforms ?? {})) {
+    if (!wasmSchema[table]) {
+      throw new Error(`bindApp: transformed columns name unknown table "${table}"; ${REGENERATE}.`);
+    }
+    for (const [column, name] of Object.entries(columns)) {
+      const transform = transforms?.[name];
+      if (
+        !transform ||
+        typeof transform.from !== "function" ||
+        typeof transform.to !== "function"
+      ) {
+        throw new Error(
+          `jazz.app.json stores ${table}.${column} through the transform "${name}", but jazz.computed.ts doesn't implement it: export \`transforms.${name}\` with \`from\` and \`to\`.`,
+        );
+      }
+      used.add(name);
+      // Null passes through uncalled. A callback that returns null for a
+      // required column is refused, as the types refuse it.
+      const nullable =
+        wasmSchema[table]!.columns.find((descriptor) => descriptor.name === column)?.nullable ??
+        true;
+      const checked = (direction: "from" | "to", result: unknown): unknown => {
+        if (!nullable && (result === null || result === undefined)) {
+          throw new TypeError(
+            `The transform "${name}" returned ${String(result)} from \`${direction}\` for ${table}.${column}, which is required: return a value, or make the column nullable in jazz.app.json.`,
+          );
         }
-      }
-
-      const slice = createAppForTables(tableNames, wasmSchema, normalizedDefinition);
-      Object.defineProperty(slice, SLICE, {
-        value: Object.freeze({ of: wasmSchema, tables: Object.freeze([...tableNames]) }),
-        enumerable: false,
-      });
-      return slice;
-    },
-  } as SliceableApp<Schema<SchemaDefinition>>;
+        return result;
+      };
+      tableTransforms(table)[column] = {
+        from: (value) =>
+          value === null || value === undefined ? value : checked("from", transform.from(value)),
+        to: (value) =>
+          value === null || value === undefined ? value : checked("to", transform.to(value)),
+      };
+    }
+  }
+  for (const name of Object.keys(transforms ?? {})) {
+    if (!used.has(name)) {
+      throw new Error(
+        `jazz.computed.ts implements the transform "${name}", which no column of jazz.app.json uses: declare it under "transforms" and name it on a column, or remove it.`,
+      );
+    }
+  }
+  return Object.keys(registry).length ? registry : undefined;
 }
 
 // The statically-registered app schema: the inspector host handle falls back to
 // it before any client exists (e.g. a write-only page with no query yet). Set
-// at defineApp time, so it does not depend on a connection being established.
-// Last-defineApp-wins by design: a dev-only fallback, not a multi-app registry —
-// pages defining several apps get the most recent one until a client exists.
+// at bindApp time, so it does not depend on a connection being established.
+// Last-bindApp-wins by design: a dev-only fallback, not a multi-app registry.
 let registeredWasmSchema: WasmSchema | undefined;
 
-/** The most recently defined app's WasmSchema, if any (used by the inspector). */
+/** The most recently bound app's WasmSchema, if any (used by the inspector). */
 export function getRegisteredWasmSchema(): WasmSchema | undefined {
   return registeredWasmSchema;
 }
@@ -2394,13 +1789,11 @@ export function getRegisteredWasmSchema(): WasmSchema | undefined {
 function createAppForTables(
   tableNames: readonly string[],
   wasmSchema: WasmSchema,
-  definition?: SchemaDefinition,
-  schemaAst?: SchemaAst,
-): App<Schema<SchemaDefinition>> {
+  columnTransformsByTable: ColumnTransformRegistry | undefined,
+): App<SchemaLike> {
   registeredWasmSchema = wasmSchema;
-  const columnTransformsByTable = definition ? columnTransformsForSchema(definition) : undefined;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
-  const history = {} as App<Schema<SchemaDefinition>>["$history"];
+  const history = {} as Record<string, unknown>;
 
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
@@ -2466,8 +1859,7 @@ function createAppForTables(
       return builder;
     },
     wasmSchema,
-    schemaAst,
-  } as unknown as App<Schema<SchemaDefinition>>;
+  } as unknown as App<SchemaLike>;
 }
 
 const utf8 = new TextEncoder();
