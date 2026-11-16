@@ -327,7 +327,7 @@ impl Relations {
         Self(relations)
     }
 
-    fn get(&self, table: &str, name: &str) -> Option<&Relation> {
+    pub(crate) fn get(&self, table: &str, name: &str) -> Option<&Relation> {
         self.0
             .get(table)?
             .iter()
@@ -751,7 +751,7 @@ fn child_shape_columns(
     Ok(columns)
 }
 
-fn predicate(
+pub(crate) fn predicate(
     table: &TableSchema,
     table_name: &str,
     condition: &Json,

@@ -198,6 +198,26 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   lost to another write; retry it). UniFFI: `JazzError.Permission`,
   `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
   these as `refused`, as before.
+- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app's
+  `untyped` builder, as the typed Rust API and TS lower them):
+  - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
+…], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
+    of the last hop's table; the top-level clauses filter the rows hopped
+    from, `after` the rows reached.
+  - `{"table", "where"?, "gather": {"relation", "maxDepth"?}}`: the rows
+    matching `where` and every row reached along a forward relation of the
+    table to itself, up to `maxDepth` (default 10).
+  - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows,
+    as TS's union: a row matched by two arms comes twice, and `limit` /
+    `offset` count every occurrence; arms read one table, with `where` only.
+    Subscribing to a union whose arms overlap can mis-apply removals (deltas
+    name rows by id), as in jazz-app.
+  - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
+    versions the server accepted, each row with `"$history":
+{"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
+    tier `remote`. Not subscribable yet.
+  - `"includeDeleted": true` on any of these or a plain query reads deleted
+    rows too.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",

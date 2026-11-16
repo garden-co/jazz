@@ -17,6 +17,7 @@ mod convert;
 mod core;
 mod error;
 mod gate;
+mod relational;
 
 use std::sync::Arc;
 
