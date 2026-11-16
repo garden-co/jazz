@@ -31,6 +31,9 @@ pub(crate) struct Core {
     parent_closed: Option<Arc<AtomicBool>>,
     /// The open subscriptions, told when the app closes.
     subscriptions: Mutex<Vec<Weak<Delivery>>>,
+    /// The open watches, told when the app closes: each gets a last
+    /// `None` (closed).
+    watches: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
     /// Transaction and upload ids: shared with a `for_user` handle's
     /// parent, so the ids in the client's tables never collide.
     next_tx: Arc<AtomicU64>,
@@ -272,6 +275,7 @@ impl Core {
             closed: Arc::new(AtomicBool::new(false)),
             parent_closed: parent,
             subscriptions: Mutex::new(Vec::new()),
+            watches: Mutex::new(Vec::new()),
             next_tx,
             has_server,
             contract,
@@ -1119,6 +1123,7 @@ impl Core {
         self.closed.store(true, Ordering::Release);
         // Signed out, the app has ended: no token callback after this.
         self.run_close_hook();
+        self.end_watches();
         Ok(())
     }
 
@@ -1169,7 +1174,9 @@ impl Core {
         Ok(())
     }
 
-    pub fn watch(&self, what: &str, listener: Box<dyn Fn(String) + Send>) -> Result<Watch> {
+    /// Calls `listener` with each state's JSON, the current one first, and
+    /// once with `None` when the app closes (after which nothing comes).
+    pub fn watch(&self, what: &str, listener: Box<dyn Fn(Option<String>) + Send>) -> Result<Watch> {
         use futures_util::StreamExt as _;
         let jazz = self.open_jazz()?;
         let mut stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = String> + Send>> =
@@ -1199,21 +1206,44 @@ impl Core {
                 }
             };
         let (cancel, mut cancelled) = tokio::sync::oneshot::channel::<()>();
+        let (close, mut closed) = tokio::sync::oneshot::channel::<()>();
+        self.watches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(close);
         let thread = std::thread::Builder::new()
             .name("jazz-watch".into())
             .spawn(move || {
                 block_on(async move {
                     loop {
-                        let next =
-                            futures_util::future::select(stream.next(), &mut cancelled).await;
-                        match next {
-                            futures_util::future::Either::Left((Some(state), _)) => listener(state),
-                            _ => return,
+                        tokio::select! {
+                            biased;
+                            _ = &mut cancelled => return,
+                            result = &mut closed => {
+                                // Sent by the app's close (an error: the
+                                // watch was dropped first, nothing to say).
+                                if result.is_ok() {
+                                    listener(None);
+                                }
+                                return;
+                            }
+                            state = stream.next() => match state {
+                                Some(state) => listener(Some(state)),
+                                None => {
+                                    // The stream ended: the app closed.
+                                    listener(None);
+                                    return;
+                                }
+                            },
                         }
                     }
                 })
             })
             .map_err(|error| FfiError::Io(format!("cannot start the watch's thread: {error}")))?;
+        // A close racing this watch may have taken the list before the push.
+        if self.closed.load(Ordering::Acquire) {
+            self.end_watches();
+        }
         Ok(Watch {
             thread_id: thread.thread().id(),
             thread: Mutex::new(Some(thread)),
@@ -1298,8 +1328,16 @@ impl Core {
         Ok(())
     }
 
+    /// Each open watch's last call: `None`, the app closed.
+    fn end_watches(&self) {
+        for close in std::mem::take(&mut *self.watches.lock().unwrap_or_else(|e| e.into_inner())) {
+            let _ = close.send(());
+        }
+    }
+
     /// Each open subscription's last event: the app closed.
     fn end_subscriptions(&self) {
+        self.end_watches();
         let subscriptions =
             std::mem::take(&mut *self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()));
         for delivery in subscriptions.iter().filter_map(Weak::upgrade) {
