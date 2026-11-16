@@ -1,0 +1,47 @@
+---
+title: Rust
+description: "Use Jazz from a Rust app or service: a client of your TypeScript main backend, with typed bindings generated from your app's schema."
+---
+
+For apps and services: run your backend in TypeScript. A Rust program is a client of your app: it
+signs in as one of your users and syncs through your main backend's `/jazz`, like a browser or a
+mobile app, or it acts as a [backend client](/docs/setup/backend-client) with a machine
+credential. Like every other language, it works from your app's TypeScript schema and permissions:
+`npx jazz-tools generate` writes its typed bindings from them.
+
+## Install
+
+Depend on the `jazz-app-support` crate:
+
+```toml title="Cargo.toml"
+[dependencies]
+jazz-app-support = "=2.0.0-alpha.66"
+tokio = { version = "1", features = ["full"] }
+```
+
+## Generate the bindings
+
+Author your app's schema and permissions in TypeScript, in a `schema.ts` beside your `Cargo.toml`.
+If your app's TypeScript side already has one, re-export it:
+
+```ts title="schema.ts"
+export { schema, permissions } from "../web/schema";
+```
+
+Then run `npx jazz-tools generate` there. It writes `jazz.app.json`, `jazz.permissions.json` and
+`src/jazz_app.rs`, the typed bindings. The crate needs no `package.json`:
+
+```bash
+npx jazz-tools generate            # writes jazz.app.json, jazz.permissions.json, src/jazz_app.rs
+npx jazz-tools generate --check    # in CI: fails if any of them is stale
+```
+
+Run it with `npx`: the standalone `jazz-tools` binary refuses to write beside a `schema.ts`, though
+its `generate --check` still works. Commit `schema.ts` and the generated files, and declare the
+bindings with `mod jazz_app;`. The [Reading](/docs/reading/queries) and
+[Writing](/docs/writing/writing-data) pages have a Rust tab for each example.
+
+## Not supported yet
+
+- running your app's main backend (serving its `/jazz` and publishing its permissions): run it in
+  TypeScript with `createJazz`.
