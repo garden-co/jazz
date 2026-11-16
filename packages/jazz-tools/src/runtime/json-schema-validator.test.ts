@@ -52,6 +52,31 @@ describe("browser JSON Schema validator", () => {
     }
   });
 
+  // Jazz refuses, natively too, the `\p{…}` names outside this table
+  // (`json_schema_support/regex.rs`), so every name in it must be one the
+  // browser translates.
+  it("translates every Unicode class name Jazz accepts", () => {
+    const table = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../crates/jazz/layers/model/src/model/json_schema_support/js_unicode_properties.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as Record<"binary" | "generalCategory" | "script", string[]>;
+    const names = [
+      ...table.binary,
+      ...table.generalCategory,
+      ...table.generalCategory.map((value) => `gc=${value}`),
+      ...table.script.map((value) => `Script=${value}`),
+      ...table.script.map((value) => `scx=${value}`),
+    ];
+    for (const name of names) {
+      expect(() => compileJsonSchema({ pattern: `\\p{${name}}` }), name).not.toThrow();
+    }
+  });
+
   it("says which value failed and where", () => {
     const check = compileJsonSchema({
       type: "object",

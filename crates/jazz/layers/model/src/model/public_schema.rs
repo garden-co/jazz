@@ -17,6 +17,7 @@ pub use crate::query::{
 };
 
 use crate::model::json_schema::{self, JsonSchemaError};
+use crate::model::json_schema_support;
 
 /// Validate JSON-bearing public values without changing their source text.
 ///
@@ -61,6 +62,29 @@ pub fn json_schema_failure(error: JsonSchemaError, path: &str) -> String {
         JsonSchemaError::Unavailable(error) => {
             format!("JSON schema validation unavailable for column `{path}`: {error}")
         }
+    }
+}
+
+/// Refuse declared JSON Schemas using a feature not every Jazz runtime
+/// evaluates (see [`json_schema_support`]). Deployments and `jazz-tools
+/// validate` run it; admitting a schema does not, so a store whose schema
+/// already uses one still opens.
+pub fn check_supported_json_schemas(column_type: &ColumnType, path: &str) -> Result<(), String> {
+    match column_type {
+        ColumnType::Json {
+            schema: Some(schema),
+        } => json_schema_support::check_supported(schema)
+            .map_err(|error| format!("unsupported JSON schema for column `{path}`: {error}")),
+        ColumnType::Array { element } => {
+            check_supported_json_schemas(element, &format!("{path}[]"))
+        }
+        ColumnType::Row { columns } => columns.columns.iter().try_for_each(|field| {
+            check_supported_json_schemas(
+                &field.column_type,
+                &format!("{path}.{}", field.name_str()),
+            )
+        }),
+        _ => Ok(()),
     }
 }
 

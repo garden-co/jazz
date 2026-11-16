@@ -453,12 +453,16 @@ pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
 }
 
 /// [`decode_schema`], refusing too what a deployment may not introduce
-/// (`check_deployable_policies`): what `jazz-tools validate` checks.
-/// Opening a store decodes its schema with [`decode_schema`] alone.
+/// (`check_deployable_policies`, `check_deployable_json_schemas`): what
+/// `jazz-tools validate` checks. Opening a store decodes its schema with
+/// [`decode_schema`] alone.
 pub fn validate_deployable_schema(schema: &[u8]) -> HostResult<JazzSchema> {
-    use jazz_model::model::public_schema_convert::check_deployable_policies;
+    use jazz_model::model::public_schema_convert::{
+        check_deployable_json_schemas, check_deployable_policies,
+    };
     let decoded = decode_schema(schema)?;
     check_deployable_policies(decoded.public_schema())
+        .and_then(|()| check_deployable_json_schemas(decoded.public_schema()))
         .map_err(|error| format!("compile public schema: {error}"))?;
     Ok(decoded)
 }
