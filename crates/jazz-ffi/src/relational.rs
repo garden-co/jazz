@@ -457,12 +457,23 @@ pub(crate) fn row(lowered: &Lowered, result: QueryResult) -> Result<Json> {
         .key
         .row_id()
         .ok_or_else(|| crate::error::FfiError::Io("a joined result is not a row".into()))?;
-    if !lowered.history {
-        return Ok(convert::row_json(&lowered.shape, id, result.fields));
+    Ok(row_of(&lowered.shape, lowered.history, id, result.fields))
+}
+
+/// A result row as JSON: a history read's carries `$history`
+/// (`{transactionId, acceptedAt}`) from its version's fields.
+pub(crate) fn row_of(
+    shape: &convert::Shape,
+    history_read: bool,
+    id: jazz_app::ObjectId,
+    result_fields: Vec<jazz_app::jazz::tools::QueryResultField>,
+) -> Json {
+    if !history_read {
+        return convert::row_json(shape, id, result_fields);
     }
     let mut history = Map::new();
-    let mut fields = Vec::with_capacity(result.fields.len());
-    for field in result.fields {
+    let mut fields = Vec::with_capacity(result_fields.len());
+    for field in result_fields {
         match field.name.as_str() {
             "$transactionId" => {
                 if let Some(tx) = untyped::transaction_id(&field.value) {
@@ -477,9 +488,9 @@ pub(crate) fn row(lowered: &Lowered, result: QueryResult) -> Result<Json> {
             _ => fields.push(field),
         }
     }
-    let mut row = convert::row_json(&lowered.shape, id, fields);
+    let mut row = convert::row_json(shape, id, fields);
     if let Json::Object(object) = &mut row {
         object.insert("$history".into(), Json::Object(history));
     }
-    Ok(row)
+    row
 }
