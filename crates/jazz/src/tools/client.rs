@@ -1741,7 +1741,7 @@ impl JazzClient {
     }
 
     /// [`JazzClient::update`] with edits of large-capable columns: a text
-    /// column's [`LargeValueUpdate::TextEdit`] (merged over what this
+    /// column's [`crate::db::LargeValueUpdate::TextEdit`] (merged over what this
     /// store has, as the authority merges), splices within a page, JSON
     /// replacements by pointer. The patch and the edits apply as one row
     /// update; a failing edit leaves the row unchanged.

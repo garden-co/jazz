@@ -54,6 +54,16 @@ export const ciPartitionJobs = Object.freeze({
   "kotlin-android": "test-kotlin-android",
 });
 
+/** The published API crates whose docs CI builds with warnings denied (`Rust API rustdoc`). */
+export const RUSTDOC_PACKAGES = Object.freeze([
+  "jazz-app-support",
+  "jazz-codegen",
+  "jazz-ffi",
+  "jazz-native-transport",
+  "jazz-core",
+  "jazz-server",
+]);
+
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 
@@ -123,11 +133,21 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
-    // jazz-app-support's docs are its Rust API reference: broken intra-doc
-    // links (a gated `Endpoint` linked from the default build) only show in
-    // rustdoc, which nothing else runs. Both the default build and the
-    // feature-gated endpoint, the two docs.rs and contributors see.
-    command("jazz-app-support rustdoc", "cargo", ["doc", "-p", "jazz-app-support", "--no-deps"], {
+    // The published API crates' docs are their Rust reference: broken
+    // intra-doc links (a feature-gated item linked from the default build,
+    // a private item linked from a public one) only show in rustdoc, which
+    // nothing else runs. One invocation for the default builds, and
+    // jazz-app-support again with its feature-gated endpoint.
+    command(
+      "Rust API rustdoc",
+      "cargo",
+      ["doc", "--no-deps", ...RUSTDOC_PACKAGES.flatMap((name) => ["-p", name])],
+      { env: { RUSTDOCFLAGS: "-D warnings" } },
+    ),
+    // jazz-core again on its own: in the shared run, cargo unifies its
+    // features with what jazz-app-support turns on, which hides links that
+    // break in jazz-core's own default build (the one docs.rs builds).
+    command("jazz-core rustdoc", "cargo", ["doc", "--no-deps", "-p", "jazz-core"], {
       env: { RUSTDOCFLAGS: "-D warnings" },
     }),
     command(
