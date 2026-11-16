@@ -59,6 +59,12 @@ func DeviceKey(key string) Auth { return deviceAuth{key: key} }
 // store keeps: it is created (signing up) the first time.
 func DeviceAccount(store SecretStore) Auth { return deviceAuth{store: store} }
 
+// String keeps the key out of logs.
+func (a deviceAuth) String() string { return "jazz.DeviceAccount([redacted])" }
+
+// GoString is String, for %#v.
+func (a deviceAuth) GoString() string { return a.String() }
+
 func (a deviceAuth) authJSON() (map[string]any, error) {
 	key := a.key
 	if key == "" {

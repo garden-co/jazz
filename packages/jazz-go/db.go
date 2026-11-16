@@ -10,6 +10,10 @@ package jazz
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -39,6 +43,56 @@ type Config struct {
 	// Session is the user a backend acts as. Its Issuer is "jazz:backend"
 	// (left empty, it is set so).
 	Session *Session `json:"session,omitempty"`
+	// AllowPlaintext lets ServerURL be http:// or ws:// to a host other than
+	// this machine. Credentials then cross the network unencrypted: only for
+	// a private network you trust.
+	AllowPlaintext bool `json:"-"`
+}
+
+// String is c without its secrets, so logging a Config never leaks them.
+func (c Config) String() string {
+	redact := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		return "[redacted]"
+	}
+	auth := "none"
+	if c.Auth != nil {
+		auth = fmt.Sprintf("%T", c.Auth)
+	}
+	return fmt.Sprintf("jazz.Config{AppID: %q, ServerURL: %q, Storage: %q, DataDir: %q, Backend: %t, BackendSecret: %q, AdminSecret: %q, Session: %v, Auth: %s}",
+		c.AppID, c.ServerURL, c.Storage, c.DataDir, c.Permissions != "", redact(c.BackendSecret), redact(c.AdminSecret), c.Session, auth)
+}
+
+// GoString is String, for %#v.
+func (c Config) GoString() string { return c.String() }
+
+// checkTransport refuses plaintext (http, ws) to a host other than this
+// machine, unless AllowPlaintext.
+func (c Config) checkTransport() error {
+	if c.ServerURL == "" || c.AllowPlaintext {
+		return nil
+	}
+	u, err := url.Parse(c.ServerURL)
+	if err != nil {
+		return &Error{Kind: KindRefused, Message: "config.ServerURL is not a URL"}
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
+		return nil
+	case "http", "ws":
+		host := u.Hostname()
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return &Error{Kind: KindRefused, Message: "config.ServerURL is plaintext (" + u.Scheme + "://) to " + host +
+			": use https:// or wss://, or set AllowPlaintext for a trusted private network"}
+	}
+	return &Error{Kind: KindRefused, Message: "config.ServerURL must be http(s):// or ws(s)://"}
 }
 
 // Storage is where an app keeps its rows.
@@ -71,6 +125,9 @@ func (db *DB) computed() any { return db.app }
 // Open opens the app cfg describes. Prefer the generated jazzapp.Open,
 // which embeds the app's jazz.app.json.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
+	if err := cfg.checkTransport(); err != nil {
+		return nil, err
+	}
 	if err := loadFFI(); err != nil {
 		return nil, err
 	}
