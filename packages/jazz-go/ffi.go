@@ -32,28 +32,20 @@ var ffi struct {
 	once sync.Once
 	err  error
 
-	open             func(config *byte, err *uintptr) uintptr
-	openUser         func(config *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
-	call             func(h uintptr, method, args *byte, err *uintptr) uintptr
-	subscribe        func(h uintptr, query *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
-	unsubscribe      func(sub uintptr)
-	watch            func(h uintptr, what *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
-	unwatch          func(w uintptr)
-	close            func(h uintptr)
-	stringFree       func(s uintptr)
-	generateKey      func(err *uintptr) uintptr
-	endpointNew      func(h uintptr, cb uintptr, ctx uintptr, options *byte, err *uintptr) uintptr
-	endpointHandle   func(e uintptr, request *byte, err *uintptr) uintptr
-	endpointIsSocket func(e uintptr, path *byte) int32
-	endpointForUser  func(e uintptr, request *byte, err *uintptr) uintptr
-	endpointSocket   func(e uintptr, upgrade *byte, onMessage, onClose uintptr, ctx uintptr, err *uintptr) uintptr
-	socketPush       func(s uintptr, data unsafe.Pointer, n uintptr, err *uintptr) int32
-	socketFree       func(s uintptr)
-	endpointFree     func(e uintptr)
-	malloc           func(n uintptr) uintptr
+	open        func(config *byte, err *uintptr) uintptr
+	openUser    func(config *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
+	call        func(h uintptr, method, args *byte, err *uintptr) uintptr
+	subscribe   func(h uintptr, query *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
+	unsubscribe func(sub uintptr)
+	watch       func(h uintptr, what *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
+	unwatch     func(w uintptr)
+	close       func(h uintptr)
+	stringFree  func(s uintptr)
+	generateKey func(err *uintptr) uintptr
+	malloc      func(n uintptr) uintptr
 
 	// The C callbacks, made once: each gets a Go id as its ctx.
-	subscriptionCallback, tokenCallback, authCallback, socketMessage, socketClosed uintptr
+	subscriptionCallback, tokenCallback uintptr
 }
 
 // loadFFI loads the library and binds the C ABI, once.
@@ -80,10 +72,6 @@ func bind() error {
 		"jazz_subscribe": &ffi.subscribe, "jazz_unsubscribe": &ffi.unsubscribe,
 		"jazz_watch": &ffi.watch, "jazz_unwatch": &ffi.unwatch, "jazz_close": &ffi.close,
 		"jazz_string_free": &ffi.stringFree, "jazz_generate_device_key": &ffi.generateKey,
-		"jazz_endpoint_new": &ffi.endpointNew, "jazz_endpoint_handle": &ffi.endpointHandle,
-		"jazz_endpoint_is_socket": &ffi.endpointIsSocket, "jazz_endpoint_for_user": &ffi.endpointForUser,
-		"jazz_endpoint_socket": &ffi.endpointSocket, "jazz_socket_push": &ffi.socketPush,
-		"jazz_socket_free": &ffi.socketFree, "jazz_endpoint_free": &ffi.endpointFree,
 	} {
 		sym, err := purego.Dlsym(lib, name)
 		if err != nil {
@@ -94,9 +82,6 @@ func bind() error {
 	purego.RegisterLibFunc(&ffi.malloc, libc, "malloc")
 	ffi.subscriptionCallback = purego.NewCallback(onSubscription)
 	ffi.tokenCallback = purego.NewCallback(onToken)
-	ffi.authCallback = purego.NewCallback(onAuth)
-	ffi.socketMessage = purego.NewCallback(onSocketMessage)
-	ffi.socketClosed = purego.NewCallback(onSocketClosed)
 	return nil
 }
 
@@ -224,14 +209,6 @@ func goString(p uintptr) string {
 		n++
 	}
 	return string(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(nil), p)), n))
-}
-
-// goBytes copies n bytes at p.
-func goBytes(p, n uintptr) []byte {
-	if p == 0 || n == 0 {
-		return nil
-	}
-	return append([]byte(nil), unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(nil), p)), n)...)
 }
 
 // mallocString is s copied into C memory jazz-ffi frees (callback answers).

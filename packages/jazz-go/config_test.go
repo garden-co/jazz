@@ -8,8 +8,7 @@ import (
 )
 
 func TestConfigNeverPrintsItsSecrets(t *testing.T) {
-	c := Config{AppID: "a", ServerURL: "https://x", BackendSecret: "s3cret-backend", AdminSecret: "s3cret-admin",
-		Auth: DeviceKey("jazz-auth-v1:s3cret-key")}
+	c := Config{AppID: "a", ServerURL: "https://x", Auth: DeviceKey("jazz-auth-v1:s3cret-key")}
 	for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
 		out := fmt.Sprintf(format, c)
 		if strings.Contains(out, "s3cret") {

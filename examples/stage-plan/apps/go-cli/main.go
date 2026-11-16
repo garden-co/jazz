@@ -1,9 +1,10 @@
-// Command go-cli is StagePlan's stage-prep board in a terminal: a Go
-// backend that acts as one signed-in user. It syncs with the Jazz server
-// that JAZZ_SERVER_URL, JAZZ_APP_ID, JAZZ_BACKEND_SECRET and
-// JAZZ_ADMIN_SECRET name.
+// Command go-cli is StagePlan's stage-prep board in a terminal, as one of
+// its users: it signs in through the app's Jazz endpoint (JAZZ_SERVER_URL,
+// its main backend's /jazz) with JAZZ_TOKEN, a token from the app's auth
+// provider. JAZZ_APP_ID defaults to the id a TypeScript client derives
+// from the URL.
 //
-//	go-cli [-user alice] [-data .jazz] show            # your show (created if needed)
+//	go-cli [-data .jazz] show                          # your show (created if needed)
 //	go-cli tasks                                       # its tasks, by rank
 //	go-cli add "Line check"                            # add a task to To do
 //	go-cli move <task-id> doing                        # todo, doing, done or blocked
@@ -16,31 +17,34 @@ import (
 	"os"
 	"strings"
 
+	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
+
 	"github.com/garden-co/jazz/examples/stage-plan/apps/go-cli/jazzapp"
 )
 
 func main() {
-	user := flag.String("user", "go-cli-user", "the user the CLI acts as")
 	data := flag.String("data", ".jazz", "where the rows are kept (empty: in memory)")
 	showName := flag.String("show", "Go Night", "the name of a show the user creates")
 	flag.Parse()
-	if err := run(context.Background(), *user, *data, *showName, flag.Args()); err != nil {
+	if err := run(context.Background(), os.Getenv("JAZZ_TOKEN"), *data, *showName, flag.Args()); err != nil {
 		fmt.Fprintln(os.Stderr, "go-cli:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, user, data, showName string, args []string) error {
+func run(ctx context.Context, token, data, showName string, args []string) error {
 	if len(args) == 0 {
 		args = []string{"tasks"}
 	}
-	srv := server{
-		appID:         os.Getenv("JAZZ_APP_ID"),
-		url:           os.Getenv("JAZZ_SERVER_URL"),
-		backendSecret: os.Getenv("JAZZ_BACKEND_SECRET"),
-		adminSecret:   os.Getenv("JAZZ_ADMIN_SECRET"),
+	srv := server{appID: os.Getenv("JAZZ_APP_ID"), url: os.Getenv("JAZZ_SERVER_URL")}
+	if srv.appID == "" {
+		id, err := jazz.EndpointAppID(srv.url)
+		if err != nil {
+			return err
+		}
+		srv.appID = id
 	}
-	db, err := openBackend(ctx, srv, user, data)
+	db, err := openUser(ctx, srv, token, data)
 	if err != nil {
 		return err
 	}

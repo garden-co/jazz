@@ -16,8 +16,6 @@ import (
 
 // Auth is how an end user signs in: Token (a JWT from your auth provider)
 // or DeviceAccount / DeviceKey (a local-first account kept on this device).
-// A backend sets Permissions, BackendSecret, AdminSecret and Session
-// instead.
 type Auth interface {
 	authJSON() (map[string]any, error)
 }
@@ -245,16 +243,6 @@ func (db *DB) Link(ctx context.Context, bearer string) (*User, error) {
 	var u *User
 	err := db.call(ctx, "link", map[string]any{"bearer": bearer}, &u)
 	return u, err
-}
-
-// Bundle is the permissions bundle a backend published ("" for a client):
-// what an app endpoint serving end users hands their sockets.
-func (db *DB) Bundle(ctx context.Context) (string, error) {
-	var b *string
-	if err := db.call(ctx, "bundle", map[string]any{}, &b); err != nil || b == nil {
-		return "", err
-	}
-	return *b, nil
 }
 
 // Refresh asks the TokenProvider for a fresh token now.

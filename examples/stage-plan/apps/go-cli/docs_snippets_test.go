@@ -5,13 +5,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -20,31 +15,17 @@ import (
 	"github.com/garden-co/jazz/examples/stage-plan/apps/go-cli/jazzapp"
 )
 
-// #region context-setup-go-backend
-func openAsBackend(ctx context.Context, appID, serverURL, userID string) (*jazz.DB, error) {
-	// A backend publishes the app's permissions and acts as one user:
-	// the server checks every write as that user's.
-	return jazzapp.Open(ctx, jazz.Config{
-		Permissions:   permissions, // the text of jazz.permissions.json
-		AppID:         appID,
-		ServerURL:     serverURL,
-		BackendSecret: os.Getenv("JAZZ_BACKEND_SECRET"),
-		AdminSecret:   os.Getenv("JAZZ_ADMIN_SECRET"),
-		Storage:       jazz.StorageMemory,
-		Session:       &jazz.Session{Subject: userID},
-	})
-}
-
-// #endregion context-setup-go-backend
-
 // #region context-setup-go-client
-func openLocally(ctx context.Context, appID, dataDir string) (*jazz.DB, error) {
-	// Without permissions and a server, the app is a local client: its rows
-	// stay in dataDir. (Syncing as an end user isn't supported in Go yet.)
+func openAsUser(ctx context.Context, appID, serverURL, dataDir string, token jazz.TokenProvider) (*jazz.DB, error) {
+	// Sign in through your main backend's /jazz with a token from your auth
+	// provider; rows stay in dataDir and sync through it. appID is your
+	// app's (jazz.EndpointAppID(serverURL) if your clients derive it).
 	return jazzapp.Open(ctx, jazz.Config{
-		AppID:   appID,
-		Storage: jazz.StoragePersistent,
-		DataDir: dataDir,
+		AppID:     appID,
+		ServerURL: serverURL,
+		Storage:   jazz.StoragePersistent,
+		DataDir:   dataDir,
+		Auth:      jazz.Token(token),
 	})
 }
 
@@ -337,121 +318,13 @@ func moveIfStillTodo(ctx context.Context, db *jazz.DB, taskID string) error {
 
 // #endregion writing-serializable-transaction-go
 
-// #region backend-open-go
-func openMainBackend(ctx context.Context, appID, serverURL string) (*jazz.DB, error) {
-	// The main backend: it publishes the app's permissions to the sync
-	// server, then reads and writes as its session user.
-	return jazzapp.Open(ctx, jazz.Config{
-		Permissions:   permissions, // the text of jazz.permissions.json
-		AppID:         appID,
-		ServerURL:     serverURL,
-		BackendSecret: os.Getenv("JAZZ_BACKEND_SECRET"),
-		AdminSecret:   os.Getenv("JAZZ_ADMIN_SECRET"),
-		Storage:       jazz.StorageMemory,
-		Session:       &jazz.Session{Subject: "stage-plan-backend"},
-	})
-}
-
-// #endregion backend-open-go
-
-// verifyBearer stands in for your auth provider's JWT check.
-func verifyBearer(authorization string) (userID string, expires time.Time, ok bool) {
-	user, ok := strings.CutPrefix(authorization, "Bearer token-")
-	return user, time.Now().Add(time.Hour), ok && user != ""
-}
-
-// #region backend-serve-go
-func serveUsers(backend *jazz.DB) (*jazz.Endpoint, error) {
-	// Your end users' clients sign in and sync at /jazz. authenticate says
-	// who a request is for: a user, a device account, or no one (nil).
-	endpoint, err := jazz.NewEndpoint(backend, func(r *http.Request) (*jazz.EndpointUser, error) {
-		user, expires, ok := verifyBearer(r.Header.Get("Authorization"))
-		if !ok {
-			return jazz.AnyDeviceAccount, nil
-		}
-		return &jazz.EndpointUser{UserID: user, ExpiresAt: expires}, nil
-	}, jazz.EndpointOptions{})
-	if err != nil {
-		return nil, err
-	}
-	http.Handle("/jazz/", endpoint)
-	return endpoint, nil
-}
-
-// #endregion backend-serve-go
-
-// #region backend-for-user-go
-func myShows(endpoint *jazz.Endpoint) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// A handle acting as the request's user: their permissions apply.
-		db, err := endpoint.ForUser(r)
-		if err != nil {
-			http.Error(w, "sign in first", http.StatusUnauthorized)
-			return
-		}
-		defer db.Close()
-		shows, err := jazzapp.Shows.Query().Tier(jazz.ReadRemote).All(r.Context(), db)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode(shows)
-	}
-}
-
-// #endregion backend-for-user-go
-
-func TestBackendSnippets(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	srv := testServer(t)
-	t.Setenv("JAZZ_BACKEND_SECRET", srv.backendSecret)
-	t.Setenv("JAZZ_ADMIN_SECRET", srv.adminSecret)
-	backend, err := openMainBackend(ctx, srv.appID, srv.url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer backend.Close()
-	// serveUsers mounts on http.DefaultServeMux, as a program would.
-	endpoint, err := serveUsers(backend)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer endpoint.Close()
-	http.Handle("/my-shows", myShows(endpoint))
-	app := httptest.NewServer(http.DefaultServeMux)
-	defer app.Close()
-	alice, err := openUser(ctx, srv, app, "token-alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer alice.Close()
-	state, _ := alice.Session(ctx)
-	if _, err := jazzapp.Shows.Insert(ctx, alice, jazzapp.NewShow{
-		Name: "Snippet gig", Venue: "Hall", Date: "2026-12-05", Doors: "20:00", ChiefAccount: state.User.Account,
-	}, jazz.WaitFor(jazz.WriteGlobal)); err != nil {
-		t.Fatal(err)
-	}
-	req, _ := http.NewRequest("GET", app.URL+"/my-shows", nil)
-	req.Header.Set("Authorization", "Bearer token-alice")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var shows []jazzapp.Show
-	if err := json.NewDecoder(resp.Body).Decode(&shows); err != nil || len(shows) != 1 || shows[0].Name != "Snippet gig" {
-		t.Fatalf("my-shows: %d %+v %v", resp.StatusCode, shows, err)
-	}
-}
-
 func TestDocsSnippets(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	srv := testServer(t)
-	t.Setenv("JAZZ_BACKEND_SECRET", srv.backendSecret)
-	t.Setenv("JAZZ_ADMIN_SECRET", srv.adminSecret)
-	db, err := openAsBackend(ctx, srv.appID, srv.url, "docs-user")
+	db, err := openAsUser(ctx, srv.appID, srv.url, t.TempDir(), func(context.Context, jazz.TokenReason) (string, error) {
+		return "token-docs-user", nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,12 +417,4 @@ func TestDocsSnippets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A local client opens the app on a store of its own.
-	client, err := openLocally(ctx, srv.appID, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
