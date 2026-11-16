@@ -96,14 +96,16 @@ fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
             AuthorSubject::SYSTEM,
         )))
         .unwrap();
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "items",
-                RowUuid::from_bytes([0x62; 16]),
-                AuthorSubject::SYSTEM,
-                BTreeMap::from([("label".to_owned(), Value::String(SEEDED.to_owned()))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "items",
+            BTreeMap::from([("label".to_owned(), Value::String(SEEDED.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([0x62; 16])),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
         let client = block_on(Db::open(config(
             0x63,
             AuthorSubject::for_test_bytes([0x63; 16]),

@@ -74,14 +74,16 @@ fn seeded_server() -> Db {
     )))
     .expect("open server");
     for (index, label) in LABELS.iter().enumerate() {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "items",
-                row(index),
-                AuthorSubject::SYSTEM,
-                BTreeMap::from([("label".to_owned(), Value::String((*label).to_owned()))]),
-            )
-            .expect("seed server row");
+        jazz::db::block_on(server.insert(
+            "items",
+            BTreeMap::from([("label".to_owned(), Value::String((*label).to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(index)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .expect("seed server row");
     }
     server
 }
@@ -234,14 +236,16 @@ fn warm_client(node: u8, server: &Db) -> Db {
 }
 
 fn seed(server: &Db, index: usize, label: &str) {
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "items",
-            row(index),
-            AuthorSubject::SYSTEM,
-            BTreeMap::from([("label".to_owned(), Value::String(label.to_owned()))]),
-        )
-        .expect("seed server row");
+    jazz::db::block_on(server.insert(
+        "items",
+        BTreeMap::from([("label".to_owned(), Value::String(label.to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(index)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .expect("seed server row");
 }
 
 /// Run a one-shot read, sleeping between owner turns so a wall-clock

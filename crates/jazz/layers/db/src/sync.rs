@@ -11197,26 +11197,6 @@ impl Db {
             .count()
     }
 
-    /// Seed a row as settled server state, written by `made_by`.
-    pub fn seed_settled_mergeable_for_bootstrap(
-        &self,
-        table: &str,
-        row: RowUuid,
-        made_by: AuthorSubject,
-        cells: BTreeMap<String, Value>,
-    ) -> Result<u64, Error> {
-        let handle = block_on(self.insert(
-            table,
-            cells,
-            InsertOptions {
-                row_id: Some(row),
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
-        ))?;
-        Ok(handle.tx)
-    }
-
     /// Sessions the server ended since the last call, with why: for what
     /// they sent (a message it cannot decode or serve), or because what it
     /// had for them could not be sent (a full queue, or a message it cannot

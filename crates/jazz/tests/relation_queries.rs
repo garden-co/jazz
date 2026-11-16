@@ -92,8 +92,16 @@ fn a_full_row_relation_projection_reads_as_its_ordinary_query() {
             ("title".to_owned(), CoreValue::String(format!("todo {n}"))),
             ("done".to_owned(), CoreValue::Bool(done)),
         ]);
-        db.seed_settled_mergeable_for_bootstrap("todos", id(n), AuthorSubject::SYSTEM, cells)
-            .unwrap();
+        jazz::db::block_on(db.insert(
+            "todos",
+            cells,
+            jazz::db::InsertOptions {
+                row_id: Some(id(n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     let prepared = db
         .prepare_query(&relation_query(done_todos(&["id", "title", "done"])))

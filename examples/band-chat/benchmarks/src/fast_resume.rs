@@ -55,14 +55,16 @@ impl FastResumeFixture {
         assert!(message_count > 0, "fixture requires at least one message");
         let server = open(0);
         for index in 0..message_count {
-            server
-                .seed_settled_mergeable_for_bootstrap(
-                    TABLE,
-                    row(index),
-                    AuthorSubject::SYSTEM,
-                    message_cells(index),
-                )
-                .expect("seed BandChat message fixture");
+            jazz::db::block_on(server.insert(
+                TABLE,
+                message_cells(index),
+                jazz::db::InsertOptions {
+                    row_id: Some(row(index)),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
+            ))
+            .expect("seed BandChat message fixture");
         }
         let client = open(1);
         let (client_side, server_side, _) = pipe();

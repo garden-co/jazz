@@ -177,9 +177,16 @@ fn bodies(db: &Db) -> Vec<String> {
 fn band() -> Db {
     let server = open(0, AuthorSubject::SYSTEM);
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server
-            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     seed(
         "rooms",

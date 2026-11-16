@@ -542,16 +542,19 @@ fn settled_rows_are_served_by_the_composite_index() {
         },
     )))
     .unwrap();
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         "tasks",
-        row(0x0a),
-        AuthorSubject::SYSTEM,
         BTreeMap::from([
             ("owner".to_owned(), Value::String("alice".to_owned())),
             ("rank".to_owned(), Value::I32(7)),
             ("title".to_owned(), Value::String("ship".to_owned())),
         ]),
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(row(0x0a)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
     insert_task(&db, row(0x0b), "alice", 3, "plan");
     insert_task(&db, row(0x0c), "bob", 9, "review");

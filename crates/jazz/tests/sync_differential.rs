@@ -356,14 +356,16 @@ fn run(seed: u64, steps: usize) -> usize {
         let Value::Uuid(id) = room(r) else {
             unreachable!()
         };
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "rooms",
-                RowUuid(id),
-                AuthorSubject::SYSTEM,
-                cells(&[("name", Value::String(format!("r{r}")))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "rooms",
+            cells(&[("name", Value::String(format!("r{r}")))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid(id)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     let mut net = Net {
         server,
