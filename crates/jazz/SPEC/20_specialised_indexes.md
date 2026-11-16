@@ -68,18 +68,29 @@ named error.
 "indexes": [
   "owner",
   ["project", "$createdAt"],
-  { "name": "search", "text": { "title": 4, "body": 1 },
+  { "name": "search",
+    "text": { "title": 4, "body": { "weight": 1, "length": 256 } },
     "analyzer": "jazz-text/1:en", "prefix": true },
   { "name": "similar", "vector": "embedding", "metric": "cosine" },
   { "name": "place", "geo": "location" }
 ]
 ```
 
-| kind key | value                               | other keys                                                                                                    |
-| -------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `text`   | string column → integer weight 1–15 | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`                                      |
-| `vector` | a `vector` column                   | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
-| `geo`    | a `point` column                    | `serverOnly`                                                                                                  |
+| kind key | value                                                                  | other keys                                                                                                    |
+| -------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `text`   | string column → weight 1–15, or `{ "weight": 1–15, "length": 1–4096 }` | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`                                      |
+| `vector` | a `vector` column                                                      | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
+| `geo`    | a `point` column                                                       | `serverOnly`                                                                                                  |
+
+A text field's **weight** multiplies its terms' impacts, and its **length**
+is the reference length in terms that the impact formula compares the
+field's actual length with (20.10.1). The weight-only form has length 32,
+which suits titles, names and other short strings. For long text
+(descriptions, bodies, documents), declare a length of about 256; with 32, a
+word appearing once in a body of a few hundred terms scores almost nothing.
+Both are baked into each posting's impact when a row is indexed, so changing
+a field's weight or length, like any change to the declaration, changes the
+declaration's canonical bytes and rebuilds the index (20.2).
 
 The artifact is the only place indexes are declared; generated bindings
 for each language read them from it. The JSON Schema in
@@ -87,6 +98,9 @@ for each language read them from it. The JSON Schema in
 
 Validation, at schema construction, with a typed error naming the table,
 index and option:
+
+- `"serverOnly": true`: "serverOnly indexes are not supported yet" (the key
+  is read so that this error, not an unknown-key one, names it; see 20.9);
 
 - no kind key or more than one, an unknown key, or a value outside the table above
   ("`ann: \"ivf\"` is not supported yet");
@@ -238,8 +252,8 @@ pub enum Predicate { /* … existing variants … */ Search(IndexSearch) }
 pub struct IndexSearch { pub index: String, pub op: IndexOp }
 
 pub enum IndexOp {
-    /// Rows whose analyzed fields contain every query term.
-    Match { text: String },
+    /// Rows whose analyzed fields contain any or all query terms.
+    Match { text: String, mode: MatchMode },
     /// The k rows nearest to a vector, by the index metric.
     Nearest { vector: Vec<f32>, k: u32 },
     /// Rows within a radius of a point.
@@ -247,7 +261,16 @@ pub enum IndexOp {
     /// Rows inside a lat/lng rectangle (may cross the antimeridian).
     WithinBox { south: f64, west: f64, north: f64, east: f64 },
 }
+
+/// How many of a text search's terms a row needs; the prefix term counts as one.
+pub enum MatchMode { #[default] Any, All }
 ```
+
+A text search's `mode` is per query, `Any` by default: a row matches when it
+holds at least one query term (`Any`) or every one (`All`). Either way it
+ranks by the summed impacts of the terms it holds (20.6), so under `Any` a
+row holding more of the terms ranks higher. `MatchMode` encodes as one byte
+after the text (`Any` 0, `All` 1); other values are refused on decode.
 
 `Predicate::Search` is valid only as a top-level element of a query's
 `filters`, at most once per query, and never in a policy, a join, an include
@@ -292,8 +315,11 @@ range (`term = ?exact OR (term >= ?lo AND term < ?hi)`, 20.10.1).
 WITH q(tid, slot) AS (SELECT ... FROM json_each(?)),
 ix(rid, score) AS (
   SELECT p.rid, sum(p.impact) FROM q JOIN post p ON p.tid = q.tid
-  GROUP BY p.rid HAVING count(DISTINCT q.slot) = ?nterms)
+  GROUP BY p.rid HAVING count(DISTINCT q.slot) >= ?needed)
 ```
+
+`?needed` is 1 under `Any` and the number of slots under `All`; nothing else
+differs between the modes.
 
 **Geo** is pure SQL. Rust covers the query region with at most 16 ranges of
 cells (20.10.3) and computes a chord threshold; SQL reads those ranges and
@@ -406,12 +432,13 @@ A query using an index runs at its requested tier:
   result by their score, which equals the authority's.
 - `Remote` searches settled rows on the authority only.
 
-An index declared `"serverOnly": true` is not maintained on clients. A
-query using it is answered at `Remote` tier only; offline, or at
-`LocalOnly`, it fails with "index `<table>.<name>` is server-only".
-(Implementation status: a client re-evaluates every query over the rows it
-holds, which it cannot do without the index, so a client refuses a search
-through a server-only index at every tier for now; see Open questions.)
+**Server-only indexes** are not supported yet: a declaration with
+`"serverOnly": true` is refused (20.1). A client re-evaluates every query
+over the rows it holds (6.5), and a search through an index it does not
+maintain is a result it cannot recompute, like a count over rows it does not
+hold. Such results get a design of their own, covering counts first and
+searches second; this chapter promises no behaviour for them until it
+lands.
 
 A local result covers only the rows the replica holds: it is complete for
 data the client's subscriptions cover, and otherwise grows as the authority's
@@ -453,11 +480,13 @@ version:
    `s'`).
 5. Drop terms longer than 64 bytes of UTF-8.
 
-There are no stop words: AND semantics make them harmless, and dropping
-them breaks queries made only of them.
+There are no stop words: dropping them breaks queries made only of them.
+Under `All` a common word costs nothing in what matches; under `Any` it
+adds the rows holding it, ranked low by their impacts.
 
 Query text is analyzed the same way; a query matches a row when every term
-occurs in at least one field. Repeated query terms count once. With
+(`All`) or at least one term (`Any`, the default, 20.4) occurs in at least
+one field. Repeated query terms count once. With
 `prefix`, the last query word is not a term but a prefix slot: it matches an
 indexed term equal to the word analyzed as a whole word (so a fully typed
 `running` meets the stem `run`), or any indexed term starting with the word
@@ -466,21 +495,25 @@ word whose stem is shorter than what has been typed (`runn`) matches only
 once completed. A query with no terms and no prefix after analysis is
 refused (20.4).
 
-The impact of a term in a field with weight `w`, frequency `f` and field
-length `L` terms (after step 5) is
+The impact of a term in a field with declared weight `w` and reference
+length `R` (20.1: 1–4096, default 32), frequency `f` and actual length `L`
+terms (after step 5) is
 
 ```text
-impact = min(255, floor(w * 16 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * L / 32))))
+impact = min(255, floor(w * 16 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * L / R))))
 ```
 
-computed in binary64 in that order; per row a term's impact is the sum over
-its fields, capped at 255. It is BM25's term-frequency part with a fixed
-reference length of 32 terms and no corpus term weight. A term occurring
-once in a field of more than about 1 200 terms has impact 0 at weight 1. It
-still matches, but adds nothing to the score.
+computed in binary64 in that order, with `w`, `R`, `f` and `L` exact
+integers; per row a term's impact is the sum over its fields, capped at 255.
+It is BM25's term-frequency part with a declared reference length per field
+in place of the corpus's average length, and no corpus term weight. A term
+occurring once in a field as long as its reference length has impact
+`16 * w` (239 at `w = 15`, by rounding). One occurring once in a field of more than about `37 * R` terms has
+impact 0 at weight 1: it still matches, but adds nothing to the score.
 
-The fixtures in `SPEC/fixtures/ix/text/` pin the terms, postings and query
-terms of both analyzers, byte for byte.
+The fixtures in `SPEC/fixtures/ix/text/` pin the terms, postings (with
+default and declared lengths) and query terms of both analyzers, and the
+impact formula over a grid of `w`, `R`, `f` and `L`, byte for byte.
 
 ### 20.10.2 Vector
 
@@ -542,7 +575,8 @@ All are typed, name the table and index, and carry no data about rows:
 
 - declaration errors (20.1);
 - query validation errors (20.4);
-- `IndexServerOnly` (20.9);
+- `IndexServerOnly` (20.9): reserved; unreachable while server-only
+  indexes are refused at declaration;
 - `IndexSearchUnsupportedUpstream`: a `Remote` search to an upstream without
   `FEATURE_INDEX_SEARCH` (20.4);
 - `IndexBuilding` (retryable, authority only) (20.3);
@@ -575,10 +609,9 @@ except `index_building`, which is `backpressure` (retry later).
 
 ## Open questions
 
-- How a client answers a `Remote` search through a server-only index: it
-  cannot re-evaluate it over its replica (6.5), so it would have to take the
-  authority's result rows and order as given.
-
+- Results a client cannot recompute (counts over rows it does not hold,
+  searches through server-only indexes): a design of their own, after which
+  20.9 says what a server-only index does.
 - An ANN vector kind (`ann: "ivf"`) in shadow tables, so the authority can
   answer unfiltered vector search.
 - Corpus-weighted text ranking (BM25 with term weights computed by the
