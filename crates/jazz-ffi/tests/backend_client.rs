@@ -167,8 +167,14 @@ async fn backend_clients_open_as_the_main_backend_trusts_them() {
         job.insert("shows".into(), show(nil_uuid())).unwrap();
         assert!(!titles_of(&job.all(shows()).unwrap()).is_empty());
 
+        let still_alice = job.for_user("alice".into(), String::new()).unwrap();
         job.shutdown_within(10_000).expect("drained");
         assert!(matches!(job.all(shows()), Err(JazzError::Closed)));
+        // The parent's close closes its for_user handles: every call, even
+        // one answered without the client, fails Closed.
+        assert!(matches!(still_alice.account(), Err(JazzError::Closed)));
+        assert!(matches!(still_alice.all(shows()), Err(JazzError::Closed)));
+        still_alice.shutdown().unwrap();
         alice.shutdown().unwrap();
 
         // A scoped machine acts as its user.

@@ -25,7 +25,10 @@ pub(crate) struct Core {
     jazz: Jazz,
     schema: Arc<Schema>,
     relations: convert::Relations,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
+    /// A `for_user` handle's parent's `closed`: closing the parent closes
+    /// it too.
+    parent_closed: Option<Arc<AtomicBool>>,
     /// The open subscriptions, told when the app closes.
     subscriptions: Mutex<Vec<Weak<Delivery>>>,
     next_tx: AtomicU64,
@@ -235,7 +238,7 @@ impl Core {
             convert::Relations::read(&app_text),
             has_server,
             contract,
-            false,
+            None,
         ))
     }
 
@@ -245,13 +248,15 @@ impl Core {
         relations: convert::Relations,
         has_server: bool,
         contract: u64,
-        derived: bool,
+        parent: Option<Arc<AtomicBool>>,
     ) -> Self {
+        let derived = parent.is_some();
         Self {
             jazz,
             schema,
             relations,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
+            parent_closed: parent,
             subscriptions: Mutex::new(Vec::new()),
             // Ids start at a random point, so a stale id from another
             // handle (or an earlier run) fails cleanly instead of naming
@@ -322,7 +327,7 @@ impl Core {
             self.relations.clone(),
             self.has_server,
             self.contract,
-            true,
+            Some(self.closed.clone()),
         ))
     }
 
@@ -332,7 +337,12 @@ impl Core {
     }
 
     fn open_jazz(&self) -> Result<&Jazz> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire)
+            || self
+                .parent_closed
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
+        {
             Err(FfiError::Closed)
         } else {
             Ok(&self.jazz)
