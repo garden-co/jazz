@@ -629,3 +629,40 @@ async fn the_token_callback_answers_while_closing_drains() {
     );
     app.stop().await;
 }
+
+/// A trusted client whose permissions bundle isn't the one the main backend
+/// serves opens, but acts for no user: kind "bundleMismatch", with both
+/// bundle ids.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trusted_client_with_other_permissions_acts_for_no_user() {
+    let app = App::start().await;
+    let mut laxer: Value = serde_json::from_str(STAGE_PLAN_PERMISSIONS).unwrap();
+    laxer["tables"]["activity"]["read"] = json!("true");
+    let mut config = parse(&app.config(json!({ "credential": true })));
+    config["permissions"] = json!(laxer.to_string());
+    let config = config.to_string();
+    let served = app.backend.bundle().unwrap().to_owned();
+    tokio::task::spawn_blocking(move || unsafe {
+        let mut err = ptr::null_mut();
+        let job = jazz_open_user(
+            c(&config).as_ptr(),
+            Some(machine_cb),
+            &TRUSTED as *const &str as *mut c_void,
+            &mut err,
+        );
+        assert!(!job.is_null(), "it opens: only acting for users is refused");
+        let none = jazz_for_user(job, c("alice").as_ptr(), ptr::null(), &mut err);
+        assert!(none.is_null());
+        let error = take(err);
+        assert_eq!(error["kind"], "bundleMismatch", "{error}");
+        assert_eq!(error["served"], served.as_str(), "{error}");
+        assert!(
+            error["own"].is_string() && error["own"] != error["served"],
+            "{error}"
+        );
+        jazz_close(job);
+    })
+    .await
+    .unwrap();
+    app.stop().await;
+}

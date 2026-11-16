@@ -34,6 +34,10 @@ fn error_json(error: &JazzError) -> String {
     match error {
         JazzError::NoAccount { user_id, .. } => json["userId"] = json!(user_id),
         JazzError::Unsynced { pending, .. } => json["pending"] = json!(pending),
+        JazzError::BundleMismatch { own, served, .. } => {
+            json["own"] = json!(own);
+            json["served"] = json!(served);
+        }
         _ => {}
     }
     json.to_string()
