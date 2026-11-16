@@ -126,6 +126,12 @@ pub(crate) fn to_value(
                 "writing a column of type {column_type:?} ({path})"
             )));
         }
+        // Only an earlier schema version can declare one; it holds no values.
+        ColumnType::LegacyEnumPayload { .. } => {
+            return Err(refused(format!(
+                "{path} is an enum whose cases carry fields, which Jazz no longer supports"
+            )));
+        }
     })
 }
 

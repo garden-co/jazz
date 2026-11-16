@@ -217,7 +217,8 @@ const STORE_FILES: [&str; 4] = [
     "client_id",
 ];
 /// Held shared by every open app of a directory, and exclusively while its
-/// store is deleted: the guard across processes.
+/// store is deleted: the guard across processes. On unix the delete
+/// removes it last, so nothing is left behind; on Windows it stays.
 const LOCK_FILE: &str = "jazz.lock";
 
 #[derive(Default)]
@@ -247,6 +248,94 @@ fn held(dir: &Path, by: &str) -> Error {
     Error::StoreHeld(format!("{} is {by}", dir.display()))
 }
 
+fn io(error: std::io::Error) -> Error {
+    jazz::tools::JazzError::Io(error).into()
+}
+
+fn remove(file: &Path) -> Result<()> {
+    match std::fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io(error)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Lock {
+    Shared,
+    Exclusive,
+}
+
+/// Locks `dir`'s [`LOCK_FILE`], creating it if needed; `None` when
+/// another holder's lock conflicts. A delete removes the file while it
+/// holds it exclusively, so a lock taken on a file that was meanwhile
+/// removed (or replaced) guards nothing: it is dropped and taken again on
+/// the file the path names now.
+fn lock_store(dir: &Path, kind: Lock) -> Result<Option<File>> {
+    let path = dir.join(LOCK_FILE);
+    loop {
+        let lock = File::create(&path).map_err(io)?;
+        let locked = match kind {
+            Lock::Shared => lock.try_lock_shared(),
+            Lock::Exclusive => lock.try_lock(),
+        };
+        match locked {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
+        }
+        if still_named(&lock, &path)? {
+            return Ok(Some(lock));
+        }
+    }
+}
+
+/// Deletes the store files in `dir` under its exclusive lock, running
+/// `locked` once it holds it and dropping what that returns once the store
+/// files are gone; `false`, deleting nothing, while another app holds the
+/// lock.
+fn delete_store<G>(dir: &Path, locked: impl FnOnce() -> G) -> Result<bool> {
+    let Some(lock) = lock_store(dir, Lock::Exclusive)? else {
+        return Ok(false);
+    };
+    let held = locked();
+    for file in STORE_FILES {
+        remove(&dir.join(file))?;
+    }
+    // The store is gone: an app may open the directory afresh from here.
+    drop(held);
+    // On unix the lock file goes too, last and while still held: an app
+    // that opened it just before finds, once it has its lock, that the
+    // path no longer names that file, and starts over (`lock_store`).
+    // Released first, an app could lock it in between and keep a lock on
+    // the removed file, which guards nothing.
+    #[cfg(unix)]
+    remove(&dir.join(LOCK_FILE))?;
+    // Elsewhere (Windows) it stays: an open file there can be removed
+    // (POSIX deletes), and a lock on it can't be checked against its path.
+    drop(lock);
+    Ok(true)
+}
+
+/// Whether `path` still names the open file `lock`.
+#[cfg(unix)]
+fn still_named(lock: &File, path: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let open = lock.metadata().map_err(io)?;
+    match std::fs::metadata(path) {
+        Ok(named) => Ok(named.dev() == open.dev() && named.ino() == open.ino()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io(error)),
+    }
+}
+
+/// Off unix the delete never removes the lock file, so the open file is
+/// the one its path names.
+#[cfg(not(unix))]
+fn still_named(_lock: &File, _path: &Path) -> Result<bool> {
+    Ok(true)
+}
+
 /// An app's hold on its store directory, from open until its client has
 /// stopped.
 pub(crate) struct StoreDir {
@@ -266,16 +355,9 @@ impl StoreDir {
         if state.deleting {
             return Err(held(&path, "being deleted"));
         }
-        let lock = File::create(path.join(LOCK_FILE)).map_err(jazz::tools::JazzError::Io)?;
-        match lock.try_lock_shared() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(held(&path, "being deleted by another process"));
-            }
-            Err(std::fs::TryLockError::Error(error)) => {
-                return Err(jazz::tools::JazzError::Io(error).into());
-            }
-        }
+        let Some(lock) = lock_store(&path, Lock::Shared)? else {
+            return Err(held(&path, "being deleted by another process"));
+        };
         state.open += 1;
         Ok(Self { path, _lock: lock })
     }
@@ -328,23 +410,11 @@ impl Deleting {
         {
             return Err(held(&self.path, "open in another app of this process"));
         }
-        let io = |error| Error::from(jazz::tools::JazzError::Io(error));
-        let lock = File::create(self.path.join(LOCK_FILE)).map_err(io)?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(held(&self.path, "open in another process"));
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
+        if delete_store(&self.path, || ())? {
+            Ok(())
+        } else {
+            Err(held(&self.path, "open in another process"))
         }
-        for file in STORE_FILES {
-            match std::fs::remove_file(self.path.join(file)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(io(error)),
-            }
-        }
-        Ok(())
     }
 }
 
@@ -356,5 +426,113 @@ impl Drop for Deleting {
         {
             state.deleting = false;
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A lock held on a lock file the delete removed, or replaced, isn't
+    /// the directory's lock: the locker takes it again.
+    #[test]
+    fn a_removed_lock_file_is_not_still_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let lock = lock_store(dir.path(), Lock::Shared).unwrap().unwrap();
+        assert!(still_named(&lock, &path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        assert!(!still_named(&lock, &path).unwrap());
+        // Another app's fresh lock file at the same path.
+        let fresh = lock_store(dir.path(), Lock::Exclusive).unwrap().unwrap();
+        assert!(!still_named(&lock, &path).unwrap());
+        assert!(still_named(&fresh, &path).unwrap());
+    }
+
+    /// Deletes and opens racing on one directory never hold its lock at
+    /// once: the deletes remove the lock file under their lock, and an open
+    /// that locked a removed file takes the lock again on the current one.
+    #[test]
+    fn deletes_and_opens_never_overlap() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+
+        const ROUNDS: usize = 20_000;
+        let dir = Arc::new(tempfile::TempDir::new().unwrap());
+        let shared = Arc::new(AtomicUsize::new(0));
+        let exclusive = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let (opened, deleted) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+
+        struct Leave(Arc<AtomicUsize>);
+        impl Drop for Leave {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, SeqCst);
+            }
+        }
+
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let (dir, shared, exclusive, overlapped, opened) = (
+                dir.clone(),
+                shared.clone(),
+                exclusive.clone(),
+                overlapped.clone(),
+                opened.clone(),
+            );
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let Some(lock) = lock_store(dir.path(), Lock::Shared).unwrap() else {
+                        continue;
+                    };
+                    shared.fetch_add(1, SeqCst);
+                    if exclusive.load(SeqCst) > 0 {
+                        overlapped.store(true, SeqCst);
+                    }
+                    shared.fetch_sub(1, SeqCst);
+                    drop(lock);
+                    opened.fetch_add(1, SeqCst);
+                    // Leave the lock free now and then, for the deletes.
+                    std::thread::yield_now();
+                }
+            }));
+        }
+        for _ in 0..2 {
+            let (dir, shared, exclusive, overlapped, deleted) = (
+                dir.clone(),
+                shared.clone(),
+                exclusive.clone(),
+                overlapped.clone(),
+                deleted.clone(),
+            );
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let done = delete_store(dir.path(), || {
+                        if exclusive.fetch_add(1, SeqCst) > 0 || shared.load(SeqCst) > 0 {
+                            overlapped.store(true, SeqCst);
+                        }
+                        Leave(exclusive.clone())
+                    })
+                    .unwrap();
+                    if done {
+                        deleted.fetch_add(1, SeqCst);
+                    }
+                    std::thread::yield_now();
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(
+            !overlapped.load(SeqCst),
+            "a delete and an open held the lock at once"
+        );
+        // Both sides actually ran, and contended.
+        let (opened, deleted) = (opened.load(SeqCst), deleted.load(SeqCst));
+        assert!(
+            opened > 1000 && deleted > 1000,
+            "{opened} opens, {deleted} deletes"
+        );
     }
 }

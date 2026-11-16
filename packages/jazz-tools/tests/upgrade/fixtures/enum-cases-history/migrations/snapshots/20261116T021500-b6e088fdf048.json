@@ -1,0 +1,36 @@
+{
+  "tickets": {
+    "columns": [
+      {
+        "name": "title",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "category",
+        "column_type": {
+          "type": "Enum",
+          "variants": ["bug", "feature"]
+        },
+        "nullable": true
+      },
+      {
+        "name": "severity",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": true
+      },
+      {
+        "name": "area",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      }
+    ],
+    "relations": {}
+  }
+}

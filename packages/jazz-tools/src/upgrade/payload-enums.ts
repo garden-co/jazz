@@ -1,31 +1,28 @@
 /**
  * Enum columns with cases (`s.enum({ bug: { severity: s.int() }, … })`,
  * `{ "enum": { "bug": { … }, … } }` in jazz.app.json) are removed in
- * alpha.65, and its loaders refuse an app that declares one. No alpha.64
- * store could hold a value of one either: every write failed (jazz#5621).
- * So upgrade refuses such an app, naming each column, rather than write
- * files alpha.65 then refuses to load.
+ * alpha.65, and its loaders refuse an app whose current tables declare one.
+ * No alpha.64 store could hold a value of one either: every write failed
+ * (jazz#5621). So upgrade refuses such an app, naming each column, rather
+ * than write files the loader then refuses.
+ *
+ * Older versions are another matter: a store keeps every version it admitted,
+ * and the loader reads an enum with cases in `history` and in migrations'
+ * `add`/`drop` types as a legacy type that hashes as alpha.64 did. Those pass
+ * through unchanged, so an app that has since moved off one can upgrade.
  */
 import { entriesOf, isObject, type Json, type JsonObject } from "./app-json.js";
 import { UpgradeRefusal } from "./errors.js";
 
-/** `table.column` (and `history.<version>: table.column`) of every enum column with cases. */
+/** `table.column` of every enum column with cases in the current tables (not history or migrations). */
 export function payloadEnumColumns(app: JsonObject): string[] {
   const found: string[] = [];
-  const scanTables = (tables: Json | undefined, prefix: string) => {
-    if (!isObject(tables)) return;
-    for (const [table, spec] of entriesOf(tables)) {
-      const columns = isObject(spec) ? spec.columns : undefined;
-      if (!isObject(columns)) continue;
-      for (const [column, type] of entriesOf(columns)) {
-        if (hasCases(type)) found.push(`${prefix}${table}.${column}`);
-      }
-    }
-  };
-  scanTables(app.tables, "");
-  if (isObject(app.history)) {
-    for (const [version, entry] of entriesOf(app.history)) {
-      scanTables(isObject(entry) ? entry.tables : undefined, `history.${version}: `);
+  if (!isObject(app.tables)) return found;
+  for (const [table, spec] of entriesOf(app.tables)) {
+    const columns = isObject(spec) ? spec.columns : undefined;
+    if (!isObject(columns)) continue;
+    for (const [column, type] of entriesOf(columns)) {
+      if (hasCases(type)) found.push(`${table}.${column}`);
     }
   }
   return found;

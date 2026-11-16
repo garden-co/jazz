@@ -3,11 +3,11 @@
 "jazz-napi": minor
 ---
 
-### Upgrading from alpha.64: run `jazz-tools upgrade` and review the diff
+### Upgrading from alpha.65: run `jazz-tools upgrade` and review the diff
 
 Breaking: `jazz.app.json` and `jazz.permissions.json` are now an app's only source of its schema, migrations and permissions, in TypeScript as in every other language. `schema.ts`, `permissions.ts` and `migrations/` are gone, and so is the TypeScript schema DSL.
 
-**Upgrade:** run `npx jazz-tools@2.0.0-alpha.65 upgrade` in each app _before_ you bump `jazz-tools` in its `package.json`, then review the diff. Upgrade reads your schema.ts types through your installed alpha.64 copy, and it refuses files alpha.64's `validate --check` would refuse, so run alpha.64's `jazz-tools validate` first if they are stale. It then:
+**Upgrade:** run `npx jazz-tools@2.0.0-alpha.66 upgrade` in each app _before_ you bump `jazz-tools` in its `package.json`, then review the diff. Upgrade reads your schema.ts types through your installed alpha.65 (or alpha.64) copy, and it refuses files alpha.65's `validate --check` would refuse, so run your installed version's `jazz-tools validate` first if they are stale. It then:
 
 - moves `s.computed` fields and `.transform` columns into `jazz.app.json` (`computed` per table, top-level `transforms`), with their callbacks in a new `jazz.computed.ts`;
 - checks that `jazz.app.json` already carries the history and migrations of `migrations/`;

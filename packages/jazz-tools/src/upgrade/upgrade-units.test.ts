@@ -183,7 +183,7 @@ describe("Rust apps", () => {
 });
 
 describe("enum columns with cases", () => {
-  it("are found in the current tables, in history and as array elements, optional or not", () => {
+  it("are found in the current tables, as array elements too, optional or not; history and migrations pass", () => {
     const cases = { bug: { severity: "int" }, feature: { area: "string" } };
     const app = parseAppJson(
       JSON.stringify({
@@ -199,12 +199,32 @@ describe("enum columns with cases", () => {
           notes: { columns: { kinds: { array: { enum: cases } } } },
         },
         history: { "0123456789ab": { tables: { old: { columns: { kind: { enum: cases } } } } } },
+        migrations: [
+          { from: "0123456789ab", migrate: { old: { kind: { drop: { enum: cases } } } } },
+        ],
       }),
     );
-    expect(payloadEnumColumns(app)).toEqual([
-      "tickets.kind",
-      "notes.kinds",
-      "history.0123456789ab: old.kind",
-    ]);
+    expect(payloadEnumColumns(app)).toEqual(["tickets.kind", "notes.kinds"]);
+  });
+
+  it("in older versions only don't stop an app that has moved off them", () => {
+    const cases = { bug: { severity: "int" }, feature: { area: "string" } };
+    const app = parseAppJson(
+      JSON.stringify({
+        format: 1,
+        tables: {
+          tickets: {
+            columns: { kind: { enum: ["bug", "feature"] }, severity: "int?", area: "string?" },
+          },
+        },
+        history: {
+          "0123456789ab": { tables: { tickets: { columns: { kind: { enum: cases } } } } },
+        },
+        migrations: [
+          { from: "0123456789ab", migrate: { tickets: { kind: { drop: { enum: cases } } } } },
+        ],
+      }),
+    );
+    expect(payloadEnumColumns(app)).toEqual([]);
   });
 });
