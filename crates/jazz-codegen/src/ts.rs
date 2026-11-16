@@ -528,8 +528,10 @@ fn kind(ty: &ColumnType) -> &'static str {
         ColumnType::Json { .. } => "json",
         ColumnType::Enum { .. } | ColumnType::ScalarEnum { .. } => "enum",
         ColumnType::Array { .. } => "array",
-        // The loader refuses these in a file.
-        ColumnType::TransactionId | ColumnType::Row { .. } => "json",
+        // The loader refuses these in a file's current tables.
+        ColumnType::TransactionId
+        | ColumnType::Row { .. }
+        | ColumnType::LegacyEnumPayload { .. } => "json",
     }
 }
 
@@ -558,7 +560,9 @@ pub(crate) fn ts_type(ty: &ColumnType) -> String {
             // parenthesised, as a JSON Schema's array items are.
             format!("{}[]", crate::json_schema::group(ts_type(element)))
         }
-        ColumnType::TransactionId | ColumnType::Row { .. } => "unknown".into(),
+        ColumnType::TransactionId
+        | ColumnType::Row { .. }
+        | ColumnType::LegacyEnumPayload { .. } => "unknown".into(),
     }
 }
 
