@@ -143,12 +143,18 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun reconnect(): Unit = live { handle.reconnect() }
 
     override fun deleteClientStorage() {
-        if (!closed.compareAndSet(false, true)) throw JazzException.Closed()
+        if (closed.get()) throw JazzException.Closed()
         try {
             call { handle.deleteClientStorage() }
-        } finally {
-            handle.destroy()
+        } catch (e: JazzException.Refused) {
+            // Refused (e.g. another open app holds the store): the app stays open.
+            throw e
+        } catch (e: Throwable) {
+            if (closed.compareAndSet(false, true)) handle.destroy()
+            throw e
         }
+        // Deleted: the core closed the app.
+        if (closed.compareAndSet(false, true)) handle.destroy()
     }
 
     override fun watchMutationErrors(onError: (String) -> Unit): () -> Unit {

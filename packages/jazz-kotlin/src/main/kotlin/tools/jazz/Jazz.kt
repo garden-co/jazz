@@ -141,7 +141,10 @@ public class Jazz internal constructor(
      * Closes the app and deletes its local store (e.g. on sign-out from a
      * shared device). Refused while another open app uses the same `dataDir`.
      */
-    public suspend fun deleteClientStorage(): Unit = io { native.deleteClientStorage() }
+    public suspend fun deleteClientStorage() {
+        io { native.deleteClientStorage() }
+        endWatches()
+    }
 
     /**
      * Each write the server refused that nobody waited on (a local-first
@@ -517,9 +520,14 @@ public class Jazz internal constructor(
      * nothing, so `use {}` and an explicit `close()` mix.
      */
     override fun close() {
-        watches.forEach { runCatching { it() } }
         native.close()
-        // A closed handle has no session any more: an end user's reads as signed out.
+        endWatches()
+    }
+
+    /** The app closed: stop watching, and an end user's session reads as signed out. */
+    private fun endWatches() {
+        watches.forEach { runCatching { it() } }
+        watches.clear()
         sessionFlow?.let { flow -> if (flow.value != null) flow.value = SessionState.SignedOut }
     }
 
