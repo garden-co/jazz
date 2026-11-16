@@ -1,4 +1,5 @@
 import { schema as s } from "jazz-tools";
+import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "./constants";
 
 export const schema = s.defineSchema({
   messages: s.table(
@@ -14,26 +15,22 @@ export const schema = s.defineSchema({
 
 const { definePermissions, session, anyOf, allOf, eq, isIn } = schema;
 
-const roleInAdminOrMember = isIn(session.claims.role, ["admin", "member"]);
+const rule1 = allOf({ chat_id: CHAT_ID }, isIn(session.claims.role, ["admin", "member"]));
 
 const roleIsAdmin = eq(session.claims.role, "admin");
 
-const createdByMe = { "$createdBy.account": session.user };
+const rule2 = allOf({ chat_id: ANNOUNCEMENTS_CHAT_ID }, roleIsAdmin);
+
+const rule3 = anyOf(
+  rule2,
+  allOf({ chat_id: CHAT_ID }, anyOf({ "$createdBy.account": session.user }, roleIsAdmin)),
+);
 
 export const permissions = definePermissions({
   messages: {
-    read: anyOf({ chat_id: "announcements" }, allOf({ chat_id: "chat-01" }, roleInAdminOrMember)),
-    insert: anyOf(
-      allOf({ chat_id: "announcements" }, roleIsAdmin),
-      allOf({ chat_id: "chat-01" }, roleInAdminOrMember),
-    ),
-    update: anyOf(
-      allOf({ chat_id: "announcements" }, roleIsAdmin),
-      allOf({ chat_id: "chat-01" }, anyOf(createdByMe, roleIsAdmin)),
-    ),
-    delete: anyOf(
-      allOf({ chat_id: "announcements" }, roleIsAdmin),
-      allOf({ chat_id: "chat-01" }, anyOf(createdByMe, roleIsAdmin)),
-    ),
+    read: anyOf({ chat_id: ANNOUNCEMENTS_CHAT_ID }, rule1),
+    insert: anyOf(rule2, rule1),
+    update: rule3,
+    delete: rule3,
   },
 });

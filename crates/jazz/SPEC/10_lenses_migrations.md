@@ -1026,8 +1026,10 @@ There is no other form: every policy the engine holds has an expression
 string, so every policy a TS app can declare round-trips through this file
 as text.
 
-There are no named definitions (a `defs` key is refused as unknown): a
-policy says everything it checks.
+There are no named definitions: a policy says everything it checks. A
+`defs` key, which files written by hand for alpha.63–65 could hold, is
+refused with a hint to inline each definition or author the app in
+`schema.ts` (`jazz-tools upgrade` does both for an alpha.65 app).
 
 **Expressions.** SQL-like, with JSON's double quotes left to the file:
 string literals use single quotes, and a name that isn't a plain identifier

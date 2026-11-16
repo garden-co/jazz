@@ -552,7 +552,8 @@ fn defs_and_calls_are_refused() {
     let error = load(written.app.as_bytes(), file.to_string().as_bytes())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("unknown key `defs`"), "{error}");
+    assert!(error.contains("`defs` was removed in alpha.66"), "{error}");
+    assert!(error.contains("inline each definition"), "{error}");
     let error = read_policy("todos", "mine(this.id)").unwrap_err();
     assert!(error.contains("unknown function `mine`"), "{error}");
     let error = read_policy("todos", "owner = $todo").unwrap_err();
@@ -2774,6 +2775,23 @@ fn the_policy_corpus_matches_its_fixture() {
             serde_json::json!({ "name": source, "permissions": file_for(table, source.into()) }),
         );
     }
+    // `updateTo`'s `old`: one condition object compares several columns with
+    // the old row's, in one self-`exists`.
+    cases.push(serde_json::json!({
+        "name": "update.new comparing several columns with the old row",
+        "permissions": {
+            "tables": {
+                "todos": {
+                    "read": "true",
+                    "update": {
+                        "old": "owner = session.user",
+                        "new": "exists todos(id = this.id, name = this.name, owner = this.owner)",
+                    },
+                },
+                "shares": { "read": "true", "update": "true" },
+            },
+        },
+    }));
     let variant = every_policy_variant();
     let mut exprs = vec![("every policy variant".to_string(), variant.clone())];
     if let PolicyExpr::And(items) | PolicyExpr::Or(items) = &variant {

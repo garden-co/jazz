@@ -6,6 +6,7 @@ import type { AppJson, PermissionsJson } from "./app-json.js";
 import { parseExpr } from "./expr.js";
 import { formatTs, layout, printPermissions, printSchemaTs } from "./index.js";
 import { printMigrations } from "./migrations.js";
+import { expandDefs } from "./defs.js";
 
 const REPO = join(__dirname, "..", "..", "..", "..");
 const read = (path: string) => JSON.parse(readFileSync(path, "utf8"));
@@ -97,6 +98,68 @@ describe("the permissions printer", () => {
     expect(out.code).toContain("read: true,\ninsert: false,");
   });
 
+  it("factors any repeated check into one helper, literals that differ as parameters", () => {
+    const shows = app({
+      crew: { columns: { showId: "uuid", userId: "uuid", role: "string" } },
+      notes: { columns: { showId: "uuid" } },
+      cues: { columns: { showId: "uuid" } },
+    });
+    const crewOrChief = (role: string) =>
+      `exists crew(showId = this.showId, userId = session.user) or exists crew(showId = this.showId, userId = session.user, role = '${role}')`;
+    const out = print(shows, {
+      notes: {
+        read: crewOrChief("chief"),
+        insert: crewOrChief("chief"),
+        delete: crewOrChief("lead"),
+      },
+      cues: { read: crewOrChief("chief") },
+    });
+    expect(out.unsupported).toEqual([]);
+    // One helper for the whole check, taking values (so every table can use it); the
+    // role that differs between uses is a parameter. Its structural name would be
+    // too long to read, so it gets a short one for the author to rename.
+    expect(out.code).toContain(
+      'const rule1 = (showId: s.Uuid, role: s.Value<"string">) => anyOf(exists.crew({ showId, userId: session.user }), exists.crew({ showId, userId: session.user, role }));',
+    );
+    expect(out.code).toContain('read: (cue) => rule1(cue.showId, "chief"),');
+    expect(out.code).toContain('delete: (note) => rule1(note.showId, "lead"),');
+  });
+
+  it("names parameters after the column they fill and types enum literals as their union", () => {
+    const bands = app({
+      members: { columns: { bandId: "uuid", userId: "uuid", role: { enum: ["admin", "player"] } } },
+      gigs: { columns: { bandId: "uuid" } },
+      songs: { columns: { bandId: "uuid" } },
+    });
+    const member = (role: string) =>
+      `exists members(bandId = this.bandId, userId = session.user, role = '${role}')`;
+    const out = print(bands, {
+      gigs: { read: member("admin") },
+      songs: { read: member("player") },
+    });
+    expect(out.code).toContain(
+      'const isMemberWithRole = (bandId: s.Uuid, role: "admin" | "player") => exists.members({ bandId, userId: session.user, role });',
+    );
+  });
+
+  it("prints named values by name", () => {
+    const out = printPermissions(
+      app({ chats: { columns: { kind: "string", role: "string" } } }),
+      {
+        format: 1,
+        tables: { chats: { read: "kind = 'announcements' and role in ['admin', 'editor']" } },
+      },
+      {
+        constants: new Map([
+          ['"announcements"', "ANNOUNCEMENTS"],
+          ['["admin", "editor"]', "editors"],
+        ]),
+      },
+    );
+    expect(out.code).toContain("read: { kind: ANNOUNCEMENTS, role: editors },");
+    expect(out.constantsUsed.sort()).toEqual(["ANNOUNCEMENTS", "editors"]);
+  });
+
   it("prints the relation IR", () => {
     const out = print(todos, {
       todos: {
@@ -137,6 +200,35 @@ describe("the permissions printer", () => {
     await expect(await formatTs(out.files["schema.ts"]!, { prettier })).toMatchFileSnapshot(
       "__snapshots__/big-label.schema.ts.snap",
     );
+  });
+});
+
+describe("defs", () => {
+  it("expand where they are called, recursively, without touching exists or hops", () => {
+    const out = expandDefs({
+      format: 1,
+      defs: {
+        "shared($todo, $user)": "exists shares(todo = $todo, user = $user)",
+        "mineOrShared($todo)": { anyOf: ["owner = session.user", "shared($todo, session.user)"] },
+      },
+      tables: {
+        todos: {
+          read: "mineOrShared(this.id)",
+          update: {
+            old: "true",
+            new: "exists todos(id = this.id).owner(name = 'x') and shared(this.id, session.user)",
+          },
+        },
+      },
+    });
+    expect(out.defs).toBeUndefined();
+    expect(out.tables.todos!.read).toBe(
+      "(anyOf(owner = session.user, (exists shares(todo = this.id, user = session.user))))",
+    );
+    expect(out.tables.todos!.update).toEqual({
+      old: "true",
+      new: "exists todos(id = this.id).owner(name = 'x') and (exists shares(todo = this.id, user = session.user))",
+    });
   });
 });
 

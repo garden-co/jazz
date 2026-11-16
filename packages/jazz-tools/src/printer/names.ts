@@ -100,7 +100,8 @@ export function singular(name: string): string {
     if (base.endsWith(pascal(plural))) return base.slice(0, -plural.length) + pascal(one);
   }
   if (/[^aeiou]ies$/.test(base)) return base.slice(0, -3) + "y";
-  if (/(ss|x|ch|sh|zz)es$/.test(base) || /[^bc](as|us|is)es$/.test(base)) return base.slice(0, -2);
+  // `boxes`, `statuses`, `canvases`, `aliases`; but `releases`, `databases`.
+  if (/(ss|x|ch|sh|zz|us|vas|ias)es$/.test(base)) return base.slice(0, -2);
   if (/[^s]s$/.test(base)) return base.slice(0, -1);
   return base;
 }

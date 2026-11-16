@@ -272,22 +272,27 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
       removed.add(statement);
     }
   }
-  const movedToExtrasOrUnused = (name: string) => !input.exports.has(name) || movedToExtras.has(name);
+  const movedToExtrasOrUnused = (name: string) =>
+    !input.exports.has(name) || movedToExtras.has(name);
   // Whatever still uses the app (a query for a row type, say) went to
   // app-extras.ts with the exports that need it, or is dead: alpha.66's
   // schema.ts has no app.
   const appName = appStatement.declarationList.declarations[0]!.name;
   if (ts.isIdentifier(appName)) {
     const usesApp = (node: TS.Node): boolean =>
-      (ts.isIdentifier(node) && node.text === appName.text) || (ts.forEachChild(node, usesApp) ?? false);
+      (ts.isIdentifier(node) && node.text === appName.text) ||
+      (ts.forEachChild(node, usesApp) ?? false);
     for (const statement of source.statements) {
-      if (statement === tablesStatement || statement === appStatement || removed.has(statement)) continue;
+      if (statement === tablesStatement || statement === appStatement || removed.has(statement))
+        continue;
       if (ts.isImportDeclaration(statement) || !usesApp(statement)) continue;
       removeStatement(statement);
       const names = declaredNamesOf(ts, statement);
       const moved = names.length > 0 && names.every((n) => input.exports.has(n));
       if (!moved && names.some((n) => movedToExtrasOrUnused(n))) {
-        changes.push(`${where(statement)}: dropped \`${names.join(", ")}\`: it used the app, which schema.ts no longer defines`);
+        changes.push(
+          `${where(statement)}: dropped \`${names.join(", ")}\`: it used the app, which schema.ts no longer defines`,
+        );
       }
     }
   }
@@ -396,11 +401,16 @@ export function codemodSpreadModule(input: {
     let end = statement.getEnd();
     while (text[end] === " " || text[end] === "\t") end++;
     if (text[end] === "\n") end++;
-    edits.push({ start: start + leading.length - leading.replace(/^\s*\n/, "").length, end, text: "" });
+    edits.push({
+      start: start + leading.length - leading.replace(/^\s*\n/, "").length,
+      end,
+      text: "",
+    });
   };
   const call = (statement: TS.VariableStatement, name: string) => {
     let init = statement.declarationList.declarations[0]?.initializer;
-    while (init && (ts.isAsExpression(init) || ts.isSatisfiesExpression(init))) init = init.expression;
+    while (init && (ts.isAsExpression(init) || ts.isSatisfiesExpression(init)))
+      init = init.expression;
     return (
       init !== undefined &&
       ts.isCallExpression(init) &&
@@ -436,12 +446,20 @@ export function codemodSpreadModule(input: {
     const name = declaration.name.text;
     if (name === input.exported && isExportedNode(ts, statement)) {
       if (name !== "tables") {
-        edits.push({ start: declaration.name.getStart(source), end: declaration.name.getEnd(), text: "tables" });
+        edits.push({
+          start: declaration.name.getStart(source),
+          end: declaration.name.getEnd(),
+          text: "tables",
+        });
       }
     } else if (call(statement, "definePermissions")) {
       hadPermissions = true;
       if (input.permissionsText && !permissionsDone) {
-        edits.push({ start: statement.getStart(source), end: statement.getEnd(), text: input.permissionsText });
+        edits.push({
+          start: statement.getStart(source),
+          end: statement.getEnd(),
+          text: input.permissionsText,
+        });
         permissionsDone = true;
       } else {
         remove(statement);
@@ -455,10 +473,17 @@ export function codemodSpreadModule(input: {
   }
   // A module without permissions gets them, so the app spreads them like Better Auth's own.
   if (!permissionsDone && input.permissionsText) {
-    edits.push({ start: text.length, end: text.length, text: `${text.endsWith("\n") ? "" : "\n"}\n${input.permissionsText}\n` });
+    edits.push({
+      start: text.length,
+      end: text.length,
+      text: `${text.endsWith("\n") ? "" : "\n"}\n${input.permissionsText}\n`,
+    });
   }
   const out = applyEdits(text, edits);
-  const renamed = input.exported === "tables" ? out : renameIdentifier(ts, file, out, input.exported, "tables", true);
+  const renamed =
+    input.exported === "tables"
+      ? out
+      : renameIdentifier(ts, file, out, input.exported, "tables", true);
   return { text: renamed.replace(/\n{3,}/g, "\n\n"), hadPermissions, dropped };
 }
 

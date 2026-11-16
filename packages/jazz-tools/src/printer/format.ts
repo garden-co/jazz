@@ -176,7 +176,12 @@ function print(nodes: Node[], indent: number, column: number, rest = 0): string 
     const hugs = body.length === 1 && first?.kind === "group" && first.open === "{";
     if (head !== undefined && !hugs) {
       const pad = " ".repeat(indent + 2);
-      return `${head.trim()}\n${pad}${print(body, indent + 2, indent + 2, rest)}`;
+      // A head too long for its line breaks its parameters, as prettier does.
+      const headText =
+        column + head.trim().length > PRINT_WIDTH
+          ? print(nodes.slice(0, arrow), indent, column) + " =>"
+          : head.trim();
+      return `${headText}\n${pad}${print(body, indent + 2, indent + 2, rest)}`;
     }
   }
   const chain = memberChain(nodes, indent, rest);
@@ -289,7 +294,7 @@ export function layout(source: string): string {
   let blank = false;
   const flush = (end: string) => {
     const nodes = trimNewlines(parse(statement, { i: 0 })[0]!);
-    if (nodes.length) out.push(print(nodes, 0, 0) + end);
+    if (nodes.length) out.push(print(nodes, 0, 0, end.length) + end);
     statement = [];
   };
   for (let i = 0; i < toks.length; i++) {

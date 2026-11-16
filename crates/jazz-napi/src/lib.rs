@@ -178,7 +178,10 @@ pub fn write_app_files(
 /// its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
 /// or `"mismatch"` (edited since; formatting alone doesn't count). Throws
 /// when the text isn't a JSON object or the marker is malformed.
-#[napi(js_name = "verifyGenerated")]
+#[napi(
+    js_name = "verifyGenerated",
+    ts_return_type = "\"none\" | \"match\" | \"mismatch\""
+)]
 pub fn verify_generated(text: String) -> napi::Result<String> {
     use jazz::tools::deployment::artifact::{self, GeneratedCheck};
     Ok(
@@ -2619,7 +2622,11 @@ impl NapiDb {
             ))
             .into());
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(self.transport(link))
     }
 
     /// The newest transaction time this database handed out under its node

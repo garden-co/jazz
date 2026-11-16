@@ -45,9 +45,7 @@
         "nullable": false
       }
     ],
-    "indexed_columns": [
-      "folder_id"
-    ],
+    "indexed_columns": ["folder_id"],
     "relations": {
       "folder": {
         "kind": "forward",
@@ -76,10 +74,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "viewer",
-            "editor"
-          ]
+          "variants": ["viewer", "editor"]
         },
         "name": "role",
         "nullable": false
@@ -114,10 +109,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "viewer",
-            "editor"
-          ]
+          "variants": ["viewer", "editor"]
         },
         "name": "role",
         "nullable": false
@@ -138,10 +130,7 @@
         "references": "profiles"
       }
     ],
-    "indexed_columns": [
-      "folder_id",
-      "user_id"
-    ],
+    "indexed_columns": ["folder_id", "user_id"],
     "relations": {
       "folder": {
         "kind": "forward",

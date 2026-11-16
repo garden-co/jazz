@@ -13,10 +13,10 @@ import { build, type Plugin } from "esbuild";
 
 // The authoring DSL alone (`schema`, `migration`): app TS loaded for
 // `generate` never needs the runtime.
-const localJazzToolsSourceEntry = fileURLToPath(new URL("./authoring.ts", import.meta.url));
-const localJazzToolsEntry = existsSync(localJazzToolsSourceEntry)
-  ? localJazzToolsSourceEntry
-  : fileURLToPath(new URL("./authoring.js", import.meta.url));
+function localJazzToolsEntry(): string {
+  const source = fileURLToPath(new URL("./authoring.ts", import.meta.url));
+  return existsSync(source) ? source : fileURLToPath(new URL("./authoring.js", import.meta.url));
+}
 
 async function removeTempDirectory(tempDir: string): Promise<void> {
   await rm(tempDir, { force: true, recursive: true });
@@ -37,7 +37,7 @@ export function localJazzToolsPlugin(): Plugin {
   return {
     name: "local-jazz-tools",
     setup(build) {
-      build.onResolve({ filter: /^jazz-tools$/ }, () => ({ path: localJazzToolsEntry }));
+      build.onResolve({ filter: /^jazz-tools$/ }, () => ({ path: localJazzToolsEntry() }));
       build.onResolve({ filter: /^file:\/\// }, (args) => ({ path: fileURLToPath(args.path) }));
     },
   };

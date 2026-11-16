@@ -53,10 +53,10 @@ type AnySchema = { readonly __tables?: SchemaTables };
 export type Schema<S extends SchemaTables = SchemaTables> = DefinedSchema<S, any>;
 
 /** The row handle of a table: `s.Row<typeof schema, "releases">`. */
-export type Row<
-  TSchema extends AnySchema,
-  TTable extends keyof TablesOf<TSchema> & string,
-> = RowOf<TablesOf<TSchema>, TTable>;
+export type Row<TSchema extends AnySchema, TTable extends keyof TablesOf<TSchema> & string> = RowOf<
+  TablesOf<TSchema>,
+  TTable
+>;
 
 /** The row before an update (`updateTo`'s `old`): `s.OldRow<typeof schema, "chats">`. */
 export type OldRow<
@@ -69,3 +69,94 @@ export type Conditions<
   TSchema extends AnySchema,
   TTable extends keyof TablesOf<TSchema> & string,
 > = ConditionsOf<TablesOf<TSchema>, TTable>;
+
+// The types inferred `schema` and `permissions` exports reach, so a
+// `declaration: true` build can name them (`import("jazz-tools").schema.…`).
+// Names `s.Row`, `s.OldRow`, `s.Conditions` and `s.Schema` already take are
+// re-exported under another one.
+export type {
+  TypedColumnBuilder,
+  AnyTypedColumnBuilder,
+  ComputedColumn,
+  AnyColumnDefinition,
+  ColumnTransform,
+  StringColumn,
+  UuidColumn,
+  BooleanColumn,
+  IntColumn,
+  BigIntColumn,
+  TimestampColumn,
+  FloatColumn,
+  BytesColumn,
+  JsonColumn,
+  EnumColumn,
+  EnumCasesColumn,
+  RefColumn,
+  ArrayColumn,
+  ColumnAlias,
+} from "./dsl.js";
+export type {
+  OldValue,
+  CompatibleKind,
+  CompareOp,
+  ContainsOp,
+  InOp,
+  SchemaTables,
+  RelationTarget,
+  KindOf,
+  LiteralFor,
+  Operand,
+  ConditionValue,
+  ColumnInfo,
+  Conditions as TableConditions,
+  Row as RowHandle,
+  OldRow as OldRowHandle,
+  TableHandles,
+  PolicyInput,
+  ConditionsIn,
+  PermissionError,
+  CheckPermissions,
+  RuleFor,
+  PermissionsInput,
+  AllTables,
+  ReadablePermissionsFile,
+  AnyClaims,
+  TypedClaims,
+  ClaimsMarker,
+  Session,
+} from "./permissions/types.js";
+export type {
+  CompareHelper,
+  EqHelper,
+  ExistsPolicy,
+  Exists,
+  AllowedTarget,
+  AllowedTo,
+  DefinePermissions,
+  PermissionTools,
+} from "./permissions/dsl.js";
+export type {
+  RelationKey,
+  RowIdRef,
+  RelationSource,
+  RelationQuery,
+  From,
+} from "./permissions/relation.js";
+export type { Schema as DefinedSchema } from "./schema-dsl/define-schema.js";
+export type { StoredColumnKeys } from "./schema-dsl/table.js";
+export type {
+  SqlType,
+  ScalarSqlType,
+  EnumSqlType,
+  ArraySqlType,
+  JsonSqlType,
+  JsonSchema,
+  TSTypeFromSqlType,
+  TSInitFromSqlType,
+} from "./schema.js";
+export type {
+  ForwardRelationship,
+  ReverseRelationship,
+  Relationship,
+  Relationships,
+} from "./relationships.js";

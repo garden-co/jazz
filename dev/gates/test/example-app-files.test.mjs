@@ -1,6 +1,6 @@
 // Every example app is written in TS (alpha.66): its schema.ts is the source,
 // and `jazz-tools generate` writes jazz.app.json, jazz.permissions.json and
-// the bindings from it, all committed. Stress-test apps stay JSON-only.
+// the bindings from it, all committed (dev/stress-tests too).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -26,8 +26,10 @@ function usesJazzSwift(manifest) {
  * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app-support`
  * crate's checks cover, Swift packages (a Package.swift naming jazz-swift),
  * whose bindings are `JazzApp.swift` and which dev/gates/jazz-swift.sh
- * covers, and Go modules (a go.mod beside it), whose bindings are
- * `jazzapp/jazz_app.go` and which jazz-codegen's golden tests cover.
+ * covers, Go modules (a go.mod beside it), whose bindings are
+ * `jazzapp/jazz_app.go` and which jazz-codegen's golden tests cover, and
+ * Kotlin apps (a build.gradle.kts), whose bindings are
+ * `src/main/kotlin/JazzApp.kt` and which the Kotlin partition covers.
  */
 function projects() {
   return execFileSync(
@@ -39,7 +41,8 @@ function projects() {
     .filter(Boolean)
     .map(dirname)
     .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")) && !isSwiftApp(dir))
-    .filter((dir) => !existsSync(join(root, dir, "go.mod")));
+    .filter((dir) => !existsSync(join(root, dir, "go.mod")))
+    .filter((dir) => !existsSync(join(root, dir, "build.gradle.kts")));
 }
 
 test("every example app commits its files and its bindings", () => {

@@ -861,11 +861,11 @@ export const migrationOperations = {
   /**
    * Add a new column to the table
    */
-  add: new AddBuilder(),
+  add: /*#__PURE__*/ new AddBuilder(),
   /**
    * Drop a column from the table
    */
-  drop: new DropBuilder(),
+  drop: /*#__PURE__*/ new DropBuilder(),
   /**
    * Rename a column in the table
    */
@@ -874,4 +874,3 @@ export const migrationOperations = {
     oldName,
   }),
 };
-
