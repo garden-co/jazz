@@ -672,9 +672,12 @@ function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLin
   // refused this connection for now (such as the connection cap per user),
   // which is retried like an outage but published at once with the server's
   // reason. After its hello both end a link like an outage.
-  if (isReconnectLaterWireError(error)) {
+  // `internal` with `later` is a server that cannot serve this session right
+  // now (its runtime shutting down in a rolling deploy): retried like
+  // overload, as `LinkFailure::from_wire_error` does.
+  if (isReconnectLaterWireError(error) || (error.code === "internal" && error.retry === "later")) {
     if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
+    return { kind: error.code === "not_ready" ? "serverNotReady" : "refused", message };
   }
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
