@@ -317,11 +317,13 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
-  // run against the library (needs a JDK and swiftc: the runner image).
+  // run against the library (needs a JDK and swiftc: the runner image); then
+  // the Jazz Swift package and the StagePlan Swift example on top of it.
   "jazz-ffi-bindings": Object.freeze([
     command("jazz-ffi Kotlin and Swift bindings", "bash", [
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
+    command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
   ]),
   // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI end to end
   // against `jazz-tools server`, on the JVM.

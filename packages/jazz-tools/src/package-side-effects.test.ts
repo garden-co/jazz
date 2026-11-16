@@ -94,7 +94,6 @@ const REVIEWED_CALLS = new Set([
   "classic-api.ts: classicFunction",
   "classic-api.ts: classicNamespace",
   "dev/app-files.ts: join",
-  "dev/project.ts: join",
   "upgrade/index.ts: join",
   "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
