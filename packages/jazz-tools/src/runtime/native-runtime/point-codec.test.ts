@@ -101,11 +101,11 @@ describe("point columns across the binding codec", () => {
   });
 
   it("decodes little-endian bits exactly, including -0, subnormals and the range edges", () => {
-    const bytes = pointToBytes([-0, 5e-324]);
+    const bytes = pointToBytes([-0, Number.MIN_VALUE]);
     expect(hex(bytes)).toBe("0000000000000080" + "0100000000000000");
     const [lng, lat] = bytesToPoint(bytes);
     expect(Object.is(lng, -0)).toBe(true);
-    expect(lat).toBe(5e-324);
+    expect(lat).toBe(Number.MIN_VALUE);
     expect(bytesToPoint(pointToBytes([-180, 90]))).toEqual([-180, 90]);
   });
 });
