@@ -517,8 +517,8 @@ cache its position in memory; it is never authoritative.
 - **A key-holding migration worker** (a service account that may read every
   space row, running sweeps server-side). It finishes promptly and reaches
   cold spaces, but gives one server-run identity every key, which is what
-  E2EE excludes. Apps may still do this explicitly, by giving such an
-  account read access to the space rows.
+  E2EE excludes. Apps may still do this explicitly, by making such an
+  account a member of the spaces.
 - **Lazy conversion only** (convert on write, no sweep). Cold rows stay in the
   old form indefinitely: plaintext stays on the server and finalising never
   becomes possible.

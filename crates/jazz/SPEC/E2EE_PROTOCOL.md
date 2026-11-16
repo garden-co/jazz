@@ -189,11 +189,7 @@ already used. Only the account itself may register a root (R9), so a wrong
 ID can only break that account's own recovery, which the client detects by
 deriving again. No other ID is derived: reset identities, member rows and
 deliveries have random IDs, so nobody can predict, and occupy in advance, the
-ID of another account's row. (An earlier draft derived reset identity IDs
-from public inputs; the reset-identity fixture
-`["jazz.e2ee.account-reset.v1","alice","1"]` →
-`0499408f-e71b-82e6-b00e-5cd5a54871e4` in
-`crates/jazz-e2ee/tests/protocol_vectors.rs` is retired with it.)
+ID of another account's row.
 
 Secret-derived recovery root fixtures, for generations 0 and above, are in
 §2.9; the account sealing key fixture is in §2.12. The test file above pins
@@ -201,7 +197,9 @@ the recovery derivation and the SHA-256 digest of every record kind's signed
 bytes, each rebuilt there from this document's formulas; those digests pin
 this document's reading, not an independent implementation's. The account
 sealing key fixture is computed from this document and is to be added to
-that file. An insert refused because a row with that ID already exists is
+that file, and its vectors for records this document does not define (the
+reset-identity ID derivation, key requests and their answer IDs, group
+records, notices) are to be removed from it. An insert refused because a row with that ID already exists is
 reported to the writer exactly like a policy refusal.
 
 Canonical JSON fields of account successors (`membership`, `revision`,
@@ -472,15 +470,13 @@ Account and device tables (fixed policies):
   identity of the generation before it, the session is not `local-first`,
   the account was not founded by a local-first identity, and the deployed
   encryption configuration sets `allowAccountReset` (§2.11); read by that
-  account. The server does not check a reset identity's ID (it is random,
-  §0).
+  account.
 - R6. `__e2ee_account_roots`: insert only with `accountId = session account`
   and a matching identity (same device, epoch, generation and ledger
   version) by the same account, in the same transaction. The root's `kind`
   is `local-first` exactly when the account was founded by a local-first
   identity (Jazz's account registry); an account founded otherwise writes
-  `app` roots. The server does not check a local-first root's key or
-  signature: clients do (§2.4 step 1).
+  `app` roots.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.
@@ -1389,9 +1385,9 @@ mechanism's envelope (`JE2E 01 ‖ len ‖ id ‖ u32be(version) ‖ verificatio
 
 The successor's `historyEpochId` is signed and bound into the `history`
 context (as its recipient field), so the version a `history` wrap opens
-cannot be substituted. These signed bytes add `historyEpochId` to the
-earlier draft's; the successor digest pinned in
-`crates/jazz-e2ee/tests/protocol_vectors.rs` is to be regenerated.
+cannot be substituted. The successor digest pinned in
+`crates/jazz-e2ee/tests/protocol_vectors.rs`, which predates
+`historyEpochId`, is to be regenerated.
 Deliveries are unsigned: the server authenticates their
 sender (`$createdBy`, R2), and a delivered key is accepted only after it
 authenticates against its version's marker and the chain (§3.3), which the
@@ -2334,25 +2330,14 @@ Limits:
   own devices raise `device-no-longer-active` and must be approved again.
   Local-first accounts cannot reset: every generation's root must be signed
   by their identity (§2.4 step 1).
-- **A second root of one generation ends the account's E2EE.** Two different
-  valid roots of one generation can only be written by the account's own
-  sessions or by the server (R6 admits only the account's own sessions, and
-  read-set validation admits one honest bootstrap or reset);
-  for a local-first account both must be signed by its identity. Clients
-  fail closed with `conflicting-roots` (§2.4 step 1): every client refuses
-  the account's state, at every later generation, so a reset does not
-  escape it. The account is unusable for E2EE and the remedy is a new
-  account. The SDK surfaces it loudly with its code, like `root-not-mine`.
-  Whoever can write as an app account (or the server) can therefore deny it
-  E2EE service this way, which gains it no content.
-- **Removing a device of a local-first account does not exclude it.** For a
-  local-first account, whoever holds the account secret is the account. A
-  removed device that still holds the secret signs in as the account, keeps
-  receiving its rows, re-enrols through recovery (§2.9) and decrypts. The
-  remedy for a lost or stolen local-first device is a new account. For
-  accounts authenticated by the application's own sign-in, removal withholds
-  future account keys and future space versions, and cuts the device off
-  once its sign-in is revoked and the spaces are rotated (§2.8).
+- **A second root of one generation ends the account's E2EE.** Only the
+  account's own sessions or the server can write one; clients fail closed
+  with `conflicting-roots` for good (§2.4 step 1), so whoever can write as
+  an app account (or the server) can deny it E2EE service this way, which
+  gains it no content.
+- **Removing a device of a local-first account does not exclude it.** A
+  device that still holds the account secret is the account (§2.8); the
+  remedy for a lost or stolen local-first device is a new account.
 - **Local-first recovery is as strong as the account secret.** The E2EE
   recovery key of a local-first account is derived from its account secret
   (§2.9), so whoever holds that secret (any device that stores it, a script
@@ -2360,7 +2345,7 @@ Limits:
   passkey) can restore the account's E2EE keys, and with them every space key
   sealed to the account. Passkey backups are protected by the platform's
   user verification.
-- **Metadata is visible to the server and to readers permitted by policy:**
+- **Metadata is visible to the server and to sessions permitted by policy:**
   which rows, spaces and devices exist; row IDs, relationships, space
   coordinates, authorship and timing; ciphertext sizes; member rows and key
   records. The public account tables (R10) are readable by every signed-in
