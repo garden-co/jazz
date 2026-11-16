@@ -52,6 +52,7 @@ mod include;
 mod large;
 mod lifecycle;
 mod query;
+mod read;
 mod relation;
 mod session;
 mod subscription;
@@ -79,14 +80,15 @@ pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, deleted_at,
-    id, updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, ValuePart, created_at,
+    deleted_at, id, updated_at,
 };
+pub use read::ReadOptions;
 pub use relation::{Hop, Step};
 pub use session::{
     AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
 };
-pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
+pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated, ValueSplice};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
