@@ -217,6 +217,36 @@ fn refuse_shared_column_changes(
     to: &TableSchema,
     renamed: &[(String, String)],
 ) -> Result<(), CodegenError> {
+    // A row's branch columns decide which branch it belongs to, so a
+    // deployment refuses any migration that changes them (#5967 review).
+    for branch in &from.branch_by {
+        if !to.branch_by.contains(branch) {
+            return Err(CodegenError::unsupported(format!(
+                "Removing `{}` from the branchBy of table `{table}` is not supported: a row's \
+                 branch columns decide which branch it belongs to, so a deployment refuses to \
+                 change them. Keep `{}` in branchBy.",
+                branch.as_str(),
+                branch.as_str()
+            )));
+        }
+        let column = |t: &TableSchema| {
+            t.columns
+                .columns
+                .iter()
+                .find(|c| &c.name == branch)
+                .cloned()
+        };
+        if let (Some(source), Some(target)) = (column(from), column(to))
+            && source.default != target.default
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Changing the default of branch column `{table}.{}` is not supported: it decides \
+                 which branch existing rows belong to, so a deployment refuses to change it. Keep \
+                 its default as it was.",
+                branch.as_str()
+            )));
+        }
+    }
     for column in &to.columns.columns {
         let Some(source) = from.columns.columns.iter().find(|c| c.name == column.name) else {
             continue;
