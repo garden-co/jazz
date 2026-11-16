@@ -71,13 +71,15 @@ export function snapshot(paths: string[]): Snapshot {
 }
 
 /** Where `generate` writes each language's bindings, relative to the app (jazz-codegen's `FILE`s). */
-export const BINDINGS_FILES = [
-  "jazz.generated.ts",
-  join("src", "jazz_app.rs"),
-  join("jazzapp", "jazz_app.go"),
-  join("src", "main", "kotlin", "JazzApp.kt"),
-  "JazzApp.swift",
-];
+function bindingsFiles(): string[] {
+  return [
+    "jazz.generated.ts",
+    join("src", "jazz_app.rs"),
+    join("jazzapp", "jazz_app.go"),
+    join("src", "main", "kotlin", "JazzApp.kt"),
+    "JazzApp.swift",
+  ];
+}
 
 /** What `upgrade` and `generate` may write in an app's directory. */
 export function appOutputs(dir: string, extra: string[] = []): string[] {
@@ -87,7 +89,7 @@ export function appOutputs(dir: string, extra: string[] = []): string[] {
     join(dir, "schema.ts"),
     join(dir, "permissions.ts"),
     join(dir, "migrations"),
-    ...BINDINGS_FILES.map((f) => join(dir, f)),
+    ...bindingsFiles().map((f) => join(dir, f)),
     ...extra,
   ];
 }

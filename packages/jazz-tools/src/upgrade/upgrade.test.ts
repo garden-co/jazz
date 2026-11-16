@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { legacyEnvironment } from "./fresh.js";
 /**
  * `jazz-tools upgrade` end to end, on alpha.65 apps (from the examples at
  * v2.0.0-alpha.65-rc.1, trimmed), whose JSON files the published
@@ -99,16 +100,20 @@ function expectGolden(
   if (options.generated !== false) expect(generated, "jazz.generated.ts").toBeDefined();
 }
 
-/** The app's own (alpha.65) `validate`, which writes its JSON files. */
-function validateWithOwnJazzTools(dir: string): void {
+/**
+ * The app's own (alpha.65) `validate`, which writes its JSON files, on its
+ * own binaries: as upgrade's check runs it, without this process's
+ * JAZZ_CORRECTNESS_* / NAPI_RS_* overrides (CI's), which would run alpha.65
+ * on this release's writer.
+ */
+function validateWithOwnJazzTools(
+  dir: string,
+  env: Record<string, string> = { UPGRADE_FIXTURE_ROOM: "lobby" },
+): void {
   execFileSync(
     process.execPath,
     [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
-    {
-      cwd: dir,
-      stdio: "pipe",
-      env: { ...process.env, UPGRADE_FIXTURE_ROOM: "lobby" },
-    },
+    { cwd: dir, stdio: "pipe", env: { ...legacyEnvironment(process.env), ...env } },
   );
 }
 
@@ -422,14 +427,7 @@ describe("jazz-tools upgrade: refusals", () => {
       ),
     );
     // Validated with the variable unset: `allowInsert.where({ room: ROOM })` became `"insert": "true"`.
-    execFileSync(
-      process.execPath,
-      [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
-      {
-        cwd: dir,
-        stdio: "pipe",
-      },
-    );
+    validateWithOwnJazzTools(dir, {});
     expect(
       JSON.parse(readFileSync(join(dir, "jazz.permissions.json"), "utf8")).tables.messages.insert,
     ).toBe("true");
