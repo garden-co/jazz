@@ -644,57 +644,15 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
             .contains(&"trusted".to_owned())
     );
 
-    // Alice has not signed in yet: no account to act as, and none is made.
-    let none = job.for_user("alice", serde_json::Value::Null).await;
+    // Acting for a user is not supported yet.
+    let unsupported = job.for_user("alice", serde_json::Value::Null).await;
     assert!(
-        matches!(&none, Err(Error::NoAccount(user)) if user == "alice"),
-        "{none:?}"
+        matches!(unsupported, Err(Error::Unsupported(_))),
+        "{unsupported:?}"
     );
 
-    // Once she has, the job acts as her: her identity, her permissions.
-    let alice = Jazz::open(
-        client_files(),
-        app.user(Auth::bearer(|_| async {
-            Ok(Some("token-alice".to_owned()))
-        })),
-    )
-    .await
-    .unwrap();
-    let as_alice = job
-        .for_user("alice", serde_json::json!({ "org": "acme" }))
-        .await
-        .expect("act for alice");
-    assert!(as_alice.acts_for_user());
-    // From any executor, not only Tokio's: the requests run on the client's.
-    let elsewhere = {
-        let job = job.clone();
-        std::thread::spawn(move || {
-            futures::executor::block_on(job.for_user("alice", serde_json::Value::Null))
-        })
-        .join()
-        .expect("no panic outside a Tokio runtime")
-    };
-    assert!(elsewhere.is_ok(), "{elsewhere:?}");
-    as_alice
-        .insert(NewTodo::new("Your weekly digest", false))
-        .await
-        .unwrap();
-    assert_eq!(remote_todos(&alice, 2).await.len(), 2);
-    // Closing drains what users' handles wrote too, not only the job's own.
-    let digest = as_alice
-        .insert(NewTodo::new("Another digest", false))
-        .await
-        .unwrap();
-    // A handle acting for a user acts for no one else.
-    assert!(matches!(
-        as_alice.for_user("bob", serde_json::Value::Null).await,
-        Err(Error::Config(_))
-    ));
-
     job.close(jazz_app::CLOSE_TIMEOUT).await.expect("drained");
-    assert!(remote_todos(&alice, 3).await.contains(&digest));
     assert!(matches!(job.all(todos::query()).await, Err(Error::Stopped)));
-    alice.shutdown().await.unwrap();
     app.stop().await;
 }
 

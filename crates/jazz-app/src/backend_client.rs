@@ -238,6 +238,13 @@ impl Jazz {
                 ));
             }
         };
+        // Not in this release: reads through a user's handle are held back
+        // until they are confirmed against the main backend.
+        if link.kind == BackendClientKind::Trusted {
+            return Err(Error::Unsupported(
+                "acting for a user from a backend client".into(),
+            ));
+        }
         if user_id.is_empty() {
             return Err(Error::Config(
                 "for_user: pass the user's id, as the main backend's authenticate names it".into(),
