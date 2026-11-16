@@ -209,16 +209,19 @@ export async function compileApp(appJson: string): Promise<Record<string, unknow
   return JSON.parse((await codegen()).compileApp(appJson)) as Record<string, unknown>;
 }
 
-/** A `jazz.permissions.json`, as imported or written inline. */
-export type PermissionsFile = { readonly format: number } & Readonly<Record<string, unknown>>;
+/**
+ * A `jazz.permissions.json`, as imported or written inline: `$schema` names its
+ * version (`https://jazz.tools/schemas/jazz.permissions.v1.json`); a legacy
+ * (.63/.64) file carries `format: 1` instead.
+ */
+export type PermissionsFile = ({ readonly $schema: string } | { readonly format: number }) &
+  Readonly<Record<string, unknown>>;
 
 /** Whether `permissions` is a `jazz.permissions.json` rather than the engine's policies. */
 export function isPermissionsFile(permissions: unknown): permissions is PermissionsFile {
-  return (
-    typeof permissions === "object" &&
-    permissions !== null &&
-    typeof (permissions as { format?: unknown }).format === "number"
-  );
+  if (typeof permissions !== "object" || permissions === null) return false;
+  const file = permissions as { $schema?: unknown; format?: unknown };
+  return typeof file.$schema === "string" || typeof file.format === "number";
 }
 
 /** Check `permissions` against `app`'s bindings with the Rust loader, as a deployed backend does. */

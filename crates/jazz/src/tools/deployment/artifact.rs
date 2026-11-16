@@ -781,7 +781,14 @@ fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> 
     let format = match get("format") {
         None => None,
         Some(Json::Number(n)) if n == &VERSION.to_string() => Some(VERSION),
-        Some(Json::Number(n)) if n.parse::<u64>().is_ok() => return Err(newer(n)),
+        Some(Json::Number(n)) if n.parse::<u64>().is_ok_and(|n| n > u64::from(VERSION)) => {
+            return Err(newer(n));
+        }
+        Some(Json::Number(n)) if n.parse::<u64>().is_ok() => {
+            return Err(refuse(format!(
+                "version {n} is not supported; this version of Jazz reads version {VERSION}"
+            )));
+        }
         Some(other) => {
             return Err(refuse(format!(
                 "the legacy `format` must be the integer {VERSION}, not {}; drop it and name \
@@ -791,30 +798,42 @@ fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> 
         }
     };
     let file_stem = file.trim_end_matches(".json");
+    let versioned = |s: &str| -> Option<String> {
+        s.strip_prefix(SCHEMA_URL_BASE)
+            .and_then(|rest| rest.strip_prefix(file_stem))
+            .and_then(|rest| rest.strip_prefix(".v"))
+            .and_then(|rest| rest.strip_suffix(".json"))
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .map(str::to_string)
+    };
     match get("$schema") {
+        // A legacy file: before .65 `$schema` was only an editor hint, so any
+        // value (a relative path, another URL, null) loaded next to `format`.
+        // Only a versioned URL naming another version contradicts it.
+        Some(Json::String(s)) if format.is_some() && versioned(s).is_none() => Ok(root),
+        Some(other) if format.is_some() && !matches!(other, Json::String(_)) => Ok(root),
         None if format.is_some() => Ok(root),
         None => Err(refuse(format!(
             "no `$schema`; the file starts {{ \"$schema\": \"{url}\", … }}. Run `jazz-tools \
              generate` to write it"
         ))),
         Some(Json::String(s)) if s == legacy_url => Ok(root),
-        Some(Json::String(s)) => {
-            let version = s
-                .strip_prefix(SCHEMA_URL_BASE)
-                .and_then(|rest| rest.strip_prefix(file_stem))
-                .and_then(|rest| rest.strip_prefix(".v"))
-                .and_then(|rest| rest.strip_suffix(".json"))
-                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()));
-            match version {
-                Some(v) if v == VERSION.to_string() => Ok(root),
-                Some(v) if format.is_none() => Err(newer(v)),
-                Some(v) => Err(refuse(format!(
-                    "`$schema` names version {v} but the legacy `format` is {VERSION}; drop \
-                     `format`"
-                ))),
-                None => Err(refuse(format!("`$schema` must be \"{url}\", not \"{s}\""))),
+        Some(Json::String(s)) => match versioned(s) {
+            Some(v) if v == VERSION.to_string() => Ok(root),
+            Some(v)
+                if format.is_none() && v.parse::<u64>().is_ok_and(|n| n > u64::from(VERSION)) =>
+            {
+                Err(newer(&v))
             }
-        }
+            Some(v) if format.is_none() => Err(refuse(format!(
+                "version {v} is not supported; this version of Jazz reads version {VERSION}"
+            ))),
+            Some(v) => Err(refuse(format!(
+                "`$schema` names version {v} but the legacy `format` is {VERSION}; drop \
+                     `format`"
+            ))),
+            None => Err(refuse(format!("`$schema` must be \"{url}\", not \"{s}\""))),
+        },
         Some(other) => Err(refuse(format!(
             "`$schema` must be the string \"{url}\", not {}",
             json::print(other).trim_end()
@@ -838,11 +857,8 @@ pub fn upgrade_legacy(file: &'static str, text: &str) -> Result<Option<String>, 
     let object = root.as_object().expect("read_version checks the object");
     let get = |key: &str| object.iter().find(|(k, _)| k == key).map(|(_, v)| v);
     let has_format = get("format").is_some();
-    let schema = get("$schema").and_then(|v| match v {
-        Json::String(s) => Some(s.clone()),
-        _ => None,
-    });
-    if !has_format && schema.as_deref() == Some(url) {
+    let schema = get("$schema").cloned();
+    if !has_format && schema == Some(Json::string(url)) {
         return Ok(None);
     }
     let schema_entry = format!(
@@ -864,8 +880,13 @@ pub fn upgrade_legacy(file: &'static str, text: &str) -> Result<Option<String>, 
         || edit("\"format\": 1, ", "")
         || edit(", \"format\": 1", ""))
         && match &schema {
-            Some(s) if s == url => true,
-            Some(_) => edit(&format!("\"$schema\": \"{legacy_url}\""), &schema_entry),
+            Some(s) if *s == Json::string(url) => true,
+            // The old URL, or whatever a legacy file named (a relative
+            // path, another URL, null): replaced.
+            Some(s) => edit(
+                &format!("\"$schema\": {}", json::print(s).trim_end()),
+                &schema_entry,
+            ),
             None => {
                 if out.starts_with("{\n  ") {
                     out = format!("{{\n  {schema_entry},\n  {}", &out[4..]);

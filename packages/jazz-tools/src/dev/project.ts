@@ -41,7 +41,7 @@ async function permissionWarnings(project: AppProject): Promise<string[]> {
   if (project.permissions === null) {
     throw new Error(
       `${shown(project, PERMISSIONS_FILE)} is missing. Every app has one, even if only backends read it: ` +
-        `start from \`{ "format": 1, "tables": {} }\`, which denies everything.`,
+        `start from \`{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }\`, which denies everything.`,
     );
   }
   const files = (await loadAppFiles(project.app, project.permissions)) as {

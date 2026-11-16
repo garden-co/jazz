@@ -818,6 +818,40 @@ fn generate_rewrites_legacy_files_byte_for_byte() {
 }
 
 #[test]
+fn a_legacy_format_takes_any_schema_and_generate_replaces_it() {
+    let written = write(shared_todos()).unwrap();
+    let versioned = format!("\"$schema\": \"{APP_SCHEMA_URL}\",\n");
+    for schema in [
+        "\"./node_modules/jazz-tools/jazz.app.schema.json\"",
+        "\"http://jazz.tools/schemas/jazz.app.schema.json\"",
+        "null",
+    ] {
+        let legacy = written.app.replacen(
+            &versioned,
+            &format!("\"$schema\": {schema},\n  \"format\": 1,\n"),
+            1,
+        );
+        load(legacy.as_bytes(), written.permissions.as_bytes())
+            .unwrap_or_else(|e| panic!("{schema}: {e}"));
+        assert_eq!(
+            upgrade_legacy(APP_FILE, &legacy).unwrap().as_ref(),
+            Some(&written.app),
+            "{schema}"
+        );
+    }
+    // Without `format`, `$schema` is the version and must be Jazz's.
+    let error = edited_app(|v| v["$schema"] = "./jazz.app.schema.json".into());
+    assert!(error.contains("`$schema` must be"), "{error}");
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("$schema");
+        v["format"] = 0.into();
+    });
+    assert!(error.contains("version 0 is not supported"), "{error}");
+    let error = edited_app(|v| v["$schema"] = "https://jazz.tools/schemas/jazz.app.v0.json".into());
+    assert!(error.contains("version 0 is not supported"), "{error}");
+}
+
+#[test]
 fn migrations_must_name_versions_and_pass_their_lens_checks() {
     let error = edited_app(|v| v["migrations"][0]["from"] = "nope".into());
     assert!(error.contains("no version `nope` in `history`"), "{error}");

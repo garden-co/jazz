@@ -267,7 +267,6 @@ function withTransform(spec: Json, transform: string): JsonObject {
   return { ...rest, transform };
 }
 
-/** Print as Jazz's Rust writer does. */
 /** The versioned `$schema` of jazz.app.json, which carries the file's version. */
 export const APP_SCHEMA_URL = "https://jazz.tools/schemas/jazz.app.v1.json";
 
@@ -304,6 +303,7 @@ export function versionedPermissionsText(text: string): string {
   }
 }
 
+/** Print as Jazz's Rust writer does. */
 export function printAppJson(value: Json): string {
   return `${writeValue(value, 0, 0)}\n`;
 }

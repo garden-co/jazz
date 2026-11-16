@@ -444,7 +444,8 @@ export interface AuthenticatedUser extends JazzUser {
  * (`import permissions from "./jazz.permissions.json" with { type: "json" }`).
  * Jazz's Rust loader reads and checks it against the app's bindings.
  */
-export type AppPermissionsFile = { readonly format: number } & Readonly<Record<string, unknown>>;
+export type AppPermissionsFile = ({ readonly $schema: string } | { readonly format: number }) &
+  Readonly<Record<string, unknown>>;
 
 export interface CreateJazzOptions {
   /** The app, as `jazz.generated.ts` exports it. */
@@ -3711,7 +3712,11 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
   provideCodegenNapi(jazzNapi);
   if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
   const permissions = options.permissions as unknown;
-  if (!isRecord(permissions) || typeof permissions.format !== "number") {
+  // `$schema` names the file's version; a legacy (.63/.64) file has `format`.
+  if (
+    !isRecord(permissions) ||
+    (typeof permissions.$schema !== "string" && typeof permissions.format !== "number")
+  ) {
     throw new Error(
       'createJazz: `permissions` must be the app\'s jazz.permissions.json, imported as JSON: `import permissions from "./jazz.permissions.json" with { type: "json" }`.',
     );
