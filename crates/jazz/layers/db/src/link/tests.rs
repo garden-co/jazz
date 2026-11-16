@@ -896,3 +896,51 @@ fn the_shared_wire_failure_table_matches_the_classifier() {
         "the table covers every case"
     );
 }
+
+/// R3b: a server that names its reason (`WireFrame::ReasonedError`) is
+/// taken at its word, whatever its message says; an older server's refusal
+/// is still read from its message.
+///
+/// ```text
+/// server ──auth_failed{reason: revoked, "token expired"}──► link: Revoked
+/// server ──auth_failed{"token expired"}────────────────────► link: Expired
+/// ```
+#[test]
+fn a_named_reason_decides_over_the_message() {
+    use crate::wire::{WireError, WireErrorCode as C, WireErrorReason as W, WireRetry as R};
+    let refused = |reason: Option<W>, retry, message: &str| {
+        let mut error = WireError::new(C::AuthFailed, retry, message);
+        error.reason = reason;
+        LinkFailure::from_wire_error(&error, false)
+    };
+    let rejected = |reason, message: &str| LinkFailure::AuthRejected {
+        reason,
+        message: message.into(),
+    };
+    for (named, expected) in [
+        (W::Expired, AuthFailureReason::Expired),
+        (W::Missing, AuthFailureReason::Missing),
+        (W::Invalid, AuthFailureReason::Invalid),
+        (W::Disabled, AuthFailureReason::Disabled),
+        (W::Revoked, AuthFailureReason::Revoked),
+    ] {
+        assert_eq!(
+            refused(Some(named), R::Never, "token expired"),
+            rejected(expected, "token expired"),
+        );
+    }
+    // A planned re-authentication needs no prefix once it is named.
+    assert_eq!(
+        refused(Some(W::Reauthenticate), R::AfterResume, "session ends"),
+        LinkFailure::Reauthenticate("session ends".into()),
+    );
+    // Without a reason, as from an older server: the message decides.
+    assert_eq!(
+        refused(None, R::Never, "token expired"),
+        rejected(AuthFailureReason::Expired, "token expired"),
+    );
+    assert_eq!(
+        refused(None, R::AfterResume, "reauthenticate: session ends"),
+        LinkFailure::Reauthenticate("reauthenticate: session ends".into()),
+    );
+}

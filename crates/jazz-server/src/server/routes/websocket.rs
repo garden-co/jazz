@@ -814,7 +814,10 @@ async fn account_still_admitted(
         return Ok(());
     };
     let Some(account) = identity.account_id() else {
-        return Err("account identity revoked".into());
+        return Err(super::accounts::AdmissionError::Refused {
+            message: "account identity revoked".into(),
+            reason: jazz::wire::WireErrorReason::Revoked,
+        });
     };
     let (issuer, subject) = identity.principal_parts();
     let assignment = super::accounts::resolve_assignment(
@@ -825,7 +828,10 @@ async fn account_still_admitted(
     if assignment == account {
         Ok(())
     } else {
-        Err("account identity revoked".into())
+        Err(super::accounts::AdmissionError::Refused {
+            message: "account identity revoked".into(),
+            reason: jazz::wire::WireErrorReason::Revoked,
+        })
     }
 }
 
@@ -1064,6 +1070,11 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     else {
         return;
     };
+    // What the client reads: a refusal names its reason to a client that
+    // offered `FEATURE_TYPED_ERROR_REASON`, even before the server's hello.
+    let client_features = jazz::wire::decode_hello_frame(&first)
+        .map(|hello| hello.features)
+        .unwrap_or(0);
     if let Some(refusal) = ws_foreign_version_refusal(&first) {
         let _ = send_ws_encoded_frames(&mut socket, &[refusal]).await;
         let _ = socket.close().await;
@@ -1076,6 +1087,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         Err(error) => {
             send_ws_error(
                 &mut socket,
+                client_features,
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
             )
             .await;
@@ -1087,7 +1099,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let admission = match ws_admission(prelude, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
-            send_ws_error(&mut socket, error.into_wire()).await;
+            send_ws_error(&mut socket, client_features, error.into_wire()).await;
             let _ = socket.close().await;
             return;
         }
@@ -1109,7 +1121,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 cap = refused.cap,
                 "refusing websocket: identity is at its connection cap with no silent connection to evict"
             );
-            send_ws_error(&mut socket, refused.into_wire()).await;
+            send_ws_error(&mut socket, client_features, refused.into_wire()).await;
             let _ = socket.close().await;
             return;
         }
@@ -1118,7 +1130,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let remote_hello = match decode_ws_hello(&first) {
         Ok(hello) => hello,
         Err(error) => {
-            send_ws_error(&mut socket, error).await;
+            send_ws_error(&mut socket, client_features, error).await;
             let _ = socket.close().await;
             return;
         }
@@ -1132,7 +1144,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
-            send_ws_error(&mut socket, error).await;
+            send_ws_error(&mut socket, client_features, error).await;
             let _ = socket.close().await;
             return;
         }
@@ -1146,6 +1158,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     if bootstrap_catalogue {
         send_ws_error(
             &mut socket,
+            client_features,
             WireError::new(
                 WireErrorCode::UnsupportedFeature,
                 WireRetry::Never,
@@ -1170,6 +1183,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         };
         send_ws_error(
             &mut socket,
+            client_features,
             WireError::new(WireErrorCode::NotReady, WireRetry::Later, message),
         )
         .await;
@@ -1198,7 +1212,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         match ws_link_admission(&admission, negotiated.features, server_endpoint.epoch) {
             Ok(link_admission) => link_admission,
             Err(error) => {
-                send_ws_error(&mut socket, error).await;
+                send_ws_error(&mut socket, client_features, error).await;
                 let _ = socket.close().await;
                 return;
             }
@@ -1217,6 +1231,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     {
         send_ws_error(
             &mut socket,
+            client_features,
             WireError::new(
                 WireErrorCode::UnsupportedFeature,
                 WireRetry::Never,
@@ -1252,7 +1267,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let session = match opened {
         Ok(session) => session,
         Err(error) => {
-            send_ws_error(&mut socket, session_open_wire_error(&error)).await;
+            send_ws_error(
+                &mut socket,
+                client_features,
+                session_open_wire_error(&error),
+            )
+            .await;
             let _ = socket.close().await;
             return;
         }
@@ -1266,6 +1286,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         Err(error) => {
             send_ws_error(
                 &mut socket,
+                client_features,
                 WireError::new(
                     WireErrorCode::Internal,
                     WireRetry::Never,
@@ -1310,7 +1331,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         refused => refused,
     };
     if let Err(error) = admitted {
-        send_ws_error(&mut socket, error.into_wire()).await;
+        send_ws_error(&mut socket, client_features, error.into_wire()).await;
         let _ = socket.close().await;
         core_server_shell.close(session);
         return;
@@ -1320,6 +1341,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         Err(error) => {
             send_ws_error(
                 &mut socket,
+                client_features,
                 WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
             )
             .await;
@@ -1383,7 +1405,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     }
                 };
                 if let Err(error) = refused {
-                    queue_ws_error(&writer_tx, error.into_wire());
+                    queue_ws_error(&writer_tx, client_features, error.into_wire());
                     break;
                 }
             }
@@ -1418,7 +1440,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     AccountWake::RegistryGone => Err(super::accounts::AdmissionError::Unavailable),
                 };
                 if let Err(error) = admitted {
-                    queue_ws_error(&writer_tx, error.into_wire());
+                    queue_ws_error(&writer_tx, client_features, error.into_wire());
                     break;
                 }
             }
@@ -1429,7 +1451,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     // half-open socket whose peer is gone. Should the peer be
                     // alive after all, it may come back like after any drop;
                     // a live link is never evicted in turn.
-                    queue_ws_error(&writer_tx, WireError::new(
+                    queue_ws_error(&writer_tx, client_features, WireError::new(
                         WireErrorCode::Backpressure, WireRetry::Later,
                         format!(
                             "websocket connection replaced: silent for over {} s while this \
@@ -1461,13 +1483,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     Ok(frames) => frames,
                     Err(error) => {
                         drop(permit);
-                        queue_ws_error(&writer_tx, error);
+                        queue_ws_error(&writer_tx, client_features, error);
                         break;
                     }
                 };
                 if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
                     drop(permit);
-                    queue_ws_error(&writer_tx, error.into_wire());
+                    queue_ws_error(&writer_tx, client_features, error.into_wire());
                     break;
                 }
                 match encode_ws_frame_batches(&outgoing) {
@@ -1476,14 +1498,14 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     }
                     Err(error) => {
                         drop(permit);
-                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Internal, WireRetry::Never, error.to_string()));
+                        queue_ws_error(&writer_tx, client_features, WireError::new(WireErrorCode::Internal, WireRetry::Never, error.to_string()));
                         break;
                     }
                 }
             }
             room = thin_reader.admitted() => {
                 if let Err(error) = thin_reader.grant(&core_server_shell, session, room) {
-                    queue_ws_error(&writer_tx, error);
+                    queue_ws_error(&writer_tx, client_features, error);
                     break 'connection;
                 }
             }
@@ -1493,7 +1515,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     None => std::future::pending().await,
                 }
             } => {
-                queue_ws_error(&writer_tx, WireError::new(
+                queue_ws_error(&writer_tx, client_features, WireError::new(
                     WireErrorCode::Backpressure, WireRetry::Later,
                     "a split thin request stalled before its next part",
                 ));
@@ -1508,7 +1530,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 let (frames, _) = held.take().expect("a held batch is waiting");
                 let received = room.and_then(|room| core_server_shell.receive_wire_frames(session, frames, room));
                 if let Err(error) = received {
-                    queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                    queue_ws_error(&writer_tx, client_features, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                     break 'connection;
                 }
             }
@@ -1518,13 +1540,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
                     if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
-                        queue_ws_error(&writer_tx, error.into_wire());
+                        queue_ws_error(&writer_tx, client_features, error.into_wire());
                         break;
                     }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
-                            queue_ws_error(&writer_tx, WireError::new(
+                            queue_ws_error(&writer_tx, client_features, WireError::new(
                                 WireErrorCode::MalformedFrame, WireRetry::Never,
                                 "failed to decode websocket frame batch",
                             ));
@@ -1533,7 +1555,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     };
                     if thin {
                         if let Err(error) = thin_reader.read(&core_server_shell, session, frames) {
-                            queue_ws_error(&writer_tx, error);
+                            queue_ws_error(&writer_tx, client_features, error);
                             break 'connection;
                         }
                         continue;
@@ -1551,7 +1573,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         Err(error) => Err(error),
                     };
                     if let Err(error) = received {
-                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                        queue_ws_error(&writer_tx, client_features, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
                     }
                 }
@@ -1755,8 +1777,12 @@ fn keepalive_beat(heartbeat: bool) -> Vec<Message> {
     beat
 }
 
-fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
-    if let Ok(frame) = encode_frame(&WireFrame::Error(error))
+fn queue_ws_error(
+    writer: &mpsc::Sender<Vec<Message>>,
+    client_features: jazz::wire::WireFeatures,
+    error: WireError,
+) {
+    if let Ok(frame) = jazz::wire::encode_error_frame_for_client(&error, client_features)
         && let Ok(batches) = encode_ws_frame_batches(&[frame])
     {
         let _ = writer.try_send(
@@ -1852,20 +1878,16 @@ async fn send_ws_encoded_frames<S: SyncSocket>(
     Ok(())
 }
 
-async fn send_ws_error<S: SyncSocket>(socket: &mut S, error: WireError) {
-    let _ = send_ws_frames(socket, &[WireFrame::Error(error)]).await;
-}
-
-async fn send_ws_frames<S: SyncSocket>(
+/// Send `error` as a client whose `Hello` offered `client_features` reads it:
+/// with its reason when it reads one.
+async fn send_ws_error<S: SyncSocket>(
     socket: &mut S,
-    frames: &[WireFrame],
-) -> Result<(), axum::Error> {
-    let encoded = frames
-        .iter()
-        .map(encode_frame)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(axum::Error::new)?;
-    send_ws_encoded_frames(socket, &encoded).await
+    client_features: jazz::wire::WireFeatures,
+    error: WireError,
+) {
+    if let Ok(frame) = jazz::wire::encode_error_frame_for_client(&error, client_features) {
+        let _ = send_ws_encoded_frames(socket, &[frame]).await;
+    }
 }
 
 /// Pack encoded wire frames into as few bounded WebSocket batch payloads as fit.
@@ -2990,6 +3012,81 @@ mod tests {
             !admitted,
             "a prelude larger than the Axum message cap must not reach admission"
         );
+    }
+
+    /// #5927 R3b: a refusal whose reason the server knows (the auth check's
+    /// typed code, a revoked identity) names it to a client whose `Hello`
+    /// offered `FEATURE_TYPED_ERROR_REASON`. Any other client gets the bytes
+    /// it always got, and reads the reason from the message as before.
+    ///
+    /// ```text
+    /// auth check ──Expired──► AdmissionError ──► client offered bit:  Error + reason
+    ///                                        └─► client did not:      Error (unchanged)
+    /// ```
+    #[test]
+    fn a_refusal_names_its_reason_to_a_client_that_reads_one() {
+        use super::super::accounts::AdmissionError;
+        use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
+        use jazz::wire::{
+            FEATURE_TYPED_ERROR_REASON, WireErrorReason, decode_frame_with_error_reason,
+            encode_error_frame_for_client,
+        };
+        let unauthenticated = |code| UnauthenticatedResponse {
+            error: "unauthenticated",
+            code,
+            message: "nope".into(),
+        };
+        let revoked = || AdmissionError::Refused {
+            message: "account identity revoked".into(),
+            reason: WireErrorReason::Revoked,
+        };
+        for (refusal, reason) in [
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Expired)),
+                WireErrorReason::Expired,
+            ),
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Missing)),
+                WireErrorReason::Missing,
+            ),
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Invalid)),
+                WireErrorReason::Invalid,
+            ),
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Disabled)),
+                WireErrorReason::Disabled,
+            ),
+            (revoked(), WireErrorReason::Revoked),
+        ] {
+            let error = refusal.into_wire();
+            assert_eq!(error.code, WireErrorCode::AuthFailed);
+            assert_eq!(error.reason, Some(reason));
+            let named = encode_error_frame_for_client(
+                &error,
+                current_wire_features() | FEATURE_TYPED_ERROR_REASON,
+            )
+            .unwrap();
+            let WireFrame::Error(read) = decode_frame_with_error_reason(&named).unwrap() else {
+                panic!("an error frame")
+            };
+            assert_eq!(read.reason, Some(reason));
+            let unnamed = encode_error_frame_for_client(&error, current_wire_features()).unwrap();
+            assert_eq!(
+                unnamed,
+                encode_frame(&WireFrame::Error(error.clone())).unwrap()
+            );
+            let WireFrame::Error(read) = decode_frame(&unnamed).unwrap() else {
+                panic!("an error frame")
+            };
+            assert_eq!(read.reason, None);
+            assert_eq!(read.message, error.message);
+        }
+        // The auth check being down is not a refusal and names nothing.
+        let unavailable =
+            AdmissionError::from(unauthenticated(UnauthenticatedCode::Unavailable)).into_wire();
+        assert_eq!(unavailable.code, WireErrorCode::NotReady);
+        assert_eq!(unavailable.reason, None);
     }
 
     fn ws_client_hello_batch_with_features(features: u64) -> Vec<u8> {
@@ -4468,6 +4565,7 @@ mod tests {
                 code: WireErrorCode::AuthFailed,
                 retry: WireRetry::AfterAuth,
                 message,
+                ..
             }) if message == super::super::accounts::SESSION_REVOKED
         )
     }

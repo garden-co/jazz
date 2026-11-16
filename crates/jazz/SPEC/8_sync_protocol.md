@@ -198,6 +198,41 @@ it on every link and drops the frame before the runtime sees it. The native
 Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
 silence timeout of its own.
 
+##### Typed error reasons
+
+A server refusing a credential says why: `expired`, `missing`, `invalid`,
+`disabled` or `revoked`, or `reauthenticate` for a planned re-authentication
+(`WireErrorReason`). A client that advertises `FEATURE_TYPED_ERROR_REASON`
+(`1 << 13`) in its Hello gets the reason at the end of the `WireFrame::Error`
+body, after the message: same tag (1), then the reason's postcard enum tag
+(encoding `wire-error-reason-v1`, pinned by
+`crates/jazz/layers/protocol/fixtures/wire_reasoned_error_v1.json`). There is
+no new frame tag: after its hello a server's frames are told apart from sync
+messages by their first byte, and every tag past 1 is a sync message's. The
+server decides by what the client offered, not by negotiation, so it names
+the reason before its own hello too; it never advertises the bit. Every
+other client gets the `Error` bytes it always got and reads the reason from
+the message, which is diagnostic text, not a contract
+(`AuthFailureReason::from_message`, `mapAuthReason`).
+
+Compatibility:
+
+- Old client, new server: an old client does not offer the bit, so the server
+  sends the plain `Error` frame. Unchanged.
+- New client, old server: an old server never appends a reason, so the client
+  reads the message as before. Unchanged.
+- New client, new server: the client takes the named reason over the message.
+  A reason tag it does not know (a newer server) is ignored and the message
+  decides.
+- A receiver that did not offer the bit decodes with `decode_frame`, which
+  rejects the extra byte (`INV-WIRE-1` holds for it); only a client that
+  offered it decodes with `decode_frame_with_error_reason`.
+
+The TypeScript carrier (browsers, Node, workers, the thin client) offers it
+on every link. The native Rust transport does not offer it yet: after its
+hello it does not read error frames at all (they reach the sync decoder), so
+it reads the reason from the message.
+
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
 (`WireTransportAdapter`).

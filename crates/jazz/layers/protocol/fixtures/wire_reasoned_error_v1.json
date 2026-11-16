@@ -1,0 +1,60 @@
+{
+  "encoding": "wire-error-reason-v1",
+  "description": "An Error frame that names its reason (encoding wire-error-reason-v1): WireFrame::Error's tag (1) and body (code, retry, message) followed by the WireErrorReason tag. Sent only to a client whose Hello offered FEATURE_TYPED_ERROR_REASON (1 << 13); every other client gets plain_hex, the WireFrame::Error bytes, unchanged. Append-only: never change a row.",
+  "cases": [
+    {
+      "name": "expired",
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "token expired",
+      "reason": "expired",
+      "reasoned_hex": "0103000d746f6b656e206578706972656400",
+      "plain_hex": "0103000d746f6b656e2065787069726564"
+    },
+    {
+      "name": "missing",
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "token missing",
+      "reason": "missing",
+      "reasoned_hex": "0103000d746f6b656e206d697373696e6701",
+      "plain_hex": "0103000d746f6b656e206d697373696e67"
+    },
+    {
+      "name": "invalid",
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "token invalid",
+      "reason": "invalid",
+      "reasoned_hex": "0103000d746f6b656e20696e76616c696402",
+      "plain_hex": "0103000d746f6b656e20696e76616c6964"
+    },
+    {
+      "name": "disabled",
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "token disabled",
+      "reason": "disabled",
+      "reasoned_hex": "0103000e746f6b656e2064697361626c656403",
+      "plain_hex": "0103000e746f6b656e2064697361626c6564"
+    },
+    {
+      "name": "revoked",
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "token revoked",
+      "reason": "revoked",
+      "reasoned_hex": "0103000d746f6b656e207265766f6b656404",
+      "plain_hex": "0103000d746f6b656e207265766f6b6564"
+    },
+    {
+      "name": "reauthenticate",
+      "code": "auth_failed",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached the expiry authenticate gave it",
+      "reason": "reauthenticate",
+      "reasoned_hex": "01030243726561757468656e7469636174653a207468652073657373696f6e207265616368656420746865206578706972792061757468656e746963617465206761766520697405",
+      "plain_hex": "01030243726561757468656e7469636174653a207468652073657373696f6e207265616368656420746865206578706972792061757468656e7469636174652067617665206974"
+    }
+  ]
+}

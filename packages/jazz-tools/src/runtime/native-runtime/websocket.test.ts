@@ -8,6 +8,7 @@ import {
   REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
   isReauthenticateWireError,
   FEATURE_HEARTBEAT,
+  FEATURE_TYPED_ERROR_REASON,
   FEATURE_PAYLOAD_ZSTD,
   HANDSHAKE_TIMEOUT_MS,
   HEARTBEAT_SILENCE_MS,
@@ -951,7 +952,10 @@ describe("websocket frame carrier", () => {
       message: "bad credentials",
     });
 
-    const suffixed = Uint8Array.from([...encoded, 0]);
+    // One byte after the message is the reason a server names to a client
+    // that offered FEATURE_TYPED_ERROR_REASON (wire-error-reason-v1); any
+    // byte past that is still trailing.
+    const suffixed = Uint8Array.from([...encoded, 0, 0]);
     expect(new PostcardReader(suffixed).u64()).toBe(1);
     expect(() => isWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
     expect(() => decodeWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
@@ -1019,7 +1023,9 @@ describe("websocket frame carrier", () => {
         reader.u64();
         reader.u64();
         reader.u64();
-        expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT);
+        expect(reader.u64()).toBe(
+          CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT | FEATURE_TYPED_ERROR_REASON,
+        );
 
         socket.emitMessage(
           encodeWebSocketFrameBatch([
