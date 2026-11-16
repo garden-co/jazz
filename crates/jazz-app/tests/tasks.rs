@@ -17,6 +17,10 @@ impl Computed for App {
         score > 5 || priority == TaskPriority::High
     }
 
+    fn tasks_title_len(&self, title: String) -> i32 {
+        title.chars().count() as i32
+    }
+
     fn iso_date_view(&self, stored: Timestamp) -> String {
         // Days since 1970-01-01 is all this test needs.
         format!("day-{}", stored.0 / DAY_MS)
@@ -201,6 +205,255 @@ async fn text_edits_merge() {
         .await
         .unwrap();
     assert_eq!(notes().await, "well, bye now, friend");
+}
+
+/// A text edit together with other column sets, in one update: TS's
+/// `update(table, id, data, { editedFrom })`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_edit_with_other_columns() {
+    use jazz_app::Edits;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            notes: Some("hello world".into()),
+            ..NewTask::new("Notes", 1, Vec::new())
+        })
+        .await
+        .unwrap();
+    // Someone else changes the notes while an editor still shows
+    // "hello world".
+    jazz.update(
+        task.id,
+        TaskUpdate {
+            notes: Some(Some("hello brave world".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    jazz.update_edited(
+        task.id,
+        TaskUpdate {
+            notes: Some(Some("hello world!".into())),
+            title: Some("Renamed".into()),
+            score: Some(7),
+            ..Default::default()
+        },
+        Edits::new().edited_from(tasks::notes(), "hello world"),
+    )
+    .await
+    .unwrap();
+    let task = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(task.notes.as_deref(), Some("hello brave world!"));
+    assert_eq!((task.title.as_str(), task.score), ("Renamed", 7));
+
+    // In a transaction, closure and open forms.
+    let id = task.id;
+    jazz.transaction(move |tx| async move {
+        tx.update_edited(
+            id,
+            TaskUpdate {
+                notes: Some(Some("bye".into())),
+                score: Some(8),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::notes(), "hello brave world!"),
+        )
+    })
+    .await
+    .unwrap();
+    let open = jazz.begin_transaction().await.unwrap();
+    open.update_edited(
+        id,
+        TaskUpdate {
+            notes: Some(Some("bye now".into())),
+            title: Some("Done".into()),
+            ..Default::default()
+        },
+        Edits::new().edited_from(tasks::notes(), "bye"),
+    )
+    .await
+    .unwrap();
+    open.commit().await.unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!(
+        (task.notes.as_deref(), task.title.as_str(), task.score),
+        (Some("bye now"), "Done", 8)
+    );
+
+    // The edited column must be set to a string by the update.
+    let unset = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                score: Some(1),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::notes(), "bye now"),
+        )
+        .await;
+    assert!(matches!(unset, Err(Error::Config(_))), "{unset:?}");
+    // A failing edit (a column without "merge": "text") writes nothing:
+    // not even the update's other sets.
+    let plain = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                title: Some("Other".into()),
+                score: Some(2),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::title(), "Done"),
+        )
+        .await;
+    assert!(plain.is_err(), "{plain:?}");
+    let missing = jazz
+        .update_edited(
+            jazz_app::ObjectId::new(),
+            TaskUpdate {
+                notes: Some(Some("x".into())),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::notes(), ""),
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(Error::NotFound { .. })),
+        "{missing:?}"
+    );
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Done", 8));
+}
+
+/// Splices and json sets together with other column sets and a text edit,
+/// in one update: TS's `update(table, id, data, { applyDiffs, editedFrom })`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diffs_with_other_columns() {
+    use jazz_app::{Edits, Page, Splice};
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            notes: Some("hello".into()),
+            attachment: Some(vec![0; 8]),
+            meta: Some(Json(serde_json::json!({ "owner": "ops", "n": 1 }))),
+            ..NewTask::new("Diffs", 1, Vec::new())
+        })
+        .await
+        .unwrap();
+    let id = task.id;
+    jazz.update_edited(
+        id,
+        TaskUpdate {
+            title: Some("Diffed".into()),
+            score: Some(5),
+            notes: Some(Some("hello!".into())),
+            ..Default::default()
+        },
+        Edits::new()
+            .edited_from(tasks::notes(), "hello")
+            .splice(
+                tasks::attachment(),
+                Page::Bytes { from: 0, to: 8 },
+                vec![Splice {
+                    at: 0,
+                    delete: 1,
+                    insert: vec![9, 9],
+                }],
+            )
+            .json_set(
+                tasks::meta(),
+                [("/owner".to_owned(), serde_json::json!("dev"))],
+            ),
+    )
+    .await
+    .unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Diffed", 5));
+    assert_eq!(task.notes.as_deref(), Some("hello!"));
+    assert_eq!(
+        task.attachment.as_deref().map(|a| &a[..3]),
+        Some(&[9, 9, 0][..])
+    );
+    assert_eq!(
+        task.meta.unwrap().0,
+        serde_json::json!({ "owner": "dev", "n": 1 })
+    );
+
+    // In a transaction, closure and open forms.
+    jazz.transaction(move |tx| async move {
+        tx.update_edited(
+            id,
+            TaskUpdate {
+                score: Some(6),
+                ..Default::default()
+            },
+            Edits::new().json_set(tasks::meta(), [("/n".to_owned(), serde_json::json!(2))]),
+        )
+    })
+    .await
+    .unwrap();
+    let open = jazz.begin_transaction().await.unwrap();
+    open.update_edited(
+        id,
+        TaskUpdate {
+            title: Some("Open".into()),
+            ..Default::default()
+        },
+        Edits::new().splice(
+            tasks::attachment(),
+            Page::Bytes { from: 0, to: 2 },
+            vec![Splice {
+                at: 0,
+                delete: 2,
+                insert: vec![1],
+            }],
+        ),
+    )
+    .await
+    .unwrap();
+    open.commit().await.unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Open", 6));
+    assert_eq!(
+        task.attachment.as_deref().map(|a| &a[..2]),
+        Some(&[1, 0][..])
+    );
+    assert_eq!(task.meta.unwrap().0["n"], serde_json::json!(2));
+
+    // A column both set and diffed is refused, as TS refuses it.
+    let both = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                meta: Some(Some(Json(serde_json::json!({})))),
+                ..Default::default()
+            },
+            Edits::new().json_set(tasks::meta(), [("/n".to_owned(), serde_json::json!(3))]),
+        )
+        .await;
+    assert!(matches!(both, Err(Error::Config(_))), "{both:?}");
+    // A failing diff writes none of the update's sets.
+    let failing = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                title: Some("Not written".into()),
+                ..Default::default()
+            },
+            Edits::new().json_set(
+                tasks::meta(),
+                [("/missing/deep".to_owned(), serde_json::json!(1))],
+            ),
+        )
+        .await;
+    assert!(failing.is_err(), "{failing:?}");
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!(task.title, "Open");
+    assert_eq!(task.meta.unwrap().0["n"], serde_json::json!(2));
 }
 
 /// Large values: a bytes cell inserted from a stream, spliced in place, and a json cell edited by pointer.
@@ -579,4 +832,396 @@ async fn restore_with_values() {
         .unwrap();
     assert_eq!(restored.title, "Third time");
     assert_eq!(restored.score, 1);
+}
+
+/// Streaming inside a transaction, as TS's `tx.insertStreaming`: the
+/// streamed row commits with the transaction, rolls back with it, and an
+/// upload dropped mid-stream is aborted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_in_a_transaction() {
+    use futures::StreamExt;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+
+    // Closure form: the streamed row commits with the transaction's other
+    // writes, and the transaction sees it before then.
+    let streamed = data.clone();
+    let (task, other) = jazz
+        .transaction(move |tx| async move {
+            let task = tx
+                .insert_streaming(
+                    NewTask::new("In tx", 0, Vec::new()),
+                    tasks::attachment(),
+                    chunked(&streamed, 64 * 1024),
+                )
+                .await?;
+            assert_eq!(task.attachment.as_deref(), Some(streamed.as_slice()));
+            let other = tx.insert(NewTask::new("Beside it", 0, Vec::new()))?;
+            Ok((task, other))
+        })
+        .await
+        .unwrap();
+    let stored = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment.as_deref(), Some(data.as_slice()));
+    assert!(jazz.get::<Task>(other.id).await.unwrap().is_some());
+
+    // Updating and upserting in a transaction.
+    let id = task.id;
+    let new_id = jazz_app::ObjectId::new();
+    jazz.transaction(move |tx| async move {
+        let updated = tx
+            .update_streaming(
+                id,
+                TaskUpdate {
+                    score: Some(4),
+                    ..Default::default()
+                },
+                tasks::attachment(),
+                chunked(&[7; 5], 2),
+            )
+            .await?;
+        assert_eq!(updated.attachment, Some(vec![7; 5]));
+        tx.upsert_streaming(
+            new_id,
+            NewTask::new("Upserted", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&[3; 3], 1),
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    let updated = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((updated.score, updated.attachment), (4, Some(vec![7; 5])));
+    let upserted = jazz.get::<Task>(new_id).await.unwrap().unwrap();
+    assert_eq!(upserted.attachment, Some(vec![3; 3]));
+
+    // A transaction that fails after streaming rolls the row back.
+    let before = jazz.all(tasks::query()).await.unwrap().len();
+    let failed = jazz
+        .transaction(move |tx| async move {
+            tx.insert_streaming(
+                NewTask::new("Rolled back", 0, Vec::new()),
+                tasks::attachment(),
+                chunked(&[1; 10], 3),
+            )
+            .await?;
+            Err::<(), _>(Error::Config("changed my mind".into()))
+        })
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(jazz.all(tasks::query()).await.unwrap().len(), before);
+
+    // A failing stream fails the call; the transaction decides the rest.
+    let failing = jazz
+        .transaction(move |tx| async move {
+            tx.insert_streaming(
+                NewTask::new("Broken", 0, Vec::new()),
+                tasks::attachment(),
+                futures::stream::iter([Ok(vec![1u8; 10]), Err("disk on fire")]),
+            )
+            .await
+        })
+        .await;
+    assert!(
+        matches!(&failing, Err(Error::Upload(message)) if message == "disk on fire"),
+        "{failing:?}"
+    );
+    assert_eq!(jazz.all(tasks::query()).await.unwrap().len(), before);
+
+    // Serializable transactions stream too, closure and open forms.
+    let serial = jazz
+        .serializable_transaction(move |tx| async move {
+            tx.insert_streaming(
+                NewTask::new("Serializable", 0, Vec::new()),
+                tasks::attachment(),
+                chunked(&[6; 70_000], 30_000),
+            )
+            .await
+        })
+        .await
+        .unwrap();
+    let stored = jazz.get::<Task>(serial.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment, Some(vec![6; 70_000]));
+    let open = jazz.begin_serializable_transaction().await.unwrap();
+    let updated = open
+        .update_streaming(
+            serial.id,
+            TaskUpdate::default(),
+            tasks::attachment(),
+            chunked(&[8; 4], 2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.attachment, Some(vec![8; 4]));
+    open.commit().await.unwrap();
+    let stored = jazz.get::<Task>(serial.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment, Some(vec![8; 4]));
+
+    // Open form: commits with the transaction...
+    let open = jazz.begin_transaction().await.unwrap();
+    let streamed = open
+        .insert_streaming(
+            NewTask::new("Open", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&data, 50_000),
+        )
+        .await
+        .unwrap();
+    assert!(jazz.get::<Task>(streamed.id).await.unwrap().is_none());
+    assert!(open.get::<Task>(streamed.id).await.unwrap().is_some());
+    open.commit().await.unwrap();
+    let stored = jazz.get::<Task>(streamed.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment.as_deref(), Some(data.as_slice()));
+
+    // ...rolls back with it...
+    let open = jazz.begin_transaction().await.unwrap();
+    let streamed = open
+        .insert_streaming(
+            NewTask::new("Open, rolled back", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&[2; 4], 2),
+        )
+        .await
+        .unwrap();
+    open.rollback().await.unwrap();
+    assert!(jazz.get::<Task>(streamed.id).await.unwrap().is_none());
+
+    // ...and an upload dropped mid-stream is aborted, leaving the
+    // transaction usable.
+    let open = jazz.begin_transaction().await.unwrap();
+    let endless = futures::stream::iter(0..).then(|_| async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        Ok::<_, std::convert::Infallible>(vec![1u8; 100])
+    });
+    let upload = open.insert_streaming(
+        NewTask::new("Endless", 0, Vec::new()),
+        tasks::attachment(),
+        endless,
+    );
+    let timed_out = tokio::time::timeout(std::time::Duration::from_millis(100), upload).await;
+    assert!(timed_out.is_err());
+    assert_eq!(jazz.uploads_in_progress().await.unwrap(), 0);
+    let kept = open
+        .insert(NewTask::new("After the drop", 0, Vec::new()))
+        .await
+        .unwrap();
+    open.commit().await.unwrap();
+    assert!(jazz.get::<Task>(kept.id).await.unwrap().is_some());
+    let titles: Vec<_> = jazz
+        .all(tasks::query())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| task.title)
+        .collect();
+    assert!(!titles.iter().any(|title| title == "Endless"), "{titles:?}");
+}
+
+/// Read options: waiting for the server's first answer (offline it answers
+/// at once), and splices of a column's changes on subscription updates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_options() {
+    use futures::StreamExt;
+    use jazz_app::ReadOptions;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask::new("abc", 0, Vec::new()))
+        .await
+        .unwrap();
+
+    let rows = jazz
+        .all_with_options(
+            tasks::query(),
+            ReadOptions::default().wait_for_remote(std::time::Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![task.clone()]);
+
+    let mut changes = jazz
+        .subscribe_with_options(
+            tasks::query(),
+            ReadOptions::default().splices(tasks::title()),
+        )
+        .await
+        .unwrap();
+    let first = changes.next().await.unwrap().unwrap();
+    assert_eq!(first.added.len(), 1);
+    jazz.update(
+        task.id,
+        bindings::TaskUpdate {
+            title: Some("abXc".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let update = loop {
+        let delta = changes.next().await.unwrap().unwrap();
+        if let Some(updated) = delta.updated.into_iter().next() {
+            break updated;
+        }
+    };
+    assert_eq!(update.row.unwrap().title, "abXc");
+    let (column, splices) = &update.splices[0];
+    assert_eq!(column, "title");
+    assert_eq!(splices.len(), 1);
+    assert_eq!(
+        (
+            splices[0].at,
+            splices[0].delete,
+            splices[0].insert.as_slice()
+        ),
+        (2, 0, b"X".as_slice())
+    );
+}
+
+/// A query can read a large value only in part: a text range, or a json
+/// subtree, of the full row or of a selection.
+#[tokio::test]
+async fn partial_reads() {
+    use jazz_app::ValuePart;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            meta: Some(Json(
+                serde_json::json!({ "owner": { "name": "ops" }, "tags": ["a"] }),
+            )),
+            r#type: Some("Partial reads".into()),
+            ..NewTask::new("héllo wörld", 0, Vec::new())
+        })
+        .await
+        .unwrap();
+    let head = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .part(tasks::r#type(), ValuePart::TextUtf8 { from: 0, to: 7 }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.r#type.as_deref(), Some("Partial"));
+
+    // A column a computed field is computed from is read whole, so the
+    // computed field is right (as TS re-reads it in full).
+    let computed = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .part(tasks::title(), ValuePart::TextUtf8 { from: 0, to: 3 }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (computed.title.as_str(), computed.title_len),
+        ("héllo wörld", 11)
+    );
+
+    // Inside an include, the included rows' column is read in part.
+    let boxed = jazz
+        .insert(bindings::NewBox {
+            task: Some(task.id),
+            ..bindings::NewBox::new("crate")
+        })
+        .await
+        .unwrap();
+    let (_, included) = jazz
+        .one(
+            bindings::boxes::query()
+                .id(boxed.id)
+                .include(bindings::boxes::task_relation().with(
+                    tasks::query().part(tasks::r#type(), ValuePart::TextUtf8 { from: 0, to: 4 }),
+                )),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(included.unwrap().r#type.as_deref(), Some("Part"));
+    let owner = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .select(tasks::meta())
+                .part(tasks::meta(), ValuePart::JsonPointer("/owner".into())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner.values.unwrap().0,
+        serde_json::json!({ "name": "ops" })
+    );
+}
+
+/// Selecting a transformed column reads its view value, through the app's
+/// transform, as a full row does; filtering on it compares the stored value.
+#[tokio::test]
+async fn select_reads_transformed_columns_as_viewed() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            due_at: Some("day-20000".into()),
+            ..NewTask::new("Ship it", 3, Vec::new())
+        })
+        .await
+        .unwrap();
+    jazz.insert(NewTask::new("Someday", 1, Vec::new()))
+        .await
+        .unwrap();
+
+    let rows = jazz
+        .all(
+            tasks::query()
+                .filter(tasks::due_at().eq(Timestamp(20_000 * DAY_MS)))
+                .select((tasks::title(), tasks::due_at())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, task.id);
+    let (title, due_at): &(String, Option<String>) = &rows[0].values;
+    assert_eq!(title, "Ship it");
+    assert_eq!(due_at.as_deref(), Some("day-20000"));
+
+    // One column alone.
+    let due: Vec<Option<String>> = jazz
+        .all(
+            tasks::query()
+                .order_by(tasks::title(), jazz_app::Order::Asc)
+                .select(tasks::due_at()),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect();
+    assert_eq!(due, [Some("day-20000".to_owned()), None]);
+
+    // Inside an included row's selection.
+    jazz.insert(bindings::NewBox {
+        task: Some(task.id),
+        ..bindings::NewBox::new("crate")
+    })
+    .await
+    .unwrap();
+    let boxed =
+        jazz.all(bindings::boxes::query().include(
+            bindings::boxes::task_relation().with(tasks::query().select(tasks::due_at())),
+        ))
+        .await
+        .unwrap();
+    let included = boxed[0].1.as_ref().expect("the box's task");
+    assert_eq!(included.id, task.id);
+    assert_eq!(included.values.as_deref(), Some("day-20000"));
 }

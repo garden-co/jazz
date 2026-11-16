@@ -82,20 +82,21 @@ pub trait Base: Row {}
 impl<T: Table> Base for T {}
 
 /// A partial row of `T`: its id, and the values of the columns a
-/// [`Query::select`] picked, as `V` (a value, or a tuple of them).
+/// [`Query::select`] picked, as `V` (a value, or a tuple of them). `P` is
+/// how they are read: `V` itself, unless a column has a transform.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Partial<T, V> {
+pub struct Partial<T, V, P = V> {
     pub id: ObjectId,
     pub values: V,
-    table: PhantomData<fn() -> T>,
+    types: PhantomData<fn() -> (T, P)>,
 }
 
-impl<T, V> Partial<T, V> {
+impl<T, V, P> Partial<T, V, P> {
     pub fn new(id: ObjectId, values: V) -> Self {
         Self {
             id,
             values,
-            table: PhantomData,
+            types: PhantomData,
         }
     }
 
@@ -104,7 +105,7 @@ impl<T, V> Partial<T, V> {
     }
 }
 
-impl<T: Table, V: Values> Row for Partial<T, V> {
+impl<T: Table, P: Values> Row for Partial<T, P::Out, P> {
     type Table = T;
 
     fn row_id(&self) -> ObjectId {
@@ -112,20 +113,37 @@ impl<T: Table, V: Values> Row for Partial<T, V> {
     }
 
     fn decode_fields(fields: &mut Fields<'_>) -> Result<Self> {
-        Ok(Self::new(fields.id(), V::decode_values(fields)?))
+        Ok(Self::new(fields.id(), P::decode_values(fields)?))
     }
 
     fn value_names() -> Vec<String> {
         // Partial values are read in order, not by name.
-        (0..V::LEN).map(|at| format!("$selected{at}")).collect()
+        (0..P::LEN).map(|at| format!("$selected{at}")).collect()
     }
 }
 
-impl<T: Table, V: Values> Base for Partial<T, V> {}
+impl<T: Table, P: Values> Base for Partial<T, P::Out, P> {}
+
+/// How [`Query::select`] reads a column: its stored value (any
+/// [`ColumnValue`]), or, for a column with a transform, its view value
+/// through the app's transform (a type generated bindings declare).
+pub trait Pick: Send + 'static {
+    /// The value a partial row holds for the column.
+    type Value: Send + 'static;
+    /// Reads it from the next of a partial row's fields.
+    fn pick(fields: &mut Fields<'_>) -> Result<Self::Value>;
+}
+
+impl<V: ColumnValue> Pick for V {
+    type Value = V;
+    fn pick(fields: &mut Fields<'_>) -> Result<V> {
+        fields.take_next::<V>()
+    }
+}
 
 /// The values of a selection: what [`Query::select`] picks.
 pub trait Selection<T>: Send + 'static {
-    /// The values a partial row holds for it.
+    /// How a partial row reads its values.
     type Values: Values;
     #[doc(hidden)]
     fn names(&self) -> Vec<&'static str>;
@@ -134,55 +152,61 @@ pub trait Selection<T>: Send + 'static {
 /// Values read in the order a selection picked their columns.
 #[doc(hidden)]
 pub trait Values: Sized + Send + 'static {
+    /// What a partial row holds.
+    type Out: Send + 'static;
     const LEN: usize;
-    fn decode_values(fields: &mut Fields<'_>) -> Result<Self>;
+    fn decode_values(fields: &mut Fields<'_>) -> Result<Self::Out>;
 }
 
-impl<V: ColumnValue> Values for V {
+impl<P: Pick> Values for P {
+    type Out = P::Value;
     const LEN: usize = 1;
-    fn decode_values(fields: &mut Fields<'_>) -> Result<Self> {
-        fields.take_next::<V>()
+    fn decode_values(fields: &mut Fields<'_>) -> Result<P::Value> {
+        P::pick(fields)
     }
 }
 
-impl<T: Send + 'static, V: ColumnValue> Selection<T> for Column<T, V> {
-    type Values = V;
+impl<T: Send + 'static, V: ColumnValue, P: Pick> Selection<T> for Column<T, V, P> {
+    type Values = P;
     fn names(&self) -> Vec<&'static str> {
         vec![self.name()]
     }
 }
 
 macro_rules! selections {
-    ($($value:ident $column:ident),+; $len:expr) => {
-        impl<T: Send + 'static, $($value: ColumnValue),+> Selection<T> for ($(Column<T, $value>,)+) {
-            type Values = ($($value,)+);
+    ($($value:ident $pick:ident $column:ident),+; $len:expr) => {
+        impl<T: Send + 'static, $($value: ColumnValue, $pick: Pick),+> Selection<T>
+            for ($(Column<T, $value, $pick>,)+)
+        {
+            type Values = ($($pick,)+);
             fn names(&self) -> Vec<&'static str> {
                 let ($($column,)+) = self;
                 vec![$($column.name()),+]
             }
         }
 
-        impl<$($value: ColumnValue),+> Values for ($($value,)+) {
+        impl<$($pick: Pick),+> Values for ($($pick,)+) {
+            type Out = ($($pick::Value,)+);
             const LEN: usize = $len;
-            fn decode_values(fields: &mut Fields<'_>) -> Result<Self> {
-                Ok(($(fields.take_next::<$value>()?,)+))
+            fn decode_values(fields: &mut Fields<'_>) -> Result<Self::Out> {
+                Ok(($($pick::pick(fields)?,)+))
             }
         }
     };
 }
 
-selections!(A a; 1);
-selections!(A a, B b; 2);
-selections!(A a, B b, C c; 3);
-selections!(A a, B b, C c, D d; 4);
-selections!(A a, B b, C c, D d, E e; 5);
-selections!(A a, B b, C c, D d, E e, F f; 6);
-selections!(A a, B b, C c, D d, E e, F f, G g; 7);
-selections!(A a, B b, C c, D d, E e, F f, G g, H h; 8);
-selections!(A a, B b, C c, D d, E e, F f, G g, H h, I i; 9);
-selections!(A a, B b, C c, D d, E e, F f, G g, H h, I i, J j; 10);
-selections!(A a, B b, C c, D d, E e, F f, G g, H h, I i, J j, K k; 11);
-selections!(A a, B b, C c, D d, E e, F f, G g, H h, I i, J j, K k, L l; 12);
+selections!(VA PA a; 1);
+selections!(VA PA a, VB PB b; 2);
+selections!(VA PA a, VB PB b, VC PC c; 3);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d; 4);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e; 5);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e, VF PF f; 6);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e, VF PF f, VG PG g; 7);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e, VF PF f, VG PG g, VH PH h; 8);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e, VF PF f, VG PG g, VH PH h, VI PI i; 9);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e, VF PF f, VG PG g, VH PH h, VI PI i, VJ PJ j; 10);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e, VF PF f, VG PG g, VH PH h, VI PI i, VJ PJ j, VK PK k; 11);
+selections!(VA PA a, VB PB b, VC PC c, VD PD d, VE PE e, VF PF f, VG PG g, VH PH h, VI PI i, VJ PJ j, VK PK k, VL PL l; 12);
 
 /// What a relation includes with each row: `Option<U>`, `U` or `Vec<U>`.
 #[doc(hidden)]
@@ -483,8 +507,8 @@ impl<T: Table, I: Included> With<I> for T {
     type Output = (T, I);
 }
 
-impl<T: Table, V: Values, I: Included> With<I> for Partial<T, V> {
-    type Output = (Partial<T, V>, I);
+impl<T: Table, P: Values, I: Included> With<I> for Partial<T, P::Out, P> {
+    type Output = (Partial<T, P::Out, P>, I);
 }
 
 macro_rules! includes {
