@@ -848,29 +848,62 @@ fn core(value: Value) -> CoreValue {
 /// An engine delta as delta JSON. `reset` marks the first delta (the full
 /// result). Rows that only moved carry no new value and are left out: the
 /// contract's deltas carry no positions.
-pub(crate) fn delta_json(table: &Shape, delta: OrderedRowDelta, reset: bool) -> Result<String> {
+/// A result's key as opaque text: base64 of jazz's versioned `ResultKey`
+/// encoding. Each result occurrence has its own (a history read's
+/// versions, a union's arms), where they share the row's id.
+pub(crate) fn result_key(key: &jazz_app::jazz::tools::ResultKey) -> Result<String> {
+    let bytes: Vec<u8> = match serde_json::to_value(key) {
+        Ok(Json::Array(bytes)) => bytes
+            .iter()
+            .map(|byte| byte.as_u64().and_then(|b| u8::try_from(b).ok()))
+            .collect::<Option<_>>()
+            .ok_or_else(|| FfiError::Io("a result key is not bytes".into()))?,
+        _ => return Err(FfiError::Io("a result key is not bytes".into())),
+    };
+    Ok(BASE64.encode(bytes))
+}
+
+/// A subscription's delta as JSON. Each added and updated row carries
+/// `$key`, its result's key, and `removedKeys` runs beside `removed`: a
+/// host holding results that share an id (history, union) applies by key.
+pub(crate) fn delta_json(
+    table: &Shape,
+    history: bool,
+    delta: OrderedRowDelta,
+    reset: bool,
+) -> Result<String> {
     let id = |key: &jazz_app::jazz::tools::ResultKey| {
         key.row_id()
             .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))
     };
+    let keyed = |key: &jazz_app::jazz::tools::ResultKey, fields| -> Result<Json> {
+        let mut row = crate::relational::row_of(table, history, id(key)?, fields);
+        if let Json::Object(object) = &mut row {
+            object.insert("$key".into(), Json::String(result_key(key)?));
+        }
+        Ok(row)
+    };
     let mut added = Vec::with_capacity(delta.added.len());
     for entry in delta.added {
-        added.push(row_json(table, id(&entry.id)?, entry.row.fields));
+        added.push(keyed(&entry.id, entry.row.fields)?);
     }
     let mut updated = Vec::new();
     for entry in delta.updated {
         if let Some(row) = entry.row {
-            updated.push(row_json(table, id(&entry.id)?, row.fields));
+            updated.push(keyed(&entry.id, row.fields)?);
         }
     }
     let mut removed = Vec::with_capacity(delta.removed.len());
+    let mut removed_keys = Vec::with_capacity(delta.removed.len());
     for entry in delta.removed {
         removed.push(Json::String(id(&entry.id)?.to_string()));
+        removed_keys.push(Json::String(result_key(&entry.id)?));
     }
     Ok(json!({
         "added": added,
         "updated": updated,
         "removed": removed,
+        "removedKeys": removed_keys,
         "reset": reset,
         // Becomes true for a reset that replaces a backlog the reader fell
         // behind on, once the engine coalesces backlogs.
