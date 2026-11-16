@@ -145,7 +145,7 @@ pub struct Codegen {
     /// The file's `transforms`, by name: what every language implements.
     #[serde(default)]
     pub transforms: BTreeMap<String, TransformDecl>,
-    /// Slices a .63 `schema.ts` exported. Slicing is gone in alpha.65:
+    /// Slices a .63 `schema.ts` exported. Slicing is gone in alpha.66:
     /// accepted from the .63 writer's input and ignored, never written.
     #[serde(default, skip_serializing)]
     pub slices: BTreeMap<String, Vec<String>>,
@@ -1088,7 +1088,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
     }
     // Every version a client may open must lead to the current one: lenses
     // run both ways, so any chain of migrations connects them. Before
-    // alpha.65, `migrations create` wrote no migration when no row needed
+    // alpha.66, `migrations create` wrote no migration when no row needed
     // transforming (an index, merge strategy or column order changed), so a
     // version such files hold may stand alone: it is joined to the next
     // version its rows pass to unchanged by the identity step it implies.
