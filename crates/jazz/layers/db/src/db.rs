@@ -859,6 +859,10 @@ struct Inner {
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
     /// Ops of the open local transaction, for upload, by stored names.
     pub(crate) capture: Vec<StagedOp>,
+    /// The claims the open local transaction's session writes were staged
+    /// with: its upload carries these, not whatever its author's claims
+    /// are by the time it commits.
+    pub(crate) capture_claims: Option<BTreeMap<String, Value>>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -2050,6 +2054,7 @@ impl Db {
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
+                capture_claims: None,
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
@@ -3695,7 +3700,10 @@ impl Db {
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
-            captured = std::mem::take(&mut inner.capture);
+            captured = (
+                std::mem::take(&mut inner.capture),
+                inner.capture_claims.take(),
+            );
             prior = inner.seq;
             match &result {
                 Ok(_) => {
@@ -3717,7 +3725,9 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None);
+        let (captured, claims) = captured;
+        let recorded =
+            self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, claims);
         if let Err(error) = recorded {
             guard.armed = false;
             self.inner().roll_back_callback_tx(Some(prior))?;
@@ -4694,6 +4704,7 @@ impl Inner {
     fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
         self.tx = None;
         self.capture.clear();
+        self.capture_claims = None;
         self.writer = None;
         self.clear_derived();
         if let Some(seq) = restore_seq {
@@ -9542,6 +9553,11 @@ struct Batch {
     /// Leases of the streamed values the batch's writes hold: their chunks
     /// stay until the batch commits or is dropped.
     uploads: Vec<crate::db::large_ops::UploadLease>,
+    /// The claims its session writes were staged with: its upload carries
+    /// these, not whatever its author's claims are by the time it commits
+    /// (another handle acting for the same user may have registered
+    /// others meanwhile).
+    claims: Option<BTreeMap<String, Value>>,
 }
 
 /// Per-batch identity and admission order; an old future never observes a reused ID.
@@ -10143,6 +10159,7 @@ impl Db {
                 rows: Arc::default(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
+                claims: None,
             },
         );
         Ok(())
@@ -10428,7 +10445,7 @@ impl Db {
             .iter()
             .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None));
+            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None, batch.claims.clone()));
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -10652,7 +10669,16 @@ impl Db {
             Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
             None => None,
         };
+        let staged_claims = match op.identity() {
+            Some(WriteIdentity::Session(author)) if op.is_session() => {
+                Some(inner.claims.get(&author).cloned().unwrap_or_default())
+            }
+            _ => None,
+        };
         let batch = inner.batches.get_mut(&id).expect("validated");
+        if batch.claims.is_none() {
+            batch.claims = staged_claims;
+        }
         if let Some((table, row)) = stored {
             Arc::make_mut(&mut batch.rows)
                 .entry(table)
