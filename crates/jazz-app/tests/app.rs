@@ -482,8 +482,7 @@ async fn query_helpers() {
     assert_eq!(by_id.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
 }
 
-/// Read options against a server: a fresh store's plain local-first read
-/// has nothing yet, `wait_for_remote` waits for the server's answer, and a
+/// Read options against a server: a fresh store has nothing locally yet, `wait_for_remote` waits for the server's answer, and a
 /// `Remote` read asks the server. What can't be answered is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_options_with_a_server() {
@@ -516,7 +515,11 @@ async fn read_options_with_a_server() {
 
     let fresh = open().await.unwrap();
     assert!(
-        fresh.all(todos::query()).await.unwrap().is_empty(),
+        fresh
+            .all_with(todos::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap()
+            .is_empty(),
         "a fresh store has nothing locally yet"
     );
     let waited = fresh

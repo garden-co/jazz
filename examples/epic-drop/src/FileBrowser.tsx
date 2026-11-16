@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
@@ -37,7 +37,7 @@ function clearInviteHash() {
 
 export function FileBrowser() {
   const showToast = useToast();
-  const userId = useSession()?.user ?? undefined;
+  const userId = useJazzSession().user?.accountId ?? undefined;
   const profile = useEnsureProfile(userId);
   const isWide = useMediaQuery("(min-width: 1100px)");
 

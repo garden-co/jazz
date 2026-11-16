@@ -125,6 +125,41 @@ describe("branch API", () => {
     expect(await db.one(app.documents, { branch: "main" })).toMatchObject({ title: "Uncommitted" });
   });
 
+  it.each(["mergeable", "serializable"] as const)(
+    "refuses branch reads inside a %s transaction instead of ignoring the branch (jazz#5806)",
+    async (kind) => {
+      db = await createDb({
+        ...(await localAccountConfig(`branch-api-tx-read-${kind}`)),
+        driver: { type: "memory" },
+      });
+      const original = db.insert(
+        app.documents,
+        { branch: "main", title: "Intro" },
+        { branch: "main" },
+      ).value;
+      // Also warms up the client, which serializable transactions need.
+      expect(await db.all(app.documents, { branch: "draft", base: "main" })).toEqual([
+        { ...original, branch: "draft" },
+      ]);
+
+      const tx =
+        kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
+      const unsupported = /inside a transaction is not supported yet \(jazz#5806\)/;
+      await expect(tx.all(app.documents, { branch: "draft", base: "main" })).rejects.toThrow(
+        unsupported,
+      );
+      await expect(tx.one(app.documents, { branch: "draft" })).rejects.toThrow(unsupported);
+      await expect(tx.all(app.documents, { base: "main" })).rejects.toThrow(unsupported);
+
+      // Branch writes inside a transaction stay allowed.
+      tx.update(app.documents, original.id, { title: "Draft" }, { branch: "draft", base: "main" });
+      await tx.commit().wait({ tier: "local" });
+      expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+        title: "Draft",
+      });
+    },
+  );
+
   it("reports unavailable history when restoring onto an empty store", async () => {
     db = await createDb({
       ...(await localAccountConfig("branch-api-capture-origin")),

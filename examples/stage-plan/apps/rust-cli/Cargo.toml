@@ -3,7 +3,7 @@ name = "stage-plan-rust-cli"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "StagePlan from Rust: a CLI over the app's generated jazz-app bindings"
+description = "StagePlan from Rust: a backend client of the app's TypeScript main backend, over the generated jazz-app bindings"
 
 [lib]
 path = "src/lib.rs"
@@ -14,7 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 jazz-app = { path = "../../../../crates/jazz-app" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs"] }
 uuid = "1"
 
 [dev-dependencies]
