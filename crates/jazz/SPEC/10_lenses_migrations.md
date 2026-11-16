@@ -808,7 +808,9 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 **Conventions.**
 
 - Plain JSON. Unknown keys are refused at every level, except `$comment`
-  (a string, allowed in every object). Repeated keys are refused.
+  (a string, allowed in every object) and a top-level `$generated` (see
+  **Generated files** below: ignored on load, but its shape is checked).
+  Repeated keys are refused.
 - **Versioning.** A required top-level `$schema` names the file's JSON Schema
   and so its version: `https://jazz.tools/schemas/jazz.app.v1.json`, resp.
   `https://jazz.tools/schemas/jazz.permissions.v1.json`. The writer puts it
@@ -833,6 +835,44 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   section lists them, a value on one line when its line fits in 100
   characters and expanded otherwise, and a trailing newline. Writing the same
   app twice gives the same bytes.
+
+**Generated files.** When TypeScript is an app's source, `npx jazz-tools
+generate` writes both files from it, and marks each with a top-level
+`$generated`, first after `$schema`:
+
+```json
+"$generated": {
+  "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+  "sha256": "3fa1c2d9…"
+}
+```
+
+- `by` is a string for people reading the file: what wrote it.
+- `sha256` is 64 lowercase hex characters: the SHA-256 of the file's
+  canonical text (the conventions above, as the writer prints it: two-space
+  indent, one line when it fits in 100 characters, a trailing newline,
+  UTF-8, no BOM) of the file's parsed JSON with the `$generated` member
+  removed, the other members in the order the file has them. For a file the
+  writer wrote, that is exactly the text it produces without the marker
+  (`artifact::write`), so the digest covers the bytes that are tool-written.
+- No other key is allowed in it. Loaders ignore it, but refuse a malformed
+  one (not an object, a missing or non-string `by`, a `sha256` that isn't 64
+  lowercase hex characters, another key).
+- `artifact::verify_generated(text)` tells a file with no marker
+  (`Unmarked`), one whose digest matches (`Matches`, unchanged since it was
+  written, give or take formatting: indent, line ends, a BOM) and one whose
+  digest doesn't (`Mismatch`, edited by hand since), so tools can refuse to
+  overwrite a hand edit. `artifact::write_generated(input, by)` writes the
+  files with the marker, `artifact::mark_generated(text, by)` marks one
+  text, and `artifact::rewrite(app, permissions, by?)` checks two readable
+  files as `load` does and re-renders them through the writer (keeping
+  migration `name`s; dropping `$comment`s), with the marker when asked. The
+  standalone `jazz-tools` binary can't read TypeScript: for an app with a
+  `schema.ts` in its directory, `src/` or `src/lib/`, its `generate` and
+  `migrations create` refuse, pointing to `npx jazz-tools generate`, while
+  `generate --check` (for CI gates) checks the committed files, their
+  `$generated` digests and the bindings, and notes that freshness from the
+  TypeScript is `npx jazz-tools generate --check`'s to check.
 
 #### `jazz.app.json`
 
@@ -965,7 +1005,6 @@ removes `slices`.
 | Field     | Type                      | Meaning                                                       |
 | --------- | ------------------------- | ------------------------------------------------------------- |
 | `$schema` | string                    | `https://jazz.tools/schemas/jazz.permissions.v1.json`, first. |
-| `defs`    | map signature → Policy    | Optional. Named, parameterised expressions.                   |
 | `tables`  | map table → TablePolicies | Every key must be a table of `jazz.app.json`'s `tables`.      |
 
 **TablePolicies** `{read?, insert?, update?, delete?}`. An absent operation
@@ -987,12 +1026,10 @@ There is no other form: every policy the engine holds has an expression
 string, so every policy a TS app can declare round-trips through this file
 as text.
 
-**`defs`.** A key is a signature `name($param, …)`. Its value is a Policy in
-which `$param` stands for a value. A call `name(arg, …)` passes values or
-column references, so `"isChatMember(this.id)"`. Definitions may call each
-other in any order, but never recursively (a cycle is refused), so every
-policy terminates. Files compiled from TS inline their helpers and have no
-`defs`.
+There are no named definitions: a policy says everything it checks. A
+`defs` key, which files written by hand for alpha.63–65 could hold, is
+refused with a hint to inline each definition or author the app in
+`schema.ts` (`jazz-tools upgrade` does both for an alpha.65 app).
 
 **Expressions.** SQL-like, with JSON's double quotes left to the file:
 string literals use single quotes, and a name that isn't a plain identifier
@@ -1005,7 +1042,7 @@ conjunction = negation , { "and" , negation } ;
 negation    = "not" , negation | atom ;
 atom        = "(" , expr , ")" | "true" | "false"
             | ( "anyOf" | "allOf" ) , "(" , [ expr , { "," , expr } ] , ")"
-            | exists | allowed | call | comparison ;
+            | exists | allowed | comparison ;
 
 comparison  = operand , ( cmp_op , operand
                         | "in" , ( list | session )
@@ -1015,9 +1052,8 @@ operand     = column | value ;
 column      = [ ( "this" | "outer" | name ) , "." ] , ( name | magic ) ;
 magic       = ( "$createdBy" | "$updatedBy" | "$deletedBy" ) , [ "." , ( "account" | "identity" ) ]
             | "$createdAt" | "$updatedAt" | "$deletedAt" ;
-value       = literal | "null" | session | param ;
+value       = literal | "null" | session ;
 session     = "session" , "." , name , { "." , name } ;
-param       = "$" , ident ;
 list        = "[" , [ value , { "," , value } ] , "]" ;
 
 literal     = string | number | "true" | "false" | typed ;
@@ -1038,7 +1074,6 @@ conditions  = expr , { "," , expr } ;
 allowed     = "allowedTo." , ( "read" | "insert" | "update" | "delete" ) , "(" ,
               ( name | "via" , [ name , "." ] , name ) ,
               [ "," , "maxDepth" , ":" , integer ] , ")" ;
-call        = ident , "(" , [ operand , { "," , operand } ] , ")" ;
 
 (* The relation IR, inside `exists ( … )`. *)
 query       = "from" , from_source , { clause } ;
@@ -1177,7 +1212,7 @@ jazz.permissions.json: tables.chatMembers.read.anyOf[1]:
 ```
 
 Names are suggested by edit distance among the columns, tables, relations,
-operations, keys or defs in scope; syntax errors (`==`, `"…"` strings, a
+operations or keys in scope; syntax errors (`==`, `"…"` strings, a
 missing `and`) add a correct example (`e.g. …`).
 
 **Loading.** `artifact::load(app, permissions)` checks both files: every

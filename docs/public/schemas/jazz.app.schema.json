@@ -10,6 +10,9 @@
     "$schema": {
       "type": "string"
     },
+    "$generated": {
+      "$ref": "#/$defs/generated"
+    },
     "$comment": {
       "type": "string"
     },
@@ -69,6 +72,21 @@
     }
   },
   "$defs": {
+    "generated": {
+      "type": "object",
+      "description": "Written by the tool that generated this file (npx jazz-tools generate, from the app's TypeScript); loaders ignore it. by says what wrote the file; sha256 is the hex SHA-256 of the file's canonical text without this member, so a file whose digest no longer matches was edited by hand since.",
+      "additionalProperties": false,
+      "required": ["by", "sha256"],
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
     "tables": {
       "type": "object",
       "propertyNames": {
