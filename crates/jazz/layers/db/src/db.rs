@@ -10173,18 +10173,6 @@ impl Db {
                     }
                 }
             }
-            // Refused before the precheck: a conflict found there would
-            // only be retried into this refusal.
-            if reads
-                .iter()
-                .any(|read| !matches!(read.through.source, ReadViewSourceSpec::Current))
-            {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "Committing a serializable transaction that read through a branch view to a \
-                     server is not supported yet",
-                ));
-            }
             // A read row the replica now holds at another version changed,
             // and the authority, which gets this replica's earlier writes
             // first, would refuse the commit too; so it is a conflict now.
@@ -10241,6 +10229,7 @@ impl Db {
                                     (*row.0.as_bytes(), by, seq)
                                 })
                                 .collect(),
+                            view: read.through.source.clone(),
                         })
                     })
                     .collect::<Result<Vec<_>, Error>>()?;
@@ -10915,6 +10904,24 @@ impl TxRef<'_> {
                     "Reading a snapshot inside a transaction is not supported yet",
                 ));
             }
+            // A live base needs nothing from the store; only a frozen one
+            // resolves its snapshot, under the store gate (which applies
+            // the staged writes of open transactions, so it is not taken
+            // for every branch read).
+            ReadViewSourceSpec::BranchView {
+                head,
+                base: None | Some(BranchViewBase::Current(_)),
+            } => Some(View {
+                head: head.clone(),
+                base: match source {
+                    ReadViewSourceSpec::BranchView {
+                        base: Some(BranchViewBase::Current(base)),
+                        ..
+                    } => Some(base.clone()),
+                    _ => None,
+                },
+                base_cut: None,
+            }),
             ReadViewSourceSpec::BranchView { .. } => {
                 let opts = ReadOpts {
                     read_view: ReadViewSpec {
