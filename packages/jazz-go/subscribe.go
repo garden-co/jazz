@@ -90,7 +90,8 @@ func subscribe[T any](ctx context.Context, db *DB, query any, decode func(event)
 	if err != nil {
 		return nil, err
 	}
-	return stream(ctx, db, decode, func(id uint64) (func(), error) {
+	sendAll := func(e event) (T, bool, bool) { v, last := decode(e); return v, last, false }
+	return stream(ctx, db, sendAll, func(id uint64) (func(), error) {
 		var cerr uintptr
 		sub := ffi.subscribe(db.handle, cstr(string(queryJSON)), ffi.subscriptionCallback, uintptr(id), &cerr)
 		if err := takeError(cerr); err != nil || sub == 0 {
@@ -105,9 +106,10 @@ func subscribe[T any](ctx context.Context, db *DB, query any, decode func(event)
 
 // stream runs a jazz-ffi callback stream that start begins (with the id
 // its callbacks get as context) and whose stop func ends it, sending what
-// decode makes of each callback, in order, until ctx is done or decode
-// says the value it made is the last (an error).
-func stream[T any](ctx context.Context, db *DB, decode func(event) (T, bool), start func(id uint64) (func(), error)) (<-chan T, error) {
+// decode makes of each callback, in order, until ctx is done, the DB
+// closes, or decode says the value it made is the last (an error); skip
+// ends the stream without sending it.
+func stream[T any](ctx context.Context, db *DB, decode func(event) (v T, last, skip bool), start func(id uint64) (func(), error)) (<-chan T, error) {
 	s := &subscriber{wake: make(chan struct{}, 1)}
 	id := nextSubscriber.Add(1)
 	subscribers.Store(id, s)
@@ -124,39 +126,69 @@ func stream[T any](ctx context.Context, db *DB, decode func(event) (T, bool), st
 		forget()
 		return nil, err
 	}
-	out := make(chan T)
-	go func() {
-		defer close(out)
-		stop := func() {
+	// stop ends jazz-ffi's side, once: no callback runs after it returns.
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
 			s.mu.Lock()
 			s.closed = true
 			s.mu.Unlock()
 			end()
-			// No callback runs after the stream's end returns.
 			forget()
-		}
+		})
+	}
+	// Close ends the stream too: it stops jazz-ffi's side at once (before
+	// the handle closes), and the stream then sends what was already
+	// queued and closes its channel.
+	closing := make(chan struct{})
+	var closeOnce sync.Once
+	db.streamsMu.Lock()
+	if db.streams == nil {
+		db.streams = map[uint64]func(){}
+	}
+	db.streams[id] = func() {
+		stop()
+		closeOnce.Do(func() { close(closing) })
+	}
+	db.streamsMu.Unlock()
+	out := make(chan T)
+	go func() {
+		defer close(out)
+		defer func() {
+			stop()
+			db.streamsMu.Lock()
+			delete(db.streams, id)
+			db.streamsMu.Unlock()
+		}()
+		draining := false
 		for {
 			s.mu.Lock()
 			events := s.queue
 			s.queue = nil
 			s.mu.Unlock()
 			for _, e := range events {
-				v, last := decode(e)
+				v, last, skip := decode(e)
+				if skip {
+					return
+				}
 				select {
 				case out <- v:
 				case <-ctx.Done():
-					stop()
 					return
 				}
 				if last {
-					stop()
 					return
 				}
 			}
+			if draining {
+				return
+			}
 			select {
 			case <-s.wake:
+			case <-closing:
+				// Nothing more arrives: send what is queued, then end.
+				draining = true
 			case <-ctx.Done():
-				stop()
 				return
 			}
 		}

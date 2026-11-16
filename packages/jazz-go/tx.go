@@ -41,8 +41,7 @@ func Serializable() TxOption {
 
 // Mergeable makes the transaction mergeable, as TS's default transaction:
 // its writes merge with concurrent ones, and its commit never fails with
-// ErrConflict. A libjazz_ffi without mergeable transactions refuses it
-// with ErrNotSupported.
+// ErrConflict.
 func Mergeable() TxOption {
 	return func(o *txOptions) { o.mergeable, o.serializable = true, false }
 }

@@ -130,6 +130,7 @@ func (db *DB) Shutdown(ctx context.Context) error {
 		}
 		return err
 	}
+	db.endStreams()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.handle == 0 {
