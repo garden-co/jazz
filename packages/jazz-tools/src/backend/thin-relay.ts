@@ -140,14 +140,26 @@ export class ThinRelay {
       const timedOut = new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), timeout);
       });
+      // A request the core keeps waiting is answered at the timeout, but
+      // the session's client serves one request at a time: the next one
+      // waits for this one to end (the answer deadline closes a socket
+      // whose requests wait too long).
+      const call = client.serve(request);
       let answer: Uint8Array | null | Error;
       try {
-        answer = await Promise.race([client.serve(request), timedOut]);
+        answer = await Promise.race([call, timedOut]);
       } catch (error) {
         answer = error instanceof Error ? error : new Error(String(error));
       } finally {
         clearTimeout(timer);
       }
+      const ended =
+        answer === null
+          ? call.then(
+              () => undefined,
+              () => undefined,
+            )
+          : undefined;
       if (this.ended) return;
       let messages: Uint8Array[];
       if (answer instanceof Uint8Array) {
@@ -172,6 +184,7 @@ export class ThinRelay {
       for (const message of messages) this.options.toClient(message);
       this.progressed();
       void this.release();
+      await ended;
     });
   }
 
