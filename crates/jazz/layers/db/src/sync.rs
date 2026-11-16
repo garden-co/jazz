@@ -3300,6 +3300,186 @@ pub(crate) enum Support {
 /// policy's arms would otherwise rebuild it arms^depth.
 type SupportMemo = HashMap<(String, usize), Rc<Vec<Support>>>;
 
+/// A followed key: table, column, whether the column is an array holding
+/// the value, and the value as bound (tag byte and bytes, so values of
+/// different SQL types never share a key; a real by its bits, so `0.0`
+/// and `-0.0` are two keys, which can only miss).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FollowKey(String, String, bool, Vec<u8>);
+
+impl FollowKey {
+    fn of(table: &str, column: &str, contains: bool, value: &Sql) -> Self {
+        let bytes = match value {
+            Sql::Null => vec![0],
+            Sql::Integer(v) => [&[1u8][..], &v.to_be_bytes()].concat(),
+            Sql::Real(v) => [&[2u8][..], &v.to_bits().to_be_bytes()].concat(),
+            Sql::Text(v) => [&[3u8][..], v].concat(),
+            Sql::Blob(v) => [&[4u8][..], v].concat(),
+        };
+        Self(table.to_owned(), column.to_owned(), contains, bytes)
+    }
+}
+
+/// While a server tick fans out to its sessions ([`Db::server_tick`]):
+/// the current rows each followed key found ([`Inner::followed_images`]),
+/// so the next session following the same key does not read them again.
+/// A session's own policies are applied to the rows afterwards, so what is
+/// kept is the same for every reader.
+///
+/// Kept rows are the store's rows only while nothing changed them. That
+/// is not assumed of the fan-out: the memo records where the connection
+/// stood when it kept them ([`FollowAt`]) and, on every use, drops all of
+/// it once a row changed on the connection since: an insert, update or
+/// delete by anyone (the store's own internal tables included), or a
+/// rollback, which changes rows back without counting as a change.
+///
+/// The store's connection is the only writer of its file in this process
+/// (the others are opened read-only), and a second process writing the
+/// file is outside the engine's contract everywhere. A change of schema
+/// alone moves neither count; the fan-out admits none, and an admission
+/// writes catalogue rows.
+///
+/// The slot stays borrowed across a follow read, so a read that came to
+/// follow another key itself would panic on the borrow, not reuse a
+/// half-kept memo.
+pub(crate) struct FollowMemo {
+    at: FollowAt,
+    by: HashMap<FollowKey, Rc<Vec<Image>>>,
+}
+
+/// Where a connection stood: its `total_changes()` and how many times it
+/// rolled back ([`crate::values::rollbacks`]). While both are as they
+/// were, every row is as it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FollowAt(u64, u64);
+
+impl FollowAt {
+    fn of(conn: &rusqlite::Connection) -> Self {
+        Self(conn.total_changes(), crate::values::rollbacks(conn))
+    }
+}
+
+impl FollowMemo {
+    /// Keep follow reads until the returned guard drops (the rest of the
+    /// tick); `at` is where the connection stands now.
+    fn arm(slot: &Rc<RefCell<Option<FollowMemo>>>, at: FollowAt) -> FollowMemoGuard {
+        *slot.borrow_mut() = Some(FollowMemo {
+            at,
+            by: HashMap::new(),
+        });
+        FollowMemoGuard(slot.clone())
+    }
+
+    /// What `key` found, unless a row changed since it was read.
+    fn get(&mut self, key: &FollowKey, at: FollowAt) -> Option<Rc<Vec<Image>>> {
+        if at != self.at {
+            follow_memo_count(|stats| stats.dropped += u64::from(!self.by.is_empty()));
+            self.by.clear();
+            self.at = at;
+        }
+        let found = self.by.get(key).cloned();
+        follow_memo_count(|stats| {
+            if found.is_some() {
+                stats.hits += 1;
+            } else {
+                stats.misses += 1;
+            }
+        });
+        found
+    }
+
+    /// Keep what `key` found, read after the [`Self::get`] that missed
+    /// it: the memo stands where the connection stood before the read, so
+    /// rows that changed during it are dropped by the next use.
+    fn put(&mut self, key: FollowKey, images: Rc<Vec<Image>>) {
+        self.by.insert(key, images);
+    }
+}
+
+/// Disarms the [`FollowMemo`] when dropped, on every way out of the tick.
+struct FollowMemoGuard(Rc<RefCell<Option<FollowMemo>>>);
+
+impl Drop for FollowMemoGuard {
+    fn drop(&mut self) {
+        *self.0.borrow_mut() = None;
+    }
+}
+
+/// Follow-memo uses on this thread (tests only): rows reused, read, and
+/// memos dropped because a row changed while they were kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(any(test, feature = "testing")), allow(dead_code))]
+pub struct FollowMemoStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub dropped: u64,
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static FOLLOW_MEMO_STATS: StdCell<FollowMemoStats> = StdCell::new(FollowMemoStats::default());
+    static FOLLOW_MEMO_ORACLE: StdCell<bool> = const { StdCell::new(false) };
+    static FOLLOW_READ_HOOK: RefCell<Option<FollowReadHook>> = RefCell::new(None);
+}
+
+/// Tests only: what [`set_follow_read_hook_for_test`] runs, given the
+/// store's connection and the table and column just read.
+#[cfg(any(test, feature = "testing"))]
+pub type FollowReadHook = Box<dyn FnMut(&rusqlite::Connection, &str, &str)>;
+
+fn follow_memo_count(f: impl FnOnce(&mut FollowMemoStats)) {
+    #[cfg(any(test, feature = "testing"))]
+    FOLLOW_MEMO_STATS.with(|cell| {
+        let mut stats = cell.get();
+        f(&mut stats);
+        cell.set(stats);
+    });
+    #[cfg(not(any(test, feature = "testing")))]
+    let _ = f;
+}
+
+/// Tests only: this thread's follow-memo counts so far.
+#[cfg(any(test, feature = "testing"))]
+pub fn follow_memo_stats_for_test() -> FollowMemoStats {
+    FOLLOW_MEMO_STATS.with(StdCell::get)
+}
+
+/// Whether every reused follow read is compared with a fresh one.
+fn follow_memo_oracle() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        FOLLOW_MEMO_ORACLE.with(StdCell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        false
+    }
+}
+
+/// Tests only: compare every reused follow read with a fresh one, on this
+/// thread, and panic where they differ.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_follow_memo_oracle_for_test(on: bool) {
+    FOLLOW_MEMO_ORACLE.with(|cell| cell.set(on));
+}
+
+/// Tests only: run `hook` on the store's connection right after each
+/// follow read a tick keeps (standing in for a write or a rollback a
+/// later change might make inside the fan-out).
+#[cfg(any(test, feature = "testing"))]
+pub fn set_follow_read_hook_for_test(hook: Option<FollowReadHook>) {
+    FOLLOW_READ_HOOK.with(|cell| *cell.borrow_mut() = hook);
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn follow_read_hook(conn: &rusqlite::Connection, table: &str, column: &str) {
+    FOLLOW_READ_HOOK.with(|cell| {
+        if let Some(hook) = cell.borrow_mut().as_mut() {
+            hook(conn, table, column);
+        }
+    });
+}
+
 /// Which walks of a key [`Inner::follow_value`] counts as the same: a table's
 /// policy support at any depth (what a key's rows reach at a depth, they reach
 /// at any deeper one), any other nested support by its node.
@@ -4206,6 +4386,53 @@ impl Inner {
         )?)
     }
 
+    /// The current rows of `table` whose `column` is `value` (or,
+    /// `contains`, whose array `column` holds it), for every reader: a
+    /// session's policies are applied to them afterwards. While a server
+    /// tick fans out ([`FollowMemo`]), one read serves every session that
+    /// follows the same key.
+    fn followed_images(
+        &self,
+        table: &str,
+        column: &str,
+        contains: bool,
+        value: &Sql,
+    ) -> Result<Rc<Vec<Image>>, Error> {
+        let read = || {
+            let filter = if column == "id" {
+                "id = ?1".to_owned()
+            } else if contains {
+                format!(
+                    "EXISTS (SELECT 1 FROM json_each({}) AS r WHERE unhex(replace(r.value, '-', '')) = ?1)",
+                    quote(column)
+                )
+            } else {
+                format!("{} = ?1", quote(column))
+            };
+            self.images_where(table, false, &filter, &[value])
+        };
+        let mut memo = self.follow_memo.borrow_mut();
+        let Some(memo) = memo.as_mut() else {
+            return Ok(Rc::new(read()?));
+        };
+        let key = FollowKey::of(table, column, contains, value);
+        let at = FollowAt::of(&self.conn);
+        if let Some(images) = memo.get(&key, at) {
+            if follow_memo_oracle() {
+                assert!(
+                    read()? == *images,
+                    "a kept follow read of {table}.{column} differs from a fresh one"
+                );
+            }
+            return Ok(images);
+        }
+        let images = Rc::new(read()?);
+        memo.put(key, images.clone());
+        #[cfg(any(test, feature = "testing"))]
+        follow_read_hook(&self.conn, table, column);
+        Ok(images)
+    }
+
     /// Ship the readable rows of `table` whose `column` is `value` (or,
     /// `contains`, whose array `column` holds it) and their nested
     /// support, watching the correlation so later writes reach the replica.
@@ -4262,17 +4489,10 @@ impl Inner {
                 first.insert(depth);
             }
         }
-        let filter = if column == "id" {
-            "id = ?1".to_owned()
-        } else if contains {
-            format!(
-                "EXISTS (SELECT 1 FROM json_each({}) AS r WHERE unhex(replace(r.value, '-', '')) = ?1)",
-                quote(column)
-            )
-        } else {
-            format!("{} = ?1", quote(column))
-        };
-        for found in self.images_where(table, false, &filter, &[&value])? {
+        for found in self
+            .followed_images(table, column, contains, &value)?
+            .iter()
+        {
             let row = RowUuid::from_bytes(found.id);
             let can = readable(
                 self,
@@ -4298,7 +4518,7 @@ impl Inner {
             // a new correlation's row.
             let ship = self.ships(
                 table,
-                &found,
+                found,
                 unwatched || fresh,
                 floor,
                 follow.identity,
@@ -4311,7 +4531,7 @@ impl Inner {
                 follow.out.push(found.clone());
             }
             if !nested.is_empty() {
-                self.follow_support(nested, &found, below, follow)?;
+                self.follow_support(nested, found, below, follow)?;
             }
         }
         Ok(())
@@ -11789,6 +12009,10 @@ impl Db {
         }
         self.notify();
         let mut inner = self.inner.borrow_mut();
+        // From here the tick ships to its sessions: what one session's
+        // followed key finds, the next session's finds too, unless a row
+        // changed on the connection meanwhile (checked on every use).
+        let _follow_memo = FollowMemo::arm(&inner.follow_memo, FollowAt::of(&inner.conn));
         let through = inner.served_through();
         let relaying = inner.relays_upstream();
         let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
