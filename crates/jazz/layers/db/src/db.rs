@@ -619,7 +619,7 @@ pub struct SchemaPublication {
 }
 
 struct Inner {
-    conn: Connection,
+    conn: crate::storage::Storage,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -1960,7 +1960,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn,
+                conn: conn.into(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
