@@ -11,9 +11,9 @@ in, and syncs through your backend's Jazz endpoint. The Swift package wraps the 
 `async`, and subscriptions are `AsyncSequence`s.
 
 Jazz for Swift is for macOS and iOS apps (Swift 6.0 or newer, Xcode 16 or newer; macOS 13 and iOS
-16 or newer). Each release's package is checked on macOS, where an app builds and runs, and built
-for the iOS simulator; iOS and macOS UI apps aren't tested yet (see
-[Not supported yet](#not-supported-yet)).
+16 or newer). Each release's package runs its tests on macOS and on an iPhone simulator against the
+prebuilt core, and the StagePlan SwiftUI example (`examples/stage-plan/apps/swiftui`) is built for
+macOS and UI-tested on the iPhone simulator.
 
 ## Install
 
@@ -250,8 +250,7 @@ you try. They return `true`, `false`, or `nil` when there's nothing to ask, such
 
 Not supported yet:
 
-- iOS, iPadOS and macOS UI apps: each release's package runs a command-line app on macOS and builds
-  for the iOS simulator, but UI apps aren't tested yet. watchOS, tvOS and visionOS aren't built.
+- watchOS, tvOS and visionOS: they aren't built (the Jazz core's Rust targets for them are tier 3).
 - Linux: there's no prebuilt core. Ask on [Discord](https://discord.gg/RN9UKh52be) if you need it.
 - A SwiftUI `Binding` for `JazzText`.
 - Running a backend in Swift (publishing permissions, acting for users) or serving the app's Jazz

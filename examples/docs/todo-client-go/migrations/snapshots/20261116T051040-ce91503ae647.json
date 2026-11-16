@@ -13,7 +13,7 @@
       "todos": {
         "kind": "reverse",
         "table": "todos",
-        "relation": "projectRelation"
+        "relation": "project"
       }
     }
   },
@@ -51,7 +51,14 @@
         "column_type": {
           "type": "Uuid"
         },
-        "name": "parent",
+        "name": "owner_id",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "parentId",
         "nullable": true,
         "references": "todos"
       },
@@ -59,26 +66,26 @@
         "column_type": {
           "type": "Uuid"
         },
-        "name": "project",
+        "name": "projectId",
         "nullable": true,
         "references": "projects"
       }
     ],
     "relations": {
-      "parentRelation": {
+      "parent": {
         "kind": "forward",
         "table": "todos",
-        "column": "parent"
+        "column": "parentId"
+      },
+      "project": {
+        "kind": "forward",
+        "table": "projects",
+        "column": "projectId"
       },
       "children": {
         "kind": "reverse",
         "table": "todos",
-        "relation": "parentRelation"
-      },
-      "projectRelation": {
-        "kind": "forward",
-        "table": "projects",
-        "column": "project"
+        "relation": "parent"
       }
     }
   }

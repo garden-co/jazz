@@ -9,7 +9,7 @@ An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app-s
 
 - **The app is authored in `schema.ts`.** It declares the tables and relations (`s.defineSchema`) and who may do what (`definePermissions`). `npx jazz-tools generate` writes `jazz.app.json` (the tables, with their history and migrations), `jazz.permissions.json` and `src/jazz_app.rs`, the typed bindings. All of them are committed. The service reads only the generated files: nothing runs `schema.ts` at runtime, and there is no Node in the service.
 - **Typed bindings.** `jazz_app::Todo`, `NewTodo` and `TodoUpdate`, plus `todos::query()`, `todos::done().eq(false)` and `todos::todos_via_parent().of(id)`.
-- **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app_support::Jazz`. The handle lives directly in Axum's router state, while the client runs on a thread of its own.
+- **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app::Jazz` (the bindings re-export everything `jazz-app-support` exports). The handle lives directly in Axum's router state, while the client runs on a thread of its own.
 - **Running as a backend client**, as TypeScript's `createJazzClient` does:
   - It connects to the main backend's `/jazz` with `Config::credential`.
   - The main backend decides what the credential is trusted as. A **scoped** client acts as one user, under the app's permissions. A **trusted** client acts as the system.

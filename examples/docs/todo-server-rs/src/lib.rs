@@ -9,6 +9,7 @@
 pub mod credential;
 pub mod docs_snippets;
 pub mod jazz_app;
+pub mod required_references;
 mod routes;
 
 pub use routes::{CreateTodoRequest, Stopping, Todo, UpdateTodoRequest, router, router_until};
