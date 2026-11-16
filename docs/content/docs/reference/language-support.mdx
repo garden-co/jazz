@@ -17,6 +17,8 @@ lists what that language doesn't support yet, compared with TypeScript.
 
     - connecting as a trusted machine (`as: "backend"`), and `forUser(userId)` on such a client:
       Rust connects as a scoped one, a machine your main backend trusts as a user;
+    - on a scoped client, rows your main backend itself writes (with `jazz.db`) don't reach it yet;
+      writes from the client do reach the main backend;
     - subscribing to history reads, and partial reads of large values (use `jazz.with_client(…)` for
       the low-level client).
 
