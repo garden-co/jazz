@@ -241,7 +241,7 @@ jobs:
   test-go:
     if: inputs.scope == 'full'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -252,6 +252,9 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # The artifact lock path, safe.directory and pnpm install, as test-ts:
+      # the go partition builds jazz-tools for its TS main-backend e2e.
+      - uses: ./.github/actions/setup-blacksmith
       - name: Build and test the Go bindings and the StagePlan Go example
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition go
 

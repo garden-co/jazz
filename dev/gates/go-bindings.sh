@@ -50,3 +50,10 @@ done
 # The race detector needs cgo; purego runs under it too.
 (cd packages/jazz-go && CGO_ENABLED=1 go test -race ./...)
 (cd examples/stage-plan/apps/go-cli && CGO_ENABLED=1 go test -race -v ./...)
+
+# The same suite with StagePlan's main backend in TypeScript (createJazz,
+# go-cli/ts-main) as the server, and Go backend clients of it: needs the
+# repository's jazz-tools build (the go partition makes it).
+if [ "${JAZZ_GO_TS_MAIN_BACKEND:-}" = "1" ]; then
+  (cd examples/stage-plan/apps/go-cli && JAZZ_MAIN_BACKEND=ts CGO_ENABLED=1 go test -race -v -count=1 ./...)
+fi
