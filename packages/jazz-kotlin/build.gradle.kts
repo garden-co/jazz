@@ -1,0 +1,137 @@
+// jazz-kotlin: the Kotlin/JVM runtime for Jazz apps, over jazz-ffi.
+//
+// `gradle build` (Gradle 8.14; no wrapper is committed) first builds crates/jazz-ffi with
+// cargo and generates its Kotlin bindings with uniffi-bindgen; pass
+// -PjazzFfi=skip to build without them (tests then use a fake native).
+
+plugins {
+    kotlin("jvm") version "2.2.21"
+    kotlin("plugin.serialization") version "2.2.21"
+    `java-library`
+}
+
+group = "tools.jazz"
+version = "2.0.0-alpha.66"
+
+repositories { mavenCentral() }
+
+dependencies {
+    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("net.java.dev.jna:jna:5.17.0")
+    testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+kotlin {
+    // The sources uniffi-bindgen generates declare no visibility.
+    explicitApiWarning()
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
+}
+
+val repo = rootDir.resolve("../..").canonicalFile
+val withFfi = (findProperty("jazzFfi") as String?) != "skip"
+val cargoProfile = (findProperty("cargoProfile") as String?) ?: "debug"
+val ffiLib = repo.resolve(
+    "target/$cargoProfile/" + when {
+        System.getProperty("os.name").lowercase().startsWith("mac") -> "libjazz_ffi.dylib"
+        System.getProperty("os.name").lowercase().startsWith("windows") -> "jazz_ffi.dll"
+        else -> "libjazz_ffi.so"
+    },
+)
+val uniffiOut = layout.buildDirectory.dir("generated/uniffi")
+
+val cargoBuildFfi by tasks.registering(Exec::class) {
+    description = "Builds crates/jazz-ffi."
+    workingDir = repo
+    commandLine(listOf("cargo", "build", "-p", "jazz-ffi") + if (cargoProfile == "release") listOf("--release") else emptyList())
+}
+
+val generateUniffi by tasks.registering(Exec::class) {
+    description = "Generates jazz-ffi's Kotlin bindings with uniffi-bindgen."
+    dependsOn(cargoBuildFfi)
+    workingDir = repo
+    inputs.file(ffiLib)
+    outputs.dir(uniffiOut)
+    commandLine(
+        "cargo", "run", "-q", "-p", "jazz-ffi", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
+        "generate", "--library", ffiLib.path, "--language", "kotlin", "--no-format",
+        "--out-dir", uniffiOut.get().asFile.path,
+    )
+}
+
+if (withFfi) {
+    sourceSets.main {
+        kotlin.srcDir("src/ffi/kotlin")
+        kotlin.srcDir(uniffiOut)
+    }
+    tasks.named("compileKotlin") { dependsOn(generateUniffi) }
+    // JNA loads libjazz_ffi from the classpath, at <os>-<arch>/ (linux-x86-64,
+    // linux-aarch64, darwin-aarch64, darwin-x86-64, win32-x86-64). A
+    // distribution jar bundles every platform's from -PnativeLibs=<dir>, laid
+    // out so (dev/scripts/build-kotlin-dist.sh); otherwise this platform's own.
+    val nativeLibs = findProperty("nativeLibs") as String?
+    if (nativeLibs != null) {
+        sourceSets.main { resources.srcDir(file(nativeLibs)) }
+    } else {
+        val bundleFfi by tasks.registering(Copy::class) {
+            dependsOn(cargoBuildFfi)
+            from(ffiLib)
+            into(layout.buildDirectory.dir("ffi-resources/${jnaPrefix()}"))
+        }
+        sourceSets.main { resources.srcDir(layout.buildDirectory.dir("ffi-resources")) }
+        tasks.named("processResources") { dependsOn(bundleFfi) }
+    }
+}
+
+/** JNA's resource prefix for the platform this build runs on. */
+fun jnaPrefix(): String {
+    val os = System.getProperty("os.name").lowercase()
+    val arch = when (val a = System.getProperty("os.arch").lowercase()) {
+        "amd64", "x86_64" -> "x86-64"
+        "arm64", "aarch64" -> "aarch64"
+        else -> a
+    }
+    return when {
+        os.startsWith("mac") -> "darwin-$arch"
+        os.startsWith("windows") -> "win32-$arch"
+        else -> "linux-$arch"
+    }
+}
+
+// jazz-codegen's Kotlin goldens must compile against this runtime: chat-react
+// (the widest types) with the tests, kotlin-edges (names that could hide
+// packages or members) on its own, as both declare package jazzapp.
+sourceSets.test { kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/chat-react")) }
+val edges = sourceSets.create("edges") {
+    kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/kotlin-edges"))
+    compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+}
+// Goldens with tests of their own (each declares package jazzapp, so each
+// gets a source set): kotlin-computed (transforms, computed fields).
+fun goldenTest(name: String, app: String): TaskProvider<Test> {
+    val set = sourceSets.create(name) {
+        kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/$app"))
+        compileClasspath += sourceSets.main.get().output + sourceSets.test.get().output +
+            configurations.testCompileClasspath.get()
+        runtimeClasspath += output + compileClasspath + configurations.testRuntimeClasspath.get()
+    }
+    return tasks.register<Test>(name) {
+        testClassesDirs = set.output.classesDirs
+        classpath = set.runtimeClasspath
+        useJUnitPlatform()
+    }
+}
+val goldenTests = listOf(goldenTest("computedTest", "kotlin-computed"))
+tasks.named("check") { dependsOn("compileEdgesKotlin", goldenTests) }
+tasks.named("test") { dependsOn("compileEdgesKotlin"); finalizedBy(goldenTests) }
+
+tasks.test {
+    useJUnitPlatform()
+    systemProperty("jna.library.path", ffiLib.parentFile.path)
+}
