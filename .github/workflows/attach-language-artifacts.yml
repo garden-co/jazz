@@ -121,8 +121,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
 
