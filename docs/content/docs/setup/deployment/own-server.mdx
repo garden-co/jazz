@@ -1,7 +1,7 @@
 ---
 title: Your Own Server
 description: "Learn how to run Jazz in your own Node server, VM or container, with the data in SQLite on its disk."
-languageTabs: backend
+languageTabs: main-backend
 ---
 
 On your own machine, Jazz is part of your backend's process, with the data in a directory on its
@@ -15,42 +15,21 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 ## Create Jazz once
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    ```ts title="jazz.server.ts"
-    import { createJazz, sqlite } from "jazz-tools/backend";
-    import { app } from "./jazz.generated";
-    import permissions from "./jazz.permissions.json" with { type: "json" };
+```ts title="jazz.server.ts"
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
-    export const jazz = createJazz({
-      app,
-      permissions,
-      store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
-      // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
-      authenticate: async (request) => null,
-    });
-    ```
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
+});
+```
 
-    <include>../../../partials/main-backend-config.mdx</include>
-
-  </Tab>
-  <Tab value="Rust">
-    <include>../../../partials/backend-jazz-server.mdx</include>
-
-    <include>../../../partials/backend-connect-rust.mdx</include>
-
-    <include>../../../partials/backend-serve-rust.mdx</include>
-
-  </Tab>
-  <Tab value="Go">
-    <include>../../../partials/backend-jazz-server.mdx</include>
-
-    <include>../../../partials/backend-connect-go.mdx</include>
-
-    <include>../../../partials/backend-serve-go.mdx</include>
-
-  </Tab>
-</Tabs>
+<include>../../../partials/main-backend-config.mdx</include>
 
 The examples on this page are ES modules and use top-level `await`, so the backend package needs
 `"type": "module"` (or `.mts` files). `jazz.generated.ts` must be an ES module too. In a CommonJS
@@ -223,8 +202,8 @@ the core's address or secret. Your backend sends its schema, migrations and perm
 on start, and tells the core who each user is; the core does no auth of its own and trusts only the
 holder of the app's admin secret. Keep it server-side, like a database password.
 
-A TypeScript backend always runs Jazz inside it, so it needs no separate Jazz server. A Rust or Go
-backend uses one for now (see the Rust and Go tabs above).
+Jazz always runs inside a backend like this one. There is no separate Jazz server to install or
+run.
 
 ## Coming from the alpha.59 server
 

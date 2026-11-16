@@ -1,7 +1,7 @@
 ---
 title: Jazz Cloud (deprecated)
 description: "Learn how to keep your app's data on Jazz Cloud, with your own backend in front for auth."
-languageTabs: backend
+languageTabs: main-backend
 ---
 
 <Callout type="warn" title="Deprecated">
@@ -35,70 +35,39 @@ JAZZ_SERVER_URL="https://v2.sync.jazz.tools/"
 JAZZ_ADMIN_SECRET="<admin secret>"
 ```
 
-Then open the app in your backend's language. The TypeScript backend points `createJazz` at Jazz
-Cloud; a Rust or Go backend connects to the same sync URL with the same admin secret.
+Then point `createJazz` at Jazz Cloud with the `remote()` store:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    Point `createJazz` at Jazz Cloud with the `remote()` store:
+```ts title="jazz.server.ts"
+import { createJazz, remote } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
-    ```ts title="jazz.server.ts"
-    import { createJazz, remote } from "jazz-tools/backend";
-    import { app } from "./jazz.generated";
-    import permissions from "./jazz.permissions.json" with { type: "json" };
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: remote({
+    appId: process.env.JAZZ_APP_ID!,
+    url: process.env.JAZZ_SERVER_URL!,
+    secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
+  }),
+  // Who is signed in, read from your own auth's session.
+  authenticate: async (request) => {
+    const session = await getSession(request);
+    if (!session) return null;
+    return {
+      userId: session.user.id,
+      expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+    };
+  },
+});
+```
 
-    export const jazz = createJazz({
-      app,
-      permissions,
-      store: remote({
-        appId: process.env.JAZZ_APP_ID!,
-        url: process.env.JAZZ_SERVER_URL!,
-        secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
-      }),
-      // Who is signed in, read from your own auth's session.
-      authenticate: async (request) => {
-        const session = await getSession(request);
-        if (!session) return null;
-        return {
-          userId: session.user.id,
-          expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
-        };
-      },
-    });
-    ```
-
-    <include>../../../partials/main-backend-config.mdx</include>
-
-  </Tab>
-  <Tab value="Rust">
-    <include>../../../partials/backend-connect-rust.mdx</include>
-  </Tab>
-  <Tab value="Go">
-    <include>../../../partials/backend-connect-go.mdx</include>
-  </Tab>
-</Tabs>
+<include>../../../partials/main-backend-config.mdx</include>
 
 On start, your backend applies its schema, migrations and permissions to the app on Jazz Cloud. For each request it tells Jazz Cloud who the user is, which is why `authenticate` lives in your backend. Browsers sync with your backend under `/jazz`, never with Jazz Cloud directly.
 
 <include>../../../partials/main-backend-mount.mdx</include>
 
 <include>../../../partials/main-backend-use.mdx</include>
-
-## Serve your users from Rust or Go
-
-A Rust or Go backend serves the same `/jazz` routes as `createJazz`, and acts as a request's user in
-your own routes, like `jazz.forReqUser(request)`:
-
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    See [Mount it](#mount-it) and [User-scoped use](#user-scoped-use) above.
-  </Tab>
-  <Tab value="Rust">
-    <include>../../../partials/backend-serve-rust.mdx</include>
-  </Tab>
-  <Tab value="Go">
-    <include>../../../partials/backend-serve-go.mdx</include>
-  </Tab>
-</Tabs>
 
 {/* TODO, coming next: limits and pricing; moving an app off Jazz Cloud onto your own deployment */}

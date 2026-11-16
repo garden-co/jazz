@@ -1,51 +1,34 @@
 ---
 title: Language Support
-description: "What each language's Jazz support doesn't do yet, compared with TypeScript."
+description: "What each language does in a Jazz app, and what it doesn't support yet, compared with TypeScript."
 ---
 
-TypeScript has all of Jazz. The other languages open the same `jazz.app.json` and
-`jazz.permissions.json`, with bindings generated from them, and this page lists what each of them
-doesn't support yet. Rust and Go run your [main backend](/docs/setup/deployment/own-server#create-jazz-once);
-Swift and Kotlin are for apps.
+Every language opens the same `jazz.app.json` and `jazz.permissions.json`, with bindings generated
+from them. Your app's main backend runs in TypeScript ([Vercel](/docs/setup/deployment/vercel) or
+[your own server](/docs/setup/deployment/own-server)). Rust and Go run as
+[backend clients](/docs/setup/backend-client) of it, and Swift and Kotlin are for apps. Each tab
+lists what that language doesn't support yet, compared with TypeScript.
 
 <Tabs groupId="jazz-environment" items={["Rust", "Go"]} persist updateAnchor>
   <Tab value="Rust">
-    In Rust, Jazz doesn't support these yet:
+    Rust is a backend client: a service that reads and writes your app's data through your main
+    backend's `/jazz`. It doesn't run a main backend, serve your users, or run Jazz's core in its
+    own process. As a backend client, it doesn't support yet:
 
+    - connecting as a trusted machine (`as: "backend"`), and `forUser(userId)` on such a client:
+      Rust connects as a scoped one, a machine your main backend trusts as a user;
     - includes, `select` and recursive queries (use `jazz.with_client(…)` for the low-level client);
     - payload enums;
-    - a handle with the backend's own authority, where your permissions aren't checked (TS `jazz.db`):
-      the backend's handle acts as the user you name in `Backend::new`;
-    - running the sync server in the backend's process (TS `sqlite()` and `memory()` stores): point
-      `Config::server` at a Jazz server;
-    - `linkIdentity`;
-    - connecting to a main backend as a trusted backend client (`as: "backend"`), and `forUser(userId)` on such a client: Rust connects as a scoped one only.
-
-    The endpoint doesn't support these yet:
-
-    - linking a device account to a signed-in user (`backend-link`);
-    - trusted backend clients (`backendClients`);
-    - the HTTP-stream transport, for hosts without WebSockets: clients connect over the WebSocket;
-    - renewing a cookie session in place: sessions reconnect at their expiry instead;
-    - `revokeUser`;
-    - `refresh`;
-    - `allowedOrigins` and `publicUrl`;
-    - device-account proofs signed for the endpoint's URL: only the app id is accepted;
-    - `withAttribution`;
-    - the Inspector (`inspect`);
-    - on a user's handle (`for_user`): permission advice, byte-range reads and streaming inserts.
+    - `linkIdentity`.
 
   </Tab>
   <Tab value="Go">
-    What TypeScript's main backend (`createJazz`) does that Go's doesn't yet:
+    Go is meant to be a backend client: a service that reads and writes your app's data through
+    your main backend's `/jazz`. It doesn't run a main backend or serve your users. It doesn't
+    support yet:
 
-    - a backend-authority handle (TS `jazz.db`): reads and writes that bypass permissions, as the system;
-    - `jazz.revokeUser` (ending a user's sessions) and the `refresh` hook;
-    - trusted backend clients (`backendClients`);
-    - linking a device account to a user (the endpoint's `backend-link` routes);
-
-    And in reading and writing:
-
+    - connecting as a backend client with a machine credential, trusted or scoped, and
+      `forUser(userId)`;
     - guest (anonymous) users;
     - history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
       select columns or be subscribed to yet;
