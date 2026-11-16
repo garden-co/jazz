@@ -3955,11 +3955,11 @@ mod tests {
         }
     }
 
-    fn thin_query(transaction: Option<&str>) -> jazz::thin::ThinOp {
+    fn thin_query() -> jazz::thin::ThinOp {
         jazz::thin::ThinOp::Query {
             query: postcard::to_allocvec(&jazz::query::Query::from("docs")).unwrap(),
             options: Vec::new(),
-            transaction: transaction.map(str::to_owned),
+            transaction: None,
         }
     }
 
@@ -3983,9 +3983,9 @@ mod tests {
             .unwrap();
     }
 
-    /// A thin session's read of offloaded leaves after a restart, inside
-    /// and outside a transaction, waits for the fetch lane instead of
-    /// fetching on the store thread, and answers once they landed. While
+    /// A thin session's read of offloaded leaves after a restart waits for
+    /// the fetch lane instead of fetching on the store thread, and answers
+    /// once they landed. While
     /// the bucket does not answer, the store thread serves everyone else,
     /// and the session's next request waits behind the parked one.
     #[test]
@@ -4003,8 +4003,8 @@ mod tests {
         rt.block_on(async {
             let (session, mut stream) = thin_docs_session(&runtime).await;
             bucket.state.stall_gets.store(true, Ordering::Relaxed);
-            send_thin(&runtime, session, 1, thin_query(None)).await;
-            send_thin(&runtime, session, 2, thin_query(None)).await;
+            send_thin(&runtime, session, 1, thin_query()).await;
+            send_thin(&runtime, session, 2, thin_query()).await;
             assert_eq!(
                 next_thin(&mut stream, Duration::from_millis(500)).await,
                 None,
@@ -4022,8 +4022,17 @@ mod tests {
         });
         assert!(bucket.state.calls.gets.load(Ordering::Relaxed) > 0);
         store.close().unwrap();
+    }
 
-        // A transaction's read, after another restart.
+    /// Between a thin session's requests the core holds no transaction or
+    /// savepoint open (SPEC 8.14), as a Durable Object can't: once a session
+    /// asked to begin a transaction and stage a write in it, another
+    /// connection to the store's SQLite file takes its write lock at once.
+    #[test]
+    fn the_core_holds_nothing_open_between_thin_requests() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = StorageConfig::data_dir(dir.path());
         let store = AppStore::open(&storage).unwrap();
         let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
         rt.block_on(async {
@@ -4035,21 +4044,41 @@ mod tests {
                 1,
                 jazz::thin::ThinOp::Begin {
                     transaction: transaction.to_owned(),
-                    kind: "serializable".to_owned(),
+                    kind: "mergeable".to_owned(),
                 },
             )
             .await;
-            assert_eq!(
-                next_thin(&mut stream, Duration::from_secs(5)).await,
-                Some((1, jazz::thin::ThinBody::Ok))
+            let begun = next_thin(&mut stream, Duration::from_secs(5)).await;
+            assert!(
+                matches!(&begun, Some((1, jazz::thin::ThinBody::Error { code, .. }))
+                    if code == jazz::thin::TRANSACTIONS_NOT_ON_CORE),
+                "{begun:?}"
             );
-            send_thin(&runtime, session, 2, thin_query(Some(transaction))).await;
-            let (answered, body) = next_thin(&mut stream, Duration::from_secs(20))
-                .await
-                .expect("the transaction's read answers");
-            assert_eq!(answered, 2);
-            assert_eq!(thin_body(body), value);
+            send_thin(
+                &runtime,
+                session,
+                2,
+                jazz::thin::ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: Vec::new(),
+                    options: Vec::new(),
+                    transaction: Some(transaction.to_owned()),
+                },
+            )
+            .await;
+            assert!(
+                next_thin(&mut stream, Duration::from_secs(5))
+                    .await
+                    .is_some()
+            );
+            store_thread_is_free(&runtime).await;
         });
+        // The session is still open: whatever it began would still be held.
+        let other = rusqlite::Connection::open(dir.path().join("jazz.sqlite")).unwrap();
+        other
+            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
+            .expect("no write lock held between requests");
+        drop(other);
         store.close().unwrap();
     }
 
@@ -4069,7 +4098,7 @@ mod tests {
         rt.block_on(async {
             let (session, mut stream) = thin_docs_session(&runtime).await;
             bucket.state.failing.store(true, Ordering::Relaxed);
-            send_thin(&runtime, session, 1, thin_query(None)).await;
+            send_thin(&runtime, session, 1, thin_query()).await;
             let (answered, body) = next_thin(&mut stream, Duration::from_secs(20))
                 .await
                 .expect("refused, not left waiting");
@@ -4079,7 +4108,7 @@ mod tests {
                 "{body:?}"
             );
             let asked = bucket.state.calls.requests.load(Ordering::Relaxed);
-            send_thin(&runtime, session, 2, thin_query(None)).await;
+            send_thin(&runtime, session, 2, thin_query()).await;
             let (answered, body) = next_thin(&mut stream, Duration::from_secs(1))
                 .await
                 .expect("refused at once while fetches back off");

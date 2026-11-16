@@ -595,6 +595,12 @@ mod tests {
     }
 }
 
+/// The error code a core answers a thin transaction request with: it
+/// holds no transaction open between calls, so the app's backend serves a
+/// thin session's transactions (SPEC 8.14). A client that sees it talks to
+/// the core through a backend from before that.
+pub const TRANSACTIONS_NOT_ON_CORE: &str = "transactions_not_on_core";
+
 /// The most bytes one thin request or response may take on the wire, split
 /// into [`ThinPart`]s; a larger one is refused before it is sent.
 pub const MAX_THIN_MESSAGE_BYTES: usize = 32 * 1024 * 1024;

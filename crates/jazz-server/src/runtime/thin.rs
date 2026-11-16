@@ -8,16 +8,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use jazz::binding_codec;
 use jazz::binding_host::{
-    EventChunk, TransactionKind, decode_cells, decode_schema, delete_options, event_chunk,
-    insert_options, open_transaction, read_opts, restore_options, update_options, upsert_options,
+    EventChunk, decode_cells, decode_schema, delete_options, event_chunk, insert_options,
+    read_opts, restore_options, update_options, upsert_options,
 };
 use jazz::db::{
-    Db, Error, ErrorCode, LargeValueUpdate, OriginWrite, SerializedReadResult,
-    StreamingMutationKind, StreamingValueUpload, SubscriptionEvent, SubscriptionStream,
-    UpdateOptions, WriteHandle, WriteIdentity, block_on,
+    Db, Error, LargeValueUpdate, OriginWrite, SerializedReadResult, StreamingMutationKind,
+    StreamingValueUpload, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteHandle,
+    WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid, SchemaVersionId};
-use jazz::model::transaction::OpenTransactionId;
 use jazz::protocol::{BranchSelector, BranchViewBase};
 use jazz::records::Value;
 use jazz::thin::{ThinBody, ThinOp, ThinRequest, ThinResponse};
@@ -25,14 +24,6 @@ use jazz::wire::{WireErrorCode, WireFrame, WireRetry, encode_frame};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use super::{Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
-
-/// A transaction a thin session began and has not ended.
-struct ThinTransaction {
-    serializable: bool,
-    /// The first staged write refused for its row's state: the commit
-    /// reports it instead of committing.
-    refused: Option<Error>,
-}
 
 /// A request that waits for offloaded large-value nodes the chunk store's
 /// fetch lane is reading, with the ingress room it was admitted in: the
@@ -56,7 +47,6 @@ struct ThinStream {
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
-    transaction: Option<OpenTransactionId>,
 }
 
 pub(super) struct ThinSession {
@@ -70,8 +60,6 @@ pub(super) struct ThinSession {
     version: Option<SchemaVersionId>,
     /// Live queries, by the id of the request that opened them.
     subscriptions: BTreeMap<u64, SubscriptionStream>,
-    /// Open transactions; they end with the session.
-    transactions: BTreeMap<OpenTransactionId, ThinTransaction>,
     /// Large-value uploads, by the id of the request that began them.
     streams: BTreeMap<u64, ThinStream>,
     /// Answers produced while the session's egress budget is spent.
@@ -100,7 +88,6 @@ impl ThinSession {
             bundle,
             version: None,
             subscriptions: BTreeMap::new(),
-            transactions: BTreeMap::new(),
             streams: BTreeMap::new(),
             held: Vec::new(),
             parked: VecDeque::new(),
@@ -143,12 +130,8 @@ impl ThinSession {
         self.output.send((Ok(frames), bytes)).is_ok()
     }
 
-    /// End what the session left open: its transactions roll back, its
-    /// uploads are dropped.
+    /// End what the session left open: its uploads are dropped.
     fn release(self, db: &Db) {
-        for id in self.transactions.into_keys() {
-            let _ = db.abandon_transaction_handle(id);
-        }
         for stream in self.streams.into_values() {
             let _ = block_on(db.abort_streaming_value_upload(stream.upload));
         }
@@ -290,30 +273,6 @@ fn written(write: Result<WriteHandle, Error>) -> ThinBody {
             row: *write.row_uuid().as_bytes(),
             seq: write.mergeable_tx_id(),
         },
-        Err(error) => error_body(&error),
-    }
-}
-
-/// A staged write's answer. A refusal decided by the row's stored state, or
-/// a serializable conflict, does not fail the call: the transaction stays
-/// open and its commit reports the first one (as for the bindings).
-fn staged(
-    transaction: &mut ThinTransaction,
-    row: RowUuid,
-    write: Result<WriteHandle, Error>,
-) -> ThinBody {
-    match write {
-        Ok(_) => ThinBody::Staged {
-            row: *row.as_bytes(),
-        },
-        Err(error)
-            if error.is_apply_time_rejection() || error.code == ErrorCode::TransactionConflict =>
-        {
-            transaction.refused.get_or_insert(error);
-            ThinBody::Staged {
-                row: *row.as_bytes(),
-            }
-        }
         Err(error) => error_body(&error),
     }
 }
@@ -767,20 +726,6 @@ fn event_body(event: SubscriptionEvent) -> (ThinBody, bool) {
     }
 }
 
-/// The open transaction `transaction` names, if this session began it.
-fn session_transaction<'a>(
-    thin: &'a mut ThinSession,
-    transaction: &str,
-) -> Result<(OpenTransactionId, &'a mut ThinTransaction), ThinBody> {
-    let id = open_transaction(transaction).map_err(host_error)?;
-    match thin.transactions.get_mut(&id) {
-        Some(open) => Ok((id, open)),
-        None => Err(argument(format!(
-            "transaction {transaction} is not open in this session"
-        ))),
-    }
-}
-
 /// One request against the session's governed view; `Ok(None)` when a live
 /// query answers later.
 fn serve_thin_op(
@@ -797,6 +742,16 @@ fn serve_thin_op(
         }
         result
     };
+    // The app's backend serves a thin session's transactions (SPEC 8.14):
+    // the core never holds one open between calls.
+    if jazz::thin_transactions::names_transaction(op) {
+        return Err(ThinBody::Error {
+            code: jazz::thin::TRANSACTIONS_NOT_ON_CORE.to_owned(),
+            message: "open transactions are not supported on this core: the app's backend \
+                      serves a thin client's transactions (update the app's jazz-tools)"
+                .to_owned(),
+        });
+    }
     let identity = thin.identity;
     let scope = thin.claims.clone().map(|claims| (identity, claims));
     let body = match op {
@@ -825,16 +780,12 @@ fn serve_thin_op(
         ThinOp::Query {
             query,
             options,
-            transaction,
+            transaction: _,
         } => {
             let opts = read_opts(&options_json(options)?).map_err(host_error)?;
-            let open = match transaction {
-                Some(transaction) => Some(session_transaction(thin, transaction)?.0),
-                None => None,
-            };
             // The authority holds everything a read can ask for: it never
             // waits.
-            let read = block_on(db.all_serialized_query(query, opts, open, scope, None));
+            let read = block_on(db.all_serialized_query(query, opts, None, scope, None));
             if let Err(error) = &read {
                 *missing |= waits_on_nodes(error);
             }
@@ -856,40 +807,24 @@ fn serve_thin_op(
             table,
             cells,
             options,
-            transaction,
+            transaction: _,
         } => {
             let cells = decode_cells(cells).map_err(host_error)?;
             let json = options_json(options)?;
             let key = write_key(&json)?;
             let mut options = insert_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
-            if key.is_some() && transaction.is_some() {
-                return Err(argument(
-                    "a writeKey names a standalone write, not a staged one",
-                ));
-            }
-            match transaction {
-                Some(transaction) => {
-                    let (open, state) = session_transaction(thin, transaction)?;
-                    let row = *options.row_id.get_or_insert_with(|| db.next_row_id());
-                    staged(
-                        state,
-                        row,
-                        noted(block_on(db.tx_ref(open).insert(table, cells, options))),
-                    )
-                }
-                None => {
-                    let row = match (key, options.row_id) {
-                        (Some(_), None) => {
-                            return Err(argument("an insert with a writeKey names its rowId"));
-                        }
-                        (_, row) => row.unwrap_or_else(|| db.next_row_id()),
-                    };
-                    options.row_id = Some(row);
-                    written_once(db, key, identity, row, &mut noted, async || {
-                        db.insert(table, cells, options).await
-                    })
-                }
+            {
+                let row = match (key, options.row_id) {
+                    (Some(_), None) => {
+                        return Err(argument("an insert with a writeKey names its rowId"));
+                    }
+                    (_, row) => row.unwrap_or_else(|| db.next_row_id()),
+                };
+                options.row_id = Some(row);
+                written_once(db, key, identity, row, &mut noted, async || {
+                    db.insert(table, cells, options).await
+                })
             }
         }
         ThinOp::Update {
@@ -897,7 +832,7 @@ fn serve_thin_op(
             row,
             patch,
             options,
-            transaction,
+            transaction: _,
         } => {
             let row = RowUuid::from_bytes(*row);
             let patch = decode_cells(patch).map_err(host_error)?;
@@ -905,31 +840,16 @@ fn serve_thin_op(
             let key = write_key(&json)?;
             let mut options = update_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
-            if key.is_some() && transaction.is_some() {
-                return Err(argument(
-                    "a writeKey names a standalone write, not a staged one",
-                ));
-            }
-            match transaction {
-                Some(transaction) => {
-                    let (open, state) = session_transaction(thin, transaction)?;
-                    staged(
-                        state,
-                        row,
-                        noted(block_on(db.tx_ref(open).update(table, row, patch, options))),
-                    )
-                }
-                None => written_once(db, key, identity, row, &mut noted, async || {
-                    db.update(table, row, patch, options).await
-                }),
-            }
+            written_once(db, key, identity, row, &mut noted, async || {
+                db.update(table, row, patch, options).await
+            })
         }
         ThinOp::Upsert {
             table,
             row,
             cells,
             options,
-            transaction,
+            transaction: _,
         } => {
             let row = RowUuid::from_bytes(*row);
             let json = options_json(options)?;
@@ -937,61 +857,31 @@ fn serve_thin_op(
             let mut options = upsert_options(&json).map_err(host_error)?;
             let cells = decode_cells(cells).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
-            if key.is_some() && transaction.is_some() {
-                return Err(argument(
-                    "a writeKey names a standalone write, not a staged one",
-                ));
-            }
-            match transaction {
-                Some(transaction) => {
-                    let (open, state) = session_transaction(thin, transaction)?;
-                    staged(
-                        state,
-                        row,
-                        noted(block_on(db.tx_ref(open).upsert(table, row, cells, options))),
-                    )
-                }
-                None => written_once(db, key, identity, row, &mut noted, async || {
-                    db.upsert(table, row, cells, options).await
-                }),
-            }
+            written_once(db, key, identity, row, &mut noted, async || {
+                db.upsert(table, row, cells, options).await
+            })
         }
         ThinOp::Delete {
             table,
             row,
             options,
-            transaction,
+            transaction: _,
         } => {
             let row = RowUuid::from_bytes(*row);
             let json = options_json(options)?;
             let key = write_key(&json)?;
             let mut options = delete_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
-            if key.is_some() && transaction.is_some() {
-                return Err(argument(
-                    "a writeKey names a standalone write, not a staged one",
-                ));
-            }
-            match transaction {
-                Some(transaction) => {
-                    let (open, state) = session_transaction(thin, transaction)?;
-                    staged(
-                        state,
-                        row,
-                        noted(block_on(db.tx_ref(open).delete(table, row, options))),
-                    )
-                }
-                None => written_once(db, key, identity, row, &mut noted, async || {
-                    db.delete(table, row, options).await
-                }),
-            }
+            written_once(db, key, identity, row, &mut noted, async || {
+                db.delete(table, row, options).await
+            })
         }
         ThinOp::Restore {
             table,
             row,
             cells,
             options,
-            transaction,
+            transaction: _,
         } => {
             let row = RowUuid::from_bytes(*row);
             let cells = cells
@@ -1003,26 +893,9 @@ fn serve_thin_op(
             let key = write_key(&json)?;
             let mut options = restore_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
-            if key.is_some() && transaction.is_some() {
-                return Err(argument(
-                    "a writeKey names a standalone write, not a staged one",
-                ));
-            }
-            match transaction {
-                Some(transaction) => {
-                    let (open, state) = session_transaction(thin, transaction)?;
-                    staged(
-                        state,
-                        row,
-                        noted(block_on(
-                            db.tx_ref(open).restore(table, row, cells, options),
-                        )),
-                    )
-                }
-                None => written_once(db, key, identity, row, &mut noted, async || {
-                    db.restore(table, row, cells, options).await
-                }),
-            }
+            written_once(db, key, identity, row, &mut noted, async || {
+                db.restore(table, row, cells, options).await
+            })
         }
         ThinOp::UpdateLargeValues {
             table,
@@ -1030,7 +903,7 @@ fn serve_thin_op(
             patch,
             mutations,
             updated_at_ms,
-            transaction,
+            transaction: _,
         } => {
             let row = RowUuid::from_bytes(*row);
             let patch = decode_cells(patch).map_err(host_error)?;
@@ -1043,72 +916,12 @@ fn serve_thin_op(
                 updated_at_ms: *updated_at_ms,
                 ..UpdateOptions::default()
             };
-            match transaction {
-                Some(transaction) => {
-                    let (open, state) = session_transaction(thin, transaction)?;
-                    staged(
-                        state,
-                        row,
-                        noted(block_on(db.tx_ref(open).update_with_large_value_mutations(
-                            table, row, patch, mutations, options,
-                        ))),
-                    )
-                }
-                None => written(noted(block_on(db.update_with_large_value_mutations(
-                    table, row, patch, mutations, options,
-                )))),
-            }
+            written(noted(block_on(db.update_with_large_value_mutations(
+                table, row, patch, mutations, options,
+            ))))
         }
-        ThinOp::Begin { transaction, kind } => {
-            let open = open_transaction(transaction).map_err(host_error)?;
-            let kind = TransactionKind::parse(kind).map_err(host_error)?;
-            let serializable = matches!(kind, TransactionKind::Serializable);
-            let begun = if serializable {
-                block_on(db.begin_serializable(open))
-            } else {
-                block_on(db.begin_mergeable(open))
-            };
-            match begun {
-                Ok(()) => {
-                    thin.transactions.insert(
-                        open,
-                        ThinTransaction {
-                            serializable,
-                            refused: None,
-                        },
-                    );
-                    ThinBody::Ok
-                }
-                Err(error) => error_body(&error),
-            }
-        }
-        ThinOp::Commit { transaction } => {
-            let open = session_transaction(thin, transaction)?.0;
-            let state = thin.transactions.remove(&open).expect("checked above");
-            if let Some(error) = state.refused {
-                let _ = db.abandon_transaction_handle(open);
-                return Err(error_body(&error));
-            }
-            let receipt = if state.serializable {
-                block_on(db.commit_serializable_handle(open))
-            } else {
-                block_on(db.commit_mergeable_handle(open))
-            };
-            match receipt {
-                Ok(receipt) => ThinBody::Written {
-                    row: [0; 16],
-                    seq: receipt.0,
-                },
-                Err(error) => error_body(&error),
-            }
-        }
-        ThinOp::Rollback { transaction } => {
-            let open = session_transaction(thin, transaction)?.0;
-            thin.transactions.remove(&open);
-            match db.abandon_transaction_handle(open) {
-                Ok(()) => ThinBody::Ok,
-                Err(error) => error_body(&error),
-            }
+        ThinOp::Begin { .. } | ThinOp::Commit { .. } | ThinOp::Rollback { .. } => {
+            unreachable!("transaction requests are refused before they are served")
         }
         ThinOp::CaptureSnapshot => match block_on(db.capture_snapshot()) {
             Ok(snapshot) => ThinBody::Snapshot {
@@ -1123,15 +936,11 @@ fn serve_thin_op(
             column,
             mutation,
             options,
-            transaction,
+            transaction: _,
         } => {
             if thin.streams.contains_key(&id) {
                 return Err(argument("an upload with this id is already open"));
             }
-            let transaction = match transaction {
-                Some(transaction) => Some(session_transaction(thin, transaction)?.0),
-                None => None,
-            };
             let mutation = streaming_mutation(mutation)?;
             let (updated_at_ms, head, base) = stream_options(&options_json(options)?)?;
             let cells = decode_cells(cells).map_err(host_error)?;
@@ -1149,7 +958,6 @@ fn serve_thin_op(
                             updated_at_ms,
                             head,
                             base,
-                            transaction,
                         },
                     );
                     ThinBody::Ok
@@ -1175,24 +983,6 @@ fn serve_thin_op(
             let Some(open) = thin.streams.remove(stream) else {
                 return Err(argument("no upload with this id is open"));
             };
-            if let Some(transaction) = open.transaction {
-                let Some(state) = thin.transactions.get_mut(&transaction) else {
-                    return Err(argument("the upload's transaction is no longer open"));
-                };
-                let write = block_on(db.tx_ref(transaction).finish_streaming_value_upload(
-                    open.upload,
-                    open.mutation,
-                    &open.table,
-                    open.row,
-                    open.cells,
-                    &open.column,
-                    WriteIdentity::Session(identity),
-                    open.updated_at_ms,
-                    open.head,
-                    open.base,
-                ));
-                return Ok(Some(staged(state, open.row, write)));
-            }
             written(block_on(db.finish_streaming_value_upload(
                 open.upload,
                 open.mutation,
@@ -1261,6 +1051,7 @@ mod write_key_tests {
 #[cfg(test)]
 mod error_body_tests {
     use super::*;
+    use jazz::db::ErrorCode;
 
     #[test]
     fn a_core_error_carries_its_stable_snake_case_code() {

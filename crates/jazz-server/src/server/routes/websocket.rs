@@ -6902,27 +6902,23 @@ mod tests {
         let ThinBody::Written { row, .. } = thin_answer(&mut ws, 1).await else {
             panic!("the insert must commit");
         };
-        const TX: &str = "0190f3e4000070008000000000000009";
-        let edit = |id: u64, mutations: serde_json::Value| ThinOp::UpdateLargeValues {
+        let edit = |mutations: serde_json::Value| ThinOp::UpdateLargeValues {
             table: "notes".to_owned(),
             row,
             patch: cells(&[]),
             mutations: serde_json::to_vec(&mutations).unwrap(),
             updated_at_ms: None,
-            transaction: (id == 5).then(|| TX.to_owned()),
+            transaction: None,
         };
         send_thin(
             &mut ws,
             2,
-            edit(
-                2,
-                serde_json::json!([{
-                    "kind": "text_edit",
-                    "column": "body",
-                    "text": "Hello world",
-                    "edited_from": "Hello",
-                }]),
-            ),
+            edit(serde_json::json!([{
+                "kind": "text_edit",
+                "column": "body",
+                "text": "Hello world",
+                "edited_from": "Hello",
+            }])),
         )
         .await;
         match thin_answer(&mut ws, 2).await {
@@ -6932,61 +6928,33 @@ mod tests {
         send_thin(
             &mut ws,
             3,
-            edit(
-                3,
-                serde_json::json!([{
-                    "kind": "splice",
-                    "column": "body",
-                    "within": { "kind": "text_utf16", "from": 11, "to": 11 },
-                    "splices": [{ "at": 0, "delete": 0, "insert": [33] }],
-                }]),
-            ),
+            edit(serde_json::json!([{
+                "kind": "splice",
+                "column": "body",
+                "within": { "kind": "text_utf16", "from": 11, "to": 11 },
+                "splices": [{ "at": 0, "delete": 0, "insert": [33] }],
+            }])),
         )
         .await;
         match thin_answer(&mut ws, 3).await {
             ThinBody::Written { .. } => {}
             other => panic!("the splice must commit, got {other:?}"),
         }
-        // Inside a transaction, too.
-        send_thin(
-            &mut ws,
-            4,
-            ThinOp::Begin {
-                transaction: TX.to_owned(),
-                kind: "mergeable".to_owned(),
-            },
-        )
-        .await;
-        assert_eq!(thin_answer(&mut ws, 4).await, ThinBody::Ok);
+        // Another full-text edit.
         send_thin(
             &mut ws,
             5,
-            edit(
-                5,
-                serde_json::json!([{
-                    "kind": "text_edit",
-                    "column": "body",
-                    "text": "Hey world!",
-                    "edited_from": "Hello world!",
-                }]),
-            ),
+            edit(serde_json::json!([{
+                "kind": "text_edit",
+                "column": "body",
+                "text": "Hey world!",
+                "edited_from": "Hello world!",
+            }])),
         )
         .await;
         match thin_answer(&mut ws, 5).await {
-            ThinBody::Staged { .. } => {}
-            other => panic!("the transaction's text edit must stage, got {other:?}"),
-        }
-        send_thin(
-            &mut ws,
-            6,
-            ThinOp::Commit {
-                transaction: TX.to_owned(),
-            },
-        )
-        .await;
-        match thin_answer(&mut ws, 6).await {
             ThinBody::Written { .. } => {}
-            other => panic!("the transaction must commit, got {other:?}"),
+            other => panic!("the text edit must commit, got {other:?}"),
         }
         send_thin(
             &mut ws,
@@ -7328,107 +7296,79 @@ mod tests {
         ));
     }
 
+    /// The core holds no transaction open between calls (SPEC 8.14): the
+    /// app's backend serves a thin session's transactions, so the core
+    /// refuses every transaction request with a code of its own, and the
+    /// session goes on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn thin_transactions_commit_or_roll_back_as_one() {
-        use jazz::thin::{ThinBody, ThinOp};
+    async fn the_core_refuses_thin_transactions() {
+        use jazz::thin::{TRANSACTIONS_NOT_ON_CORE, ThinBody, ThinOp};
         let (state, schema) = private_docs_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let mut ws = open_thin_ws(addr, &state, alice).await;
         bind_thin_schema(&mut ws, &schema).await;
 
-        for (kind, tx, title) in [
-            ("serializable", "0190f3e4000070008000000000000001", "kept"),
-            ("mergeable", "0190f3e4000070008000000000000002", "dropped"),
-        ] {
-            send_thin(
-                &mut ws,
-                1,
-                ThinOp::Begin {
-                    transaction: tx.to_owned(),
-                    kind: kind.to_owned(),
-                },
-            )
-            .await;
-            assert_eq!(thin_answer(&mut ws, 1).await, ThinBody::Ok);
-            send_thin(
-                &mut ws,
-                2,
-                ThinOp::Insert {
-                    table: "docs".to_owned(),
-                    cells: doc_cells(title, alice),
-                    options: Vec::new(),
-                    transaction: Some(tx.to_owned()),
-                },
-            )
-            .await;
-            assert!(matches!(
-                thin_answer(&mut ws, 2).await,
-                ThinBody::Staged { .. }
-            ));
-            // The transaction reads its own write; nobody else sees it yet.
-            assert!(
-                thin_titles(&mut ws, 3, Some(tx))
-                    .await
-                    .contains(&title.to_owned())
-            );
-            assert!(
-                !thin_titles(&mut ws, 4, None)
-                    .await
-                    .contains(&title.to_owned())
-            );
-            if kind == "serializable" {
-                send_thin(
-                    &mut ws,
-                    5,
-                    ThinOp::Commit {
-                        transaction: tx.to_owned(),
-                    },
-                )
-                .await;
-                assert!(matches!(
-                    thin_answer(&mut ws, 5).await,
-                    ThinBody::Written { .. }
-                ));
-            } else {
-                send_thin(
-                    &mut ws,
-                    5,
-                    ThinOp::Rollback {
-                        transaction: tx.to_owned(),
-                    },
-                )
-                .await;
-                assert_eq!(thin_answer(&mut ws, 5).await, ThinBody::Ok);
-            }
-        }
-        assert_eq!(thin_titles(&mut ws, 6, None).await, vec!["kept".to_owned()]);
-
-        // Another session cannot use a transaction it did not begin.
-        let mut other = open_thin_ws(addr, &state, alice).await;
-        bind_thin_schema(&mut other, &schema).await;
-        send_thin(
-            &mut ws,
-            7,
+        let tx = "0190f3e4000070008000000000000001";
+        let refused = [
             ThinOp::Begin {
-                transaction: "0190f3e4000070008000000000000003".to_owned(),
+                transaction: tx.to_owned(),
                 kind: "mergeable".to_owned(),
             },
-        )
-        .await;
-        assert_eq!(thin_answer(&mut ws, 7).await, ThinBody::Ok);
-        send_thin(
-            &mut other,
-            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("staged", alice),
+                options: Vec::new(),
+                transaction: Some(tx.to_owned()),
+            },
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: Some(tx.to_owned()),
+            },
+            ThinOp::BeginStream {
+                table: "docs".to_owned(),
+                row: [7; 16],
+                cells: doc_cells("streamed", alice),
+                column: "title".to_owned(),
+                mutation: "insert".to_owned(),
+                options: Vec::new(),
+                transaction: Some(tx.to_owned()),
+            },
             ThinOp::Commit {
-                transaction: "0190f3e4000070008000000000000003".to_owned(),
+                transaction: tx.to_owned(),
+            },
+            ThinOp::Rollback {
+                transaction: tx.to_owned(),
+            },
+        ];
+        for (id, op) in (1..).zip(refused) {
+            send_thin(&mut ws, id, op).await;
+            match thin_answer(&mut ws, id).await {
+                ThinBody::Error { code, .. } if code == TRANSACTIONS_NOT_ON_CORE => {}
+                other => panic!("request {id} must be refused, got {other:?}"),
+            }
+        }
+        // Nothing of them was written, and the session serves on.
+        send_thin(
+            &mut ws,
+            10,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("plain", alice),
+                options: Vec::new(),
+                transaction: None,
             },
         )
         .await;
         assert!(matches!(
-            thin_answer(&mut other, 1).await,
-            ThinBody::Error { code, .. } if code == "Argument"
+            thin_answer(&mut ws, 10).await,
+            ThinBody::Written { .. }
         ));
+        assert_eq!(
+            thin_titles(&mut ws, 11, None).await,
+            vec!["plain".to_owned()]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
