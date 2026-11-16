@@ -1,4 +1,4 @@
-//! JSON-in/JSON-out bindings of [`jazz_app`] for other languages.
+//! JSON-in/JSON-out bindings of [`jazz_app_support`] for other languages.
 //!
 //! Two surfaces over one dynamic handle:
 //! - UniFFI (proc-macros) for Swift and Kotlin: [`JazzHandle`],
@@ -698,7 +698,7 @@ impl Session {
                     .token(reason.to_owned())
                     .map_err(|error| error.to_string())
             }));
-            let tokens: Arc<dyn jazz_app::TokenProvider> = Arc::new(host);
+            let tokens: Arc<dyn jazz_app_support::TokenProvider> = Arc::new(host);
             tokens
         });
         let core = session::SessionCore::open(&config_json, tokens)

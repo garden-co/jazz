@@ -2,7 +2,7 @@
 
 use std::convert::Infallible;
 
-use ::jazz_app::{Jazz, ObjectId, Rows};
+use ::jazz_app_support::{Jazz, ObjectId, Rows};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -90,7 +90,7 @@ pub fn router_until(jazz: Jazz, stopping: Stopping) -> Router {
         .with_state(AppState { jazz, stopping })
 }
 
-fn failed(error: ::jazz_app::Error) -> Response {
+fn failed(error: ::jazz_app_support::Error) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(serde_json::json!({ "error": error.to_string() })),

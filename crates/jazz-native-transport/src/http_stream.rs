@@ -224,12 +224,14 @@ pub(crate) struct HttpStreamCarrier {
 
 impl HttpStreamCarrier {
     /// Opens a session at the stream endpoint beside `socket_url`, sending
-    /// `authorization` on each of its requests.
+    /// `authorization` on each of its requests. The task returned ends the
+    /// session (its DELETE) once the carrier is closed or dropped, and then
+    /// finishes.
     pub(crate) async fn open(
         http: &reqwest::Client,
         socket_url: &str,
         authorization: Option<String>,
-    ) -> Result<Self, HttpStreamError> {
+    ) -> Result<(Self, tokio::task::JoinHandle<()>), HttpStreamError> {
         let stream_url = http_url(socket_url, "stream");
         let mut open = http.post(&stream_url);
         if let Some(authorization) = &authorization {
@@ -278,7 +280,7 @@ impl HttpStreamCarrier {
         let (incoming_tx, incoming) = mpsc::channel(INCOMING_SLOTS);
         let (outgoing, outgoing_rx) = fmpsc::channel(OUTGOING_SLOTS);
         let reader_task = tokio::spawn(read_records(body, reader, early, incoming_tx.clone()));
-        tokio::spawn(send_records(
+        let sender = tokio::spawn(send_records(
             http.clone(),
             format!("{stream_url}/{}", urlencode(&session.id)),
             session.key,
@@ -287,7 +289,7 @@ impl HttpStreamCarrier {
             incoming_tx,
             reader_task.abort_handle(),
         ));
-        Ok(Self { incoming, outgoing })
+        Ok((Self { incoming, outgoing }, sender))
     }
 }
 
@@ -601,6 +603,9 @@ pub struct HttpStreamFallbackConnector {
     http: reqwest::Client,
     endpoints: Arc<Mutex<HashMap<String, EndpointState>>>,
     last: Arc<Mutex<Option<HttpStreamTransportKind>>>,
+    /// The tasks that end this connector's stream sessions (see
+    /// [`Self::settle`]).
+    endings: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl Default for HttpStreamFallbackConnector {
@@ -634,7 +639,33 @@ impl HttpStreamFallbackConnector {
                 .expect("an HTTP client with no redirects builds"),
             endpoints: Arc::default(),
             last: Arc::default(),
+            endings: Arc::default(),
         }
+    }
+
+    /// Waits, for at most `timeout`, until the stream sessions this
+    /// connector opened and its client has since dropped are ended on the
+    /// backend (their DELETEs answered). A client calls it as it shuts
+    /// down, before its runtime goes: the DELETE runs on that runtime, and
+    /// a session whose DELETE never went out lingers on the backend until
+    /// it notices the response is gone. Call it once the client has
+    /// stopped: a session still in use holds it until `timeout`. Sockets
+    /// need nothing: their close goes with the socket.
+    ///
+    /// A zero `timeout` returns at once without waiting for anything, as
+    /// a client closing with no time to spare (`close(Duration::ZERO)`)
+    /// asks: the backend then ends the sessions when their responses go.
+    pub async fn settle(&self, timeout: Duration) {
+        if timeout.is_zero() {
+            return;
+        }
+        let endings = std::mem::take(&mut *self.endings.lock().expect("endings lock"));
+        let _ = tokio::time::timeout(timeout, async {
+            for ending in endings {
+                let _ = ending.await;
+            }
+        })
+        .await;
     }
 
     /// The transport the last session that opened used.
@@ -775,7 +806,12 @@ impl HttpStreamFallbackConnector {
         .await
         .unwrap_or(Err(HttpStreamError::Timeout));
         let carrier = match opened {
-            Ok(carrier) => carrier,
+            Ok((carrier, ending)) => {
+                let mut endings = self.endings.lock().expect("endings lock");
+                endings.retain(|ending| !ending.is_finished());
+                endings.push(ending);
+                carrier
+            }
             Err(error) => {
                 // Refused before it opened: the next session tries a socket.
                 self.with_endpoint(url, |state| state.stream = false);

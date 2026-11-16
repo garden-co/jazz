@@ -1,0 +1,42 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "tickets": {
+      "columns": {
+        "title": "string",
+        "category": { "enum": ["bug", "feature"], "optional": true },
+        "severity": "int?",
+        "area": "string?"
+      }
+    }
+  },
+  "history": {
+    "3453b5960772": {
+      "tables": {
+        "legacy_kinds": {
+          "columns": {
+            "kind": {
+              "enum": { "bug": { "severity": "int" }, "feature": { "area": "string" } },
+              "optional": true
+            }
+          }
+        },
+        "tickets": { "columns": { "title": "string" } }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "3453b5960772",
+      "dropTables": ["legacy_kinds"],
+      "migrate": {
+        "tickets": {
+          "category": { "add": { "enum": ["bug", "feature"] }, "default": null },
+          "severity": { "add": "int", "default": null },
+          "area": { "add": "string", "default": null }
+        }
+      }
+    }
+  ]
+}

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bindings::{NewTodo, Todo, todos};
 use futures::StreamExt;
-use jazz_app::{AppFiles, AppId, Auth, Backend, Config, DeviceKey, Jazz, Link, ReadTier};
+use jazz_app_support::{AppFiles, AppId, Auth, Backend, Config, DeviceKey, Jazz, Link, ReadTier};
 use jazz_server::JazzServer;
 
 const APP: &str = concat!(
@@ -39,7 +39,7 @@ fn relay_bin() -> std::path::PathBuf {
     ));
     assert!(
         bin.is_file(),
-        "build it: cargo build -p jazz-app --features test-relay ({})",
+        "build it: cargo build -p jazz-app-support --features test-relay ({})",
         bin.display()
     );
     bin

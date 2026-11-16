@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures::{SinkExt, StreamExt};
-use jazz_app::AppId;
+use jazz_app_support::AppId;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -43,6 +43,8 @@ pub struct Links {
     pub revoke: bool,
     /// Links attempted so far.
     pub attempts: usize,
+    /// Users whose next `backend-sign-in` fails (`503`), once each.
+    pub fail_sign_in: std::collections::HashSet<String>,
 }
 
 pub struct Relay {
@@ -58,6 +60,9 @@ pub struct Relay {
     /// How `backend-link` behaves.
     #[allow(dead_code)]
     pub links: Arc<Mutex<Links>>,
+    /// While set, connections are dropped as they arrive: the backend is
+    /// unreachable.
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -66,6 +71,16 @@ impl Relay {
     pub fn kick(&self) {
         for connection in self.connections.lock().unwrap().drain(..) {
             connection.abort();
+        }
+    }
+
+    /// Makes the backend unreachable (`true`: open connections drop, new
+    /// ones are closed at once) or reachable again.
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.unreachable
+            .store(unreachable, std::sync::atomic::Ordering::SeqCst);
+        if unreachable {
+            self.kick();
         }
     }
 
@@ -105,12 +120,18 @@ pub async fn start(
     let admitted = Arc::new(Mutex::new(Vec::new()));
     let refusing = Arc::new(Mutex::new(HashMap::new()));
     let connections = Arc::new(Mutex::new(Vec::new()));
+    let unreachable = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (log, refused, open) = (admitted.clone(), refusing.clone(), connections.clone());
+    let down = unreachable.clone();
     let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            if down.load(std::sync::atomic::Ordering::SeqCst) {
+                drop(stream);
+                continue;
+            }
             let connection =
                 tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
             open.lock().unwrap().push(connection.abort_handle());
@@ -122,6 +143,7 @@ pub async fn start(
         refusing,
         connections,
         links,
+        unreachable,
         task,
     }
 }
@@ -282,8 +304,15 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
             },
         }
     } else if path.ends_with("/accounts/backend-sign-in") {
+        let failing = user
+            .as_ref()
+            .is_some_and(|user| backend.links.lock().unwrap().fail_sign_in.remove(user));
         match user {
             None => ("401 Unauthorized", "signed_out".to_owned()),
+            Some(_) if failing => (
+                "503 Service Unavailable",
+                "account_request_failed".to_owned(),
+            ),
             Some(user) => {
                 let account = account_of(&backend, &user).await;
                 let body = json!({
@@ -298,15 +327,21 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
     } else {
         ("404 Not Found", "Not found".to_owned())
     };
+    // `backend/admit` names the bundle the main backend serves (jazz#5808).
+    let bundle = if path.ends_with("/backend/admit") {
+        format!("x-jazz-bundle: {}\r\n", backend.bundle)
+    } else {
+        String::new()
+    };
     let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{bundle}connection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
 fn uuid_v4() -> String {
-    jazz_app::ObjectId::new().to_string()
+    jazz_app_support::ObjectId::new().to_string()
 }
 
 /// `backendLink`: the challenge was issued for this user, the device's proof
@@ -318,14 +353,14 @@ async fn link(backend: &Backend, user: &str, body: &[u8]) -> Option<Value> {
     if issued_for != user {
         return None;
     }
-    let subject = jazz_app::jazz::tools::identity::verify_local_first_challenge(
+    let subject = jazz_app_support::jazz::tools::identity::verify_local_first_challenge(
         body["proof"].as_str()?,
         challenge,
     )
     .ok()?
     .to_string();
     let guest = json!({
-        "issuer": jazz_app::jazz::tools::identity::LOCAL_FIRST_ISSUER,
+        "issuer": jazz_app_support::jazz::tools::identity::LOCAL_FIRST_ISSUER,
         "subject": subject,
     });
     let (refused, appears, revoke) = {
@@ -447,7 +482,7 @@ async fn relay_socket(
         .and_then(|header| header.strip_prefix("Bearer "))
         .and_then(|bearer| refusing.lock().unwrap().get(bearer).cloned());
     if let Some(message) = refusal {
-        use jazz_app::jazz::wire::{
+        use jazz_app_support::jazz::wire::{
             WireError, WireErrorCode, WireFrame, WireRetry, encode_frame,
             encode_websocket_frame_batch,
         };

@@ -1,4 +1,4 @@
-//! A user-following session (jazz-app's `JazzSession`, TS's `JazzSession`):
+//! A user-following session (jazz-app-support's `JazzSession`, TS's `JazzSession`):
 //! who is signed in (the app's bearer, a device account, or no one), and
 //! the client for that user, replaced when the user changes.
 //!
@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_executor::block_on;
-use jazz_app::jazz::tools::Schema;
-use jazz_app::{AppFiles, AppId, Initial, JazzSession, SessionConfig, Storage};
+use jazz_app_support::jazz::tools::Schema;
+use jazz_app_support::{AppFiles, AppId, Initial, JazzSession, SessionConfig, Storage};
 use serde_json::Value as Json;
 
 use crate::convert;
@@ -38,7 +38,7 @@ pub(crate) struct SessionCore {
 impl SessionCore {
     pub fn open(
         config_json: &str,
-        tokens: Option<Arc<dyn jazz_app::TokenProvider>>,
+        tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
     ) -> Result<Self> {
         let (files, config, app_text, contract) = session_config(config_json, tokens)?;
         let session = block_on(JazzSession::open(files, config))?;
@@ -170,7 +170,7 @@ impl SessionCore {
 
 fn session_config(
     config_json: &str,
-    tokens: Option<Arc<dyn jazz_app::TokenProvider>>,
+    tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
 ) -> Result<(AppFiles, SessionConfig, String, u64)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));

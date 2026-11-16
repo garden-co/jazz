@@ -1,6 +1,6 @@
 # jazz-ffi
 
-A dynamic, JSON-in/JSON-out layer over [`jazz-app`](../jazz-app), so the
+A dynamic, JSON-in/JSON-out layer over [`jazz-app-support`](../jazz-app), so the
 Swift, Kotlin and Go bindings only (de)serialize JSON. Two surfaces over one
 handle:
 
@@ -67,8 +67,11 @@ backend decides what the client is, reported by `backend_client()` /
   returns a handle acting as one of the app's users, under their
   permissions. That never creates an account: `NoAccount` (kind
   `"noAccount"`, with `userId`) when the user has none yet, `Permission`
-  when the main backend refuses the identity (its 403). Closing such a
-  handle leaves its parent open.
+  when the main backend refuses the identity (its 403), and
+  `BundleMismatch` (kind `"bundleMismatch"`, with `own` and `served`, the
+  two bundle ids) when the client's `permissions` aren't the ones the main
+  backend serves: reopen it with the app's published
+  `jazz.permissions.json`. Closing such a handle leaves its parent open.
 - `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
   kind `"refused"`), as on a `for_user` handle or any other app.
 
@@ -117,8 +120,8 @@ guest's account; `false` leaves the guest until `link_device_account()`.
 Linking reopens the account on the bearer: `clientEpoch` moves on.
 
 - `snapshot()` / `"snapshot"`: `{"status": "starting"|"ready"|"signed-out"|
-  "transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
-  {"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
+"transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
+{"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
 - `jazz()` / `jazz_session_jazz`: a `JazzHandle` for the user signed in now
   (`NoUser`, kind `"noUser"` with `"status"`, while there is none). Once the
   user changes (or signs out) every call on it fails with `Replaced` (kind
@@ -273,7 +276,7 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   lost to another write; retry it). UniFFI: `JazzError.Permission`,
   `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
   these as `refused`, as before.
-- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app's
+- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app-support's
   `untyped` builder, as the typed Rust API and TS lower them):
   - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
 …], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
@@ -286,7 +289,7 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
     as TS's union: a row matched by two arms comes twice, and `limit` /
     `offset` count every occurrence; arms read one table, with `where` only.
     Subscribing to a union whose arms overlap can mis-apply removals (deltas
-    name rows by id), as in jazz-app.
+    name rows by id), as in jazz-app-support.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
     versions the server accepted, each row with `"$history":
 {"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
@@ -340,5 +343,5 @@ yet":
 Computed columns and transforms are the language bindings' job: this layer
 reads and writes the stored values.
 
-Writes are local-first, as in jazz-app. A write that the server's permissions
+Writes are local-first, as in jazz-app-support. A write that the server's permissions
 refuse is not refused by the call. It just never syncs.

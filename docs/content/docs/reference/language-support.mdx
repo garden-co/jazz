@@ -1,0 +1,55 @@
+---
+title: Language Support
+description: "What each language does in a Jazz app, and what it doesn't support yet, compared with TypeScript."
+---
+
+Every language opens the same `jazz.app.json` and `jazz.permissions.json`, with bindings generated
+from them. Your app's main backend runs in TypeScript ([Vercel](/docs/setup/deployment/vercel) or
+[your own server](/docs/setup/deployment/own-server)). Rust and Go run as
+[backend clients](/docs/setup/backend-client) of it, and Swift, Kotlin and Go are for apps. Each tab
+lists what that language doesn't support yet, compared with TypeScript.
+
+<Tabs groupId="jazz-environment" items={["Rust", "Go"]} persist updateAnchor>
+  <Tab value="Rust">
+    Rust is a backend client: a service that reads and writes your app's data through your main
+    backend's `/jazz`, trusted or scoped, with `for_user` on a trusted client. It doesn't run your
+    app's main backend (serving its `/jazz` and publishing its permissions): use TypeScript's
+    `createJazz` for that, and connect Rust services to it as backend clients.
+
+  </Tab>
+  <Tab value="Go">
+    Go is for apps, and runs as a backend client: a Go program can be a client of your app, signed
+    in as one of its users, or a service that reads and writes through your main backend's `/jazz`
+    with a machine credential. It doesn't run a main backend. It doesn't support yet:
+
+    - guest (anonymous) users;
+    - history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
+      select columns or be subscribed to yet;
+    - nested rows and catalogue enums;
+    - subscription deltas carry no positions: `q.Live(ctx, db)` keeps a query's rows in order for you;
+    - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
+      reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
+      column. In a subscription, such a row ends it with an error delta.
+
+    Open the app as one of its users, through your backend's `/jazz`, as a browser does:
+
+    ```go
+    db, err := jazzapp.Open(ctx, jazz.Config{
+    	AppID:     appID,
+    	ServerURL: "https://app.example/jazz",
+    	Storage:   jazz.StoragePersistent,
+    	DataDir:   "./jazz-data",
+    	// A local-first device account, created on first open; or
+    	// jazz.Token(func(ctx context.Context, reason jazz.TokenReason) (string, error) { … })
+    	// to sign in with a JWT from your auth provider.
+    	Auth: jazz.DeviceAccount(jazz.FileStore("./jazz-data/device-key")),
+    })
+    ```
+
+    `db.Session(ctx)` is who is signed in, `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of
+    their changes, and `db.Refresh(ctx)` and `db.SignOut(ctx)` do what they say. Keep a device key like a
+    password: `jazz.FileStore` keeps it in a file only its owner can read; implement `jazz.SecretStore`
+    to keep it in the OS keychain.
+
+  </Tab>
+</Tabs>

@@ -1,5 +1,5 @@
 //! The Rust back end: `src/jazz_app.rs`, typed bindings over the
-//! `jazz-app` crate.
+//! `jazz-app-support` crate.
 //!
 //! Per table: a row struct (`Todo`), a new-row struct (`NewTodo`) and an
 //! update struct (`TodoUpdate`), with snake_case fields mapped to the
@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The version of the bindings' shape this generator writes: the second
 /// line records it.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
@@ -42,9 +42,9 @@ const APP_PREFIX: &str = "pub const APP: &str = r";
 /// How the recorded source starts.
 const SOURCE_PREFIX: &str = "pub const SOURCE: &str = ";
 
-/// The runtime crate, as an absolute path: the bindings' own module is
-/// usually named `jazz_app` too.
-const RT: &str = "::jazz_app";
+/// The runtime crate, as an absolute path. The bindings' own module is
+/// `jazz_app` (`src/jazz_app.rs`), so the crate has a different name.
+const RT: &str = "::jazz_app_support";
 
 /// Type names the bindings declare themselves.
 const RESERVED: &[&str] = &["Computed", "Implementations", "Self"];
@@ -925,8 +925,8 @@ fn longest_hash_run(text: &str) -> usize {
     text.split(|c| c != '#').map(str::len).max().unwrap_or(0)
 }
 
-/// Whether `manifest` (a `Cargo.toml`) is a crate that uses `jazz-app`: a
-/// `[package]` with `jazz-app` among its dependencies of any kind.
+/// Whether `manifest` (a `Cargo.toml`) is a crate that uses `jazz-app-support`: a
+/// `[package]` with `jazz-app-support` among its dependencies of any kind.
 pub fn is_app_manifest(manifest: &str) -> bool {
     let mut package = false;
     let mut depends = false;
@@ -936,18 +936,18 @@ pub fn is_app_manifest(manifest: &str) -> bool {
         if let Some(header) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             section = header.trim().trim_matches(['[', ']']).trim().to_owned();
             package |= section == "package";
-            // `[dependencies.jazz-app]`, `[target.'…'.dependencies.jazz-app]`
+            // `[dependencies.jazz-app-support]`, `[target.'…'.dependencies.jazz-app-support]`
             depends |= section
-                .strip_suffix(".jazz-app")
-                .or_else(|| section.strip_suffix(".\"jazz-app\""))
+                .strip_suffix(".jazz-app-support")
+                .or_else(|| section.strip_suffix(".\"jazz-app-support\""))
                 .is_some_and(is_runtime_dependencies);
             continue;
         }
-        // A renamed dependency: `app = { package = "jazz-app", … }` in a
-        // dependencies table, or `package = "jazz-app"` in its own table.
+        // A renamed dependency: `app = { package = "jazz-app-support", … }` in a
+        // dependencies table, or `package = "jazz-app-support"` in its own table.
         let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-        let renamed =
-            compact.contains("package=\"jazz-app\"") || compact.contains("package='jazz-app'");
+        let renamed = compact.contains("package=\"jazz-app-support\"")
+            || compact.contains("package='jazz-app-support'");
         if renamed
             && (is_runtime_dependencies(&section)
                 || section
@@ -963,7 +963,7 @@ pub fn is_app_manifest(manifest: &str) -> bool {
                 .unwrap_or("")
                 .trim()
                 .trim_matches('"');
-            depends |= key == "jazz-app";
+            depends |= key == "jazz-app-support";
         }
     }
     package && depends
@@ -1116,40 +1116,39 @@ mod tests {
 
     #[test]
     fn app_manifests_depend_on_jazz_app() {
-        let app =
-            "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app = { path = \"../jazz-app\" }\n";
+        let app = "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app-support = { path = \"../jazz-app-support\" }\n";
         assert!(is_app_manifest(app));
         // Under another name.
         assert!(is_app_manifest(
-            "[package]\nname = \"a\"\n[dependencies]\njazz = { package = \"jazz-app\", version = \"0.1\" }\n"
+            "[package]\nname = \"a\"\n[dependencies]\njazz = { package = \"jazz-app-support\", version = \"0.1\" }\n"
         ));
         assert!(is_app_manifest(
-            "[package]\nname = \"a\"\n[dependencies.jazz]\npackage = \"jazz-app\"\nversion = \"0.1\"\n"
+            "[package]\nname = \"a\"\n[dependencies.jazz]\npackage = \"jazz-app-support\"\nversion = \"0.1\"\n"
         ));
         assert!(!is_app_manifest(
-            "[package]\nname = \"a\"\n[dev-dependencies]\njazz = { package = \"jazz-app\" }\n"
+            "[package]\nname = \"a\"\n[dev-dependencies]\njazz = { package = \"jazz-app-support\" }\n"
         ));
         assert!(is_app_manifest(
-            "[package]\nname = \"x\"\n[dependencies]\njazz-app.workspace = true\n"
+            "[package]\nname = \"x\"\n[dependencies]\njazz-app-support.workspace = true\n"
         ));
         assert!(is_app_manifest(
-            "[package]\nname = \"x\"\n[dependencies.jazz-app]\nversion = \"1\"\n"
+            "[package]\nname = \"x\"\n[dependencies.jazz-app-support]\nversion = \"1\"\n"
         ));
-        // A workspace root, a crate without jazz-app, a commented-out one.
+        // A workspace root, a crate without jazz-app-support, a commented-out one.
         assert!(!is_app_manifest(
-            "[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\njazz-app = \"1\"\n"
+            "[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\njazz-app-support = \"1\"\n"
         ));
         assert!(!is_app_manifest(
             "[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n"
         ));
         assert!(!is_app_manifest(
-            "[package]\nname = \"x\"\n[dependencies]\n# jazz-app = \"1\"\n"
+            "[package]\nname = \"x\"\n[dependencies]\n# jazz-app-support = \"1\"\n"
         ));
         assert!(!is_app_manifest(
             "[package]\nname = \"x\"\n[dependencies]\njazz-application = \"1\"\n"
         ));
         assert!(is_app_manifest(
-            "[package]\nname = \"x\"\n[target.'cfg(unix)'.dependencies]\njazz-app = \"1\"\n"
+            "[package]\nname = \"x\"\n[target.'cfg(unix)'.dependencies]\njazz-app-support = \"1\"\n"
         ));
         // A root that is also a package only declares it for its members;
         // dev- and build-dependencies don't count.
@@ -1158,10 +1157,12 @@ mod tests {
             "dev-dependencies",
             "build-dependencies",
         ] {
-            let manifest = format!("[package]\nname = \"x\"\n[{section}]\njazz-app = \"1\"\n");
+            let manifest =
+                format!("[package]\nname = \"x\"\n[{section}]\njazz-app-support = \"1\"\n");
             assert!(!is_app_manifest(&manifest), "{section}");
-            let table = format!("[package]\nname = \"x\"\n[{section}.jazz-app]\nversion = \"1\"\n");
-            assert!(!is_app_manifest(&table), "{section}.jazz-app");
+            let table =
+                format!("[package]\nname = \"x\"\n[{section}.jazz-app-support]\nversion = \"1\"\n");
+            assert!(!is_app_manifest(&table), "{section}.jazz-app-support");
         }
     }
 

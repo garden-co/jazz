@@ -19,26 +19,26 @@ use serde_json::{Value, json};
 
 struct App {
     _server: jazz_server::JazzServer,
-    backend: jazz_app::Jazz,
+    backend: jazz_app_support::Jazz,
     relay: relay::Relay,
-    app_id: jazz_app::AppId,
+    app_id: jazz_app_support::AppId,
 }
 
 impl App {
     async fn start() -> Self {
-        let app_id = jazz_app::AppId::random();
+        let app_id = jazz_app_support::AppId::random();
         let server = jazz_server::JazzServer::builder()
             .with_app_id(app_id)
             .start()
             .await
             .unwrap();
-        let files = jazz_app::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
+        let files = jazz_app_support::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
             .with_permissions(STAGE_PLAN_PERMISSIONS.as_bytes().to_vec());
-        let backend = jazz_app::Jazz::open(
+        let backend = jazz_app_support::Jazz::open(
             files,
-            jazz_app::Config::new(app_id)
+            jazz_app_support::Config::new(app_id)
                 .server(server.base_url())
-                .backend(jazz_app::Backend::new(
+                .backend(jazz_app_support::Backend::new(
                     server.backend_secret(),
                     server.admin_secret(),
                     "stage-plan",
@@ -400,6 +400,96 @@ async fn a_c_host_follows_a_session() {
         );
         assert_eq!(seen.last().unwrap().1["kind"], "closed");
         jazz_unwatch(watch);
+    })
+    .await
+    .unwrap();
+    app.backend.shutdown().await.unwrap();
+}
+
+/// What a slow host token callback saw: whether it is running, and whether
+/// it ran after the session closed.
+struct SlowHost {
+    running: std::sync::atomic::AtomicBool,
+    closed: std::sync::atomic::AtomicBool,
+    after_close: std::sync::atomic::AtomicBool,
+}
+
+unsafe extern "C" fn slow_cb(
+    ctx: *mut c_void,
+    reason: *const c_char,
+    token: *mut *mut c_char,
+) -> i32 {
+    use std::sync::atomic::Ordering;
+    let host = unsafe { &*(ctx as *const SlowHost) };
+    if host.closed.load(Ordering::SeqCst) {
+        host.after_close.store(true, Ordering::SeqCst);
+    }
+    host.running.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(400));
+    host.running.store(false, Ordering::SeqCst);
+    unsafe { alice_cb(ctx, reason, token) }
+}
+
+/// When `jazz_session_close` returns, the token callback is not running and
+/// is never called again, though the client was renewing its bearer on its
+/// own (the backend refused it as expired): a host may free its ctx then.
+/// No other call on the session runs meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_token_callback_runs_after_the_session_closes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let app = App::start().await;
+    let config = app.config(json!({ "auth": { "bearer": true } }));
+    let host: &'static SlowHost = Box::leak(Box::new(SlowHost {
+        running: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        after_close: AtomicBool::new(false),
+    }));
+    let session = tokio::task::spawn_blocking(move || unsafe {
+        let mut err = ptr::null_mut();
+        let session = jazz_session_open(
+            c(&config).as_ptr(),
+            Some(slow_cb),
+            host as *const SlowHost as *mut c_void,
+            &mut err,
+        );
+        assert!(!session.is_null(), "{}", take(err));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut err = ptr::null_mut();
+            let out =
+                jazz_session_call(session, c("snapshot").as_ptr(), c("{}").as_ptr(), &mut err);
+            if take(out)["status"] == "ready" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "not ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        session as usize
+    })
+    .await
+    .unwrap();
+    // The backend refuses alice's bearer as expired: the client asks the
+    // host for another, on its own, again and again.
+    app.relay.refuse("token-alice", "token expired");
+    app.relay.kick();
+    tokio::task::spawn_blocking(move || unsafe {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !host.running.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "no renewal");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        jazz_session_close(session as *mut _);
+        assert!(
+            !host.running.load(Ordering::SeqCst),
+            "close returned while the callback ran"
+        );
+        host.closed.store(true, Ordering::SeqCst);
+        // The client's renewals would come now, if any could.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !host.after_close.load(Ordering::SeqCst),
+            "the callback ran after close"
+        );
     })
     .await
     .unwrap();

@@ -64,6 +64,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         // user, and no user signed in.
         case .Replaced: return JazzError.closed
         case .NoUser(_, let message): return JazzError.refused(message)
+        // A trusted backend client's: a Swift app never opens one.
+        case .BundleMismatch(_, _, let message): return JazzError.refused(message)
         }
     }
 }
@@ -312,15 +314,34 @@ public final class Client: Sendable {
         }
     }
 
-    /// Runs `body` in a serializable transaction: it commits when `body`
-    /// returns (waiting for `commit`'s tier, if given) and rolls back when it
-    /// throws, rethrowing that error. Inside, reads see the transaction's
-    /// own writes. Don't let `tx` escape `body`. A `JazzError.conflict`
-    /// means another write won: running the transaction again may succeed.
+    /// Runs `body` in a mergeable transaction (TS's `transaction`): it
+    /// commits when `body` returns (waiting for `commit`'s tier, if given)
+    /// and rolls back when it throws, rethrowing that error. Inside, reads
+    /// see the transaction's own writes. Its writes commit together and
+    /// merge with concurrent ones, so its commit is never a conflict; it
+    /// works offline. Don't let `tx` escape `body`.
     public func transaction<T: Sendable>(
         commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
     ) async throws -> T {
-        let ffi = try await Self.typed { try await Self.run { try self.handle.begin() } }
+        try await run(transaction: { try self.handle.beginMergeable() }, commit: tier, body)
+    }
+
+    /// Runs `body` in a serializable transaction (TS's
+    /// `serializableTransaction`), as `transaction` does, but the server
+    /// accepts it only if nothing it read changed meanwhile. A
+    /// `JazzError.conflict` means another write won: running the
+    /// transaction again may succeed.
+    public func serializableTransaction<T: Sendable>(
+        commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
+    ) async throws -> T {
+        try await run(transaction: { try self.handle.begin() }, commit: tier, body)
+    }
+
+    func run<T: Sendable>(
+        transaction begin: @escaping @Sendable () throws -> JazzFFI.Transaction,
+        commit tier: WriteTier?, _ body: (Transaction) async throws -> T
+    ) async throws -> T {
+        let ffi = try await Self.typed { try await Self.run(begin) }
         let tx = Transaction(ffi, implementations: implementations)
         let result: T
         do {
