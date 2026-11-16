@@ -1,17 +1,13 @@
 import { expect } from "vitest";
-import { schema, type Db } from "../../src/index.js";
+import type { Db } from "../../src/index.js";
+import { app } from "./apps/write-contract/jazz.generated.js";
 
 /**
  * Write error / backpressure / read-your-writes contract (#3273), asserted
  * through the public `Db` API with the same calls on every binding: React
- * Native (native relay), NAPI and WASM.
+ * Native (native relay), NAPI and WASM. The app is ./apps/write-contract/.
  */
-export const writeContractApp = schema.defineApp(
-  {
-    notes: schema.table({ text: schema.string(), seq: schema.int() }, {}),
-  },
-  { migrations: "none" },
-);
+export const writeContractApp = app;
 
 const notes = writeContractApp.notes;
 
@@ -45,7 +41,7 @@ export async function assertResidentTombstoneRejectsThroughHandle(db: Db): Promi
  * (here: re-inserting a deleted row's caller-supplied id, which only the
  * apply step checks) is reported by the write handle and the mutation-error
  * listener, not thrown by the call. This matches the NAPI receipt in
- * tests/ts-dsl/insert-api.test.ts.
+ * tests/typed-app/insert-api.test.ts.
  */
 export async function assertApplyFailureSurfacesThroughHandle(db: Db): Promise<void> {
   const id = crypto.randomUUID();

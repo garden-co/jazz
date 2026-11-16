@@ -1,38 +1,9 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
+import { ART, HUES } from "./app-extras";
+import { MAX_LINE_QUANTITY } from "./src/store/limits";
 
-/** Token hues used by the generated product illustrations. */
-export const HUES = [
-  "gray",
-  "blue",
-  "cyan",
-  "green",
-  "orange",
-  "pink",
-  "purple",
-  "red",
-  "teal",
-  "yellow",
-] as const;
-/** The illustration drawn for a product; see src/components/ProductArt.tsx. */
-export const ART = [
-  "guitar",
-  "bass",
-  "keys",
-  "synth",
-  "drum",
-  "cymbal",
-  "mic",
-  "headphones",
-  "amp",
-  "pedal",
-  "cable",
-  "strings",
-  "picks",
-] as const;
-
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
 
   // ── Catalogue: public, written only by the store backend ──────────────
@@ -170,21 +141,109 @@ const schema = {
       { order: s.rel("orders", "orderId") },
     )
     .indexOnly(["orderId"]),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions, allowedTo, session, allOf, gte, lte } = schema;
 
-export type Category = s.RowOf<typeof app.categories>;
-export type Product = s.RowOf<typeof app.products>;
-export type Stock = s.RowOf<typeof app.stock>;
-export type Cart = s.RowOf<typeof app.carts>;
-export type CartLine = s.RowOf<typeof app.cartLines>;
-export type Order = s.RowOf<typeof app.orders>;
-export type OrderLine = s.RowOf<typeof app.orderLines>;
-export type OrderEvent = s.RowOf<typeof app.orderEvents>;
-export type Payment = s.RowOf<typeof app.payments>;
-export type OrderStatus = Order["status"];
-export type ShippingMethod = Cart["shippingMethod"];
-export type Hue = (typeof HUES)[number];
-export type Art = (typeof ART)[number];
+// A cart belongs to exactly one account. Guests have a device account
+// too, so the same rule covers a guest cart and a signed-in cart; linking a
+// provider identity keeps the account, and with it the cart.
+const mine = { shopper: session.user };
+
+const sensibleQuantity = allOf({ quantity: gte(0) }, { quantity: lte(MAX_LINE_QUANTITY) });
+
+export const permissions = definePermissions({
+  // Better Auth rows are owned by the trusted auth route (backend authority).
+  better_auth_account: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_jwks: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_session: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_user: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_verification: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  // Cart lines inherit from their cart. The new row must still point at a
+  // cart the shopper owns, so a line cannot be moved into someone else's cart.
+  cartLines: {
+    read: (cartLine) => allowedTo.read(cartLine.cart),
+    insert: (cartLine) => allOf(allowedTo.update(cartLine.cart), sensibleQuantity),
+    updateIf: (cartLine) => allowedTo.update(cartLine.cart),
+    updateTo: (cartLine) => allOf(allowedTo.update(cartLine.cart), sensibleQuantity),
+    delete: (cartLine) => allowedTo.update(cartLine.cart),
+  },
+  carts: {
+    read: mine,
+    insert: mine,
+    update: mine,
+    delete: mine,
+  },
+  // The catalogue and stock levels are public. Only the backend writes them:
+  // it seeds the catalogue and decrements stock inside checkout.
+  categories: {
+    read: true,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  // Orders and everything hanging off them are readable by their shopper and
+  // written only by the backend: placing an order, recording a payment and
+  // shipping are backend decisions, never client writes.
+  orderEvents: {
+    read: (orderEvent) => allowedTo.read(orderEvent.order),
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  orderLines: {
+    read: (orderLine) => allowedTo.read(orderLine.order),
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  orders: {
+    read: mine,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  payments: {
+    read: (payment) => allowedTo.read(payment.order),
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  products: {
+    read: true,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  stock: {
+    read: true,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+});

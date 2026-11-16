@@ -1,13 +1,11 @@
 <script lang="ts">
-  import { useJazzAuth } from "jazz-tools/svelte";
+  import { getJazzSession } from "jazz-tools/svelte";
   import { authClient } from "$lib/auth-client";
 
-  const jazzAuth = useJazzAuth();
+  const jazz = getJazzSession();
   const betterAuthSession = authClient.useSession();
   // Signed in: an account the backend names, not this device's guest.
-  const signedIn = $derived(
-    !!$jazzAuth.account && $jazzAuth.account.identity.issuer !== "urn:jazz:local-first",
-  );
+  const signedIn = $derived($jazz.user?.kind === "backend");
 
   let mode = $state<"closed" | "sign-up" | "sign-in">("closed");
   let name = $state("");
@@ -33,13 +31,13 @@
     }
   }
 
-  // Creating an account links it to the guest's local-first account, so every
+  // Creating an account links it to the guest's device account, so every
   // show and task made so far simply stays.
   const signUp = () =>
     change(async () => {
       const result = await authClient.signUp.email({ name: name.trim() || email, email, password });
       if (result.error) throw new Error(result.error.message ?? "Could not create the account.");
-      await jazzAuth.sessionActions.linkWithBackend();
+      await jazz.linkDeviceAccount();
     });
 
   // Signing in opens the existing account. What this browser made as a
@@ -48,22 +46,22 @@
     change(async () => {
       const result = await authClient.signIn.email({ email, password });
       if (result.error) throw new Error(result.error.message ?? "Could not sign in.");
-      await jazzAuth.sessionActions.loginWithBackend();
+      await jazz.refresh();
     });
 
   const signOut = () =>
     change(async () => {
-      await jazzAuth.logout();
+      await jazz.signOut();
       await authClient.signOut();
       // A fresh guest: the next person on this device starts empty.
-      await jazzAuth.sessionActions.createLocalFirst();
+      await jazz.createDeviceAccount();
     });
 
   // A Jazz session is not kept across reloads for a signed-in account: when
   // Better Auth still has a session, sign back in through the backend.
   $effect(() => {
     if ($betterAuthSession.isPending || changing || signedIn) return;
-    if ($betterAuthSession.data?.user) void change(() => jazzAuth.sessionActions.loginWithBackend());
+    if ($betterAuthSession.data?.user) void change(() => jazz.refresh());
   });
 </script>
 

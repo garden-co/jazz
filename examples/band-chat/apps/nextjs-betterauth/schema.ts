@@ -1,8 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   profiles: s.table(
     {
@@ -19,12 +18,11 @@ const schema = {
       joinRequestsViaProfile: s.reverse("joinRequests", "profile"),
     },
   ),
+  // A room carries no activity of its own: the room list reads each room's
+  // newest message, so nobody has to update the room when they post.
   rooms: s.table(
     {
       name: s.string(),
-      // Denormalized "last activity" carrier, written by members when they
-      // post. Unread state is derived per reader from `readMarkers`.
-      lastActivityAt: s.timestamp().optional(),
     },
     {
       roomMembersViaRoom: s.reverse("roomMembers", "room"),
@@ -51,7 +49,11 @@ const schema = {
     { roomId: s.uuid(), requester: s.uuid(), profileId: s.uuid() },
     { room: s.rel("rooms", "roomId"), profile: s.rel("profiles", "profileId") },
   ),
-  // One private row per reader and room: everything newer is unread.
+  // One row per member and room, updated in place, never a history: the
+  // `$createdAt` of the newest message the reader has seen. Messages from
+  // others after it are unread. Co-members can read it, which is what the
+  // check marks under a message and "Read by" show; it only moves forward,
+  // and it goes when its reader leaves or is removed.
   readMarkers: s.table(
     { roomId: s.uuid(), reader: s.uuid(), lastReadAt: s.timestamp() },
     { room: s.rel("rooms", "roomId") },
@@ -104,16 +106,4 @@ const schema = {
     },
     { canvas: s.rel("canvases", "canvasId"), room: s.rel("rooms", "roomId") },
   ),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Profile = s.RowOf<typeof app.profiles>;
-export type Room = s.RowOf<typeof app.rooms>;
-export type RoomMember = s.RowOf<typeof app.roomMembers>;
-export type JoinRequest = s.RowOf<typeof app.joinRequests>;
-export type ReadMarker = s.RowOf<typeof app.readMarkers>;
-export type Message = s.RowOf<typeof app.messages>;
-export type Reaction = s.RowOf<typeof app.reactions>;
-export type Canvas = s.RowOf<typeof app.canvases>;
-export type Stroke = s.RowOf<typeof app.strokes>;
+});

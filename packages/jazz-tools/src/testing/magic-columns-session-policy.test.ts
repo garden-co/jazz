@@ -1,22 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { definePermissions } from "../permissions/index.js";
-import { schema as s } from "../index.js";
-import { createPolicyTestApp } from "./index.js";
+import { createPolicyTestApp, testApp } from "./index.js";
 
-const schema = {
-  notes: s.table({ title: s.string(), ownerId: s.uuid() }, {}),
+const app = testApp({
+  tables: { notes: { columns: { title: "string", ownerId: "uuid" } } },
+});
+
+const sessionPolicy = {
+  tables: { notes: { read: "ownerId = session.user", insert: "ownerId = session.user" } },
 };
-type Schema = s.Schema<typeof schema>;
-const app: s.App<Schema> = s.defineApp(schema, { migrations: "none" });
-
-const sessionPolicy = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ ownerId: session.user });
-  policy.notes.allowInsert.where({ ownerId: session.user });
-});
-const openPolicy = definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-});
+const openPolicy = {
+  tables: { notes: { read: "true", insert: "true" } },
+};
 
 // The docs list `$createdAt` and friends as selectable edit-metadata columns.
 // They must come back whatever shape the table's read policy has.
@@ -25,10 +19,10 @@ describe.each([
   ["a session-dependent read policy", sessionPolicy],
 ])("selecting magic columns under %s", (_label, permissions) => {
   it("returns $createdAt and $updatedAt", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
       const account = crypto.randomUUID();
-      const db = testApp.as({
+      const db = policyApp.as({
         issuer: "https://magic-columns.test",
         user_id: "ada",
         account_id: account,
@@ -45,7 +39,7 @@ describe.each([
       expect(rows[0]!.$createdAt).toBeInstanceOf(Date);
       expect(rows[0]!.$updatedAt).toBeInstanceOf(Date);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 60_000);
 });

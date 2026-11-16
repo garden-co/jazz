@@ -16,6 +16,8 @@ import {
 import type { PublicSession } from "../runtime/context.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { trackPromise } from "../subscriptions-orchestrator.js";
+import { SessionContext } from "./session-context.js";
+import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 
 type CoreJazzDb = {
   getAuthState(): AuthState;
@@ -39,7 +41,8 @@ export type JazzClientProviderProps = {
   children: ReactNode;
 };
 
-export type JazzProviderProps = {
+/** @internal */
+export type JazzDbProviderProps = {
   config: DbConfig;
   /** Rendered during SSR and until client acquisition completes after browser commit. */
   fallback?: ReactNode;
@@ -106,7 +109,20 @@ function usePromise<T extends object>(promise: Promise<T> | T): T {
  * Makes a Jazz client available to children components through a React context.
  * Useful if you need to create a Jazz client outside of the React component lifecycle.
  */
-export function JazzClientProvider({ client: clientPromise, children }: JazzClientProviderProps) {
+export function JazzClientProvider(props: JazzClientProviderProps) {
+  // Its children read this client, not an enclosing <JazzProvider>'s session.
+  return (
+    <SessionContext.Provider value={null}>
+      <JazzClientContextProvider {...props} />
+    </SessionContext.Provider>
+  );
+}
+
+/** @internal `<JazzClientProvider>` for a session's own client: the session stays visible. */
+export function JazzClientContextProvider({
+  client: clientPromise,
+  children,
+}: JazzClientProviderProps) {
   const client = usePromise(clientPromise);
 
   const authRev = useAuthSubscription(client);
@@ -117,12 +133,16 @@ export function JazzClientProvider({ client: clientPromise, children }: JazzClie
 }
 
 /**
- * Default Jazz provider. Creates a Jazz client and makes it available to children
- * components through a React context.
- * If you need to create a Jazz client outside of the React component lifecycle,
- * use {@link JazzClientProvider}.
+ * @internal Opens a client straight from a Db config (a local or test Db, no
+ * session) and makes it available to children. Apps use `<JazzProvider>`,
+ * which owns a session, or `<JazzClientProvider>` for a client they opened.
  */
-export function JazzProvider({ config, fallback, children, openJazzClient }: JazzProviderProps) {
+export function JazzDbProvider({
+  config,
+  fallback,
+  children,
+  openJazzClient,
+}: JazzDbProviderProps) {
   // Stable per-provider identity, used as the registry holder across effect
   // cleanup and re-acquisition (including React Strict Mode's effect replay).
   const holder = useRef({}).current;
@@ -184,9 +204,17 @@ export function JazzProvider({ config, fallback, children, openJazzClient }: Jaz
   );
 }
 
+/**
+ * @internal The nearest client's context, or null outside a provider. A new
+ * value each time the client's auth changes.
+ */
+export function useOptionalJazzClientContext(): { client: CoreJazzClient } | null {
+  return useContext(JazzContext);
+}
+
 export function useJazzClient(): CoreJazzClient {
   const ctx = useContext(JazzContext);
-  if (!ctx) throw new Error("useDb must be used within <JazzProvider>");
+  if (!ctx) throw new Error("useDb must be used within <JazzProvider> or <JazzClientProvider>");
   return ctx.client;
 }
 
@@ -200,8 +228,12 @@ export function useDb<TDb = unknown>(): TDb {
 /**
  * Get the current Jazz {@link PublicSession}, including the canonical user,
  * immutable provider claims, and auth mode.
+ *
+ * @deprecated Use `useJazzSession().user`: the same user, with `user` as
+ * `accountId`. Warns once in development; removed in a later alpha.
  */
 export function useSession(): PublicSession | null {
+  warnSessionHookDeprecated("useSession()", "useJazzSession().user");
   const session = useJazzClient().session;
   return session ?? null;
 }

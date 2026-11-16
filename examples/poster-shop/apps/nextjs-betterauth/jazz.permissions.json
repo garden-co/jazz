@@ -1,0 +1,110 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "b9fa989336f5ef9d17363f23ea9109d0844de61cb00f5f72451f3fb5a4595635"
+  },
+  "tables": {
+    "assets": {
+      "read": "allowedTo.read(canvas)",
+      "insert": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])",
+      "update": "false",
+      "delete": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])"
+    },
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "canvasInvites": {
+      "read": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role = 'admin')",
+      "insert": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role = 'admin')",
+      "update": "false",
+      "delete": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role = 'admin')"
+    },
+    "canvasMembers": {
+      "read": "allowedTo.read(canvas)",
+      "insert": "allowedTo.update(canvas)",
+      "update": "allowedTo.update(canvas)",
+      "delete": { "anyOf": ["allowedTo.update(canvas)", "memberAuthor = session.user"] }
+    },
+    "canvases": {
+      "read": "exists canvasMembers(canvasId = this.id, memberAuthor = session.user)",
+      "insert": "false",
+      "update": "exists canvasMembers(canvasId = this.id, memberAuthor = session.user, role = 'admin')",
+      "delete": "exists canvasMembers(canvasId = this.id, memberAuthor = session.user, role = 'admin')"
+    },
+    "checkpoints": {
+      "read": "allowedTo.read(canvas)",
+      "insert": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role = 'admin')",
+      "update": "false",
+      "delete": "false"
+    },
+    "cursors": {
+      "read": "allowedTo.read(canvas)",
+      "insert": {
+        "allOf": [
+          "author = session.user",
+          "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user)"
+        ]
+      },
+      "update": {
+        "old": "author = session.user",
+        "new": {
+          "allOf": [
+            "author = session.user",
+            "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user)"
+          ]
+        }
+      },
+      "delete": "author = session.user"
+    },
+    "layers": {
+      "read": "allowedTo.read(canvas)",
+      "insert": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])",
+      "update": "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])",
+      "delete": {
+        "allOf": [
+          "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])",
+          "locked = false"
+        ]
+      }
+    },
+    "shapes": {
+      "read": "allowedTo.read(canvas)",
+      "insert": {
+        "allOf": [
+          "exists layers(id = this.layerId, canvasId = this.canvasId, locked = false)",
+          "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])"
+        ]
+      },
+      "update": {
+        "allOf": [
+          "exists layers(id = this.layerId, canvasId = this.canvasId, locked = false)",
+          "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])"
+        ]
+      },
+      "delete": {
+        "allOf": [
+          "exists layers(id = this.layerId, canvasId = this.canvasId, locked = false)",
+          "exists canvasMembers(canvasId = this.canvasId, memberAuthor = session.user, role in ['editor', 'admin'])"
+        ]
+      }
+    }
+  }
+}

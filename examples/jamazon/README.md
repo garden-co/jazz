@@ -13,14 +13,14 @@ the Jazz design system.
 - **A public catalogue.** Categories, a product grid, product pages with generated illustrations,
   specifications and live stock badges. Search is a live Jazz query over the local copy of the
   catalogue, so it narrows on every keystroke and keeps working offline.
-- **An offline-first cart.** Every visitor gets a local-first Jazz account on first load, so the
+- **An offline-first cart.** Every visitor gets a Jazz device account on first load, so the
   cart works before sign-in and without a connection. Cart edits are ordinary local writes that
   sync to the shopper's other devices. Each (cart, product) pair has one row with a
   deterministic id: two devices that add the same product converge on one line, and if they set
   different quantities the later edit wins. Lines are zeroed rather than deleted, so removing
   and re-adding a product addresses the same row everywhere.
 - **Guest carts that follow you.** Creating an account links the Better Auth identity to the
-  guest's Jazz account (`linkWithBackend`), so the cart stays put. Signing in to an existing account
+  guest's Jazz account (`linkDeviceAccount`), so the cart stays put. Signing in to an existing account
   switches accounts, and the app claims the guest cart's lines into the account's cart, keeping
   the larger quantity where both have the product.
 - **An idempotent checkout.** Shipping details live on the cart row (they sync too). Reaching the
@@ -47,7 +47,7 @@ the Jazz design system.
   payments and runs a fulfilment worker that subscribes to paid orders and ships them after a
   short packing delay. Shoppers watch the order timeline (placed, paid, shipped) advance through
   the same live query.
-- **Permissions in `permissions.ts`.** The catalogue and stock are public and read-only. Carts
+- **Permissions in `jazz.permissions.json`.** The catalogue and stock are public and read-only. Carts
   and their lines belong to one account, quantities stay in range and a line cannot be moved into
   another cart. Orders, order lines, events and payments are readable by their shopper and
   written only by the backend.
@@ -70,7 +70,7 @@ start.
 That includes `next dev` on a non-loopback host (for example a LAN address or a tunnel): it
 needs the full deployment configuration too.
 
-By default the backend stores data in SQLite next to the app. To sync through Jazz Cloud or your
+By default the backend stores data in SQLite next to the app. To sync through Jazz Cloud (deprecated) or your
 own sync server instead, set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`; the backend then uses `remote()`, and browsers still talk only to `/jazz`.
 
 To try Stripe test mode, set `PAYMENT_PROVIDER=stripe`, `STRIPE_SECRET_KEY=sk_test_…` and
@@ -105,13 +105,13 @@ Runs against a local Jazz server started by `createPolicyTestApp`:
 
 ## Layout
 
-| Path                          | What lives there                                               |
-| ----------------------------- | -------------------------------------------------------------- |
-| `schema.ts`, `permissions.ts` | Tables and row-level policies                                  |
-| `src/catalogue/catalogue.ts`  | The deterministic synthetic catalogue                          |
-| `src/lib/ids.ts`              | Deterministic (version 5) row ids                              |
-| `src/store/cart.ts`           | Cart hook, merge rules and guest cart claim                    |
-| `src/server/orders.ts`        | Checkout, payment and shipping workflow (backend authority)    |
-| `src/server/payments/`        | `PaymentProvider`, the sandbox and Stripe test mode            |
-| `src/server/fulfilment.ts`    | The worker that ships paid orders                              |
-| `src/components/`             | Storefront UI built from Astryx components with the Jazz theme |
+| Path                                     | What lives there                                               |
+| ---------------------------------------- | -------------------------------------------------------------- |
+| `jazz.app.json`, `jazz.permissions.json` | Tables and row-level policies                                  |
+| `src/catalogue/catalogue.ts`             | The deterministic synthetic catalogue                          |
+| `src/lib/ids.ts`                         | Deterministic (version 5) row ids                              |
+| `src/store/cart.ts`                      | Cart hook, merge rules and guest cart claim                    |
+| `src/server/orders.ts`                   | Checkout, payment and shipping workflow (backend authority)    |
+| `src/server/payments/`                   | `PaymentProvider`, the sandbox and Stripe test mode            |
+| `src/server/fulfilment.ts`               | The worker that ships paid orders                              |
+| `src/components/`                        | Storefront UI built from Astryx components with the Jazz theme |

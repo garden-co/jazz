@@ -130,7 +130,9 @@ evolution requires a new explicitly versioned envelope, never a reordered
 field, permissive fallback, or in-place migration. A host and its JavaScript
 come from one build: NAPI and WASM artifacts carry an ABI fingerprint the
 TypeScript loader checks, and React Native's native relay ABI version
-(`NATIVE_RELAY_ABI_V1`, 4 since `updated_splices`) must match the bundle's,
+(`NATIVE_RELAY_ABI_V1`, 4 since `updated_splices`, 5 since an attached
+schema carries the app's migrations, 6 since an upstream failure carries its
+refusal's code) must match the bundle's,
 so a mismatched pair refuses to open rather than misreading a delta.
 
 Named-cell input has the explicit v1 postcard field order `descriptor, raw`.

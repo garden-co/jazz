@@ -1,0 +1,297 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "3c2d14a4f55cc075bcfeab2a1e91fe419f8d1268b43a1e4b823928e8d4a97d05"
+  },
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "patterns": {
+      "columns": { "session_id": "uuid", "position": "int", "name": "string", "length": "int" },
+      "relations": {
+        "session": { "rel": "sessions", "column": "session_id" },
+        "stepsViaPattern": { "reverse": "steps", "relation": "pattern" }
+      },
+      "indexes": ["session_id", "position"]
+    },
+    "presence": {
+      "columns": {
+        "session_id": "uuid",
+        "profile_id": "uuid",
+        "cursor_step": "int",
+        "heartbeat_at": "timestamp"
+      },
+      "relations": {
+        "profile": { "rel": "profiles", "column": "profile_id" },
+        "session": { "rel": "sessions", "column": "session_id" }
+      },
+      "indexes": ["session_id", "heartbeat_at"]
+    },
+    "profiles": {
+      "columns": { "author": "uuid", "displayName": "string" },
+      "relations": { "presenceViaProfile": { "reverse": "presence", "relation": "profile" } }
+    },
+    "session_members": {
+      "columns": {
+        "session_id": "uuid",
+        "member_author": "uuid",
+        "role": { "enum": ["owner", "editor", "viewer"] }
+      },
+      "relations": { "session": { "rel": "sessions", "column": "session_id" } },
+      "indexes": ["session_id", "member_author"]
+    },
+    "sessions": {
+      "columns": { "title": "string", "tempo_bpm": "int" },
+      "relations": {
+        "patternsViaSession": { "reverse": "patterns", "relation": "session" },
+        "presenceViaSession": { "reverse": "presence", "relation": "session" },
+        "session_membersViaSession": { "reverse": "session_members", "relation": "session" },
+        "stepsViaSession": { "reverse": "steps", "relation": "session" },
+        "tracksViaSession": { "reverse": "tracks", "relation": "session" },
+        "transport_observationsViaSession": {
+          "reverse": "transport_observations",
+          "relation": "session"
+        }
+      }
+    },
+    "steps": {
+      "columns": {
+        "session_id": "uuid",
+        "track_id": "uuid",
+        "pattern_id": "uuid",
+        "position": "int",
+        "enabled": "boolean",
+        "velocity": "int",
+        "probability": "int"
+      },
+      "relations": {
+        "pattern": { "rel": "patterns", "column": "pattern_id" },
+        "session": { "rel": "sessions", "column": "session_id" },
+        "track": { "rel": "tracks", "column": "track_id" }
+      },
+      "indexes": ["track_id", "pattern_id", "position"]
+    },
+    "tracks": {
+      "columns": {
+        "session_id": "uuid",
+        "position": "int",
+        "name": "string",
+        "color": "string",
+        "instrument": {
+          "enum": ["kick", "snare", "clap", "closed_hat", "open_hat", "tom", "bass", "lead"],
+          "default": "kick"
+        },
+        "volume": { "type": "int", "default": 80 },
+        "muted": { "type": "boolean", "default": false },
+        "solo": { "type": "boolean", "default": false }
+      },
+      "relations": {
+        "session": { "rel": "sessions", "column": "session_id" },
+        "stepsViaTrack": { "reverse": "steps", "relation": "track" }
+      },
+      "indexes": ["session_id", "position"]
+    },
+    "transport_observations": {
+      "columns": {
+        "session_id": "uuid",
+        "playing": "boolean",
+        "bar": "int",
+        "observed_at": "timestamp",
+        "tempo_bpm": { "type": "int", "default": 120 },
+        "pattern_id": "uuid?"
+      },
+      "relations": {
+        "pattern": { "rel": "patterns", "column": "pattern_id" },
+        "session": { "rel": "sessions", "column": "session_id" }
+      },
+      "indexes": ["session_id", "observed_at"]
+    }
+  },
+  "history": {
+    "a0d57d731cd5": {
+      "tables": {
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "patterns": {
+          "columns": {
+            "session_id": { "type": "uuid", "references": "sessions" },
+            "position": "int",
+            "name": "string",
+            "length": "int"
+          },
+          "indexes": ["session_id", "position"]
+        },
+        "presence": {
+          "columns": {
+            "session_id": { "type": "uuid", "references": "sessions" },
+            "profile_id": { "type": "uuid", "references": "profiles" },
+            "cursor_step": "int",
+            "heartbeat_at": "timestamp"
+          },
+          "indexes": ["session_id", "heartbeat_at"]
+        },
+        "profiles": { "columns": { "author": "uuid", "displayName": "string" } },
+        "session_members": {
+          "columns": {
+            "session_id": { "type": "uuid", "references": "sessions" },
+            "member_author": "uuid",
+            "role": { "enum": ["owner", "editor", "viewer"] }
+          },
+          "indexes": ["session_id", "member_author"]
+        },
+        "sessions": { "columns": { "title": "string", "tempo_bpm": "int" } },
+        "steps": {
+          "columns": {
+            "session_id": { "type": "uuid", "references": "sessions" },
+            "track_id": { "type": "uuid", "references": "tracks" },
+            "pattern_id": { "type": "uuid", "references": "patterns" },
+            "position": "int",
+            "enabled": "boolean",
+            "velocity": "int",
+            "probability": "int"
+          },
+          "indexes": ["track_id", "pattern_id", "position"]
+        },
+        "tracks": {
+          "columns": {
+            "session_id": { "type": "uuid", "references": "sessions" },
+            "position": "int",
+            "name": "string",
+            "color": "string",
+            "instrument": {
+              "enum": ["kick", "snare", "clap", "closed_hat", "open_hat", "tom", "bass", "lead"],
+              "default": "kick"
+            },
+            "volume": { "type": "int", "default": 80 },
+            "muted": { "type": "boolean", "default": false },
+            "solo": { "type": "boolean", "default": false }
+          },
+          "indexes": ["session_id", "position"]
+        },
+        "transport_observations": {
+          "columns": {
+            "session_id": { "type": "uuid", "references": "sessions" },
+            "playing": "boolean",
+            "bar": "int",
+            "observed_at": "timestamp",
+            "tempo_bpm": { "type": "int", "default": 120 },
+            "pattern_id": { "type": "uuid", "optional": true, "references": "patterns" }
+          },
+          "indexes": ["session_id", "observed_at"]
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "a0d57d731cd5",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

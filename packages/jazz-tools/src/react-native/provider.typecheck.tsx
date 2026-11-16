@@ -1,19 +1,20 @@
-import { JazzProvider, useJazzAuth, type JazzUser } from "./index.js";
+import { JazzProvider, useJazzSession, type JazzUser } from "./index.js";
 import type { AccountStore } from "../accounts/persistence.js";
 declare const store: AccountStore;
 function Data() {
-  const { status, sessionActions, user, reauthenticate } = useJazzAuth();
+  const { status, user, refresh, createDeviceAccount, linkDeviceAccount, exportDeviceKey } =
+    useJazzSession();
   const signedIn: JazzUser | null = user;
-  void signedIn;
-  void sessionActions;
-  void reauthenticate;
+  void signedIn?.kind;
+  void refresh;
+  void createDeviceAccount;
+  void linkDeviceAccount;
+  void exportDeviceKey;
   return status;
 }
 export const nativeApplication = (
   <JazzProvider
-    scope="native-app"
-    serverUrl="https://sync.example.test"
-    store={store}
+    config={{ scope: "native-app", serverUrl: "https://sync.example.test", store }}
     signedOut={null}
   >
     <Data />
@@ -21,11 +22,14 @@ export const nativeApplication = (
 );
 export const nativeApplicationWithoutGuests = (
   <JazzProvider
-    serverUrl="https://app.example.test/jazz"
-    store={store}
-    initial="signed-out"
+    config={{ serverUrl: "https://app.example.test/jazz", store, initial: "signed-out" }}
     signedOut={null}
   >
+    <Data />
+  </JazzProvider>
+);
+export const nativeDeviceAccounts = (
+  <JazzProvider config={{ serverUrl: "https://app.example.test/jazz", store, initial: "device" }}>
     <Data />
   </JazzProvider>
 );

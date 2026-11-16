@@ -17,7 +17,7 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -53,7 +53,7 @@ export declare class JazzCoreSocket {
 }
 
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -154,6 +154,14 @@ export declare class NapiDb {
    * this is not a query.
    */
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
+  /**
+   * The Inspector's `explain`: for each of `rows` (uuid strings) of
+   * `table`, which clauses of its read policy (the arms of its top-level
+   * `Or`) hold for `author` with `claims`.
+   */
+  explainReadClauses(table: string, rows: Array<string>, author: Uint8Array, claims?: JsonValue | undefined | null): ExplainedReadClauses
+  /** A pool that pooled subscriptions are read through, all in one call. */
+  createSubscriptionPool(): SubscriptionPool
   subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription
   /** Apply received frames and send what is due on every link. */
   tick(): void
@@ -161,8 +169,12 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount(): number
+  /**
+   * This store's uploads: how many still wait for the server's verdict
+   * and since when, and what the server refused since it opened
+   * (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+   */
+  uploadStatus(): JsonValue
   /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
@@ -221,6 +233,13 @@ export declare class NapiDb {
    * the SQLite file when their write call returns, so only `global` waits.
    */
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
+  /**
+   * TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+   * session's author bytes; none for this database's own) reached `tier`,
+   * failing with a rejection of theirs, including one that settled
+   * before and no wait reported.
+   */
+  waitForSync(tier: string, writer?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 
@@ -277,7 +296,29 @@ export declare class Subscription {
    */
   readAll(): Array<SubscriptionEvent>
   drain(): Array<SubscriptionEvent>
+  /**
+   * Move this subscription's stream into `pool`, which then reads it in
+   * [`SubscriptionPool::drain`]. Returns the id its batches carry.
+   */
+  joinPool(pool: SubscriptionPool): number
   close(): boolean
+}
+
+/**
+ * Subscriptions read together: one [`drain`](Self::drain) call returns the
+ * events of every pooled subscription that has any, instead of one
+ * `readAll` call per subscription.
+ */
+export declare class SubscriptionPool {
+  constructor()
+  /**
+   * The events of every pooled subscription that has any now, by id.
+   * Subscriptions with nothing are left out. A closed or failed stream
+   * leaves the pool after its batch.
+   */
+  drain(): Array<SubscriptionBatch>
+  /** Pooled subscriptions still open. */
+  get size(): number
 }
 
 /**
@@ -355,12 +396,66 @@ export declare function captureTextRange(text: string, version: number | undefin
  */
 export declare function checkClientMigrations(migrations: string, target: string): void
 
+/**
+ * The options the generated TS bindings pass to `bindApp` (`{ source,
+ * schema, relations }`, without the computed and transform callbacks), as
+ * JSON text, for tests that define an app inline.
+ */
+export declare function compileApp(appJson: string): string
+
+/** What `migrationsCreate` wrote. */
+export interface CreatedMigration {
+  /** The new `jazz.app.json` text. */
+  app: string
+  /** Whether a version and migration were added. */
+  changed: boolean
+  /** JSON paths of the `"TODO: …"` strings left for the author. */
+  todos: Array<string>
+  /**
+   * Why nothing was written, when it isn't simply that nothing changed
+   * (an index-only edit).
+   */
+  note?: string
+}
+
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
+}
+
+/** Options of [`generate_for_dir`] and [`migrations_create_for_dir`]. */
+export interface DirOptions {
+  /** Fail when the files or bindings are stale, and write nothing. */
+  check?: boolean
+  /**
+   * The bindings' languages (`"ts"`, `"rust"`, …); by default each the
+   * directory's files say the app is written in.
+   */
+  lang?: Array<string>
+  /**
+   * The language assumed when nothing in the directory names one and
+   * no other language's manifest is there (the npm CLI passes `"ts"`).
+   */
+  fallback?: string
+}
+
+/** What `generateForDir` / `migrationsCreateForDir` did in an app's directory. */
+export interface DirOutcome {
+  /** Lines to print. */
+  notes: Array<string>
+  /** Warnings to print. */
+  warnings: Array<string>
+  /** Bindings files written, relative to the directory. */
+  written: Array<string>
+  /** Bindings files already up to date, relative to the directory. */
+  current: Array<string>
+  /** `migrationsCreateForDir`: whether `jazz.app.json` changed. */
+  changed: boolean
+  /** `migrationsCreateForDir`: JSON paths of the TODOs left to resolve. */
+  todos: Array<string>
 }
 
 /** Authenticates before returning plaintext; rejects short or invalid ciphertext. */
@@ -399,6 +494,40 @@ export interface E2EeSodiumStreamRecord {
 /** Verifies a detached Ed25519 signature; malformed sizes return false. */
 export declare function e2eeSodiumVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): boolean
 
+/** The Inspector's `explain`: how many clauses the read policy has, and the rows found. */
+export interface ExplainedReadClauses {
+  clauses: number
+  rows: Array<ExplainedReadRow>
+}
+
+/** One row of the Inspector's `explain`: whether each read-policy clause holds. */
+export interface ExplainedReadRow {
+  id: string
+  holds: Array<boolean>
+}
+
+/**
+ * The bindings for `appJson` (a `jazz.app.json` text) in `lang` (`"ts"`):
+ * the whole `jazz.generated.ts`.
+ */
+export declare function generate(lang: string, appJson: string): string
+
+/** The `$generated` marker to write: `{ by }`, what wrote the files. */
+export interface GeneratedBy {
+  /**
+   * E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+   * this file".
+   */
+  by: string
+}
+
+/**
+ * `jazz-tools generate [--check]` in `dir`, the directory of the app's
+ * `jazz.app.json`: the same languages, checks and bytes as the
+ * `jazz-tools` binary, which runs the same code.
+ */
+export declare function generateForDir(dir: string, options?: DirOptions | undefined | null): DirOutcome
+
 export interface InsertOptions {
   rowId?: Uint8Array
   author?: Uint8Array
@@ -432,6 +561,35 @@ export interface JazzCoreSocketEvent {
 export type JsonValue =
   any
 
+/**
+ * Read and check an app's `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does. Returns the
+ * current schema hash and the bundle id the two files make.
+ */
+export declare function loadAppArtifact(app: string, permissions: string): JsonValue
+
+/**
+ * Read and check a backend's `jazz.permissions.json` (`permissions`)
+ * against the compiled app its generated bindings embed (`schema`: JSON of
+ * `{ schema, relations }`, the options they pass to `bindApp`), for a
+ * deployed backend that has the bindings but not `jazz.app.json`. Same
+ * result and checks as `loadAppArtifact`.
+ */
+export declare function loadBackendApp(schema: string, permissions: string): JsonValue
+
+/**
+ * Write the migration from the version the committed bindings
+ * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
+ * generated from to `appJson`'s edited `tables`, named `name`.
+ */
+export declare function migrationsCreate(appJson: string, bindings: string | undefined | null, name: string): CreatedMigration
+
+/**
+ * `jazz-tools migrations create --name <name>` in `dir`, as the
+ * `jazz-tools` binary runs it.
+ */
+export declare function migrationsCreateForDir(dir: string, name: string, options?: DirOptions | undefined | null): DirOutcome
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
@@ -451,17 +609,49 @@ export interface RestoreOptions {
 }
 
 /**
+ * The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+ * policies dropped as a deployment drops them, as 64 hex characters. Not
+ * [`schema_source_hash`], which hashes the `jazz.app.json` file.
+ */
+export declare function schemaHash(engineSchemaJson: string): string
+
+/**
+ * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
+ * `source` generated bindings record.
+ */
+export declare function schemaSourceHash(appJson: string): string
+
+/**
  * Serve a production core (the `jazz_server::run` shell: connection and
  * memory limits, graceful drain) until [`ServedCore::stop`]. One per
  * process at a time: the cores would share the process's storage cache
  * budget, so a second call fails until the first core has stopped.
  */
-export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
+export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {
   publicKey: Uint8Array
   privateKey: Uint8Array
+}
+
+/** One subscription's share of a [`SubscriptionPool::drain`]. */
+export interface SubscriptionBatch {
+  /** The id [`Subscription::join_pool`] returned. */
+  id: number
+  /** The events available now, oldest first. */
+  events: Array<SubscriptionEvent>
+  /**
+   * Set when the stream failed after `events`; the stream has left the
+   * pool. Other subscriptions in the same drain are unaffected.
+   */
+  error?: SubscriptionBatchError
+}
+
+export interface SubscriptionBatchError {
+  message: string
+  /** The stable core error code, or the napi status name. */
+  code: string
 }
 
 export interface SubscriptionClosedEvent {
@@ -491,6 +681,11 @@ export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
   /** The server's reason. */
   code: string
+  /**
+   * The rejection's core error code (`"authority_changed"`, …), as a
+   * thrown core error's `code`.
+   */
+  errorCode: string
 }
 
 export interface UpdateOptions {
@@ -517,8 +712,26 @@ export interface UpstreamRefusal {
   message: string
 }
 
+/**
+ * Check committed bindings (`bindings`, or null) against `appJson`. Throws
+ * with `error.code` `JAZZ_SCHEMA_CHANGED` when `tables` changed since the
+ * bindings were generated and no migration leads from that version (run
+ * `migrations create` before regenerating: the bindings hold the only
+ * copy of that version), or `JAZZ_BINDINGS_STALE` when regenerating is
+ * enough (including when there are none).
+ */
+export declare function validateBindings(appJson: string, bindings?: string | undefined | null): void
+
 /** Validate a schema and its embedded permissions without opening a database. */
 export declare function validateSchema(schema: Uint8Array): void
+
+/**
+ * Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+ * its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+ * or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+ * when the text isn't a JSON object or the marker is malformed.
+ */
+export declare function verifyGenerated(text: string): "none" | "match" | "mismatch"
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
@@ -526,4 +739,39 @@ export interface VerifyTokenResult {
   ok: boolean
   id: string
   error?: string
+}
+
+/**
+ * Build the `jazz.app.json` and `jazz.permissions.json` texts from what
+ * `jazz-tools validate` compiled (an
+ * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
+ * JSON): the files' only writer, which refuses what a reader would. With
+ * `options.generated`, each file carries a `$generated` marker.
+ */
+export declare function writeAppArtifact(input: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/**
+ * Check an app's readable `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does and render
+ * them canonically through the writer, which reads its output back to
+ * exactly the same app. With `options.generated`, each file carries a
+ * `$generated` marker. Idempotent.
+ */
+export declare function writeAppFiles(app: string, permissions: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/** How [`write_app_artifact`] and [`write_app_files`] write the files. */
+export interface WriteAppFilesOptions {
+  /**
+   * Mark each file `"$generated": { "by", "sha256" }`, first after
+   * `$schema`.
+   */
+  generated?: GeneratedBy
+}
+
+/** An app's two files, as [`write_app_artifact`] renders them. */
+export interface WrittenAppFiles {
+  /** `jazz.app.json`, which the app and its clients ship. */
+  app: string
+  /** `jazz.permissions.json`, which only its backends read. */
+  permissions: string
 }

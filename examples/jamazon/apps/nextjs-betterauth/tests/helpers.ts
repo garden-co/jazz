@@ -1,8 +1,8 @@
 import type { Db } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
 import { expect } from "vitest";
-import permissions from "../permissions";
-import { app } from "../schema";
+import permissions from "../jazz.permissions.json" with { type: "json" };
+import { app } from "../jazz.generated";
 
 export const ISSUER = "https://jamazon.test";
 
@@ -33,7 +33,7 @@ export function shopper(testApp: PolicyTestApp, name: string): { account: string
 }
 
 /**
- * A guest: the local-first account every visitor gets on first load, before
+ * A guest: the device account every visitor gets on first load, before
  * signing in. A real guest session: no issuer, no admitted account and no
  * custom claims; the test app derives its account from the device key.
  */

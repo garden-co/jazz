@@ -27,7 +27,7 @@ audio back in byte ranges.
 - **Sharing with roles.** The playlist owner invites another account as a
   listener or an editor. The invitation stays `pending` until the recipient
   accepts it; only then does the read (and, for editors, write) policy admit
-  them. The owner can revoke. See `permissions.ts`.
+  them. The owner can revoke. See `jazz.permissions.json`.
 - **Better Auth → Jazz.** Better Auth owns the browser session. Jazz runs
   inside the Next app (`createJazz` in `src/lib/jazz.server.ts`, mounted at
   `/jazz`), and its `authenticate` reads that session cookie, so the browser
@@ -49,7 +49,7 @@ pnpm dev
 
 In development Jazz uses a local app id and keeps its data in `.jazz/`; no
 separate server runs. A deployment sets its own `JAZZ_APP_ID` and
-`BETTER_AUTH_SECRET`. To keep the data on a sync server such as Jazz Cloud,
+`BETTER_AUTH_SECRET`. To keep the data on a sync server such as Jazz Cloud (deprecated),
 also set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`.
 
 Sign in with the pre-filled demo account (choose **Create account** the first

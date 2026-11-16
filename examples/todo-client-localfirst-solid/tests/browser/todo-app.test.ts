@@ -1,6 +1,5 @@
 import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 /**
  * E2E browser tests for the Solid todo app.
  *
@@ -9,9 +8,11 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 
 import { describe, it, expect, afterEach } from "vitest";
 import { render } from "solid-js/web";
-import { App } from "../../src/App.js";
+import { App, type AppConfig } from "../../src/App.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
-import type { DbConfig } from "jazz-tools";
+
+// These tests are about the local-first client (IndexedDB, sync between replicas).
+const loadLocalFirst = () => import("jazz-tools/local-first");
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -29,21 +30,17 @@ describe("Solid Todo App E2E", () => {
     storageNamespace: string | undefined;
   }> = [];
 
-  async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
+  /** Each mount is its own user unless it shares a `store` with another. */
+  async function mountApp(config: AppConfig = {}): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
-    const account =
-      config.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        config.appId ?? "test-app",
-        config.serverUrl ?? SERVER_URL,
-      ));
-    const resolvedConfig: Partial<DbConfig> = {
+    const resolvedConfig: AppConfig = {
       appId: config.appId ?? "test-app",
       driver: { type: "persistent", dbName: crypto.randomUUID() },
+      store: memoryAccountStore(),
+      client: loadLocalFirst,
+      localFirst: "now",
       ...config,
-      account,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
@@ -98,9 +95,9 @@ describe("Solid Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(createAccountManager, "test-app", SERVER_URL);
+    const store = memoryAccountStore();
 
-    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ store, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -116,7 +113,7 @@ describe("Solid Todo App E2E", () => {
 
     await unmountApp(el1);
 
-    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el2 = await mountApp({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

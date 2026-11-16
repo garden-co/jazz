@@ -1,0 +1,10 @@
+{
+  "name": "jazz-upgrade-legacy-fixture",
+  "private": true,
+  "description": "The alpha.65 jazz-tools that upgrade's fixture apps were written for: it checks their JSON files are fresh.",
+  "dependencies": {
+    "jazz-tools": "2.0.0-alpha.65",
+    "jazz-napi": "2.0.0-alpha.65",
+    "typescript": "6.0.2"
+  }
+}

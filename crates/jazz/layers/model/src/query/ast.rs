@@ -1,3 +1,26 @@
+/// Holds the place of a variant that was removed from a serialized enum, so
+/// the variants after it keep their positional (postcard) tags. It has no
+/// values: nothing can build one, and decoding one is refused.
+///
+/// Predicates held payload-enum matches here until 2.0.0-alpha.66, when
+/// enums with payloads were removed (jazz#5758).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RemovedVariant {}
+
+impl serde::Serialize for RemovedVariant {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        match *self {}
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RemovedVariant {
+    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom(
+            "this variant was removed (payload-enum matches, removed in 2.0.0-alpha.66)",
+        ))
+    }
+}
+
 /// Namespace used for query shape and binding UUIDv5 ids.
 pub const QUERY_NAMESPACE: uuid::Uuid = uuid::uuid!("5d39e9ed-88f3-5b58-b8db-8786b02f5d2f");
 
@@ -282,13 +305,9 @@ pub enum RelationPredicate {
         left: RelationColumnRef,
         right: RelationValueRef,
     },
-    /// Match one tagged payload-enum case. The nested predicate's column refs
-    /// name fields in the selected case payload and are deliberately unscoped.
-    EnumMatch {
-        column: RelationColumnRef,
-        case: String,
-        payload: Box<RelationPredicate>,
-    },
+    /// The slot of a removed variant (see [`RemovedVariant`]).
+    #[doc(hidden)]
+    Removed(RemovedVariant),
     And(Vec<RelationPredicate>),
     Or(Vec<RelationPredicate>),
     Not(Box<RelationPredicate>),

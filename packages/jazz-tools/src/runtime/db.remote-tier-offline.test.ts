@@ -1,6 +1,5 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import { WriteWaitTimeoutError } from "./client.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -11,15 +10,12 @@ import { startTestJazz } from "../testing/index.js";
 // pinned for tabs over a browser worker and for React Native foregrounds over
 // the native relay.
 it("waits for the server while offline and answers once it reconnects", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-  const permissions = definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
+  const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+  const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
   const server = await startTestJazz({
-    app: app,
-    permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    app,
+    permissions,
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -53,15 +49,12 @@ it("waits for the server while offline and answers once it reconnects", async ()
 // A Global wait outlives a disconnect (#3923): it settles once the write
 // reaches the server, and only a caller-chosen timeout ends it early.
 it("keeps a Global wait pending while offline unless the caller sets a timeout", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-  const permissions = definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
+  const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+  const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
   const server = await startTestJazz({
-    app: app,
-    permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    app,
+    permissions,
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {

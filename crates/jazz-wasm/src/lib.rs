@@ -25,6 +25,7 @@ use jazz::binding_host::{
 use jazz::db::{block_on, Error, LargeValueUpdate, SubscriptionEvent, SubscriptionStream};
 use jazz::ids::AuthorSubject;
 use jazz::tx::DurabilityTier;
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
@@ -48,7 +49,7 @@ static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocato
 /// Validate a schema and its embedded permissions without opening a database.
 #[wasm_bindgen(js_name = validateSchema)]
 pub fn validate_schema(schema: Vec<u8>) -> Result<(), JsValue> {
-    binding_host::decode_schema(&schema)
+    binding_host::validate_deployable_schema(&schema)
         .map(|_| ())
         .map_err(host_error)
 }
@@ -1630,11 +1631,14 @@ impl WasmDb {
     /// Resolve once every local write so far reached `tier`. Settling
     /// `cancelled` stops a wait that is still pending and rejects it, so a
     /// caller that gives up does not leave the core waiter parked.
+    /// `for_sync`: TS `waitForSync`, which also fails with a rejection of
+    /// this database's own that settled before and no wait reported.
     #[wasm_bindgen(js_name = waitForPendingWrites)]
     pub fn wait_for_pending_writes(
         &self,
         tier: String,
         cancelled: Option<js_sys::Promise>,
+        for_sync: Option<bool>,
     ) -> js_sys::Promise {
         let inner = match self.open_inner() {
             Ok(inner) => inner,
@@ -1645,6 +1649,12 @@ impl WasmDb {
                 match durability_tier_from_str(&tier)? {
                     DurabilityTier::None => {}
                     DurabilityTier::Local => inner.flush().await?,
+                    DurabilityTier::Global if for_sync.unwrap_or(false) => inner
+                        .binding
+                        .wait_for_sync_global(None)
+                        .map_err(host_error)?
+                        .await
+                        .map_err(host_error)?,
                     DurabilityTier::Global => inner
                         .binding
                         .wait_for_pending_writes_global()
@@ -1760,10 +1770,15 @@ impl WasmDb {
         })
     }
 
-    /// How many local commits still wait for the server's verdict.
-    #[wasm_bindgen(js_name = pendingUploadCount)]
-    pub fn pending_upload_count(&self) -> Result<u32, JsValue> {
-        Ok(self.binding()?.pending_upload_count() as u32)
+    /// This store's uploads: how many still wait for the server's verdict
+    /// and since when, and what the server refused since it opened
+    /// (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+    #[wasm_bindgen(js_name = uploadStatus)]
+    pub fn upload_status(&self) -> Result<JsValue, JsValue> {
+        self.binding()?
+            .upload_status()
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
     /// The optimistic in-memory side of a browser client/worker pair: its
@@ -1861,7 +1876,13 @@ impl WasmDb {
                 "server negotiated wire features {features:#x}, but this WASM binding was not compiled with {unsupported:#x}"
             )));
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(js_sys::Promise::resolve(&JsValue::from(
+            WasmTransport::new(link),
+        )))
     }
 
     /// Serve a subscriber (a tab's in-memory database) as `identity`.
@@ -2133,10 +2154,11 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
         EventChunk::Closed => {
             set_prop(&object, "type", JsValue::from_str("closed"))?;
         }
-        EventChunk::Rejected { detail } => {
+        EventChunk::Rejected { detail, code } => {
             let reason = js_sys::Object::new();
             set_prop(&reason, "type", JsValue::from_str("ServerFailure"))?;
             set_prop(&reason, "detail", JsValue::from_str(&detail))?;
+            set_prop(&reason, "errorCode", JsValue::from_str(code))?;
             set_prop(&object, "type", JsValue::from_str("rejected"))?;
             set_prop(&object, "reason", reason.into())?;
         }

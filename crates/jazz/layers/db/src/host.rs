@@ -90,6 +90,27 @@ pub trait HostTables {
     fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error>;
 }
 
+/// Turn on SQLite's query planner stability guarantee
+/// (`SQLITE_DBCONFIG_ENABLE_QPSG`) for every statement `conn` prepares from
+/// now on.
+///
+/// Without it, SQLite folds the value bound to `LIMIT ?` into the plan and
+/// marks the statement as depending on it, and *any* rebind of that
+/// parameter, even to the same value, expires the statement. Every compiled
+/// read ends in `LIMIT ? OFFSET ?` and rusqlite rebinds every parameter on
+/// each run, so each cached read was parsed and planned again on every run
+/// (thousands of reprepares per write on a busy client). The engine never
+/// runs `ANALYZE`, uses no `LIKE` on bound patterns and no partial indexes,
+/// so the guarantee costs no plan it would otherwise pick.
+pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
+        true,
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
@@ -476,4 +497,42 @@ fn delete(conn: &Connection, table: HostTable, key: &[u8]) -> Result<(), Error> 
         .and_then(|mut statement| statement.execute([key]))
         .map(|_| ())
         .map_err(storage)
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, StatementStatus};
+
+    /// Reprepares of a cached `LIMIT ?` read run `runs` times on `conn`.
+    fn reprepares(conn: &Connection, runs: i64) -> i32 {
+        conn.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);")
+            .unwrap();
+        let sql = "SELECT x FROM t ORDER BY x LIMIT ?1 OFFSET ?2";
+        for _ in 0..runs {
+            let mut stmt = conn.prepare_cached(sql).unwrap();
+            let rows: Vec<i64> = stmt
+                .query_map([2i64, 0], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(rows, [1, 2]);
+        }
+        conn.prepare_cached(sql)
+            .unwrap()
+            .get_status(StatementStatus::RePrepare)
+    }
+
+    #[test]
+    fn a_cached_limit_read_is_not_planned_again_on_each_run() {
+        // The cost this guards against: rebinding `LIMIT ?` expires it.
+        let plain = Connection::open_in_memory().unwrap();
+        assert!(
+            reprepares(&plain, 5) >= 4,
+            "SQLite no longer expires on LIMIT rebinds"
+        );
+
+        let conn = Connection::open_in_memory().unwrap();
+        super::stable_plans(&conn).unwrap();
+        assert_eq!(reprepares(&conn, 5), 0);
+    }
 }

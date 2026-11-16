@@ -24,7 +24,7 @@ it("signs up, signs in to Jazz through the backend with the Better Auth cookie, 
         }),
       );
     const jazzSignIn = async (cookie?: string) =>
-      (await jazz()).fetch(
+      (await jazz()).handle(
         new Request(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, {
           method: "POST",
           headers: cookie ? { Cookie: cookie } : {},

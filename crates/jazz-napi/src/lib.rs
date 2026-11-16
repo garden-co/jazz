@@ -48,6 +48,7 @@ mod rn_test_bridge;
 static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -87,7 +88,7 @@ pub type JsonValue = serde_json::Value;
 /// Validate a schema and its embedded permissions without opening a database.
 #[napi(js_name = "validateSchema")]
 pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
-    binding_host::decode_schema(&schema).map_err(host_error)?;
+    binding_host::validate_deployable_schema(&schema).map_err(host_error)?;
     Ok(())
 }
 
@@ -98,6 +99,360 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
 pub fn check_client_migrations(migrations: String, target: String) -> napi::Result<()> {
     jazz::tools::deployment::published::check_client_migrations(migrations.as_bytes(), &target)
         .map_err(napi::Error::from_reason)
+}
+
+/// An app's two files, as [`write_app_artifact`] renders them.
+#[napi(object)]
+pub struct WrittenAppFiles {
+    /// `jazz.app.json`, which the app and its clients ship.
+    pub app: String,
+    /// `jazz.permissions.json`, which only its backends read.
+    pub permissions: String,
+}
+
+/// The `$generated` marker to write: `{ by }`, what wrote the files.
+#[napi(object)]
+pub struct GeneratedBy {
+    /// E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+    /// this file".
+    pub by: String,
+}
+
+/// How [`write_app_artifact`] and [`write_app_files`] write the files.
+#[napi(object)]
+pub struct WriteAppFilesOptions {
+    /// Mark each file `"$generated": { "by", "sha256" }`, first after
+    /// `$schema`.
+    pub generated: Option<GeneratedBy>,
+}
+
+/// Build the `jazz.app.json` and `jazz.permissions.json` texts from what
+/// `jazz-tools validate` compiled (an
+/// [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
+/// JSON): the files' only writer, which refuses what a reader would. With
+/// `options.generated`, each file carries a `$generated` marker.
+#[napi(js_name = "writeAppArtifact")]
+pub fn write_app_artifact(
+    input: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
+    use jazz::tools::deployment::artifact;
+    let input: artifact::ArtifactInput = serde_json::from_str(&input)
+        .map_err(|error| napi::Error::from_reason(format!("jazz.app.json input: {error}")))?;
+    let written = match options.and_then(|o| o.generated) {
+        Some(generated) => artifact::write_generated(input, &generated.by),
+        None => artifact::write(input),
+    }
+    .map_err(artifact_error)?;
+    Ok(WrittenAppFiles {
+        app: written.app,
+        permissions: written.permissions,
+    })
+}
+
+/// Check an app's readable `jazz.app.json` (`app`) and
+/// `jazz.permissions.json` (`permissions`) as a backend does and render
+/// them canonically through the writer, which reads its output back to
+/// exactly the same app. With `options.generated`, each file carries a
+/// `$generated` marker. Idempotent.
+#[napi(js_name = "writeAppFiles")]
+pub fn write_app_files(
+    app: String,
+    permissions: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
+    let by = options.and_then(|o| o.generated).map(|g| g.by);
+    let written = jazz::tools::deployment::artifact::rewrite(
+        app.as_bytes(),
+        permissions.as_bytes(),
+        by.as_deref(),
+    )
+    .map_err(artifact_error)?;
+    Ok(WrittenAppFiles {
+        app: written.app,
+        permissions: written.permissions,
+    })
+}
+
+/// Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+/// its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+/// or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+/// when the text isn't a JSON object or the marker is malformed.
+#[napi(
+    js_name = "verifyGenerated",
+    ts_return_type = "\"none\" | \"match\" | \"mismatch\""
+)]
+pub fn verify_generated(text: String) -> napi::Result<String> {
+    use jazz::tools::deployment::artifact::{self, GeneratedCheck};
+    Ok(
+        match artifact::verify_generated(text.as_bytes()).map_err(napi::Error::from_reason)? {
+            GeneratedCheck::Unmarked => "none",
+            GeneratedCheck::Matches(_) => "match",
+            GeneratedCheck::Mismatch { .. } => "mismatch",
+        }
+        .to_owned(),
+    )
+}
+
+/// Read and check an app's `jazz.app.json` (`app`) and
+/// `jazz.permissions.json` (`permissions`) as a backend does. Returns the
+/// current schema hash and the bundle id the two files make.
+#[napi(js_name = "loadAppArtifact")]
+pub fn load_app_artifact(app: String, permissions: String) -> js::Result<JsonValue> {
+    let loaded = jazz::tools::deployment::artifact::load(app.as_bytes(), permissions.as_bytes())
+        .map_err(artifact_error)?;
+    Ok(loaded_backend(&loaded))
+}
+
+/// What a backend needs of its loaded files: the current schema hash, the
+/// bundle id, the engine permissions (`{ [table]: TablePolicies }`), the
+/// body it publishes (`deployment`, the server's `DeployRequest` with
+/// `allowDroppingHistory: false`) and what loaded but is ignored.
+fn loaded_backend(loaded: &jazz::tools::deployment::artifact::LoadedApp) -> JsonValue {
+    serde_json::json!({
+        "current": loaded.current_hash().to_string(),
+        "bundle": loaded.bundle().to_hex(),
+        "permissions": loaded.permissions(),
+        "deployment": loaded.deployment_body(false),
+        "warnings": loaded.warnings(),
+    })
+}
+
+/// Read and check a backend's `jazz.permissions.json` (`permissions`)
+/// against the compiled app its generated bindings embed (`schema`: JSON of
+/// `{ schema, relations }`, the options they pass to `bindApp`), for a
+/// deployed backend that has the bindings but not `jazz.app.json`. Same
+/// result and checks as `loadAppArtifact`.
+#[napi(js_name = "loadBackendApp")]
+pub fn load_backend_app(schema: String, permissions: String) -> js::Result<JsonValue> {
+    let loaded =
+        jazz::tools::deployment::artifact::load_backend(schema.as_bytes(), permissions.as_bytes())
+            .map_err(artifact_error)?;
+    Ok(loaded_backend(&loaded))
+}
+
+/// The bindings for `appJson` (a `jazz.app.json` text) in `lang` (`"ts"`):
+/// the whole `jazz.generated.ts`.
+#[napi(js_name = "generate")]
+pub fn generate_bindings(lang: String, app_json: String) -> js::Result<String> {
+    let lang = jazz_codegen::Lang::parse(&lang).map_err(codegen_error)?;
+    jazz_codegen::generate(lang, app_json.as_bytes()).map_err(codegen_error)
+}
+
+/// The options the generated TS bindings pass to `bindApp` (`{ source,
+/// schema, relations }`, without the computed and transform callbacks), as
+/// JSON text, for tests that define an app inline.
+#[napi(js_name = "compileApp")]
+pub fn compile_app(app_json: String) -> js::Result<String> {
+    jazz_codegen::compile_app(app_json.as_bytes()).map_err(codegen_error)
+}
+
+/// `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
+/// `source` generated bindings record.
+#[napi(js_name = "schemaSourceHash")]
+pub fn schema_source_hash(app_json: String) -> String {
+    jazz::tools::deployment::artifact::source_hash(app_json.as_bytes())
+}
+
+/// The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+/// policies dropped as a deployment drops them, as 64 hex characters. Not
+/// [`schema_source_hash`], which hashes the `jazz.app.json` file.
+#[napi(js_name = "schemaHash")]
+pub fn schema_hash(engine_schema_json: String) -> js::Result<String> {
+    jazz::tools::deployment::artifact::schema_hash(engine_schema_json.as_bytes())
+        .map(|hash| hash.to_string())
+        .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
+/// What `migrationsCreate` wrote.
+#[napi(object)]
+pub struct CreatedMigration {
+    /// The new `jazz.app.json` text.
+    pub app: String,
+    /// Whether a version and migration were added.
+    pub changed: bool,
+    /// JSON paths of the `"TODO: …"` strings left for the author.
+    pub todos: Vec<String>,
+    /// Why nothing was written, when it isn't simply that nothing changed
+    /// (an index-only edit).
+    pub note: Option<String>,
+}
+
+/// Write the migration from the version the committed bindings
+/// (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
+/// generated from to `appJson`'s edited `tables`, named `name`.
+#[napi(js_name = "migrationsCreate")]
+pub fn migrations_create(
+    app_json: String,
+    bindings: Option<String>,
+    name: String,
+) -> js::Result<CreatedMigration> {
+    let created = jazz_codegen::migrations::create(
+        jazz_codegen::Lang::TypeScript,
+        app_json.as_bytes(),
+        bindings.as_deref(),
+        &name,
+    )
+    .map_err(codegen_error)?;
+    Ok(CreatedMigration {
+        app: created.app,
+        changed: created.changed,
+        todos: created.todos,
+        note: created.note,
+    })
+}
+
+/// Check committed bindings (`bindings`, or null) against `appJson`. Throws
+/// with `error.code` `JAZZ_SCHEMA_CHANGED` when `tables` changed since the
+/// bindings were generated and no migration leads from that version (run
+/// `migrations create` before regenerating: the bindings hold the only
+/// copy of that version), or `JAZZ_BINDINGS_STALE` when regenerating is
+/// enough (including when there are none).
+#[napi(js_name = "validateBindings")]
+pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Result<()> {
+    use jazz_codegen::bindings::Staleness;
+    let app = jazz_codegen::App::load(app_json.as_bytes()).map_err(artifact_error)?;
+    match jazz_codegen::bindings::staleness(
+        &app,
+        jazz_codegen::Lang::TypeScript,
+        bindings.as_deref(),
+    )
+    .map_err(codegen_error)?
+    {
+        None => Ok(()),
+        Some(staleness) => {
+            let code = match staleness {
+                Staleness::SchemaChanged => "JAZZ_SCHEMA_CHANGED",
+                Staleness::Missing | Staleness::OutOfDate | Staleness::Unreadable(_) => {
+                    "JAZZ_BINDINGS_STALE"
+                }
+            };
+            Err(BindingError(napi::Error::new(
+                JsErrorCode(code.to_owned()),
+                staleness.message(jazz_codegen::Lang::TypeScript),
+            )))
+        }
+    }
+}
+
+/// What `generateForDir` / `migrationsCreateForDir` did in an app's directory.
+#[napi(object)]
+pub struct DirOutcome {
+    /// Lines to print.
+    pub notes: Vec<String>,
+    /// Warnings to print.
+    pub warnings: Vec<String>,
+    /// Bindings files written, relative to the directory.
+    pub written: Vec<String>,
+    /// Bindings files already up to date, relative to the directory.
+    pub current: Vec<String>,
+    /// `migrationsCreateForDir`: whether `jazz.app.json` changed.
+    pub changed: bool,
+    /// `migrationsCreateForDir`: JSON paths of the TODOs left to resolve.
+    pub todos: Vec<String>,
+}
+
+/// Options of [`generate_for_dir`] and [`migrations_create_for_dir`].
+#[napi(object)]
+pub struct DirOptions {
+    /// Fail when the files or bindings are stale, and write nothing.
+    pub check: Option<bool>,
+    /// The bindings' languages (`"ts"`, `"rust"`, …); by default each the
+    /// directory's files say the app is written in.
+    pub lang: Option<Vec<String>>,
+    /// The language assumed when nothing in the directory names one and
+    /// no other language's manifest is there (the npm CLI passes `"ts"`).
+    pub fallback: Option<String>,
+}
+
+fn dir_languages(
+    dir: &std::path::Path,
+    options: &Option<DirOptions>,
+) -> js::Result<Vec<jazz_codegen::project::Selected>> {
+    let given = options
+        .as_ref()
+        .and_then(|o| o.lang.clone())
+        .unwrap_or_default()
+        .iter()
+        .map(|name| jazz_codegen::Lang::parse(name))
+        .collect::<std::result::Result<Vec<_>, jazz_codegen::CodegenError>>()
+        .map_err(codegen_error)?;
+    let fallback = options
+        .as_ref()
+        .and_then(|o| o.fallback.as_deref())
+        .map(jazz_codegen::Lang::parse)
+        .transpose()
+        .map_err(codegen_error)?;
+    jazz_codegen::project::languages_or(dir, &given, fallback)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+fn dir_outcome(outcome: jazz_codegen::project::Outcome) -> DirOutcome {
+    DirOutcome {
+        notes: outcome.notes,
+        warnings: outcome.warnings,
+        written: outcome.written,
+        current: outcome.current,
+        changed: outcome.changed,
+        todos: outcome.todos,
+    }
+}
+
+/// `jazz-tools generate [--check]` in `dir`, the directory of the app's
+/// `jazz.app.json`: the same languages, checks and bytes as the
+/// `jazz-tools` binary, which runs the same code.
+#[napi(js_name = "generateForDir")]
+pub fn generate_for_dir(dir: String, options: Option<DirOptions>) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    let check = options.as_ref().and_then(|o| o.check).unwrap_or(false);
+    jazz_codegen::project::generate(dir, &langs, check)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+/// `jazz-tools migrations create --name <name>` in `dir`, as the
+/// `jazz-tools` binary runs it.
+#[napi(js_name = "migrationsCreateForDir")]
+pub fn migrations_create_for_dir(
+    dir: String,
+    name: String,
+    options: Option<DirOptions>,
+) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    jazz_codegen::project::migrations_create(dir, &langs, &name)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+/// A codegen refusal, coded as [`artifact_error`] codes the loaders'.
+fn codegen_error(error: jazz_codegen::CodegenError) -> BindingError {
+    use jazz::tools::deployment::artifact;
+    if error.is_unsupported() {
+        BindingError(napi::Error::new(
+            JsErrorCode(artifact::UNSUPPORTED_CODE.to_owned()),
+            error.message().to_owned(),
+        ))
+    } else {
+        napi::Error::from_reason(error.message().to_owned()).into()
+    }
+}
+
+/// An app-file refusal: what the files can't express (yet) throws with
+/// `error.code` [`UNSUPPORTED_CODE`](jazz::tools::deployment::artifact::UNSUPPORTED_CODE)
+/// (`"JAZZ_APP_FILES_UNSUPPORTED"`); every other refusal keeps the default
+/// `GenericFailure`.
+fn artifact_error(error: jazz::tools::deployment::artifact::ArtifactError) -> BindingError {
+    use jazz::tools::deployment::artifact;
+    if error.is_unsupported() {
+        BindingError(napi::Error::new(
+            JsErrorCode(artifact::UNSUPPORTED_CODE.to_owned()),
+            error.to_string(),
+        ))
+    } else {
+        napi::Error::from_reason(error.to_string()).into()
+    }
 }
 
 /// Exact build/ABI fingerprint for the generated native artifact.
@@ -157,6 +512,20 @@ pub fn test_core_error_reason_names() -> Vec<String> {
 #[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
+}
+
+/// One row of the Inspector's `explain`: whether each read-policy clause holds.
+#[napi(object)]
+pub struct ExplainedReadRow {
+    pub id: String,
+    pub holds: Vec<bool>,
+}
+
+/// The Inspector's `explain`: how many clauses the read policy has, and the rows found.
+#[napi(object)]
+pub struct ExplainedReadClauses {
+    pub clauses: u32,
+    pub rows: Vec<ExplainedReadRow>,
 }
 
 // ---- options -------------------------------------------------------------------------
@@ -957,6 +1326,10 @@ pub struct SubscriptionServerFailureReason {
     pub reason_type: String,
     /// The server's reason.
     pub code: String,
+    /// The rejection's core error code (`"authority_changed"`, …), as a
+    /// thrown core error's `code`.
+    #[napi(js_name = "errorCode")]
+    pub error_code: String,
 }
 
 #[napi]
@@ -965,7 +1338,17 @@ pub type SubscriptionEvent =
 
 #[napi(js_name = "Subscription")]
 pub struct Subscription {
-    stream: Option<SubscriptionStream>,
+    stream: SubscriptionSlot,
+}
+
+/// Where a subscription's stream lives: read through this object, or moved
+/// into a [`SubscriptionPool`] that drains every pooled stream in one call.
+enum SubscriptionSlot {
+    Own(Option<Box<SubscriptionStream>>),
+    Pooled {
+        pool: Rc<RefCell<PoolStreams>>,
+        id: u32,
+    },
 }
 
 fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
@@ -984,11 +1367,12 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 settled,
                 tier,
             }),
-            EventChunk::Rejected { detail } => Either3::B(SubscriptionRejectedEvent {
+            EventChunk::Rejected { detail, code } => Either3::B(SubscriptionRejectedEvent {
                 event_type: "rejected".to_owned(),
                 reason: SubscriptionServerFailureReason {
                     reason_type: "ServerFailure".to_owned(),
                     code: detail,
+                    error_code: code.to_owned(),
                 },
             }),
             EventChunk::Closed => Either3::C(SubscriptionClosedEvent {
@@ -998,26 +1382,107 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
     )
 }
 
+/// Something events are taken from without waiting: a live stream, or a
+/// scripted source in tests.
+trait EventSource {
+    fn try_next(&mut self) -> Option<CoreEvent>;
+}
+
+impl EventSource for SubscriptionStream {
+    fn try_next(&mut self) -> Option<CoreEvent> {
+        self.try_next_event()
+    }
+}
+
+/// What one read of one stream produced.
+struct StreamRead<T> {
+    events: Vec<T>,
+    /// The stream delivered `Closed`: it has nothing more to say.
+    closed: bool,
+    /// Encoding an event failed. The events before it are kept; the stream
+    /// is not read further.
+    error: Option<napi::Error>,
+}
+
+/// Take every event `source` has now, encoding each.
+fn read_stream<S: EventSource, T>(
+    source: &mut S,
+    encode: &mut impl FnMut(CoreEvent) -> napi::Result<T>,
+) -> StreamRead<T> {
+    let mut read = StreamRead {
+        events: Vec::new(),
+        closed: false,
+        error: None,
+    };
+    while let Some(event) = source.try_next() {
+        let closed = matches!(event, CoreEvent::Closed);
+        match encode(event) {
+            Ok(event) => read.events.push(event),
+            Err(error) => {
+                read.error = Some(error);
+                return read;
+            }
+        }
+        if closed {
+            read.closed = true;
+            break;
+        }
+    }
+    read
+}
+
+/// Read every stream in `streams` that has something, in id order, and
+/// forget the ones that closed or failed. One stream's encode error fails
+/// only that stream's entry.
+fn drain_streams<S: EventSource, T>(
+    streams: &mut BTreeMap<u32, S>,
+    mut encode: impl FnMut(CoreEvent) -> napi::Result<T>,
+) -> Vec<(u32, StreamRead<T>)> {
+    let mut out = Vec::new();
+    streams.retain(|id, stream| {
+        let read = read_stream(stream, &mut encode);
+        let keep = !read.closed && read.error.is_none();
+        if !read.events.is_empty() || read.error.is_some() {
+            out.push((*id, read));
+        }
+        keep
+    });
+    out
+}
+
 #[napi]
 impl Subscription {
     /// Every event available now; empty until the next tick or local write
     /// has something to deliver.
     #[napi(js_name = "readAll")]
     pub fn read_all(&mut self) -> js::Result<Vec<SubscriptionEvent>> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?;
-        let mut events = Vec::new();
-        while let Some(event) = stream.try_next_event() {
-            let closed = matches!(event, CoreEvent::Closed);
-            events.push(subscription_event(event)?);
-            if closed {
-                self.stream = None;
-                break;
+        let read = match &mut self.stream {
+            SubscriptionSlot::Own(stream) => {
+                let Some(source) = stream.as_mut() else {
+                    return Err(napi::Error::from_reason("subscription is closed").into());
+                };
+                let read = read_stream(source.as_mut(), &mut subscription_event);
+                if read.closed {
+                    *stream = None;
+                }
+                read
             }
+            SubscriptionSlot::Pooled { pool, id } => {
+                let mut pool = pool.borrow_mut();
+                let Some(source) = pool.streams.get_mut(id) else {
+                    return Err(napi::Error::from_reason("subscription is closed").into());
+                };
+                let read = read_stream(source, &mut subscription_event);
+                if read.closed {
+                    pool.streams.remove(id);
+                }
+                read
+            }
+        };
+        match read.error {
+            Some(error) => Err(error.into()),
+            None => Ok(read.events),
         }
-        Ok(events)
     }
 
     #[napi]
@@ -1025,9 +1490,130 @@ impl Subscription {
         self.read_all()
     }
 
+    /// Move this subscription's stream into `pool`, which then reads it in
+    /// [`SubscriptionPool::drain`]. Returns the id its batches carry.
+    #[napi(js_name = "joinPool")]
+    pub fn join_pool(&mut self, pool: &SubscriptionPool) -> js::Result<u32> {
+        let stream = match &mut self.stream {
+            SubscriptionSlot::Pooled { pool: joined, id } if Rc::ptr_eq(joined, &pool.streams) => {
+                return Ok(*id);
+            }
+            SubscriptionSlot::Pooled { .. } => {
+                return Err(napi::Error::from_reason("subscription is in another pool").into());
+            }
+            SubscriptionSlot::Own(stream) => stream
+                .take()
+                .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?,
+        };
+        let mut streams = pool.streams.borrow_mut();
+        let id = streams.next_id;
+        streams.next_id = streams.next_id.wrapping_add(1);
+        streams.streams.insert(id, *stream);
+        drop(streams);
+        self.stream = SubscriptionSlot::Pooled {
+            pool: Rc::clone(&pool.streams),
+            id,
+        };
+        Ok(id)
+    }
+
     #[napi]
     pub fn close(&mut self) -> bool {
-        self.stream.take().is_some()
+        match &mut self.stream {
+            SubscriptionSlot::Own(stream) => stream.take().is_some(),
+            SubscriptionSlot::Pooled { pool, id } => pool.borrow_mut().streams.remove(id).is_some(),
+        }
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        // A collected subscription ends its pooled stream as an unpooled
+        // one ends with it.
+        self.close();
+    }
+}
+
+#[derive(Default)]
+struct PoolStreams {
+    next_id: u32,
+    streams: BTreeMap<u32, SubscriptionStream>,
+}
+
+/// One subscription's share of a [`SubscriptionPool::drain`].
+#[napi(object)]
+pub struct SubscriptionBatch {
+    /// The id [`Subscription::join_pool`] returned.
+    pub id: u32,
+    /// The events available now, oldest first.
+    pub events: Vec<SubscriptionEvent>,
+    /// Set when the stream failed after `events`; the stream has left the
+    /// pool. Other subscriptions in the same drain are unaffected.
+    pub error: Option<SubscriptionBatchError>,
+}
+
+#[napi(object)]
+pub struct SubscriptionBatchError {
+    pub message: String,
+    /// The stable core error code, or the napi status name.
+    pub code: String,
+}
+
+impl From<napi::Error> for SubscriptionBatchError {
+    fn from(error: napi::Error) -> Self {
+        let code = carried_core(&error)
+            .map(|(code, _)| code.to_owned())
+            .unwrap_or_else(|| error.status.as_ref().to_owned());
+        Self {
+            message: error.reason,
+            code,
+        }
+    }
+}
+
+/// Subscriptions read together: one [`drain`](Self::drain) call returns the
+/// events of every pooled subscription that has any, instead of one
+/// `readAll` call per subscription.
+#[napi(js_name = "SubscriptionPool")]
+pub struct SubscriptionPool {
+    streams: Rc<RefCell<PoolStreams>>,
+}
+
+impl Default for SubscriptionPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[napi]
+impl SubscriptionPool {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            streams: Rc::default(),
+        }
+    }
+
+    /// The events of every pooled subscription that has any now, by id.
+    /// Subscriptions with nothing are left out. A closed or failed stream
+    /// leaves the pool after its batch.
+    #[napi]
+    pub fn drain(&self) -> Vec<SubscriptionBatch> {
+        let mut streams = self.streams.borrow_mut();
+        drain_streams(&mut streams.streams, subscription_event)
+            .into_iter()
+            .map(|(id, read)| SubscriptionBatch {
+                id,
+                events: read.events,
+                error: read.error.map(SubscriptionBatchError::from),
+            })
+            .collect()
+    }
+
+    /// Pooled subscriptions still open.
+    #[napi(getter)]
+    pub fn size(&self) -> u32 {
+        self.streams.borrow().streams.len() as u32
     }
 }
 
@@ -1867,6 +2453,36 @@ impl NapiDb {
             .into())
     }
 
+    /// The Inspector's `explain`: for each of `rows` (uuid strings) of
+    /// `table`, which clauses of its read policy (the arms of its top-level
+    /// `Or`) hold for `author` with `claims`.
+    #[napi(js_name = "explainReadClauses")]
+    pub fn explain_read_clauses(
+        &self,
+        table: String,
+        rows: Vec<String>,
+        author: Uint8Array,
+        claims: Option<JsonValue>,
+    ) -> js::Result<ExplainedReadClauses> {
+        let (clauses, rows) = self
+            .binding()?
+            .explain_read_clauses(&table, &rows, &author, claims)
+            .map_err(host_error)?;
+        Ok(ExplainedReadClauses {
+            clauses: clauses as u32,
+            rows: rows
+                .into_iter()
+                .map(|(id, holds)| ExplainedReadRow { id, holds })
+                .collect(),
+        })
+    }
+
+    /// A pool that pooled subscriptions are read through, all in one call.
+    #[napi(js_name = "createSubscriptionPool")]
+    pub fn create_subscription_pool(&self) -> SubscriptionPool {
+        SubscriptionPool::new()
+    }
+
     #[napi]
     pub fn subscribe(
         &self,
@@ -1881,7 +2497,7 @@ impl NapiDb {
             .subscribe(&query, &json_or_null(opts), author.as_deref(), claims)
             .map_err(host_error)?;
         Ok(Subscription {
-            stream: Some(stream),
+            stream: SubscriptionSlot::Own(Some(Box::new(stream))),
         })
     }
 
@@ -1915,10 +2531,13 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
-    /// How many local commits still wait for the server's verdict.
-    #[napi(js_name = "pendingUploadCount")]
-    pub fn pending_upload_count(&self) -> js::Result<u32> {
-        Ok(self.binding()?.pending_upload_count() as u32)
+    /// This store's uploads: how many still wait for the server's verdict
+    /// and since when, and what the server refused since it opened
+    /// (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+    #[napi(js_name = "uploadStatus")]
+    pub fn upload_status(&self) -> js::Result<JsonValue> {
+        serde_json::to_value(self.binding()?.upload_status())
+            .map_err(|error| napi::Error::from_reason(error.to_string()).into())
     }
 
     /// The optimistic in-memory side of a client/worker pair: its
@@ -2003,7 +2622,11 @@ impl NapiDb {
             ))
             .into());
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(self.transport(link))
     }
 
     /// The newest transaction time this database handed out under its node
@@ -2053,6 +2676,29 @@ impl NapiDb {
         }
     }
 
+    /// TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+    /// session's author bytes; none for this database's own) reached `tier`,
+    /// failing with a rejection of theirs, including one that settled
+    /// before and no wait reported.
+    #[napi(js_name = "waitForSync")]
+    pub fn wait_for_sync(
+        &self,
+        tier: String,
+        writer: Option<Uint8Array>,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let binding = self.binding()?;
+        let tier = jazz::binding_args::durability_tier(&tier).map_err(napi::Error::from_reason)?;
+        match tier {
+            DurabilityTier::None | DurabilityTier::Local => Ok(Either::A(Vec::new().into())),
+            DurabilityTier::Global => {
+                let wait = binding
+                    .wait_for_sync_global(writer.as_deref())
+                    .map_err(host_error)?;
+                read_or_pending(Box::pin(wait.map(|result| result.map(|()| Vec::new()))))
+            }
+        }
+    }
+
     /// Close the database (a schema view leaves its owner open). The
     /// package's `close()` wraps this pollable form.
     #[napi(js_name = "__closePollable", skip_typescript)]
@@ -2084,9 +2730,10 @@ struct JazzServerStartOptions {
     backend_secret: Option<String>,
     admin_secret: Option<String>,
     upstream_url: Option<String>,
-    allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
     schema: Option<Vec<u8>>,
+    /// Live WebSocket connections one signed-in user may hold.
+    max_connections_per_user: Option<u32>,
     /// Trust this OIDC workload instead of the shared secrets.
     trusted_workload: Option<TrustedWorkloadOptions>,
 }
@@ -2104,15 +2751,56 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
         .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
 }
 
+/// Where a server this process runs reports: to `collector_url` when one
+/// is given, else to stderr ([`init_server_logs`]).
 pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
+        init_server_logs("warn");
         return;
     };
+    // The first collector this process reports to; a later core naming the
+    // same one shares it.
+    static COLLECTOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(installed) = COLLECTOR.get() {
+        if installed != collector_url {
+            tracing::warn!(
+                "telemetry: this process already reports to {installed}; the collector at {collector_url} gets nothing"
+            );
+        }
+        return;
+    }
+    if tracing::dispatcher::has_been_set() {
+        tracing::warn!(
+            "telemetry: this process already reports its logs elsewhere; the collector at {collector_url} gets nothing"
+        );
+        return;
+    }
+    let _ = COLLECTOR.set(collector_url.to_owned());
     jazz_otel::init_process_tracing_with_endpoint_once(
         "jazz-server",
         collector_url,
         &["jazz_tools=trace", "tower_http=debug"],
     );
+}
+
+/// Print Jazz's logs at `level` and up to stderr (`RUST_LOG` replaces the
+/// filter), unless the process already reports elsewhere. Without it, a
+/// server inside a Node process says nothing: a blob store refusing its
+/// credentials, or a failing upload, goes unnoticed. An in-process core
+/// passes `warn`, to stay quiet in the app's own output; a served core
+/// passes `info`, as the standalone server logs.
+pub(crate) fn init_server_logs(level: &str) {
+    use std::io::IsTerminal;
+    // `RUST_LOG` sets the level of any target it names; the defaults cover
+    // the rest.
+    let jazz = format!("jazz={level}");
+    let jazz_tools = format!("jazz_tools={level}");
+    let filter = jazz_otel::env_filter_with_defaults(&["error", &jazz, &jazz_tools]);
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_env_filter(filter)
+        .try_init();
 }
 
 // ============================================================================
@@ -2140,7 +2828,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
+            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -2185,7 +2873,6 @@ impl JazzServer {
         };
 
         let auth_config = AuthConfig {
-            allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: backend_secret.clone(),
             admin_secret: admin_secret.clone(),
             trusted_workload,
@@ -2200,6 +2887,9 @@ impl JazzServer {
         };
 
         let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        if let Some(max) = opts.max_connections_per_user {
+            server_builder = server_builder.with_max_websocket_connections_per_user(max as usize);
+        }
         if let Some(schema) = core_server_shell_schema {
             server_builder = server_builder.with_core_server_shell_schema(schema);
         }
@@ -2467,5 +3157,107 @@ mod native_root_tests {
         ] {
             assert!(names_foreign_store(name), "{name} should be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod subscription_pool_tests {
+    use super::{CoreEvent, EventSource, drain_streams};
+    use std::collections::{BTreeMap, VecDeque};
+
+    struct Scripted(VecDeque<CoreEvent>);
+
+    impl EventSource for Scripted {
+        fn try_next(&mut self) -> Option<CoreEvent> {
+            self.0.pop_front()
+        }
+    }
+
+    fn rejected(reason: &str) -> CoreEvent {
+        CoreEvent::Rejected {
+            code: jazz::db::ErrorCode::Query,
+            message: reason.to_owned(),
+            reason: reason.to_owned(),
+        }
+    }
+
+    fn scripted(events: Vec<CoreEvent>) -> Scripted {
+        Scripted(events.into())
+    }
+
+    /// Encodes an event as its reason; "unencodable" fails to encode.
+    fn encode(event: CoreEvent) -> napi::Result<String> {
+        match event {
+            CoreEvent::Rejected { reason, .. } if reason == "unencodable" => {
+                Err(napi::Error::from_reason("encode failed"))
+            }
+            CoreEvent::Rejected { reason, .. } => Ok(reason),
+            CoreEvent::Closed => Ok("closed".to_owned()),
+            CoreEvent::Delta { .. } => Ok("delta".to_owned()),
+        }
+    }
+
+    #[test]
+    fn drain_returns_only_streams_with_events_in_id_order() {
+        let mut streams = BTreeMap::from([
+            (1, scripted(vec![])),
+            (2, scripted(vec![rejected("a"), rejected("b")])),
+            (3, scripted(vec![])),
+            (4, scripted(vec![rejected("c")])),
+        ]);
+        let drained = drain_streams(&mut streams, encode);
+        let got: Vec<_> = drained
+            .iter()
+            .map(|(id, read)| (*id, read.events.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(2, vec!["a".into(), "b".into()]), (4, vec!["c".into()])]
+        );
+        assert_eq!(streams.len(), 4, "open streams stay pooled");
+        assert!(drain_streams(&mut streams, encode).is_empty());
+    }
+
+    #[test]
+    fn an_encode_error_fails_only_its_own_stream() {
+        let mut streams = BTreeMap::from([
+            (
+                1,
+                scripted(vec![
+                    rejected("before"),
+                    rejected("unencodable"),
+                    rejected("after"),
+                ]),
+            ),
+            (2, scripted(vec![rejected("neighbour")])),
+        ]);
+        let drained = drain_streams(&mut streams, encode);
+        assert_eq!(drained.len(), 2);
+        let (id, failed) = &drained[0];
+        assert_eq!(*id, 1);
+        assert_eq!(failed.events, vec!["before".to_owned()]);
+        assert_eq!(failed.error.as_ref().unwrap().reason, "encode failed");
+        let (id, ok) = &drained[1];
+        assert_eq!(*id, 2);
+        assert_eq!(ok.events, vec!["neighbour".to_owned()]);
+        assert!(ok.error.is_none());
+        assert_eq!(
+            streams.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "the failed stream leaves"
+        );
+    }
+
+    #[test]
+    fn a_closed_stream_leaves_after_its_last_batch() {
+        let mut streams =
+            BTreeMap::from([(7, scripted(vec![rejected("last"), CoreEvent::Closed]))]);
+        let drained = drain_streams(&mut streams, encode);
+        assert_eq!(
+            drained[0].1.events,
+            vec!["last".to_owned(), "closed".to_owned()]
+        );
+        assert!(drained[0].1.closed);
+        assert!(streams.is_empty());
     }
 }

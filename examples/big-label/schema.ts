@@ -1,8 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   organizations: s.table(
     { name: s.string(), slug: s.string() },
@@ -133,7 +132,4 @@ const schema = {
       membership: s.rel("memberships", "membershipId"),
     },
   ),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+});

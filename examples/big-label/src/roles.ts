@@ -1,6 +1,6 @@
 /**
  * Organization roles and what each one may do. `permissions.ts` enforces these
- * rules at the Jazz edge; the UI reads the same table to hide or disable
+ * rules on the Jazz server; the UI reads the same table to hide or disable
  * controls a role cannot use. Hiding is a courtesy: the server still refuses.
  */
 export const roles = ["admin", "editor", "viewer"] as const;

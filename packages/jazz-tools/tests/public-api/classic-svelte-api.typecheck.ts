@@ -1,11 +1,10 @@
 import type { ComponentProps } from "svelte";
-import type { AccountHandle } from "jazz-tools";
 import {
   CoState,
   AccountCoState,
   InviteListener,
   SyncConnectionStatus,
-  JazzSvelteProvider,
+  JazzProvider as JazzSvelteProvider,
 } from "jazz-tools/svelte";
 
 // Svelte consumers use Bundler resolution to read generated .svelte.d.ts files.
@@ -20,15 +19,14 @@ new InviteListener();
 new SyncConnectionStatus();
 
 declare const children: ComponentProps<typeof JazzSvelteProvider>["children"];
-declare const account: AccountHandle;
 const oldProps: ComponentProps<typeof JazzSvelteProvider> = {
-  config: { appId: "classic-svelte-types", account },
+  config: { scope: "classic-svelte-types" },
   children,
   // @ts-expect-error Diagnostics must not make Classic props supported.
   sync: undefined,
 };
 const currentProps: ComponentProps<typeof JazzSvelteProvider> = {
-  config: { appId: "current-svelte-types", account },
+  config: { scope: "current-svelte-types" },
   children,
 };
 void [oldProps, currentProps];

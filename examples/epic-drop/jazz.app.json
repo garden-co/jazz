@@ -1,0 +1,54 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "edaf78fd70b46b420d6566480e06f70d5850a389e2a30b2e57a344b36f249afe"
+  },
+  "tables": {
+    "files": {
+      "columns": {
+        "folder_id": "uuid",
+        "name": "string",
+        "content_type": "string",
+        "size_bytes": "int",
+        "owner_id": "uuid",
+        "contents": "bytes"
+      },
+      "relations": { "folder": { "rel": "folders", "column": "folder_id" } },
+      "indexes": ["folder_id"]
+    },
+    "folderInvites": {
+      "columns": { "folder_id": "uuid", "code": "string", "role": { "enum": ["viewer", "editor"] } },
+      "relations": { "folder": { "rel": "folders", "column": "folder_id" } }
+    },
+    "folderMembers": {
+      "columns": {
+        "folder_id": "uuid",
+        "user_id": "uuid",
+        "role": { "enum": ["viewer", "editor"] },
+        "invite_code": "string",
+        "folder_owner_id": "uuid"
+      },
+      "relations": {
+        "folder": { "rel": "folders", "column": "folder_id" },
+        "folderOwner": { "rel": "profiles", "column": "folder_owner_id" },
+        "user": { "rel": "profiles", "column": "user_id" }
+      },
+      "indexes": ["folder_id", "user_id"]
+    },
+    "folders": {
+      "columns": { "name": "string", "owner_id": "uuid", "parent_id": "uuid?" },
+      "relations": {
+        "filesViaFolder": { "reverse": "files", "relation": "folder" },
+        "parent": { "rel": "folders", "column": "parent_id" }
+      }
+    },
+    "profiles": {
+      "columns": { "name": "string" },
+      "relations": {
+        "hostedMemberships": { "reverse": "folderMembers", "relation": "folderOwner" },
+        "memberships": { "reverse": "folderMembers", "relation": "user" }
+      }
+    }
+  }
+}

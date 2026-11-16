@@ -6,7 +6,7 @@ import { makeFakeAccount } from "../react-core/test-utils.js";
 
 const mocks = vi.hoisted(() => ({ openJazzClient: vi.fn() }));
 vi.mock("./create-jazz-client.js", () => ({ openJazzClient: mocks.openJazzClient }));
-import { JazzProvider } from "./provider.js";
+import { LegacyJazzProvider as JazzProvider } from "./provider.js";
 
 function client() {
   return {
@@ -41,7 +41,7 @@ function mount() {
     render: () =>
       h(
         JazzProvider,
-        { config: config.value, autoAttachDevTools: false },
+        { config: config.value },
         {
           default: () => h("p", "ready"),
           fallback: () => h("p", "loading"),

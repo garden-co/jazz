@@ -43,20 +43,26 @@ mount it under `/jazz`:
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
-  authenticate: async (request) => /* your session */ null,
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
 });
 ```
 
-Edit `schema.ts` or `permissions.ts` and restart the dev server: Jazz applies them on start. Don't
-count on hot reload for these: Turbopack usually recovers, but webpack builds can get stuck on the
-old schema. See
+`jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts` come from
+`npx jazz-tools generate`: run it after each change to `schema.ts`. Change the permissions, run
+`generate` and restart the dev server: Jazz applies them on start. Changing the tables once the
+store holds data needs a migration: `generate` refuses the change and tells you to run
+`npx jazz-tools migrations create --name <name>`, which writes one into `migrations/` (see
+[Migrations](/docs/schemas/migrations)). A store that refuses the app after a schema change is
+missing a migration; don't delete it. Don't count on hot reload for these files: Turbopack usually
+recovers, but webpack builds can get stuck on the old schema. See
 [Your Own Server](/docs/setup/deployment/own-server) for mounting it in Next.js, Hono or Express.
 
 ## How we test this page

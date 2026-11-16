@@ -1,38 +1,32 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, type Db } from "jazz-tools";
-import { createJazz, remote, type Jazz } from "jazz-tools/backend";
+import { createJazz, createJazzClient, remote, type Jazz } from "jazz-tools/backend";
 import {
-  deploy,
   startLocalJazzServer,
   startTestJazz,
   type LocalJazzServerHandle,
   type TestJazz,
 } from "jazz-tools/testing";
-import permissions from "../permissions";
-import { app } from "../schema";
+import permissions from "../jazz.permissions.json" with { type: "json" };
+import { app } from "../jazz.generated";
+import { memoryAccountStore } from "../../../../testing/accounts";
 
 describe("Better Auth storage boundary", () => {
   let server: LocalJazzServerHandle | undefined;
   let session: Jazz | undefined;
   let front: TestJazz | undefined;
-  let client: Db | undefined;
+  let client: Awaited<ReturnType<typeof createJazzClient>> | undefined;
 
   afterEach(async () => {
     await session?.close();
-    await client?.shutdown();
+    await client?.close({ timeoutMs: 0 });
     await front?.stop();
     await server?.stop();
   });
 
   it("allows backend persistence across reopen while denying client reads and writes", async () => {
-    server = await startLocalJazzServer();
-    await deploy({
-      appId: server.appId,
-      serverUrl: server.url,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
+    // Published as the app's createJazz publishes it, with the migrations
+    // it ships.
+    server = await startLocalJazzServer({ schema: app, permissions });
 
     // The app's backend, as its server runs it.
     const openSession = () =>
@@ -53,29 +47,20 @@ describe("Better Auth storage boundary", () => {
       })
       .wait({ tier: "global" });
 
-    // An ordinary client is a local-first guest, syncing through the app's
+    // An ordinary client is a device account (a guest), syncing through the app's
     // backend: a core admits only its app's backend.
     front = await startTestJazz({ core: server, app, permissions });
-    let storedAccount: string | null = null;
-    const accounts = await createAccountManager({
-      appId: server.appId,
+    client = await createJazzClient({
+      app,
+      permissions,
       serverUrl: front.url,
-      store: {
-        read: async () => storedAccount,
-        update: async (transform) => {
-          storedAccount = transform(storedAccount);
-        },
-      },
-    });
-    client = await createDb({
-      appId: server.appId,
-      serverUrl: front.url,
-      account: accounts.createLocalFirst(),
+      initial: "device",
+      store: memoryAccountStore(),
       driver: { type: "memory" },
     });
-    await expect(client.all(app.better_auth_user, { tier: "remote" })).resolves.toEqual([]);
+    await expect(client.db.all(app.better_auth_user, { tier: "remote" })).resolves.toEqual([]);
     await expect(
-      client
+      client.db
         .insert(app.better_auth_user, {
           name: "Forbidden client user",
           email: "forbidden@example.test",

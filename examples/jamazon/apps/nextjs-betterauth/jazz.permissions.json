@@ -1,0 +1,75 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "a76c4ddefbbde979079e1eddbf2a1306a52043be9835a7d3394ee7d3487cbf18"
+  },
+  "tables": {
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "cartLines": {
+      "read": "allowedTo.read(cart)",
+      "insert": {
+        "allOf": ["allowedTo.update(cart)", { "allOf": ["quantity >= 0", "quantity <= 20"] }]
+      },
+      "update": {
+        "old": "allowedTo.update(cart)",
+        "new": {
+          "allOf": ["allowedTo.update(cart)", { "allOf": ["quantity >= 0", "quantity <= 20"] }]
+        }
+      },
+      "delete": "allowedTo.update(cart)"
+    },
+    "carts": {
+      "read": "shopper = session.user",
+      "insert": "shopper = session.user",
+      "update": "shopper = session.user",
+      "delete": "shopper = session.user"
+    },
+    "categories": { "read": "true", "insert": "false", "update": "false", "delete": "false" },
+    "orderEvents": {
+      "read": "allowedTo.read(`order`)",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "orderLines": {
+      "read": "allowedTo.read(`order`)",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "orders": {
+      "read": "shopper = session.user",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "payments": {
+      "read": "allowedTo.read(`order`)",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "products": { "read": "true", "insert": "false", "update": "false", "delete": "false" },
+    "stock": { "read": "true", "insert": "false", "update": "false", "delete": "false" }
+  }
+}

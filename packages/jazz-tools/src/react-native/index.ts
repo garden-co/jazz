@@ -5,7 +5,7 @@ export {
   useSuspenseAccount,
   JazzReactNativeProvider,
 } from "../classic-api.js";
-export { createDb, Db, type DbConfig } from "./create-db.js";
+export { Db } from "./create-db.js";
 export {
   type SnapshotRef,
   parseSnapshotRef,
@@ -25,16 +25,20 @@ export {
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
 export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
-export {
-  useLocalFirstAuth,
-  REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
-  type LocalFirstAuth,
-  type UseLocalFirstAuthOptions,
-} from "./use-local-first-auth.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
-export type { AuthSecretStore } from "../runtime/auth-secret-store.js";
-export { schema } from "../schema-namespace.js";
-export { migration } from "../migration-namespace.js";
+// jazz.generated.ts imports bindApp from "jazz-tools", which resolves here on React Native.
+export { bindApp } from "../typed-app.js";
+export type {
+  AppTypes,
+  ComputedImpl,
+  TransformImpl,
+  RowOf,
+  InsertOf,
+  WhereOf,
+  App,
+} from "../typed-app.js";
+// Removed in alpha.65 (files as source): stubs that throw, pointing at `jazz-tools upgrade`.
+export { schema, migration } from "../removed-schema-api.js";
 export {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
@@ -47,30 +51,23 @@ export {
   isUnsupportedStorageCodecsError,
 } from "../runtime/unsupported-storage-codecs-error.js";
 
-export { useAccountState } from "../react-core/use-account-state.js";
 export { useSyncStatus } from "../react-core/use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
-export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 export * from "../accounts/exports.js";
 
+export { createJazzClient, startJazzClient, type JazzClientConfig } from "./create-jazz-session.js";
+export type {
+  JazzSession,
+  JazzSessionSnapshot,
+  JazzSessionOperation,
+  JazzUser,
+} from "../session/jazz-session.js";
 export {
-  createJazzClient,
-  JazzSessionProvider,
   useJazzSession,
-  type JazzClientConfig,
-  type JazzSessionProviderProps,
   type UseJazzSessionResult,
-  type JazzSession,
-  type JazzSessionSnapshot,
-  type JazzSessionActions,
-} from "./session.js";
-
-export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
-
-export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
-export type { JazzUser } from "../session/app.js";
-export type { JazzAppProviderProps } from "./provider.js";
+  type JazzSessionViewProps,
+} from "../react-core/session.js";
 
 export type {
   ForwardRelationship,
@@ -78,3 +75,16 @@ export type {
   Relationship,
   Relationships,
 } from "../relationships.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  JazzSessionProvider,
+  createAccountManager,
+  createDb,
+  exportLocalFirstSecret,
+  useAccountState,
+  useJazzAuth,
+  useJazzSessionOwner,
+  useLocalFirstAuth,
+} from "../removed-api.js";

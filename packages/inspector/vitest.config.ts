@@ -21,6 +21,14 @@ export default defineConfig({
         replacement: resolve(__dirname, "../jazz-tools/src/_dev/inspector-client.ts"),
       },
       {
+        find: "jazz-tools/backend",
+        replacement: resolve(__dirname, "../jazz-tools/src/backend/index.ts"),
+      },
+      {
+        find: "jazz-tools/inspect",
+        replacement: resolve(__dirname, "../jazz-tools/src/inspect/protocol.ts"),
+      },
+      {
         find: "jazz-tools/react",
         replacement: resolve(__dirname, "../jazz-tools/src/react/index.ts"),
       },

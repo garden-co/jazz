@@ -1,41 +1,37 @@
 import * as React from "react";
-import { JazzProvider, JazzSessionProvider } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
+import { JazzProvider, type JazzSession, type JazzClient } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
-import { sessionConfig } from "./account.js";
+import { sessionConfig, type SessionOverrides } from "./account.js";
 
 type AppProps = {
-  config?: Partial<DbConfig>;
-  fallback?: React.ReactNode;
+  config?: SessionOverrides;
+  /** A session you opened yourself (tests open one to restore a device key). */
+  session?: JazzSession<JazzClient>;
+  loading?: React.ReactNode;
   children?: React.ReactNode;
 };
 
 // #region context-setup-react
-function LocalFirstApp({ config, fallback, children }: AppProps) {
+function DeviceAccountApp({ config, loading, children }: AppProps) {
   return (
-    <JazzSessionProvider config={sessionConfig(config)} fallback={fallback ?? <p>Loading...</p>}>
+    <JazzProvider config={sessionConfig(config)} loading={loading ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
       {children}
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 // #endregion context-setup-react
 
 export function App(props: AppProps = {}) {
-  // Advanced callers can still supply a fixed opaque handle, for example to
-  // exercise two independent replicas in the browser integration tests.
-  const { config, fallback, children } = props;
-  if (config?.account)
+  const { session, loading, children } = props;
+  if (session)
     return (
-      <JazzProvider
-        config={{ appId: config.appId!, env: "dev", ...config, account: config.account }}
-        fallback={fallback ?? <p>Loading...</p>}
-      >
+      <JazzProvider session={session} loading={loading ?? <p>Loading...</p>}>
         <h1>Todos</h1>
         <TodoList />
         {children}
       </JazzProvider>
     );
-  return <LocalFirstApp {...props} />;
+  return <DeviceAccountApp {...props} />;
 }

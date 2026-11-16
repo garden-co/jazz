@@ -1,5 +1,5 @@
-import { app } from "@/schema";
-import permissions from "@/permissions";
+import { app } from "@/jazz.generated";
+import permissions from "@/jazz.permissions.json" with { type: "json" };
 import { createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
 import { jazzAppId } from "./jazz-env";
 
@@ -24,7 +24,12 @@ export function backendJazzClient(): Promise<Jazz> {
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      return session ? { userId: session.user.id } : null;
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+          }
+        : null;
     },
   }).ready());
   // A failed start must not poison all later requests.

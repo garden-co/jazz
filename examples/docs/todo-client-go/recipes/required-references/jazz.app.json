@@ -1,0 +1,17 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "7a0d80dd326c03183ea22f3aca4db17a53749db5bb5751226bceb28ba9209383"
+  },
+  "tables": {
+    "customers": {
+      "columns": { "name": "string" },
+      "relations": { "orders": { "reverse": "orders", "relation": "customer" } }
+    },
+    "orders": {
+      "columns": { "customerId": "uuid" },
+      "relations": { "customer": { "rel": "customers", "column": "customerId" } }
+    }
+  }
+}

@@ -61,14 +61,18 @@ describe("LiveQuery", () => {
     });
   });
 
-  it("renders an empty state when there are no active overlay subscriptions", () => {
+  it("says it can't see subscriptions opened before the Inspector was mounted, not that there are none (#3234)", () => {
     render(
       <MemoryRouter>
         <LiveQuery />
       </MemoryRouter>,
     );
 
-    expect(screen.getByText("No active subscriptions")).not.toBeNull();
+    expect(screen.queryByText("No active subscriptions")).toBeNull();
+    expect(
+      screen.getByText("No subscriptions opened since the Inspector was mounted"),
+    ).not.toBeNull();
+    expect(screen.getByText(/aren't listed: that is not supported yet/)).not.toBeNull();
   });
 
   it("renders subscriptions pushed from the host (no stack column)", async () => {
@@ -127,7 +131,7 @@ describe("LiveQuery", () => {
     expect(screen.getByRole("cell", { name: "projects" })).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("Filter by tier"), { target: { value: "local-first" } });
-    expect(screen.getByText("No active subscriptions")).not.toBeNull();
+    expect(screen.getByText("No subscriptions match these filters")).not.toBeNull();
   });
 
   it("sorts overlay rows by started date and tier, and toggles started order", () => {

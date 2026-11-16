@@ -1332,6 +1332,84 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
   ]);
 });
 
+// An ordinary write names no time: the authority stamps it when it accepts
+// it, so an offline edit synced later is not stamped with the device clock
+// at authoring (R19), and a fast device clock is never refused.
+it("stages writes without updatedAt without an explicit timestamp", () => {
+  const expectedUpdatedAtMs = undefined;
+  const staged: Array<{ op: string; updatedAtMs: number | null | undefined }> = [];
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          all: () => encodeRows([]),
+          insertInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array; updatedAtMs?: number },
+          ) => {
+            staged.push({ op: "insert", updatedAtMs: options?.updatedAtMs });
+            return options?.rowId ?? new Uint8Array(16);
+          },
+          updateInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            _patch: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "update", updatedAtMs: options?.updatedAtMs }),
+          upsertInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            _cells: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "upsert", updatedAtMs: options?.updatedAtMs }),
+          restoreInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            _cells: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "restore", updatedAtMs: options?.updatedAtMs }),
+          deleteInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "delete", updatedAtMs: options?.updatedAtMs }),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const tx = beginTestBatch(runtime);
+  const context = JSON.stringify({ transaction_id: tx });
+  const rowId = "00000000-0000-0000-0000-000000000001";
+  runtime.insert("todos", { title: { type: "Text", value: "inserted" } }, context, rowId);
+  runtime.update("todos", rowId, { title: { type: "Text", value: "updated" } }, context);
+  runtime.upsert("todos", rowId, { title: { type: "Text", value: "upserted" } }, context);
+  runtime.restore("todos", rowId, { title: { type: "Text", value: "restored" } }, context);
+  runtime.delete("todos", rowId, context);
+
+  expect(staged).toEqual([
+    { op: "insert", updatedAtMs: expectedUpdatedAtMs },
+    { op: "update", updatedAtMs: expectedUpdatedAtMs },
+    { op: "upsert", updatedAtMs: expectedUpdatedAtMs },
+    { op: "restore", updatedAtMs: expectedUpdatedAtMs },
+    { op: "delete", updatedAtMs: expectedUpdatedAtMs },
+  ]);
+});
+
 it("preserves the full branch view for staged mergeable upserts", () => {
   let received: { head?: unknown; base?: unknown } | undefined;
   const runtime = new NativeRuntimeAdapter(

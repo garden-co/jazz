@@ -9,11 +9,11 @@ import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav
 import { VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
-import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import type { District, Warehouse } from "@/schema";
+import type { District, Warehouse } from "@/jazz.generated";
 import { authClient } from "@/src/lib/auth-client";
 import { consoleQueries } from "@/src/warehouse";
 import { JoinWarehouse } from "./join-warehouse";
@@ -61,7 +61,7 @@ export async function bootstrap(warehouseId?: string): Promise<void> {
 }
 
 export function Console({ children }: { children: ReactNode }) {
-  const accountId = useSession()?.user ?? undefined;
+  const accountId = useJazzSession().user?.accountId ?? undefined;
   const [prepared, setPrepared] = useState<"pending" | "ready" | Error>("pending");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -124,7 +124,7 @@ function ScopedShell({
   children: ReactNode;
 }) {
   const pathname = usePathname();
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   const [warehouseId, setWarehouseId] = useState(homeWarehouse.id);
   const [districtId, setDistrictId] = useState<string>();
   const warehouse = warehouses.find((candidate) => candidate.id === warehouseId) ?? homeWarehouse;
@@ -177,7 +177,7 @@ function ScopedShell({
               size="sm"
               onClick={async () => {
                 await authClient.signOut();
-                await reauthenticate();
+                await refresh();
               }}
             />
           }

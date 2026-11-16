@@ -1,8 +1,9 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { schema as s, migration as m } from "../index.js";
+import { bindApp, boundApp } from "../typed-app.js";
+import { compileTestApp, testApp, testPermissions, type TestAppFile } from "../testing/test-app.js";
 import {
   deploy,
   startLocalJazzServer,
@@ -12,72 +13,50 @@ import {
 } from "../testing/index.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
-import { appMigrations } from "../testing/client-migrations.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
+import { shippedMigrations } from "./client-migrations.js";
+import type { WasmSchema } from "../drivers/types.js";
 
-import { computeSchemaHash } from "../dev/catalogue.js";
-import { loadDefinedMigration } from "../dev/catalogue-project.js";
+import { generateTs, loadBackendAppFor, migrationsCreate } from "../dev/codegen-napi.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
-import { renderMigrationStub } from "../dev/migrations.js";
 import { wasmSchemasEqual } from "../dev/schema-utils.js";
-import { fetchStoredWasmSchema } from "../dev/catalogue-api.js";
+import {
+  DeploymentError,
+  fetchStoredWasmSchema,
+  publishDeployment,
+  type DeploymentBody,
+} from "../dev/catalogue-api.js";
 
-const oldSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
+/** Every operation allowed on each of `tables`, as a `jazz.permissions.json`. */
+function allowAll(tables: string[], ops = ["read", "insert", "update", "delete"]) {
+  return {
+    format: 1,
+    tables: Object.fromEntries(
+      tables.map((table) => [table, Object.fromEntries(ops.map((op) => [op, "true"]))]),
+    ),
+  };
+}
 
-const newSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      tags: s.array(s.string()).default([]),
-    },
-    {},
-  ),
-};
-
-type OldAppSchema = s.Schema<typeof oldSchema>;
-type NewAppSchema = s.Schema<typeof newSchema>;
-
-const migration = m.defineMigration({
-  from: oldSchema,
-  to: newSchema,
-  migrate: {
-    todos: {
-      tags: m.add.array({ of: s.string(), default: [] }),
-    },
+const oldTables = { todos: { columns: { title: "string", done: "boolean" } } };
+const newTables = {
+  todos: {
+    columns: { title: "string", done: "boolean", tags: { array: "string", default: [] } },
   },
-});
+};
 
 // Each app ships its migrations, as its generated module would hold them.
-const oldApp: s.App<OldAppSchema> = s.defineApp(oldSchema, {
-  migrations: await appMigrations(oldSchema),
-});
-const newApp: s.App<NewAppSchema> = s.defineApp(newSchema, {
-  migrations: await appMigrations(oldSchema, { to: newSchema, migration }),
+const oldApp = testApp({ tables: oldTables });
+const newApp = testApp({
+  tables: newTables,
+  history: { v1: { tables: oldTables } },
+  migrations: [
+    { from: "v1", migrate: { todos: { tags: { add: { array: "string" }, default: [] } } } },
+  ],
 });
 
-const oldPermissions = s.definePermissions(oldApp, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-
-const newPermissions = s.definePermissions(newApp, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
+const oldPermissions = allowAll(["todos"]);
+const newPermissions = allowAll(["todos"]);
 
 describe("schema migrations", () => {
   let server: LocalJazzServerHandle;
@@ -89,7 +68,6 @@ describe("schema migrations", () => {
 
   beforeEach(async () => {
     server = await startLocalJazzServer({
-      allowLocalFirstAuth: true,
       inMemory: true,
     });
     const { appId, adminSecret, url: serverUrl } = server;
@@ -98,7 +76,7 @@ describe("schema migrations", () => {
       serverUrl,
       appId,
       adminSecret,
-      schema: oldApp,
+      app: oldApp,
       permissions: oldPermissions,
     });
 
@@ -106,9 +84,8 @@ describe("schema migrations", () => {
       serverUrl,
       appId,
       adminSecret,
-      schema: newApp,
+      app: newApp,
       permissions: newPermissions,
-      migration,
     });
     front = await startTestJazz({ app: newApp, permissions: newPermissions, core: server });
 
@@ -171,41 +148,35 @@ describe("schema migrations", () => {
 
 it("publishes UUID reference identity lenses and relates rows written before publication", async () => {
   const columns = {
-    ownerId: s.uuid(),
-    memberIds: s.array(s.uuid()),
-    reviewerId: s.uuid().optional(),
+    ownerId: "uuid",
+    memberIds: { array: "uuid" },
+    reviewerId: "uuid?",
   };
-  const users = s.table({ name: s.string() }, {});
-  const before = { users, records: s.table(columns, {}) };
+  const users = { columns: { name: "string" } };
+  const before = { users, records: { columns } };
   const after = {
     users,
-    records: s.table(columns, {
-      owner: s.rel("users", "ownerId"),
-      members: s.rel("users", "memberIds"),
-      reviewer: s.rel("users", "reviewerId"),
-    }),
+    records: {
+      columns,
+      relations: {
+        owner: { rel: "users", column: "ownerId" },
+        members: { rel: "users", column: "memberIds" },
+        reviewer: { rel: "users", column: "reviewerId" },
+      },
+    },
   };
-  const migration = m.defineMigration({ from: before, to: after });
-  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) }),
-    afterApp = s.defineApp(after, {
-      migrations: await appMigrations(before, { to: after, migration }),
+  const beforeApp = testApp({ tables: before }),
+    afterApp = testApp({
+      tables: after,
+      history: { v1: { tables: before } },
+      migrations: [{ from: "v1", migrate: { records: {} } }],
     });
-  const permissionsBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.users.allowRead.always(),
-    policy.users.allowInsert.always(),
-    policy.records.allowRead.always(),
-    policy.records.allowInsert.always(),
-  ]);
-  const permissionsAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.users.allowRead.always(),
-    policy.users.allowInsert.always(),
-    policy.records.allowRead.always(),
-    policy.records.allowInsert.always(),
-  ]);
+  const permissionsBefore = allowAll(["users", "records"], ["read", "insert"]);
+  const permissionsAfter = allowAll(["users", "records"], ["read", "insert"]);
   const server = await startTestJazz({
     app: beforeApp,
     permissions: permissionsBefore,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
@@ -221,15 +192,19 @@ it("publishes UUID reference identity lenses and relates rows written before pub
         reviewerId: null,
       })
       .wait({ tier: "global" });
-    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
-    await server.redeploy({ app: afterApp, permissions: permissionsAfter, migration });
+    expect(
+      shippedMigrations(afterApp.wasmSchema)?.migrations.map((edge) => edge.forward),
+    ).toMatchObject([[{ table: "records", operations: [] }]]);
+    await server.redeploy({ app: afterApp, permissions: permissionsAfter });
     newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const rows = await waitForRows(
       newDb,
       afterApp.records
         .where({ id: record.id })
         .include({ owner: true, members: true, reviewer: true }),
-      (rows) => rows.length === 1 && rows[0]?.owner?.name === "Existing owner",
+      (rows) =>
+        rows.length === 1 &&
+        (rows[0]?.owner as { name?: string } | undefined)?.name === "Existing owner",
     );
     expect(rows).toEqual([
       {
@@ -260,51 +235,56 @@ it("publishes generated default-bearing relation migrations and preserves them a
     createdAt: new Date("2026-01-02T03:04:05.678Z"),
     metadata: { archived: false, labels: ["initial"], nested: { count: 3, value: null } },
   };
-  const users = s.table({ name: s.string().default("Unnamed") }, {});
+  const users = { columns: { name: { type: "string", default: "Unnamed" } } };
   const columns = {
-    ownerId: s.uuid(),
-    status: s.string().default("draft"),
-    enabled: s.boolean().default(false),
-    tags: s.array(s.string()).default(["initial"]),
-    sequence: s.bigint().default(complexDefaults.sequence),
-    checkpoints: s.array(s.array(s.bigint())).default(complexDefaults.checkpoints),
-    payload: s.bytes().default(complexDefaults.payload),
-    createdAt: s.timestamp().default(complexDefaults.createdAt),
-    metadata: s.json().default(complexDefaults.metadata),
+    ownerId: "uuid",
+    status: { type: "string", default: "draft" },
+    enabled: { type: "boolean", default: false },
+    tags: { array: "string", default: ["initial"] },
+    sequence: { type: "bigint", default: "9223372036854775806" },
+    checkpoints: {
+      array: { array: "bigint" },
+      default: [["9223372036854775806", "-9223372036854775807"], []],
+    },
+    payload: { type: "bytes", default: "AAF//w==" },
+    createdAt: { type: "timestamp", default: 1767323045678 },
+    metadata: {
+      json: true,
+      default: { archived: false, labels: ["initial"], nested: { count: 3, value: null } },
+    },
   };
-  const before = { users, records: s.table(columns, {}) };
+  // Not `records`: its TS type `Record` would clash with the built-in.
+  const before = { users, items: { columns } };
   const after = {
     users,
-    records: s.table(columns, { owner: s.rel("users", "ownerId") }),
+    items: { columns, relations: { owner: { rel: "users", column: "ownerId" } } },
   };
-  const beforeApp = s.defineApp(before, { migrations: "none" }),
-    afterApp = s.defineApp(after, { migrations: "none" });
-  const permissionsBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.users.allowRead.always(),
-    policy.users.allowInsert.always(),
-    policy.records.allowRead.always(),
-    policy.records.allowInsert.always(),
-  ]);
-  const permissionsAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.users.allowRead.always(),
-    policy.users.allowInsert.always(),
-    policy.records.allowRead.always(),
-    policy.records.allowInsert.always(),
-  ]);
+  const beforeFile: TestAppFile = { format: 1, tables: before };
+  const beforeApp = testApp(beforeFile);
+  // `migrations create` after adding the relation: the previous version moves
+  // into history, with a migration to the current one.
+  const stub = await migrationsCreate(
+    JSON.stringify({ format: 1, tables: after }),
+    await generateTs(JSON.stringify(beforeFile)),
+    "references",
+  );
+  expect(stub).toMatchObject({ changed: true, todos: [] });
+  const afterApp = testApp(stub.app);
+  const permissionsBefore = allowAll(["users", "items"], ["read", "insert"]);
+  const permissionsAfter = allowAll(["users", "items"], ["read", "insert"]);
   const root = await mkdtemp(join(tmpdir(), "jazz-default-relation-e2e-"));
   let server: LocalJazzServerHandle | undefined;
   let front: TestJazz | undefined;
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
     server = await startLocalJazzServer({
-      allowLocalFirstAuth: true,
       dataDir: join(root, "data"),
     });
     const { appId, adminSecret, backendSecret } = server;
     const catalogue = { appId, adminSecret, serverUrl: server.url };
     const deployed = await deploy({
       ...catalogue,
-      schema: beforeApp,
+      app: beforeApp,
       permissions: permissionsBefore,
     });
     front = await startTestJazz({ app: beforeApp, permissions: permissionsBefore, core: server });
@@ -313,7 +293,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
       .insert(beforeApp.users, { name: "Existing owner" })
       .wait({ tier: "global" });
     const existing = await oldDb
-      .insert(beforeApp.records, {
+      .insert(beforeApp.items, {
         ownerId: owner.id,
         status: "published",
         enabled: true,
@@ -321,44 +301,78 @@ it("publishes generated default-bearing relation migrations and preserves them a
       })
       .wait({ tier: "global" });
     const fromHash = deployed.schema.hash;
-    const toHash = await computeSchemaHash(afterApp.wasmSchema);
+    const toHash = boundApp(afterApp.wasmSchema)!.schema.current;
     expect(toHash).not.toBe(fromHash);
-    expect(await computeSchemaHash(beforeApp.wasmSchema)).toBe(fromHash);
-    expect(await computeSchemaHash(afterApp.wasmSchema)).toBe(toHash);
-    const source = renderMigrationStub({
-      fromHash,
-      toHash,
-      fromSchema: beforeApp.wasmSchema,
-      toSchema: afterApp.wasmSchema,
-    }).replace('"jazz-tools"', JSON.stringify(new URL("../index.ts", import.meta.url).pathname));
-    const migrationFile = join(
-      root,
-      `references-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`,
+    expect(boundApp(beforeApp.wasmSchema)!.schema.current).toBe(fromHash);
+    // The new version ships the deployed one, under the same hash.
+    expect(boundApp(afterApp.wasmSchema)!.schema.schemas.map((version) => version.hash)).toEqual(
+      expect.arrayContaining([fromHash, toHash]),
     );
-    await writeFile(join(root, "package.json"), '{"type":"module"}');
-    expect(source).toContain('.default("draft")');
-    for (const invalid of [
-      source.replaceAll('.default("draft")', ""),
-      source.replaceAll('.default("draft")', '.default("tampered")'),
+    // The migration ships the previous version's schema, defaults included:
+    // a shipped version whose defaults differ from what its hash names is
+    // refused, and nothing is published.
+    // The loader refuses it locally, and the server refuses a deployment body
+    // that ships it anyway.
+    const compiled = compileTestApp(stub.app);
+    const shippedBefore = compiled.schema.schemas.find((version) => version.hash === fromHash);
+    expect(shippedBefore).toBeDefined();
+    const statusOf = (schema: unknown) =>
+      (schema as { tables: WasmSchema }).tables.items!.columns.find(
+        (column) => column.name === "status",
+      )!;
+    expect(statusOf(shippedBefore!.schema).default).toEqual({ type: "Text", value: "draft" });
+    for (const tamper of [
+      (status: { default?: unknown }) => delete status.default,
+      (status: { default?: unknown }) => (status.default = { type: "Text", value: "tampered" }),
     ]) {
-      await writeFile(migrationFile, invalid);
-      await expect(
-        deploy({
-          ...catalogue,
-          schema: afterApp,
-          permissions: permissionsAfter,
-          migration: await loadDefinedMigration(migrationFile),
-        }),
-      ).rejects.toThrow(/schema witness for table records does not match canonical schema/);
+      const invalid = structuredClone(compiled);
+      tamper(statusOf(invalid.schema.schemas.find((version) => version.hash === fromHash)!.schema));
+      const invalidApp = bindApp(invalid as never);
+      expect(() => testPermissions(invalidApp, permissionsAfter)).toThrow(
+        new RegExp(`schema ${fromHash} doesn't match its content`),
+      );
       expect((await fetchMigrationGraph(catalogue)).migrations).toEqual([]);
     }
-    await writeFile(migrationFile, source);
+    // The deployment body `deploy` would publish, sent whole (deploy leaves
+    // out schemas the server already stores), with the previous version or
+    // the lens tampered.
+    const { deployment } = await loadBackendAppFor(afterApp, permissionsAfter);
+    const body = deployment as DeploymentBody;
+    expect(body.schemas.map(({ hash }) => hash)).toContain(fromHash);
+    const tamperedBodies: [DeploymentBody, RegExp, string][] = [];
+    for (const tamper of [
+      (status: { default?: unknown }) => delete status.default,
+      (status: { default?: unknown }) => (status.default = { type: "Text", value: "tampered" }),
+    ]) {
+      const invalid = structuredClone(body);
+      tamper(statusOf(invalid.schemas.find(({ hash }) => hash === fromHash)!.schema));
+      tamperedBodies.push([
+        invalid,
+        new RegExp(`schema ${fromHash} does not match its content hash`),
+        "schema_hash_mismatch",
+      ]);
+    }
+    const tamperedLens = structuredClone(body);
+    tamperedLens.migrations[0]!.forward = [
+      { table: "items", operations: [{ type: "rename", column: "status", value: "state" }] },
+    ];
+    tamperedBodies.push([
+      tamperedLens,
+      /the migration does not produce the columns of table "items"/,
+      "invalid_migration",
+    ]);
+    for (const [invalid, message, code] of tamperedBodies) {
+      const refused = publishDeployment(server.url, catalogue, invalid);
+      await expect(refused).rejects.toThrow(message);
+      await expect(refused).rejects.toBeInstanceOf(DeploymentError);
+      await expect(refused).rejects.toMatchObject({ code });
+      expect((await fetchMigrationGraph(catalogue)).migrations).toEqual([]);
+    }
     expect(
       await deploy({
         ...catalogue,
-        schema: afterApp,
+        app: afterApp,
         permissions: permissionsAfter,
-        migration: await loadDefinedMigration(migrationFile),
       }),
     ).toMatchObject({ changed: true, published: { migrations: [{ fromHash, toHash }] } });
     expect((await fetchMigrationGraph(catalogue)).migrations).toContainEqual(
@@ -374,7 +388,6 @@ it("publishes generated default-bearing relation migrations and preserves them a
       appId,
       adminSecret,
       backendSecret,
-      allowLocalFirstAuth: true,
       dataDir: join(root, "data"),
     });
     for (const [schemaHash, expected] of [
@@ -383,22 +396,18 @@ it("publishes generated default-bearing relation migrations and preserves them a
     ] as const) {
       const stored = await fetchStoredWasmSchema(server.url, { appId, adminSecret, schemaHash });
       expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
-      expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
     }
-    // The app as it ships after `migrations create`: its migrations module
-    // now holds the generated migration.
-    const shippedApp = s.defineApp(after, {
-      migrations: await appMigrations(before, {
-        to: after,
-        migration: await loadDefinedMigration(migrationFile),
-      }),
-    });
+    // The app as it ships after `migrations create`: its jazz.app.json now
+    // holds the previous version and the generated migration.
+    const shippedApp = afterApp;
     front = await startTestJazz({ app: shippedApp, permissions: permissionsAfter, core: server });
     newDb = await createDb(await localAccountConfig(appId, front.url));
     const rows = await waitForRows(
       newDb,
-      shippedApp.records.where({ id: existing.id }).include({ owner: true }),
-      (rows) => rows.length === 1 && rows[0]?.owner?.name === "Existing owner",
+      shippedApp.items.where({ id: existing.id }).include({ owner: true }),
+      (rows) =>
+        rows.length === 1 &&
+        (rows[0]?.owner as { name?: string } | undefined)?.name === "Existing owner",
     );
     expect(rows).toEqual([
       {
@@ -413,12 +422,13 @@ it("publishes generated default-bearing relation migrations and preserves them a
     ]);
     const defaultOwner = await newDb.insert(shippedApp.users, {}).wait({ tier: "global" });
     const created = await newDb
-      .insert(shippedApp.records, { ownerId: defaultOwner.id })
+      .insert(shippedApp.items, { ownerId: defaultOwner.id })
       .wait({ tier: "global" });
     const defaultRows = await waitForRows(
       newDb,
-      shippedApp.records.where({ id: created.id }).include({ owner: true }),
-      (rows) => rows.length === 1 && rows[0]?.owner?.name === "Unnamed",
+      shippedApp.items.where({ id: created.id }).include({ owner: true }),
+      (rows) =>
+        rows.length === 1 && (rows[0]?.owner as { name?: string } | undefined)?.name === "Unnamed",
     );
     expect(defaultRows).toEqual([
       {
@@ -441,34 +451,25 @@ it("publishes generated default-bearing relation migrations and preserves them a
 }, 60_000);
 
 it("a client shipping the app's migrations writes a renamed column where the server keeps it", async () => {
-  const before = { notes: s.table({ title: s.string() }, {}) };
-  const after = { notes: s.table({ body: s.string() }, {}) };
-  const rename = m.defineMigration({
-    from: before,
-    to: after,
-    migrate: { notes: { body: m.renameFrom("title") } },
-  });
-  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) }),
-    afterApp = s.defineApp(after, {
-      migrations: await appMigrations(before, { to: after, migration: rename }),
+  const before = { notes: { columns: { title: "string" } } };
+  const after = { notes: { columns: { body: "string" } } };
+  const beforeApp = testApp({ tables: before }),
+    afterApp = testApp({
+      tables: after,
+      history: { v1: { tables: before } },
+      migrations: [{ from: "v1", migrate: { notes: { body: { renameFrom: "title" } } } }],
     });
-  const allowBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
-  const allowAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
+  const allowBefore = allowAll(["notes"], ["read", "insert"]);
+  const allowAfter = allowAll(["notes"], ["read", "insert"]);
   const server = await startTestJazz({
     app: beforeApp,
     permissions: allowBefore,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
     const { appId, url: serverUrl } = server;
-    await server.redeploy({ app: afterApp, permissions: allowAfter, migration: rename });
+    await server.redeploy({ app: afterApp, permissions: allowAfter });
     newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const created = await newDb

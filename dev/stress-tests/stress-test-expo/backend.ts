@@ -4,16 +4,16 @@
 //
 //   pnpm backend    (data in ./.jazz; JAZZ_IN_MEMORY=1 keeps it in memory)
 import { createServer } from "node:http";
-import { acceptLocalFirstAuth, createJazz, memory, sqlite } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { acceptDeviceAccounts, createJazz, memory, sqlite } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 const port = Number(process.env.PORT ?? 1625);
 const jazz = createJazz({
   app,
   permissions,
   // No sign-in: every browser is a guest, so let guests sync.
-  authenticate: acceptLocalFirstAuth,
+  authenticate: acceptDeviceAccounts,
   store: process.env.JAZZ_IN_MEMORY === "1" ? memory({}) : sqlite({ path: ".jazz" }),
 });
 const server = createServer((req, res) =>

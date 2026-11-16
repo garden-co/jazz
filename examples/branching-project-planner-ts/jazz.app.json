@@ -1,0 +1,27 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "e9ad30a5ac2e1ec05c67ef792d4174ade5f66dac278d9074f04c603fbd556db4"
+  },
+  "tables": {
+    "scenarios": {
+      "columns": {
+        "name": "string",
+        "base_scenario_id": "uuid?",
+        "base_snapshot_ref": "string?",
+        "status": { "enum": ["open", "approved", "archived"] }
+      },
+      "relations": {
+        "base_scenario": { "rel": "scenarios", "column": "base_scenario_id" },
+        "scenariosViaBase_scenario": { "reverse": "scenarios", "relation": "base_scenario" },
+        "tasksViaScenario": { "reverse": "tasks", "relation": "scenario" }
+      }
+    },
+    "tasks": {
+      "columns": { "scenario_id": "uuid", "title": "string", "estimate": "int" },
+      "relations": { "scenario": { "rel": "scenarios", "column": "scenario_id" } },
+      "branchBy": ["scenario_id"]
+    }
+  }
+}

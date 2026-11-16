@@ -627,3 +627,109 @@ fn random_interleavings_keep_the_invariants() {
         }
     }
 }
+
+impl Host {
+    fn reauthenticate(&mut self) {
+        self.fail(LinkFailure::Reauthenticate(
+            "reauthenticate: session expires".into(),
+        ));
+    }
+
+    fn published_phases(&mut self) -> Vec<LinkPhase> {
+        self.link
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                LinkEvent::Status(status) => Some(status.phase),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// alice's session reaches the expiry her app's auth gave it, so the server
+/// asks her client to re-authenticate. The link reconnects at once, with no
+/// backoff timer, and observers never see it leave Live: the app's auth
+/// admits her again on the new socket.
+///
+/// ```text
+/// Live ──reauthenticate──► (Connecting, shown Live) ──admitted──► Live
+/// ```
+#[test]
+fn a_planned_reauthentication_reconnects_at_once_and_stays_live() {
+    let mut alice = Host::configured();
+    alice.admit();
+    alice.link.drain_events();
+
+    alice.reauthenticate();
+    assert_eq!(alice.connects.len(), 2, "reconnects at once");
+    assert!(alice.timer.is_none(), "no backoff");
+    assert_eq!(alice.link.phase(), &LinkPhase::Connecting);
+    assert_eq!(alice.link.status().phase, LinkPhase::Live);
+    assert_eq!(alice.link.status().reason, None);
+
+    alice.admit();
+    assert_eq!(alice.link.phase(), &LinkPhase::Live);
+    assert_eq!(alice.published_phases(), Vec::<LinkPhase>::new());
+    assert!(alice.auth_events().is_empty());
+}
+
+/// The new socket is refused: alice signed out meanwhile. The swap ends as
+/// a refusal does, so the app's session hears it and signs her out.
+#[test]
+fn a_reauthentication_refused_waits_for_a_credential_like_any_refusal() {
+    let mut alice = Host::configured();
+    alice.admit();
+    alice.link.drain_events();
+    alice.reauthenticate();
+    alice.refuse(AuthFailureReason::Missing);
+    assert_eq!(
+        alice.link.phase(),
+        &LinkPhase::AwaitingCredential(AuthFailureReason::Missing)
+    );
+    assert_eq!(
+        alice.published_phases(),
+        vec![LinkPhase::AwaitingCredential(AuthFailureReason::Missing)]
+    );
+    assert!(alice.timer.is_none());
+}
+
+/// The network drops during the swap: the link backs off and reports it,
+/// as for any lost link, and the next admission is an ordinary one.
+#[test]
+fn a_reauthentication_racing_a_network_drop_backs_off_visibly() {
+    let mut alice = Host::configured();
+    alice.admit();
+    alice.link.drain_events();
+    alice.reauthenticate();
+    alice.network_down();
+    assert_eq!(alice.link.phase(), &LinkPhase::Backoff);
+    assert_eq!(alice.published_phases(), vec![LinkPhase::Backoff]);
+    assert!(alice.timer.is_some());
+    alice.fire();
+    alice.admit();
+    assert_eq!(alice.link.status().phase, LinkPhase::Live);
+}
+
+/// A server that asks a link to re-authenticate before admitting it gets
+/// an ordinary failed attempt with backoff, never a tight reconnect loop.
+#[test]
+fn a_reauthentication_before_admission_backs_off() {
+    let mut alice = Host::configured();
+    alice.link.drain_events();
+    alice.reauthenticate();
+    assert_eq!(alice.link.phase(), &LinkPhase::Backoff);
+    assert!(alice.timer.is_some());
+    assert_eq!(alice.connects.len(), 1);
+}
+
+/// The app goes offline mid-swap: the link is offline, not shown live.
+#[test]
+fn going_offline_during_a_reauthentication_shows_offline() {
+    let mut alice = Host::configured();
+    alice.admit();
+    alice.reauthenticate();
+    alice.link.drain_events();
+    alice.send(LinkInput::SetOffline(true));
+    assert_eq!(alice.link.status().phase, LinkPhase::Offline);
+}

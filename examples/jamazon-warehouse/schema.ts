@@ -1,16 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
-/**
- * Stock rows may not declare a reorder level above this cap. The invariant is
- * what makes the stock-level report's indexed candidate read complete: any
- * row with `on_hand < reorder_level` also has `on_hand < REORDER_LEVEL_CAP`.
- * See `stockLevelCandidates` in src/warehouse.ts and #1864.
- */
-export const REORDER_LEVEL_CAP = 100;
-
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   warehouses: s
     .table(
@@ -175,14 +166,4 @@ const schema = {
       },
     )
     .indexOnly(["warehouse_id", "order_id"]),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Warehouse = s.RowOf<typeof app.warehouses>;
-export type District = s.RowOf<typeof app.districts>;
-export type Item = s.RowOf<typeof app.items>;
-export type Stock = s.RowOf<typeof app.stock>;
-export type Customer = s.RowOf<typeof app.customers>;
-export type Order = s.RowOf<typeof app.orders>;
-export type OrderLine = s.RowOf<typeof app.order_lines>;
+});

@@ -1,46 +1,26 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { JazzSvelteProvider } from 'jazz-tools/svelte';
-  import type { DbConfig } from 'jazz-tools';
+  import { untrack } from 'svelte';
+  import { JazzProvider } from 'jazz-tools/svelte';
   import { Toaster } from 'svelte-sonner';
-  import { prepareAccountConfig } from './account.js';
+  import { sessionConfig, type SessionOverrides } from './account.js';
   import TodoList from './TodoList.svelte';
 
-  interface Props { config?: Partial<DbConfig>; }
+  interface Props { config?: SessionOverrides; }
   let { config: configOverrides = {} }: Props = $props();
-  let config = $state<DbConfig>();
-  let error = $state<string>();
 
   // #region context-setup-svelte
-  onMount(() => {
-    let cancelled = false;
-    void prepareAccountConfig(configOverrides)
-      .then((prepared) => {
-        if (!cancelled) config = prepared;
-      })
-      .catch((reason) => {
-        if (!cancelled) error = reason instanceof Error ? reason.message : String(reason);
-      });
-    return () => {
-      cancelled = true;
-    };
-  });
+  // Captured at mount: the provider owns one session for its lifetime.
+  const config = untrack(() => sessionConfig(configOverrides));
   // #endregion context-setup-svelte
 </script>
 
-{#if error}
-  <p role="alert">{error}</p>
-{:else if config}
-  <JazzSvelteProvider {config}>
-    {#snippet children()}
-      <h1>Todos</h1>
-      <TodoList />
-      <Toaster />
-    {/snippet}
-    {#snippet fallback()}
-      <p>Loading...</p>
-    {/snippet}
-  </JazzSvelteProvider>
-{:else}
-  <p>Loading...</p>
-{/if}
+<JazzProvider {config}>
+  {#snippet children()}
+    <h1>Todos</h1>
+    <TodoList />
+    <Toaster />
+  {/snippet}
+  {#snippet loading()}
+    <p>Loading...</p>
+  {/snippet}
+</JazzProvider>

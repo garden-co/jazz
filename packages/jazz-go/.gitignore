@@ -1,0 +1,4 @@
+# Per-platform libjazz_ffi, embedded only on release commits
+# (dev/scripts/go-embed-ffi-libraries.sh).
+/lib/
+/embed_*_*.go

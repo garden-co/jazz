@@ -3,7 +3,7 @@ import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbConfig } from "../runtime/db.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
-import { JazzClientProvider, JazzProvider } from "./provider.js";
+import { JazzClientProvider, LegacyJazzProvider as JazzProvider } from "./provider.js";
 import type { PendingSolidJazzClient } from "./create-solid-jazz-client.js";
 
 const openJazzClient = vi.hoisted(() => vi.fn<(config: DbConfig) => Promise<JazzClient>>());

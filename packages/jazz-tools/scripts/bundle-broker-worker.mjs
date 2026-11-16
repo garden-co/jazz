@@ -1,12 +1,15 @@
 // Bundle the browser broker SharedWorker into self-contained ESM. The
 // SharedWorker constructor is intentionally indirect, so consumer bundlers do
 // not reliably discover and bundle its imports themselves.
-import { build } from "esbuild";
+import { build, transform } from "esbuild";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertWasmGlueInstantiates } from "../../../dev/artifacts/wasm-glue-abi.mjs";
+import {
+  assertWasmGlueAbi,
+  assertWasmGlueInstantiates,
+} from "../../../dev/artifacts/wasm-glue-abi.mjs";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const entry = fileURLToPath(new URL("../src/worker/jazz-broker-worker.ts", import.meta.url));
@@ -72,10 +75,23 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir, entryPo
     // asset. Refuse to publish a worker whose embedded wasm-bindgen glue cannot
     // instantiate the binary it is built alongside: the browser otherwise reports
     // an opaque missing-import error only after the SharedWorker has started.
-    await assertWasmGlueInstantiates(
-      await readFile(wasmSource),
-      await readFile(stagedWorker, "utf8"),
-    );
+    const wasmBytes = await readFile(wasmSource);
+    await assertWasmGlueInstantiates(wasmBytes, await readFile(stagedWorker, "utf8"));
+
+    // Bundlers that start the worker from its URL (Next.js/Turbopack copies
+    // it into `media/` byte for byte) ship exactly this file, so it has to be
+    // production-ready on its own; Vite and webpack minify it again anyway.
+    // Minified after the check above, which evaluates wasm-bindgen's glue by
+    // its generated names. No code splitting: the bundlers that copy the file
+    // would not emit its chunks.
+    const minified = await transform(await readFile(stagedWorker, "utf8"), {
+      format: "esm",
+      target: "es2022",
+      legalComments: "none",
+      minify: true,
+    });
+    assertWasmGlueAbi(wasmBytes, minified.code);
+    await writeFile(stagedWorker, minified.code);
 
     // The worker bundles wasm-bindgen's JS glue. Its default initializer resolves
     // `jazz_wasm_bg.wasm` relative to that glue, which esbuild places in this

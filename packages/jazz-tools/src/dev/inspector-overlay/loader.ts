@@ -1,6 +1,11 @@
 import { installInspectorHost, type InspectorHostDb } from "./host-bridge.js";
 
 const ELEMENT_NAME = "jazz-inspector-overlay";
+// The base path `createJazz` serves at, and so the Inspector's embedded page
+// below it, when the Db names no `serverUrl`.
+const DEFAULT_BASE_PATH = "/jazz";
+// Set by startInspectorOverlay before the overlay mounts.
+let embeddedPage: URL | null = null;
 
 const OPEN_KEY = "jazz-inspector-overlay:open";
 const HEIGHT_KEY = "jazz-inspector-overlay:height";
@@ -219,7 +224,7 @@ const TEMPLATE = `
  * changes when the host recreates its Db on login/logout, which must repoint
  * the handle at the new Db instead of leaving the overlay bound to a shut-down
  * one forever. The iframe window is captured by connectedCallback. Binding is
- * idempotent: providers call startInspectorOnce(db) on every effect run
+ * idempotent: an app may call mountInspector(db) on every effect run
  * (StrictMode remounts included), and repeat calls with an unchanged pair must
  * not tear down and reinstall the handle they just installed. Keeping the
  * bound pair and its disposer in one object makes the invariant structural:
@@ -350,7 +355,7 @@ class JazzInspectorOverlay extends HTMLElement {
       );
       if (dockOpen) {
         if (!iframe.hasAttribute("src")) {
-          const url = new URL("/__jazz/embedded/embedded.html", window.location.href);
+          const url = new URL(embeddedPage!.href);
           url.searchParams.set("route", this.#activeRoute);
           iframe.src = url.href;
         }
@@ -385,7 +390,7 @@ class JazzInspectorOverlay extends HTMLElement {
       apply();
     };
     const openDetachedWindow = (route: string): boolean => {
-      const url = new URL("/__jazz/embedded/embedded.html", window.location.href);
+      const url = new URL(embeddedPage!.href);
       url.searchParams.set("detached", "1");
       url.searchParams.set("route", route);
       const rect = dock.getBoundingClientRect();
@@ -586,7 +591,39 @@ function mount(): void {
  * No-op at module load — providers call this from a dev-only dynamic import, so
  * it's absent from prod builds.
  */
-export function startInspectorOverlay(db: InspectorHostDb): void {
+export function startInspectorOverlay(db: InspectorHostDb, options: OverlayOptions = {}): void {
+  embeddedPage = embeddedPageFor(db, options.url);
   hostBinding.setDb(db);
   mount();
+}
+
+export interface OverlayOptions {
+  /**
+   * Where the app's backend serves the Inspector's embedded page. Defaults to
+   * `<serverUrl>/inspect/embedded.html`, with the Db's `serverUrl` (or
+   * `/jazz`). It must be on this page's origin: the page and the Inspector
+   * share the Db through the window, not over the network.
+   */
+  url?: string;
+}
+
+/** The embedded page for `db`, refusing one on another origin. */
+export function embeddedPageFor(db: InspectorHostDb, url?: string): URL {
+  let page: URL;
+  if (url !== undefined) {
+    page = new URL(url, window.location.href);
+  } else {
+    const base = new URL(db.getConfig().serverUrl ?? DEFAULT_BASE_PATH, window.location.href);
+    if (base.protocol === "ws:") base.protocol = "http:";
+    if (base.protocol === "wss:") base.protocol = "https:";
+    page = new URL(`${base.pathname.replace(/\/+$/, "")}/inspect/embedded.html`, base);
+  }
+  if (page.origin !== window.location.origin) {
+    throw new Error(
+      `The Inspector overlay on another origin (${page.origin}) is not supported yet: ` +
+        `it shares this page's Db through the window. Serve Jazz on this page's origin ` +
+        `(${window.location.origin}), or pass \`url\` to a same-origin copy of its embedded page.`,
+    );
+  }
+  return page;
 }

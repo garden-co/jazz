@@ -2,12 +2,12 @@
 
 import { useState, type FormEvent } from "react";
 import { Banner, Button, Card, Heading, Text, TextInput, VStack } from "@astryxdesign/core";
-import { useJazzAuth } from "jazz-tools/react";
+import { useJazzSession } from "jazz-tools/react";
 import { authClient } from "@/src/lib/auth-client";
 
 /**
  * Email and password via Better Auth. After signing in, the form asks Jazz to
- * reauthenticate: Jazz asks the backend who is signed in, logs in or registers
+ * refresh: Jazz asks the backend who is signed in, logs in or registers
  * the account and then renders whichever page the visitor opened (the
  * workspace or an invite).
  */
@@ -19,7 +19,7 @@ export function SignInForm() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const signingUp = mode === "sign-up";
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -29,7 +29,7 @@ export function SignInForm() {
       ? await authClient.signUp.email({ name, email, password })
       : await authClient.signIn.email({ email, password });
     if (error) setError(error.message ?? "Could not sign in");
-    else await reauthenticate();
+    else await refresh();
     setPending(false);
   }
 

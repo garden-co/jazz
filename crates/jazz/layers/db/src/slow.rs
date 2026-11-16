@@ -119,10 +119,49 @@ impl SlowQuery {
         }
         line.push_str(&format!(
             ". Plan: {}. SQL: {}",
-            self.plan.replace('\n', " | "),
-            self.sql
+            capped_plan(&self.plan),
+            capped_sql(&self.sql)
         ));
         line
+    }
+}
+
+/// Plan steps a report line shows: a policy that expands into thousands of
+/// `UNION ALL` branches would otherwise make one line tens of megabytes.
+pub const LINE_PLAN_STEPS: usize = 40;
+
+/// Characters of SQL a report line shows.
+pub const LINE_SQL_CHARS: usize = 2_000;
+
+/// `plan`'s first [`LINE_PLAN_STEPS`] steps on one line, then how many more
+/// it has.
+fn capped_plan(plan: &str) -> String {
+    let steps: Vec<&str> = plan.lines().collect();
+    let mut out = steps
+        .iter()
+        .take(LINE_PLAN_STEPS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if steps.len() > LINE_PLAN_STEPS {
+        out.push_str(&format!(
+            " | … {} more plan steps ({} in all)",
+            steps.len() - LINE_PLAN_STEPS,
+            steps.len()
+        ));
+    }
+    out
+}
+
+/// `sql`'s first [`LINE_SQL_CHARS`] characters, then its length.
+fn capped_sql(sql: &str) -> String {
+    match sql.char_indices().nth(LINE_SQL_CHARS) {
+        None => sql.to_owned(),
+        Some((end, _)) => format!(
+            "{} … ({} characters in all)",
+            &sql[..end],
+            sql.chars().count()
+        ),
     }
 }
 
@@ -398,5 +437,41 @@ mod tests {
         log.record("t", "SELECT a", run, Some(1), || "SCAN t".into());
         assert!(log.take_due().is_none(), "within the window");
         assert_eq!(log.take().0[0].runs, 1, "kept for the next report");
+    }
+
+    /// A policy that expands into thousands of `UNION ALL` branches, and a
+    /// statement as long, make a bounded line (jazz#5128): the first plan
+    /// steps and how many more there are, and the start of the SQL with
+    /// its length.
+    #[test]
+    fn a_huge_plan_and_statement_make_a_bounded_line() {
+        let step = "COMPOUND QUERY\nLEFT-MOST SUBQUERY\nSEARCH h USING PRIMARY KEY (id=? AND _branch=?)\nUNION ALL";
+        let plan = vec![step; 20_000].join("\n");
+        let mut query = shape(&plan, false);
+        query.sql = format!("SELECT {}", "x, ".repeat(1_000_000));
+        let line = query.line(Some("app"));
+        assert!(line.len() < 20_000, "{} bytes", line.len());
+        assert!(line.contains("80000 in all"), "it counts the plan's steps");
+        assert!(
+            line.contains(&format!("{} characters in all", query.sql.chars().count())),
+            "and the statement's length"
+        );
+        assert!(
+            line.contains("COMPOUND QUERY | LEFT-MOST SUBQUERY"),
+            "{}",
+            &line[..400]
+        );
+
+        // A short plan and statement are shown whole, as before.
+        let short = shape("SCAN docs", false).line(None);
+        assert!(!short.contains("more plan steps") && !short.contains("characters in all"));
+    }
+
+    #[test]
+    fn a_long_statement_is_cut_on_a_character_boundary() {
+        let sql = "é".repeat(LINE_SQL_CHARS + 5);
+        let capped = capped_sql(&sql);
+        assert!(capped.starts_with(&"é".repeat(LINE_SQL_CHARS)));
+        assert!(capped.ends_with(&format!("({} characters in all)", LINE_SQL_CHARS + 5)));
     }
 }

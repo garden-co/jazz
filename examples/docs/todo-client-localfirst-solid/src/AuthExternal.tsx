@@ -1,38 +1,28 @@
 import { Show, type ParentProps } from "solid-js";
-import { createAccountManager, type DbConfig } from "jazz-tools";
-import { JazzProvider, createAccountState } from "jazz-tools/solid";
+import { JazzProvider, useJazzSession, type JazzClient, type JazzSession } from "jazz-tools/solid";
 
-// Login starts outside a context. Linking requires the old context to complete
-// shutdown({ waitForSync: true }) before calling accounts.linkWithBackend.
-export function AuthExternal(
-  props: ParentProps<{
-    accounts: Awaited<ReturnType<typeof createAccountManager>>;
-    config: Omit<DbConfig, "account">;
-  }>,
-) {
-  const state = createAccountState(props.accounts);
+// A session you opened with await createJazzClient({ serverUrl: "/jazz" }).
+export function AuthExternal(props: ParentProps<{ session: JazzSession<JazzClient> }>) {
+  const { snapshot, refresh } = useJazzSession(props.session);
   return (
-    <Show
-      when={state().account}
-      fallback={
+    <JazzProvider
+      session={props.session}
+      signedOut={
         <>
+          {/* After your own sign-in has set its session cookie, ask your backend who is signed in. */}
           <button
-            disabled={!!state().pending}
+            disabled={!!snapshot().pending}
             onClick={() => {
-              void props.accounts.loginWithBackend().catch(() => {});
+              void refresh().catch(() => {});
             }}
           >
             Sign in
           </button>
-          <Show when={state().error}>{(error) => <p role="alert">{error().message}</p>}</Show>
+          <Show when={snapshot().error}>{(error) => <p role="alert">{error().message}</p>}</Show>
         </>
       }
     >
-      {(account) => (
-        <JazzProvider config={{ ...props.config, account: account() }}>
-          {props.children}
-        </JazzProvider>
-      )}
-    </Show>
+      {props.children}
+    </JazzProvider>
   );
 }

@@ -3,11 +3,6 @@ title: Inspector
 description: "Learn how to look at your app's data, and let agents debug it, through your own backend."
 ---
 
-<Callout type="info">
-  Coming soon: the Inspector isn't in alpha.60 yet. This page describes how it will work once it
-  ships; `inspect`, `/jazz/inspect/` and the `jazz-tools inspect` commands don't exist until then.
-</Callout>
-
 The Inspector lets you browse and edit your app's data, follow relations, see a table's schema and
 permissions, and look at the app as a given user would. Your backend serves it at
 `<basePath>/inspect/`, by default `/jazz/inspect/`, and decides who may open it. The same access
@@ -41,24 +36,42 @@ export const jazz = createJazz({
 </Callout>
 
 Without `inspect`, only local development gets in: a request from this machine while `NODE_ENV` is
-`"development"`. Jazz can only check that on hosts that hand it the Node request (`attach()` and
+`"development"`. A browser counts as local only when the page it comes from is on this machine too,
+judged by its `Origin`. Jazz can only check that on hosts that hand it the Node request (`attach()` and
 `nodeHandler`). On Next.js route handlers, Hono, Bun and Deno it can't see where a request comes
 from, so the default is off there; pass an `inspect` hook to use the Inspector. Pass `() => null` to
 turn it off everywhere.
+
+<Callout type="warn" title="Dev servers reachable from other machines">
+  Behind a dev proxy that adds no `X-Forwarded-For` header, such as Vite's `server.proxy` without
+  `xfwd` while you run `vite --host`, a non-browser client on another machine looks local too. If
+  other machines can reach your dev server, pass an `inspect` hook.
+</Callout>
 
 Every call is audited, allowed or refused. By default that's one `console.info` line per call; pass
 `inspector: { audit }` to send events to your own log.
 
 ## The Inspector page
 
-Open `/jazz/inspect/` on your app. Besides the data grid, it has:
+Open `/jazz/inspect/` on your app. The page itself, its HTML and scripts, loads for anyone who
+reaches that URL, without your `inspect` hook: it holds no data. Everything it shows comes from
+`<basePath>/inspect/api`, which only answers requests your `inspect` hook (or an approved token)
+lets in, so a visitor without access gets no data.
 
-- **View as user**: browse the data under one user's permissions.
+In the data grid, a value over 32 KB shows as a summary such as "‹large bytes value, 5.2 MB›" and
+can't be edited there; the CLI and MCP `get` read it in parts (see
+[Large values](/docs/tooling/cli-and-mcp#large-values)).
+
+Besides the data grid, it has:
+
+- **View as user**: browse the data under one user's permissions. If your permissions read `session.claims`, give that user's claims too ("with claims"): without them you see what a session with no claims would, and the Inspector says so.
 - **Sessions**: who is connected right now.
 - **Linked queries**: follow a query from a session or an agent's answer.
 
-Links into the Inspector carry their place in the URL fragment (`#q`, `#table`, `#row`, `#as`), and
-hold no credential, so you can paste them into a chat or an issue. The page can't be framed by other
+Links into the Inspector carry their place in the URL fragment (`#q`, `#table`, `#row`, `#as`, `#claims`), and
+hold no credential, so you can paste them into a chat or an issue. Claims you view as with go into the
+fragment too, and so into the browser's history and every link you copy: use claims that describe the
+user (a role, a team), never real secrets such as tokens or passwords. The page can't be framed by other
 sites.
 
 ## Agents
@@ -82,8 +95,11 @@ the page shows the token to paste instead.
   example `claude mcp add jazz -- npx jazz-tools inspect mcp --app <url>`. An agent without a
   token calls the `request_access` tool, which starts the same approval.
 
+`jazz-tools inspect` and the MCP server send a token over plain `http://` only to this machine
+(`localhost` or a loopback address); anywhere else needs `https://`.
+
 Tokens are read-only unless you allow writes, can be limited to some tables, and expire (after a day
-at most, `inspector.maxTokenTtlSeconds`). To keep columns from agents, pass
+at most, `inspector.maxTokenTtlSeconds`). A token limited to some tables can't list sessions. To keep columns from agents, pass
 `inspector: { redact: { users: ["email"] } }`: those values read as `"[redacted]"`. To revoke every
 token, set `inspector.tokensIssuedAfter` to now.
 
@@ -105,6 +121,16 @@ It docks the Inspector in the page, loaded from `<serverUrl>/inspect/embedded.ht
 your backend must share an origin; another origin is refused as not supported yet. Importing
 `jazz-tools/inspector` is safe on a server: the overlay loads on first mount.
 
-## Not supported yet
+## Explain
 
-- Explaining which policy let a row through or refused it (`explain`).
+Why can (or can't) a user read a row? On a linked query viewed as a user, **Explain why** lists every
+row the query matches with the backend's authority, whether that user may read it, and which clause of
+the table's read policy allowed it. The clauses are the parts of the policy's top-level `or` (or the
+entries of an `anyOf`), so each alternative becomes one; they're shown as text such as `owner = session.user`.
+
+```bash title="Terminal"
+npx jazz-tools inspect explain '{"table":"expenses"}' --as <user> --claims '{"role":"manager"}'
+```
+
+Agents get the same from the MCP server's `explain` tool. Pass the user's claims if your policies read
+them.

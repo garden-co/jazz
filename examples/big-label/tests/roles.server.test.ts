@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
-import { app } from "../schema.js";
-import permissions from "../permissions.js";
+import { app } from "../jazz.generated.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 let testApp: PolicyTestApp | undefined;
 afterEach(async () => await testApp?.shutdown());
@@ -23,7 +23,7 @@ const artist = (organizationId: string, name = "New artist") => ({
   searchKey: name.toLowerCase(),
 });
 
-describe("BigLabel roles at the Jazz edge", () => {
+describe("BigLabel roles on the Jazz server", () => {
   it("refuses role escalation, forged assignments and writes a role can't make", async () => {
     testApp = await createPolicyTestApp(app, permissions, expect);
     const seeded = await seed(testApp);

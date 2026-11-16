@@ -42,7 +42,9 @@ pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;
 
 #[cfg(feature = "runtime")]
-pub use client::{JazzClient, JazzTransaction};
+pub use client::{
+    JazzClient, JazzTransaction, MutationError, PermissionAdviceRequest, StreamingUpload,
+};
 
 pub use crate::object::{BranchName, ObjectId, ResultKey};
 #[cfg(feature = "runtime")]
@@ -90,12 +92,11 @@ pub struct AppContext {
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
-    /// The app's schema versions and the lenses between them, as
-    /// `jazz-tools validate` and `deploy` write them to `migrations/index.ts`
-    /// beside schema.ts (load it with
-    /// [`deployment::published::client_migrations_module`]): the store
-    /// reaches `schema` along them, so it stores each version as the server
-    /// does (SPEC 10.7).
+    /// The app's schema versions and the lenses between them: what
+    /// [`deployment::artifact::load_client`] reads from `jazz.app.json`, or
+    /// [`deployment::published::lowered_client_migrations`] lowers from the
+    /// compiled schema generated bindings embed. The store reaches `schema`
+    /// along them, so it stores each version as the server does (SPEC 10.7).
     pub migrations: crate::db::Migrations,
 }
 
@@ -170,6 +171,21 @@ pub enum JazzError {
 
     #[error("Channel closed")]
     ChannelClosed,
+}
+
+/// How a durable wait's error for a refused transaction begins.
+#[cfg(feature = "runtime")]
+pub(crate) const REJECTED_BEFORE: &str = "transaction was rejected before reaching";
+
+#[cfg(feature = "runtime")]
+impl JazzError {
+    /// Whether this is [`JazzClient::wait_for_transaction`]'s error for a
+    /// transaction the server refused, rather than a wait that failed for
+    /// another reason. For `jazz-app-support`'s mutation-error reporting.
+    #[doc(hidden)]
+    pub fn is_transaction_rejection(&self) -> bool {
+        matches!(self, Self::Sync(message) | Self::Write(message) if message.starts_with(REJECTED_BEFORE))
+    }
 }
 
 /// Result type for Jazz operations.

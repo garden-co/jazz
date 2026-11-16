@@ -9,15 +9,15 @@ permissions; this app shows the Effect bindings.
   moving tasks, and adding the standard pre-show checklist, each one
   transaction.
 - The browser (`src/main.ts`, `src/planner.ts`) opens Jazz with
-  `createJazzApp({ serverUrl: "/jazz" })`, which starts signed out and asks
-  the backend who is signed in, calls `jazz.reauthenticate()` after signing in
+  `createJazzClient({ serverUrl: "/jazz" })`, which starts signed out and asks
+  the backend who is signed in, calls `jazz.refresh()` after signing in
   or out with Better Auth, wraps the client's database with `Jazz.fromDb`, and draws each live query
   from `jazz.stream(...)` with plain DOM.
 - The Hono server (`server/index.ts`) mounts the app's Jazz (`createJazz` in
   `server/jazz.ts`) under `/jazz` and Better Auth under `/api/auth`.
   `POST /api/shows/:id/checklist` (`server/checklist.ts`) runs the same
   `addChecklist` Effect as the requesting user (`Jazz.fromDb(await
-jazz.forReqUser(request))`), so permissions.ts decides, exactly as for the
+jazz.forReqUser(request))`), so jazz.permissions.json decides, exactly as for the
   browser.
 
 ## Run it

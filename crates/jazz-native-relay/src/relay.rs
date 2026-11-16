@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, RemoteLinkHint, SubscriptionStream,
-    block_on,
+    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, Migrations, RemoteLinkHint,
+    SubscriptionStream, UploadStatus, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::link::{
@@ -121,6 +121,21 @@ impl RelayScope {
     }
 }
 
+pub(crate) type MigrationsKey = (
+    Vec<jazz::ids::SchemaVersionId>,
+    Vec<jazz::ids::MigrationLensId>,
+);
+
+/// An upstream the relay's database refused on its own (see
+/// [`Link::upstream_refusal`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UpstreamRefusal {
+    /// The core's stable error code (`ErrorCode::as_str`).
+    pub code: String,
+    /// The reason the relay reported the refusal with.
+    pub reason: String,
+}
+
 /// Immutable configuration used to start a relay owner thread.
 #[derive(Clone, Debug)]
 pub struct RelayOpenConfig {
@@ -133,10 +148,27 @@ pub struct RelayOpenConfig {
     /// interpolates auth tokens or untrusted strings into a filesystem path.
     pub sqlite_path: PathBuf,
     pub schema: JazzSchema,
+    /// The app's earlier schema versions and the lenses between them, as it
+    /// ships them: the store keeps each column where the authority does.
+    pub migrations: Migrations,
     pub identity: DbIdentity,
 }
 
 impl RelayOpenConfig {
+    /// What identifies this config's schema history: its earlier versions
+    /// and its content-addressed lenses, in the order shipped. A scope
+    /// reopened with another history is another configuration.
+    pub(crate) fn migrations_key(&self) -> MigrationsKey {
+        (
+            self.migrations
+                .schemas
+                .iter()
+                .map(|schema| schema.version_id())
+                .collect(),
+            self.migrations.lenses.iter().map(|lens| lens.id).collect(),
+        )
+    }
+
     fn validate(&self) -> Result<(), RelayError> {
         ensure_native_relay_abi_compatible(self.supported_abi)?;
         self.scope.validate()
@@ -164,6 +196,10 @@ pub struct NativeRelayWire {
     outbound_ready: Arc<tokio::sync::Notify>,
     /// Set when the owner retired this connection: no more frames cross it.
     retired: Arc<AtomicBool>,
+    /// Why the relay's database dropped this connection on its own (see
+    /// [`Link::upstream_refusal`]): whoever carries it stops instead of
+    /// keeping a socket nothing syncs over, and reports why.
+    refusal: Arc<Mutex<Option<String>>>,
 }
 
 impl NativeRelayWire {
@@ -235,6 +271,24 @@ impl NativeRelayWire {
         self.retired.store(true, Ordering::Release);
         self.outbound_ready.notify_one();
     }
+
+    /// Retire the connection because the relay's database refused its
+    /// upstream, recording why first so the carrier reads it.
+    pub(crate) fn refuse(&self, reason: String) {
+        *self
+            .refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+        self.retire();
+    }
+
+    /// Why the relay refused this connection, once it has.
+    pub fn refusal(&self) -> Option<String> {
+        self.refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 // ---- the relay handle ---------------------------------------------------------------
@@ -258,6 +312,7 @@ struct RelayInner {
     alive: Arc<AtomicBool>,
     sqlite_path: PathBuf,
     schema_version: jazz::ids::SchemaVersionId,
+    migrations: MigrationsKey,
     identity: DbIdentity,
 }
 
@@ -308,6 +363,7 @@ impl NativeRelay {
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
         let schema_version = config.schema.version_id();
+        let migrations = config.migrations_key();
         let identity = config.identity;
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) =
@@ -341,6 +397,7 @@ impl NativeRelay {
                 alive,
                 sqlite_path,
                 schema_version,
+                migrations,
                 identity,
             }),
         })
@@ -405,6 +462,25 @@ impl NativeRelay {
         self.run(|worker| Ok(worker.host_upstream()))
     }
 
+    /// Writes the server has not confirmed. A foreground's pending write is
+    /// the relay store's too once handed to it, so this is the larger of the
+    /// store's count and any foreground's, not their sum.
+    pub(crate) fn unconfirmed_writes(&self) -> Result<usize, RelayError> {
+        self.run(|worker| {
+            Ok(worker
+                .clients
+                .values()
+                .map(|client| client.binding.pending_upload_count())
+                .fold(worker.persistent.pending_upload_count(), usize::max))
+        })
+    }
+
+    /// The last upstream the relay's database refused, if the connection
+    /// since has not been replaced.
+    pub(crate) fn upstream_refusal(&self) -> Result<Option<UpstreamRefusal>, RelayError> {
+        self.run(|worker| Ok(worker.refusal.clone()))
+    }
+
     /// Diagnostics: attached peers and host-carried upstream queue depths.
     pub(crate) fn diagnostics(&self) -> Result<(u64, usize, usize), RelayError> {
         self.run(|worker| {
@@ -433,6 +509,7 @@ impl NativeRelay {
     /// Report the path to the authoritative server to the relay database.
     pub(crate) fn set_remote_link_hint(&self, hint: RemoteLinkHint) -> Result<(), RelayError> {
         self.run(move |worker| {
+            worker.remote_link_hint = Some(hint);
             worker.persistent.db.set_remote_link_hint(hint);
             worker.persistent.hooks.progress.wake_all();
             worker.persistent_dirty.set(true);
@@ -440,8 +517,11 @@ impl NativeRelay {
         })
     }
 
-    fn begin_socket_upstream(&self) -> Result<(u64, NativeRelayWire), RelayError> {
-        self.run(|worker| Ok(worker.begin_socket_upstream()))
+    fn begin_socket_upstream(
+        &self,
+        features: jazz::wire::WireFeatures,
+    ) -> Result<(u64, NativeRelayWire), RelayError> {
+        self.run(move |worker| Ok(worker.begin_socket_upstream(features)))
     }
 
     fn retire_socket_upstream(&self, generation: u64) -> Result<(), RelayError> {
@@ -752,7 +832,7 @@ impl Foreground {
                         tier,
                         delta,
                     },
-                    EventChunk::Rejected { detail } => {
+                    EventChunk::Rejected { detail, .. } => {
                         ForegroundSubscriptionEvent::Rejected { reason: detail }
                     }
                     EventChunk::Closed => {
@@ -808,6 +888,7 @@ fn poll_once<T>(future: &mut Pin<Box<dyn Future<Output = T>>>) -> Poll<T> {
 
 pub(crate) struct RelayWorker {
     schema: JazzSchema,
+    migrations: Migrations,
     persistent: Binding,
     persistent_dirty: Rc<Cell<bool>>,
     upstream: Option<UpstreamConnection>,
@@ -816,6 +897,21 @@ pub(crate) struct RelayWorker {
     next_client: u64,
     /// The last drive failed; reported by the next foreground tick.
     drive_error: Option<String>,
+    /// The last upstream the relay's database refused: the core's stable
+    /// error code and the reason reported with it. Cleared when a new
+    /// upstream connection begins.
+    refusal: Option<UpstreamRefusal>,
+    /// Where the persistent store lives and whom it is, to rebuild it.
+    sqlite_path: PathBuf,
+    identity: DbIdentity,
+    /// The scope's latest claims and remote-link hint, given again to a
+    /// rebuilt store.
+    claims: Option<BTreeMap<String, Value>>,
+    remote_link_hint: Option<RemoteLinkHint>,
+    /// The store was rebuilt once in this process (see
+    /// [`RelayWorker::rebuild_stale_store`]): never again, so a bundle that
+    /// disagrees with its server cannot rebuild forever.
+    rebuilt: bool,
     /// The last drive stopped at its round bound with work left.
     redrive: bool,
     /// When time-bound waits were last evaluated.
@@ -854,6 +950,45 @@ fn ensure_sqlite_store(path: &std::path::Path) -> Result<(), RelayError> {
     Ok(())
 }
 
+/// A relay store's config, for its persistent store and each session's.
+/// Like the client bindings' ([`binding_host::db_config`]), it has no chunk
+/// store, so a tick never runs chunk-store I/O (whose failures a later tick
+/// retries) and every tick error is treated as terminal by the JavaScript
+/// runtime (`core_tick_failed`). Adding a chunk store here means first
+/// giving hosts a way to tell those failures apart.
+/// Beside a store: the schema version it was last rebuilt for (#5145).
+fn rebuilt_marker(sqlite_path: &std::path::Path) -> PathBuf {
+    let mut path = sqlite_path.as_os_str().to_owned();
+    path.push(".rebuilt-for");
+    PathBuf::from(path)
+}
+
+/// Delete a store's SQLite files: its `-wal` and `-shm` first, so a crash
+/// part-way never leaves a write-ahead log beside no main file, or one for a
+/// newer file. Missing files are fine.
+pub(crate) fn delete_store_files(sqlite_path: &std::path::Path) -> std::io::Result<()> {
+    for suffix in ["-wal", "-shm", ""] {
+        let mut path = sqlite_path.as_os_str().to_owned();
+        path.push(suffix);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Forget that a store was rebuilt: a store deleted by the app starts over.
+pub(crate) fn forget_rebuilt_marker(sqlite_path: &std::path::Path) {
+    let _ = std::fs::remove_file(rebuilt_marker(sqlite_path));
+}
+
+fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrations) -> DbConfig {
+    DbConfig::new(schema, identity)
+        .with_migrations(migrations.schemas.clone(), migrations.lenses.clone())
+}
+
 impl RelayWorker {
     fn open(config: RelayOpenConfig) -> Result<Self, RelayError> {
         ensure_sqlite_store(&config.sqlite_path)?;
@@ -862,7 +997,7 @@ impl RelayWorker {
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let db = block_on(Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity),
+            relay_db_config(config.schema.clone(), config.identity, &config.migrations),
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -871,6 +1006,7 @@ impl RelayWorker {
         let persistent_dirty = hook(&persistent);
         Ok(Self {
             schema: config.schema,
+            migrations: config.migrations,
             persistent,
             persistent_dirty,
             upstream: None,
@@ -878,6 +1014,12 @@ impl RelayWorker {
             clients: BTreeMap::new(),
             next_client: 0,
             drive_error: None,
+            refusal: None,
+            sqlite_path: config.sqlite_path,
+            identity: config.identity,
+            claims: None,
+            remote_link_hint: None,
+            rebuilt: false,
             redrive: false,
             timed: Instant::now(),
         })
@@ -966,8 +1108,12 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity)))
-            .map_err(|error| RelayError::Host(error.into()))?;
+        let db = block_on(Db::open(relay_db_config(
+            self.schema.clone(),
+            identity,
+            &self.migrations,
+        )))
+        .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -990,11 +1136,14 @@ impl RelayWorker {
         self.persistent
             .db
             .set_identity_claims(identity.author, claims.clone());
+        self.claims = Some(claims.clone());
         let served = self
             .persistent
             .accept_subscriber(identity.author, claims)
             .map_err(RelayError::Host)?;
         let link = binding.connect_upstream();
+        // The foreground store and this relay run the same build.
+        link.set_features(jazz::wire::current_wire_features());
         self.next_client += 1;
         let id = self.next_client;
         self.clients.insert(
@@ -1034,6 +1183,7 @@ impl RelayWorker {
     }
 
     fn refresh_claims(&mut self, author: AuthorSubject, claims: BTreeMap<String, Value>) {
+        self.claims = Some(claims.clone());
         self.persistent
             .db
             .set_identity_claims(author, claims.clone());
@@ -1051,13 +1201,19 @@ impl RelayWorker {
 
     /// Connect the relay's upstream through a fresh host-carried wire,
     /// replacing any earlier connection.
-    fn begin_socket_upstream(&mut self) -> (u64, NativeRelayWire) {
+    fn begin_socket_upstream(
+        &mut self,
+        features: jazz::wire::WireFeatures,
+    ) -> (u64, NativeRelayWire) {
+        self.refusal = None;
         if let Some(mut previous) = self.upstream.take() {
             previous.link.close();
             previous.wire.retire();
         }
         self.generation += 1;
         let link = self.persistent.connect_upstream();
+        // What the server negotiated it can take (jazz#5806).
+        link.set_features(features);
         let wire = NativeRelayWire::default();
         self.upstream = Some(UpstreamConnection {
             generation: self.generation,
@@ -1088,8 +1244,147 @@ impl RelayWorker {
     fn host_upstream(&mut self) -> NativeRelayWire {
         match &self.upstream {
             Some(upstream) => upstream.wire.clone(),
-            None => self.begin_socket_upstream().1,
+            // The host negotiates this wire's features itself and does not
+            // report them yet: none, so branch-read serializable commits are
+            // refused here rather than validated as root reads.
+            None => self.begin_socket_upstream(jazz::wire::FEATURE_NONE).1,
         }
+    }
+
+    /// Stop the current upstream connection because the relay's database
+    /// refused it, recording the refusal's code and reason for foregrounds.
+    pub(crate) fn refuse_upstream(&mut self, error: &jazz::db::Error) {
+        if error.code == jazz::db::ErrorCode::StoreOpenedWithoutMigrations
+            && self.rebuild_stale_store()
+        {
+            return;
+        }
+        let Some(upstream) = &self.upstream else {
+            return;
+        };
+        let reason = format!("native relay upstream refused: {error}");
+        tracing::warn!(target: "jazz_native_relay", "{reason}");
+        upstream.wire.refuse(reason.clone());
+        self.refusal = Some(UpstreamRefusal {
+            code: error.code.as_str().to_owned(),
+            reason,
+        });
+    }
+
+    /// Writes the relay's store holds that its server has not confirmed.
+    #[cfg(test)]
+    pub(crate) fn persistent_pending_uploads(&self) -> usize {
+        self.persistent.pending_upload_count()
+    }
+
+    /// The current upstream connection's generation (tests carry the
+    /// upstream themselves, and serve each new connection afresh).
+    #[cfg(test)]
+    pub(crate) fn upstream_generation(&self) -> Option<u64> {
+        self.upstream.as_ref().map(|upstream| upstream.generation)
+    }
+
+    /// Rebuild a store an older relay opened without the app's migrations
+    /// (#5145), when nothing would be lost: neither it nor any foreground
+    /// holds a write the server has not confirmed, nor a refused one kept
+    /// for retry. The new store opens with
+    /// the migrations and syncs everything again from the server; every
+    /// foreground is served by it, and the socket worker reconnects. Once
+    /// per schema version: a marker beside the store remembers the version
+    /// it was rebuilt for, so a bundle that disagrees with its server does
+    /// not rebuild and re-sync on every launch. `false` leaves the refusal to
+    /// be reported, so the app can reset the store itself
+    /// (`deleteClientStorage()`), dropping its writes.
+    fn rebuild_stale_store(&mut self) -> bool {
+        let marker = rebuilt_marker(&self.sqlite_path);
+        let version: String = self
+            .schema
+            .version_id()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        if self.rebuilt
+            || std::fs::read_to_string(&marker).is_ok_and(|rebuilt| rebuilt == version)
+            || self.persistent.pending_upload_count() > 0
+            // Refused commits kept for the app's listeners or a retry are
+            // its writes too: a store holding any is not rebuilt.
+            || self
+                .persistent
+                .db
+                .rejected_transactions()
+                .map_or(true, |rejected| !rejected.is_empty())
+            || self
+                .clients
+                .values()
+                .any(|client| client.binding.pending_upload_count() > 0)
+        {
+            return false;
+        }
+        self.rebuilt = true;
+        match self.reopen_fresh_store() {
+            Ok(()) => {
+                // Best effort: without it, the next launch may rebuild once more.
+                let _ = std::fs::write(&marker, &version);
+                tracing::warn!(
+                    target: "jazz_native_relay",
+                    "rebuilt a store opened without the app's migrations; it syncs again from the server"
+                );
+                true
+            }
+            Err(error) => {
+                self.drive_error = Some(format!(
+                    "native relay could not rebuild its store opened without the app's migrations: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    fn reopen_fresh_store(&mut self) -> Result<(), String> {
+        // Transaction ids are (seq, node): a rebuilt store goes on above every
+        // seq this node minted, so none is reused.
+        let high_water = self.persistent.db.seq_high_water();
+        if let Some(mut upstream) = self.upstream.take() {
+            upstream.link.close();
+            // Not a refusal: the socket worker reconnects to the new store.
+            upstream.wire.retire();
+        }
+        for client in self.clients.values_mut() {
+            client.link.close();
+            client.served.close();
+        }
+        block_on(self.persistent.close()).map_err(|error| error.to_string())?;
+        delete_store_files(&self.sqlite_path).map_err(|error| error.to_string())?;
+        let db = block_on(Db::open_at(
+            relay_db_config(self.schema.clone(), self.identity, &self.migrations),
+            &self.sqlite_path,
+            FileOptions::default(),
+        ))
+        .map_err(|error| error.to_string())?;
+        db.seed_seq_floor(high_water);
+        if let Some(hint) = self.remote_link_hint {
+            db.set_remote_link_hint(hint);
+        }
+        let author = self.identity.author;
+        let claims = self.claims.clone().unwrap_or_default();
+        db.set_identity_claims(author, claims.clone());
+        self.persistent = Binding::new(db, self.identity, false);
+        self.persistent_dirty = hook(&self.persistent);
+        for client in self.clients.values_mut() {
+            client.authority = self.persistent.clone();
+            client.served = self
+                .persistent
+                .accept_subscriber(author, claims.clone())
+                .map_err(|error| error.to_string())?;
+            client.link = client.binding.connect_upstream();
+            client
+                .link
+                .set_features(jazz::wire::current_wire_features());
+            client.dirty.set(true);
+        }
+        self.persistent_dirty.set(true);
+        Ok(())
     }
 
     /// Tick what asked for a tick and move frames until nothing moves.
@@ -1140,6 +1435,16 @@ impl RelayWorker {
             if !progressed {
                 break;
             }
+        }
+        // A refused upstream syncs nothing: stop its connection and say why,
+        // rather than keeping the socket open.
+        if let Some(error) = self
+            .upstream
+            .as_ref()
+            .filter(|upstream| upstream.wire.refusal().is_none())
+            .and_then(|upstream| upstream.link.upstream_refusal())
+        {
+            self.refuse_upstream(&error);
         }
         for client in self.clients.values_mut() {
             if let Err(error) = client.collect_events() {
@@ -1635,7 +1940,14 @@ fn foreground_command(
             Response::SlowQueryThresholdSet
         }
         Request::PendingUploadCount => Response::PendingUploadCount {
-            count: binding.pending_upload_count() as u64,
+            count: foreground_upload_status(&binding, &client.authority).pending as u64,
+        },
+        Request::UploadStatus => Response::UploadStatus {
+            status_json: serde_json::to_string(&foreground_upload_status(
+                &binding,
+                &client.authority,
+            ))
+            .expect("an upload status serializes"),
         },
         Request::BeginStreamingMutation {
             mutation,
@@ -1770,10 +2082,53 @@ fn foreground_command(
         | Request::ReconnectNativeUpstream
         | Request::NativeConnectionStatus
         | Request::NativeSessionMetadata
-        | Request::DrainTickEvents => {
+        | Request::DrainTickEvents
+        | Request::DeleteStore => {
             return Err("host command reached the relay owner".into());
         }
     })
+}
+
+/// A foreground's uploads as its app sees them: its own commits and the
+/// ones the scope's store holds, which after a restart are the only copy of
+/// an earlier process's writes. A relayed commit uploads under its
+/// session's id, so the two count each write once. Refusals are the
+/// foreground's own: the store reports a relayed commit's refusal to its
+/// session, not as one of its own.
+fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadStatus {
+    let own = binding.upload_status();
+    let store = authority.upload_status();
+    let pending = sorted_union_len(
+        &binding.db.pending_upload_ids(),
+        &authority.db.pending_upload_ids(),
+    );
+    UploadStatus {
+        pending,
+        oldest_pending_at: own
+            .oldest_pending_at
+            .into_iter()
+            .chain(store.oldest_pending_at)
+            .min(),
+        ..own
+    }
+}
+
+/// How many distinct items two sorted, deduplicated slices hold together:
+/// a linear merge, no sort.
+fn sorted_union_len<T: Ord>(a: &[T], b: &[T]) -> usize {
+    let (mut i, mut j, mut len) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+        len += 1;
+    }
+    len + (a.len() - i) + (b.len() - j)
 }
 
 /// Wait for a write this foreground committed to reach `tier`. Unless
@@ -1822,6 +2177,7 @@ impl NativeRelayRegistry {
         if let Some(existing) = relays.get(&config.scope) {
             if existing.inner.sqlite_path != config.sqlite_path
                 || existing.inner.schema_version != config.schema.version_id()
+                || existing.inner.migrations != config.migrations_key()
                 || existing.inner.identity != config.identity
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
@@ -1874,6 +2230,147 @@ pub struct NativeRelaySocketWorker {
     join: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
+/// What the device's operating system says about its network path
+/// (`NWPathMonitor` on iOS). The default is a usable path on unknown
+/// interfaces, which is how a host without a monitor behaves: nothing in the
+/// worker changes until a monitor reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkPath {
+    /// The device has a route out at all.
+    pub satisfied: bool,
+    /// The interface kinds the path uses, as [`NETWORK_INTERFACE_WIFI`] and
+    /// friends. Zero when unknown.
+    pub interfaces: u32,
+}
+
+impl Default for NetworkPath {
+    fn default() -> Self {
+        Self {
+            satisfied: true,
+            interfaces: 0,
+        }
+    }
+}
+
+pub const NETWORK_INTERFACE_WIFI: u32 = 1 << 0;
+pub const NETWORK_INTERFACE_CELLULAR: u32 = 1 << 1;
+pub const NETWORK_INTERFACE_WIRED: u32 = 1 << 2;
+pub const NETWORK_INTERFACE_OTHER: u32 = 1 << 3;
+
+/// Interfaces the device only stops routing through when they go away: Wi-Fi,
+/// wired, and other (a VPN's tunnel, whose sockets die with it). The path
+/// leaves cellular as soon as Wi-Fi is preferred, while cellular itself stays
+/// up and keeps carrying the sockets opened on it, so a link opened on
+/// cellular is not dropped for that.
+const NETWORK_INTERFACES_GONE_WHEN_LEFT: u32 =
+    NETWORK_INTERFACE_WIFI | NETWORK_INTERFACE_WIRED | NETWORK_INTERFACE_OTHER;
+
+/// However often the path changes, it cuts a backoff short at most once per
+/// this long after an attempt began: a flapping path must not become a
+/// reconnect loop.
+const PATH_RETRY_FLOOR: Duration = Duration::from_secs(1);
+
+/// The device's one network path, set by the platform's monitor and read by
+/// every socket worker.
+static NETWORK_PATH: std::sync::LazyLock<tokio::sync::watch::Sender<NetworkPath>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(NetworkPath::default()).0);
+
+/// Report the device's network path. Only a real change reaches the workers.
+pub fn report_network_path(path: NetworkPath) {
+    NETWORK_PATH.send_if_modified(|current| {
+        let changed = *current != path;
+        *current = path;
+        changed
+    });
+}
+
+/// Follow the device's network path.
+pub fn network_path() -> tokio::sync::watch::Receiver<NetworkPath> {
+    NETWORK_PATH.subscribe()
+}
+
+/// One wait's view of the network path, from the moment it was taken.
+///
+/// A socket bound to an interface the device no longer uses is dead even if
+/// nothing has told it so yet: the operating system's word arrives at once,
+/// the transport's silence watchdog only after its deadline.
+struct PathWatch {
+    path: tokio::sync::watch::Receiver<NetworkPath>,
+    taken_on: NetworkPath,
+}
+
+impl PathWatch {
+    fn new(path: &tokio::sync::watch::Receiver<NetworkPath>) -> Self {
+        let mut path = path.clone();
+        let taken_on = *path.borrow_and_update();
+        Self { path, taken_on }
+    }
+
+    /// A watch that compares against `taken_on`, a path seen earlier.
+    fn since(path: &tokio::sync::watch::Receiver<NetworkPath>, taken_on: NetworkPath) -> Self {
+        let mut path = path.clone();
+        path.borrow_and_update();
+        Self { path, taken_on }
+    }
+
+    /// Resolves once the path can no longer carry a connection opened when
+    /// this watch was taken: the device lost its route, or stopped using a
+    /// Wi-Fi or wired interface the connection may be bound to. An interface
+    /// added alongside does not end it. While `connecting`, a route that came
+    /// back after the attempt began without one ends it too: that attempt was
+    /// dialled into no network and may hang until its timeout, while a fresh
+    /// one can land at once. Cancel-safe.
+    async fn lost(&mut self, connecting: bool) -> String {
+        loop {
+            if self.path.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            let now = *self.path.borrow_and_update();
+            if !now.satisfied {
+                return "the device lost its network path".to_owned();
+            }
+            if !self.taken_on.satisfied || self.taken_on.interfaces == 0 {
+                if connecting {
+                    return "the device's network path came back".to_owned();
+                }
+                // A link that got through while the device reported no path
+                // lives on the path it reports now.
+                self.taken_on = now;
+                continue;
+            }
+            if self.taken_on.interfaces & NETWORK_INTERFACES_GONE_WHEN_LEFT & !now.interfaces != 0 {
+                return "the device's network path moved to another interface".to_owned();
+            }
+        }
+    }
+
+    /// The connection was admitted. One dialled while the device reported no
+    /// path got through anyway, so the monitor was behind: the link lives on
+    /// the path the device reports now, and is watched against that.
+    fn admitted(&mut self) {
+        if !self.taken_on.satisfied || self.taken_on.interfaces == 0 {
+            self.taken_on = *self.path.borrow();
+        }
+    }
+
+    /// Resolves once the device has a usable path that differs from the one
+    /// this watch was taken on, at once if it already has. Cancel-safe.
+    async fn usable_again(&mut self) {
+        let now = *self.path.borrow();
+        if now.satisfied && now != self.taken_on {
+            return;
+        }
+        loop {
+            if self.path.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            if self.path.borrow_and_update().satisfied {
+                return;
+            }
+        }
+    }
+}
+
 /// Private native socket inputs. This is intentionally absent from postcard
 /// commands and diagnostics: JavaScript can neither configure the endpoint
 /// nor read its bearer.
@@ -1887,6 +2384,10 @@ pub struct NativeRelaySocketConfig {
     pub authorization: Option<String>,
     /// Every event of the worker's [`UpstreamLink`], in order.
     pub on_event: Arc<dyn Fn(LinkEvent) + Send + Sync>,
+    /// The device's network path ([`network_path`] in production).
+    pub network_path: tokio::sync::watch::Receiver<NetworkPath>,
+    /// Retry timing ([`LinkPolicy::default`] in production).
+    pub link_policy: LinkPolicy,
 }
 
 impl std::fmt::Debug for NativeRelaySocketConfig {
@@ -2064,8 +2565,12 @@ async fn run_socket_worker(
         use std::hash::BuildHasher;
         std::collections::hash_map::RandomState::new().hash_one(std::process::id())
     };
-    let mut link = UpstreamLink::new(LinkPolicy::default(), seed);
+    let mut link = UpstreamLink::new(config.link_policy, seed);
     let mut actions = link.handle(0, LinkInput::ServerConfigured(true));
+    // The path the last attempt was made on: the backoff it earned is a
+    // judgement about that path, not about one the device moved to since.
+    let mut attempted_on = *config.network_path.borrow();
+    let mut attempt_began: Option<tokio::time::Instant> = None;
     loop {
         for event in link.drain_events() {
             (config.on_event)(event);
@@ -2092,9 +2597,23 @@ async fn run_socket_worker(
             Some(Ok((token, after_ms))) => {
                 let sleep = tokio::time::sleep(Duration::from_millis(after_ms));
                 tokio::pin!(sleep);
+                let mut path = PathWatch::since(&config.network_path, attempted_on);
+                let mut path_moved = false;
                 loop {
                     tokio::select! {
                         () = &mut sleep => break LinkInput::TimerFired(token),
+                        // The backoff spares a server that is down; a device
+                        // whose own path came back, or moved, has nothing to
+                        // wait for, beyond the floor that keeps a flapping
+                        // path from turning into a reconnect loop.
+                        () = path.usable_again(), if !path_moved => {
+                            path_moved = true;
+                            let now = tokio::time::Instant::now();
+                            let earliest = attempt_began.map_or(now, |began| began + PATH_RETRY_FLOOR);
+                            if earliest < sleep.deadline() {
+                                sleep.as_mut().reset(earliest.max(now));
+                            }
+                        }
                         () = wake.notified() => {
                             if cancelled.load(Ordering::Acquire) {
                                 return;
@@ -2113,8 +2632,19 @@ async fn run_socket_worker(
                         (config.on_event)(event);
                     }
                 };
-                match connect_and_bridge(&relay, &config, &*connector, &cancelled, &wake, admitted)
-                    .await
+                let mut path = PathWatch::new(&config.network_path);
+                attempted_on = path.taken_on;
+                attempt_began = Some(tokio::time::Instant::now());
+                match connect_and_bridge(
+                    &relay,
+                    &config,
+                    &*connector,
+                    &cancelled,
+                    &wake,
+                    &mut path,
+                    admitted,
+                )
+                .await
                 {
                     LinkEnd::Cancelled => return,
                     LinkEnd::Lost(failure) => LinkInput::Ended(attempt, failure),
@@ -2139,6 +2669,7 @@ async fn connect_and_bridge(
     connector: &dyn NativeTransportConnector,
     cancelled: &AtomicBool,
     wake: &Arc<tokio::sync::Notify>,
+    path: &mut PathWatch,
     admitted: impl FnOnce(),
 ) -> LinkEnd {
     let inbound_wake = Arc::clone(wake);
@@ -2152,11 +2683,18 @@ async fn connect_and_bridge(
         bundle: None,
         wake: Arc::new(move || inbound_wake.notify_one()),
     };
+    // Taken before the attempt: a path lost between dialling and admission
+    // ends this connection like one lost afterwards.
     let connecting = connector.connect(request);
     tokio::pin!(connecting);
     let connected = loop {
         tokio::select! {
             result = &mut connecting => break result,
+            reason = path.lost(true) => {
+                return LinkEnd::Lost(LinkFailure::Network(format!(
+                    "native relay socket connect abandoned: {reason}"
+                )));
+            }
             () = wake.notified() => {
                 if cancelled.load(Ordering::Acquire) {
                     return LinkEnd::Cancelled;
@@ -2191,7 +2729,7 @@ async fn connect_and_bridge(
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
         }
-        match relay.begin_socket_upstream() {
+        match relay.begin_socket_upstream(connected.transport.features()) {
             Ok(installed) => break installed,
             Err(RelayError::OwnerQueueFull) => {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -2207,6 +2745,7 @@ async fn connect_and_bridge(
         wire,
     };
     admitted();
+    path.admitted();
     let end = bridge_connection(
         relay,
         &lease.wire,
@@ -2214,6 +2753,7 @@ async fn connect_and_bridge(
         connected.terminal,
         cancelled,
         wake,
+        path,
     )
     .await;
     drop(lease);
@@ -2229,6 +2769,7 @@ async fn bridge_connection(
     mut terminal: jazz::tools::native_transport_connector::NativeTransportTerminalFuture,
     cancelled: &AtomicBool,
     wake: &tokio::sync::Notify,
+    path: &mut PathWatch,
 ) -> LinkEnd {
     // Losing an admitted link is an outage, whatever the transport calls it,
     // unless the server refused the credential.
@@ -2251,10 +2792,21 @@ async fn bridge_connection(
             }
         })
     };
-    let lost = || LinkEnd::Lost(LinkFailure::Network("native relay wire closed".to_owned()));
+    // A wire the owner retired because it refused the upstream stops the
+    // link with that refusal, however the bridge found it closed: the
+    // refusal can land between the check below and a queue operation.
+    let lost = || match wire.refusal() {
+        Some(reason) => LinkEnd::Stop(reason),
+        None => LinkEnd::Lost(LinkFailure::Network("native relay wire closed".to_owned())),
+    };
     loop {
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
+        }
+        // The relay refused this upstream: retrying the same link cannot
+        // succeed, so the link stops with the refusal until a reconnect.
+        if let Some(reason) = wire.refusal() {
+            return LinkEnd::Stop(reason);
         }
         // The relay's frames out.
         let outbound = match wire.take_outbound_encoded() {
@@ -2305,6 +2857,12 @@ async fn bridge_connection(
         }
         tokio::select! {
             terminal = &mut terminal => return terminal_end(terminal),
+            // The socket may never hear of it: a dead route is silence.
+            reason = path.lost(false) => {
+                return LinkEnd::Lost(LinkFailure::Network(format!(
+                    "native relay socket dropped: {reason}"
+                )));
+            }
             _ = wire.outbound_ready.notified() => {},
             _ = wake.notified() => {},
             _ = tokio::time::sleep(Duration::from_millis(50)) => {},
@@ -2369,4 +2927,37 @@ pub enum RelayError {
     Drive(String),
     #[error("native relay socket: {0}")]
     Socket(String),
+}
+
+#[cfg(test)]
+mod relay_config_tests {
+    use super::*;
+
+    /// See [`relay_db_config`]: relay stores, like the bindings', have no
+    /// chunk store.
+    #[test]
+    fn relay_configs_have_no_chunk_store() {
+        let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
+        let identity = DbIdentity {
+            node: jazz::ids::NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let config = relay_db_config(schema, identity, &Migrations::default());
+        assert!(config.chunk_store.is_none());
+        assert!(!config.host_chunk_io);
+    }
+}
+
+#[cfg(test)]
+mod sorted_union_len_tests {
+    use super::sorted_union_len;
+
+    #[test]
+    fn counts_each_shared_item_once() {
+        assert_eq!(sorted_union_len::<u8>(&[], &[]), 0);
+        assert_eq!(sorted_union_len(&[1, 2], &[]), 2);
+        assert_eq!(sorted_union_len(&[], &[1, 2]), 2);
+        assert_eq!(sorted_union_len(&[1, 3, 5], &[2, 3, 6, 7]), 6);
+        assert_eq!(sorted_union_len(&[1, 2, 3], &[1, 2, 3]), 3);
+    }
 }

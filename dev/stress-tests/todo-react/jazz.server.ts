@@ -4,9 +4,9 @@
 // connects to a sync server itself.
 import type { Server } from "node:http";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
-import { acceptLocalFirstAuth, createJazz, memory, sqlite } from "jazz-tools/backend";
-import { app } from "./schema.js";
-import permissions from "./permissions.js";
+import { acceptDeviceAccounts, createJazz, memory, sqlite } from "jazz-tools/backend";
+import { app } from "./jazz.generated.js";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 /**
  * Serve Jazz from the Vite server. Data stays in `dataDir`, or in memory.
@@ -17,7 +17,7 @@ export function jazzBackend(options: { dataDir?: string } = {}): Plugin {
       app,
       permissions,
       // No sign-in: every browser is a guest, so let guests sync.
-      authenticate: acceptLocalFirstAuth,
+      authenticate: acceptDeviceAccounts,
       store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
     });
     server.middlewares.use((req, res, next) => jazz.nodeHandler(req, res, next));

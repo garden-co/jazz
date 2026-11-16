@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { mount, unmount, tick, createRawSnippet, getAllContexts } from "svelte";
-import JazzSessionProvider from "./JazzSessionProvider.svelte";
-import { createJazzSessionOwner } from "../session/state.js";
+import JazzProvider from "./JazzProvider.svelte";
+import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
+import { createJazzSessionOwner, replaceJazzSessionClient } from "../session/state.js";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { attachSubscriptionStore, type SubscriptionStore } from "../subscription-store-internal.js";
@@ -27,7 +28,7 @@ async function setup(events: string[]) {
     old,
   );
   const clients: JazzClient[] = [];
-  const session = await createJazzSessionOwner({
+  const core = await createJazzSessionOwner({
     accounts,
     openClient: async (account) => {
       const client = attachSubscriptionStore(
@@ -44,7 +45,9 @@ async function setup(events: string[]) {
       return client;
     },
   });
-  return { session, clients };
+  const session = ownJazzSession({}, async () => core, { start: false });
+  await startJazzSession(session as JazzSession<unknown>);
+  return { core, session, clients };
 }
 const settle = async () => {
   for (let i = 0; i < 8; i++) {
@@ -56,20 +59,19 @@ const settle = async () => {
 describe("Svelte Jazz session", () => {
   it("provides startup status and retry to a configured fallback", async () => {
     const events: string[] = [];
-    const { session } = await setup(events);
+    const { core } = await setup(events);
     const factory = await import("../session/create-jazz-session.js");
     const create = vi
-      .spyOn(factory, "createJazzClient")
+      .spyOn(factory, "openBrowserSessionCore")
       .mockRejectedValueOnce(new Error("startup failed"))
-      .mockResolvedValueOnce(session);
+      .mockResolvedValueOnce(core);
     const target = document.createElement("div");
-    const component = mount(JazzSessionProvider, {
+    const component = mount(JazzProvider, {
       target,
       props: {
-        config: { scope: "test", serverUrl: "http://localhost:1", initial: "local-first" },
-        autoAttachDevTools: false,
+        config: { scope: "test", serverUrl: "http://localhost:1", initial: "device" },
         children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
-        fallback: createRawSnippet(() => ({
+        error: createRawSnippet(() => ({
           render: () => "<div></div>",
           setup: (element) => {
             const status = mount(SessionStatus, { target: element, context: getAllContexts() });
@@ -95,23 +97,22 @@ describe("Svelte Jazz session", () => {
     const { session, clients } = await setup(events);
     const target = document.createElement("div");
     document.body.append(target);
-    const component = mount(JazzSessionProvider, {
+    const component = mount(JazzProvider, {
       target,
       props: {
         session,
-        autoAttachDevTools: false,
         children: createRawSnippet(() => ({
           render: () => "<p>Ready</p>",
           setup: () => () => {
             events.push("detach");
           },
         })),
-        fallback: createRawSnippet(() => ({ render: () => "<p>Waiting</p>" })),
+        loading: createRawSnippet(() => ({ render: () => "<p>Waiting</p>" })),
       },
     });
     await settle();
     expect(target.textContent).toBe("Ready");
-    await session.linkWithBackend();
+    await session.linkDeviceAccount();
     await settle();
     expect(events.slice(0, 3)).toEqual(["detach", "shutdown:old", "link"]);
     expect(target.textContent).toBe("Ready");
@@ -122,23 +123,113 @@ describe("Svelte Jazz session", () => {
     target.remove();
   });
 
-  it("releases the transition barrier when the provider unmounts", async () => {
-    const { session } = await setup([]);
+  it("keeps the app mounted when the session upgrades its client in place (#5459)", async () => {
+    const account = {
+      id: "guest",
+      identity: { issuer: "test", subject: "guest" },
+    } as AccountHandle;
+    const accounts = new AccountManager<JWTAuth>(
+      {
+        createLocalFirst: () => account,
+        restoreLocalFirst: () => account,
+        logout: () => {},
+        linkWithBackend: async () => account,
+      },
+      account,
+    );
+    let localFirst = false;
+    const client = attachSubscriptionStore(
+      {
+        db: { onAuthChanged: () => () => {}, isLocalFirst: () => localFirst },
+        session: null,
+        shutdown: vi.fn(async () => {}),
+      },
+      {} as SubscriptionStore,
+    ) as unknown as JazzClient;
+    const core = await createJazzSessionOwner({ accounts, openClient: async () => client });
+    const session = ownJazzSession({}, async () => core, { start: false });
+    await startJazzSession(session as JazzSession<unknown>);
+    let mounts = 0;
+    let unmounts = 0;
     const target = document.createElement("div");
-    const component = mount(JazzSessionProvider, {
+    const component = mount(JazzProvider, {
       target,
       props: {
         session,
-        autoAttachDevTools: false,
+        children: createRawSnippet(() => ({
+          render: () => "<p>App</p>",
+          setup: () => {
+            mounts++;
+            return () => {
+              unmounts++;
+            };
+          },
+        })),
+      },
+    });
+    await settle();
+    expect(target.textContent).toBe("App");
+    expect(session.getSnapshot()).toMatchObject({ client, localFirst: false });
+
+    // The thin client turns local-first in place: same client, new snapshot.
+    await replaceJazzSessionClient(
+      core,
+      async () => client,
+      () => {
+        localFirst = true;
+      },
+    );
+    await settle();
+    expect(session.getSnapshot()).toMatchObject({ client, localFirst: true });
+    expect(target.textContent).toBe("App");
+    expect({ mounts, unmounts }).toEqual({ mounts: 1, unmounts: 0 });
+
+    await unmount(component);
+    await session.close();
+  });
+
+  it("releases the transition barrier when the provider unmounts", async () => {
+    const { session } = await setup([]);
+    const target = document.createElement("div");
+    const component = mount(JazzProvider, {
+      target,
+      props: {
+        session,
         children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
       },
     });
     await settle();
-    const transition = session.logout();
+    const transition = session.signOut();
     await unmount(component);
     await transition;
     expect(session.getSnapshot().status).toBe("signed-out");
     await session.close();
+  });
+
+  it("renders nothing once the session is closed, or the closed snippet", async () => {
+    for (const closed of [
+      undefined,
+      createRawSnippet(() => ({ render: () => "<p>Session closed</p>" })),
+    ]) {
+      const { session } = await setup([]);
+      const target = document.createElement("div");
+      const component = mount(JazzProvider, {
+        target,
+        props: {
+          session,
+          children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
+          ...(closed ? { closed } : {}),
+        },
+      });
+      await settle();
+      expect(target.textContent).toBe("Ready");
+      await session.close();
+      await settle();
+      expect(session.getSnapshot().status).toBe("closed");
+      // Before: the loading view, forever.
+      expect(target.textContent).toBe(closed ? "Session closed" : "");
+      await unmount(component);
+    }
   });
 
   it("store subscriptions expose snapshots and bound commands", async () => {
@@ -146,8 +237,8 @@ describe("Svelte Jazz session", () => {
     const state = sessionState(session);
     const statuses: string[] = [];
     const unsubscribe = state.subscribe((value) => statuses.push(value.status));
-    const { logout } = state;
-    await logout();
+    const { signOut } = state;
+    await signOut();
     expect(statuses[0]).toBe("ready");
     expect(statuses).toContain("transitioning");
     expect(statuses.at(-1)).toBe("signed-out");

@@ -1,0 +1,32 @@
+{
+  "notes": {
+    "columns": [
+      {
+        "name": "title",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "body",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "pinned",
+        "column_type": {
+          "type": "Boolean"
+        },
+        "nullable": false,
+        "default": {
+          "type": "Boolean",
+          "value": false
+        }
+      }
+    ],
+    "relations": {}
+  }
+}

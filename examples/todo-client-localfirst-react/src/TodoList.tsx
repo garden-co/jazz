@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { toast } from "sonner";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { PersistedWriteRejectedError, WriteHandle, WriteResult } from "jazz-tools";
 
 function notifyLocalWriteDurable(write: WriteResult<unknown>) {
@@ -36,8 +36,8 @@ export function TodoList() {
   // #region reading-reactive-hooks-react
   const { data: todos = [], db } = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
-  const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const session = useJazzSession();
+  const sessionUserId = session.user?.accountId ?? null;
   const [title, setTitle] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {

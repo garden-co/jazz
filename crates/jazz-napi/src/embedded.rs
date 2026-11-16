@@ -34,7 +34,6 @@ struct JazzCoreOpenOptions {
     s3_region: Option<String>,
     s3_endpoint: Option<String>,
     s3_prefix: Option<String>,
-    allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
 }
 
@@ -67,7 +66,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
+        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }",
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -78,7 +77,6 @@ impl JazzCore {
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
         let auth_config = AuthConfig {
-            allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: Some(opts.backend_secret),
             admin_secret: Some(opts.admin_secret),
             ..Default::default()

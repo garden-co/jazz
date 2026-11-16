@@ -1,34 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import { ACTIVITY_KINDS, TASK_STATUSES } from "./app-extras";
 
-/**
- * StagePlan: a crew preparing shows.
- *
- * The core tables mirror the W1 "team task board" workload one to one, so the
- * benchmark can later run against this schema:
- *
- *   W1 users     -> crew       (a person's display profile)
- *   W1 projects  -> shows      (a gig with venue, date and doors time)
- *   W1 tasks     -> tasks      (show, title, status, assignee; updated_at is $updatedAt)
- *   W1 comments  -> comments   (task, author, body; created_at is $createdAt)
- *   W1 activity  -> activity   (show, task, actor, kind; created_at is $createdAt)
- *
- * On top of that, StagePlan adds what a real app needs for permissions
- * (showCrew memberships and private showInvites) and a personal checklist.
- */
-export const TASK_STATUSES = ["todo", "doing", "done", "blocked"] as const;
-export type TaskStatus = (typeof TASK_STATUSES)[number];
-
-export const ACTIVITY_KINDS = [
-  "created",
-  "moved",
-  "assigned",
-  "renamed",
-  "commented",
-  "deleted",
-] as const;
-
-const schema = {
+export const schema = s.defineSchema({
   crew: s.table(
     {
       account: s.uuid(),
@@ -88,7 +61,9 @@ const schema = {
       title: s.string(),
       status: s.enum(...TASK_STATUSES),
       assigneeId: s.uuid().optional(),
-      notes: s.string().optional(),
+      // Concurrent edits to a task's notes merge instead of the last one
+      // winning.
+      notes: s.string().optional().merge("text"),
       /** Sort key inside a column. Lower values come first. */
       rank: s.float(),
     },
@@ -133,16 +108,128 @@ const schema = {
     },
     {},
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+/**
+ * Who can do what in StagePlan:
+ *
+ * - The crew chief (the account that created a show) manages the show, its
+ *   invite link and its crew.
+ * - Crew members (anyone with a showCrew row) see the show and can add, edit
+ *   and move its tasks, comment and log activity.
+ * - Everyone else sees nothing of the show: not the show, its tasks,
+ *   comments, activity or crew list.
+ * - Checklist items are private to their owner.
+ */
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
 
-export type Crew = s.RowOf<typeof app.crew>;
-export type Show = s.RowOf<typeof app.shows>;
-export type ShowCrew = s.RowOf<typeof app.showCrew>;
-export type Task = s.RowOf<typeof app.tasks>;
-export type Comment = s.RowOf<typeof app.comments>;
-export type Activity = s.RowOf<typeof app.activity>;
-export type ActivityKind = Activity["kind"];
-export type ChecklistItem = s.RowOf<typeof app.checklistItems>;
+const isChief = (showId: s.Uuid) => exists.shows({ id: showId, chiefAccount: session.user });
+
+// The chief counts as crew even before their own showCrew row syncs.
+const isCrew = (showId: s.Uuid) =>
+  anyOf(exists.showCrew({ showId, account: session.user }), isChief(showId));
+
+const isMyProfile = (crewId: s.Uuid) => exists.crew({ id: crewId, account: session.user });
+
+// A task is assigned to nobody or to someone on the show's crew.
+const assigneeIsCrew = (showId: s.Uuid, assigneeId: s.Uuid) =>
+  anyOf({ assigneeId: null }, exists.showCrew({ showId, crewId: assigneeId }));
+
+const mine = { account: session.user };
+
+const iAmChief = { chiefAccount: session.user };
+
+const ownedByMe = { ownerAccount: session.user };
+
+export const permissions = definePermissions({
+  // Activity is an append-only log per show.
+  activity: {
+    read: (entry) => isCrew(entry.showId),
+    insert: (entry) => allOf(isCrew(entry.showId), isMyProfile(entry.actorId)),
+  },
+  // A personal checklist.
+  checklistItems: {
+    read: ownedByMe,
+    insert: ownedByMe,
+    update: ownedByMe,
+    delete: ownedByMe,
+  },
+  // Comments follow their task; authors delete their own.
+  comments: {
+    read: (comment) => allowedTo.read(comment.task),
+    insert: (comment) => allOf(allowedTo.read(comment.task), isMyProfile(comment.authorId)),
+    delete: (comment) => isMyProfile(comment.authorId),
+  },
+  // Crew profiles: names are shared, only you edit yours.
+  crew: {
+    read: true,
+    insert: mine,
+    update: mine,
+  },
+  showCrew: {
+    read: (member) => isCrew(member.showId),
+    insert: (member) =>
+      anyOf(
+        // The chief adds themselves when creating the show.
+        allOf(
+          { account: session.user, role: "chief" },
+          isChief(member.showId),
+          isMyProfile(member.crewId),
+        ),
+        // Anyone holding the current invite code can join as crew.
+        allOf(
+          { account: session.user, role: "crew" },
+          isMyProfile(member.crewId),
+          exists.showInvites({ showId: member.showId, code: member.inviteCode }),
+        ),
+      ),
+    // Two updates, each keeping the row on the same show and profile:
+    // - once the server has accepted a membership, the joiner clears its invite
+    //   code, so other crew can't read the code;
+    // - the chief rewrites their own membership when a repair from another tab
+    //   lands on the same row (it has a stable id).
+    updateIf: mine,
+    updateTo: (member, old) =>
+      allOf(
+        { account: session.user, inviteCode: null },
+        isMyProfile(member.crewId),
+        anyOf(
+          allOf(
+            { role: "crew" },
+            exists.showCrew({ id: member.id, showId: member.showId, role: "crew" }),
+          ),
+          allOf({ role: "chief" }, isChief(member.showId), { showId: old.showId }),
+        ),
+      ),
+    // Members leave on their own; the chief can remove anyone.
+    delete: (member) => anyOf(mine, isChief(member.showId)),
+  },
+  // Invite codes are bearer secrets: only the chief reads or rotates them. A
+  // joiner's membership carries the code until they clear it (see showCrew).
+  showInvites: {
+    read: (invite) => isChief(invite.showId),
+    insert: (invite) => isChief(invite.showId),
+    // A repair of the first invite from another tab rewrites the same row.
+    updateIf: (invite) => isChief(invite.showId),
+    updateTo: (invite, old) => allOf(isChief(invite.showId), { showId: old.showId }),
+    delete: (invite) => isChief(invite.showId),
+  },
+  shows: {
+    read: (show) => isCrew(show.id),
+    insert: iAmChief,
+    update: iAmChief,
+    delete: iAmChief,
+  },
+  // Any crew member edits tasks; the chief or the task's creator deletes them.
+  tasks: {
+    read: (task) => isCrew(task.showId),
+    insert: (task) => allOf(isCrew(task.showId), assigneeIsCrew(task.showId, task.assigneeId)),
+    updateIf: (task) => isCrew(task.showId),
+    updateTo: (task) => allOf(isCrew(task.showId), assigneeIsCrew(task.showId, task.assigneeId)),
+    delete: (task) =>
+      anyOf(
+        isChief(task.showId),
+        allOf({ "$createdBy.account": session.user }, isCrew(task.showId)),
+      ),
+  },
+});

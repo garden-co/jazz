@@ -1,0 +1,308 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "2ccca5d40ca189d094678dafadcbdbc58d1c3695a44c63962718bc4da8be4902"
+  },
+  "tables": {
+    "assets": {
+      "columns": {
+        "canvasId": "uuid",
+        "name": "string",
+        "mimeType": "string",
+        "byteLength": "int",
+        "width": "int",
+        "height": "int",
+        "bytes": "bytes"
+      },
+      "relations": {
+        "canvas": { "rel": "canvases", "column": "canvasId" },
+        "shapesViaAsset": { "reverse": "shapes", "relation": "asset" }
+      },
+      "indexes": ["canvasId", "name"]
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "canvasInvites": {
+      "columns": {
+        "canvasId": "uuid",
+        "token": "string",
+        "role": { "enum": ["viewer", "editor"] },
+        "singleUse": { "type": "boolean", "default": false }
+      },
+      "relations": { "canvas": { "rel": "canvases", "column": "canvasId" } },
+      "indexes": ["canvasId", "token"]
+    },
+    "canvasMembers": {
+      "columns": {
+        "canvasId": "uuid",
+        "memberAuthor": "uuid",
+        "role": { "enum": ["viewer", "editor", "admin"] }
+      },
+      "relations": { "canvas": { "rel": "canvases", "column": "canvasId" } },
+      "indexes": ["canvasId", "memberAuthor"]
+    },
+    "canvases": {
+      "columns": { "title": "string", "width": "int", "height": "int" },
+      "relations": {
+        "assetsViaCanvas": { "reverse": "assets", "relation": "canvas" },
+        "canvasInvitesViaCanvas": { "reverse": "canvasInvites", "relation": "canvas" },
+        "canvasMembersViaCanvas": { "reverse": "canvasMembers", "relation": "canvas" },
+        "checkpointsViaCanvas": { "reverse": "checkpoints", "relation": "canvas" },
+        "cursorsViaCanvas": { "reverse": "cursors", "relation": "canvas" },
+        "layersViaCanvas": { "reverse": "layers", "relation": "canvas" },
+        "shapesViaCanvas": { "reverse": "shapes", "relation": "canvas" }
+      }
+    },
+    "checkpoints": {
+      "columns": { "canvasId": "uuid", "label": "string", "snapshot": { "json": true } },
+      "relations": { "canvas": { "rel": "canvases", "column": "canvasId" } },
+      "indexes": ["canvasId"]
+    },
+    "cursors": {
+      "columns": {
+        "canvasId": "uuid",
+        "author": "uuid",
+        "x": "float",
+        "y": "float",
+        "color": "string",
+        "name": { "type": "string", "default": "" },
+        "active": { "type": "boolean", "default": true }
+      },
+      "relations": { "canvas": { "rel": "canvases", "column": "canvasId" } },
+      "indexes": ["canvasId", "author"]
+    },
+    "layers": {
+      "columns": {
+        "canvasId": "uuid",
+        "name": "string",
+        "zIndex": "int",
+        "visible": "boolean",
+        "locked": { "type": "boolean", "default": false }
+      },
+      "relations": {
+        "canvas": { "rel": "canvases", "column": "canvasId" },
+        "shapesViaLayer": { "reverse": "shapes", "relation": "layer" }
+      },
+      "indexes": ["canvasId", "zIndex"]
+    },
+    "shapes": {
+      "columns": {
+        "canvasId": "uuid",
+        "layerId": "uuid",
+        "assetId": "uuid?",
+        "kind": { "enum": ["rect", "ellipse", "text", "image"] },
+        "x": "float",
+        "y": "float",
+        "width": "float",
+        "height": "float",
+        "rotation": "float",
+        "zIndex": "int",
+        "text": "string?",
+        "fill": "string"
+      },
+      "relations": {
+        "asset": { "rel": "assets", "column": "assetId" },
+        "canvas": { "rel": "canvases", "column": "canvasId" },
+        "layer": { "rel": "layers", "column": "layerId" }
+      },
+      "indexes": ["canvasId", "layerId", "zIndex"]
+    }
+  },
+  "history": {
+    "55a9ac8b000f": {
+      "tables": {
+        "assets": {
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "name": "string",
+            "mimeType": "string",
+            "byteLength": "int",
+            "width": "int",
+            "height": "int",
+            "bytes": "bytes"
+          },
+          "indexes": ["canvasId", "name"]
+        },
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "canvasInvites": {
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "token": "string",
+            "role": { "enum": ["viewer", "editor"] },
+            "singleUse": { "type": "boolean", "default": false }
+          },
+          "indexes": ["canvasId", "token"]
+        },
+        "canvasMembers": {
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "memberAuthor": "uuid",
+            "role": { "enum": ["viewer", "editor", "admin"] }
+          },
+          "indexes": ["canvasId", "memberAuthor"]
+        },
+        "canvases": { "columns": { "title": "string", "width": "int", "height": "int" } },
+        "checkpoints": {
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "label": "string",
+            "snapshot": { "json": true }
+          },
+          "indexes": ["canvasId"]
+        },
+        "cursors": {
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "author": "uuid",
+            "x": "float",
+            "y": "float",
+            "color": "string",
+            "name": { "type": "string", "default": "" },
+            "active": { "type": "boolean", "default": true }
+          },
+          "indexes": ["canvasId", "author"]
+        },
+        "layers": {
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "name": "string",
+            "zIndex": "int",
+            "visible": "boolean",
+            "locked": { "type": "boolean", "default": false }
+          },
+          "indexes": ["canvasId", "zIndex"]
+        },
+        "shapes": {
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "layerId": { "type": "uuid", "references": "layers" },
+            "assetId": { "type": "uuid", "optional": true, "references": "assets" },
+            "kind": { "enum": ["rect", "ellipse", "text", "image"] },
+            "x": "float",
+            "y": "float",
+            "width": "float",
+            "height": "float",
+            "rotation": "float",
+            "zIndex": "int",
+            "text": "string?",
+            "fill": "string"
+          },
+          "indexes": ["canvasId", "layerId", "zIndex"]
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "55a9ac8b000f",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

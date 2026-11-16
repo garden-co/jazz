@@ -65,11 +65,27 @@ pub fn prepare_catalogue_change(
         .iter()
         .filter_map(|schema| schema.version)
         .collect::<BTreeSet<_>>();
-    if admitted
+    // Errors name versions by the short hashes `jazz-tools` prints.
+    let stored_hash = |id: &SchemaVersionId| {
+        stored
+            .schemas
+            .iter()
+            .find(|schema| schema.version == Some(*id))
+            .map(|schema| schema.hash.to_hex()[..12].to_owned())
+            .unwrap_or_else(|| uuid::Uuid::from_bytes(*id.as_bytes()).to_string())
+    };
+    if let Some(omitted) = admitted
         .iter()
-        .any(|id| !versions.iter().any(|schema| schema.version_id() == *id))
+        .find(|id| !versions.iter().any(|schema| schema.version_id() == **id))
     {
-        return Err("deployment cannot omit a runtime schema".into());
+        return Err(format!(
+            "deployment cannot omit a runtime schema: the store already holds schema {}, which the \
+             app's migrations don't include. The app ships no migration from it, as with \
+             `defineApp(schema, {{ migrations: \"none\" }})` or a migrations/index.ts that misses \
+             it. Snapshot that version and migrate from it: `npx jazz-tools migrations create` \
+             (see https://jazz.tools/docs/schemas/migrations)",
+            stored_hash(omitted)
+        ));
     }
     let stored_versions = stored
         .schemas
@@ -91,7 +107,25 @@ pub fn prepare_catalogue_change(
         .filter(|id| !targets.contains(id))
         .collect::<Vec<_>>();
     if !admitted.is_empty() && stored_roots != [&root.version_id()] {
-        return Err("deployment cannot replace the runtime genesis schema".into());
+        let root_hash = hashes
+            .iter()
+            .find(|(_, schema)| schema.version_id() == root.version_id())
+            .map(|(hash, _)| hash.to_hex()[..12].to_owned())
+            .unwrap_or_else(|| uuid::Uuid::from_bytes(*root.version_id().as_bytes()).to_string());
+        let store_first = stored_roots
+            .iter()
+            .map(|id| stored_hash(id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "deployment cannot replace the runtime genesis schema: this store's history starts at \
+             schema {store_first}, but the app's migrations start at {root_hash}. A store can't \
+             take another first version. Either start the app's history at {store_first} \
+             (snapshot that version, then `npx jazz-tools migrations create` from it), or open \
+             the app on a fresh store (this one keeps its rows). Starting a store \
+             under `{{ migrations: \"none\" }}` and adding migrations later leads here \
+             (see https://jazz.tools/docs/schemas/migrations)"
+        ));
     }
     // The stored lenses, compiled, by version edge: another hash of an
     // admitted predecessor (defaults and indexes do not change the version)
@@ -327,6 +361,83 @@ mod tests {
         let error = redeploy_from_an_equivalent_hash("other").unwrap_err();
         assert!(
             error.contains("different lens from that predecessor"),
+            "{error}"
+        );
+    }
+
+    /// A store that admitted `stored` (in order, each the next one's lens
+    /// target), and a deployment of `deployed` with `a -> b` between them.
+    fn deploy_onto(stored: &[&Schema], deployed: &[&Schema]) -> Result<CatalogueChange, String> {
+        let hash = SchemaHash::compute;
+        let rows = CatalogueRows {
+            schemas: stored
+                .iter()
+                .enumerate()
+                .map(|(n, schema)| CatalogueSchema {
+                    hash: hash(schema),
+                    admitted: Some(n as u64),
+                    version: Some(JazzSchema::new(schema).unwrap().version_id()),
+                    published_at: Some(1),
+                    schema: (*schema).clone(),
+                })
+                .collect(),
+            lenses: Vec::new(),
+            permissions: Vec::new(),
+            bundles: Vec::new(),
+        };
+        let migrations = deployed
+            .windows(2)
+            .map(|pair| Lens::new(hash(pair[0]), hash(pair[1]), adds_a("")))
+            .collect();
+        let prepared = PreparedDeployment {
+            schemas: deployed.iter().map(|schema| (*schema).clone()).collect(),
+            migrations,
+            active_schema: JazzSchema::new(deployed.last().unwrap()).unwrap(),
+        };
+        prepare_catalogue_change(&prepared, &rows, CataloguePut::default())
+    }
+
+    fn short(schema: &Schema) -> String {
+        SchemaHash::compute(schema).to_hex()[..12].to_owned()
+    }
+
+    /// #5053: a store that started at `b` (an app on `{ migrations: "none" }`)
+    /// refuses the app's real history `a -> b`, naming both first versions by
+    /// the short hashes `jazz-tools` prints, and the ways out.
+    #[test]
+    fn a_store_that_started_elsewhere_names_both_first_versions() {
+        let (a, b) = (notes(None, false), notes(Some("a"), false));
+        let error = deploy_onto(&[&b], &[&a, &b]).unwrap_err();
+        assert!(
+            error.contains(&format!(
+                "this store's history starts at schema {}, but the app's migrations start at {}",
+                short(&b),
+                short(&a)
+            )),
+            "{error}"
+        );
+        assert!(
+            error.contains("npx jazz-tools migrations create"),
+            "{error}"
+        );
+        assert!(!error.contains("not supported yet"), "{error}");
+    }
+
+    /// #5053: a deployment that leaves out a version the store runs names it
+    /// and how to migrate from it.
+    #[test]
+    fn a_deployment_omitting_a_stored_version_names_it() {
+        let (a, b) = (notes(None, false), notes(Some("a"), false));
+        let error = deploy_onto(&[&a], &[&b]).unwrap_err();
+        assert!(
+            error.contains(&format!(
+                "the store already holds schema {}, which the app's migrations don't include",
+                short(&a)
+            )),
+            "{error}"
+        );
+        assert!(
+            error.contains("npx jazz-tools migrations create"),
             "{error}"
         );
     }

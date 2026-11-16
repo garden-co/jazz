@@ -749,3 +749,154 @@ fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
         "{message}"
     );
 }
+
+mod executing_policy_context {
+    use crate::common::{compile_schema, read_and_allow_all_writes};
+    use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+    use jazz::query::Query;
+    use jazz::records::Value;
+    use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
+
+    fn schema(read: bool) -> jazz::tools::public_schema::Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(if read {
+                        PolicyExpr::True
+                    } else {
+                        PolicyExpr::False
+                    })),
+            )
+            .build()
+    }
+    fn owner() -> Db {
+        let db = block_on(Db::open(DbConfig::new(
+            compile_schema(&schema(true)),
+            DbIdentity {
+                node: NodeUuid::from_bytes([19; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        block_on(db.insert(
+            "notes",
+            [("body".into(), Value::String("private note".into()))].into(),
+            Default::default(),
+        ))
+        .unwrap();
+        db
+    }
+    fn read(db: &Db, query: &jazz::db::PreparedQuery) -> usize {
+        block_on(db.all_for_identity(
+            query,
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..Default::default()
+            },
+            AuthorSubject::for_test_bytes([1; 16]),
+        ))
+        .unwrap()
+        .len()
+    }
+    fn pinned(db: &Db, allow: bool) -> Db {
+        let bundle = block_on(db.publish_bundle(&schema(allow))).unwrap();
+        db.pinned_view(db.current_schema().version_id(), Some(&bundle))
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Alice executes a query prepared under Bob's open bundle through her closed
+    /// bundle handle. Preparation must not grant the executing session more access.
+    #[test]
+    fn closed_executing_bundle_does_not_inherit_open_preparation() {
+        let db = owner();
+        let open = pinned(&db, true);
+        let closed = pinned(&db, false);
+        let open_query = open.prepare_query(&Query::from("notes")).unwrap();
+        let closed_query = closed.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(read(&open, &open_query), 1);
+        assert_eq!(read(&closed, &closed_query), 0);
+        assert_eq!(
+            read(&closed, &open_query),
+            0,
+            "preparation borrowed another bundle's SELECT permission"
+        );
+    }
+
+    /// Alice's open bundle remains open when Bob supplies a structurally identical
+    /// query prepared under a closed bundle; the executing bundle selects policy.
+    #[test]
+    fn open_executing_bundle_does_not_inherit_closed_preparation() {
+        let db = owner();
+        let open = pinned(&db, true);
+        let closed = pinned(&db, false);
+        let closed_query = closed.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(read(&closed, &closed_query), 0);
+        assert_eq!(
+            read(&open, &closed_query),
+            1,
+            "preparation replaced the executing bundle's policy"
+        );
+    }
+
+    /// Alice's explicit-identity transaction read uses its executing bundle,
+    /// even when Bob prepared the query under another bundle.
+    #[test]
+    fn transaction_identity_read_uses_executing_bundle() {
+        use jazz::tools::OpenTransactionId;
+        let db = owner();
+        let open = pinned(&db, true);
+        let closed = pinned(&db, false);
+        for (executor, preparer, expected) in [(&closed, &open, 0), (&open, &closed, 1)] {
+            let id = OpenTransactionId::new();
+            block_on(executor.begin_serializable(id)).unwrap();
+            let query = preparer.prepare_query(&Query::from("notes")).unwrap();
+            let rows = block_on(executor.tx_ref(id).all_prepared_at(
+                &query,
+                false,
+                Some(AuthorSubject::for_test_bytes([1; 16])),
+                ReadTier::LocalOnly,
+            ))
+            .unwrap();
+            executor.abandon_transaction_handle(id).unwrap();
+            assert_eq!(rows.len(), expected);
+        }
+    }
+
+    /// Alice's ordinary local read has no requested policy identity. Bundle
+    /// correction must not turn the existing unfiltered cache API into a check.
+    #[test]
+    fn local_reads_without_policy_identity_remain_unfiltered() {
+        let db = block_on(Db::open(DbConfig::new(
+            compile_schema(&schema(true)),
+            DbIdentity {
+                node: NodeUuid::from_bytes([20; 16]),
+                author: AuthorSubject::for_test_bytes([1; 16]),
+            },
+        )))
+        .unwrap();
+        block_on(db.insert(
+            "notes",
+            [("body".into(), Value::String("cached note".into()))].into(),
+            Default::default(),
+        ))
+        .unwrap();
+        let closed = pinned(&db, false);
+        let query = closed.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(read(&closed, &query), 0);
+        assert_eq!(
+            block_on(closed.all(
+                &query,
+                ReadOpts {
+                    tier: ReadTier::LocalOnly,
+                    ..Default::default()
+                }
+            ))
+            .unwrap()
+            .len(),
+            1
+        );
+    }
+}

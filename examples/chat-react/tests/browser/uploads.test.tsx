@@ -10,7 +10,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 import { Toaster } from "../../src/components/ui/sonner.js";
-import { TEST_SERVER_URL, SCOPE, testAccount } from "./test-constants.js";
+import { TEST_SERVER_URL, SCOPE } from "./test-constants.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,7 +54,7 @@ describe("Upload E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      account?: import("jazz-tools").AccountHandle;
+      store?: ReturnType<typeof memoryAccountStore>;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -64,11 +65,11 @@ describe("Upload E2E", () => {
     const appId = config.appId ?? SCOPE;
     const serverUrl = config.serverUrl ?? TEST_SERVER_URL;
 
-    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+    const store = config.store ?? memoryAccountStore();
 
     r.render(
       <>
-        <App config={{ account, appId, dbName: crypto.randomUUID(), serverUrl, ...config }} />
+        <App config={{ store, appId, dbName: crypto.randomUUID(), serverUrl, ...config }} />
         <Toaster />
       </>,
     );

@@ -1,15 +1,20 @@
-import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
-import { app } from "../schema.js";
+import {
+  JazzProvider,
+  useAll,
+  useDb,
+  useJazzSession,
+  type JazzClientConfig,
+} from "jazz-tools/react";
+import { app } from "../jazz.generated.js";
 
 function YourApp() {
   return null;
 }
 
 // #region provider-react
-export function ProviderExample({ config }: { config: DbConfig }) {
+export function ProviderExample({ config }: { config: JazzClientConfig }) {
   return (
-    <JazzProvider config={config} fallback={<p>Loading...</p>}>
+    <JazzProvider config={config} loading={<p>Loading...</p>}>
       <YourApp />
     </JazzProvider>
   );
@@ -49,9 +54,12 @@ export function DbAccessExample() {
 
 // #region session-react
 export function SessionExample() {
-  const session = useSession(); // { user: { account, identity }, ... } | null
+  // Who is signed in: { accountId, kind: "device" | "backend", identity, claims } | null.
+  // Your permissions see the same user as `session.user` (the accountId),
+  // `session.identity` and `session.claims`.
+  const { user } = useJazzSession();
 
-  void session;
+  void user;
   return null;
 }
 // #endregion session-react

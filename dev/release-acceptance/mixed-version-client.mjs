@@ -13,8 +13,13 @@ const [project, stateDir] = process.argv.slice(2);
 if (!project || !stateDir) throw new Error("usage: mixed-version-client.mjs <project> <state-dir>");
 mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 const require = createRequire(join(project, "package.json"));
-const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
+const jazzTools = await import(pathToFileURL(require.resolve("jazz-tools")));
 const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+// alpha.61 renamed local-first guests to device accounts and moved the
+// account handle off the session snapshot; older releases keep the old names.
+const deviceAccounts = typeof backendModule.acceptDeviceAccounts === "function";
+const deviceInitial = deviceAccounts ? "device" : "local-first";
+const accountIdOf = (snap) => (deviceAccounts ? snap.user?.accountId : snap.account?.id);
 // Releases before alpha.60 call it createJazzSession.
 const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
 const version = JSON.parse(
@@ -22,16 +27,30 @@ const version = JSON.parse(
 ).version;
 
 // Keep in sync with FIXTURE_SCHEMA in mixed-version.mjs (deployed via the CLI).
-const app = s.defineApp(
-  {
-    docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
-    policy.docs[op].always();
-});
+// From alpha.65 an app is its jazz.app.json and jazz.permissions.json; older
+// clients use the TS DSL. Both describe the same table, so the hash matches.
+let app;
+let permissions;
+if (typeof jazzTools.bindApp === "function") {
+  const { testApp } = await import(pathToFileURL(require.resolve("jazz-tools/testing")));
+  app = testApp({
+    tables: { docs: { columns: { label: "string", body: "string", author: "string" } } },
+  });
+  permissions = {
+    format: 1,
+    tables: { docs: { read: "true", insert: "true", update: "true", delete: "true" } },
+  };
+} else {
+  const { schema: s } = jazzTools;
+  app = s.defineApp(
+    { docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}) },
+    { migrations: "none" },
+  );
+  permissions = s.definePermissions(app, ({ policy }) => {
+    for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
+      policy.docs[op].always();
+  });
+}
 
 let session, db;
 const subs = new Map();
@@ -83,12 +102,12 @@ const ops = {
       permissions,
       driver: { type: "persistent", dataPath: join(stateDir, name) },
       store: accountStore(name),
-      initial: "local-first",
+      initial: deviceInitial,
     });
     const snap = session.getSnapshot();
     if (!snap.client) throw new Error(snap.error?.message ?? `session status ${snap.status}`);
     db = snap.client.db;
-    return { version, account: snap.account?.id };
+    return { version, account: accountIdOf(snap) };
   },
   async insert({ values, wait }) {
     const write = db.insert(app.docs, values);

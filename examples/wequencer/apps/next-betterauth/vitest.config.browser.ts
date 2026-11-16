@@ -6,11 +6,9 @@ import wasm from "vite-plugin-wasm";
 
 import {
   jazzServerInfo,
-  createJazzServerTransportControl,
-  blockJazzServerTransport,
-  unblockJazzServerTransport,
-  stopJazzServerTransportControl,
+  jazzServerTransportControlCommands,
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   stopJazzServerByUrl,
@@ -41,15 +39,11 @@ export default defineConfig({
       commands: {
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
-        jazzServerTransportControlCreate: async (_context, url) =>
-          createJazzServerTransportControl(url),
-        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
-          blockJazzServerTransport(url, direction),
-        jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
-        jazzServerTransportControlStop: async (_context, url) =>
-          stopJazzServerTransportControl(url),
+        ...jazzServerTransportControlCommands(),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

@@ -1,41 +1,36 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { migration as m } from "../migration-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { appMigrations } from "../testing/client-migrations.js";
 import { startTestJazz } from "../testing/index.js";
 
 it("inserts an ordinary parent and child atomically after adding a table", async () => {
-  const before = { projects: s.table({ title: s.string() }, {}) };
-  const after = {
-    ...before,
-    notes: s.table(
-      { projectId: s.uuid(), title: s.string() },
-      { project: s.rel("projects", "projectId") },
-    ),
+  const before = { projects: { columns: { title: "string" } } };
+  const oldApp = testApp({ tables: before });
+  const newApp = testApp({
+    tables: {
+      ...before,
+      notes: {
+        columns: { projectId: "uuid", title: "string" },
+        relations: { project: { rel: "projects", column: "projectId" } },
+      },
+    },
+    history: { before: { tables: before } },
+    migrations: [{ from: "before", createTables: ["notes"] }],
+  });
+  const oldPermissions = { format: 1, tables: { projects: { read: "true", insert: "true" } } };
+  const newPermissions = {
+    format: 1,
+    tables: {
+      projects: { read: "true", insert: "true" },
+      notes: { read: "true", insert: "true" },
+    },
   };
-  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
-  });
-  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-  });
-  const newPermissions = definePermissions(newApp, ({ policy }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
   const server = await startTestJazz({
     app: oldApp,
     permissions: oldPermissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -44,7 +39,7 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     await db.insert(oldApp.projects, { title: "Existing project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
+    await server.redeploy({ app: newApp, permissions: newPermissions });
     db = await createDb(account);
     await db.all(newApp.projects, { tier: "remote" });
     const tx = db.beginSerializableTransaction();
@@ -63,18 +58,12 @@ it("inserts an ordinary parent and child atomically after adding a table", async
 it.each(["local", "global"] as const)(
   "rejects a matching phantom at %s durability",
   async (tier) => {
-    const app = s.defineApp(
-      { notes: s.table({ bucket: s.string(), title: s.string() }, {}) },
-      { migrations: "none" },
-    );
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.notes.allowRead.always();
-      policy.notes.allowInsert.always();
-    });
+    const app = testApp({ tables: { notes: { columns: { bucket: "string", title: "string" } } } });
+    const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
     const server = await startTestJazz({
       app: app,
       permissions: permissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      coreOptions: { inMemory: true },
     });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     try {
@@ -110,18 +99,12 @@ it.each(["local", "global"] as const)(
 );
 
 it("does not reject a filtered transaction read when an unrelated row is inserted", async () => {
-  const app = s.defineApp(
-    { notes: s.table({ bucket: s.string(), title: s.string() }, {}) },
-    { migrations: "none" },
-  );
-  const permissions = definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
+  const app = testApp({ tables: { notes: { columns: { bucket: "string", title: "string" } } } });
+  const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -146,18 +129,17 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
 it.each(["offline", "synced"] as const)(
   "rejects the losing serializable write on the same row without failing the core tick (%s)",
   async (mode) => {
-    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.notes.allowRead.always();
-      policy.notes.allowInsert.always();
-      policy.notes.allowUpdate.always();
-    });
+    const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+    const permissions = {
+      format: 1,
+      tables: { notes: { read: "true", insert: "true", update: "true" } },
+    };
     const server =
       mode === "synced"
         ? await startTestJazz({
             app,
             permissions,
-            coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+            coreOptions: { inMemory: true },
           })
         : undefined;
     const uncaught: unknown[] = [];

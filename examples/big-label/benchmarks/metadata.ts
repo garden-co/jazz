@@ -97,3 +97,45 @@ for (const desks of [4, 6]) {
     source: loads,
   });
 }
+
+// Contention: another label's back-catalogue search on the same server.
+const contention = "examples/big-label/benchmarks/benches/contention.rs";
+for (const [request, title, unit, timed] of [
+  [
+    "open_releases",
+    "open your label's newest releases",
+    "page loads/s",
+    "One remote read of your label's newest 50 releases, from request to verified rows",
+  ],
+  [
+    "rename_release",
+    "rename a release",
+    "renames/s",
+    "One release update, from the call until the server acknowledges it (GlobalServer)",
+  ],
+] as const) {
+  for (const [arm, during] of [
+    ["idle", "with the server otherwise idle"],
+    ["during_search", "while another label's staffer searches its back catalogue"],
+  ] as const) {
+    bigLabelBenchmarks.push({
+      name: `big_label_${request}_${arm}`,
+      title: `BigLabel contention · ${title}, ${arm === "idle" ? "idle" : "during a search"}`,
+      description: `A member of one label requests over a WebSocket to one durable server ${during}. The search is a contains filter that matches nothing, so it reads all of that label's releases; searches run back to back on their own client. Compare with the other arm: the difference is how long one tenant's slow query holds up another tenant's cheap request.`,
+      fixture:
+        "One durable SQLite server: label A has 300,000 releases, label B 500, interleaved in one table. Row policies admit members through a memberships table.",
+      storage: "Durable SQLite server over WebSockets; each client has its own thread",
+      includes: [timed],
+      excludes: [
+        "Seeding, server start, client sign-in and warm-up",
+        "The searching client's work, except as it delays the server",
+      ],
+      work: {
+        count: 1,
+        unit,
+        explanation: "One request per iteration; searches are not counted.",
+      },
+      source: contention,
+    });
+  }
+}

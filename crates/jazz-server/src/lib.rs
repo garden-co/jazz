@@ -236,8 +236,8 @@ pub async fn run_until(
         None => info!("Memory limit: none detected"),
     }
     info!(
-        "WebSocket connection cap: {}",
-        limits.max_websocket_connections
+        "WebSocket connection cap: {} ({} per user)",
+        limits.max_websocket_connections, limits.max_websocket_connections_per_user
     );
     if !limits.stored_arrangements {
         tracing::warn!("--no-stored-arrangements has no effect: SQLite reads stored tables by key");
@@ -276,7 +276,8 @@ pub async fn run_until(
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout)
-        .with_max_websocket_connections(limits.max_websocket_connections);
+        .with_max_websocket_connections(limits.max_websocket_connections)
+        .with_max_websocket_connections_per_user(limits.max_websocket_connections_per_user);
     if let Some(dump) = diagnostics.heap_profiler {
         builder = builder.with_heap_profiler(dump);
     }

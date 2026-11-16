@@ -12,7 +12,7 @@ vi.mock("./create-jazz-client.js", () => ({
   openJazzClient: mocks.openJazzClient,
 }));
 
-import { JazzProvider } from "./provider.js";
+import { LegacyJazzProvider as JazzProvider } from "./provider.js";
 
 describe("JazzProvider SSR", () => {
   it("renders its fallback without creating a browser client", async () => {

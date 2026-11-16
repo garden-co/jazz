@@ -100,9 +100,11 @@
 </template>
 
 <script setup lang="ts">
+import { asLines } from "../lib/text.js";
 import { reactive, ref } from "vue";
 import { useAll } from "jazz-tools/vue";
-import { app, type StopStatus } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
+import { type StopStatus } from "../../app-extras.js";
 import { fromDateInput, statusLabels } from "../lib/format.js";
 import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";
@@ -137,7 +139,7 @@ function submit() {
 async function addStop() {
   const date = fromDateInput(show.date);
   date.setHours(20);
-  const body = show.notes.trim();
+  const body = asLines(show.notes);
 
   const written = await db.transaction((tx) => {
     const venueId =
@@ -154,7 +156,7 @@ async function addStop() {
       venueId,
       date,
       status: show.status,
-      publicDescription: show.description,
+      publicDescription: asLines(show.description),
     });
     if (body) tx.insert(app.stopNotes, { stopId: stop.id, bandId: props.bandId, body });
     return stop;

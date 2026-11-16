@@ -1,5 +1,5 @@
 import { ReadTier, type Db } from "jazz-tools";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";

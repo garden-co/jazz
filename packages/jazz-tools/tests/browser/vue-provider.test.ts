@@ -11,7 +11,7 @@ vi.mock("../../src/vue/create-jazz-client.js", () => ({
   openJazzClient: mocks.openJazzClient,
 }));
 
-import { JazzClientProvider, JazzProvider } from "../../src/vue/provider.js";
+import { JazzClientProvider, LegacyJazzProvider as JazzProvider } from "../../src/vue/provider.js";
 
 function deferred() {
   let resolve!: () => void;

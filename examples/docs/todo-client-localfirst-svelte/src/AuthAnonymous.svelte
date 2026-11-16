@@ -1,10 +1,10 @@
 <!-- #region auth-anon-svelte -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import type { DbConfig } from "jazz-tools";
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  // Prepare a handle outside this context with createAccountManager.
-  let { config, children }: { config: DbConfig; children: Snippet } = $props();
+  import { JazzProvider } from "jazz-tools/svelte";
+  // Everyone starts as a guest: a device account, created on this device.
+  // Your backend accepts guests with acceptDeviceAccounts.
+  let { children }: { children: Snippet } = $props();
 </script>
-<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
+<JazzProvider config={{ serverUrl: "/jazz", initial: "device" }}>{@render children()}</JazzProvider>
 <!-- #endregion auth-anon-svelte -->

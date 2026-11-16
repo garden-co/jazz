@@ -1185,7 +1185,10 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     }
     let reason = rejected.expect("the remote read says why");
     assert!(
-        reason.contains("not supported") && !reason.contains("before it became a replica"),
+        // It names why it can't mirror (#5053 dropped "not supported yet"
+        // from this refusal: it read as a missing feature).
+        reason.contains("opened without the app's migrations")
+            && !reason.contains("before it became a replica"),
         "{reason}"
     );
     // One opened after the refusal says why at once, never waiting on an

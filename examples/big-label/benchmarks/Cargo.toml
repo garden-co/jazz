@@ -9,6 +9,10 @@ jazz = { workspace = true, features = ["testing"] }
 sha2 = "0.10"
 tempfile = "3.27.0"
 jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
+jazz-testkit = { path = "../../../crates/jazz-testkit", default-features = false, features = [
+  "scenarios",
+] }
+uuid = "1.18.1"
 
 [dev-dependencies]
 divan = { workspace = true }
@@ -19,4 +23,9 @@ harness = false
 
 [[bench]]
 name = "ingest_walltime"
+harness = false
+
+# Measured by the nightly CodSpeed run only (dev/benchmarks/codspeed-artifact.mjs).
+[[bench]]
+name = "contention"
 harness = false
