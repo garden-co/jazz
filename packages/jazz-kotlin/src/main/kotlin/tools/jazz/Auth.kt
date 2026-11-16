@@ -23,9 +23,11 @@ public sealed interface JazzAuth {
     }
 
     /**
-     * A user your backend signs in: [token] gives its bearer token (`null`
-     * signs the user out). It's asked when connecting, before the token
-     * expires, after the server refused one, and on [Jazz.refreshSession].
+     * A user your backend signs in: [token] gives its bearer token. `null`
+     * signs the user out; throwing (e.g. offline) is a failure the session
+     * retries, and the user stays signed in. It's asked when connecting,
+     * before the token expires, after the server refused one, and on
+     * [Jazz.refreshSession].
      */
     public class Bearer(public val token: suspend (TokenReason) -> String?) : JazzAuth
 

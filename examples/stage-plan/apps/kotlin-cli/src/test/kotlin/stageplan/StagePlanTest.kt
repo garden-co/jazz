@@ -306,4 +306,17 @@ class StagePlanTest {
             kotlin.test.assertTrue(DocsSnippets.includeDeleted(jazz, show.id).any { it.id == c.id })
         }
     }
+
+    @Test
+    fun a_token_provider_that_throws_doesnt_sign_the_user_out(): Unit = runBlocking {
+        var n = 0
+        val jazz = openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { if (n++ == 0) "token-tp" else throw java.io.IOException("sign-in server down") })
+        jazz.use {
+            assertEquals("tp", (jazz.session.value as tools.jazz.SessionState.SignedIn).user.subject)
+            runCatching { jazz.refreshSession() }
+            kotlin.test.assertTrue(jazz.session.value !is tools.jazz.SessionState.SignedOut, "${jazz.session.value}")
+            // Still open, and reading.
+            jazz.all(jazzapp.Shows.query())
+        }
+    }
 }

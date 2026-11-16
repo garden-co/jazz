@@ -21,7 +21,13 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
         @JvmStatic
         public fun openWithTokens(configJson: String, tokens: (String) -> String?): Native {
             val provider = object : uniffi.jazz_ffi.TokenProvider {
-                override fun token(reason: String): String? = tokens(reason)
+                // A provider that throws (offline, the sign-in server down) is an error the
+                // session retries, not a sign-out: only returning null signs the user out.
+                override fun token(reason: String): String? = try {
+                    tokens(reason)
+                } catch (e: Throwable) {
+                    throw FfiException.Io(e.message ?: e.toString())
+                }
             }
             return UniffiNative(call { JazzHandle.openWithTokens(configJson, provider) })
         }
