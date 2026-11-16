@@ -16,6 +16,8 @@ pub mod c_abi;
 mod convert;
 mod core;
 mod error;
+mod gate;
+mod relational;
 
 use std::sync::Arc;
 
@@ -34,9 +36,10 @@ pub struct JazzHandle {
 
 #[uniffi::export]
 impl JazzHandle {
-    /// Opens an app from its config JSON: `{ "app", "permissions"?,
-    /// "appId"?, "serverUrl"?, "dataDir"?, "storage"?, "backendSecret"?,
-    /// "adminSecret"?, "session"? }`.
+    /// Opens an app from its config JSON: `{ "app", "appId"?, "serverUrl"?,
+    /// "auth"?, "dataDir"?, "storage"?, "contract"? }` (see the README): a
+    /// local client, or an end user with a device key. Bearer users and
+    /// backend clients open with [`Self::open_with_tokens`].
     #[uniffi::constructor]
     pub fn open(config_json: String) -> Result<Arc<Self>> {
         let contract = serde_json::from_str::<serde_json::Value>(&config_json)
@@ -48,8 +51,74 @@ impl JazzHandle {
         Ok(Arc::new(Self { core }))
     }
 
-    /// The account id of the user a backend acts as (`session.user`);
-    /// `None` for a client.
+    /// Opens an app as an end user who signs in with the app's bearer
+    /// (`"auth": { "bearer": true }` in the config): `tokens` gives it.
+    #[uniffi::constructor]
+    pub fn open_with_tokens(
+        config_json: String,
+        tokens: Arc<dyn TokenProvider>,
+    ) -> Result<Arc<Self>> {
+        let contract = serde_json::from_str::<serde_json::Value>(&config_json)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
+            .unwrap_or(1);
+        let host = core::HostTokens(Arc::new(move |reason: &str| {
+            tokens
+                .token(reason.to_owned())
+                .map_err(|error| error.to_string())
+        }));
+        let core = core::Core::open_with_tokens(&config_json, Some(Arc::new(host)))
+            .map_err(|error| JazzError::from(error).for_contract(contract))?;
+        Ok(Arc::new(Self { core }))
+    }
+
+    /// The end user's session as JSON: `{"status": "signedIn", "user":
+    /// {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
+    /// `None` for a local app.
+    pub fn session_state(&self) -> Result<Option<String>> {
+        self.core.surface(self.core.session_state())
+    }
+
+    /// The connection's status as JSON: `{"link": ...}`.
+    pub fn sync_status(&self) -> Result<String> {
+        self.core.surface(self.core.sync_status())
+    }
+
+    /// Asks the token provider for a fresh token (reason `refresh`).
+    pub fn refresh(&self) -> Result<()> {
+        self.core.surface(self.core.refresh())
+    }
+
+    /// Links this device account to the user's account with the app's own
+    /// sign-in (`bearer`): the session becomes that user's. Returns the user
+    /// as JSON.
+    pub fn link(&self, bearer: String) -> Result<String> {
+        self.core.surface(self.core.link(&bearer))
+    }
+
+    /// Signs the end user out and closes the app.
+    pub fn sign_out(&self) -> Result<()> {
+        self.core.surface(self.core.sign_out())
+    }
+
+    /// Calls `listener` with each session state, the current one first.
+    pub fn watch_session(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        self.watch("session", listener)
+    }
+
+    /// Calls `listener` with each sync status, the current one first.
+    pub fn watch_sync(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        self.watch("sync", listener)
+    }
+
+    /// Not part of the documented .65 surface; `None` for every client.
+    pub fn bundle(&self) -> Result<Option<String>> {
+        self.core.surface(self.core.bundle())
+    }
+
+    /// The account id of the user this handle acts as (an end user, a
+    /// scoped backend client, a `for_user` handle); `None` for a local app
+    /// or a trusted backend client (the system).
     pub fn account(&self) -> Result<Option<String>> {
         self.core.surface(self.core.account())
     }
@@ -196,6 +265,50 @@ impl JazzHandle {
         })())
     }
 
+    /// Writes the row with this id: a new id inserts (`row_json` then holds
+    /// every required column), an existing one sets the columns `row_json`
+    /// names. Returns the row.
+    pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
+        self.core.surface(
+            self.core
+                .upsert(&table, &id, &row_json, &Default::default()),
+        )
+    }
+
+    /// Brings back a deleted row, as it was or with `patch_json` (a whole
+    /// row) as its new content. Returns the row.
+    pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
+        self.core.surface(self.core.restore(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &Default::default(),
+        ))
+    }
+
+    /// Begins uploading a large value of `column` piece by piece: `kind`
+    /// `"insert"` (a new row, `id` none, its other columns `row_json`),
+    /// `"update"` or `"upsert"` (the row with `id`).
+    pub fn begin_upload(
+        self: Arc<Self>,
+        table: String,
+        column: String,
+        kind: String,
+        id: Option<String>,
+        row_json: Option<String>,
+    ) -> Result<Arc<Upload>> {
+        let upload = self.core.surface(
+            self.core
+                .upload_begin(&table, &column, &kind, id.as_deref(), row_json.as_deref())
+                .and_then(|id| core::parse_tx(&id)),
+        )?;
+        Ok(Arc::new(Upload {
+            handle: self,
+            upload,
+            open: std::sync::atomic::AtomicBool::new(true),
+        }))
+    }
+
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
@@ -235,9 +348,53 @@ impl JazzHandle {
     pub fn shutdown(&self) -> Result<()> {
         self.core.surface(self.core.close())
     }
+
+    /// [`Self::shutdown`], first waiting up to `timeout_ms` for the writes
+    /// the client holds to reach the server (TS's `close({ timeoutMs })`,
+    /// 10 000 by default there). With memory storage, writes still unsent
+    /// fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
+    /// the app is closed all the same. `0` closes at once.
+    pub fn shutdown_within(&self, timeout_ms: u64) -> Result<()> {
+        self.core.surface(
+            self.core
+                .close_within(Some(std::time::Duration::from_millis(timeout_ms))),
+        )
+    }
+
+    /// A backend client's kind (`"auth": { "credential": true }`), as the
+    /// main backend decided it: `"trusted"` or `"scoped"`; `None` for any
+    /// other app.
+    pub fn backend_client(&self) -> Result<Option<String>> {
+        self.core
+            .surface(self.core.backend_client())
+            .map(|kind| kind.map(str::to_owned))
+    }
+
+    /// On a trusted backend client, a handle acting as `user_id` (the id the
+    /// main backend's `authenticate` names them by), with `claims_json` (a
+    /// JSON object; empty for `{}`) as the claims its permissions see. It
+    /// never creates an account: `NoAccount` (contract 2) when the user has
+    /// none yet; `Permission` when the main backend refuses the identity;
+    /// `Refused` on a scoped client, a `for_user` handle or any other app.
+    /// Its `shutdown` leaves this handle open; after this handle closes, its
+    /// calls fail with `Closed`.
+    pub fn for_user(&self, user_id: String, claims_json: String) -> Result<Arc<Self>> {
+        let core = self
+            .core
+            .surface(self.core.for_user(&user_id, &claims_json))?;
+        Ok(Arc::new(Self { core }))
+    }
 }
 
 impl JazzHandle {
+    fn watch(&self, what: &str, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        let inner = self.core.surface(
+            self.core
+                .watch(what, Box::new(move |state| listener.on_change(state))),
+        )?;
+        Ok(Arc::new(Watch { inner }))
+    }
+
     fn subscribe_with(
         &self,
         query_json: String,
@@ -386,6 +543,23 @@ impl Transaction {
         ))
     }
 
+    pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
+        self.handle.core.surface(
+            self.handle
+                .core
+                .upsert(&table, &id, &row_json, &self.opts()),
+        )
+    }
+
+    pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
+        self.handle.core.surface(self.handle.core.restore(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &self.opts(),
+        ))
+    }
+
     /// Commits its writes together, returning once they reach `tier`
     /// (`"local"` or `"global"`) if given.
     pub fn commit(&self, tier: Option<String>) -> Result<()> {
@@ -419,6 +593,89 @@ impl std::fmt::Debug for JazzHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("JazzHandle")
     }
+}
+
+/// Where an end user's bearer tokens come from (the host's own sign-in).
+/// Called on a thread of its own, so it may block; `reason` is `connect`,
+/// `renew`, `expired` or `refresh` (the last two want a fresh token, not a
+/// cached one). `None` means no one is signed in (the app stops); an error
+/// means the fetch failed (a network blip): the session stays signed in and
+/// asks again.
+#[uniffi::export(with_foreign)]
+pub trait TokenProvider: Send + Sync {
+    fn token(&self, reason: String) -> Result<Option<String>>;
+}
+
+/// What a session or sync watch calls with each state (JSON).
+#[uniffi::export(with_foreign)]
+pub trait StateListener: Send + Sync {
+    fn on_change(&self, state_json: String);
+}
+
+/// A live watch of session or sync states; it ends when cancelled or
+/// dropped.
+#[derive(uniffi::Object)]
+pub struct Watch {
+    inner: core::Watch,
+}
+
+#[uniffi::export]
+impl Watch {
+    /// When it returns, no callback is running (unless called from one).
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+}
+
+/// A large value being uploaded: `push` its pieces, then `finish` (or
+/// `abort`). Use it from one thread at a time.
+#[derive(uniffi::Object)]
+pub struct Upload {
+    handle: Arc<JazzHandle>,
+    upload: u64,
+    /// Not yet finished or aborted: dropped, it aborts.
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        if self.open.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let _ = self.handle.core.upload_abort(self.upload);
+        }
+    }
+}
+
+#[uniffi::export]
+impl Upload {
+    pub fn push(&self, bytes: Vec<u8>) -> Result<()> {
+        self.handle
+            .core
+            .surface(self.handle.core.upload_push(self.upload, bytes))
+    }
+
+    /// Commits the row with its value; returns the row.
+    pub fn finish(&self) -> Result<String> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
+        self.handle.core.surface(
+            self.handle
+                .core
+                .upload_finish(self.upload, &Default::default()),
+        )
+    }
+
+    pub fn abort(&self) -> Result<()> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
+        self.handle
+            .core
+            .surface(self.handle.core.upload_abort(self.upload))
+    }
+}
+
+/// A new device account's key as `jazz-auth-v1:…` text, for `"auth":
+/// {"deviceKey": …}`: keep it as a password, in the platform's keychain.
+#[uniffi::export]
+pub fn generate_device_key() -> Result<String> {
+    core::generate_device_key().map_err(JazzError::from)
 }
 
 /// What a subscription calls with its deltas.
