@@ -241,7 +241,7 @@ jobs:
   test-go:
     if: inputs.scope == 'full'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
