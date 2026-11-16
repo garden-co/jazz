@@ -31,6 +31,15 @@ pub enum JazzError {
     /// (memory storage, where they are lost).
     #[error("{reason}")]
     Unsynced { pending: u64, reason: String },
+    /// Contract 2: this handle's client was replaced, as its session's user
+    /// signed out or changed (TS's `DbReplacedError`): fetch the current
+    /// one from the session.
+    #[error("{reason}")]
+    Replaced { reason: String },
+    /// Contract 2: the session has no usable client now; `status` is the
+    /// session's (`signedOut`, `transitioning`, …).
+    #[error("{reason}")]
+    NoUser { status: String, reason: String },
 }
 
 impl JazzError {
@@ -46,6 +55,8 @@ impl JazzError {
             | Self::Conflict { reason }
             | Self::NoAccount { reason, .. } => Self::Refused { reason },
             Self::Unsynced { reason, .. } => Self::Io { reason },
+            Self::Replaced { .. } => Self::Closed,
+            Self::NoUser { reason, .. } => Self::Refused { reason },
             other => other,
         }
     }
@@ -61,6 +72,8 @@ impl JazzError {
             Self::Conflict { .. } => "conflict",
             Self::NoAccount { .. } => "noAccount",
             Self::Unsynced { .. } => "unsynced",
+            Self::Replaced { .. } => "replaced",
+            Self::NoUser { .. } => "noUser",
         }
     }
 }
@@ -87,6 +100,8 @@ pub(crate) enum JazzErrorKind {
     Conflict(String),
     NoAccount { user_id: String, reason: String },
     Unsynced { pending: u64, reason: String },
+    Replaced(String),
+    NoUser { status: String, reason: String },
 }
 
 impl From<JazzErrorKind> for JazzError {
@@ -100,6 +115,8 @@ impl From<JazzErrorKind> for JazzError {
             JazzErrorKind::Conflict(reason) => Self::Conflict { reason },
             JazzErrorKind::NoAccount { user_id, reason } => Self::NoAccount { user_id, reason },
             JazzErrorKind::Unsynced { pending, reason } => Self::Unsynced { pending, reason },
+            JazzErrorKind::Replaced(reason) => Self::Replaced { reason },
+            JazzErrorKind::NoUser { status, reason } => Self::NoUser { status, reason },
         }
     }
 }
@@ -166,6 +183,11 @@ impl From<jazz_app::Error> for JazzErrorKind {
             E::StoreHeld(_) => Self::Refused(message),
             E::NoAccount(user_id) => Self::NoAccount {
                 user_id,
+                reason: message,
+            },
+            E::Replaced => Self::Replaced(message),
+            E::NoUser { status } => Self::NoUser {
+                status: status.to_string(),
                 reason: message,
             },
             E::Unsynced { pending } => Self::Unsynced {

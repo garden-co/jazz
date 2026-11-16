@@ -18,6 +18,7 @@ mod core;
 mod error;
 mod gate;
 mod relational;
+mod session;
 
 use std::sync::Arc;
 
@@ -660,6 +661,126 @@ const CLOSED_STATE: &str = r#"{"kind":"closed","message":"the app is closed"}"#;
 #[uniffi::export(with_foreign)]
 pub trait StateListener: Send + Sync {
     fn on_change(&self, state_json: String);
+}
+
+/// A user-following session (TS's `JazzSession`): who is signed in (the
+/// app's bearer, a device account, or no one) and a client for that user,
+/// replaced when the user changes. Config: the app's, with `"initial"`:
+/// `"backend"` (follow the bearer, the default; needs `"auth": {"bearer":
+/// true}` and a token provider), `"device"` or `"signed-out"`.
+#[derive(uniffi::Object)]
+pub struct Session {
+    core: session::SessionCore,
+}
+
+impl Session {
+    fn surface<T>(&self, result: error::Result<T>) -> Result<T> {
+        result.map_err(|error| JazzError::from(error).for_contract(self.core.contract))
+    }
+
+    fn call(&self, method: &str) -> Result<()> {
+        self.surface(self.core.call(method, &serde_json::Value::Null))
+            .map(drop)
+    }
+}
+
+#[uniffi::export]
+impl Session {
+    #[uniffi::constructor]
+    pub fn open(config_json: String, tokens: Option<Arc<dyn TokenProvider>>) -> Result<Arc<Self>> {
+        let contract = serde_json::from_str::<serde_json::Value>(&config_json)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
+            .unwrap_or(1);
+        let tokens = tokens.map(|tokens| {
+            let host = core::HostTokens(Arc::new(move |reason: &str| {
+                tokens
+                    .token(reason.to_owned())
+                    .map_err(|error| error.to_string())
+            }));
+            let tokens: Arc<dyn jazz_app::TokenProvider> = Arc::new(host);
+            tokens
+        });
+        let core = session::SessionCore::open(&config_json, tokens)
+            .map_err(|error| JazzError::from(error).for_contract(contract))?;
+        Ok(Arc::new(Self { core }))
+    }
+
+    /// `{"status": "starting"|"ready"|"signed-out"|"transitioning"|"error"|
+    /// "closed", "user"?, "clientEpoch", "error"?: {"kind", "message"},
+    /// "recovery"?: "action"|"session"}`.
+    pub fn snapshot(&self) -> Result<String> {
+        self.surface(self.core.snapshot())
+    }
+
+    /// A handle acting for the user signed in now: `NoUser` (with the
+    /// status) while there is none. Fetch it again when `clientEpoch`
+    /// changes: one from before fails with `Replaced`. Its `shutdown`
+    /// leaves the session open.
+    pub fn jazz(&self) -> Result<Arc<JazzHandle>> {
+        let core = self.surface(self.core.jazz())?;
+        Ok(Arc::new(JazzHandle { core }))
+    }
+
+    /// The app's auth changed: asks the bearer and the backend who is
+    /// signed in now, and follows.
+    pub fn refresh(&self) -> Result<()> {
+        self.call("refresh")
+    }
+
+    pub fn create_device_account(&self) -> Result<()> {
+        self.call("createDeviceAccount")
+    }
+
+    /// Signs in as the device account `device_key` (`jazz-auth-v1:…`).
+    pub fn restore_device_account(&self, device_key: String) -> Result<()> {
+        self.surface(self.core.call(
+            "restoreDeviceAccount",
+            &serde_json::json!({ "deviceKey": device_key }),
+        ))
+        .map(drop)
+    }
+
+    /// Signs in again as the device account this device keeps.
+    pub fn reopen_device_account(&self) -> Result<()> {
+        self.call("reopenDeviceAccount")
+    }
+
+    /// Links the signed-in device account to the bearer's user.
+    pub fn link_device_account(&self) -> Result<()> {
+        self.call("linkDeviceAccount")
+    }
+
+    /// The device account's key (`jazz-auth-v1:…`): keep it as a password.
+    pub fn export_device_key(&self) -> Result<String> {
+        let key = self.surface(self.core.call("exportDeviceKey", &serde_json::Value::Null))?;
+        Ok(key.as_str().unwrap_or_default().to_owned())
+    }
+
+    /// Signs out; the session stays, `signed-out`.
+    pub fn sign_out(&self) -> Result<()> {
+        self.call("signOut")
+    }
+
+    /// Repeats what failed, as the snapshot's `recovery` says.
+    pub fn retry(&self) -> Result<()> {
+        self.call("retry")
+    }
+
+    /// Calls `listener` with each snapshot, the current one first; when the
+    /// session closes, a last `{"kind": "closed", "message"}`.
+    pub fn watch(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        let inner = self.surface(self.core.watch(Box::new(move |state| {
+            listener.on_change(state.unwrap_or_else(|| CLOSED_STATE.to_owned()))
+        })))?;
+        Ok(Arc::new(Watch { inner }))
+    }
+
+    /// Closes the session and its client: handles it gave fail with
+    /// `Closed`, watches end.
+    pub fn shutdown(&self) -> Result<()> {
+        self.surface(self.core.close())
+    }
 }
 
 /// A live watch of session or sync states; it ends when cancelled or

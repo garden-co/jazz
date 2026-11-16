@@ -29,6 +29,10 @@ pub(crate) struct Core {
     /// A `for_user` handle's parent's `closed`: closing the parent closes
     /// it too.
     parent_closed: Option<Arc<AtomicBool>>,
+    /// A session's handle: whether its user has changed since it was
+    /// fetched (every call then fails `Replaced`, even one answered without
+    /// the client).
+    replaced: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     /// The open subscriptions, told when the app closes.
     subscriptions: Mutex<Vec<Weak<Delivery>>>,
     /// The open watches, told when the app closes: each gets a last
@@ -247,6 +251,31 @@ impl Core {
         ))
     }
 
+    /// A handle on a session's client for its signed-in user: closed with
+    /// the session, its ids from the session's counter. Closing it leaves
+    /// the session (and its client) open, as a `for_user` handle's close
+    /// leaves its parent.
+    pub(crate) fn for_session(
+        jazz: Jazz,
+        schema: Arc<Schema>,
+        relations: convert::Relations,
+        contract: u64,
+        closed: Arc<AtomicBool>,
+        next_tx: Arc<AtomicU64>,
+        replaced: Box<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        let mut core = Self::with(
+            jazz,
+            schema,
+            relations,
+            true,
+            contract,
+            Some((closed, next_tx)),
+        );
+        core.replaced = Some(replaced);
+        core
+    }
+
     fn with(
         jazz: Jazz,
         schema: Arc<Schema>,
@@ -274,6 +303,7 @@ impl Core {
             relations,
             closed: Arc::new(AtomicBool::new(false)),
             parent_closed: parent,
+            replaced: None,
             subscriptions: Mutex::new(Vec::new()),
             watches: Mutex::new(Vec::new()),
             next_tx,
@@ -359,6 +389,10 @@ impl Core {
                 .is_some_and(|closed| closed.load(Ordering::Acquire))
         {
             Err(FfiError::Closed)
+        } else if self.replaced.as_ref().is_some_and(|replaced| replaced()) {
+            Err(FfiError::Replaced(
+                "this client was replaced: the session's user signed out or changed".into(),
+            ))
         } else {
             Ok(&self.jazz)
         }
@@ -1152,7 +1186,7 @@ impl Core {
         let jazz = self.open_jazz()?;
         if self.derived {
             return Err(refused(
-                "delete_client_storage on a for_user handle: it has no store of its own",
+                "delete_client_storage on a for_user or session handle: delete through the app that owns the store (not supported yet for a session's account)",
             ));
         }
         // Open transactions roll back while their client still runs.
@@ -1181,76 +1215,33 @@ impl Core {
     pub fn watch(&self, what: &str, listener: Box<dyn Fn(Option<String>) + Send>) -> Result<Watch> {
         use futures_util::StreamExt as _;
         let jazz = self.open_jazz()?;
-        let mut stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = String> + Send>> =
-            match what {
-                "mutationErrors" => Box::pin(
-                    block_on(jazz.mutation_errors())?
-                        .map(|error| serde_json::to_string(&error).unwrap_or_default()),
-                ),
-                "session" => {
-                    let session = jazz
-                        .session()
-                        .ok_or_else(|| refused("watching the session is for an end user's app"))?;
-                    Box::pin(
-                        session
-                            .changes()
-                            .map(|state| serde_json::to_string(&state).unwrap_or_default()),
-                    )
-                }
-                "sync" => Box::pin(
-                    jazz.sync_changes()
-                        .map(|status| serde_json::to_string(&status).unwrap_or_default()),
-                ),
-                other => {
-                    return Err(refused(format!(
-                        "watch \"session\" or \"sync\", not {other:?}"
-                    )));
-                }
-            };
-        let (cancel, mut cancelled) = tokio::sync::oneshot::channel::<()>();
-        let (close, mut closed) = tokio::sync::oneshot::channel::<()>();
-        self.watches
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(close);
-        let thread = std::thread::Builder::new()
-            .name("jazz-watch".into())
-            .spawn(move || {
-                block_on(async move {
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = &mut cancelled => return,
-                            result = &mut closed => {
-                                // Sent by the app's close (an error: the
-                                // watch was dropped first, nothing to say).
-                                if result.is_ok() {
-                                    listener(None);
-                                }
-                                return;
-                            }
-                            state = stream.next() => match state {
-                                Some(state) => listener(Some(state)),
-                                None => {
-                                    // The stream ended: the app closed.
-                                    listener(None);
-                                    return;
-                                }
-                            },
-                        }
-                    }
-                })
-            })
-            .map_err(|error| FfiError::Io(format!("cannot start the watch's thread: {error}")))?;
-        // A close racing this watch may have taken the list before the push.
-        if self.closed.load(Ordering::Acquire) {
-            self.end_watches();
-        }
-        Ok(Watch {
-            thread_id: thread.thread().id(),
-            thread: Mutex::new(Some(thread)),
-            cancel: Mutex::new(Some(cancel)),
-        })
+        let stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = String> + Send>> = match what
+        {
+            "mutationErrors" => Box::pin(
+                block_on(jazz.mutation_errors())?
+                    .map(|error| serde_json::to_string(&error).unwrap_or_default()),
+            ),
+            "session" => {
+                let session = jazz
+                    .session()
+                    .ok_or_else(|| refused("watching the session is for an end user's app"))?;
+                Box::pin(
+                    session
+                        .changes()
+                        .map(|state| serde_json::to_string(&state).unwrap_or_default()),
+                )
+            }
+            "sync" => Box::pin(
+                jazz.sync_changes()
+                    .map(|status| serde_json::to_string(&status).unwrap_or_default()),
+            ),
+            other => {
+                return Err(refused(format!(
+                    "watch \"session\" or \"sync\", not {other:?}"
+                )));
+            }
+        };
+        spawn_watch(stream, listener, &self.watches, &self.closed)
     }
 
     /// Closes the app: the calls already made finish, subscriptions end,
@@ -1531,6 +1522,65 @@ thread_local! {
 }
 
 /// A watch of session or sync states.
+/// Delivers `stream`'s states to `listener` on a thread of its own until
+/// cancelled, then once with `None` when the app (or session) closes:
+/// `closers` gets the sender its close fires, `closed` is checked for a
+/// close that raced the registration.
+pub(crate) fn spawn_watch(
+    mut stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = String> + Send>>,
+    listener: Box<dyn Fn(Option<String>) + Send>,
+    closers: &Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
+    closed_flag: &AtomicBool,
+) -> Result<Watch> {
+    use futures_util::StreamExt as _;
+    let (cancel, mut cancelled) = tokio::sync::oneshot::channel::<()>();
+    let (close, mut closed) = tokio::sync::oneshot::channel::<()>();
+    closers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(close);
+    let thread = std::thread::Builder::new()
+        .name("jazz-watch".into())
+        .spawn(move || {
+            block_on(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut cancelled => return,
+                        result = &mut closed => {
+                            // Sent by the close (an error: the watch was
+                            // dropped first, nothing to say).
+                            if result.is_ok() {
+                                listener(None);
+                            }
+                            return;
+                        }
+                        state = stream.next() => match state {
+                            Some(state) => listener(Some(state)),
+                            None => {
+                                // The stream ended: the app closed.
+                                listener(None);
+                                return;
+                            }
+                        },
+                    }
+                }
+            })
+        })
+        .map_err(|error| FfiError::Io(format!("cannot start the watch's thread: {error}")))?;
+    // A close racing this watch may have taken the list before the push.
+    if closed_flag.load(Ordering::Acquire) {
+        for close in std::mem::take(&mut *closers.lock().unwrap_or_else(|e| e.into_inner())) {
+            let _ = close.send(());
+        }
+    }
+    Ok(Watch {
+        thread_id: thread.thread().id(),
+        thread: Mutex::new(Some(thread)),
+        cancel: Mutex::new(Some(cancel)),
+    })
+}
+
 pub(crate) struct Watch {
     thread_id: ThreadId,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -1602,7 +1652,7 @@ impl Drop for SubscriptionCore {
 }
 
 /// A host's token source as jazz-app's.
-struct Tokens(Arc<dyn jazz_app::TokenProvider>);
+pub(crate) struct Tokens(pub(crate) Arc<dyn jazz_app::TokenProvider>);
 
 impl jazz_app::TokenProvider for Tokens {
     fn token(&self, reason: jazz_app::TokenReason) -> jazz_app::TokenFuture {

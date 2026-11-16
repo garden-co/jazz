@@ -102,6 +102,38 @@ rejected, lastError, synced}`). Anonymous users are not supported (as in TS).
 Without `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
+## Sessions (TS's `JazzSession`)
+
+A session follows who is signed in, and hands out a client for that user,
+replacing it when the user changes. UniFFI `Session.open(config, tokens?)`,
+C `jazz_session_open(config, token_cb, ctx, err)`. The config is the app's,
+with `serverUrl` (the app's `/jazz`), `appId`, `storage` / `dataDir` (each
+account's store under `dataDir/<account>/`, the device key in
+`dataDir/device.key`), `"auth": {"bearer": true}` with a token provider,
+and `"initial"`: `"backend"` (follow the bearer; the default, which needs
+one), `"device"` or `"signed-out"`.
+
+- `snapshot()` / `"snapshot"`: `{"status": "starting"|"ready"|"signed-out"|
+  "transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
+  {"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
+- `jazz()` / `jazz_session_jazz`: a `JazzHandle` for the user signed in now
+  (`NoUser`, kind `"noUser"` with `"status"`, while there is none). Once the
+  user changes (or signs out) every call on it fails with `Replaced` (kind
+  `"replaced"`; `Closed` without contract 2): fetch the new one when
+  `clientEpoch` changes. Its `shutdown` / `jazz_close` leaves the session
+  open.
+- `refresh()` (the app's auth changed: ask the bearer and follow),
+  `create_device_account()`, `restore_device_account(key)`,
+  `reopen_device_account()`, `link_device_account()`,
+  `export_device_key()`, `sign_out()` (the session stays, signed out),
+  `retry()` (as `recovery` says); C `jazz_session_call(s, method, args)`.
+- `watch(listener)` / `jazz_session_watch`: each snapshot, the current one
+  first, and a last `{"kind": "closed"}` when the session closes.
+- `shutdown()` / `jazz_session_close`: closes the session; its handles fail
+  `Closed`, its watches end, and no token callback runs after.
+
+Not yet: deleting a session account's store through its handle (refused).
+
 ## Lifecycle (as TS's)
 
 - `begin_mergeable()` / `txBegin {"serializable": false}`: a mergeable

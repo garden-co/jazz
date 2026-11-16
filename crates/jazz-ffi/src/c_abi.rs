@@ -34,6 +34,7 @@ fn error_json(error: &JazzError) -> String {
     match error {
         JazzError::NoAccount { user_id, .. } => json["userId"] = json!(user_id),
         JazzError::Unsynced { pending, .. } => json["pending"] = json!(pending),
+        JazzError::NoUser { status, .. } => json["status"] = json!(status),
         _ => {}
     }
     json.to_string()
@@ -527,6 +528,164 @@ pub unsafe extern "C" fn jazz_for_user(
     })
 }
 
+/// A user-following session (opaque to C).
+pub struct JazzSession(crate::session::SessionCore);
+
+/// # Safety
+/// `session` is NULL or a session from `jazz_session_open`, not yet closed.
+unsafe fn session<'a>(
+    session: *const JazzSession,
+) -> Result<&'a crate::session::SessionCore, FfiError> {
+    // SAFETY: per the function's contract.
+    unsafe { session.as_ref() }
+        .map(|session| &session.0)
+        .ok_or_else(|| refused("the session is NULL"))
+}
+
+/// Opens a user-following session (see the header). `token_cb` (NULL
+/// without `"auth": {"bearer": true}`) gives the app's bearer.
+///
+/// # Safety
+/// `config_json` is NUL-terminated; `token_cb` and `ctx` stay valid, from
+/// any thread, until `jazz_session_close` returns; `err` is NULL or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_session_open(
+    config_json: *const c_char,
+    token_cb: JazzTokenCallback,
+    ctx: *mut c_void,
+    err: *mut *mut c_char,
+) -> *mut JazzSession {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let config = unsafe { text(config_json, "config_json") }?;
+        if let Some(version) = serde_json::from_str::<Json>(config)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(Json::as_u64))
+        {
+            contract.set(version);
+        }
+        let (tokens, gate) = match token_cb {
+            Some(cb) => {
+                let (host, gate) = host_tokens(cb, ctx);
+                let tokens: std::sync::Arc<dyn jazz_app::TokenProvider> = std::sync::Arc::new(host);
+                (Some(tokens), Some(gate))
+            }
+            None => (None, None),
+        };
+        let core = crate::session::SessionCore::open(config, tokens)?;
+        if let Some(gate) = gate {
+            core.on_close(Box::new(move || gate.close()));
+        }
+        Ok(Box::into_raw(Box::new(JazzSession(core))))
+    })
+}
+
+/// Calls a session's `method` with `args_json` (see the header); returns
+/// its result as JSON.
+///
+/// # Safety
+/// `session` comes from `jazz_session_open` and is not closed; the strings
+/// are NUL-terminated; `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_session_call(
+    session_ptr: *const JazzSession,
+    method: *const c_char,
+    args_json: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let core = unsafe { session(session_ptr) }?;
+        contract.set(core.contract);
+        // SAFETY: as above.
+        let (method, args) = unsafe { (text(method, "method")?, text(args_json, "args_json")?) };
+        let args = if args.trim().is_empty() {
+            Json::Object(Default::default())
+        } else {
+            crate::convert::parse(args, "args_json")?
+        };
+        Ok(into_c(core.call(method, &args)?.to_string()))
+    })
+}
+
+/// A handle acting for the user the session has signed in now (kind
+/// `"noUser"`, with `"status"`, while there is none). Free it with
+/// `jazz_close`, which leaves the session open; once the session's user
+/// changes, its calls fail with kind `"replaced"` (contract 2; `"closed"`
+/// otherwise): fetch the new one when the snapshot's `clientEpoch` changes.
+///
+/// # Safety
+/// `session` comes from `jazz_session_open` and is not closed; `err` is
+/// NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_session_jazz(
+    session_ptr: *const JazzSession,
+    err: *mut *mut c_char,
+) -> *mut JazzHandle {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let core = unsafe { session(session_ptr) }?;
+        contract.set(core.contract);
+        Ok(Box::into_raw(Box::new(JazzHandle(core.jazz()?))))
+    })
+}
+
+/// Calls `cb` with kind `"session"` and each snapshot's JSON, the current
+/// one first, on a thread of its own, until `jazz_unwatch`; when the
+/// session closes, a last call with kind `"error"` and
+/// `{"kind":"closed",…}`.
+///
+/// # Safety
+/// `session` comes from `jazz_session_open` and is not closed; `cb` and
+/// `ctx` stay valid, from any thread, until `jazz_unwatch` returns; `err`
+/// is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_session_watch(
+    session_ptr: *const JazzSession,
+    cb: JazzCallback,
+    ctx: *mut c_void,
+    err: *mut *mut c_char,
+) -> *mut JazzWatch {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let core = unsafe { session(session_ptr) }?;
+        contract.set(core.contract);
+        let cb = cb.ok_or_else(|| refused("the callback is NULL"))?;
+        let ctx = Context(ctx);
+        let watch = core.watch(Box::new(move |state| {
+            let ctx = &ctx;
+            let (kind, json) = match state {
+                Some(state) => (c"session", state),
+                None => (c"error", error_json(&JazzError::Closed)),
+            };
+            let json = CString::new(json).unwrap_or_default();
+            // SAFETY: per `jazz_session_watch`'s contract.
+            unsafe { cb(ctx.0, kind.as_ptr(), json.as_ptr()) };
+        }))?;
+        Ok(Box::into_raw(Box::new(JazzWatch(watch))))
+    })
+}
+
+/// Closes the session and frees it: every handle it gave fails with kind
+/// `"closed"` (free them with `jazz_close`, before or after), every watch
+/// gets its last callback, and no token callback runs once it returns.
+///
+/// # Safety
+/// `session` is NULL or from `jazz_session_open`, not yet closed; no other
+/// call on it runs concurrently with or follows this one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_session_close(session: *mut JazzSession) {
+    if session.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: per the function's contract.
+        let session = unsafe { Box::from_raw(session) };
+        let _ = session.0.close();
+    }));
+}
+
 /// Frees a string a function of this API returned or stored in `*err`.
 ///
 /// # Safety
@@ -589,45 +748,53 @@ pub unsafe extern "C" fn jazz_open_user(
             contract.set(version);
         }
         let cb = token_cb.ok_or_else(|| refused("the token callback is NULL"))?;
-        // The callback and its ctx while the handle is open: `jazz_close`
-        // waits for a fetch in progress and clears it, so no fetch calls
-        // the host after close returns (a late one fails, without signing
-        // anyone out).
-        let gate: std::sync::Arc<TokenGate> =
-            std::sync::Arc::new(crate::gate::Gate::new((cb, TokenRef(ctx))));
-        let calling = gate.clone();
-        let host = crate::core::HostTokens(std::sync::Arc::new(move |reason: &str| {
-            calling
-                .call(|&(cb, ctx)| {
-                    let reason = CString::new(reason).unwrap_or_default();
-                    let mut token: *mut c_char = ptr::null_mut();
-                    // SAFETY: per `jazz_open_user`'s contract, while the
-                    // handle (this gate) is open.
-                    let failed = unsafe { cb(ctx.0, reason.as_ptr(), &mut token) };
-                    let text = if token.is_null() {
-                        None
-                    } else {
-                        // SAFETY: the callback sets a NUL-terminated
-                        // `malloc`ed string.
-                        let text = unsafe { CStr::from_ptr(token) }
-                            .to_string_lossy()
-                            .into_owned();
-                        unsafe { free(token.cast()) };
-                        Some(text)
-                    };
-                    if failed != 0 {
-                        return Err(text.unwrap_or_else(|| "the token callback failed".into()));
-                    }
-                    Ok(text)
-                })
-                .unwrap_or_else(|| Err("the app is closed".into()))
-        }));
+        let (host, gate) = host_tokens(cb, ctx);
         let core = Core::open_with_tokens(config, Some(std::sync::Arc::new(host)))?;
         // Closing waits for fetches in progress (but its own, when closed
         // from inside the callback); no fetch calls the host after.
         core.on_close(Box::new(move || gate.close()));
         Ok(Box::into_raw(Box::new(JazzHandle(core))))
     })
+}
+
+/// A C host's token callback as a token provider, behind a gate its
+/// handle's (or session's) close shuts: the callback and its ctx while open;
+/// close waits for a fetch in progress and clears it, so no fetch calls the
+/// host after close returns (a late one fails, without signing anyone out).
+fn host_tokens(
+    cb: unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32,
+    ctx: *mut c_void,
+) -> (crate::core::HostTokens, std::sync::Arc<TokenGate>) {
+    let gate: std::sync::Arc<TokenGate> =
+        std::sync::Arc::new(crate::gate::Gate::new((cb, TokenRef(ctx))));
+    let calling = gate.clone();
+    let host = crate::core::HostTokens(std::sync::Arc::new(move |reason: &str| {
+        calling
+            .call(|&(cb, ctx)| {
+                let reason = CString::new(reason).unwrap_or_default();
+                let mut token: *mut c_char = ptr::null_mut();
+                // SAFETY: per `jazz_open_user`'s contract, while the
+                // handle (this gate) is open.
+                let failed = unsafe { cb(ctx.0, reason.as_ptr(), &mut token) };
+                let text = if token.is_null() {
+                    None
+                } else {
+                    // SAFETY: the callback sets a NUL-terminated
+                    // `malloc`ed string.
+                    let text = unsafe { CStr::from_ptr(token) }
+                        .to_string_lossy()
+                        .into_owned();
+                    unsafe { free(token.cast()) };
+                    Some(text)
+                };
+                if failed != 0 {
+                    return Err(text.unwrap_or_else(|| "the token callback failed".into()));
+                }
+                Ok(text)
+            })
+            .unwrap_or_else(|| Err("the app is closed".into()))
+    }));
+    (host, gate)
 }
 
 /// A watch of session or sync states (opaque to C).
