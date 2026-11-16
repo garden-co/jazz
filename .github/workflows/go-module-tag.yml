@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release, e.g. 2.0.0-alpha.65: v<version> must exist, and its draft release must hold the libjazz_ffi archives."
+        description: "Release, e.g. 2.0.0-alpha.66: v<version> must exist, and its draft release must hold the libjazz_ffi archives."
         required: true
         type: string
       dry-run:
