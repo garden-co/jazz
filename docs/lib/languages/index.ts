@@ -76,9 +76,9 @@ export const LANGUAGES: readonly Language[] = [
     bindings: {
       file: "examples/stage-plan/apps/kotlin-cli/src/main/kotlin/JazzApp.kt",
       lang: "kotlin",
-      symbols: ["TaskStatus", "Task", "TaskInsert"],
+      symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Go",
