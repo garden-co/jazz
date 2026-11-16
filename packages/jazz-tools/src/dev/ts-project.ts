@@ -22,7 +22,7 @@ export const PERMISSIONS_TS_FILE = "permissions.ts";
 export const MIGRATIONS_DIR = "migrations";
 
 /** Where a project keeps `schema.ts`: the root, ./src, ./src/lib. */
-export const SCHEMA_ROOTS = [".", "src", join("src", "lib")];
+export const SCHEMA_ROOTS = [".", "src", "src/lib"];
 
 export type LoadModule = (file: string) => Promise<Record<string, unknown>>;
 
