@@ -520,6 +520,29 @@ describe("browser session", () => {
       .toEqual(["unsent"]);
   }, 60_000);
 
+  it("names no pending rows while the thin runtime still uploads, then the local-first Db's", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    const seen: (readonly string[] | null)[] = [];
+    const stop = kept.onPendingUploadRowsChange(app.notes, (ids) => seen.push(ids));
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The thin runtime cannot name its writes' rows: unknown, not "none".
+    expect(kept.getPendingUploadRows(app.notes)).toBeNull();
+    kept.insert(app.notes, { text: "local" });
+    expect(kept.getPendingUploadRows(app.notes)).toBeNull();
+
+    await kept.reconnect();
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    // Drained: the answer is the local-first Db's own, and it is complete.
+    await expect.poll(() => kept.getPendingUploadRows(app.notes), { timeout: 10_000 }).toEqual([]);
+    expect(seen.at(-1)).toEqual([]);
+    stop();
+  }, 60_000);
+
   it("keeps an app that went offline offline across the upgrade", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());

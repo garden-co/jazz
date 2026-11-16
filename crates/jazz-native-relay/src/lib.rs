@@ -539,6 +539,12 @@ pub enum ForegroundDbCommandRequest {
     /// store that syncs everything again. Writes the server had not confirmed
     /// are dropped, and counted in the answer.
     DeleteStore,
+    /// Ids of `table`'s rows with a write the server has neither accepted
+    /// nor refused yet: the foreground's own and the ones the scope's store
+    /// recovered after a restart (append-only, as above).
+    PendingUploadRows {
+        table: String,
+    },
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -756,6 +762,10 @@ pub enum ForegroundDbCommandResponse {
     /// the server had not confirmed were dropped with the store.
     StoreDeleted {
         pending_uploads: u64,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::PendingUploadRows`], sorted.
+    PendingUploadRows {
+        rows: Vec<[u8; 16]>,
     },
 }
 

@@ -58,7 +58,7 @@ import {
   WriteWaitTimeoutError,
 } from "./client.js";
 import { assertBacklogRows } from "./backlog-rows.js";
-import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
+import { samePendingUploadRows, sameSyncStatus, type SyncStatus } from "./sync-status.js";
 import type { TextAnchors } from "./text-anchors.js";
 import {
   type BrowserForegroundNodeLease,
@@ -433,6 +433,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "onMutationError",
   "textAnchors",
   "getSyncStatus",
+  "getPendingUploadRows",
   "waitForSync",
   "getConfig",
   "setDevMode",
@@ -2422,6 +2423,7 @@ export class Db {
   private readonly movable = new Set<{ move(next: Db): void }>();
   private readonly shutdownAbort = new AbortController();
   private syncStatusSnapshot: SyncStatus | null = null;
+  private pendingUploadRowsSnapshots = new Map<string, readonly string[] | null>();
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -3043,6 +3045,91 @@ export class Db {
     // went offline: the status says it then (`authReason`).
     const stopAuth = this.authStateStore.onChange(publish);
     subscription.signal.addEventListener("abort", stopAuth, { once: true });
+    return end;
+  }
+
+  /**
+   * Ids of `table`'s rows with a write the server has neither accepted nor
+   * refused yet, sorted: the rows to show as "not sent yet". In Node and
+   * React Native this includes writes recovered from local storage after a
+   * restart; a browser tab names its own writes, as
+   * {@link SyncStatus.pendingUploads} counts them.
+   *
+   * `null` when this Db cannot tell (its client is not created yet, or its
+   * runtime does not report rows), which is not "none pending". The same
+   * array is returned until the rows change, so it can back
+   * `useSyncExternalStore` directly.
+   */
+  getPendingUploadRows<T, Init>(table: TableProxy<T, Init>): readonly string[] | null {
+    return this.pendingUploadRowsSnapshot(
+      table._table,
+      this.connection.pendingUploadRows(table._table),
+    );
+  }
+
+  private pendingUploadRowsSnapshot(
+    table: string,
+    next: readonly string[] | null,
+  ): readonly string[] | null {
+    const last = this.pendingUploadRowsSnapshots.get(table);
+    if (last !== undefined && samePendingUploadRows(last, next)) return last;
+    this.pendingUploadRowsSnapshots.set(table, next);
+    return next;
+  }
+
+  /**
+   * Call `listener` whenever {@link getPendingUploadRows} of `table` changes.
+   *
+   * @returns an unsubscribe callback
+   */
+  onPendingUploadRowsChange<T, Init>(
+    table: TableProxy<T, Init>,
+    listener: (ids: readonly string[] | null) => void,
+  ): () => void {
+    let last = this.getPendingUploadRows(table);
+    const deliver = (ids: readonly string[] | null) => {
+      if (samePendingUploadRows(ids, last)) return;
+      last = ids;
+      listener(ids);
+    };
+    return this.registerMovable((db) => {
+      const stop = db.pendingUploadRowsChangeRegistration(table, deliver);
+      // Moved at the upgrade: the rows now cover both runtimes.
+      if (db.successor) deliver(db.getPendingUploadRows(table));
+      return stop;
+    }, true);
+  }
+
+  /** How this Db reports pending row changes: its own, or combined with its successor's. */
+  private pendingUploadRowsChangeRegistration<T, Init>(
+    table: TableProxy<T, Init>,
+    listener: (ids: readonly string[] | null) => void,
+  ): () => void {
+    return this.onPendingUploadRowsChangeHere(table, listener);
+  }
+
+  private onPendingUploadRowsChangeHere<T, Init>(
+    table: TableProxy<T, Init>,
+    listener: (ids: readonly string[] | null) => void,
+  ): () => void {
+    const subscription = new AbortController();
+    const end = () => subscription.abort();
+    this.shutdownAbort.signal.addEventListener("abort", end, { once: true });
+    subscription.signal.addEventListener(
+      "abort",
+      () => this.shutdownAbort.signal.removeEventListener("abort", end),
+      { once: true },
+    );
+    let published = this.getPendingUploadRows(table);
+    // The raw upload-status signal, not `getSyncStatus`: a write that joins
+    // as another settles keeps the public status equal, and on React Native
+    // this subscription is what keeps the relay's store polled.
+    this.connection.onSyncStatusChange(() => {
+      const ids = this.getPendingUploadRows(table);
+      if (ids === published) return;
+      published = ids;
+      listener(ids);
+    }, subscription.signal);
     return end;
   }
 
@@ -4330,8 +4417,42 @@ export class Db {
       if (combined && sameSyncStatus(status, combined)) return combined;
       return (combined = status);
     };
+    // While this Db's runtime still uploads, its rows count too; a runtime
+    // that cannot name them makes the whole answer unknown.
+    const combinedRows = new Map<string, readonly string[] | null>();
+    const pendingUploadRows = <T, Init>(table: TableProxy<T, Init>): readonly string[] | null => {
+      const ahead = next.getPendingUploadRows(table);
+      if (!draining) return ahead;
+      const own = Db.prototype.getPendingUploadRows.call(this, table) as readonly string[] | null;
+      const rows = ahead === null || own === null ? null : [...new Set([...ahead, ...own])].sort();
+      const last = combinedRows.get(table._table);
+      if (last !== undefined && samePendingUploadRows(last, rows)) return last;
+      combinedRows.set(table._table, rows);
+      return rows;
+    };
     const overrides: Record<string, (...args: never[]) => unknown> = {
       getSyncStatus: syncStatus,
+      getPendingUploadRows: pendingUploadRows,
+      pendingUploadRowsChangeRegistration: <T, Init>(
+        table: TableProxy<T, Init>,
+        listener: (ids: readonly string[] | null) => void,
+      ) => {
+        let published = pendingUploadRows(table);
+        const publish = () => {
+          const ids = pendingUploadRows(table);
+          if (ids === published) return;
+          published = ids;
+          listener(ids);
+        };
+        const stopAhead = next.onPendingUploadRowsChange(table, publish);
+        const stopOwn = draining ? this.onPendingUploadRowsChangeHere(table, publish) : () => {};
+        drainListeners.add(publish);
+        return () => {
+          stopAhead();
+          stopOwn();
+          drainListeners.delete(publish);
+        };
+      },
       syncStatusChangeRegistration: (listener: (status: SyncStatus) => void) => {
         let published = syncStatus();
         const publish = () => {
@@ -4376,6 +4497,10 @@ export class Db {
     Object.defineProperty(this, "syncStatusChangeRegistration", {
       configurable: true,
       value: overrides.syncStatusChangeRegistration,
+    });
+    Object.defineProperty(this, "pendingUploadRowsChangeRegistration", {
+      configurable: true,
+      value: overrides.pendingUploadRowsChangeRegistration,
     });
     // An app that took the thin Db offline keeps the local-first one offline.
     // The last toggle the app asked for counts, even while it is in flight.

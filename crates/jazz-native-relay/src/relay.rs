@@ -1286,6 +1286,12 @@ impl RelayWorker {
         self.persistent.pending_upload_count()
     }
 
+    /// The relay store's pending revision (see `UploadStatus`).
+    #[cfg(test)]
+    pub(crate) fn persistent_pending_revision(&self) -> u64 {
+        self.persistent.upload_status().pending_revision
+    }
+
     /// The current upstream connection's generation (tests carry the
     /// upstream themselves, and serve each new connection afresh).
     #[cfg(test)]
@@ -1354,6 +1360,7 @@ impl RelayWorker {
         // Transaction ids are (seq, node): a rebuilt store goes on above every
         // seq this node minted, so none is reused.
         let high_water = self.persistent.db.seq_high_water();
+        let revision = self.persistent.upload_status().pending_revision;
         if let Some(mut upstream) = self.upstream.take() {
             upstream.link.close();
             // Not a refusal: the socket worker reconnects to the new store.
@@ -1372,6 +1379,8 @@ impl RelayWorker {
         ))
         .map_err(|error| error.to_string())?;
         db.seed_seq_floor(high_water);
+        // Statuses compare by revision: the new store continues the old's.
+        db.seed_pending_revision(revision);
         if let Some(hint) = self.remote_link_hint {
             db.set_remote_link_hint(hint);
         }
@@ -1960,6 +1969,20 @@ fn foreground_command(
             ))
             .expect("an upload status serializes"),
         },
+        Request::PendingUploadRows { table } => {
+            let mut rows = binding.pending_upload_rows(&table)?;
+            // Each store resolves the app's name itself: a store opened
+            // along other versions keeps the table under another stored
+            // name. Both open with the app's schema, so the store knows the
+            // table too; if it ever did not, failing is right, as an empty
+            // answer would call its recovered writes sent.
+            rows.extend(client.authority.pending_upload_rows(&table)?);
+            rows.sort_unstable();
+            rows.dedup();
+            Response::PendingUploadRows {
+                rows: rows.into_iter().map(|row| *row.as_bytes()).collect(),
+            }
+        }
         Request::BeginStreamingMutation {
             mutation,
             table,
@@ -2120,6 +2143,7 @@ fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadSta
             .into_iter()
             .chain(store.oldest_pending_at)
             .min(),
+        pending_revision: own.pending_revision + store.pending_revision,
         ..own
     }
 }
