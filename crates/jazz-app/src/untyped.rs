@@ -291,17 +291,26 @@ impl Query {
         self.order_by(ACCEPTED_AT_COLUMN, direction)
     }
 
-    /// The rows `hop` reaches from this query's rows. Hops chain; filters,
-    /// order and window after a hop apply to the rows it reached.
-    /// `order_by`, `limit` or `offset` before a hop is not supported.
-    pub fn hop_to(self, hop: Hop) -> Self {
+    /// The rows `hop` reaches from this query's rows. Hops chain; filters
+    /// after a hop apply to the rows it reached. As in TypeScript, a query
+    /// has one order and window, applied to the rows it ends on: an
+    /// `order_by`, `limit` or `offset` before a hop orders and windows the
+    /// rows the hop reaches (an order names a column of the table reached),
+    /// and later ones add to or replace it as they would without the hop.
+    pub fn hop_to(mut self, hop: Hop) -> Self {
         let include_deleted = self.include_deleted;
+        let order_by = std::mem::take(&mut self.query.order_by);
+        let limit = self.query.limit.take();
+        let offset = std::mem::take(&mut self.query.offset);
         let (column, to, forward) = match hop {
             Hop::Forward { column, to } | Hop::ForwardArray { column, to } => (column, to, true),
             Hop::Reverse { column, to } => (column, to, false),
         };
         let mut query = Self::table(to);
         query.include_deleted = include_deleted;
+        query.query.order_by = order_by;
+        query.query.limit = limit;
+        query.query.offset = offset;
         let (expr, scope, hops) = match self.path("hop_to(...)") {
             Ok(path) => path,
             Err(reason) => return query.refuse(reason),
@@ -529,12 +538,10 @@ impl Query {
                 "{what} after select(...) or include(...) is not supported"
             ));
         }
-        if !self.query.order_by.is_empty() || self.query.limit.is_some() || self.query.offset > 0 {
-            return Err(format!(
-                "{what} after order_by, limit or offset is not supported; \
-                 order and window the rows it reaches"
-            ));
-        }
+        // Callers carry the order and window over to the rows they reach.
+        debug_assert!(
+            self.query.order_by.is_empty() && self.query.limit.is_none() && self.query.offset == 0
+        );
         let table = self.query.table;
         let source = self.source.unwrap_or_else(|| Source::Path {
             expr: RelationExpr::TableScan {

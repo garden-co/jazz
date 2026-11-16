@@ -237,6 +237,55 @@ async fn hop_to_follows_forward_and_reverse_relations() {
     jazz.shutdown().await.unwrap();
 }
 
+/// As in TypeScript, a query has one order and window, applied to the rows
+/// it ends on: `order_by`, `limit` and `offset` before a hop order and
+/// window the rows the hop reaches, not the rows it starts from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn order_and_window_before_a_hop_apply_to_the_rows_it_reaches() {
+    let jazz = local().await;
+    let f = fixture(&jazz).await;
+
+    // The children of every todo are Skimmed and Low-fat. Ordered by title
+    // descending and limited to one, that's Skimmed. (Applied to the todos
+    // the hop starts from, it would be Skimmed's child, Low-fat.)
+    let first: Vec<Todo> = jazz
+        .all(
+            todos::query()
+                .order_by(todos::title(), Order::Desc)
+                .limit(1)
+                .hop_to(todos::todos_via_parent()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(titles(&first), ["Skimmed"]);
+
+    // The offset before the hop skips reached rows; a later order adds to
+    // the earlier one.
+    let second: Vec<Todo> = jazz
+        .all(
+            todos::query()
+                .offset(1)
+                .hop_to(todos::todos_via_parent())
+                .order_by(todos::title(), Order::Asc),
+        )
+        .await
+        .unwrap();
+    assert_eq!(titles(&second), ["Skimmed"]);
+
+    // A limit before a hop to another table limits the projects it reaches.
+    let projects: Vec<Project> = jazz
+        .all(
+            todos::query()
+                .filter(todos::done().eq(false))
+                .limit(1)
+                .hop_to(todos::project_relation()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(projects, std::slice::from_ref(&f.home));
+    jazz.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gather_walks_a_relation_up_to_a_depth() {
     let jazz = local().await;
@@ -529,14 +578,6 @@ async fn unsupported_combinations_are_refused_as_in_typescript() {
         .unwrap_err(),
     );
     assert!(reason.contains("include(...)"), "{reason}");
-
-    // A hop windows what it reaches, not what it starts from.
-    let reason = unsupported(
-        jazz.all(todos::query().limit(1).hop_to(todos::project_relation()))
-            .await
-            .unwrap_err(),
-    );
-    assert!(reason.contains("hop_to(...)"), "{reason}");
 
     // An include's query does not hop.
     let reason = unsupported(
