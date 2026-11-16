@@ -7,8 +7,8 @@ reviewedAt: "b29b48d1a"
 A transaction groups related writes under one commit. Reads made through the transaction can see
 its staged writes, while code outside the transaction cannot see them until it commits.
 
-Permission checks follow the same rule: a transaction's writes are checked together, against the
-state the whole transaction leaves behind. See [Know when permissions are checked](#know-when-permissions-are-checked).
+The server checks a transaction's writes against what the transaction itself wrote. See
+[Know when permissions are checked](#know-when-permissions-are-checked).
 
 Jazz has two transaction types. The difference is how they handle concurrent changes:
 
@@ -178,10 +178,11 @@ wait on the transaction result.
 
 ## Know when permissions are checked
 
-Jazz doesn't check a transaction's writes one by one as you make them. It checks them all when the
-transaction is decided: by the server (the authority) when the committed transaction reaches it, or
-locally for an app without a sync server. If any write isn't allowed, the whole transaction is rejected, not
-just that write, and `wait(...)` rejects as described in [Handle errors](#handle-errors).
+Permissions are enforced by the server (the authority). For a transaction committed by a
+local-first client, it doesn't check the writes one by one as you made them: it checks them all
+when the committed transaction reaches it. If any write isn't allowed, the whole transaction is
+rejected, not just that write, and `wait(...)` rejects as described in
+[Handle errors](#handle-errors).
 
 Each write is checked against the state the transaction leaves behind:
 
@@ -190,26 +191,31 @@ Each write is checked against the state the transaction leaves behind:
 - A row the transaction deletes is still seen as it was before the transaction, so a transaction
   can use a row as evidence and delete it, such as admitting a member and removing their join
   request.
-- Writes from other transactions don't count until the authority has accepted them.
-- The order of the writes inside the transaction doesn't matter.
+- Writes from other transactions don't count until the server has accepted them.
+- For a local-first client, the order of the writes inside the transaction doesn't matter.
 
 For example:
 
 - **A task inserted with the show it needs.** If a task's insert policy requires its show to
-  exist, you can create the show and the task in one transaction, in either order. Checked alone, the task insert would be refused,
-  because the show doesn't exist yet; checked with the rest of the transaction, it's allowed. The
-  show insert itself still has to be allowed by its own policy: rows a transaction writes can't
-  grant each other access in a cycle.
+  exist, a local-first client can create the show and the task in one transaction, in either
+  order. Checked alone, the task insert would be refused, because the show doesn't exist yet;
+  checked with the rest of the transaction, it's allowed. The show insert itself still has to be
+  allowed by its own policy: rows a transaction writes can't grant each other access in a cycle.
 - **Demoting yourself while making an admin-only write.** If documents may only be created by an
   admin, a transaction that creates a document _and_ changes your own membership from admin to
   member is rejected, even if the document insert comes first. In the state the transaction leaves
   behind, you're no longer an admin.
 
+A thin client (`jazz-tools/thin`) stages each write of a transaction at the server as you make it,
+and the server checks each one when it's staged, against the rows the transaction staged before
+it. There, order matters: stage the show before the task that needs it, or the task is refused.
+
 To check whether an action is allowed before or between steps, for example to show or hide a
 button, use `db.canInsert()`, `db.canUpdate()`, `db.canDelete()` or `db.canRead()` (see
 [Check permissions before an action](/docs/schemas/policies#check-permissions-before-an-action)).
-They answer against the current data, not against the writes a transaction has staged but not
-committed, and they're advice: the transaction's own check when it's decided is final.
+They ask the server about its committed data, not about writes a transaction has staged, and
+answer `"unknown"` when the server can't be reached. They're advice: the server's check of the
+transaction itself is final.
 
 ## Use a serializable transaction to reject conflicts
 
