@@ -1565,7 +1565,7 @@ impl ServerRuntimeHandle {
     /// Wait for room for a thin request `bytes` long on the wire, before
     /// reading or joining it: in `session`'s budget (the most one request
     /// takes, [`jazz::thin::MAX_THIN_MESSAGE_BYTES`]) and, for a request
-    /// `split` into parts, the server's ([`THIN_INGRESS_SERVER_BUDGET`]).
+    /// `split` into parts, the server's (`THIN_INGRESS_SERVER_BUDGET`).
     /// While it waits, its reader reads nothing more, so the client's
     /// socket backs up instead of the session ending; the room frees as the
     /// owner runs queued requests.
