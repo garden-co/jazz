@@ -91,10 +91,15 @@ func openBackendClient(t *testing.T, srv server, token string) *jazz.DB {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	permissions, err := os.ReadFile("jazz.permissions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	db, err := jazzapp.Open(ctx, jazz.Config{
-		AppID:     srv.appID,
-		ServerURL: srv.url,
-		Storage:   jazz.StorageMemory,
+		AppID:       srv.appID,
+		ServerURL:   srv.url,
+		Storage:     jazz.StorageMemory,
+		Permissions: string(permissions),
 		Auth: jazz.Credential(func(context.Context, jazz.TokenReason) (string, error) {
 			return token, nil
 		}),
@@ -157,8 +162,8 @@ func TestBackendClient(t *testing.T) {
 	if err := trusted.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
-	if _, err := asAlice.Account(ctx); !errors.Is(err, jazz.ErrClosed) {
-		t.Fatalf("a ForUser DB after its parent's Shutdown = %v, want ErrClosed", err)
+	if _, err := jazzapp.Shows.Query().All(ctx, asAlice); !errors.Is(err, jazz.ErrClosed) {
+		t.Errorf("a ForUser DB's query after its parent's Shutdown = %v, want ErrClosed", err)
 	}
 	asAlice.Close()
 	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(200 * time.Millisecond) {

@@ -22,6 +22,10 @@ type Config struct {
 	// App is the text of jazz.app.json.
 	App   string `json:"app"`
 	AppID string `json:"appId,omitempty"`
+	// Permissions is the text of the app's jazz.permissions.json: a
+	// backend client (Auth: Credential) needs it, as TS createJazzClient
+	// does. It is not published.
+	Permissions string `json:"permissions,omitempty"`
 	// ServerURL is the sync server; empty keeps the app local.
 	ServerURL string `json:"serverUrl,omitempty"`
 	// DataDir is where persistent storage lives.

@@ -14,7 +14,8 @@ import (
 // Credential connects as a backend client with the OIDC tokens provider
 // gets, asked for the same reasons as Token's. Set
 // ServerURL to the main backend's /jazz. Open fails with ErrRefused when
-// the main backend trusts the token neither way.
+// the main backend trusts the token neither way. Config.Permissions must
+// be the app's jazz.permissions.json.
 func Credential(provider TokenProvider) Auth {
 	return tokenAuth{provider: provider, credential: true}
 }
