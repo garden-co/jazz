@@ -65,7 +65,7 @@ pub use advice::Advice;
 pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
-pub use edit::{EditedFrom, TextColumn};
+pub use edit::{Edits, TextColumn};
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};

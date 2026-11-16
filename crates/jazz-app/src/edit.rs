@@ -1,7 +1,7 @@
 //! Editing text columns: a mergeable (`"merge": "text"`) column's new value
 //! as an edit of the value its writer saw, so concurrent edits merge. On
 //! its own ([`Jazz::edit_text`]) or with an update's other columns
-//! ([`Jazz::update_edited`], with [`EditedFrom`]).
+//! ([`Jazz::update_edited`], with [`Edits`]).
 
 use jazz::db::LargeValueUpdate;
 use jazz::tools::{ObjectId, Value};
@@ -93,125 +93,211 @@ pub(crate) fn not_found<T: crate::Table>(
     }
 }
 
-/// Which of an update's text columns are edits, and of what: TS's
-/// `update(…, { editedFrom })`. Each column named here takes its new value
-/// from the update (which must set it to a string), applied as an edit of
-/// the value given here, as [`Jazz::edit_text`] does; the update's other
-/// columns are set as usual, all in one row update.
+/// How an update edits columns in place, as TS's `update` options do:
+/// text columns written as edits of the value their writer saw
+/// ([`Edits::edited_from`], TS's `editedFrom`), and splices and json sets
+/// ([`Edits::splice`], [`Edits::json_set`], TS's `applyDiffs`). The
+/// update's other columns are set as usual, all in one row update.
 ///
 /// ```ignore
 /// jazz.update_edited(
 ///     id,
 ///     NoteUpdate { body: Some(next), title: Some(title), ..Default::default() },
-///     EditedFrom::new().column(notes::body(), shown),
+///     Edits::new()
+///         .edited_from(notes::body(), shown)
+///         .json_set(notes::meta(), [("/seen".to_owned(), json!(true))]),
 /// ).await?;
 /// ```
-pub struct EditedFrom<T> {
-    columns: Vec<(&'static str, String)>,
+///
+/// A later entry for a column replaces an earlier one.
+pub struct Edits<T> {
+    edits: Vec<Edit>,
     table: std::marker::PhantomData<fn() -> T>,
 }
 
-impl<T> Default for EditedFrom<T> {
+#[derive(Clone, Debug)]
+enum Edit {
+    /// The update's value of `column`, as an edit of this one.
+    Text {
+        column: &'static str,
+        edited_from: String,
+    },
+    /// A splice or json set, which the update must leave `column` unset for.
+    Diff {
+        column: &'static str,
+        diff: LargeValueUpdate,
+    },
+}
+
+impl Edit {
+    fn column(&self) -> &'static str {
+        match self {
+            Edit::Text { column, .. } | Edit::Diff { column, .. } => column,
+        }
+    }
+}
+
+impl<T> Default for Edits<T> {
     fn default() -> Self {
         Self {
-            columns: Vec::new(),
+            edits: Vec::new(),
             table: std::marker::PhantomData,
         }
     }
 }
 
-impl<T> Clone for EditedFrom<T> {
+impl<T> Clone for Edits<T> {
     fn clone(&self) -> Self {
         Self {
-            columns: self.columns.clone(),
+            edits: self.edits.clone(),
             table: std::marker::PhantomData,
         }
     }
 }
 
-impl<T> std::fmt::Debug for EditedFrom<T> {
+impl<T> std::fmt::Debug for Edits<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map()
-            .entries(self.columns.iter().map(|(c, v)| (c, v)))
-            .finish()
+        f.debug_list().entries(&self.edits).finish()
     }
 }
 
-impl<T> EditedFrom<T> {
+impl<T> Edits<T> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// `column`'s new value is an edit of `edited_from`, the value its
-    /// writer saw.
-    pub fn column<V: TextColumn>(
-        mut self,
-        column: Column<T, V>,
-        edited_from: impl Into<String>,
-    ) -> Self {
-        let name = column.name();
-        let edited_from = edited_from.into();
-        match self.columns.iter_mut().find(|(c, _)| *c == name) {
-            Some(entry) => entry.1 = edited_from,
-            None => self.columns.push((name, edited_from)),
+    fn with(mut self, edit: Edit) -> Self {
+        let column = edit.column();
+        match self.edits.iter_mut().find(|e| e.column() == column) {
+            Some(entry) => *entry = edit,
+            None => self.edits.push(edit),
         }
         self
     }
 
+    /// `column`'s new value, which the update sets, is an edit of
+    /// `edited_from`, the value its writer saw (TS's `editedFrom`).
+    pub fn edited_from<V: TextColumn>(
+        self,
+        column: Column<T, V>,
+        edited_from: impl Into<String>,
+    ) -> Self {
+        self.with(Edit::Text {
+            column: column.name(),
+            edited_from: edited_from.into(),
+        })
+    }
+
+    /// Splices within one page of a bytes or text cell, as
+    /// [`Jazz::splice`] (TS's `applyDiffs`). The update must leave `column`
+    /// unset.
+    pub fn splice<V: crate::LargeColumn>(
+        self,
+        column: Column<T, V>,
+        within: crate::Page,
+        splices: Vec<crate::Splice>,
+    ) -> Self {
+        self.with(Edit::Diff {
+            column: column.name(),
+            diff: LargeValueUpdate::Splice {
+                column: column.name().to_owned(),
+                within,
+                splices,
+            },
+        })
+    }
+
+    /// Replaces members of a json cell by pointer, as [`Jazz::json_set`]
+    /// (TS's `applyDiffs`). The update must leave `column` unset.
+    pub fn json_set<V: crate::JsonColumn>(
+        self,
+        column: Column<T, V>,
+        edits: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) -> Self {
+        self.with(Edit::Diff {
+            column: column.name(),
+            diff: LargeValueUpdate::JsonSet {
+                column: column.name().to_owned(),
+                edits: edits
+                    .into_iter()
+                    .map(|(at, value)| jazz::db::JsonSetEdit { at, value })
+                    .collect(),
+            },
+        })
+    }
+
     fn is_empty(&self) -> bool {
-        self.columns.is_empty()
+        self.edits.is_empty()
     }
 }
 
 type Cells = Vec<(String, Value)>;
 
-/// Splits `cells` into the plain sets and the text edits `edited_from`
-/// names, as TS lowers `editedFrom`.
+/// Splits `cells` into the plain sets and the edits, as TS lowers
+/// `editedFrom` and `applyDiffs`.
 fn lower<T: crate::Table>(
     mut cells: Cells,
-    edited_from: EditedFrom<T>,
+    edits: Edits<T>,
 ) -> Result<(Cells, Vec<LargeValueUpdate>)> {
-    let mut edits = Vec::with_capacity(edited_from.columns.len());
-    for (column, from) in edited_from.columns {
-        let at = cells.iter().position(|(name, _)| name == column);
-        let text = match at.map(|at| cells.remove(at).1) {
-            Some(Value::Text(text)) => text,
-            _ => {
-                return Err(crate::Error::Config(format!(
-                    "{}.{column} is edited from a value: the update must set it to a string",
-                    T::NAME
-                )));
+    let mut lowered = Vec::with_capacity(edits.edits.len());
+    for edit in edits.edits {
+        let at = cells.iter().position(|(name, _)| name == edit.column());
+        match edit {
+            Edit::Text {
+                column,
+                edited_from,
+            } => {
+                let text = match at.map(|at| cells.remove(at).1) {
+                    Some(Value::Text(text)) => text,
+                    _ => {
+                        return Err(crate::Error::Config(format!(
+                            "{}.{column} is edited from a value: the update must set it to a string",
+                            T::NAME
+                        )));
+                    }
+                };
+                lowered.push(LargeValueUpdate::TextEdit {
+                    column: column.to_owned(),
+                    text,
+                    edited_from,
+                });
             }
-        };
-        edits.push(LargeValueUpdate::TextEdit {
-            column: column.to_owned(),
-            text,
-            edited_from: from,
-        });
+            Edit::Diff { column, diff } => {
+                if at.is_some() {
+                    return Err(crate::Error::Config(format!(
+                        "{}.{column} is edited in place: the update must leave it unset",
+                        T::NAME
+                    )));
+                }
+                lowered.push(diff);
+            }
+        }
     }
-    Ok((cells, edits))
+    Ok((cells, lowered))
 }
 
 impl Jazz {
-    /// Updates the row with this id, as [`Jazz::update`], with the text
-    /// columns `edited_from` names applied as edits of the values given
-    /// there, as [`Jazz::edit_text`] does: TS's
-    /// `update(table, id, data, { editedFrom })`. The sets and the edits
-    /// commit as one row update; a failing edit leaves the row unchanged.
+    /// Updates the row with this id, as [`Jazz::update`], with `edits`
+    /// applied in place: text columns as edits of the values their writer
+    /// saw, as [`Jazz::edit_text`] does, and splices and json sets, as
+    /// [`Jazz::splice`] and [`Jazz::json_set`] do. TS's
+    /// `update(table, id, data, { editedFrom, applyDiffs })`. The sets and
+    /// the edits commit as one row update; a failing edit leaves the row
+    /// unchanged.
     pub async fn update_edited<U: Update>(
         &self,
         id: ObjectId,
         update: U,
-        edited_from: EditedFrom<U::Row>,
+        edits: Edits<U::Row>,
     ) -> Result<()> {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = update.into_cells(&implementations)?;
-            let written = if edited_from.is_empty() {
+            let written = if edits.is_empty() {
                 client.update(<U::Row as crate::Table>::NAME, id, cells)?
             } else {
-                let (cells, edits) = lower::<U::Row>(cells, edited_from)?;
+                let (cells, edits) = lower::<U::Row>(cells, edits)?;
                 client
                     .update_with_edits(<U::Row as crate::Table>::NAME, id, cells, edits)
                     .map_err(|error| not_found::<U::Row>(error, id))?
@@ -228,10 +314,10 @@ impl Transaction {
         &self,
         id: ObjectId,
         update: U,
-        edited_from: EditedFrom<U::Row>,
+        edits: Edits<U::Row>,
     ) -> Result<()> {
         let cells = update.into_cells(self.implementations())?;
-        let (cells, edits) = lower::<U::Row>(cells, edited_from)?;
+        let (cells, edits) = lower::<U::Row>(cells, edits)?;
         self.client()
             .update_with_edits(<U::Row as crate::Table>::NAME, id, cells, edits)
             .map_err(|error| not_found::<U::Row>(error, id))?;
@@ -246,9 +332,9 @@ impl crate::transaction::OpenTransaction {
         &self,
         id: ObjectId,
         update: U,
-        edited_from: EditedFrom<U::Row>,
+        edits: Edits<U::Row>,
     ) -> Result<()> {
-        self.on(move |tx| async move { tx.update_edited(id, update, edited_from) })
+        self.on(move |tx| async move { tx.update_edited(id, update, edits) })
             .await
     }
 }
