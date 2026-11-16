@@ -16,6 +16,7 @@ Depend on the `jazz-app-support` crate:
 ```toml title="Cargo.toml"
 [dependencies]
 jazz-app-support = "=2.0.0-alpha.66"
+futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -41,7 +42,76 @@ its `generate --check` still works. Commit `schema.ts` and the generated files, 
 bindings with `mod jazz_app;`. The [Reading](/docs/reading/queries) and
 [Writing](/docs/writing/writing-data) pages have a Rust tab for each example.
 
+## Open the app as an end user
+
+An end user's client syncs through your app's Jazz endpoint (its backend's handler), never with the
+core directly. Open it with `Config::user`, signed in with a device account (the key is the account)
+or with your own sign-in's bearer token:
+
+<include cwd lang="rust" meta='title="src/main.rs"'>
+  ../examples/docs/backend-client-rs/src/client.rs#context-setup-rust-client
+</include>
+
+To follow who is signed in, as TypeScript's `createJazzClient` does, open a `JazzSession`. It starts
+with a device account (a guest), and a user your sign-in names takes the guest's account over if
+they have none yet:
+
+<include cwd lang="rust" meta='title="src/main.rs"'>
+  ../examples/docs/backend-client-rs/src/client.rs#context-setup-rust-session
+</include>
+
+`jazz.session().state()` and `.changes()` give the session's state: `SignedIn`, `Expired` or
+`SignedOut`. When the backend ends a session, the client reconnects with a fresh bearer.
+
+### Storage
+
+- `Storage::Memory` keeps the store for the life of the process only.
+- `Storage::Dir(dir)` keeps it on disk. With `Config::user`, `dir` holds that one user's store; with
+  `JazzSession`, each account's store sits in `dir/<account id>/`, with the device key in
+  `dir/device.key`.
+- `jazz.delete_client_storage()` deletes the store (one account's, under a session). It's refused
+  with `StoreHeld` while another open client holds it.
+
+Keep a device key in your platform's secure store: a `DeviceKey` reads and writes as
+`jazz-auth-v1:…`, the same form as TypeScript's `exportDeviceKey`. `DeviceKey::load_or_create(path)`
+keeps it in a file only this user can read, for hosts without a store.
+
+### Reads and sync
+
+An end user's `all`, `one`, `get` and `subscribe` read local data first, and the first load waits up
+to 5 seconds for the server, as TypeScript's browser and React Native clients do. Name a tier to
+choose: `all_with(query, ReadTier::Remote)` or `ReadTier::LocalOnly`, or pass `ReadOptions`. See
+[Loading tiers](/docs/reading/loading-tiers).
+
+`jazz.sync_status()` and `jazz.sync_changes()` give TypeScript's `SyncStatus`, with the same fields:
+`link`, `pendingUploads`, `oldestPendingAt`, `rejected`, `lastError` and `synced`. The connection
+falls back to an HTTP stream on its own when WebSockets can't get through, as the browser client
+does.
+
+### Closing
+
+- `jazz.shutdown()` stops the client: calls already made finish (for up to 30 seconds), then
+  subscriptions end. Call it before exiting with `Storage::Dir`, so the store is flushed and closed.
+- `jazz.close(timeout)` first waits up to `timeout` (`CLOSE_TIMEOUT` is 10 seconds) for queued
+  writes to reach the server, then shuts down. With `Storage::Memory`, writes that never arrived are
+  lost and reported as `Error::Unsynced { pending }`; `Duration::ZERO` closes at once and accepts
+  that.
+- With `JazzSession`, `session.sign_out()` signs out and keeps the session usable, while
+  `session.close()` ends it.
+
+For a service acting with a machine credential instead of as a user, see
+[Backend Client](/docs/setup/backend-client).
+
 ## Not supported yet
 
 - running your app's main backend (serving its `/jazz` and publishing its permissions): run it in
-  TypeScript with `createJazz`.
+  TypeScript with `createJazz`;
+- a built-in platform keychain or secure store for device keys: keep the key yourself (above);
+- cookie sessions, and renewing a session over the open connection: a Rust client signs in with a
+  bearer and reconnects with a fresh one;
+- `JazzSession`'s browser-only parts: focus and visibility re-checks (call `session.refresh()` when
+  your sign-in changes), cross-tab sign-out, `clearOnSignOut` (sign-out keeps each account's store),
+  `linkDeviceAccountOnSignUp` (following the backend links a guest by default instead, with
+  `link_guest`) and the thin-client upgrade;
+- the session snapshot's `client`, `localFirst` and `pending` fields: use `session.jazz()` and
+  `client_epoch`.

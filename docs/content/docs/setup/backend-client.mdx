@@ -235,6 +235,8 @@ backend's `authenticate` names the user by.
 
     `job.for_user(user_id, claims)` fails with `Error::NoAccount` for a user with no account yet,
     and with `Error::Refused` when your main backend refuses the identity.
+    It also refuses when your app's `jazz.permissions.json` doesn't match the permissions your main
+    backend serves: regenerate it with `npx jazz-tools generate` and redeploy.
 
   </Tab>
   <Tab value="Go">
