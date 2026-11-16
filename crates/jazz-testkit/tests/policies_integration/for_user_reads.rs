@@ -125,3 +125,135 @@ async fn for_user_claims_do_not_bleed_between_handles_of_one_user() {
         })
         .await;
 }
+
+/// A schema of projects (readable by everyone) and their docs (readable in
+/// the session's `org`), with one project and a doc in each of two orgs.
+async fn projects_with_docs(
+    server: &JazzServer,
+    schema: &Schema,
+) -> (ObjectId, ObjectId, ObjectId) {
+    let seeder = connect_ready_client(server, schema, "seeder", "docs", WAIT).await;
+    let project = seeder
+        .insert("projects", row_input!("name" => "p"))
+        .unwrap();
+    seeder
+        .wait_for_transaction(project.2.unwrap(), DurabilityTier::GlobalServer)
+        .await
+        .unwrap();
+    let project = project.0;
+    let d1 = seeder
+        .insert(
+            "docs",
+            row_input!("project_id" => Value::Uuid(project), "org" => "o1"),
+        )
+        .unwrap();
+    let d2 = seeder
+        .insert(
+            "docs",
+            row_input!("project_id" => Value::Uuid(project), "org" => "o2"),
+        )
+        .unwrap();
+    for tx in [d1.2, d2.2] {
+        seeder
+            .wait_for_transaction(tx.unwrap(), DurabilityTier::GlobalServer)
+            .await
+            .unwrap();
+    }
+    (project, d1.0, d2.0)
+}
+
+fn projects_and_docs_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .table(
+            TableSchema::builder("docs")
+                .fk_column("project_id", "projects")
+                .column("org", ColumnType::Text)
+                .policies(permissions(|p| {
+                    p.allow_read()
+                        .where_(pe::eq("org", pe::session(vec!["claims", "org"])));
+                })),
+        )
+        .table(probe_table())
+        .build()
+}
+
+/// How many related rows the first result nests under `relation`.
+fn nested_count(rows: &[jazz::tools::QueryResult], relation: &str) -> usize {
+    rows.first()
+        .and_then(|row| row.fields.iter().find(|field| field.name == relation))
+        .map(|field| match &field.value {
+            Value::Array(items) => items.len(),
+            other => panic!("{relation} is not nested rows: {other:?}"),
+        })
+        .unwrap_or_else(|| panic!("no {relation} in {rows:?}"))
+}
+
+/// A local one-shot read for a user nests only the related rows that
+/// user's read policy grants, as their subscription does.
+#[tokio::test]
+async fn for_user_local_read_nests_only_related_rows_the_user_may_read() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = projects_and_docs_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
+            let (_, d1, d2) = projects_with_docs(&server, &schema).await;
+
+            let backend = fresh_backend(&server, &schema, "backend").await;
+            // The backend holds both docs (it read them as itself).
+            let mut held = remote_ids(&backend, "docs").await;
+            held.sort();
+            let mut both = vec![d1, d2];
+            both.sort();
+            assert_eq!(held, both);
+            let _ = remote_ids(&backend, "projects").await;
+
+            let in_o1 = backend.for_session(bob().with_claims(serde_json::json!({ "org": "o1" })));
+            let query = Query::from("projects").array_subquery(jazz::query::ArraySubquery::new(
+                "docs",
+                "docs",
+                "project_id",
+                "id",
+            ));
+            let local = in_o1.query(query, ReadTier::LocalFirst).await.unwrap();
+            assert_eq!(nested_count(&local, "docs"), 1, "local one-shot read");
+
+            server.shutdown().await;
+        })
+        .await;
+}
+
+/// A read inside a transaction opened for a user reads by that user's read
+/// policy and claims.
+#[tokio::test]
+async fn for_user_transaction_read_reads_as_the_user() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = projects_and_docs_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
+            let (_, d1, _) = projects_with_docs(&server, &schema).await;
+
+            let backend = fresh_backend(&server, &schema, "backend").await;
+            let _ = remote_ids(&backend, "docs").await;
+
+            let in_o1 = backend.for_session(bob().with_claims(serde_json::json!({ "org": "o1" })));
+            let tx = in_o1.begin_mergeable_transaction().unwrap();
+            let rows = tx
+                .client()
+                .query(Query::from("docs"), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            let ids: Vec<_> = rows
+                .into_iter()
+                .map(|row| row.key.row_id().unwrap())
+                .collect();
+            assert_eq!(ids, vec![d1]);
+            tx.rollback().unwrap();
+            server.shutdown().await;
+        })
+        .await;
+}
