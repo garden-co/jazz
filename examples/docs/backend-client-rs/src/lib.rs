@@ -27,6 +27,7 @@ pub async fn backend_client() -> ::jazz_app::Result<()> {
     // A backend client opens with the app's permissions too, as TypeScript's
     // `createJazzClient` does: the generated bindings embed only the schema.
     let files = AppFiles::new(jazz_app::APP, None)
+        // your app's jazz.permissions.json
         .with_permissions(include_bytes!("../../todo-server-rs/jazz.permissions.json").as_slice());
     let jazz = Jazz::open(files, config).await?;
     let open = jazz
