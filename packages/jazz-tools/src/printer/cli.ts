@@ -1,8 +1,10 @@
 /**
  * `jazz-tools print-ts --dir <app>` (hidden): write an app's alpha.66 TS
- * sources from its `jazz.app.json` and `jazz.permissions.json`. For apps
- * whose JSON is their only source (the examples without TS history);
- * `upgrade` converts apps that have alpha.65 TS.
+ * sources from its `jazz.app.json` and `jazz.permissions.json`, for the
+ * examples without TS history. Users run `upgrade` instead: it converts
+ * apps that have alpha.65 TS and writes schema.ts for a JSON-only app
+ * (checking it keeps the schema hashes and bundle id), which `generate`
+ * and `migrations create` refuse until it has one.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";

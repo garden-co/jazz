@@ -50,12 +50,12 @@ describe("generate", () => {
     await generateApp({ cwd: dir });
     await rm(join(dir, "jazz.generated.ts"));
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(
-      "no jazz.generated.ts: run `jazz-tools generate`",
+      "no jazz.generated.ts: run `npx jazz-tools generate`",
     );
     await generateApp({ cwd: dir });
     await writeFile(join(dir, "jazz.generated.ts"), "// edited\n");
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(
-      "jazz.generated.ts: not a module jazz-tools generated (its first line differs); regenerate it with `jazz-tools generate`",
+      "jazz.generated.ts: not a module jazz-tools generated (its first line differs); regenerate it with `npx jazz-tools generate`",
     );
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe("// edited\n");
   });
@@ -71,7 +71,7 @@ describe("generate", () => {
       SCHEMA.replace("done: s.boolean() }", "done: s.boolean(), note: s.string().optional() }"),
     );
     await expect(generateApp({ cwd: dir })).rejects.toThrow(
-      "the schema changed since the last version: run `jazz-tools migrations create --name <name>`",
+      "the schema changed since the last version: run `npx jazz-tools migrations create --name <name>`",
     );
     // Nothing is written when generate refuses: not the bindings, not jazz.app.json.
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe(before);

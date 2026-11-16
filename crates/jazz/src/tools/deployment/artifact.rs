@@ -128,7 +128,7 @@ impl ArtifactError {
     }
 }
 
-const REGENERATE: &str = "regenerate it with `jazz-tools generate`";
+const REGENERATE: &str = "regenerate it with `npx jazz-tools generate`";
 
 // ============================================================================
 // Codegen metadata
@@ -424,7 +424,7 @@ enum BoundRelation {
 pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> {
     let refuse = |message: String| {
         ArtifactError::new(format!(
-            "the bindings' compiled app: {message}; regenerate them with `jazz-tools generate`"
+            "the bindings' compiled app: {message}; regenerate them with `npx jazz-tools generate`"
         ))
     };
     let bound: BoundApp =
@@ -890,8 +890,8 @@ fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
         .map(|(path, text)| format!("  {path}: {text}"))
         .collect();
     Err(ArtifactError::new(format!(
-        "{} unresolved TODO{} left by `jazz-tools migrations create` or `upgrade`; replace each with \
-         the value it asks for, then run `jazz-tools generate` again:\n{}",
+        "{} unresolved TODO{} left by `npx jazz-tools migrations create` or `upgrade`; replace each with \
+         the value it asks for, then run `npx jazz-tools generate` again:\n{}",
         todos.len(),
         if todos.len() == 1 { "" } else { "s" },
         list.join("\n")
@@ -964,8 +964,8 @@ fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> 
         Some(other) if format.is_some() && !matches!(other, Json::String(_)) => Ok(root),
         None if format.is_some() => Ok(root),
         None => Err(refuse(format!(
-            "no `$schema`; the file starts {{ \"$schema\": \"{url}\", … }}. Run `jazz-tools \
-             generate` to write it"
+            "no `$schema`; the file starts {{ \"$schema\": \"{url}\", … }}. Run `npx \
+             jazz-tools generate` to write it"
         ))),
         Some(Json::String(s)) if s == legacy_url => Ok(root),
         Some(Json::String(s)) => match versioned(s) {
@@ -1136,7 +1136,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             stranded.push(format!(
                 "{APP_FILE}: history.{name}: no migration leads from it to the current `tables`, \
                  directly or through other versions, so clients holding its rows couldn't open; \
-                 add one (`jazz-tools migrations create` writes it) or remove the version"
+                 add one (`npx jazz-tools migrations create` writes it) or remove the version"
             ));
             stranded_hashes.push(*hash);
             continue;
