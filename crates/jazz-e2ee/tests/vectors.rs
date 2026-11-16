@@ -793,6 +793,12 @@ fn equality_values() {
         to_hex(&equality_value(&E::Uuid([0xab; 16]))),
         "01abababababababababababababababab"
     );
+    // An enum value is encoded by its variant name's exact UTF-8 bytes, like
+    // text; the column's type bytes (which list the variants) keep it apart
+    // from a text column.
+    assert_eq!(to_hex(&equality_value(&E::Enum("open"))), "016f70656e");
+    assert_eq!(to_hex(&equality_value(&E::Enum("done"))), "01646f6e65");
+    assert_eq!(to_hex(&equality_value(&E::Enum("é"))), "01c3a9");
 
     let identity = records::EqualityIdentity {
         application: IDENTITY.application,
@@ -831,15 +837,48 @@ fn equality_values() {
         Err(Error::InvalidInput)
     );
     assert!(token_in(records::EqualityColumnType::BigInt, E::Int(1 << 40)).is_ok());
+    // Enum columns are indexable by variant, and take only enum values.
+    let enum_type =
+        br#"{"column_type":{"type":"Enum","variants":["open","done"]},"nullable":false}"#;
+    let enum_column = records::EqualityColumn::declare(records::EqualityColumnType::Enum).unwrap();
+    let enum_token = |value: E<'_>| {
+        records::equality_token_of(
+            &equality::Builtin,
+            &root(),
+            &identity,
+            enum_type,
+            &enum_column,
+            &value,
+        )
+        .map(|token| to_hex(&token))
+    };
+    assert_ne!(
+        enum_token(E::Enum("open")).unwrap(),
+        enum_token(E::Enum("done")).unwrap()
+    );
+    assert_eq!(
+        enum_token(E::Enum("open")).unwrap(),
+        enum_token(E::Enum("open")).unwrap()
+    );
+    assert_eq!(enum_token(E::Text("open")), Err(Error::InvalidInput));
+    assert_eq!(
+        token_in(records::EqualityColumnType::Text, E::Enum("open")),
+        Err(Error::InvalidInput)
+    );
+    assert_eq!(
+        enum_token(E::Enum("open")).unwrap(),
+        "4a45324501146a617a7a2e736f6469756d2e657175616c69747900000001b27f5fa9cdb35413706405ad7a8a7dd81a93bbec0a0308a5c35eb154e128273d"
+    );
     assert_eq!(
         token(E::Float(-0.0)),
         "4a45324501146a617a7a2e736f6469756d2e657175616c69747900000001cd771c3a1e2f0e55f0cfe1cfc6f1ff86eb4ae15f9b5c9270e769602f74f956f6"
     );
-    // Arrays, rows and transaction IDs cannot be equality-indexed: the
+    // Arrays, rows, JSON and transaction IDs cannot be equality-indexed: the
     // declaration is refused, naming the type.
     for column in [
         records::EqualityColumnType::Array,
         records::EqualityColumnType::Row,
+        records::EqualityColumnType::Json,
         records::EqualityColumnType::TransactionId,
     ] {
         let refused = records::EqualityColumn::declare(column).unwrap_err();
@@ -857,6 +896,12 @@ fn equality_values() {
             .unwrap_err()
             .to_string(),
         "Equality indexes are not supported for transaction-id columns"
+    );
+    assert_eq!(
+        records::EqualityColumn::declare(records::EqualityColumnType::Json)
+            .unwrap_err()
+            .to_string(),
+        "Equality indexes are not supported for json columns"
     );
     // An equality identity is checked like a cell identity.
     assert_eq!(

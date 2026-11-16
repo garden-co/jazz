@@ -61,6 +61,7 @@ followed by:
 | Text                  | the exact UTF-8 bytes                                 |
 | Bytes                 | the bytes                                             |
 | UUID                  | the 16 bytes                                          |
+| Enum                  | the exact UTF-8 bytes of the value's variant name     |
 
 The canonical bit pattern of a float is a design choice of the token
 encoding: every NaN is encoded as `7ff8000000000000` and `-0.0` as `0.0`, so
@@ -81,16 +82,21 @@ bound by `T`, so values of different types are never compared. Fixtures
 (asserted by the crate's `equality_values` test): `0.0` and `-0.0` both
 encode as `010000000000000000`, every NaN as `017ff8000000000000`, `-2` as
 `01fffffffffffffffe`, null as `00` and the empty text as `01`.
+An enum value is encoded by its variant name, exactly as a text value (no
+length framing, since `V` is the whole hash input, and no normalisation):
+the variant `open` encodes as `016f70656e` and `done` as `01646f6e65`. The
+column's type bytes `T`, which list the variants, keep an enum column's
+tokens apart from a text column's.
 
 ## Column types
 
 An equality index is declared per column, and its type decides the
 encoding: boolean, integer (32-bit, values must fit), bigint, timestamp,
-double, text, bytes and UUID columns, as in the table above. Array, row and
-transaction-ID columns have no value encoding and cannot be equality-indexed:
-a declaration naming one is refused when it is declared, with a typed error
-that names the type (`records::EqualityColumn::declare`,
-`UnsupportedEqualityColumn`: "Equality indexes are not supported for array
+double, text, bytes, UUID and enum columns, as in the table above. Array,
+row, JSON and transaction-ID columns have no value encoding and cannot be
+equality-indexed: a declaration naming one is refused when it is declared,
+with a typed error that names the type (`records::EqualityColumn::declare`,
+`UnsupportedEqualityColumn`: "Equality indexes are not supported for json
 columns"), never at write time. Tokens are computed only through a declared
 column (`records::equality_token_of`), which refuses a value of another
 type with `InvalidInput`; there is no public entry point that hashes

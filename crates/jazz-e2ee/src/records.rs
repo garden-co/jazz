@@ -308,9 +308,9 @@ pub fn decrypt_stream_value(
 }
 
 /// A column type as an equality-index declaration names it
-/// (`E2EE_EQUALITY_FORMAT.md`, "Column types"). The scalar types have a
-/// value encoding; arrays, rows and transaction IDs do not, and a
-/// declaration naming one is refused ([`EqualityColumn::declare`]).
+/// (`E2EE_EQUALITY_FORMAT.md`, "Column types"). The scalar and enum types
+/// have a value encoding; arrays, rows, JSON and transaction IDs do not, and
+/// a declaration naming one is refused ([`EqualityColumn::declare`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EqualityColumnType {
     Boolean,
@@ -323,8 +323,11 @@ pub enum EqualityColumnType {
     Text,
     Bytes,
     Uuid,
+    /// An enum of named variants; a value is encoded by its variant.
+    Enum,
     Array,
     Row,
+    Json,
     TransactionId,
 }
 
@@ -340,8 +343,10 @@ impl EqualityColumnType {
             Self::Text => "text",
             Self::Bytes => "bytes",
             Self::Uuid => "uuid",
+            Self::Enum => "enum",
             Self::Array => "array",
             Self::Row => "row",
+            Self::Json => "json",
             Self::TransactionId => "transaction-id",
         }
     }
@@ -364,14 +369,15 @@ pub struct EqualityColumn {
 }
 
 impl EqualityColumn {
-    /// Declares an equality index on a column of `column_type`. Arrays, rows
-    /// and transaction IDs are refused with the type named.
+    /// Declares an equality index on a column of `column_type`. Arrays, rows,
+    /// JSON and transaction IDs are refused with the type named.
     pub fn declare(
         column_type: EqualityColumnType,
     ) -> core::result::Result<Self, UnsupportedEqualityColumn> {
         match column_type {
             EqualityColumnType::Array
             | EqualityColumnType::Row
+            | EqualityColumnType::Json
             | EqualityColumnType::TransactionId => Err(UnsupportedEqualityColumn { column_type }),
             column_type => Ok(Self { column_type }),
         }
@@ -397,6 +403,7 @@ impl EqualityColumn {
             (EqualityColumnType::Text, EqualityValue::Text(_)) => true,
             (EqualityColumnType::Bytes, EqualityValue::Bytes(_)) => true,
             (EqualityColumnType::Uuid, EqualityValue::Uuid(_)) => true,
+            (EqualityColumnType::Enum, EqualityValue::Enum(_)) => true,
             _ => false,
         };
         if fits {
@@ -422,6 +429,8 @@ pub enum EqualityValue<'a> {
     Text(&'a str),
     Bytes(&'a [u8]),
     Uuid([u8; 16]),
+    /// An enum value, by its variant name; compared by exact UTF-8 bytes.
+    Enum(&'a str),
 }
 
 /// The canonical bit pattern the token encoding gives every NaN; `-0.0` is
@@ -433,7 +442,8 @@ const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
 /// otherwise `01` followed by the value: one byte `00`/`01` for a boolean,
 /// eight big-endian bytes for an integer (two's complement), a timestamp or
 /// a float (its canonical bit pattern), the exact UTF-8 bytes of a text,
-/// the bytes of a byte string, the 16 bytes of a UUID.
+/// the bytes of a byte string, the 16 bytes of a UUID, the exact UTF-8
+/// bytes of an enum value's variant name.
 pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
     let mut out = vec![1u8];
     match *value {
@@ -454,6 +464,7 @@ pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
         EqualityValue::Text(value) => out.extend_from_slice(value.as_bytes()),
         EqualityValue::Bytes(value) => out.extend_from_slice(value),
         EqualityValue::Uuid(value) => out.extend_from_slice(&value),
+        EqualityValue::Enum(variant) => out.extend_from_slice(variant.as_bytes()),
     }
     out
 }
