@@ -58,6 +58,7 @@ import {
 } from "./project.js";
 import { JsonOnlyApp } from "./project.js";
 import { upgradeJsonOnly } from "./json-only.js";
+import { appOutputs, snapshot } from "./snapshot.js";
 import { environmentReads, refuseDroppedConditions } from "./permissions-check.js";
 import { refusePayloadEnums } from "./payload-enums.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
@@ -178,13 +179,11 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   }
   const scan = scanImports(project);
   const envReads = environmentReads(project, schemaSources(project, scan));
-  if (envReads.length > 0) {
-    notes.push(
-      "The old schema or permissions read the environment. The printed permissions hold the values `validate` resolved them to, " +
-        `so the env-dependent logic needs a look by hand:\n${envReads.map((r) => `  ${r}`).join("\n")}`,
-    );
-  }
   refuseDroppedConditions(project);
+  // A policy that reads the environment and compiled to a bare `true` may be
+  // a condition whose value was unset when `validate` ran: printing it would
+  // allow more than its author wrote, for good.
+  if (envReads.length > 0) refuseBareTrue(project, envReads);
   const appText = readFileSync(project.appFile, "utf8");
   const permissionsText = readFileSync(project.permissionsJsonFile, "utf8");
   const appJson = parseAppJson(appText);
@@ -421,7 +420,13 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
       ...(manifest?.changes ?? []),
       ...[...aliasEdits.values()].flatMap((e) => e.changes),
     ],
-    manual: rewrites.manual,
+    manual: [
+      ...envReads.map(
+        (read) =>
+          `${read}: the printed permissions hold the value it had when \`validate\` ran; make the env-dependent logic explicit in schema.ts`,
+      ),
+      ...rewrites.manual,
+    ],
     notes,
     typeErrors: [],
     preexistingTypeErrors: [],
@@ -435,30 +440,15 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   if (!options.skipTypecheck)
     beforeErrors = countTypeErrors(projectTypeErrors(project, writes, new Set()));
 
-  // Write, keeping what was there to put back.
-  const originals = new Map<string, string | null>();
-  for (const path of [
-    ...writes.map(([p]) => p),
-    ...deleted,
-    project.appFile,
-    project.permissionsJsonFile,
-    generatedFile,
-  ]) {
-    if (!originals.has(path))
-      originals.set(path, existsSync(path) ? readFileSync(path, "utf8") : null);
-  }
-  // `generate` writes files too (a first snapshot, bindings): what wasn't there goes again.
+  // Write, keeping what was there to put back byte for byte: the files upgrade
+  // writes or deletes, the JSON files, the bindings and migrations/ (removed
+  // if upgrade made it). Anything else `generate` adds goes again.
+  const undo = snapshot(appOutputs(project.schemaDir, [...writes.map(([p]) => p), ...deleted]));
   const filesBefore = new Set(appFiles(project.schemaDir));
   const restore = () => {
-    for (const [path, text] of originals) {
-      if (text === null) rmSync(path, { force: true });
-      else {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, text);
-      }
-    }
     for (const path of appFiles(project.schemaDir))
       if (!filesBefore.has(path)) rmSync(path, { force: true });
+    undo.restore();
   };
   for (const [path, text] of writes) writeFileSync(path, text);
   for (const path of deleted) rmSync(path, { force: true });
@@ -664,6 +654,33 @@ async function rustBindings(appJson: string): Promise<string | { reason: string 
       reason: (error instanceof Error ? error.message : String(error)).replace(/[.\s]*$/, ""),
     };
   }
+}
+
+/** Refuse bare `true` policies (anywhere) in an app whose old permissions read the environment. */
+function refuseBareTrue(project: Project, envReads: string[]): void {
+  const permissions = JSON.parse(
+    readFileSync(project.permissionsJsonFile, "utf8"),
+  ) as PermissionsJson;
+  const found: string[] = [];
+  const walk = (value: unknown, path: string) => {
+    if (typeof value === "string") {
+      if (value.trim() === "true") found.push(path);
+    } else if (Array.isArray(value)) value.forEach((v, i) => walk(v, `${path}[${i}]`));
+    else if (value && typeof value === "object") {
+      for (const [key, v] of Object.entries(value))
+        if (key !== "$comment") walk(v, `${path}.${key}`);
+    }
+  };
+  for (const [table, rules] of Object.entries(permissions.tables ?? {})) walk(rules, table);
+  if (found.length === 0) return;
+  throw new UpgradeRefusal(
+    `jazz.permissions.json allows ${found.map((f) => `\`${f}\``).join(", ")} unconditionally (\`"true"\`), and the old permissions read the environment:\n` +
+      envReads.map((r) => `  ${r}`).join("\n") +
+      "\nalpha.65 compiled a condition on an unset value to `true`, so these may allow more than the author wrote. " +
+      "Set those environment variables and run `npx jazz-tools validate` with the app's alpha.65, then upgrade again " +
+      "(or, if they really are unconditional, check jazz.permissions.json and fix the old permissions by hand first).",
+    relative(project.root, project.permissionsJsonFile),
+  );
 }
 
 /** This jazz-tools' `generate`, in the app's directory: the JSON files from the TS, then the bindings. */
