@@ -178,7 +178,8 @@ extension Client {
         }
     }
 
-    /// The session's state each time it changes, the current one first.
+    /// The session's state each time it changes, the current one first. It
+    /// fails with `JazzError.closed` once the app closes.
     public var session: AsyncThrowingStream<SessionState, any Error> {
         watch { listener in try self.handle.watchSession(listener: listener) } decode: { try SessionState(json: $0) }
     }
@@ -190,7 +191,8 @@ extension Client {
         }
     }
 
-    /// The sync status each time it changes, the current one first.
+    /// The sync status each time it changes, the current one first. It fails
+    /// with `JazzError.closed` once the app closes.
     public var syncChanges: AsyncThrowingStream<SyncStatus, any Error> {
         watch { listener in try self.handle.watchSync(listener: listener) } decode: {
             try Coding.decode(SyncStatus.self, $0)
@@ -226,6 +228,11 @@ extension Client {
             let holder = WatchHolder()
             continuation.onTermination = { _ in holder.cancel() }
             let listener = States { json in
+                // The app closed (`close`, `signOut`): the watch's last state.
+                if (try? Coding.decode(Closed.self, json))?.kind == "closed" {
+                    continuation.finish(throwing: JazzError.closed)
+                    return
+                }
                 do {
                     continuation.yield(try decode(json))
                 } catch {
@@ -289,6 +296,11 @@ extension Transaction {
             return try Coding.decode(R.self, stored, userInfo)
         }
     }
+}
+
+/// The last state a watch gets when the app closes.
+struct Closed: Decodable {
+    var kind: String?
 }
 
 /// A `Watch` cancelled once, whether the stream ended before or after it started.
