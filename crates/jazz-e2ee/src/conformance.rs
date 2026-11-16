@@ -14,9 +14,12 @@
 //! duplicated and dropped segments), routing by the mechanism's own
 //! envelope header, and that the declared vectors reproduce exactly when
 //! replayed with their recorded random bytes. The `check_*_header_binding`
-//! functions take the same algorithm under a sibling ID or version and prove
-//! that the header is authenticated, not only routed: output relabelled to
-//! the sibling decodes but fails authentication.
+//! functions derive siblings of the mechanism under test themselves (its ID
+//! altered, then its version), build each with the author's relabelling
+//! constructor after checking that it reproduces the implementation exactly
+//! under its own label, and prove that the header is authenticated, not
+//! only routed: output relabelled to a sibling decodes but fails
+//! authentication.
 //!
 //! Zeroization is enforced by the trait signatures rather than observed:
 //! secrets cross the traits only as `Zeroizing` values or
@@ -31,7 +34,7 @@ use crate::agility::{
     CellCipher, EqualityTagger, KeyPair, KeySealer, KeyWrapper, MechanismId, MechanismImpl,
     PublicKey, Signer, StreamCipher,
 };
-use crate::envelope;
+use crate::envelope::{self, Mechanism};
 use crate::error::{Error, Result};
 use crate::random::RandomSource;
 
@@ -1017,15 +1020,56 @@ pub fn check_failing_stream_cipher(failing: Arc<dyn StreamCipher>) -> Outcome {
 }
 
 // Header binding: a mechanism must authenticate its own envelope header, so
-// that its bytes cannot be presented as another ID's or version's. The
-// caller supplies `sibling`, the same algorithm under another ID or version
-// (for the built-ins, the `Sibling` type of each mechanism module).
-// Relabelled output then passes the sibling's header decoding, and must fail
-// its authentication with `InvalidCiphertext` (a false verification for
-// signatures, a different token for equality).
+// that its bytes cannot be presented as another ID's or version's. The kit
+// derives the siblings itself: it alters the ID, then the version, of the
+// mechanism under test, and builds each with the author's `relabel`, which
+// constructs the implementation under a given mechanism. Relabelling to the
+// mechanism's own ID and version must reproduce the implementation under
+// test byte for byte, so a sibling is provably the same algorithm with only
+// its label changed. Relabelled output then passes the sibling's header
+// decoding, and must fail its authentication with `InvalidCiphertext` (a
+// false verification for signatures, a different token for equality).
+
+/// Builds an implementation of one role under the given mechanism: the
+/// algorithm under test, labelled with another ID or version.
+pub type Relabel<'a, T> = &'a dyn Fn(Mechanism<'static>) -> Box<T>;
+
+/// The siblings the kit derives from `mechanism`: its ID with the last
+/// character changed (same length, still a valid ID), and its version
+/// changed by one. The altered ID is leaked to give it the `'static`
+/// lifetime mechanisms have; the kit runs in tests only.
+fn derived_siblings(mechanism: Mechanism<'static>) -> [Mechanism<'static>; 2] {
+    let mut id = mechanism.id.as_bytes().to_vec();
+    if let Some(last) = id.last_mut() {
+        *last = if *last == b'x' { b'y' } else { b'x' };
+    }
+    let id: &'static str = Box::leak(String::from_utf8(id).expect("ASCII ID").into_boxed_str());
+    let version = mechanism
+        .version
+        .checked_add(1)
+        .unwrap_or(mechanism.version - 1);
+    [
+        Mechanism::new(id, mechanism.version),
+        Mechanism::new(mechanism.id, version),
+    ]
+}
+
+/// Builds the implementation under `target`, which must report it.
+fn relabelled<T: MechanismImpl + ?Sized>(
+    c: &Checker,
+    relabel: Relabel<'_, T>,
+    target: Mechanism<'static>,
+) -> core::result::Result<Box<T>, Failure> {
+    let built = relabel(target);
+    c.ensure(
+        built.mechanism() == target,
+        "the relabelled implementation reports the requested mechanism",
+    )?;
+    Ok(built)
+}
 
 /// Replaces `from`'s header at the start of `bytes` with `to`'s.
-fn relabel(
+fn relabel_bytes(
     c: &Checker,
     bytes: &[u8],
     from: &dyn MechanismImpl,
@@ -1040,19 +1084,6 @@ fn relabel(
     Ok([&to[..], &bytes[from.len()..]].concat())
 }
 
-fn siblings(
-    implementation: &dyn MechanismImpl,
-    sibling: &dyn MechanismImpl,
-) -> core::result::Result<Checker, Failure> {
-    let c = Checker::new(implementation)?;
-    Checker::new(sibling)?;
-    c.ensure(
-        implementation.mechanism() != sibling.mechanism(),
-        "the sibling has another ID or version",
-    )?;
-    Ok(c)
-}
-
 /// Relabelled input must fail authentication, not decoding.
 fn unauthentic<T>(c: &Checker, result: Result<T>, check: &str) -> Outcome {
     match result {
@@ -1065,161 +1096,256 @@ fn unauthentic<T>(c: &Checker, result: Result<T>, check: &str) -> Outcome {
     }
 }
 
-pub fn check_cell_header_binding(cipher: &dyn CellCipher, sibling: &dyn CellCipher) -> Outcome {
-    let c = siblings(cipher, sibling)?;
+const SAME_ALGORITHM: &str =
+    "relabelling to the mechanism's own ID and version reproduces it byte for byte";
+
+pub fn check_cell_header_binding(
+    cipher: &dyn CellCipher,
+    relabel: Relabel<'_, dyn CellCipher>,
+) -> Outcome {
+    let c = Checker::new(cipher)?;
+    let own = relabelled(&c, relabel, cipher.mechanism())?;
     let mut inputs = Inputs(0x4ead_0001);
     let (key, context, plaintext) = (inputs.key(), inputs.bytes(40), inputs.bytes(31));
-    for (from, to) in [(cipher, sibling), (sibling, cipher)] {
-        let sealed = c.ok(
-            from.encrypt(&key, &context, &plaintext, &mut inputs),
+    c.ensure(
+        c.ok(
+            cipher.encrypt(&key, &context, &plaintext, &mut Inputs(7)),
             "encrypt",
-        )?;
-        let own = c.ok(
-            to.encrypt(&key, &context, &plaintext, &mut inputs),
-            "the sibling encrypts",
-        )?;
-        c.ok(to.decrypt(&key, &context, &own), "the sibling round-trips")?;
-        let relabelled = relabel(&c, &sealed, from, to)?;
-        unauthentic(
-            &c,
-            to.decrypt(&key, &context, &relabelled),
-            "a cell relabelled to the sibling fails authentication",
-        )?;
+        )? == c.ok(
+            own.encrypt(&key, &context, &plaintext, &mut Inputs(7)),
+            "encrypt",
+        )?,
+        SAME_ALGORITHM,
+    )?;
+    for target in derived_siblings(cipher.mechanism()) {
+        let sibling = relabelled(&c, relabel, target)?;
+        let sibling = &*sibling;
+        for (from, to) in [(cipher, sibling), (sibling, cipher)] {
+            let sealed = c.ok(
+                from.encrypt(&key, &context, &plaintext, &mut inputs),
+                "encrypt",
+            )?;
+            let own = c.ok(
+                to.encrypt(&key, &context, &plaintext, &mut inputs),
+                "the sibling encrypts",
+            )?;
+            c.ok(to.decrypt(&key, &context, &own), "the sibling round-trips")?;
+            let relabelled = relabel_bytes(&c, &sealed, from, to)?;
+            unauthentic(
+                &c,
+                to.decrypt(&key, &context, &relabelled),
+                "a cell relabelled to the sibling fails authentication",
+            )?;
+        }
     }
     Ok(())
 }
 
 pub fn check_key_wrapper_header_binding(
     wrapper: &dyn KeyWrapper,
-    sibling: &dyn KeyWrapper,
+    relabel: Relabel<'_, dyn KeyWrapper>,
 ) -> Outcome {
-    let c = siblings(wrapper, sibling)?;
+    let c = Checker::new(wrapper)?;
+    let own = relabelled(&c, relabel, wrapper.mechanism())?;
     let mut inputs = Inputs(0x4ead_0002);
     let (wrapping_key, context, key) = (inputs.key(), inputs.bytes(40), inputs.key());
-    for (from, to) in [(wrapper, sibling), (sibling, wrapper)] {
-        let wrapped = c.ok(
-            from.wrap(&wrapping_key, &context, &key, &mut inputs),
-            "wrap",
-        )?;
-        let own = c.ok(
-            to.wrap(&wrapping_key, &context, &key, &mut inputs),
-            "the sibling wraps",
-        )?;
+    c.ensure(
         c.ok(
-            to.unwrap(&wrapping_key, &context, &own),
-            "the sibling round-trips",
-        )?;
-        let relabelled = relabel(&c, &wrapped, from, to)?;
-        unauthentic(
-            &c,
-            to.unwrap(&wrapping_key, &context, &relabelled),
-            "a wrapped key relabelled to the sibling fails authentication",
-        )?;
+            wrapper.wrap(&wrapping_key, &context, &key, &mut Inputs(7)),
+            "wrap",
+        )? == c.ok(
+            own.wrap(&wrapping_key, &context, &key, &mut Inputs(7)),
+            "wrap",
+        )?,
+        SAME_ALGORITHM,
+    )?;
+    for target in derived_siblings(wrapper.mechanism()) {
+        let sibling = relabelled(&c, relabel, target)?;
+        let sibling = &*sibling;
+        for (from, to) in [(wrapper, sibling), (sibling, wrapper)] {
+            let wrapped = c.ok(
+                from.wrap(&wrapping_key, &context, &key, &mut inputs),
+                "wrap",
+            )?;
+            let own = c.ok(
+                to.wrap(&wrapping_key, &context, &key, &mut inputs),
+                "the sibling wraps",
+            )?;
+            c.ok(
+                to.unwrap(&wrapping_key, &context, &own),
+                "the sibling round-trips",
+            )?;
+            let relabelled = relabel_bytes(&c, &wrapped, from, to)?;
+            unauthentic(
+                &c,
+                to.unwrap(&wrapping_key, &context, &relabelled),
+                "a wrapped key relabelled to the sibling fails authentication",
+            )?;
+        }
     }
     Ok(())
 }
 
-pub fn check_key_sealer_header_binding(sealer: &dyn KeySealer, sibling: &dyn KeySealer) -> Outcome {
-    let c = siblings(sealer, sibling)?;
+pub fn check_key_sealer_header_binding(
+    sealer: &dyn KeySealer,
+    relabel: Relabel<'_, dyn KeySealer>,
+) -> Outcome {
+    let c = Checker::new(sealer)?;
+    let own = relabelled(&c, relabel, sealer.mechanism())?;
     let mut inputs = Inputs(0x4ead_0003);
     let (ikm, context, key) = (inputs.bytes(32), inputs.bytes(40), inputs.key());
     let pair = c.ok(sealer.derive_key_pair(&ikm), "derive a key pair")?;
-    let sibling_pair = c.ok(
-        sibling.derive_key_pair(&ikm),
-        "the sibling derives a key pair",
+    let own_pair = c.ok(own.derive_key_pair(&ikm), "derive a key pair")?;
+    c.ensure(
+        pair.public == own_pair.public
+            && c.ok(
+                sealer.seal(&pair.public, &context, &key, &mut Inputs(7)),
+                "seal",
+            )? == c.ok(
+                own.seal(&own_pair.public, &context, &key, &mut Inputs(7)),
+                "seal",
+            )?,
+        SAME_ALGORITHM,
     )?;
-    for (from, from_pair, to, to_pair) in [
-        (sealer, &pair, sibling, &sibling_pair),
-        (sibling, &sibling_pair, sealer, &pair),
-    ] {
-        let sealed = c.ok(
-            from.seal(&from_pair.public, &context, &key, &mut inputs),
-            "seal",
+    for target in derived_siblings(sealer.mechanism()) {
+        let sibling = relabelled(&c, relabel, target)?;
+        let sibling = &*sibling;
+        let sibling_pair = c.ok(
+            sibling.derive_key_pair(&ikm),
+            "the sibling derives a key pair",
         )?;
-        let own = c.ok(
-            to.seal(&to_pair.public, &context, &key, &mut inputs),
-            "the sibling seals",
-        )?;
-        c.ok(to.open(to_pair, &context, &own), "the sibling round-trips")?;
-        let relabelled = relabel(&c, &sealed, from, to)?;
-        unauthentic(
-            &c,
-            to.open(to_pair, &context, &relabelled),
-            "a sealed key relabelled to the sibling fails authentication",
-        )?;
+        for (from, from_pair, to, to_pair) in [
+            (sealer, &pair, sibling, &sibling_pair),
+            (sibling, &sibling_pair, sealer, &pair),
+        ] {
+            let sealed = c.ok(
+                from.seal(&from_pair.public, &context, &key, &mut inputs),
+                "seal",
+            )?;
+            let own = c.ok(
+                to.seal(&to_pair.public, &context, &key, &mut inputs),
+                "the sibling seals",
+            )?;
+            c.ok(to.open(to_pair, &context, &own), "the sibling round-trips")?;
+            let relabelled = relabel_bytes(&c, &sealed, from, to)?;
+            unauthentic(
+                &c,
+                to.open(to_pair, &context, &relabelled),
+                "a sealed key relabelled to the sibling fails authentication",
+            )?;
+        }
     }
     Ok(())
 }
 
-pub fn check_signer_header_binding(signer: &dyn Signer, sibling: &dyn Signer) -> Outcome {
-    let c = siblings(signer, sibling)?;
+pub fn check_signer_header_binding(
+    signer: &dyn Signer,
+    relabel: Relabel<'_, dyn Signer>,
+) -> Outcome {
+    let c = Checker::new(signer)?;
+    let own = relabelled(&c, relabel, signer.mechanism())?;
     let mut inputs = Inputs(0x4ead_0004);
     let (seed, record) = (inputs.bytes(32), inputs.bytes(64));
     let pair = c.ok(signer.derive_key_pair(&seed), "derive a key pair")?;
-    let sibling_pair = c.ok(
-        sibling.derive_key_pair(&seed),
-        "the sibling derives a key pair",
+    let own_pair = c.ok(own.derive_key_pair(&seed), "derive a key pair")?;
+    let signature = c.ok(signer.sign(&pair, &record), "sign")?;
+    c.ensure(
+        pair.public == own_pair.public
+            && c.ok(own.verify(&own_pair.public, &record, &signature), "verify")?,
+        SAME_ALGORITHM,
     )?;
-    for (from, from_pair, to, to_pair) in [
-        (signer, &pair, sibling, &sibling_pair),
-        (sibling, &sibling_pair, signer, &pair),
-    ] {
-        let signature = c.ok(from.sign(from_pair, &record), "sign")?;
-        let own = c.ok(to.sign(to_pair, &record), "the sibling signs")?;
-        c.ensure(
-            matches!(to.verify(&to_pair.public, &record, &own), Ok(true)),
-            "the sibling verifies its own signature",
+    for target in derived_siblings(signer.mechanism()) {
+        let sibling = relabelled(&c, relabel, target)?;
+        let sibling = &*sibling;
+        let sibling_pair = c.ok(
+            sibling.derive_key_pair(&seed),
+            "the sibling derives a key pair",
         )?;
-        let relabelled = relabel(&c, &signature, from, to)?;
-        c.ensure(
-            matches!(to.verify(&to_pair.public, &record, &relabelled), Ok(false)),
-            "a signature relabelled to the sibling does not verify",
-        )?;
+        for (from, from_pair, to, to_pair) in [
+            (signer, &pair, sibling, &sibling_pair),
+            (sibling, &sibling_pair, signer, &pair),
+        ] {
+            let signature = c.ok(from.sign(from_pair, &record), "sign")?;
+            let own = c.ok(to.sign(to_pair, &record), "the sibling signs")?;
+            c.ensure(
+                matches!(to.verify(&to_pair.public, &record, &own), Ok(true)),
+                "the sibling verifies its own signature",
+            )?;
+            let relabelled = relabel_bytes(&c, &signature, from, to)?;
+            c.ensure(
+                matches!(to.verify(&to_pair.public, &record, &relabelled), Ok(false)),
+                "a signature relabelled to the sibling does not verify",
+            )?;
+        }
     }
     Ok(())
 }
 
 pub fn check_equality_tagger_header_binding(
     tagger: &dyn EqualityTagger,
-    sibling: &dyn EqualityTagger,
+    relabel: Relabel<'_, dyn EqualityTagger>,
 ) -> Outcome {
-    let c = siblings(tagger, sibling)?;
+    let c = Checker::new(tagger)?;
+    let own = relabelled(&c, relabel, tagger.mechanism())?;
     let mut inputs = Inputs(0x4ead_0005);
     let (key, context, value) = (inputs.key(), inputs.bytes(40), inputs.bytes(16));
     let token = c.ok(tagger.token(&key, &context, &value), "token")?;
-    let other = c.ok(sibling.token(&key, &context, &value), "the sibling's token")?;
     c.ensure(
-        relabel(&c, &token, tagger, sibling)? != other,
-        "the sibling's token for the same input differs beyond its header",
-    )
+        c.ok(own.token(&key, &context, &value), "token")? == token,
+        SAME_ALGORITHM,
+    )?;
+    for target in derived_siblings(tagger.mechanism()) {
+        let sibling = relabelled(&c, relabel, target)?;
+        let other = c.ok(sibling.token(&key, &context, &value), "the sibling's token")?;
+        c.ensure(
+            relabel_bytes(&c, &token, tagger, &*sibling)? != other,
+            "the sibling's token for the same input differs beyond its header",
+        )?;
+    }
+    Ok(())
 }
 
 pub fn check_stream_cipher_header_binding(
     cipher: &dyn StreamCipher,
-    sibling: &dyn StreamCipher,
+    relabel: Relabel<'_, dyn StreamCipher>,
 ) -> Outcome {
-    let c = siblings(cipher, sibling)?;
+    let c = Checker::new(cipher)?;
+    let own = relabelled(&c, relabel, cipher.mechanism())?;
     let mut inputs = Inputs(0x4ead_0006);
     let (key, context, plaintext) = (inputs.key(), inputs.bytes(40), inputs.bytes(1000));
-    for (from, to) in [(cipher, sibling), (sibling, cipher)] {
-        let (encoding, _) = c.ok(
-            stream_encrypt(from, &key, &context, &plaintext, &mut inputs),
-            "encrypt",
-        )?;
-        let (own, _) = c.ok(
-            stream_encrypt(to, &key, &context, &plaintext, &mut inputs),
-            "the sibling encrypts",
-        )?;
+    c.ensure(
         c.ok(
-            stream_decrypt(to, &key, &context, &own, 4096),
-            "the sibling round-trips",
-        )?;
-        let relabelled = relabel(&c, &encoding, from, to)?;
-        unauthentic(
-            &c,
-            stream_decrypt(to, &key, &context, &relabelled, 4096),
-            "a stream relabelled to the sibling fails authentication",
-        )?;
+            stream_encrypt(cipher, &key, &context, &plaintext, &mut Inputs(7)),
+            "encrypt",
+        )? == c.ok(
+            stream_encrypt(&*own, &key, &context, &plaintext, &mut Inputs(7)),
+            "encrypt",
+        )?,
+        SAME_ALGORITHM,
+    )?;
+    for target in derived_siblings(cipher.mechanism()) {
+        let sibling = relabelled(&c, relabel, target)?;
+        let sibling = &*sibling;
+        for (from, to) in [(cipher, sibling), (sibling, cipher)] {
+            let (encoding, _) = c.ok(
+                stream_encrypt(from, &key, &context, &plaintext, &mut inputs),
+                "encrypt",
+            )?;
+            let (own, _) = c.ok(
+                stream_encrypt(to, &key, &context, &plaintext, &mut inputs),
+                "the sibling encrypts",
+            )?;
+            c.ok(
+                stream_decrypt(to, &key, &context, &own, 4096),
+                "the sibling round-trips",
+            )?;
+            let relabelled = relabel_bytes(&c, &encoding, from, to)?;
+            unauthentic(
+                &c,
+                stream_decrypt(to, &key, &context, &relabelled, 4096),
+                "a stream relabelled to the sibling fails authentication",
+            )?;
+        }
     }
     Ok(())
 }

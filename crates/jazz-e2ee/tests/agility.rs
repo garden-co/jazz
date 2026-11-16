@@ -341,49 +341,84 @@ fn readers_route_by_envelope_and_writers_by_config() {
 /// but fails authentication.
 #[test]
 fn builtins_authenticate_their_headers() {
-    let sibling = cell::Sibling(Mechanism::new(
-        cell::MECHANISM.id,
-        cell::MECHANISM.version + 1,
-    ));
-    conformance::check_cell_header_binding(&cell::Builtin, &sibling).unwrap();
-    conformance::check_cell_header_binding(
-        &cell::Builtin,
-        &cell::Sibling(Mechanism::new("jazz.sodium.cell-sibling", 1)),
-    )
+    conformance::check_cell_header_binding(&cell::Builtin, &|m| Box::new(cell::Sibling(m)))
+        .unwrap();
+    conformance::check_key_wrapper_header_binding(&key_envelope::Builtin, &|m| {
+        Box::new(key_envelope::Sibling(m))
+    })
     .unwrap();
-    conformance::check_key_wrapper_header_binding(
-        &key_envelope::Builtin,
-        &key_envelope::Sibling(Mechanism::new(key_envelope::MECHANISM.id, 2)),
-    )
+    conformance::check_key_sealer_header_binding(&key_seal::Builtin, &|m| {
+        Box::new(key_seal::Sibling(m))
+    })
     .unwrap();
-    conformance::check_key_sealer_header_binding(
-        &key_seal::Builtin,
-        &key_seal::Sibling(Mechanism::new("jazz.wrap.hpke-x25519-sibling", 1)),
-    )
+    conformance::check_signer_header_binding(&signature::Builtin, &|m| {
+        Box::new(signature::Sibling(m))
+    })
     .unwrap();
-    conformance::check_signer_header_binding(
-        &signature::Builtin,
-        &signature::Sibling(Mechanism::new(signature::MECHANISM.id, 2)),
-    )
+    conformance::check_equality_tagger_header_binding(&equality::Builtin, &|m| {
+        Box::new(equality::Sibling(m))
+    })
     .unwrap();
-    conformance::check_equality_tagger_header_binding(
-        &equality::Builtin,
-        &equality::Sibling(Mechanism::new(equality::MECHANISM.id, 2)),
-    )
-    .unwrap();
-    conformance::check_stream_cipher_header_binding(
-        &stream::Builtin,
-        &stream::Sibling(Mechanism::new(stream::MECHANISM.id, 2)),
-    )
+    conformance::check_stream_cipher_header_binding(&stream::Builtin, &|m| {
+        Box::new(stream::Sibling(m))
+    })
     .unwrap();
     // A mechanism that ignores its header fails the check.
     assert!(
-        conformance::check_cell_header_binding(
-            &cell::Builtin,
-            &RoutedOnly(Mechanism::new(cell::MECHANISM.id, 2)),
-        )
+        conformance::check_cell_header_binding(&RoutedOnly(cell::MECHANISM), &|m| {
+            Box::new(RoutedOnly(m))
+        })
         .is_err()
     );
+    // The kit does not trust the relabelling: one that builds another
+    // algorithm, or reports another mechanism, fails.
+    assert!(
+        conformance::check_cell_header_binding(&cell::Builtin, &|m| Box::new(RoutedOnly(m)))
+            .is_err()
+    );
+    assert!(
+        conformance::check_key_wrapper_header_binding(&key_envelope::Builtin, &|_| {
+            Box::new(key_envelope::Sibling(Mechanism::new("jazz.other", 1)))
+        })
+        .is_err()
+    );
+    assert!(
+        conformance::check_cell_header_binding(&cell::Builtin, &|m| { Box::new(Reversed(m)) })
+            .is_err()
+    );
+}
+
+/// The built-in cell algorithm with the plaintext reversed: not the same
+/// algorithm under another label.
+struct Reversed(Mechanism<'static>);
+
+impl MechanismImpl for Reversed {
+    fn mechanism(&self) -> Mechanism<'static> {
+        self.0
+    }
+}
+
+impl CellCipher for Reversed {
+    fn encrypt(
+        &self,
+        key: &[u8; 32],
+        context: &[u8],
+        plaintext: &[u8],
+        rng: &mut dyn RandomSource,
+    ) -> Result<Vec<u8>> {
+        let reversed: Vec<u8> = plaintext.iter().rev().copied().collect();
+        cell::Sibling(self.0).encrypt(key, context, &reversed, rng)
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8; 32],
+        context: &[u8],
+        envelope: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let plaintext = cell::Sibling(self.0).decrypt(key, context, envelope)?;
+        Ok(Zeroizing::new(plaintext.iter().rev().copied().collect()))
+    }
 }
 
 /// The built-in cell algorithm that checks its header for routing only and
