@@ -14,7 +14,19 @@
 //! queries, and an `open` that embeds the app's schema. This crate is what
 //! they build on: the [`Jazz`] handle and the traits they implement.
 //!
+//! The bindings re-export this crate (`pub use ::jazz_app_support::*`), so
+//! app code names everything through one module, `jazz_app`. A generated
+//! item wins where a name is the same (a table `errors` is `jazz_app::Error`;
+//! this crate's stays `jazz_app_support::Error`).
+//!
 //! ```ignore
+//! mod jazz_app;
+//! use jazz_app::{Config, Jazz, NewTodo, Todo, todos};
+//!
+//! async fn open_todos(jazz: &Jazz) -> jazz_app::Result<Vec<Todo>> {
+//!     jazz.all(todos::query().filter(todos::done().eq(false))).await
+//! }
+//!
 //! let jazz = jazz_app::open(config).await?;                    // generated
 //! let open = jazz.all(todos::query().filter(todos::done().eq(false))).await?;
 //! let todo = jazz.insert(NewTodo { title: "Write docs".into(), ..Default::default() }).await?;
