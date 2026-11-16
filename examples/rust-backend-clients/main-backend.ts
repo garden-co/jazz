@@ -17,7 +17,8 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createJazz, memory, trustWorkload, type Jazz } from "jazz-tools/backend";
+import { createJazz, memory, remote, trustWorkload, type Jazz } from "jazz-tools/backend";
+import { startLocalJazzServer } from "jazz-tools/dev";
 import type { App } from "jazz-tools";
 import { testApp, type LooseAppTypes } from "jazz-tools/testing";
 
@@ -47,7 +48,23 @@ export interface MainBackend {
     claims: Record<string, unknown>,
     options?: { audience?: string; ttlSeconds?: number },
   ): string;
+  /**
+   * Gives `userId`, an identity the main backend hasn't met yet, an account
+   * at the core and revokes it there: the main backend then answers 403
+   * `identity_not_authorized` for them. Only with `{ core: "server" }`, whose
+   * core takes admin requests.
+   */
+  revokeIdentity(userId: string): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface MainBackendOptions {
+  /**
+   * `"memory"` (the default) runs the core in this process; `"server"`
+   * runs a local core server the main backend reaches as `remote`, whose
+   * admin API `revokeIdentity` uses.
+   */
+  core?: "memory" | "server";
 }
 
 function base64url(data: Buffer | string): string {
@@ -87,7 +104,10 @@ function shut(server: Server): Promise<void> {
  * SCOPED_USER (a scoped one). USER_A and USER_B have accounts, for a
  * trusted client to act for (`for_user` never creates one).
  */
-export async function startMainBackend(exampleDir: string): Promise<MainBackend> {
+export async function startMainBackend(
+  exampleDir: string,
+  options: MainBackendOptions = {},
+): Promise<MainBackend> {
   const app = testApp<LooseAppTypes>(readFileSync(join(exampleDir, "jazz.app.json"), "utf8"));
   const permissions = JSON.parse(readFileSync(join(exampleDir, "jazz.permissions.json"), "utf8"));
 
@@ -108,10 +128,13 @@ export async function startMainBackend(exampleDir: string): Promise<MainBackend>
   });
   issuer = await listen(issuerServer);
 
+  const appId = randomUUID();
+  const core =
+    options.core === "server" ? await startLocalJazzServer({ appId, inMemory: true }) : null;
   const jazz = await createJazz({
     app,
     permissions,
-    store: memory(),
+    store: core ? remote({ url: core.url, appId, secret: core.adminSecret }) : memory(),
     // The app's people sign in elsewhere; this backend serves machines only.
     authenticate: () => null,
     backendClients: [
@@ -154,9 +177,31 @@ export async function startMainBackend(exampleDir: string): Promise<MainBackend>
         ...claims,
       });
     },
+    async revokeIdentity(userId) {
+      if (!core) throw new Error('revokeIdentity needs startMainBackend(dir, { core: "server" })');
+      // The main backend names its users `jazz:backend/<userId>`.
+      // An identity the main backend hasn't met yet, registered and revoked
+      // at the core, as TS's own backend-client test does.
+      const identity = { issuer: "jazz:backend", subject: userId };
+      const admin = (operation: string, body: unknown) =>
+        fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
+          method: "POST",
+          headers: { "X-Jazz-Admin-Secret": core.adminSecret, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const registered = await admin("login-or-register", { identity });
+      if (registered.status !== 200) {
+        throw new Error(`registering ${userId}: the core answered ${registered.status}`);
+      }
+      const revoked = await admin("revoke", { approver: identity, target: identity });
+      if (revoked.status !== 204) {
+        throw new Error(`revoking ${userId}'s identity: the core answered ${revoked.status}`);
+      }
+    },
     async close() {
       await shut(server);
       await jazz.close();
+      await core?.stop();
       await shut(issuerServer);
     },
   };

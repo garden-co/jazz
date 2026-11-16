@@ -1,6 +1,6 @@
 # jazz-ffi
 
-A dynamic, JSON-in/JSON-out layer over [`jazz-app`](../jazz-app), so the
+A dynamic, JSON-in/JSON-out layer over [`jazz-app-support`](../jazz-app), so the
 Swift, Kotlin and Go bindings only (de)serialize JSON. Two surfaces over one
 handle:
 
@@ -67,8 +67,11 @@ backend decides what the client is, reported by `backend_client()` /
   returns a handle acting as one of the app's users, under their
   permissions. That never creates an account: `NoAccount` (kind
   `"noAccount"`, with `userId`) when the user has none yet, `Permission`
-  when the main backend refuses the identity (its 403). Closing such a
-  handle leaves its parent open.
+  when the main backend refuses the identity (its 403), and
+  `BundleMismatch` (kind `"bundleMismatch"`, with `own` and `served`, the
+  two bundle ids) when the client's `permissions` aren't the ones the main
+  backend serves: reopen it with the app's published
+  `jazz.permissions.json`. Closing such a handle leaves its parent open.
 - `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
   kind `"refused"`), as on a `for_user` handle or any other app.
 
@@ -101,6 +104,30 @@ rejected, lastError, synced}`). Anonymous users are not supported (as in TS).
 
 Without `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
+
+## Lifecycle (as TS's)
+
+- `begin_mergeable()` / `txBegin {"serializable": false}`: a mergeable
+  transaction (TS's default `transaction`). Its writes commit together and
+  merge with concurrent ones, and its commit is never refused as a
+  conflict. `begin()` / `txBegin {}` stays serializable.
+- `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
+  the server, with local reads and writes going on, then resume sync.
+- `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
+  deletes its local store, so the next open starts empty. It is refused,
+  and the app left open, while another open app holds the same `dataDir`.
+  On the C ABI, free the handle with `jazz_close` afterwards, as after
+  `signOut`.
+- `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
+  each write the server refused that no durable wait (a `global` tier,
+  `wait_for_sync`) reported, as TS's `onMutationError`:
+  `{"transaction", "message", "denied", "serializable"}`. Refusals from
+  before the first watch come first.
+- Every watch (session, sync, mutation errors) ends when the app closes,
+  whichever way (`shutdown`, `sign_out`, `delete_client_storage`): a last
+  state `{"kind": "closed", "message"}` (UniFFI), or a last callback with
+  kind `"error"` and `{"kind": "closed", …}` (C), after which nothing
+  comes.
 
 ## Values, queries, rows, deltas
 
@@ -214,7 +241,7 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   lost to another write; retry it). UniFFI: `JazzError.Permission`,
   `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
   these as `refused`, as before.
-- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app's
+- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app-support's
   `untyped` builder, as the typed Rust API and TS lower them):
   - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
 …], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
@@ -227,7 +254,7 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
     as TS's union: a row matched by two arms comes twice, and `limit` /
     `offset` count every occurrence; arms read one table, with `where` only.
     Subscribing to a union whose arms overlap can mis-apply removals (deltas
-    name rows by id), as in jazz-app.
+    name rows by id), as in jazz-app-support.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
     versions the server accepted, each row with `"$history":
 {"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
@@ -242,6 +269,13 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   ([jazz#5635](https://github.com/garden-co/jazz/pull/5635)). Deltas carry no
   positions, so an ordered subscription re-sorts locally. A row that only
   moved is left out.
+- **Result keys:** each `added` and `updated` row carries `"$key"`, an
+  opaque string naming that result, and `"removedKeys"` runs beside
+  `removed` (same order). One row can be several results: each version of a
+  history subscription (which carries `$history`), or each arm of a union
+  that matches it (UNION ALL). A host that holds such results applies
+  `updated` and `removedKeys` by `$key`; elsewhere the key and the `id`
+  name the same result, and applying by `id` stays correct.
 
 Every way a subscription ends, other than being cancelled, ends with one
 last error, after which no callback comes: a rejection (`Refused`), or
@@ -274,5 +308,5 @@ yet":
 Computed columns and transforms are the language bindings' job: this layer
 reads and writes the stored values.
 
-Writes are local-first, as in jazz-app. A write that the server's permissions
+Writes are local-first, as in jazz-app-support. A write that the server's permissions
 refuse is not refused by the call. It just never syncs.

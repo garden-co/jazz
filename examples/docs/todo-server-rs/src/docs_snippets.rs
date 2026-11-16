@@ -2,71 +2,29 @@
 //!
 //! The docs include each `#region` by name. Most use the typed API the
 //! generated bindings (`crate::jazz_app`) give the [`Jazz`] handle. What it
-//! doesn't cover yet (per-request sessions, includes, select, recursive
-//! queries, files, serializable transactions with reads) uses the
+//! doesn't cover yet (includes, select, recursive queries, files,
+//! serializable transactions with reads) uses the
 //! low-level `JazzClient`, either directly or through [`Jazz::with_client`].
 //! Permissions are the app's `jazz.permissions.json`.
 #![allow(dead_code)]
 
-use ::jazz_app::jazz;
-use ::jazz_app::{DurabilityTier, Jazz, ObjectId, Order, ReadTier, Subscription, Timestamp};
-use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use ::jazz_app_support::jazz;
+use ::jazz_app_support::{
+    DurabilityTier, Jazz, ObjectId, Order, ReadTier, Subscription, Timestamp,
+};
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Gather, Query, col, eq, lit};
-use jazz::tools::{JazzClient, Session, Value};
+use jazz::tools::{JazzClient, Value};
 
 use crate::jazz_app::{NewTodo, Todo, TodoUpdate, projects, todos};
 
-fn verify_jwt_and_extract_claims(_token: &str) -> (String, String, serde_json::Value) {
-    unimplemented!("replace with your auth provider's JWT verification logic")
-}
-
-// #region backend-request-session-rust
-pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, StatusCode> {
-    let auth = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let (issuer, user_id, claims) = verify_jwt_and_extract_claims(token);
-    Ok(Session::new(issuer, user_id).with_claims(claims))
-}
-// #endregion backend-request-session-rust
-
-// #region backend-request-scoped-client-rust
-pub fn scoped_client_for_session(client: &JazzClient, session: Session) -> JazzClient {
-    client.for_session(session)
-}
-// #endregion backend-request-scoped-client-rust
-
-// #region backend-request-handler-rust
-pub async fn list_todos_for_request(headers: &HeaderMap, jazz: &Jazz) -> Result<usize, StatusCode> {
-    let session = requester_session_from_headers(headers)?;
-    // The typed handle acts as the backend's own user; a request's user
-    // reads through the low-level client, scoped to their session.
-    jazz.with_client(move |client| async move {
-        let user_client = client.for_session(session);
-        let rows = user_client
-            .query(todos::query().into_untyped()?, ReadTier::LocalFirst)
-            .await?;
-        Ok(rows.len())
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-// #endregion backend-request-handler-rust
-
 // #region reading-oneshot-rust
-pub async fn read_todos_oneshot(jazz: &Jazz) -> ::jazz_app::Result<Vec<Todo>> {
+pub async fn read_todos_oneshot(jazz: &Jazz) -> ::jazz_app_support::Result<Vec<Todo>> {
     jazz.all(todos::query()).await
 }
 // #endregion reading-oneshot-rust
 
 // #region reading-subscriptions-rust
-pub async fn subscribe_todos(jazz: &Jazz) -> ::jazz_app::Result<Subscription<Todo>> {
+pub async fn subscribe_todos(jazz: &Jazz) -> ::jazz_app_support::Result<Subscription<Todo>> {
     // A stream of deltas, starting with the rows the query matches now;
     // `Rows::apply` folds them into the current list.
     jazz.subscribe(todos::query()).await
@@ -74,13 +32,13 @@ pub async fn subscribe_todos(jazz: &Jazz) -> ::jazz_app::Result<Subscription<Tod
 // #endregion reading-subscriptions-rust
 
 // #region reading-durability-tier-rust
-pub async fn read_todos_at_remote_tier(jazz: &Jazz) -> ::jazz_app::Result<Vec<Todo>> {
+pub async fn read_todos_at_remote_tier(jazz: &Jazz) -> ::jazz_app_support::Result<Vec<Todo>> {
     jazz.all_with(todos::query(), ReadTier::Remote).await
 }
 // #endregion reading-durability-tier-rust
 
 // #region reading-filters-rust
-pub async fn read_todos_with_filters(jazz: &Jazz) -> ::jazz_app::Result<Vec<Todo>> {
+pub async fn read_todos_with_filters(jazz: &Jazz) -> ::jazz_app_support::Result<Vec<Todo>> {
     let query = todos::query().filter(todos::done().eq(false));
 
     jazz.all(query).await
@@ -88,7 +46,7 @@ pub async fn read_todos_with_filters(jazz: &Jazz) -> ::jazz_app::Result<Vec<Todo
 // #endregion reading-filters-rust
 
 // #region reading-sorting-rust
-pub async fn read_todos_sorted(jazz: &Jazz) -> ::jazz_app::Result<Vec<Todo>> {
+pub async fn read_todos_sorted(jazz: &Jazz) -> ::jazz_app_support::Result<Vec<Todo>> {
     let query = todos::query()
         .filter(todos::done().eq(false))
         .order_by(todos::title(), Order::Asc);
@@ -102,7 +60,7 @@ pub async fn read_todo_page(
     jazz: &Jazz,
     page_size: usize,
     page: usize,
-) -> ::jazz_app::Result<Vec<Todo>> {
+) -> ::jazz_app_support::Result<Vec<Todo>> {
     let offset = page.saturating_sub(1) * page_size;
     let query = todos::query()
         .filter(todos::done().eq(false))
@@ -131,7 +89,7 @@ pub async fn read_todos_with_project(client: &JazzClient) -> jazz::tools::Result
 pub async fn read_open_todos_of_project(
     jazz: &Jazz,
     project_id: ObjectId,
-) -> ::jazz_app::Result<Vec<Todo>> {
+) -> ::jazz_app_support::Result<Vec<Todo>> {
     // `projects.todos`: the todos whose `project` references this project.
     let query = projects::todos()
         .of(project_id)
@@ -175,7 +133,7 @@ pub fn build_todo_lineage_query() -> Query {
 // #endregion reading-recursive-rust
 
 // #region writing-crud-rust
-pub async fn write_todo_crud(jazz: &Jazz, existing_id: ObjectId) -> ::jazz_app::Result<()> {
+pub async fn write_todo_crud(jazz: &Jazz, existing_id: ObjectId) -> ::jazz_app_support::Result<()> {
     let _new_todo = jazz.insert(NewTodo::new("Write docs", false)).await?;
     jazz.update(
         existing_id,
@@ -191,7 +149,9 @@ pub async fn write_todo_crud(jazz: &Jazz, existing_id: ObjectId) -> ::jazz_app::
 // #endregion writing-crud-rust
 
 // #region writing-durability-tier-rust
-pub async fn write_todo_with_default_durability(jazz: &Jazz) -> ::jazz_app::Result<ObjectId> {
+pub async fn write_todo_with_default_durability(
+    jazz: &Jazz,
+) -> ::jazz_app_support::Result<ObjectId> {
     // A plain write returns once it is committed locally, then syncs.
     let draft = jazz.insert(NewTodo::new("Draft the docs", false)).await?;
 
@@ -216,7 +176,7 @@ pub async fn write_todo_with_default_durability(jazz: &Jazz) -> ::jazz_app::Resu
 pub async fn group_todo_writes(
     jazz: &Jazz,
     existing_todo_id: ObjectId,
-) -> ::jazz_app::Result<ObjectId> {
+) -> ::jazz_app_support::Result<ObjectId> {
     // Committed together if the closure returns `Ok`, rolled back if it
     // returns `Err`. Mergeable: reads inside it see local data with its own
     // staged writes, and each write merges with concurrent ones.
@@ -236,7 +196,10 @@ pub async fn group_todo_writes(
 // #endregion writing-transaction-rust
 
 // #region writing-serializable-transaction-rust
-pub async fn finish_todo_serializably(jazz: &Jazz, todo_id: ObjectId) -> ::jazz_app::Result<bool> {
+pub async fn finish_todo_serializably(
+    jazz: &Jazz,
+    todo_id: ObjectId,
+) -> ::jazz_app_support::Result<bool> {
     // Reads see the data as of the transaction's start; the server applies
     // the commit only if nothing it read or wrote changed meanwhile, and
     // refuses it otherwise.
@@ -260,7 +223,7 @@ pub async fn finish_todo_serializably(jazz: &Jazz, todo_id: ObjectId) -> ::jazz_
 }
 // #endregion writing-serializable-transaction-rust
 
-pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app::Result<()> {
+pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app_support::Result<()> {
     let search_term = "milk";
 
     // #region where-eq-ne-rust
@@ -282,7 +245,7 @@ pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app::Result<()> {
 
     // Every table has `created_at()` and `updated_at()` columns.
     let one_week_ago = Timestamp(Timestamp::now().0 - 7 * 24 * 60 * 60 * 1000);
-    let query = todos::query().filter(::jazz_app::created_at().gt(one_week_ago));
+    let query = todos::query().filter(::jazz_app_support::created_at().gt(one_week_ago));
     let recent_todos = jazz.all(query).await?;
     // #endregion where-numeric-rust
 
@@ -313,7 +276,7 @@ pub async fn where_operator_examples(jazz: &Jazz) -> ::jazz_app::Result<()> {
     // #region where-order-limit-rust
     let query = todos::query()
         .filter(todos::done().eq(false))
-        .order_by(::jazz_app::created_at(), Order::Asc)
+        .order_by(::jazz_app_support::created_at(), Order::Asc)
         .limit(50);
     let recent_incomplete = jazz.all(query).await?;
     // #endregion where-order-limit-rust
@@ -345,7 +308,7 @@ pub fn composing_queries() {
     let open = todos::query().filter(todos::done().eq(false));
     let newest = open
         .clone()
-        .order_by(::jazz_app::created_at(), Order::Desc)
+        .order_by(::jazz_app_support::created_at(), Order::Desc)
         .limit(20);
     let by_priority = open.order_by(todos::priority(), Order::Desc);
 
@@ -354,7 +317,10 @@ pub fn composing_queries() {
 // #endregion reading-composing-queries-rust
 
 // #region writing-nullable-update-rust
-pub async fn clear_nullable_fields(jazz: &Jazz, todo_id: ObjectId) -> ::jazz_app::Result<()> {
+pub async fn clear_nullable_fields(
+    jazz: &Jazz,
+    todo_id: ObjectId,
+) -> ::jazz_app_support::Result<()> {
     // `Some(None)` sets a nullable column to null; `None` leaves it as-is.
     jazz.update(
         todo_id,

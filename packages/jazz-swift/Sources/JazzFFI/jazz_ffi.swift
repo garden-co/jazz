@@ -613,6 +613,14 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func begin() throws  -> Transaction
     
     /**
+     * Begins a mergeable transaction (TS's default `transaction`): its
+     * reads see a snapshot and its own writes, its writes commit together
+     * and merge with concurrent writes, so its commit is never refused as
+     * a conflict.
+     */
+    func beginMergeable() throws  -> Transaction
+    
+    /**
      * Begins uploading a large value of `column` piece by piece: `kind`
      * `"insert"` (a new row, `id` none, its other columns `row_json`),
      * `"update"` or `"upsert"` (the row with `id`).
@@ -620,7 +628,8 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?) throws  -> Upload
     
     /**
-     * Not part of the documented .65 surface; `None` for every client.
+     * Not part of the documented surface (the backend publish mode); `None`
+     * for every client.
      */
     func bundle() throws  -> String?
     
@@ -638,6 +647,21 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * [`Self::delete`], returning once the write reaches `tier`.
      */
     func deleteAt(table: String, id: String, tier: String) throws 
+    
+    /**
+     * Closes the app and deletes its local store (TS's
+     * `deleteClientStorage`): the next open starts empty and syncs again.
+     * Writes the server hasn't accepted yet are lost. Refused while another
+     * open app holds the same `dataDir`.
+     */
+    func deleteClientStorage() throws 
+    
+    /**
+     * Leaves the server: local reads and writes go on, and sync resumes
+     * with `reconnect` (TS's `disconnect`). Without a server it does
+     * nothing.
+     */
+    func disconnect() throws 
     
     /**
      * Partial edits of a row's text, bytes and JSON values (`edits_json`:
@@ -692,6 +716,11 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * [`Self::one`] read at `tier`.
      */
     func oneAt(queryJson: String, tier: String) throws  -> String?
+    
+    /**
+     * Resumes sync after `disconnect` (TS's `reconnect`).
+     */
+    func reconnect() throws 
     
     /**
      * Asks the token provider for a fresh token (reason `refresh`).
@@ -770,6 +799,14 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * (`"local"` or `"global"`).
      */
     func waitForSync(tier: String) throws 
+    
+    /**
+     * Calls `listener` with each write the server refused that no durable
+     * wait (a `global` tier, `wait_for_sync`) reported, as TS's
+     * `onMutationError`: `{"transaction", "message", "denied",
+     * "serializable"}`. Refusals from before the first watch come first.
+     */
+    func watchMutationErrors(listener: StateListener) throws  -> Watch
     
     /**
      * Calls `listener` with each session state, the current one first.
@@ -938,6 +975,21 @@ open func begin()throws  -> Transaction  {
 }
     
     /**
+     * Begins a mergeable transaction (TS's default `transaction`): its
+     * reads see a snapshot and its own writes, its writes commit together
+     * and merge with concurrent writes, so its commit is never refused as
+     * a conflict.
+     */
+open func beginMergeable()throws  -> Transaction  {
+    return try  FfiConverterTypeTransaction_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_begin_mergeable(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Begins uploading a large value of `column` piece by piece: `kind`
      * `"insert"` (a new row, `id` none, its other columns `row_json`),
      * `"update"` or `"upsert"` (the row with `id`).
@@ -957,7 +1009,8 @@ open func beginUpload(table: String, column: String, kind: String, id: String?, 
 }
     
     /**
-     * Not part of the documented .65 surface; `None` for every client.
+     * Not part of the documented surface (the backend publish mode); `None`
+     * for every client.
      */
 open func bundle()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -1006,6 +1059,33 @@ open func deleteAt(table: String, id: String, tier: String)throws   {try rustCal
         FfiConverterString.lower(table),
         FfiConverterString.lower(id),
         FfiConverterString.lower(tier),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Closes the app and deletes its local store (TS's
+     * `deleteClientStorage`): the next open starts empty and syncs again.
+     * Writes the server hasn't accepted yet are lost. Refused while another
+     * open app holds the same `dataDir`.
+     */
+open func deleteClientStorage()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_delete_client_storage(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Leaves the server: local reads and writes go on, and sync resumes
+     * with `reconnect` (TS's `disconnect`). Without a server it does
+     * nothing.
+     */
+open func disconnect()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_disconnect(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
@@ -1136,6 +1216,17 @@ open func oneAt(queryJson: String, tier: String)throws  -> String?  {
         FfiConverterString.lower(tier),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Resumes sync after `disconnect` (TS's `reconnect`).
+     */
+open func reconnect()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_reconnect(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -1321,6 +1412,22 @@ open func waitForSync(tier: String)throws   {try rustCallWithError(FfiConverterT
 }
     
     /**
+     * Calls `listener` with each write the server refused that no durable
+     * wait (a `global` tier, `wait_for_sync`) reported, as TS's
+     * `onMutationError`: `{"transaction", "message", "denied",
+     * "serializable"}`. Refusals from before the first watch come first.
+     */
+open func watchMutationErrors(listener: StateListener)throws  -> Watch  {
+    return try  FfiConverterTypeWatch_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_watch_mutation_errors(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeStateListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Calls `listener` with each session state, the current one first.
      */
 open func watchSession(listener: StateListener)throws  -> Watch  {
@@ -1397,7 +1504,8 @@ public func FfiConverterTypeJazzHandle_lower(_ value: JazzHandle) -> UInt64 {
 
 
 /**
- * What a session or sync watch calls with each state (JSON).
+ * What a watch calls with each state (JSON); when the app closes, a last
+ * `{"kind": "closed", "message"}`, after which no call comes.
  */
 public protocol StateListener: AnyObject, Sendable {
     
@@ -1405,7 +1513,8 @@ public protocol StateListener: AnyObject, Sendable {
     
 }
 /**
- * What a session or sync watch calls with each state (JSON).
+ * What a watch calls with each state (JSON); when the app closes, a last
+ * `{"kind": "closed", "message"}`, after which no call comes.
  */
 open class StateListenerImpl: StateListener, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -2769,7 +2878,7 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Permission(reason: String
     )
     /**
-     * Contract 2: something this layer or jazz-app doesn't support yet.
+     * Contract 2: something this layer or jazz-app-support doesn't support yet.
      */
     case NotSupported(reason: String
     )
@@ -2790,6 +2899,14 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      * (memory storage, where they are lost).
      */
     case Unsynced(pending: UInt64, reason: String
+    )
+    /**
+     * Contract 2: a trusted backend client's `for_user` refused because
+     * the client's permissions bundle (`own`) isn't the one the main
+     * backend serves (`served`): reopen it with the app's published
+     * `jazz.permissions.json` (TS's `code: "bundle_mismatch"`).
+     */
+    case BundleMismatch(own: String, served: String, reason: String
     )
 
     
@@ -2844,6 +2961,11 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             pending: try FfiConverterUInt64.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
+        case 9: return .BundleMismatch(
+            own: try FfiConverterString.read(from: &buf), 
+            served: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2894,6 +3016,13 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
         case let .Unsynced(pending,reason):
             writeInt(&buf, Int32(8))
             FfiConverterUInt64.write(pending, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .BundleMismatch(own,served,reason):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(own, into: &buf)
+            FfiConverterString.write(served, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -3007,10 +3136,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_begin() != 20203) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_begin_mergeable() != 26397) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_begin_upload() != 36715) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_bundle() != 24631) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_bundle() != 9426) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_can() != 65067) {
@@ -3020,6 +3152,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_at() != 42862) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_client_storage() != 20846) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_disconnect() != 12631) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_edit() != 18210) {
@@ -3044,6 +3182,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_one_at() != 24686) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_reconnect() != 27458) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_refresh() != 40251) {
@@ -3083,6 +3224,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_wait_for_sync() != 43748) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_watch_mutation_errors() != 3339) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_watch_session() != 20465) {

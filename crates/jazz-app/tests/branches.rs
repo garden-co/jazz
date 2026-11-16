@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bindings::{Document, DocumentUpdate, NewDocument, NewDraft, documents, drafts};
 use futures::StreamExt;
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, Backend, Branch, Config, Error, Jazz, Order, ReadOptions, ReadTier, Rows,
     Snapshot,
 };
@@ -20,7 +20,7 @@ fn titles(rows: &[Document]) -> Vec<(&str, &str)> {
         .collect()
 }
 
-fn by_title() -> jazz_app::Query<Document> {
+fn by_title() -> jazz_app_support::Query<Document> {
     documents::query().order_by(documents::title(), Order::Asc)
 }
 
@@ -257,21 +257,23 @@ async fn transactions_and_selectors() {
         )?;
         draft.insert(NewDocument::new("draft", "Added"))?;
         tx.insert(NewDraft::new("draft"))?;
-        // Reads through a branch inside a transaction are not supported yet,
-        // and the writes that read back are refused before staging: this
-        // ignored upsert commits nothing.
-        assert!(draft.get::<Document>(intro.id).await.is_err());
-        let refused = draft
+        // A mergeable transaction reads through the branch, staged writes
+        // included, and so can write what it reads back.
+        let seen = draft
+            .get::<Document>(intro.id)
+            .await?
+            .expect("the draft's row");
+        assert_eq!(
+            (seen.branch.as_str(), seen.title.as_str()),
+            ("draft", "Intro, in a transaction")
+        );
+        let upserted = draft
             .upsert(
-                jazz_app::ObjectId::new(),
+                jazz_app_support::ObjectId::new(),
                 NewDocument::new("draft", "Upserted"),
             )
-            .await;
-        assert!(matches!(refused, Err(Error::Unsupported(_))), "{refused:?}");
-        assert!(matches!(
-            draft.restore::<Document>(intro.id).await,
-            Err(Error::Unsupported(_))
-        ));
+            .await?;
+        assert_eq!(upserted.branch, "draft");
         Ok(())
     })
     .await
@@ -284,7 +286,11 @@ async fn transactions_and_selectors() {
                 .await
                 .unwrap()
         ),
-        [("draft", "Added"), ("draft", "Intro, in a transaction")]
+        [
+            ("draft", "Added"),
+            ("draft", "Intro, in a transaction"),
+            ("draft", "Upserted")
+        ]
     );
     assert_eq!(jazz.all(drafts::query()).await.unwrap().len(), 1);
 
@@ -295,7 +301,7 @@ async fn transactions_and_selectors() {
         typed.all(by_title()).await.unwrap(),
         named.all(by_title()).await.unwrap()
     );
-    assert_eq!(typed.all(by_title()).await.unwrap().len(), 2);
+    assert_eq!(typed.all(by_title()).await.unwrap().len(), 3);
 
     for wrong in [
         Branch::named("title", "draft".to_owned()),
@@ -340,9 +346,16 @@ async fn a_serializable_transaction_writes_into_a_branch() {
                 },
             )?;
             draft.insert(NewDocument::new("draft", "Notes"))?;
+            // A serializable transaction can't read through a branch yet
+            // (jazz#5806), so writes that read back are refused before
+            // staging: this ignored upsert commits nothing.
+            assert!(matches!(
+                draft.get::<Document>(intro.id).await,
+                Err(Error::Unsupported(_))
+            ));
             let _ignored = draft
                 .upsert(
-                    jazz_app::ObjectId::new(),
+                    jazz_app_support::ObjectId::new(),
                     NewDocument::new("draft", "Never"),
                 )
                 .await;
@@ -485,7 +498,7 @@ async fn drafts_sync_through_the_server() {
         .unwrap();
     let draft = writer
         .on_branch(Branch::from("draft").over("main"))
-        .durable(jazz_app::DurabilityTier::GlobalServer);
+        .durable(jazz_app_support::DurabilityTier::GlobalServer);
     draft
         .update(
             intro.id,
@@ -502,7 +515,7 @@ async fn drafts_sync_through_the_server() {
         .unwrap();
     writer.wait_for_sync().await.unwrap();
 
-    let seen = |view: jazz_app::OnBranch, want: usize| async move {
+    let seen = |view: jazz_app_support::OnBranch, want: usize| async move {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let rows = view.all_with(by_title(), ReadTier::Remote).await.unwrap();
@@ -527,7 +540,7 @@ async fn drafts_sync_through_the_server() {
     // not updated or read.
     let locked = writer
         .on_branch(Branch::from("locked").over("main"))
-        .durable(jazz_app::DurabilityTier::GlobalServer);
+        .durable(jazz_app_support::DurabilityTier::GlobalServer);
     let hidden = locked
         .insert(NewDocument::new("locked", "Hidden"))
         .await
@@ -558,7 +571,9 @@ async fn drafts_sync_through_the_server() {
     server.shutdown().await;
 }
 
-async fn next(changes: &mut jazz_app::Subscription<Document>) -> jazz_app::Delta<Document> {
+async fn next(
+    changes: &mut jazz_app_support::Subscription<Document>,
+) -> jazz_app_support::Delta<Document> {
     tokio::time::timeout(Duration::from_secs(5), changes.next())
         .await
         .expect("a delta")

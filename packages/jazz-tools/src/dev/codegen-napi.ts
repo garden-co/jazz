@@ -129,7 +129,7 @@ export async function generateTs(appJson: string): Promise<string> {
   return (await codegen()).generate("ts", appJson);
 }
 
-/** `src/jazz_app.rs` (the `jazz-app` crate's bindings) for `appJson`. */
+/** `src/jazz_app.rs` (the `jazz-app-support` crate's bindings) for `appJson`. */
 export async function generateRust(appJson: string): Promise<string> {
   return (await codegen()).generate("rust", appJson);
 }

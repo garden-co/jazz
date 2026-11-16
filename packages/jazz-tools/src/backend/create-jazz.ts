@@ -41,6 +41,7 @@ import {
 import { resolveSchemaSource } from "../schema-source.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
+import { BUNDLE_HEADER } from "./admission.js";
 import { boundApp } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { publishLoadedDeployment } from "../dev/catalogue.js";
@@ -3055,7 +3056,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       new Uint8Array(0),
       "backend",
     );
-    return new Response(null, { status: response.status === 204 ? 204 : 502 });
+    if (response.status !== 204) return new Response(null, { status: 502 });
+    // The bundle this backend pins the client's socket to (see
+    // `pinnedSocket`): a client that evaluates its users' reads against its
+    // own permissions checks they are the ones published here (jazz#5808).
+    return new Response(null, {
+      status: 204,
+      headers: pin === undefined ? undefined : { [BUNDLE_HEADER]: pin },
+    });
   }
 
   /**

@@ -13,7 +13,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    ColumnDescriptor, PolicyExpr, RelationCmpOp, RelationColumnRef, RelationExpr,
+    ColumnDescriptor, LegacyEnumCase, PolicyExpr, RelationCmpOp, RelationColumnRef, RelationExpr,
     RelationPredicate, RelationValueRef, RowDescriptor, Schema, SchemaHash, TableName,
     TablePolicies, TableSchema,
 };
@@ -358,6 +358,24 @@ fn every_definition_shape_reads_back_equal_after_a_reopen() {
                 "doc",
                 ColumnType::Json {
                     schema: Some(serde_json::json!({"type": "object", "required": ["a"]})),
+                },
+            )
+            .nullable(),
+            // An enum with payload fields, as a store of 2.0.0-alpha.64 or
+            // earlier may still hold in its history.
+            column(
+                "state",
+                ColumnType::LegacyEnumPayload {
+                    cases: vec![
+                        LegacyEnumCase {
+                            name: "open".into(),
+                            fields: vec![column("note", ColumnType::Text).nullable()],
+                        },
+                        LegacyEnumCase {
+                            name: "closed".into(),
+                            fields: vec![],
+                        },
+                    ],
                 },
             )
             .nullable(),

@@ -60,6 +60,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         // exhaustive.
         case .NoAccount(_, let message): return JazzError.refused(message)
         case .Unsynced(_, let message): return JazzError.io(message)
+        // A trusted backend client's: a Swift app never opens one.
+        case .BundleMismatch(_, _, let message): return JazzError.refused(message)
         }
     }
 }
@@ -75,8 +77,8 @@ public struct Config: Sendable {
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?
 
-    /// Swift apps are clients (`.client`, `.local`); backends run in TS,
-    /// Rust or Go.
+    /// Swift apps are clients (`.client`, `.local`); the app's backend runs
+    /// in TypeScript (`createJazz`).
     init(storage: Storage, appId: String? = nil, serverUrl: String? = nil, dataDir: String? = nil) {
         self.storage = storage
         self.appId = appId
@@ -177,7 +179,7 @@ public final class Client: Sendable {
     /// passes it), with the app's `JazzApp.Computed` if it declares computed
     /// fields or transforms.
     public static func open(app: String, config: Config, implementations: (any Sendable)? = nil)
-        async throws(JazzError) -> Client
+        async throws -> Client
     {
         try await typed { try await openUntyped(app: app, config: config, implementations: implementations) }
     }
@@ -197,7 +199,7 @@ public final class Client: Sendable {
     }
 
     /// The signed-in user's account id (`session.user` in permissions).
-    public func account() async throws(JazzError) -> Jazz.ID {
+    public func account() async throws -> Jazz.ID {
         try await Self.typed {
             guard let account = try await Self.run({ try self.handle.account() }) else {
                 throw JazzError.refused("no one is signed in")
@@ -207,7 +209,7 @@ public final class Client: Sendable {
     }
 
     /// Every row `query` matches.
-    public func all<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws(JazzError) -> [R] {
+    public func all<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws -> [R] {
         try await Self.typed {
             let json = try query.json()
             let rows = try await Self.run {
@@ -220,7 +222,7 @@ public final class Client: Sendable {
     /// Rows of `selection`'s columns, decoded into `T` (a `Decodable` with
     /// those properties, and `id` if it wants it).
     public func all<R, T: Decodable & Sendable>(_ selection: Selection<R>, as type: T.Type)
-        async throws(JazzError) -> [T]
+        async throws -> [T]
     {
         try await Self.typed {
             let json = try selection.json()
@@ -230,7 +232,7 @@ public final class Client: Sendable {
     }
 
     /// The first row `query` matches, if any.
-    public func one<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws(JazzError) -> R? {
+    public func one<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws -> R? {
         try await Self.typed {
             let json = try query.json()
             guard
@@ -246,7 +248,7 @@ public final class Client: Sendable {
 
     /// Inserts `row`, returning it as stored (with its `id`).
     @discardableResult
-    public func insert<I: Insert>(_ row: I, tier: WriteTier? = nil) async throws(JazzError) -> I.Row {
+    public func insert<I: Insert>(_ row: I, tier: WriteTier? = nil) async throws -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
             let inserted = try await Self.run {
@@ -262,7 +264,7 @@ public final class Client: Sendable {
 
     /// Changes the columns `patch` sets on row `id`.
     public func update<P: Patch>(_ id: Jazz.ID, _ patch: P, tier: WriteTier? = nil)
-        async throws(JazzError)
+        async throws
     {
         try await Self.typed {
             let json = try Coding.json(patch, userInfo)
@@ -278,13 +280,13 @@ public final class Client: Sendable {
 
     /// Changes the columns `patch` sets on `row`.
     public func update<P: Patch>(_ row: P.Row, _ patch: P, tier: WriteTier? = nil)
-        async throws(JazzError)
+        async throws
     {
         try await update(row.id, patch, tier: tier)
     }
 
     public func delete<R: Row>(_ type: R.Type, id: Jazz.ID, tier: WriteTier? = nil)
-        async throws(JazzError)
+        async throws
     {
         try await Self.typed {
             try await Self.run {
@@ -297,26 +299,45 @@ public final class Client: Sendable {
         }
     }
 
-    public func delete<R: Row>(_ row: R, tier: WriteTier? = nil) async throws(JazzError) {
+    public func delete<R: Row>(_ row: R, tier: WriteTier? = nil) async throws {
         try await delete(R.self, id: row.id, tier: tier)
     }
 
     /// Returns once every write made so far has reached `tier`.
-    public func waitForSync(_ tier: WriteTier = .global) async throws(JazzError) {
+    public func waitForSync(_ tier: WriteTier = .global) async throws {
         try await Self.typed {
             try await Self.run { try self.handle.waitForSync(tier: tier.rawValue) }
         }
     }
 
-    /// Runs `body` in a serializable transaction: it commits when `body`
-    /// returns (waiting for `commit`'s tier, if given) and rolls back when it
-    /// throws, rethrowing that error. Inside, reads see the transaction's
-    /// own writes. Don't let `tx` escape `body`. A `JazzError.conflict`
-    /// means another write won: running the transaction again may succeed.
+    /// Runs `body` in a mergeable transaction (TS's `transaction`): it
+    /// commits when `body` returns (waiting for `commit`'s tier, if given)
+    /// and rolls back when it throws, rethrowing that error. Inside, reads
+    /// see the transaction's own writes. Its writes commit together and
+    /// merge with concurrent ones, so its commit is never a conflict; it
+    /// works offline. Don't let `tx` escape `body`.
     public func transaction<T: Sendable>(
         commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
     ) async throws -> T {
-        let ffi = try await Self.typed { try await Self.run { try self.handle.begin() } }
+        try await run(transaction: { try self.handle.beginMergeable() }, commit: tier, body)
+    }
+
+    /// Runs `body` in a serializable transaction (TS's
+    /// `serializableTransaction`), as `transaction` does, but the server
+    /// accepts it only if nothing it read changed meanwhile. A
+    /// `JazzError.conflict` means another write won: running the
+    /// transaction again may succeed.
+    public func serializableTransaction<T: Sendable>(
+        commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
+    ) async throws -> T {
+        try await run(transaction: { try self.handle.begin() }, commit: tier, body)
+    }
+
+    func run<T: Sendable>(
+        transaction begin: @escaping @Sendable () throws -> JazzFFI.Transaction,
+        commit tier: WriteTier?, _ body: (Transaction) async throws -> T
+    ) async throws -> T {
+        let ffi = try await Self.typed { try await Self.run(begin) }
         let tx = Transaction(ffi, implementations: implementations)
         let result: T
         do {
@@ -376,7 +397,7 @@ public final class Client: Sendable {
         }
     }
 
-    public func close() async throws(JazzError) {
+    public func close() async throws {
         try await Self.typed {
             try await Self.run { try self.handle.shutdown() }
         }
@@ -411,7 +432,7 @@ public final class Client: Sendable {
     }
 
     /// `body`'s failures as `JazzError`s.
-    static func typed<T>(_ body: () async throws -> T) async throws(JazzError) -> T {
+    static func typed<T>(_ body: () async throws -> T) async throws -> T {
         do {
             return try await body()
         } catch {
