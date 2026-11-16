@@ -244,6 +244,29 @@ class JazzTest {
     }
 
     @Test
+    fun sign_out_reads_signed_out_even_when_the_watch_closes_first(): Unit = runBlocking {
+        // As jazz-ffi can: signing out ends the session watch with `closed`
+        // before (or without) a final `signedOut` state.
+        val listeners = java.util.Collections.synchronizedList(ArrayList<(String) -> Unit>())
+        val native = object : Native by FakeNative() {
+            override fun sessionState(): String =
+                """{"status":"signedIn","user":{"account":"a","kind":"backend","issuer":"i","subject":"alice"}}"""
+            override fun watch(sync: Boolean, onChange: (String) -> Unit): () -> Unit {
+                if (!sync) listeners += onChange
+                return {}
+            }
+            override fun signOut() {
+                listeners.toList().forEach { it("""{"kind":"closed"}""") }
+            }
+        }
+        Jazz.opener = Native.Opener { native }
+        val jazz = Jazz.open("{}", JazzConfig())
+        assertTrue(jazz.session.value is SessionState.SignedIn)
+        jazz.signOut()
+        assertEquals(SessionState.SignedOut, jazz.session.value)
+    }
+
+    @Test
     fun watch_keeps_results_with_the_same_id_apart_by_key(): Unit = runBlocking {
         // As a history or union subscription delivers them: one row id, two results.
         val native = object : Native by FakeNative() {
