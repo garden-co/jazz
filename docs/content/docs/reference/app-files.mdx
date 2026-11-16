@@ -16,9 +16,12 @@ every backend runs and writes the typed bindings (`jazz.generated.ts` for TypeSc
 format reference.
 
 Both files are plain JSON: no comments, no trailing commas, no repeated keys, and unknown keys are
-refused. A `$comment` string is allowed in every object, and a top-level `$schema` points your
-editor at the files' JSON Schemas (`https://jazz.tools/schemas/jazz.app.schema.json`, resp.
-`jazz.permissions.schema.json`). `migrations create` writes `jazz.app.json` back in a canonical
+refused. A `$comment` string is allowed in every object. Each file starts with a `$schema` naming its
+JSON Schema and so its version (`https://jazz.tools/schemas/jazz.app.v1.json`, resp.
+`https://jazz.tools/schemas/jazz.permissions.v1.json`); it also points your editor at the schema.
+Jazz refuses a file written by a newer version. Files from alpha.63 and alpha.64 carry `"format": 1`
+and an unversioned `…/jazz.app.schema.json` URL instead: they still load, and `jazz-tools generate`
+rewrites them. `migrations create` writes `jazz.app.json` back in a canonical
 layout. The bindings record a hash of `jazz.app.json`'s text, so reformatting it makes them out of
 date until the next `generate`: add `jazz.app.json` to `.prettierignore` (or your formatter's
 ignore file) to keep the two in step.
@@ -27,7 +30,7 @@ ignore file) to keep the two in step.
 
 ```json
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "chats": {
       "columns": {
@@ -53,7 +56,7 @@ ignore file) to keep the two in step.
 }
 ```
 
-- **`format`**: `1`.
+- **`$schema`**: `https://jazz.tools/schemas/jazz.app.v1.json`, required.
 - **Columns**, in declared order: `string`, `int`, `bigint`, `float`, `boolean`, `timestamp`,
   `uuid`, `bytes`, with `?` for optional. Columns with options are objects:
   `{ "enum": ["todo", "done"] }`, `{ "json": { …JSON Schema… } }`, `{ "array": "string" }`,
@@ -81,7 +84,7 @@ ignore file) to keep the two in step.
 
 ```json
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "chats": {
       "read": {

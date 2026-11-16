@@ -150,6 +150,34 @@ pub fn languages_or(
 /// from), which is refused before any file is written.
 pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, String> {
     let mut outcome = Outcome::default();
+    // Legacy files (.63/.64: `"format": 1`, an unversioned `$schema`) load
+    // as version 1; `generate` rewrites them in the versioned form, and
+    // `--check` only warns, so they keep passing until the next `generate`.
+    for file in [APP_FILE, PERMISSIONS_FILE] {
+        let path = dir.join(file);
+        let Some(text) = read_optional(&path)? else {
+            continue;
+        };
+        let Some(upgraded) =
+            artifact::upgrade_legacy(file, &text).map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if check {
+            outcome.warnings.push(format!(
+                "{}: legacy `format`/`$schema`; run `jazz-tools generate` to rewrite it with a \
+                 versioned `$schema`",
+                shown(&path)
+            ));
+        } else {
+            std::fs::write(&path, upgraded)
+                .map_err(|error| format!("{}: {error}", shown(&path)))?;
+            outcome.notes.push(format!(
+                "rewrote {} with a versioned `$schema`",
+                shown(&path)
+            ));
+        }
+    }
     let app_json = read(&dir.join(APP_FILE))?;
     let app = App::load(&app_json).map_err(|error| error.to_string())?;
     outcome.warnings.extend(app.warnings.iter().cloned());

@@ -27,7 +27,7 @@ If we have the following schema:
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "projects": {
       "columns": {
@@ -71,8 +71,7 @@ We can define permissions in `jazz.permissions.json`:
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "projects": {
       "read": "true",
@@ -116,7 +115,7 @@ policies.
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": "owner_id = session.user",
@@ -147,7 +146,7 @@ Use `"true"` when an operation should always be permitted.
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": "true",
@@ -166,7 +165,7 @@ Use `"false"` when an operation should be impossible. Leaving the operation out 
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": "false",
@@ -190,7 +189,7 @@ adding an allow rule to silence the warning:
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "auditLog": {
       "read": "ownerId = session.user",
@@ -212,7 +211,7 @@ rules readable:
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "projects": {
       "read": "owner_id = session.user"
@@ -237,7 +236,7 @@ like a function. Definitions may call each other, but never recursively:
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "defs": {
     "isOwner($owner)": "$owner = session.user"
   },
@@ -260,7 +259,7 @@ When your backend's `authenticate` returns claims, `session.claims.<path>` lets 
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": { "anyOf": ["owner_id = session.user", "session.claims.role = 'manager'"] }
@@ -300,7 +299,7 @@ target.
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "projects": {
       "read": "owner_id = session.user",
@@ -327,7 +326,7 @@ Sometimes access isn't determined by ownership or a parent relationship, but by 
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": {
@@ -385,7 +384,7 @@ filter again. For example, a doctor may read the patients they have an appointme
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "doctors": {
       "columns": {
@@ -415,7 +414,7 @@ filter again. For example, a doctor may read the patients they have an appointme
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "doctors": {
       "read": {
@@ -450,7 +449,7 @@ If a table references itself (e.g. a comment that can have sub-comments), you ca
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": {
@@ -483,7 +482,7 @@ original row and that the result is also valid.
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "update": {
@@ -504,7 +503,7 @@ The row being written is always seen as it was before the write, even inside a t
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "update": {
@@ -597,7 +596,7 @@ canonical author identity.
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "$comment": "Only the row's creator can read, create, update, or delete it.",
@@ -614,7 +613,7 @@ The creator condition is a plain comparison, so it composes inside larger rules:
 
 ```json title="jazz.permissions.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": "$createdBy.account = session.user or done = true"

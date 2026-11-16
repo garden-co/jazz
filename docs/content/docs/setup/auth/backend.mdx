@@ -336,8 +336,7 @@ column and base your policies on it:
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "todos": {
       "columns": {
@@ -351,8 +350,7 @@ column and base your policies on it:
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": "owner_id = session.user",

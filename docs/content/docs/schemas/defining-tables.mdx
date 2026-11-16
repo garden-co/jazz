@@ -43,8 +43,7 @@ table with no relations leaves `relations` out.
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "projects": {
       "columns": {
@@ -87,7 +86,7 @@ relation lets a user find their `authoredPosts`:
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "posts": {
       "columns": {
@@ -155,7 +154,7 @@ instead of the whole table.
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "messages": {
       "columns": {
@@ -181,7 +180,7 @@ as editor presence or cursors, keep only each row's latest version with `"histor
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "presence": {
       "columns": {
