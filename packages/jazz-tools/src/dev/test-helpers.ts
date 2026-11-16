@@ -61,11 +61,20 @@ export function todoPermissions(): string {
 }
 
 /**
- * Write the todos app's files into `dir`: `jazz.app.json`,
- * `jazz.permissions.json`, and the `jazz.generated.ts` generate writes.
+ * Write the todos app into `dir`: its `schema.ts`, and the `jazz.app.json`,
+ * `jazz.permissions.json` and `jazz.generated.ts` generate writes from it.
  */
 export async function writeTodoSchema(dir: string): Promise<void> {
-  await writeFile(join(dir, APP_FILE), todoSchema());
-  await writeFile(join(dir, PERMISSIONS_FILE), todoPermissions());
+  await writeFile(
+    join(dir, "schema.ts"),
+    [
+      'import { schema as s } from "jazz-tools";',
+      "export const schema = s.defineSchema({",
+      "  todos: s.table({ title: s.string(), done: s.boolean() }, {}),",
+      "});",
+      "export const permissions = schema.definePermissions({ todos: { read: true, insert: true } });",
+      "",
+    ].join("\n"),
+  );
   await generateApp({ cwd: dir });
 }

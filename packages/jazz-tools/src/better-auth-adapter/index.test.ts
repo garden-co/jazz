@@ -17,7 +17,6 @@ import {
   wasmSchema as wasmSchemaExample,
 } from "./fixtures/app.js";
 import { jazzAdapter } from "./index.js";
-import { betterAuthAppFileNotes } from "./schema.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
@@ -323,15 +322,18 @@ describe("jazzAdapter", () => {
     },
   });
 
-  // The adapter writes no policies for its tables. Deny-all must hold for a
-  // client both as the adapter leaves the app (the tables absent from
-  // jazz.permissions.json) and once the entries it prints are pasted in.
+  // Deny-all must hold for a client both for tables absent from
+  // jazz.permissions.json and as the generated schema-better-auth/schema.ts
+  // writes them (`false` for each operation).
   it.each([
     ["absent from jazz.permissions.json", {}],
     [
-      "given the entries the adapter prints",
-      JSON.parse(
-        `{${betterAuthAppFileNotes(Object.keys(fixtureAppFile.tables)).split("jazz.permissions.json:\n")[1]}}`,
+      "as schema-better-auth/schema.ts writes them",
+      Object.fromEntries(
+        Object.keys(fixtureAppFile.tables).map((name) => [
+          name,
+          { read: "false", insert: "false", update: "false", delete: "false" },
+        ]),
       ),
     ],
   ])(
@@ -1250,8 +1252,7 @@ describe("jazzAdapter", () => {
       });
     });
 
-    it("creates jazz.app.json output for Better Auth CLI generation", async () => {
-      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    it("creates schema-better-auth/schema.ts for Better Auth CLI generation", async () => {
       const generated = await (adapter as any).createSchema({
         tables: {
           user: {
@@ -1265,23 +1266,17 @@ describe("jazzAdapter", () => {
           },
         },
       });
-      const notes = String(log.mock.calls[0]?.[0]);
-      log.mockRestore();
 
       expect(generated).toMatchObject({
-        path: "./jazz.app.json",
+        path: "./schema-better-auth/schema.ts",
         overwrite: true,
       });
-      const file = JSON.parse(generated.code);
-      expect(file).toMatchObject({
-        $schema: "https://jazz.tools/schemas/jazz.app.schema.json",
-        format: 1,
-        tables: { better_auth_user: { columns: { name: "string" } } },
-      });
-      expect(Object.keys(file.tables).every((name) => name.startsWith("better_auth_"))).toBe(true);
-      // No policies: every client read and write of the table is denied.
-      expect(notes).toContain(
-        '"better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" }',
+      expect(generated.code).toContain("export const tables = {");
+      expect(generated.code).toContain("better_auth_user: s.table(");
+      expect(generated.code).toContain("name: s.string(),");
+      // No client may read or write the table.
+      expect(generated.code).toContain(
+        "better_auth_user: { read: false, insert: false, update: false, delete: false },",
       );
     });
   });
