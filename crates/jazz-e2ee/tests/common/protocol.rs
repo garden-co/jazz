@@ -1,0 +1,272 @@
+//! An account's ledger built with the crate's own record builders, accepted
+//! row by row at increasing positions, for protocol tests.
+
+use jazz_e2ee::agility::MechanismConfig;
+use jazz_e2ee::protocol::account::build::{
+    self, AccountWriter, ApprovalRecords, LocalDevice, ResetPolicy, RotationRecords, RotationTarget,
+};
+use jazz_e2ee::protocol::account::{
+    AccountKey, AccountKeyEvidence, AccountReplay, AccountState, PrivateAccountLedger,
+    PrivateEvidence, PublicAccountLedger, verify_private,
+};
+use jazz_e2ee::protocol::derive::RecoveryKeys;
+use jazz_e2ee::protocol::domain::{AccountDomain, AppDomain};
+use jazz_e2ee::protocol::records::account::RecoveryRoot;
+use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult};
+use jazz_e2ee::registry::Registry;
+
+use super::TestRandom;
+
+pub const APP_ID: &str = "0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f";
+
+/// The mechanisms, domain and account under test.
+pub struct Env {
+    pub registry: Registry,
+    pub config: MechanismConfig,
+    pub domain: AppDomain,
+    pub account: String,
+}
+
+impl Env {
+    pub fn new(account: &str) -> Self {
+        Self::with(Registry::builtin(), MechanismConfig::default(), account)
+    }
+
+    pub fn with(registry: Registry, config: MechanismConfig, account: &str) -> Self {
+        Self {
+            registry,
+            config,
+            domain: AppDomain::new(APP_ID, Some("test")).unwrap(),
+            account: account.to_owned(),
+        }
+    }
+
+    pub fn writer(&self) -> AccountWriter<'_> {
+        AccountWriter {
+            suite: self.registry.select(&self.config).unwrap(),
+            registry: &self.registry,
+            domain: &self.domain,
+            account_id: &self.account,
+        }
+    }
+
+    pub fn application(&self) -> AccountDomain {
+        self.domain.account(&self.account).unwrap()
+    }
+
+    pub fn device(&self, rng: &mut TestRandom) -> LocalDevice {
+        LocalDevice::generate(
+            &self.registry.select(&self.config).unwrap(),
+            &self.registry,
+            &self.application(),
+            rng,
+        )
+        .unwrap()
+    }
+}
+
+/// One account's public and private rows, with the next position to accept
+/// at.
+pub struct Ledger {
+    pub public: PublicAccountLedger,
+    pub private: PrivateAccountLedger,
+    next: u64,
+}
+
+impl Ledger {
+    pub fn new(account: &str) -> Self {
+        Self {
+            public: PublicAccountLedger::new(account, Position(0)),
+            private: PrivateAccountLedger::new(Position(0)),
+            next: 1,
+        }
+    }
+
+    /// A new transaction's position; the cut moves to it.
+    pub fn next(&mut self) -> Position {
+        let position = Position(self.next);
+        self.next += 1;
+        self.public.through = position;
+        self.private.through = position;
+        position
+    }
+
+    /// Accepts the device's request and key projection.
+    pub fn request(&mut self, device: &LocalDevice, rng: &mut TestRandom) -> Position {
+        let at = self.next();
+        self.private
+            .requests
+            .push(Accepted::new(at, device.request()));
+        self.public
+            .keys
+            .push(Accepted::new(at, device.keys_row(rng).unwrap()));
+        at
+    }
+
+    /// Bootstraps the account with `device` (generation 0), or resets it to
+    /// the next generation, after the builders' own precondition checks.
+    pub fn root(
+        &mut self,
+        env: &Env,
+        device: &LocalDevice,
+        generation: u64,
+        rng: &mut TestRandom,
+    ) -> (Position, AccountKeyBytes) {
+        let writer = env.writer();
+        let permit = if generation == 0 {
+            build::check_bootstrap(&writer, device, &self.public, &self.private).unwrap()
+        } else {
+            let policy = ResetPolicy {
+                local_first: false,
+                allow_account_reset: true,
+            };
+            let state = self.state(env);
+            build::check_reset(&writer, policy, &state, device, &self.public, &self.private)
+                .unwrap()
+        };
+        assert_eq!(permit.generation(), generation);
+        let records = build::account_root(&writer, device, &permit, rng).unwrap();
+        let at = self.next();
+        self.private
+            .identities
+            .push(Accepted::new(at, records.identity));
+        self.public.roots.push(Accepted::new(at, records.root));
+        (at, *records.key)
+    }
+
+    pub fn replay<'a>(&'a self, env: &'a Env) -> AccountReplay<'a> {
+        AccountReplay::new(&self.public, &env.domain, &env.registry).unwrap()
+    }
+
+    pub fn state(&self, env: &Env) -> AccountState {
+        self.replay(env).current().unwrap().expect("a root")
+    }
+
+    pub fn evidence(&self, env: &Env) -> (AccountState, PrivateEvidence) {
+        let replay = self.replay(env);
+        let state = replay.current().unwrap().expect("a root");
+        let evidence = verify_private(&replay, &state, &self.private).unwrap();
+        (state, evidence)
+    }
+
+    /// The account key `device` obtains at the cut.
+    pub fn acquire(&self, env: &Env, device: &LocalDevice) -> ProtocolResult<AccountKey> {
+        let replay = self.replay(env);
+        let state = replay.current()?.expect("a root");
+        let private = verify_private(&replay, &state, &self.private)?;
+        AccountKeyEvidence {
+            replay: &replay,
+            state: &state,
+            private: &private,
+        }
+        .acquire(&device.id, std::slice::from_ref(&device.sealing))
+    }
+
+    /// The challenge, proof and approval of `requester` by `approver`, each
+    /// accepted in its own transaction. Returns the approval rows and the
+    /// position they were accepted at.
+    pub fn approve(
+        &mut self,
+        env: &Env,
+        approver: &LocalDevice,
+        requester: &LocalDevice,
+        rng: &mut TestRandom,
+    ) -> (Position, ApprovalRecords) {
+        let key = self.acquire(env, approver).unwrap();
+        let writer = env.writer();
+        let state = self.state(env);
+        let challenge =
+            build::challenge(&writer, &state, &approver.id, &requester.request(), rng).unwrap();
+        let at = self.next();
+        self.private
+            .challenges
+            .push(Accepted::new(at, challenge.challenge.clone()));
+        let proof = build::respond(&writer, &state, requester, &challenge.challenge, rng).unwrap();
+        let at = self.next();
+        self.private.proofs.push(Accepted::new(at, proof.clone()));
+        let records = build::approve(
+            &writer,
+            &state,
+            approver,
+            &challenge,
+            &proof,
+            &requester.request(),
+            &key,
+            rng,
+        )
+        .unwrap();
+        let at = self.next();
+        self.accept_approval(at, &records);
+        (at, records)
+    }
+
+    pub fn accept_approval(&mut self, at: Position, records: &ApprovalRecords) {
+        self.private
+            .approvals
+            .push(Accepted::new(at, records.approval.clone()));
+        self.public
+            .approvals
+            .push(Accepted::new(at, records.public.clone()));
+        self.private
+            .deliveries
+            .push(Accepted::new(at, records.delivery.clone()));
+    }
+
+    /// A rotation by `author`, with the key it acquires, accepted in one
+    /// transaction.
+    pub fn rotate(
+        &mut self,
+        env: &Env,
+        author: &LocalDevice,
+        target: RotationTarget,
+        rng: &mut TestRandom,
+    ) -> (Position, RotationRecords) {
+        let key = self.acquire(env, author).unwrap();
+        let state = self.state(env);
+        let records = build::rotate(&env.writer(), &state, author, &key, &target, rng).unwrap();
+        let at = self.next();
+        self.accept_rotation(at, &records);
+        (at, records)
+    }
+
+    pub fn accept_rotation(&mut self, at: Position, records: &RotationRecords) {
+        self.private
+            .successors
+            .push(Accepted::new(at, records.private.clone()));
+        self.public
+            .successors
+            .push(Accepted::new(at, records.public.clone()));
+        for delivery in &records.recovery_deliveries {
+            self.private
+                .recovery_deliveries
+                .push(Accepted::new(at, delivery.clone()));
+        }
+    }
+
+    /// Registers `recovery` by `signer` and delivers `key` to it, in two
+    /// transactions.
+    pub fn register_recovery(
+        &mut self,
+        env: &Env,
+        signer: &LocalDevice,
+        recovery: &RecoveryKeys,
+        rng: &mut TestRandom,
+    ) -> RecoveryRoot {
+        let key = self.acquire(env, signer).unwrap();
+        let writer = env.writer();
+        let state = self.state(env);
+        let root = build::recovery_root(&writer, &state, signer, recovery).unwrap();
+        let at = self.next();
+        self.public
+            .recovery_roots
+            .push(Accepted::new(at, root.clone()));
+        let delivery = build::recovery_delivery(&writer, &state, &root, &key, rng).unwrap();
+        let at = self.next();
+        self.private
+            .recovery_deliveries
+            .push(Accepted::new(at, delivery));
+        root
+    }
+}
+
+pub type AccountKeyBytes = [u8; 32];

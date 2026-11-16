@@ -16,6 +16,8 @@
 //! - [`agility`] and [`registry`]: one trait per role, keys that name their
 //!   mechanism, routing by envelope header and per-role selection, so a
 //!   custom mechanism plugs in beside the built-ins.
+//! - [`protocol`]: the protocol's records, signed bytes, derived IDs and
+//!   account replay, as pure functions over ledger rows.
 //! - `conformance` (feature `conformance`): the test kit every mechanism
 //!   implementation runs.
 //!
@@ -30,6 +32,7 @@ pub mod envelope;
 mod error;
 pub mod mechanisms;
 pub mod primitives;
+pub mod protocol;
 mod random;
 pub mod records;
 pub mod registry;

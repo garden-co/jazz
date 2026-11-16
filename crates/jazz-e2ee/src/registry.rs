@@ -180,6 +180,13 @@ impl Registry {
         "stream cipher"
     );
 
+    /// Whether a signer of `id` is registered at any version.
+    pub(crate) fn has_signer_id(&self, id: &str) -> bool {
+        self.signers
+            .iter()
+            .any(|signer| signer.mechanism().id == id)
+    }
+
     /// Resolves the writer's per-role selection.
     pub fn select(&self, config: &MechanismConfig) -> Result<Suite<'_>> {
         Ok(Suite {

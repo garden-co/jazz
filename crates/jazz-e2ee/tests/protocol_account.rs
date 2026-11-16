@@ -1,0 +1,1074 @@
+//! Account and device lifecycle (`E2EE_PROTOCOL.md` §2): records built by
+//! the crate's builders, accepted at positions, and replayed. These tests
+//! drive the public replay, private verification and key APIs end to end.
+
+mod common;
+
+use common::TestRandom;
+use common::protocol::{Env, Ledger};
+use jazz_e2ee::agility::MechanismId;
+use jazz_e2ee::mechanisms::signature;
+use jazz_e2ee::protocol::account::build::{self, ResetPolicy, RotationTarget};
+use jazz_e2ee::protocol::account::{AccountKeyEvidence, PrivateAccountLedger, verify_private};
+use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
+use jazz_e2ee::protocol::error::{
+    IntrinsicContradiction, ProtocolError, RecoveryFailure, RefusalCode, UnsupportedCapability,
+};
+use jazz_e2ee::protocol::records::account::AccountRoot;
+use jazz_e2ee::protocol::{Accepted, Position, ids, signing};
+
+fn refused(code: RefusalCode) -> ProtocolError {
+    ProtocolError::Refused(code)
+}
+
+/// The first device bootstraps the account: replay makes it the only active
+/// device of the root epoch, and it obtains the root key from its identity
+/// envelope.
+///
+/// ```text
+/// alice-laptop ──request──► ledger ──bootstrap──► root(gen 0, epoch e0)
+/// ```
+#[test]
+fn bootstrap_makes_the_first_device_active() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(1);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    build::check_bootstrap(&env.writer(), &laptop, &ledger.public, &ledger.private).unwrap();
+    let (at, key) = ledger.root(&env, &laptop, 0, &mut rng);
+
+    let state = ledger.state(&env);
+    assert_eq!(state.generation, 0);
+    assert_eq!(state.root.position, at);
+    assert!(state.is_active(&laptop.id));
+    assert_eq!(state.active.len(), 1);
+    assert_eq!(state.epochs.len(), 1);
+
+    let acquired = ledger.acquire(&env, &laptop).unwrap();
+    assert_eq!(*acquired.key(), key);
+    assert_eq!(acquired.authenticated().epoch_id, state.epoch_id());
+}
+
+/// Bootstrap refuses a device without a request, a device whose keys differ
+/// from its request, and an account that already has history.
+#[test]
+fn bootstrap_preconditions_refuse() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(2);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    assert_eq!(
+        build::check_bootstrap(&env.writer(), &laptop, &ledger.public, &ledger.private),
+        Err(refused(RefusalCode::NoDeviceRequest))
+    );
+    let impostor = env.device(&mut rng);
+    let mut other = Ledger::new("alice");
+    other.request(&laptop, &mut rng);
+    other.private.requests[0].row.keys = impostor.keys();
+    assert_eq!(
+        build::check_bootstrap(&env.writer(), &laptop, &other.public, &other.private),
+        Err(refused(RefusalCode::DeviceKeysMismatch))
+    );
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    assert_eq!(
+        build::check_bootstrap(&env.writer(), &laptop, &ledger.public, &ledger.private),
+        Err(refused(RefusalCode::AccountHasHistory))
+    );
+}
+
+/// Challenge and response approve a second device; private verification
+/// accepts the approval, and the new device obtains the account key from
+/// its approval delivery.
+///
+/// ```text
+/// laptop ──challenge──► phone ──proof──► laptop ──approval+delivery──► ledger
+/// ```
+#[test]
+fn approval_activates_a_device_that_then_obtains_the_key() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(3);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    let (_, key) = ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let (at, records) = ledger.approve(&env, &laptop, &phone, &mut rng);
+
+    let (state, evidence) = ledger.evidence(&env);
+    assert!(state.is_active(&phone.id));
+    assert_eq!(state.approvals.len(), 1);
+    assert_eq!(state.approvals[0].position, at);
+    assert_eq!(evidence.approvals.len(), 1);
+    assert!(evidence.approvals[0].delivery.is_some());
+    assert!(evidence.identity.is_some());
+
+    let acquired = ledger.acquire(&env, &phone).unwrap();
+    assert_eq!(*acquired.key(), key);
+    assert!(
+        acquired
+            .authenticated()
+            .approval_ids
+            .contains(&records.approval.id)
+    );
+
+    // Approval is complete before its position, not at it.
+    let replay = ledger.replay(&env);
+    assert!(
+        !replay
+            .author_active_at(at, &phone.id, state.epoch_id())
+            .unwrap()
+    );
+    assert!(
+        replay
+            .author_active_at(Position(at.0 + 1), &phone.id, state.epoch_id())
+            .unwrap()
+    );
+}
+
+/// A tampered public approval signature, or a non-recovery approval
+/// carrying a recovery signature, is skipped rather than failing replay.
+#[test]
+fn tampered_approvals_are_skipped() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(4);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+
+    let mut flipped = ledger.public.clone();
+    let last = flipped.approvals[0].row.signature.len() - 1;
+    flipped.approvals[0].row.signature[last] ^= 1;
+    let mut forged = ledger.public.clone();
+    forged.approvals[0].row.recovery_signature = Some(vec![1, 2, 3]);
+    for public in [flipped, forged] {
+        let state =
+            jazz_e2ee::protocol::account::AccountReplay::new(&public, &env.domain, &env.registry)
+                .unwrap()
+                .current()
+                .unwrap()
+                .unwrap();
+        assert!(!state.is_active(&phone.id));
+        assert!(state.approvals.is_empty());
+    }
+}
+
+/// Approvals at one position are judged against the active set before the
+/// batch: a device approved in a batch cannot approve another in the same
+/// batch.
+///
+/// ```text
+/// position p: laptop approves phone, phone approves tablet → tablet skipped
+/// ```
+#[test]
+fn approvals_in_one_batch_do_not_authorise_each_other() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(5);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.request(&tablet, &mut rng);
+    let (_, first) = ledger.approve(&env, &laptop, &phone, &mut rng);
+    // Pretend phone's approval of tablet was accepted with laptop's.
+    let batch = ledger.public.approvals[0].position;
+    let (_, second) = ledger.approve(&env, &phone, &tablet, &mut rng);
+    ledger
+        .public
+        .approvals
+        .retain(|row| row.row.id != second.public.id);
+    ledger
+        .public
+        .approvals
+        .push(Accepted::new(batch, second.public));
+    let state = ledger.state(&env);
+    assert!(state.is_active(&phone.id));
+    assert!(!state.is_active(&tablet.id));
+    assert_eq!(state.approvals[0].row.id, first.public.id);
+}
+
+/// Removing a device rotates the account: the survivors obtain the new key
+/// through the successor's deliveries and its history back to the root; the
+/// removed device has no candidate and is never reactivated.
+///
+/// ```text
+/// e0 {laptop, phone} ──successor(remove phone)──► e1 {laptop}
+///                                    phone re-approved in e1 ──✗── skipped
+/// ```
+#[test]
+fn removal_rotates_and_excludes_the_device() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(6);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let (at, rotation) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+
+    let state = ledger.state(&env);
+    assert_eq!(state.epoch_id(), rotation.public.epoch_id);
+    assert_eq!(state.current_epoch().position, at);
+    assert!(state.is_removed(&phone.id));
+    assert!(!state.is_active(&phone.id));
+
+    let acquired = ledger.acquire(&env, &laptop).unwrap();
+    assert_eq!(*acquired.key(), *rotation.key);
+    assert_eq!(
+        ledger.acquire(&env, &phone).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
+
+    // A removed device cannot be challenged, and an approval of it in the
+    // new epoch is skipped.
+    let writer = env.writer();
+    assert_eq!(
+        build::challenge(&writer, &state, &laptop.id, &phone.request(), &mut rng).unwrap_err(),
+        refused(RefusalCode::DeviceRemoved)
+    );
+    assert_eq!(
+        build::rotate(
+            &writer,
+            &state,
+            &laptop,
+            &acquired,
+            &RotationTarget::RemoveDevice(phone.id.clone()),
+            &mut rng,
+        )
+        .unwrap_err(),
+        refused(RefusalCode::TargetNotActive)
+    );
+}
+
+/// Two successors of one predecessor at one position are unordered: neither
+/// is accepted, and the epoch does not move.
+#[test]
+fn concurrent_successors_at_one_position_both_lose() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(7);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let before = ledger.state(&env);
+    let (at, _) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let mut other = ledger.public.clone();
+    other.successors.pop();
+    let mut staged = Ledger::new("alice");
+    staged.public = other;
+    staged.private = ledger.private.clone();
+    staged.private.successors.pop();
+    let (_, second) = staged.rotate(
+        &env,
+        &phone,
+        RotationTarget::RemoveDevice(laptop.id.clone()),
+        &mut rng,
+    );
+    ledger
+        .public
+        .successors
+        .push(Accepted::new(at, second.public));
+    let state = ledger.state(&env);
+    assert_eq!(state.epoch_id(), before.epoch_id());
+    assert!(state.removed.is_empty());
+}
+
+/// A successor accepted at the same position as a recovery root is skipped;
+/// so is one whose public revision differs from replay's.
+#[test]
+fn successor_tie_with_recovery_root_and_wrong_revision_are_skipped() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(8);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let secret = RecoverySecret::from_bytes([9; 32]);
+    let recovery = RecoveryKeys::derive(&secret, &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &recovery, &mut rng);
+    let (at, _) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    assert!(ledger.state(&env).is_removed(&phone.id));
+
+    let mut tied = ledger.public.clone();
+    tied.recovery_roots[0].position = at;
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&tied, &env.domain, &env.registry)
+            .unwrap();
+    assert!(replay.current().unwrap().unwrap().removed.is_empty());
+
+    let mut wrong = ledger.public.clone();
+    wrong.successors[0].row.revision = b"[]".to_vec();
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&wrong, &env.domain, &env.registry)
+            .unwrap();
+    assert!(replay.current().unwrap().unwrap().removed.is_empty());
+}
+
+/// Recovery: a root derived from the recovery secret is registered and
+/// receives the account key; a new device restores with the secret alone,
+/// approves itself with the recovery key, and becomes active although no
+/// active device signed.
+///
+/// ```text
+/// laptop ──register root(s)──► ledger ──recovery delivery──► root
+/// (laptop lost) new-laptop ──derive(s)──► open delivery ──self-approve──► active
+/// ```
+#[test]
+fn recovery_restores_a_new_device() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(9);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    let (_, key) = ledger.root(&env, &laptop, 0, &mut rng);
+    let secret = RecoverySecret::from_bytes([7; 32]);
+    let recovery = RecoveryKeys::derive(&secret, &env.application(), 0).unwrap();
+    let root = ledger.register_recovery(&env, &laptop, &recovery, &mut rng);
+    assert_eq!(root.id, recovery.root_id);
+    assert_eq!(ids::uuid_version(&root.id), Some(8));
+    assert_eq!(ledger.state(&env).recovery_roots.len(), 1);
+
+    let replacement = env.device(&mut rng);
+    ledger.request(&replacement, &mut rng);
+    let restored = RecoveryKeys::derive(&secret, &env.application(), 0).unwrap();
+    let (state, evidence) = ledger.evidence(&env);
+    let replay = ledger.replay(&env);
+    let account_key = AccountKeyEvidence {
+        replay: &replay,
+        state: &state,
+        private: &evidence,
+    }
+    .acquire_with_recovery(&restored, &ledger.private.recovery_deliveries)
+    .unwrap();
+    assert_eq!(*account_key.key(), key);
+
+    let records = build::recovery_approve(
+        &env.writer(),
+        &state,
+        &replacement,
+        &restored,
+        &account_key,
+        &mut rng,
+    )
+    .unwrap()
+    .expect("not yet active");
+    let at = ledger.next();
+    ledger
+        .private
+        .challenges
+        .push(Accepted::new(at, records.challenge));
+    ledger.private.proofs.push(Accepted::new(at, records.proof));
+    ledger.accept_approval(at, &records.records);
+    let state = ledger.state(&env);
+    assert!(state.is_active(&replacement.id));
+    let acquired = ledger.acquire(&env, &replacement).unwrap();
+    assert_eq!(*acquired.key(), key);
+
+    // Already active: nothing to write.
+    assert!(
+        build::recovery_approve(
+            &env.writer(),
+            &state,
+            &replacement,
+            &restored,
+            &acquired,
+            &mut rng
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+/// Recovery fails with its own codes: keys of another secret do not match
+/// any root, and a root without a delivery of the current epoch has none.
+#[test]
+fn recovery_failures_keep_their_codes() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(10);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let recovery =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([7; 32]), &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &recovery, &mut rng);
+    let (state, evidence) = ledger.evidence(&env);
+    let replay = ledger.replay(&env);
+    let keys = AccountKeyEvidence {
+        replay: &replay,
+        state: &state,
+        private: &evidence,
+    };
+    let stranger =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([8; 32]), &env.application(), 0).unwrap();
+    assert_eq!(
+        keys.acquire_with_recovery(&stranger, &ledger.private.recovery_deliveries)
+            .unwrap_err(),
+        ProtocolError::Recovery(RecoveryFailure::RootMismatch)
+    );
+    assert_eq!(
+        keys.acquire_with_recovery(&recovery, &[]).unwrap_err(),
+        ProtocolError::Recovery(RecoveryFailure::DeliveryMissing)
+    );
+    let mut broken = ledger.private.recovery_deliveries.clone();
+    let last = broken[0].row.envelope.len() - 1;
+    broken[0].row.envelope[last] ^= 1;
+    assert_eq!(
+        keys.acquire_with_recovery(&recovery, &broken).unwrap_err(),
+        ProtocolError::Recovery(RecoveryFailure::DeliveryUnusable)
+    );
+}
+
+/// Retiring a recovery root rotates the account; the retired root receives
+/// no delivery of the new key, and a recovery approval with it afterwards is
+/// ignored.
+#[test]
+fn retired_recovery_root_no_longer_approves() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(11);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let recovery =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([3; 32]), &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &recovery, &mut rng);
+    let replacement = env.device(&mut rng);
+    ledger.request(&replacement, &mut rng);
+    let before = ledger.state(&env);
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    // Prepared while the root was still active, accepted after retirement.
+    let stale = build::recovery_approve(
+        &env.writer(),
+        &before,
+        &replacement,
+        &recovery,
+        &key,
+        &mut rng,
+    )
+    .unwrap()
+    .unwrap();
+    let (_, rotation) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RetireRecoveryRoot(recovery.root_id.clone()),
+        &mut rng,
+    );
+    assert!(rotation.recovery_deliveries.is_empty());
+    let state = ledger.state(&env);
+    assert!(state.recovery_roots.is_empty());
+    assert!(state.retired_recovery_roots.contains_key(&recovery.root_id));
+    let new_key = ledger.acquire(&env, &laptop).unwrap();
+    assert_eq!(*new_key.key(), *rotation.key);
+    assert_eq!(
+        build::recovery_approve(
+            &env.writer(),
+            &state,
+            &replacement,
+            &recovery,
+            &new_key,
+            &mut rng
+        )
+        .unwrap_err(),
+        ProtocolError::Recovery(RecoveryFailure::RootMismatch)
+    );
+
+    // The same approval re-signed for the new epoch is still ignored.
+    let mut current = stale.records.public.clone();
+    current.id = ids::random_v4(&mut rng).unwrap();
+    current.epoch_id = state.epoch_id().to_owned();
+    let bytes = current.signed_bytes(&env.application()).unwrap();
+    let signer = env.registry.signer(signature::MECHANISM).unwrap();
+    current.signature = signing::sign(signer, &replacement.signing, &bytes).unwrap();
+    current.recovery_signature = Some(signing::sign(signer, &recovery.signing, &bytes).unwrap());
+    let at = ledger.next();
+    ledger
+        .public
+        .approvals
+        .push(Accepted::new(at, stale.records.public));
+    ledger.public.approvals.push(Accepted::new(at, current));
+    assert!(!ledger.state(&env).is_active(&replacement.id));
+}
+
+/// An account reset starts a new generation: the new root's device is the
+/// only active one, earlier devices and recovery roots are inactive, and the
+/// state as of a position before the reset is still generation 0.
+///
+/// ```text
+/// gen 0: laptop ──(all devices lost)──► gen 1: new-phone
+/// as_of(before reset) → gen 0, laptop active
+/// ```
+#[test]
+fn reset_starts_a_new_generation() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(12);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let recovery =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([4; 32]), &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &recovery, &mut rng);
+    let gen0 = ledger.state(&env);
+
+    let phone = env.device(&mut rng);
+    ledger.request(&phone, &mut rng);
+    let policy = ResetPolicy {
+        local_first: false,
+        allow_account_reset: true,
+    };
+    // A still-active device needs no reset.
+    assert_eq!(
+        build::check_reset(
+            &env.writer(),
+            policy,
+            &gen0,
+            &laptop,
+            &ledger.public,
+            &ledger.private
+        ),
+        Err(refused(RefusalCode::ResetDeviceActive))
+    );
+    build::check_reset(
+        &env.writer(),
+        policy,
+        &gen0,
+        &phone,
+        &ledger.public,
+        &ledger.private,
+    )
+    .unwrap();
+    let (reset_at, reset_key) = ledger.root(&env, &phone, 1, &mut rng);
+    assert_eq!(
+        ledger.private.identities[1].row.id,
+        ids::account_identity_id("alice", 1)
+    );
+
+    let state = ledger.state(&env);
+    assert_eq!(state.generation, 1);
+    assert!(state.is_active(&phone.id));
+    assert!(!state.is_active(&laptop.id));
+    assert!(state.recovery_roots.is_empty());
+    assert_eq!(*ledger.acquire(&env, &phone).unwrap().key(), reset_key);
+
+    let replay = ledger.replay(&env);
+    assert_eq!(replay.generation_at(reset_at).unwrap(), Some(0));
+    assert!(
+        replay
+            .author_active_at(reset_at, &laptop.id, gen0.epoch_id())
+            .unwrap()
+    );
+    assert_eq!(
+        replay.generation_at(Position(reset_at.0 + 1)).unwrap(),
+        Some(1)
+    );
+
+    for refused_policy in [
+        ResetPolicy {
+            local_first: true,
+            allow_account_reset: true,
+        },
+        ResetPolicy {
+            local_first: false,
+            allow_account_reset: false,
+        },
+    ] {
+        assert_eq!(
+            build::check_reset(
+                &env.writer(),
+                refused_policy,
+                &gen0,
+                &phone,
+                &ledger.public,
+                &ledger.private
+            ),
+            Err(refused(RefusalCode::AccountResetNotAllowed))
+        );
+    }
+}
+
+/// A root of generation 1 counts only after a root of generation 0;
+/// otherwise it is ignored.
+#[test]
+fn a_generation_counts_only_after_the_previous_one() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(13);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.request(&phone, &mut rng);
+    // A raw generation-1 root with no generation-0 root before it.
+    let early = AccountRoot {
+        id: ids::random_v4(&mut rng).unwrap(),
+        ledger_version: 1,
+        generation: 1,
+        account_id: "alice".into(),
+        device_id: phone.id.clone(),
+        epoch_id: ids::random_v4(&mut rng).unwrap(),
+    };
+    let at = ledger.next();
+    ledger.public.roots.push(Accepted::new(at, early));
+    assert!(ledger.replay(&env).current().unwrap().is_none());
+    // Bootstrap refuses an account with any root, so laptop's generation-0
+    // root is built on its own and then accepted here.
+    let mut scratch = Ledger::new("alice");
+    scratch.request(&laptop, &mut rng);
+    scratch.root(&env, &laptop, 0, &mut rng);
+    let at = ledger.next();
+    ledger
+        .public
+        .roots
+        .push(Accepted::new(at, scratch.public.roots[0].row.clone()));
+    let state = ledger.state(&env);
+    assert_eq!(state.generation, 0);
+    assert!(state.is_active(&laptop.id));
+}
+
+fn bootstrapped(seed: u64) -> (Env, Ledger, TestRandom) {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(seed);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    (env, ledger, rng)
+}
+
+/// Contradictory accepted rows fail current replay with their codes:
+/// conflicting roots, conflicting device keys, a root device without keys.
+#[test]
+fn intrinsic_contradictions_fail_replay() {
+    let (env, ledger, mut rng) = bootstrapped(14);
+    let replay_error = |ledger: &Ledger| {
+        jazz_e2ee::protocol::account::AccountReplay::new(&ledger.public, &env.domain, &env.registry)
+            .unwrap()
+            .current()
+            .unwrap_err()
+    };
+
+    let mut conflicting = Ledger::new("alice");
+    conflicting.public = ledger.public.clone();
+    let mut other: AccountRoot = conflicting.public.roots[0].row.clone();
+    other.id = ids::random_v4(&mut rng).unwrap();
+    other.device_id = ids::random_v4(&mut rng).unwrap();
+    let at = conflicting.public.roots[0].position;
+    conflicting.public.roots.push(Accepted::new(at, other));
+    assert_eq!(
+        replay_error(&conflicting),
+        ProtocolError::Intrinsic(IntrinsicContradiction::ConflictingRoots)
+    );
+
+    let mut keys = Ledger::new("alice");
+    keys.public = ledger.public.clone();
+    let mut second = keys.public.keys[0].clone();
+    second.row.id = ids::random_v4(&mut rng).unwrap();
+    second.row.keys.public_key[0] ^= 1;
+    keys.public.keys.push(second);
+    assert_eq!(
+        replay_error(&keys),
+        ProtocolError::Intrinsic(IntrinsicContradiction::ConflictingDeviceKeys)
+    );
+
+    let mut missing = Ledger::new("alice");
+    missing.public = ledger.public.clone();
+    missing.public.keys.clear();
+    assert_eq!(
+        replay_error(&missing),
+        ProtocolError::Intrinsic(IntrinsicContradiction::MissingRootKey)
+    );
+}
+
+/// An approval whose recipient has no published keys is a contradiction
+/// once its signature verifies.
+#[test]
+fn approval_without_recipient_keys_is_a_contradiction() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(15);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger
+        .public
+        .keys
+        .retain(|row| row.row.device_id != phone.id);
+    assert_eq!(
+        ledger.replay(&env).current().unwrap_err(),
+        ProtocolError::Intrinsic(IntrinsicContradiction::MissingRecipientKey)
+    );
+}
+
+/// Unsupported capabilities stop replay and are never read as invalid: a
+/// root of another ledger version, and a signer of an unregistered signing
+/// mechanism or version.
+#[test]
+fn unsupported_capabilities_are_not_invalid() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(16);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+
+    let mut version = ledger.public.clone();
+    version.roots[0].row.ledger_version = 2;
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&version, &env.domain, &env.registry)
+            .unwrap();
+    assert_eq!(
+        replay.current().unwrap_err(),
+        ProtocolError::Unsupported(UnsupportedCapability::LedgerVersion)
+    );
+
+    for (mechanism, version, expected) in [
+        (
+            "com.example.sign",
+            1,
+            UnsupportedCapability::SigningMechanism,
+        ),
+        ("jazz.sodium.sign", 2, UnsupportedCapability::SigningVersion),
+    ] {
+        let mut public = ledger.public.clone();
+        for row in &mut public.keys {
+            if row.row.device_id == laptop.id {
+                row.row.keys.signing_mechanism = mechanism.to_owned();
+                row.row.keys.signing_version = version;
+            }
+        }
+        let replay =
+            jazz_e2ee::protocol::account::AccountReplay::new(&public, &env.domain, &env.registry)
+                .unwrap();
+        assert_eq!(
+            replay.current().unwrap_err(),
+            ProtocolError::Unsupported(expected)
+        );
+    }
+}
+
+/// Private verification leaves out what does not verify: an identity at
+/// another position, a private approval with a bad signature. Key
+/// acquisition then reports the key unavailable, not an error.
+#[test]
+fn private_verification_drops_unverified_records() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(17);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+
+    let mut tampered = ledger.private.clone();
+    tampered.approvals[0].row.signature[10] ^= 1;
+    tampered.identities[0].position = Position(tampered.identities[0].position.0 + 1);
+    let replay = ledger.replay(&env);
+    let state = replay.current().unwrap().unwrap();
+    let evidence = verify_private(&replay, &state, &tampered).unwrap();
+    assert!(evidence.identity.is_none());
+    assert!(evidence.approvals.is_empty());
+    let keys = AccountKeyEvidence {
+        replay: &replay,
+        state: &state,
+        private: &evidence,
+    };
+    assert_eq!(
+        keys.acquire(&phone.id, std::slice::from_ref(&phone.sealing))
+            .unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
+
+    // Evidence from another cut is refused outright.
+    let mut other_cut = PrivateAccountLedger::new(Position(ledger.public.through.0 + 1));
+    other_cut.requests = ledger.private.requests.clone();
+    assert_eq!(
+        verify_private(&replay, &state, &other_cut).unwrap_err(),
+        ProtocolError::InconsistentEvidence
+    );
+}
+
+/// An invalid delivery marker makes that candidate unusable; the key is
+/// unavailable through it.
+#[test]
+fn invalid_delivery_marker_makes_the_key_unavailable() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(18);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let last = ledger.private.deliveries[0].row.verification.len() - 1;
+    ledger.private.deliveries[0].row.verification[last] ^= 1;
+    assert_eq!(
+        ledger.acquire(&env, &phone).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
+    // The approval itself still counts publicly.
+    assert!(ledger.state(&env).is_active(&phone.id));
+}
+
+/// The challenge and response refuse with their codes: an inactive
+/// approver, a challenge for another device, and a tampered proof.
+#[test]
+fn approval_handshake_refusals() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(19);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.request(&tablet, &mut rng);
+    let writer = env.writer();
+    let state = ledger.state(&env);
+    assert_eq!(
+        build::challenge(&writer, &state, &tablet.id, &phone.request(), &mut rng).unwrap_err(),
+        refused(RefusalCode::DeviceNotActive)
+    );
+    let challenge =
+        build::challenge(&writer, &state, &laptop.id, &phone.request(), &mut rng).unwrap();
+    assert_eq!(
+        build::respond(&writer, &state, &tablet, &challenge.challenge, &mut rng).unwrap_err(),
+        refused(RefusalCode::StaleChallenge)
+    );
+    let mut proof =
+        build::respond(&writer, &state, &phone, &challenge.challenge, &mut rng).unwrap();
+    let last = proof.proof.len() - 1;
+    proof.proof[last] ^= 1;
+    assert_eq!(
+        build::approve(
+            &writer,
+            &state,
+            &laptop,
+            &challenge,
+            &proof,
+            &phone.request(),
+            &ledger.acquire(&env, &laptop).unwrap(),
+            &mut rng
+        )
+        .unwrap_err(),
+        refused(RefusalCode::InvalidPossessionProof)
+    );
+}
+
+fn debug_free_of(rendered: &str, secret: &[u8; 32]) {
+    for needle in [
+        format!("{secret:?}"),
+        format!("{secret:#?}"),
+        secret
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    ] {
+        assert!(!rendered.contains(&needle), "secret bytes in {rendered}");
+    }
+}
+
+/// No secret-bearing result prints its secret, in ordinary or alternate
+/// Debug: root records, challenges, rotations, acquired account keys, local
+/// devices and recovery keys and secrets.
+#[test]
+fn debug_output_never_contains_secrets() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(40);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let writer = env.writer();
+    let permit = build::check_bootstrap(&writer, &laptop, &ledger.public, &ledger.private).unwrap();
+    let root = build::account_root(&writer, &laptop, &permit, &mut rng).unwrap();
+    for rendered in [format!("{root:?}"), format!("{root:#?}")] {
+        debug_free_of(&rendered, &root.key);
+    }
+    let at = ledger.next();
+    ledger
+        .private
+        .identities
+        .push(Accepted::new(at, root.identity.clone()));
+    ledger
+        .public
+        .roots
+        .push(Accepted::new(at, root.root.clone()));
+    let state = ledger.state(&env);
+
+    let challenge =
+        build::challenge(&writer, &state, &laptop.id, &phone.request(), &mut rng).unwrap();
+    for rendered in [format!("{challenge:?}"), format!("{challenge:#?}")] {
+        debug_free_of(&rendered, &challenge.secret);
+    }
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    for rendered in [format!("{key:?}"), format!("{key:#?}")] {
+        debug_free_of(&rendered, key.key());
+    }
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let (_, rotation) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    for rendered in [format!("{rotation:?}"), format!("{rotation:#?}")] {
+        debug_free_of(&rendered, &rotation.key);
+    }
+
+    let secret = RecoverySecret::from_bytes([0x5a; 32]);
+    let recovery = RecoveryKeys::derive(&secret, &env.application(), 0).unwrap();
+    for rendered in [
+        format!("{secret:?}"),
+        format!("{recovery:#?}"),
+        format!("{laptop:#?}"),
+    ] {
+        debug_free_of(&rendered, secret.as_bytes());
+        for pair in [
+            &recovery.sealing,
+            &recovery.signing,
+            &laptop.sealing,
+            &laptop.signing,
+        ] {
+            let secret_bytes = pair.secret.as_bytes();
+            assert!(!rendered.contains(&format!("{secret_bytes:?}")));
+        }
+    }
+}
+
+/// A state as of a position needs every row before it: a position beyond
+/// the read's cut is inconsistent evidence, never answered from the cut.
+#[test]
+fn state_beyond_the_cut_is_refused() {
+    let (env, ledger, _) = bootstrapped(41);
+    let replay = ledger.replay(&env);
+    let through = ledger.public.through;
+    assert!(replay.as_of(Position(through.0 + 1)).unwrap().is_some());
+    assert_eq!(
+        replay.as_of(Position(through.0 + 2)).unwrap_err(),
+        ProtocolError::InconsistentEvidence
+    );
+    let device = ledger.public.roots[0].row.device_id.clone();
+    let epoch = ledger.public.roots[0].row.epoch_id.clone();
+    assert_eq!(
+        replay
+            .author_active_at(Position(through.0 + 100), &device, &epoch)
+            .unwrap_err(),
+        ProtocolError::InconsistentEvidence
+    );
+}
+
+/// After a reset, the same recovery secret derives a fresh root for the new
+/// generation, which registers and restores; the generation-0 root stays
+/// invalid.
+#[test]
+fn recovery_secret_survives_a_reset() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(42);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let secret = RecoverySecret::from_bytes([6; 32]);
+    let gen0 = RecoveryKeys::derive(&secret, &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &gen0, &mut rng);
+
+    let phone = env.device(&mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.root(&env, &phone, 1, &mut rng);
+    let state = ledger.state(&env);
+    assert!(state.recovery_root(&gen0.root_id).is_none());
+
+    let gen1 = RecoveryKeys::derive(&secret, &env.application(), state.generation).unwrap();
+    assert_ne!(gen1.root_id, gen0.root_id);
+    ledger.register_recovery(&env, &phone, &gen1, &mut rng);
+    let (state, evidence) = ledger.evidence(&env);
+    assert!(state.recovery_root(&gen1.root_id).is_some());
+    let replay = ledger.replay(&env);
+    let restored = AccountKeyEvidence {
+        replay: &replay,
+        state: &state,
+        private: &evidence,
+    }
+    .acquire_with_recovery(&gen1, &ledger.private.recovery_deliveries)
+    .unwrap();
+    assert_eq!(restored.key(), ledger.acquire(&env, &phone).unwrap().key());
+}
+
+/// A recovery root whose sealing key is of a mechanism the configuration
+/// does not select receives no delivery from a rotation, and does not block
+/// it.
+#[test]
+fn rotation_skips_recovery_roots_of_other_mechanisms() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(43);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let mut foreign =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([1; 32]), &env.application(), 0).unwrap();
+    foreign.sealing.public.mechanism = MechanismId::new("com.example.kem", 1);
+    let state = ledger.state(&env);
+    let root = build::recovery_root(&env.writer(), &state, &laptop, &foreign).unwrap();
+    let at = ledger.next();
+    ledger.public.recovery_roots.push(Accepted::new(at, root));
+    let native =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([2; 32]), &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &native, &mut rng);
+    assert_eq!(ledger.state(&env).recovery_roots.len(), 2);
+
+    let (_, rotation) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    assert_eq!(rotation.recovery_deliveries.len(), 1);
+    assert_eq!(rotation.recovery_deliveries[0].root_id, native.root_id);
+}
