@@ -30,6 +30,7 @@ export const {
   JazzServer,
   loadAppArtifact,
   loadBackendApp,
+  migrationDiff,
   migrationsCreate,
   migrationsCreateForDir,
   NapiDb,

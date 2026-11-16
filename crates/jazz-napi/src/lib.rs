@@ -278,6 +278,18 @@ pub fn schemas_are_compatible(left_json: String, right_json: String) -> js::Resu
     .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
 }
 
+/// What the migration between two schemas in the engine's JSON form
+/// (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+/// `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+/// [{ table, steps, addedVariants, unchangedRows }] }`, each step
+/// `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+/// Throws, with the reason, for a change no migration step does.
+#[napi(js_name = "migrationDiff")]
+pub fn migration_diff(from_json: String, to_json: String) -> js::Result<String> {
+    jazz_codegen::migrations::diff_steps_json(from_json.as_bytes(), to_json.as_bytes())
+        .map_err(codegen_error)
+}
+
 /// What `migrationsCreate` wrote.
 #[napi(object)]
 pub struct CreatedMigration {
