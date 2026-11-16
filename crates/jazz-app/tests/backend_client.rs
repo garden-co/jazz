@@ -141,3 +141,74 @@ async fn a_backend_client_needs_the_apps_permissions() {
     .await;
     assert!(matches!(opened, Err(Error::App(_))), "{opened:?}");
 }
+
+/// A trusted client evaluates its users' reads by its own permissions: one
+/// opened with other permissions than the main backend serves acts for no
+/// user, rather than read by stale or laxer policies (jazz#5808). Its own
+/// system reads and writes go on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trusted_client_with_other_permissions_acts_for_no_user() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let backend = Jazz::open(
+        files(),
+        Config::new(app_id)
+            .server(server.base_url())
+            .backend(Backend::new(
+                server.backend_secret(),
+                server.admin_secret(),
+                "notes-service",
+            )),
+    )
+    .await
+    .unwrap();
+    let relay = relay::start(
+        &server.base_url(),
+        app_id,
+        server.backend_secret(),
+        server.admin_secret(),
+        backend.bundle().unwrap(),
+    )
+    .await;
+    let a = Jazz::open(
+        files(),
+        Config::new(app_id)
+            .server(&relay.endpoint)
+            .user(Auth::bearer(token("token-a"))),
+    )
+    .await
+    .unwrap();
+
+    // Everyone may read every note, by this client's copy.
+    let laxer = AppFiles::new(
+        std::fs::read(format!("{FIXTURE}/jazz.app.json")).unwrap(),
+        Some(
+            br#"{ "format": 1, "tables": { "notes": {
+                "read": "true", "insert": "owner = session.user",
+                "update": "owner = session.user", "delete": "owner = session.user" } } }"#
+                .to_vec(),
+        ),
+    );
+    let job = Jazz::open(
+        laxer,
+        Config::new(app_id)
+            .server(&relay.endpoint)
+            .credential(token("machine-trusted")),
+    )
+    .await
+    .expect("it opens: only acting for users is refused");
+    let refused = job.for_user("a", serde_json::Value::Null).await;
+    let Err(Error::App(message)) = &refused else {
+        panic!("for_user is refused: {refused:?}");
+    };
+    assert!(message.contains(backend.bundle().unwrap()), "{message}");
+
+    job.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+    a.shutdown().await.unwrap();
+    backend.shutdown().await.unwrap();
+    server.shutdown().await;
+}

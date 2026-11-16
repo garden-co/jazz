@@ -259,8 +259,14 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
     } else {
         ("404 Not Found", "Not found".to_owned())
     };
+    // `backend/admit` names the bundle the main backend serves (jazz#5808).
+    let bundle = if path.ends_with("/backend/admit") {
+        format!("x-jazz-bundle: {}\r\n", backend.bundle)
+    } else {
+        String::new()
+    };
     let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{bundle}connection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
