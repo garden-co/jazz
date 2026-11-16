@@ -31,7 +31,7 @@ With Jazz:
 - **Streams and files in the same model.** Files, streams and mergeable text live in Jazz too, so
   they sync and follow your permissions like every other value. Edit metadata
   (`$createdBy`, `$updatedAt`, …), history, drafts and branches come with every row.
-- **One set of permissions.** Policies live next to your schema in TypeScript and apply the same way
+- **One set of permissions.** Policies live in a JSON file next to your schema and apply the same way
   to backend code, thin clients, local-first clients, files and streams. They're verbose, but agents
   are good at writing and checking them.
 
@@ -62,7 +62,7 @@ With Jazz:
     ],
     [
       "Permissions",
-      "Declarative permissions in TypeScript, next to the schema",
+      "Declarative policies in a JSON file, next to the schema",
       "Declarative policies in SQL, on Postgres tables",
     ],
     ["History, branches and mergeable text", "yes", "no"],
@@ -93,7 +93,11 @@ hosted dashboard with auth, storage and functions included.
       "Your API layer, or declarative policies in SQL",
     ],
     ["Sync to browsers and devices", "yes", "no"],
-    ["Migrations", "Typed and generated from the schema", "SQL you write, or a separate tool"],
+    [
+      "Migrations",
+      "Generated from schema changes, then reviewed",
+      "SQL you write, or a separate tool",
+    ],
     ["Arbitrary SQL and analytics", "no", "yes"],
     ["Ecosystem", "Young", "Decades of tools, extensions and hosting options"],
   ]}
@@ -164,7 +168,7 @@ game rooms or rate limiters, and you want to build that behaviour yourself.
   other="Convex"
   common={[
     ["Reactive queries", "Clients see query results update as data changes."],
-    ["Typed schema", "Schema and types in TypeScript."],
+    ["Typed schema", "Typed rows and queries in TypeScript."],
   ]}
   differences={[
     ["Where it runs", "Inside your own backend", "Convex's hosted service, or self-hosted"],

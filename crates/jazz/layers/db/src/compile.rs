@@ -1234,9 +1234,6 @@ impl<'a> Ctx<'a> {
             let mut conjuncts = Vec::new();
             flatten_all(filter, &mut conjuncts);
             for conjunct in conjuncts {
-                if matches!(conjunct, Predicate::EnumMatch { .. }) {
-                    return Err(unsupported("enum-match filters in flat joins"));
-                }
                 let mut predicate = conjunct.clone();
                 let mut reads = BTreeSet::new();
                 let mut failed = None;
@@ -2080,9 +2077,7 @@ impl<'a> Ctx<'a> {
                 Term::NaN => "0".to_owned(),
                 term => format!("({} IS NULL)", term.sql().expect("present")),
             },
-            Predicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload predicates"));
-            }
+            Predicate::Removed(removed) => match *removed {},
         })
     }
 
@@ -2940,9 +2935,7 @@ impl<'a> Ctx<'a> {
                 let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 self.contains(left, right)
             }
-            RelationPredicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload relation predicates"));
-            }
+            RelationPredicate::Removed(removed) => match *removed {},
         })
     }
 }
@@ -3008,9 +3001,8 @@ fn outer_key_only(rel: &RelationExpr) -> bool {
                 refs(right)
             }
             RelationPredicate::In { values, .. } => values.iter().map(refs).sum(),
-            RelationPredicate::EnumMatch { payload, .. } | RelationPredicate::Not(payload) => {
-                predicate_refs(payload)
-            }
+            RelationPredicate::Not(payload) => predicate_refs(payload),
+            RelationPredicate::Removed(removed) => match *removed {},
             RelationPredicate::And(parts) | RelationPredicate::Or(parts) => {
                 parts.iter().map(predicate_refs).sum()
             }

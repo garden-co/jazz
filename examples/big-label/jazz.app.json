@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "75dd76adccc6f1679be0a684fe6ad0570555c8df8f8cdf38eab9e4a14ca9e0d0"
+  },
   "tables": {
     "artists": {
       "columns": {

@@ -10,7 +10,8 @@ import { Section } from "@astryxdesign/core/Section";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { TASK_STATUSES, type Task, type TaskStatus } from "../../schema.js";
+import { type Task } from "../../jazz.generated.js";
+import { TASK_STATUSES, type TaskStatus } from "../../app-extras.js";
 import {
   addTask,
   moveTask,

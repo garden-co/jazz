@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useDb, useOne } from "jazz-tools/react";
 import { Button, Item, ProgressBar, Skeleton, Text, VStack } from "@astryxdesign/core";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 /** Images up to this size render inline; anything larger downloads on demand. */
 const INLINE_IMAGE_LIMIT = 8 * 1024 * 1024;

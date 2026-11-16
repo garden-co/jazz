@@ -3622,3 +3622,480 @@ fn a_subscriber_joining_a_result_that_awaits_chunks_opens_on_current_rows() {
         "the joiner opens on the current row: {later:?}"
     );
 }
+
+// ---- ranges past the end (#5502) ---------------------------------------------
+
+/// The values `column` took in `stream`'s events since it was last read,
+/// in order. A rejection fails the test: the subscription must live on.
+fn shown(stream: &mut SubscriptionStream, column: &str) -> Vec<Option<Value>> {
+    let mut out = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        match event {
+            jazz::db::SubscriptionEvent::Delta { added, updated, .. } => {
+                for row in added.iter().chain(&updated) {
+                    out.push(
+                        row.cells()
+                            .find(|(name, _)| *name == column)
+                            .and_then(|(_, value)| value.cloned()),
+                    );
+                }
+            }
+            other => panic!("the subscription ended: {other:?}"),
+        }
+    }
+    out
+}
+
+fn update(db: &Db, n: u8, cells: Vec<(&str, Value)>) {
+    block_on(
+        db.update(
+            "docs",
+            row(n),
+            cells
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect(),
+            jazz::db::UpdateOptions::default(),
+        ),
+    )
+    .unwrap();
+    block_on(db.tick()).unwrap();
+}
+
+/// #5502: a value that shrinks below a subscribed range clamps the range
+/// to its new end (empty when it starts past it), and the subscription
+/// follows the value as it grows again. UTF-16, UTF-8 and byte ranges.
+#[test]
+fn a_subscribed_range_past_a_shrunk_values_end_clamps_and_lives_on() {
+    use jazz::query::Part;
+    let db = open(0, AuthorSubject::SYSTEM);
+    insert(
+        &db,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("abcdefgh".into())),
+            ("blob", Value::Bytes(b"abcdefgh".to_vec())),
+        ],
+    );
+    let string = |s: &str| Some(Value::String(s.into()));
+    let bytes = |b: &[u8]| Some(Value::Bytes(b.to_vec()));
+    let ranged = |column: &str, part: Part| {
+        Query::from("docs")
+            .select(["body", "blob"])
+            .select_part(column, part)
+    };
+    let whole = ranged("body", Part::TextUtf16 { from: 0, to: 8 });
+    let tail = ranged("body", Part::TextUtf16 { from: 4, to: 8 });
+    let middle = ranged("body", Part::TextUtf8 { from: 2, to: 6 });
+    let blob = ranged("blob", Part::Bytes { from: 2, to: 6 });
+    let mut whole_s = subscribe(&db, whole.clone());
+    let mut tail_s = subscribe(&db, tail.clone());
+    let mut middle_s = subscribe(&db, middle.clone());
+    let mut blob_s = subscribe(&db, blob.clone());
+    block_on(db.tick()).unwrap();
+    assert_eq!(
+        shown(&mut whole_s, "body").last(),
+        Some(&string("abcdefgh"))
+    );
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("efgh")));
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("cdef")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"cdef")));
+
+    // Shrunk below every range: each clamps, the one past the end to empty.
+    update(
+        &db,
+        1,
+        vec![
+            ("body", Value::String("ab".into())),
+            ("blob", Value::Bytes(b"ab".to_vec())),
+        ],
+    );
+    assert_eq!(shown(&mut whole_s, "body").last(), Some(&string("ab")));
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("")));
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"")));
+    // A one-shot read of the same query clamps alike.
+    assert_eq!(partial_rows(&db, &tail, "body"), vec![string("")]);
+    assert_eq!(partial_rows(&db, &blob, "blob"), vec![bytes(b"")]);
+
+    // Partly overlapping: the part the value still covers.
+    update(
+        &db,
+        1,
+        vec![
+            ("body", Value::String("abcdé".into())),
+            ("blob", Value::Bytes(b"abcd".to_vec())),
+        ],
+    );
+    assert_eq!(shown(&mut whole_s, "body").last(), Some(&string("abcdé")));
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("é")));
+    // "abcdé" is 6 UTF-8 bytes: [2, 6) is all there.
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("cdé")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"cd")));
+    assert_eq!(partial_rows(&db, &blob, "blob"), vec![bytes(b"cd")]);
+
+    // Grown back: every range shows its whole window again.
+    update(
+        &db,
+        1,
+        vec![
+            ("body", Value::String("abcdefgh".into())),
+            ("blob", Value::Bytes(b"abcdefgh".to_vec())),
+        ],
+    );
+    assert_eq!(
+        shown(&mut whole_s, "body").last(),
+        Some(&string("abcdefgh"))
+    );
+    assert_eq!(shown(&mut tail_s, "body").last(), Some(&string("efgh")));
+    assert_eq!(shown(&mut middle_s, "body").last(), Some(&string("cdef")));
+    assert_eq!(shown(&mut blob_s, "blob").last(), Some(&bytes(b"cdef")));
+}
+
+/// #5502 on chunked values a replica reads in part: the clamped range
+/// reads through the shrunk value's tree, and grows back with it. The text
+/// is multi-byte (`é` is one UTF-16 unit and two UTF-8 bytes, `🚀` two
+/// and four), so UTF-16 and UTF-8 bounds differ from char counts.
+#[test]
+fn a_subscribed_range_on_a_replica_clamps_as_a_chunked_value_shrinks() {
+    use jazz::query::Part;
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let chars: Vec<char> = text(17, LARGE * 4)
+        .chars()
+        .enumerate()
+        .map(|(n, c)| match n % 7 {
+            1 => 'é',
+            4 => '🚀',
+            _ => c,
+        })
+        .collect();
+    let body = |n: usize| chars[..n].iter().collect::<String>();
+    let blob = text(19, LARGE * 4).into_bytes();
+    let full = chars.len();
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body(full))),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    // Window bounds on char boundaries 600_000..600_050, in each unit.
+    let units = |n: usize, utf16: bool| -> u64 {
+        chars[..n]
+            .iter()
+            .map(|c| if utf16 { c.len_utf16() } else { c.len_utf8() } as u64)
+            .sum()
+    };
+    let (lo, hi) = (600_000, 600_050);
+    let utf16_q = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf16 {
+            from: units(lo, true),
+            to: units(hi, true),
+        },
+    );
+    let utf8_q = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf8 {
+            from: units(lo, false),
+            to: units(hi, false),
+        },
+    );
+    let (from, to) = (700_000_u64, 700_050_u64);
+    let bytes_q = Query::from("docs")
+        .select(["blob"])
+        .select_part("blob", Part::Bytes { from, to });
+    let mut utf16_s = subscribe(&alice, utf16_q);
+    let mut utf8_s = subscribe(&alice, utf8_q);
+    let mut bytes_s = subscribe(&alice, bytes_q);
+    pump(&server, &[&alice]);
+    // What the window shows of a body `n` chars long, and of a blob `len`
+    // bytes long.
+    let text_window = |n: usize| Some(Value::String(chars[lo.min(n)..hi.min(n)].iter().collect()));
+    let blob_window = |len: usize| {
+        Some(Value::Bytes(
+            blob[(from as usize).min(len)..(to as usize).min(len)].to_vec(),
+        ))
+    };
+    let check = |n: usize,
+                 len: usize,
+                 utf16_s: &mut SubscriptionStream,
+                 utf8_s: &mut SubscriptionStream,
+                 bytes_s: &mut SubscriptionStream| {
+        assert_eq!(shown(utf16_s, "body").last(), Some(&text_window(n)), "{n}");
+        assert_eq!(shown(utf8_s, "body").last(), Some(&text_window(n)), "{n}");
+        assert_eq!(
+            shown(bytes_s, "blob").last(),
+            Some(&blob_window(len)),
+            "{len}"
+        );
+    };
+    check(full, blob.len(), &mut utf16_s, &mut utf8_s, &mut bytes_s);
+
+    // Shrunk to end inside each window, then before it; all stay chunked.
+    for (n, len) in [
+        (lo + 20, from as usize + 20),
+        (lo - 1000, from as usize - 1000),
+    ] {
+        update(
+            &server,
+            1,
+            vec![
+                ("body", Value::String(body(n))),
+                ("blob", Value::Bytes(blob[..len].to_vec())),
+            ],
+        );
+        pump(&server, &[&alice]);
+        check(n, len, &mut utf16_s, &mut utf8_s, &mut bytes_s);
+    }
+
+    // Grown back: the whole window again.
+    update(
+        &server,
+        1,
+        vec![
+            ("body", Value::String(body(full))),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    check(full, blob.len(), &mut utf16_s, &mut utf8_s, &mut bytes_s);
+}
+
+/// The direct range read (`Db::read_value_range`) names exact bytes, like
+/// a file read: past the end it still fails, and says so. A query's
+/// inverted range, which no value can satisfy, is refused as it prepares.
+#[test]
+fn a_direct_range_read_past_the_end_still_fails_explicitly() {
+    use jazz::query::Part;
+    let db = open(0, AuthorSubject::SYSTEM);
+    insert(
+        &db,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("ab".into())),
+            ("blob", Value::Bytes(b"ab".to_vec())),
+        ],
+    );
+    for column in ["body", "blob"] {
+        let error = block_on(db.read_value_range("docs", row(1), column, 0..8)).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("value range is out of bounds"),
+            "{error:?}"
+        );
+        assert_eq!(
+            block_on(db.read_value_range("docs", row(1), column, 0..2)).unwrap(),
+            b"ab"
+        );
+    }
+    let inverted = Query::from("docs")
+        .select(["body"])
+        .select_part("body", Part::TextUtf16 { from: 2, to: 1 });
+    let error = db.prepare_query(&inverted).map(|_| ()).unwrap_err();
+    assert!(
+        format!("{error:?}").contains("ends before it starts"),
+        "{error:?}"
+    );
+}
+
+/// Admitting an uploaded bytes value proves its tree once: the walk that
+/// authenticates every node (object hash, logical hash, metrics) is the
+/// whole check, because the logical-value validator reads nothing of a
+/// bytes value. Reading the value back a second time proves nothing more.
+/// Text keeps its read-back: UTF-8, its UTF-16 length and JSON are checked
+/// on the bytes themselves.
+#[test]
+fn an_uploaded_bytes_value_is_read_once_on_admission() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let blob: Vec<u8> = (0..LARGE * 4).map(|n| (n * 13 % 251) as u8).collect();
+    let before = jazz::large_values::finalize_validation_bytes_for_test();
+    insert(
+        &alice,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    let read = jazz::large_values::finalize_validation_bytes_for_test() - before;
+    assert_eq!(
+        local_cell(&server, "docs", 1, "blob").unwrap(),
+        Some(Value::Bytes(blob.clone()))
+    );
+    assert!(
+        read >= blob.len() as u64 && read < blob.len() as u64 * 3 / 2,
+        "admission read {read} bytes of a {}-byte value",
+        blob.len()
+    );
+
+    // A text value of the same size is still read back to check its text.
+    let body = text(7, LARGE * 4);
+    let before = jazz::large_values::finalize_validation_bytes_for_test();
+    insert(
+        &alice,
+        "docs",
+        2,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    let read = jazz::large_values::finalize_validation_bytes_for_test() - before;
+    assert_eq!(
+        local_cell(&server, "docs", 2, "body").unwrap(),
+        Some(Value::String(body.clone()))
+    );
+    assert!(
+        read >= 2 * body.len() as u64,
+        "text admission read {read} bytes of a {}-byte value",
+        body.len()
+    );
+}
+
+/// With the read-back skipped for bytes, the tree walk alone still refuses
+/// an upload that does not prove its value: a descriptor whose length or
+/// logical hash disagrees with the pushed tree, a tree missing a leaf, and
+/// a leaf whose bytes do not match the hash it is pushed under.
+#[test]
+fn an_uploaded_bytes_value_that_does_not_prove_its_tree_is_refused() {
+    use jazz::large_values::{ChunkNode, LargeValueKind, StagedChunk, decode_node};
+
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    pump(&server, &[&mallory]);
+    let blob = |seed: u64| -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..LARGE * 2)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    };
+    let prepared = |seed| jazz::large_values::prepare(LargeValueKind::Bytes, &blob(seed)).unwrap();
+    let is_leaf = |chunk: &StagedChunk| {
+        matches!(
+            decode_node(
+                LargeValueKind::Bytes,
+                chunk.node_ref.object_hash,
+                &chunk.encoded
+            ),
+            Ok(ChunkNode::Leaf { .. })
+        )
+    };
+    let push = |chunks: Vec<StagedChunk>| {
+        up.borrow_mut().push_back(SyncMessage::PushChunks {
+            nodes: chunks
+                .into_iter()
+                .map(|chunk| WireChunk {
+                    hash: chunk.node_ref.object_hash.0,
+                    bytes: chunk.encoded,
+                })
+                .collect(),
+        });
+    };
+    let id = |tx: u64| TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16]));
+    let commit = |tx: u64, n: u8, value: jazz::large_values::LargeValueRef| {
+        up.borrow_mut().push_back(SyncMessage::Commit {
+            clock: 0,
+            id: id(tx),
+            kind: WireKind::Mergeable,
+            ops: vec![
+                WireWrite::Insert {
+                    table: "docs".to_owned(),
+                    row: *row(n).0.as_bytes(),
+                    cells: [
+                        (
+                            common::stored(&server, "docs", "body"),
+                            Value::String("small".into()),
+                        ),
+                        (
+                            common::stored(&server, "docs", "blob"),
+                            Value::Large(Box::new(value)),
+                        ),
+                    ]
+                    .into(),
+                    target: WireTarget::Root,
+                    at: None,
+                }
+                .into(),
+            ],
+            acting: Acting::Own,
+        });
+    };
+    let accepted = |tx: u64| -> Option<bool> {
+        down.borrow().iter().find_map(|message| match message {
+            SyncMessage::Fate {
+                id: fate, outcome, ..
+            } if *fate == id(tx) => Some(outcome.result().is_ok()),
+            _ => None,
+        })
+    };
+    let settle = || {
+        for _ in 0..4 {
+            block_on(server.tick()).unwrap();
+        }
+    };
+
+    // The harness: an honest upload is accepted.
+    let honest = prepared(1);
+    push(honest.staged_chunks.clone());
+    commit(1, 1, honest.value_ref.clone());
+    settle();
+    assert_eq!(accepted(1), Some(true), "an honest upload is admitted");
+
+    // A descriptor one byte longer than its tree.
+    let long = prepared(2);
+    push(long.staged_chunks.clone());
+    let mut value = long.value_ref.clone();
+    value.byte_length += 1;
+    commit(2, 2, value);
+    // A descriptor naming another logical hash.
+    let mut value = long.value_ref.clone();
+    value.logical_hash.0[0] ^= 1;
+    commit(3, 3, value);
+    // A tree missing one leaf.
+    let holed = prepared(3);
+    let leaf = holed
+        .staged_chunks
+        .iter()
+        .position(is_leaf)
+        .expect("a multi-leaf tree");
+    let mut chunks = holed.staged_chunks.clone();
+    chunks.remove(leaf);
+    push(chunks);
+    commit(4, 4, holed.value_ref.clone());
+    // A leaf pushed under its hash with other bytes.
+    let flipped = prepared(4);
+    let mut chunks = flipped.staged_chunks.clone();
+    let leaf = chunks.iter().position(is_leaf).expect("a multi-leaf tree");
+    let last = chunks[leaf].encoded.len() - 1;
+    chunks[leaf].encoded[last] ^= 1;
+    push(chunks);
+    commit(5, 5, flipped.value_ref.clone());
+    settle();
+
+    for tx in 2..=5 {
+        assert_ne!(accepted(tx), Some(true), "tx {tx} was admitted");
+        let n = tx as u8;
+        assert_eq!(
+            local_cell(&server, "docs", n, "blob").ok().flatten(),
+            None,
+            "row {n} is on the server"
+        );
+    }
+}

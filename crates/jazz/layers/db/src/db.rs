@@ -10,7 +10,7 @@ use std::task::{Poll, Waker};
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
     BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
-    SchemaVersion,
+    ReadViewSpec, SchemaVersion,
 };
 use crate::query::Query;
 use crate::records::{Value, ValueType};
@@ -865,6 +865,9 @@ struct Inner {
     /// followed key found, read once for every session following it
     /// (see `sync::FollowMemo`).
     follow_memo: Rc<RefCell<Option<sync::FollowMemo>>>,
+    /// Whether `_jazz_pruned_txs` exists, as last read (see
+    /// `sync::has_pruned_txs`).
+    pruned_txs: std::cell::Cell<Option<sync::Known>>,
 }
 
 /// Large-value nodes one tick may reclaim.
@@ -2034,6 +2037,7 @@ impl Db {
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
                 follow_memo: Rc::default(),
+                pruned_txs: std::cell::Cell::new(None),
             })),
         };
         {
@@ -9545,7 +9549,18 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
+    /// The view it read through.
+    through: ReadThrough,
     rows: Vec<(RowUuid, sync::Rank)>,
+}
+
+/// The view a transaction's read goes through: the root view, or a branch
+/// view, resolved (`view`) and as the reader named it (`source`, for the
+/// authority to resolve again).
+#[derive(Clone, Debug)]
+struct ReadThrough {
+    view: Option<View>,
+    source: ReadViewSourceSpec,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -10184,6 +10199,7 @@ impl Db {
                 for read in reads {
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
+                        view: read.through.view.clone(),
                         ..ReadSpec::default()
                     };
                     let now = inner.read_versions(&read.prepared, None, &spec)?;
@@ -10227,6 +10243,7 @@ impl Db {
                                     (*row.0.as_bytes(), by, seq)
                                 })
                                 .collect(),
+                            view: read.through.source.clone(),
                         })
                     })
                     .collect::<Result<Vec<_>, Error>>()?;
@@ -10258,6 +10275,7 @@ impl Db {
             for read in reads {
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
+                    view: read.through.view.clone(),
                     ..ReadSpec::default()
                 };
                 if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
@@ -10675,6 +10693,7 @@ impl Db {
         include_deleted: bool,
         prefix: usize,
         identity: Option<AuthorSubject>,
+        through: ReadThrough,
     ) -> Result<(), Error> {
         // A mergeable read records nothing: peek without the store gate,
         // so the batch's cached overlay stays for its next stage or read.
@@ -10697,9 +10716,13 @@ impl Db {
         else {
             return Ok(());
         };
+        // A branch read records the rows of its view: the head's, or the
+        // base's it inherits, so a change to either (or a head row masking
+        // a base one) conflicts.
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
+            view: through.view.clone(),
             ..ReadSpec::default()
         };
         let rows = inner.read_versions(prepared, None, &read)?;
@@ -10714,6 +10737,7 @@ impl Db {
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
+                through,
                 rows,
             });
         }
@@ -10860,6 +10884,69 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_in(
+            prepared,
+            include_deleted,
+            identity,
+            tier,
+            &ReadViewSourceSpec::Current,
+        )
+        .await
+    }
+
+    /// As [`Self::all_prepared_at`], through `source`: a branch view (a head
+    /// over an optional live or frozen base) composes as it does outside a
+    /// transaction, over the transaction's staged writes.
+    ///
+    /// Only a mergeable transaction reads through a branch view so far: a
+    /// serializable one records its read set for the root view alone, so a
+    /// branch read there is refused rather than validated against the wrong
+    /// rows. A historic (snapshot) source is refused in either.
+    pub async fn all_prepared_in(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+        source: &ReadViewSourceSpec,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let view = match source {
+            ReadViewSourceSpec::Current => None,
+            ReadViewSourceSpec::Snapshot { .. } => {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "Reading a snapshot inside a transaction is not supported yet",
+                ));
+            }
+            // A live base needs nothing from the store; only a frozen one
+            // resolves its snapshot, under the store gate (which applies
+            // the staged writes of open transactions, so it is not taken
+            // for every branch read).
+            ReadViewSourceSpec::BranchView {
+                head,
+                base: None | Some(BranchViewBase::Current(_)),
+            } => Some(View {
+                head: head.clone(),
+                base: match source {
+                    ReadViewSourceSpec::BranchView {
+                        base: Some(BranchViewBase::Current(base)),
+                        ..
+                    } => Some(base.clone()),
+                    _ => None,
+                },
+                base_cut: None,
+            }),
+            ReadViewSourceSpec::BranchView { .. } => {
+                let opts = ReadOpts {
+                    read_view: ReadViewSpec {
+                        source: source.clone(),
+                        include_deleted,
+                    },
+                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
+                };
+                ReadSpec::of(&opts, &self.db.inner())?.view
+            }
+        };
         // Capture staging before queueing: later writes must not leak into
         // the prefix this read admitted, even when its predecessor is cancelled.
         let (prefix, state) = {
@@ -10879,7 +10966,12 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix);
+        let through = ReadThrough {
+            view,
+            source: source.clone(),
+        };
+        let reading =
+            self.read_admitted(prepared, include_deleted, identity, tier, prefix, through);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -10916,6 +11008,7 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
         prefix: BatchPrefix,
+        through: ReadThrough,
     ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
@@ -10991,7 +11084,7 @@ impl TxRef<'_> {
                     None,
                     None,
                     tier == ReadTier::Remote,
-                    &ReadViewSourceSpec::Current,
+                    &through.source,
                 )
                 .await?;
             if let Some(Batch {
@@ -11026,6 +11119,7 @@ impl TxRef<'_> {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
+                        view: through.view.clone(),
                         ..ReadSpec::default()
                     };
                     let roots = inner.run(&prepared, identity, &read)?;
@@ -11034,8 +11128,14 @@ impl TxRef<'_> {
                 Ok((rows, prepared))
             })
             .await?;
-        self.db
-            .record_read(self.id, &prepared, include_deleted, prefix.ops, identity)?;
+        self.db.record_read(
+            self.id,
+            &prepared,
+            include_deleted,
+            prefix.ops,
+            identity,
+            through,
+        )?;
         Ok(rows)
     }
 

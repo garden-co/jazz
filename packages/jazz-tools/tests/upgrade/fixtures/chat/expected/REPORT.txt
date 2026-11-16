@@ -1,0 +1,22 @@
+Wrote:
+  schema.ts
+  app-extras.ts
+  jazz.server.ts
+  src/messages.ts
+  package.json
+  jazz.app.json
+  jazz.permissions.json
+  jazz.generated.ts
+Deleted:
+  migrations/index.ts
+  permissions.ts
+Rewrote:
+  schema.ts:71: `s.defineApp(…)` → `export const schema = s.defineSchema({…})`
+  schema.ts:2: dropped the import of migrations/index.ts
+  jazz.server.ts:8: ./schema.js → ./jazz.generated.js
+  jazz.server.ts:9: permissions now come from jazz.permissions.json
+  src/messages.ts:1: ../schema.js → ../jazz.generated.js + ../app-extras.js
+  package.json: script "build": `jazz-tools validate` → `jazz-tools generate`
+Notes:
+  The permissions were printed from jazz.permissions.json: repeated checks became helpers named for what they check, and the old permissions.ts's named values kept their names. Its comments didn't survive: bring back what they said.
+  The schema hashes and the bundle id (63e640964d0e) are unchanged.

@@ -10,7 +10,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import { useAccountId, useStore } from "./library-data";
 
 /** Pending invitations addressed to this account, readable before acceptance. */

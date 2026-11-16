@@ -865,6 +865,32 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
     );
 }
 
+/// The schema objects a store's file holds, by type and name.
+fn schema_objects(path: &Path) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT type, name FROM sqlite_master ORDER BY type, name")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Opening a pinned store creates no schema objects: a store this build
+/// only reads keeps its file as it was (the browser's pinned corpus checks
+/// its bytes). Objects a newer feature needs (pending reads' views,
+/// jazz#5806) are created when a write first needs them.
+#[test]
+fn opening_the_pinned_client_store_creates_no_schema_objects() {
+    let dir = scratch("schema-objects");
+    let client_path = install(CLIENT_FILE, CLIENT_SHA256, &dir);
+    let before = schema_objects(&client_path);
+    drop(open_client(&client_path));
+    assert_eq!(schema_objects(&client_path), before);
+}
+
 #[test]
 fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
     let dir = scratch("reopen");

@@ -1,5 +1,5 @@
 import { useAll } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { TodoItem } from "./TodoItem.js";
 import { AddTodo } from "./AddTodo.js";
 

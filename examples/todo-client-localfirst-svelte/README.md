@@ -7,7 +7,7 @@ Local-first todo app on Svelte 5 + Vite, anonymous device account (`<JazzProvide
 - Anonymous identity from a device account (its key lives on this device) — no login UI, no auth server.
 - `QuerySubscription` reactive live queries with composable `where()` filters (filter by title substring, by done status).
 - Synchronous local writes through the `db` handle on the `QuerySubscription` (`todos.db.insert`, `todos.db.update`, `todos.db.delete`).
-- Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own surface as toast errors via `svelte-sonner`.
+- Row-level permissions — `owner_id` enforced by `src/lib/jazz.permissions.json`; mutations on rows you don't own surface as toast errors via `svelte-sonner`.
 - IndexedDB-backed persistence across reload, synced through the app's own backend.
 - Jazz inside the app's backend: `jazz.server.ts` runs `createJazz` in the Vite server, so pages sync on their own origin under `/jazz`. In production, run the same `createJazz` in your server.
 

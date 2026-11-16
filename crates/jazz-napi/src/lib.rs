@@ -110,20 +110,88 @@ pub struct WrittenAppFiles {
     pub permissions: String,
 }
 
+/// The `$generated` marker to write: `{ by }`, what wrote the files.
+#[napi(object)]
+pub struct GeneratedBy {
+    /// E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+    /// this file".
+    pub by: String,
+}
+
+/// How [`write_app_artifact`] and [`write_app_files`] write the files.
+#[napi(object)]
+pub struct WriteAppFilesOptions {
+    /// Mark each file `"$generated": { "by", "sha256" }`, first after
+    /// `$schema`.
+    pub generated: Option<GeneratedBy>,
+}
+
 /// Build the `jazz.app.json` and `jazz.permissions.json` texts from what
 /// `jazz-tools validate` compiled (an
 /// [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
-/// JSON): the files' only writer, which refuses what a reader would.
+/// JSON): the files' only writer, which refuses what a reader would. With
+/// `options.generated`, each file carries a `$generated` marker.
 #[napi(js_name = "writeAppArtifact")]
-pub fn write_app_artifact(input: String) -> js::Result<WrittenAppFiles> {
+pub fn write_app_artifact(
+    input: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
     use jazz::tools::deployment::artifact;
     let input: artifact::ArtifactInput = serde_json::from_str(&input)
         .map_err(|error| napi::Error::from_reason(format!("jazz.app.json input: {error}")))?;
-    let written = artifact::write(input).map_err(artifact_error)?;
+    let written = match options.and_then(|o| o.generated) {
+        Some(generated) => artifact::write_generated(input, &generated.by),
+        None => artifact::write(input),
+    }
+    .map_err(artifact_error)?;
     Ok(WrittenAppFiles {
         app: written.app,
         permissions: written.permissions,
     })
+}
+
+/// Check an app's readable `jazz.app.json` (`app`) and
+/// `jazz.permissions.json` (`permissions`) as a backend does and render
+/// them canonically through the writer, which reads its output back to
+/// exactly the same app. With `options.generated`, each file carries a
+/// `$generated` marker. Idempotent.
+#[napi(js_name = "writeAppFiles")]
+pub fn write_app_files(
+    app: String,
+    permissions: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
+    let by = options.and_then(|o| o.generated).map(|g| g.by);
+    let written = jazz::tools::deployment::artifact::rewrite(
+        app.as_bytes(),
+        permissions.as_bytes(),
+        by.as_deref(),
+    )
+    .map_err(artifact_error)?;
+    Ok(WrittenAppFiles {
+        app: written.app,
+        permissions: written.permissions,
+    })
+}
+
+/// Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+/// its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+/// or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+/// when the text isn't a JSON object or the marker is malformed.
+#[napi(
+    js_name = "verifyGenerated",
+    ts_return_type = "\"none\" | \"match\" | \"mismatch\""
+)]
+pub fn verify_generated(text: String) -> napi::Result<String> {
+    use jazz::tools::deployment::artifact::{self, GeneratedCheck};
+    Ok(
+        match artifact::verify_generated(text.as_bytes()).map_err(napi::Error::from_reason)? {
+            GeneratedCheck::Unmarked => "none",
+            GeneratedCheck::Matches(_) => "match",
+            GeneratedCheck::Mismatch { .. } => "mismatch",
+        }
+        .to_owned(),
+    )
 }
 
 /// Read and check an app's `jazz.app.json` (`app`) and
@@ -205,6 +273,9 @@ pub struct CreatedMigration {
     pub changed: bool,
     /// JSON paths of the `"TODO: …"` strings left for the author.
     pub todos: Vec<String>,
+    /// Why nothing was written, when it isn't simply that nothing changed
+    /// (an index-only edit).
+    pub note: Option<String>,
 }
 
 /// Write the migration from the version the committed bindings
@@ -227,6 +298,7 @@ pub fn migrations_create(
         app: created.app,
         changed: created.changed,
         todos: created.todos,
+        note: created.note,
     })
 }
 
@@ -261,6 +333,97 @@ pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Resu
             )))
         }
     }
+}
+
+/// What `generateForDir` / `migrationsCreateForDir` did in an app's directory.
+#[napi(object)]
+pub struct DirOutcome {
+    /// Lines to print.
+    pub notes: Vec<String>,
+    /// Warnings to print.
+    pub warnings: Vec<String>,
+    /// Bindings files written, relative to the directory.
+    pub written: Vec<String>,
+    /// Bindings files already up to date, relative to the directory.
+    pub current: Vec<String>,
+    /// `migrationsCreateForDir`: whether `jazz.app.json` changed.
+    pub changed: bool,
+    /// `migrationsCreateForDir`: JSON paths of the TODOs left to resolve.
+    pub todos: Vec<String>,
+}
+
+/// Options of [`generate_for_dir`] and [`migrations_create_for_dir`].
+#[napi(object)]
+pub struct DirOptions {
+    /// Fail when the files or bindings are stale, and write nothing.
+    pub check: Option<bool>,
+    /// The bindings' languages (`"ts"`, `"rust"`, …); by default each the
+    /// directory's files say the app is written in.
+    pub lang: Option<Vec<String>>,
+    /// The language assumed when nothing in the directory names one and
+    /// no other language's manifest is there (the npm CLI passes `"ts"`).
+    pub fallback: Option<String>,
+}
+
+fn dir_languages(
+    dir: &std::path::Path,
+    options: &Option<DirOptions>,
+) -> js::Result<Vec<jazz_codegen::project::Selected>> {
+    let given = options
+        .as_ref()
+        .and_then(|o| o.lang.clone())
+        .unwrap_or_default()
+        .iter()
+        .map(|name| jazz_codegen::Lang::parse(name))
+        .collect::<std::result::Result<Vec<_>, jazz_codegen::CodegenError>>()
+        .map_err(codegen_error)?;
+    let fallback = options
+        .as_ref()
+        .and_then(|o| o.fallback.as_deref())
+        .map(jazz_codegen::Lang::parse)
+        .transpose()
+        .map_err(codegen_error)?;
+    jazz_codegen::project::languages_or(dir, &given, fallback)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+fn dir_outcome(outcome: jazz_codegen::project::Outcome) -> DirOutcome {
+    DirOutcome {
+        notes: outcome.notes,
+        warnings: outcome.warnings,
+        written: outcome.written,
+        current: outcome.current,
+        changed: outcome.changed,
+        todos: outcome.todos,
+    }
+}
+
+/// `jazz-tools generate [--check]` in `dir`, the directory of the app's
+/// `jazz.app.json`: the same languages, checks and bytes as the
+/// `jazz-tools` binary, which runs the same code.
+#[napi(js_name = "generateForDir")]
+pub fn generate_for_dir(dir: String, options: Option<DirOptions>) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    let check = options.as_ref().and_then(|o| o.check).unwrap_or(false);
+    jazz_codegen::project::generate(dir, &langs, check)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+/// `jazz-tools migrations create --name <name>` in `dir`, as the
+/// `jazz-tools` binary runs it.
+#[napi(js_name = "migrationsCreateForDir")]
+pub fn migrations_create_for_dir(
+    dir: String,
+    name: String,
+    options: Option<DirOptions>,
+) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    jazz_codegen::project::migrations_create(dir, &langs, &name)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
 }
 
 /// A codegen refusal, coded as [`artifact_error`] codes the loaders'.
@@ -2459,7 +2622,11 @@ impl NapiDb {
             ))
             .into());
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(self.transport(link))
     }
 
     /// The newest transaction time this database handed out under its node
@@ -2504,6 +2671,29 @@ impl NapiDb {
             DurabilityTier::None | DurabilityTier::Local => Ok(Either::A(Vec::new().into())),
             DurabilityTier::Global => {
                 let wait = binding.wait_for_pending_writes_global();
+                read_or_pending(Box::pin(wait.map(|result| result.map(|()| Vec::new()))))
+            }
+        }
+    }
+
+    /// TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+    /// session's author bytes; none for this database's own) reached `tier`,
+    /// failing with a rejection of theirs, including one that settled
+    /// before and no wait reported.
+    #[napi(js_name = "waitForSync")]
+    pub fn wait_for_sync(
+        &self,
+        tier: String,
+        writer: Option<Uint8Array>,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let binding = self.binding()?;
+        let tier = jazz::binding_args::durability_tier(&tier).map_err(napi::Error::from_reason)?;
+        match tier {
+            DurabilityTier::None | DurabilityTier::Local => Ok(Either::A(Vec::new().into())),
+            DurabilityTier::Global => {
+                let wait = binding
+                    .wait_for_sync_global(writer.as_deref())
+                    .map_err(host_error)?;
                 read_or_pending(Box::pin(wait.map(|result| result.map(|()| Vec::new()))))
             }
         }

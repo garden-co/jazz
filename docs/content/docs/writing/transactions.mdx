@@ -45,6 +45,7 @@ authority runs locally instead.
 | Best for            | Grouping normal local-first writes        | Enforcing an invariant across reads and writes                         |
 | Concurrent work     | Merges using Jazz's normal conflict rules | The authority validates the transaction as one serialisable unit       |
 | TypeScript callback | `db.transaction(...)`                     | `db.serializableTransaction(...)`                                      |
+| Go                  | `db.Tx(ctx, fn)`                          | `db.Tx(ctx, fn, jazz.Serializable())`                                  |
 | TypeScript wait     | `wait({ tier: "local" \| "global" })`     | `wait()`                                                               |
 | Offline             | Can commit locally and sync later         | Can be staged, but cannot be accepted until the authority is reachable |
 
@@ -62,7 +63,12 @@ already apply locally first and sync in the background.
 The callback form commits automatically when the callback finishes. Jazz rolls the transaction back
 if the callback throws or returns a rejected promise.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+A mergeable callback that writes nothing, such as a cleanup that finds nothing to delete, commits
+nothing and doesn't fail: `db.transaction(...)` resolves with the callback's value, its `wait()`
+resolves at once, and its `txId` rejects, since there is no transaction to name (from alpha.65;
+earlier versions throw "empty mergeable transaction has no committed unit").
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
@@ -72,6 +78,29 @@ if the callback throws or returns a rejected promise.
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-transaction-swift
+    </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-transaction-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-transaction-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -129,7 +158,7 @@ A transaction can fail at three points:
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
    with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
@@ -139,6 +168,12 @@ A transaction can fail at three points:
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-errors-effect
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-transaction-errors-kotlin
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -151,7 +186,7 @@ A serializable transaction reads from a stable transaction snapshot. The authori
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-serializable-transaction-ts
@@ -161,6 +196,12 @@ write is valid only if the data you just read has not changed in a conflicting t
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-serializable-transaction-effect
     </include>
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-serializable-transaction-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -196,7 +237,8 @@ For a serializable transaction, use `beginSerializableTransaction()` instead. Ca
 commit result to wait for the authority to accept or reject the transaction. You do not choose a
 durability tier, it is always settled by the authority.
 
-If a mergeable transaction has no writes, `commit()` throws. Call `rollback()` instead.
+If a mergeable transaction you manage yourself has no writes, `commit()` throws. Call `rollback()`
+instead. (The callback form handles that case for you, as above.)
 
 Await every read you start through a transaction before you commit it. Committing while one of
 its reads is still pending throws a `not_observed` error, and the transaction ends without

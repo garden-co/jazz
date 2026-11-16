@@ -1,0 +1,27 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "d790e5ba468d359c81e1f6a274c59cf6690d2895a76a8c8786bab04b0acc311a"
+  },
+  "tables": {
+    "comments": {
+      "read": "allowedTo.read(task)",
+      "insert": "allowedTo.read(task)",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
+    },
+    "projects": {
+      "read": "$createdBy = session.user",
+      "insert": "true",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
+    },
+    "tasks": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)",
+      "update": "allowedTo.update(project)",
+      "delete": "allowedTo.delete(project)"
+    }
+  }
+}

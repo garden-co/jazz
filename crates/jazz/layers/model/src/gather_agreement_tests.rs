@@ -588,29 +588,17 @@ fn outer_doc() -> RelationPredicate {
     )
 }
 
-/// Under `Or`, `Not` or an enum payload, a row correlation cannot become a
+/// Under `Or` or `Not`, a row correlation cannot become a
 /// join. Dropping it as `true` would let every access row authorize the
 /// document.
 #[test]
-fn policy_row_correlation_under_or_not_or_enum_payload_is_rejected() {
+fn policy_row_correlation_under_or_or_not_is_rejected() {
     let cases = [
         (
             "Or",
             RelationPredicate::Or(vec![outer_doc(), RelationPredicate::False]),
         ),
         ("Not", RelationPredicate::Not(Box::new(outer_doc()))),
-        (
-            "EnumMatch",
-            RelationPredicate::EnumMatch {
-                column: column("access", "team"),
-                case: "member".to_owned(),
-                payload: Box::new(RelationPredicate::Cmp {
-                    left: RelationColumnRef::unscoped("doc"),
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
-                }),
-            },
-        ),
     ];
     for (under, predicate) in cases {
         let error = policy_access_error(predicate);

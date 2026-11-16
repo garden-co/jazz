@@ -59,7 +59,7 @@ use std::rc::Rc;
 use std::task::Poll;
 use web_time::Instant;
 
-use crate::protocol::SnapshotRef;
+use crate::protocol::{ReadViewSourceSpec, SnapshotRef};
 use crate::tx::TxId;
 use jazz_protocol::protocol::{PermissionAdvice, PermissionAdviceAction};
 use jazz_types::large_values::chunks::ChunkRequest;
@@ -297,6 +297,12 @@ pub trait Transport {
     fn flush(&mut self) -> Result<(), TransportError> {
         Ok(())
     }
+    /// The optional wire features negotiated with the peer, as far as this
+    /// transport knows them; it may learn them after it was attached (a
+    /// host's link learns them from the peer's `Hello`). None by default.
+    fn features(&self) -> crate::wire::WireFeatures {
+        crate::wire::FEATURE_NONE
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -314,6 +320,11 @@ impl Transport for InProcess {
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
+    }
+
+    /// Both ends run this build.
+    fn features(&self) -> crate::wire::WireFeatures {
+        crate::wire::current_wire_features()
     }
 }
 
@@ -549,6 +560,10 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
 
     fn take_failure(&mut self) -> Option<TransportError> {
         self.failed.as_mut().and_then(Option::take)
+    }
+
+    fn features(&self) -> crate::wire::WireFeatures {
+        self.wire.features()
     }
 }
 
@@ -1200,9 +1215,21 @@ pub struct WireRead {
     /// its (node, tx): the sender's own, or one a relay names for its
     /// upstream.
     pub rows: Vec<([u8; 16], Option<[u8; 16]>, u64)>,
+    /// The view the read went through: the root view (`Current`), or a
+    /// branch view (jazz#5806). Not part of this struct's encoding: a
+    /// [`WireKind`] with a branch read travels as its `SerializableViews`
+    /// form, which carries the views beside the reads.
+    #[serde(skip)]
+    pub view: ReadViewSourceSpec,
 }
 
+/// A commit's kind. It travels as [`WireKindRepr`]: a serializable commit
+/// whose reads all went through the root view encodes as `Serializable`,
+/// as before; one with a branch read as `SerializableViews`, which only a
+/// link that negotiated [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`]
+/// carries.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "WireKindRepr", into = "WireKindRepr")]
 pub enum WireKind {
     Mergeable,
     /// `own`: the sender's own commits (by local seq) that were unsettled
@@ -1211,11 +1238,111 @@ pub enum WireKind {
     /// `snapshot`: the authority seq it read at, as the sender's server
     /// served it when it pinned it.
     Serializable {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+    },
+}
+
+impl WireKind {
+    /// It names a read through a branch view, so it needs a link that
+    /// negotiated [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`].
+    pub fn reads_branch_views(&self) -> bool {
+        matches!(self, WireKind::Serializable { reads, .. }
+            if reads.iter().any(|read| read.view != ReadViewSourceSpec::Current))
+    }
+}
+
+/// [`WireKind`]'s encoding. Variants are only ever appended.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum WireKindRepr {
+    Mergeable,
+    Serializable {
         #[serde(deserialize_with = "accepted_seq")]
         snapshot: u64,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
+    /// A serializable commit with a read through a branch view: `views`
+    /// holds each read's view, in order.
+    SerializableViews {
+        #[serde(deserialize_with = "accepted_seq")]
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+        views: Vec<ReadViewSourceSpec>,
+    },
+}
+
+impl From<WireKind> for WireKindRepr {
+    fn from(kind: WireKind) -> Self {
+        let viewed = kind.reads_branch_views();
+        match kind {
+            WireKind::Mergeable => Self::Mergeable,
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } if viewed => Self::SerializableViews {
+                snapshot,
+                views: reads.iter().map(|read| read.view.clone()).collect(),
+                reads,
+                own,
+            },
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } => Self::Serializable {
+                snapshot,
+                reads,
+                own,
+            },
+        }
+    }
+}
+
+impl TryFrom<WireKindRepr> for WireKind {
+    type Error = String;
+
+    /// `SerializableViews` names exactly one view per read: any other count
+    /// is malformed, not a read through the root view.
+    fn try_from(repr: WireKindRepr) -> Result<Self, String> {
+        Ok(match repr {
+            WireKindRepr::Mergeable => Self::Mergeable,
+            WireKindRepr::Serializable {
+                snapshot,
+                reads,
+                own,
+            } => Self::Serializable {
+                snapshot,
+                reads,
+                own,
+            },
+            WireKindRepr::SerializableViews {
+                snapshot,
+                mut reads,
+                own,
+                views,
+            } => {
+                if views.len() != reads.len() {
+                    return Err(format!(
+                        "a serializable commit names {} views for its {} reads",
+                        views.len(),
+                        reads.len()
+                    ));
+                }
+                for (read, view) in reads.iter_mut().zip(views) {
+                    read.view = view;
+                }
+                Self::Serializable {
+                    snapshot,
+                    reads,
+                    own,
+                }
+            }
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1748,6 +1875,16 @@ struct Pending {
     expected: Option<Vec<Expected>>,
 }
 
+/// Whose a commit of these ops is, for [`Db::wait_for_sync`]: a trusted
+/// session's author, or `None` for this store's own (attributed ones too).
+fn writer(ops: &[StagedOp]) -> Option<AuthorSubject> {
+    if ops.iter().any(StagedOp::is_session) {
+        ops.iter().find_map(StagedOp::author)
+    } else {
+        None
+    }
+}
+
 impl Pending {
     /// Where it orders among unsettled versions.
     fn order(&self) -> Order {
@@ -2186,6 +2323,11 @@ pub(crate) struct Client {
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
+    /// Commits of this store the upstream rejected that no wait has reported
+    /// yet, by writer ([`writer`]): [`Db::wait_for_sync`] reports them to
+    /// their writer's wait even when they settled before it was called (TS
+    /// `waitForSync`, jazz#5728).
+    unreported_rejections: BTreeMap<u64, Option<AuthorSubject>>,
     /// Fates the upstream gave this replica's commits, counted: each is
     /// progress a read queued behind them makes (see [`Db::settled_upstream`]).
     settled_upstream: u64,
@@ -3438,7 +3580,7 @@ fn wk(key: (String, String, String)) -> u64 {
 }
 
 fn watch_key(cell: &Sql) -> String {
-    format!("{cell:?}")
+    cell.key()
 }
 
 fn image_cell(image: &Image, column: &str) -> Option<Sql> {
@@ -6825,14 +6967,7 @@ impl Inner {
     }
 
     fn has_pruned_txs(&self) -> Result<bool, Error> {
-        self.conn
-            .cached_row(
-                "SELECT count(*) > 0 FROM sqlite_master \
-                 WHERE type = 'table' AND name = '_jazz_pruned_txs'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(storage)
+        has_pruned_txs(&self.conn, &self.pruned_txs)
     }
 
     /// Drop the dedupe entries of accepted commits that wrote only tables
@@ -6854,12 +6989,8 @@ impl Inner {
         if self.retention().is_empty() {
             return Ok(());
         }
-        self.exec(
-            "CREATE TABLE IF NOT EXISTS _jazz_pruned_txs \
-             (n INTEGER PRIMARY KEY, waiting INTEGER, through INTEGER NOT NULL)",
-            [],
-        )
-        .map_err(storage)?;
+        self.exec(PRUNED_TXS_DDL, []).map_err(storage)?;
+        pruned_txs_created(&self.conn, &self.pruned_txs);
         // The commit's own version decides, as for its history.
         let latest_only = !ops.is_empty()
             && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
@@ -7820,6 +7951,7 @@ impl Client {
             pending: PendingQueue::default(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            unreported_rejections: BTreeMap::new(),
             settled_upstream: 0,
             local_fates: HashSet::new(),
             refused: Vec::new(),
@@ -8423,6 +8555,9 @@ impl Db {
                 ));
             }
         }
+        // A relayed commit is a session's, not this store's: its refusal is
+        // that session's to report.
+        let unreported = relayed.is_none().then(|| writer(&ops));
         // A session's commit goes up under its own id, at its own clock;
         // this store's at the stamp its writes took.
         let (bases, id, clock) = match relayed {
@@ -8519,6 +8654,9 @@ impl Db {
                 }
             }
             Err(error) => {
+                if let Some(writer) = unreported {
+                    client.unreported_rejections.insert(seq, writer);
+                }
                 client.fates.insert(seq, Err(error));
                 client.pending.push(Pending {
                     tx: seq,
@@ -8993,8 +9131,22 @@ impl Db {
             }
     }
 
-    /// Wait for a local transaction's fate at `tier`.
+    /// Wait for a local transaction's fate at `tier`. A rejection it reports
+    /// is reported: a later [`Db::wait_for_sync`] doesn't report it again.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
+        let fate = self.observe_transaction(tx, tier).await;
+        if fate.is_err()
+            && let Some(client) = self.inner.borrow_mut().client.as_mut()
+        {
+            client.unreported_rejections.remove(&tx);
+        }
+        fate
+    }
+
+    /// Like [`Db::wait_for_transaction`], but a rejection it sees stays
+    /// unreported: a later [`Db::wait_for_sync`] reports it. For
+    /// waits that only watch a write (a host routing its mutation errors).
+    pub async fn observe_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         if !self.waits_upstream(tier) {
             return Ok(tx);
         }
@@ -9038,7 +9190,9 @@ impl Db {
 
     /// Wait until every transaction pending upload when called (recovered
     /// ones included) reaches `tier`, failing with the first the server
-    /// rejected. Writes made after the call are not waited for.
+    /// rejected. Writes made after the call are not waited for. Rejections
+    /// that settled before the call are not this wait's (graceful shutdown
+    /// waits so): see [`Db::wait_for_sync`].
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
         if !self.waits_upstream(tier) {
             return Ok(());
@@ -9052,6 +9206,66 @@ impl Db {
             self.wait_for_transaction(tx, tier).await?;
         }
         Ok(())
+    }
+
+    /// TS `waitForSync` for one writer: `None` is this store's own writes
+    /// (and those attributed to someone), `Some(author)` a trusted session's
+    /// writes as `author`. Waits until each of the writer's transactions
+    /// pending upload when called reaches `tier`, then fails with the
+    /// earliest rejection among them and the writer's commits rejected
+    /// earlier that no wait has reported yet (jazz#5728). Each rejection is
+    /// reported once: the earliest per call, the others by later calls.
+    /// Another writer's rejections are never reported here. The writer is
+    /// the author, not a session object: two sessions of the same user
+    /// share their writes and rejections.
+    pub async fn wait_for_sync(
+        &self,
+        tier: DurabilityTier,
+        writer: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        if !self.waits_upstream(tier) {
+            return Ok(());
+        }
+        let pending: Vec<u64> = {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            client
+                .pending
+                .iter()
+                .filter(|p| self::writer(&p.ops) == writer)
+                .map(|p| p.tx)
+                .collect()
+        };
+        // Every verdict first, then the earliest failure among them and the
+        // writer's rejections still unreported.
+        let mut failed: Option<(u64, Error)> = None;
+        for tx in pending {
+            if let Err(error) = self.observe_transaction(tx, tier).await
+                && failed.as_ref().is_none_or(|(first, _)| tx < *first)
+            {
+                failed = Some((tx, error));
+            }
+        }
+        let mut inner = self.inner.borrow_mut();
+        let client = inner.client.as_mut().expect("client");
+        if let Some((&tx, _)) = client
+            .unreported_rejections
+            .iter()
+            .find(|(_, of)| **of == writer)
+            && failed.as_ref().is_none_or(|(first, _)| tx < *first)
+            && let Some(Err(error)) = client.fates.get(&tx)
+        {
+            failed = Some((tx, error.clone()));
+        }
+        // Only the rejection reported is reported; later ones wait for the
+        // next call.
+        if let Some((tx, _)) = &failed {
+            client.unreported_rejections.remove(tx);
+        }
+        match failed {
+            Some((_, error)) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// One-shot read records, answer slots, and queued one-shot requests.
@@ -9093,6 +9307,19 @@ impl Db {
             .client
             .as_ref()
             .map_or(0, |client| client.pending.len())
+    }
+
+    /// The ids the pending commits upload under, sorted: a relayed commit
+    /// uploads under its session's id, so a host holding both a session and
+    /// the store that relays it counts each write once by this id.
+    pub fn pending_upload_ids(&self) -> Vec<TxId> {
+        let inner = self.inner.borrow();
+        let mut ids = inner.client.as_ref().map_or_else(Vec::new, |client| {
+            client.pending.iter().map(|pending| pending.id).collect()
+        });
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// This replica's uploads as its host reports them: what still awaits
@@ -9786,6 +10013,7 @@ impl Db {
                         // commit refused before sending was never sent.
                         let settling = client.pending.get(tx);
                         let serializable = settling.is_some_and(|p| p.serializable);
+                        let settling_writer = settling.map(|p| writer(&p.ops));
                         if let (Some(changed), Some(settling)) = (changed.as_mut(), settling) {
                             changed.extend(settling.rows.iter().cloned());
                         }
@@ -9837,8 +10065,13 @@ impl Db {
                         if accepted && !global {
                             client.local_fates.insert(tx);
                         }
-                        client.fates.insert(tx, result);
                         // A relayed commit is a session's, not this store's.
+                        if result.is_err() && !relayed {
+                            client
+                                .unreported_rejections
+                                .insert(tx, settling_writer.flatten());
+                        }
+                        client.fates.insert(tx, result);
                         if !relayed {
                             client.settled_upstream += 1;
                         }
@@ -10064,6 +10297,40 @@ impl Db {
                                         "a commit of {size} bytes is over the {limit} bytes one \
                                          message may carry: not supported yet"
                                     ),
+                                },
+                            },
+                            global: false,
+                        });
+                    }
+                    _ => kept.push((commit, push)),
+                }
+            }
+            (commits, pushes) = kept.into_iter().unzip();
+        }
+        // A commit with a read through a branch view is checked against
+        // that view only by an upstream that negotiated it (jazz#5806). It
+        // is made like any serializable commit, offline too, and decided
+        // here, when a link is up: one without the feature (an older
+        // server) would check it as a root read, against other rows, so
+        // it is refused, for good, as a rejected fate.
+        let features = client
+            .transport
+            .as_ref()
+            .map_or(crate::wire::FEATURE_NONE, |transport| transport.features());
+        if features & crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS == 0 {
+            let mut kept = Vec::with_capacity(commits.len());
+            for (commit, push) in commits.into_iter().zip(pushes) {
+                match &commit {
+                    SyncMessage::Commit { id, kind, .. } if kind.reads_branch_views() => {
+                        client.refused.push(SyncMessage::Fate {
+                            id: *id,
+                            outcome: Outcome::Refused {
+                                through: client.known,
+                                error: WireError::Rejected {
+                                    reason: None,
+                                    message: "a serializable transaction that read through a \
+                                              branch view: not supported yet by this server"
+                                        .to_owned(),
                                 },
                             },
                             global: false,
@@ -12409,12 +12676,17 @@ impl Db {
             // replica with no server accepted. (Where a latest-only table
             // pruned an earlier of several own versions of the row in one
             // tick, that version counts as unreadable.)
-            let covered: BTreeSet<String> = inner.sessions[index]
-                .subs
-                .values()
-                .filter_map(|(_, group, ..)| group.upgrade())
-                .flat_map(|group| group.borrow().tables().clone())
-                .collect();
+            // The tables the session's live reads read, built only once a
+            // written row asks: most sessions get no accepted write in a tick.
+            let covered_now = |inner: &Inner| -> BTreeSet<String> {
+                inner.sessions[index]
+                    .subs
+                    .values()
+                    .filter_map(|(_, group, ..)| group.upgrade())
+                    .flat_map(|group| group.borrow().tables().clone())
+                    .collect()
+            };
+            let mut covered: Option<BTreeSet<String>> = None;
             let mut write_only: HashSet<(String, RowUuid, Vec<u8>)> = HashSet::new();
             {
                 let mut written: BTreeMap<(String, RowUuid, Vec<u8>), Vec<Pos>> = BTreeMap::new();
@@ -12430,7 +12702,10 @@ impl Db {
                     // A live read of the table reconciles the row: checked
                     // first, so a burst into a read table costs no extra
                     // store lookup per row (R62).
-                    if covered.contains(&table) {
+                    if covered
+                        .get_or_insert_with(|| covered_now(&inner))
+                        .contains(&table)
+                    {
                         continue;
                     }
                     let Some(current) = inner.current_image(&table, row, &key)? else {
@@ -14435,8 +14710,36 @@ impl Db {
                     request_claims: None,
                     schema: Some(schema),
                 };
+                // A branch read is evaluated through its view (jazz#5806):
+                // the head's rows, or the base's it inherits. A snapshot (a
+                // historic read) is never a transaction's read.
+                let view = match &read.view {
+                    ReadViewSourceSpec::Current => None,
+                    ReadViewSourceSpec::Snapshot { .. } => {
+                        return Err((
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "a serializable read names a snapshot view",
+                            ),
+                            Vec::new(),
+                        ));
+                    }
+                    source @ ReadViewSourceSpec::BranchView { .. } => {
+                        let opts = ReadOpts {
+                            read_view: crate::protocol::ReadViewSpec {
+                                source: source.clone(),
+                                include_deleted: read.include_deleted,
+                            },
+                            ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
+                        };
+                        ReadSpec::of(&opts, &inner)
+                            .map_err(|e| (e, Vec::new()))?
+                            .view
+                    }
+                };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
+                    view,
                     ..ReadSpec::default()
                 };
                 let now: Vec<([u8; 16], Option<Pos>)> = inner
@@ -15008,11 +15311,12 @@ impl Db {
         if let Some(tx) = open_tx {
             let rows = self
                 .tx_ref(tx)
-                .all_prepared_at(
+                .all_prepared_in(
                     &prepared,
                     opts.read_view.include_deleted,
                     identity,
                     opts.tier,
+                    &opts.read_view.source,
                 )
                 .await?;
             return Ok(result(rows));
@@ -15262,8 +15566,112 @@ fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
     }
 }
 
+const PRUNED_TXS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_pruned_txs \
+     (n INTEGER PRIMARY KEY, waiting INTEGER, through INTEGER NOT NULL)";
+
+/// What a store was last seen to hold, and the connection's rollback count
+/// ([`crate::values::rollbacks`]) when it was seen.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Known {
+    holds: bool,
+    rollbacks: u64,
+}
+
+#[cfg(feature = "testing")]
+thread_local! {
+    static PRUNED_TXS_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread asked `sqlite_master` whether a store holds
+/// `_jazz_pruned_txs`.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn pruned_txs_lookups_for_test() -> usize {
+    PRUNED_TXS_LOOKUPS.with(std::cell::Cell::get)
+}
+
+/// Whether `_jazz_pruned_txs` exists, asked of `sqlite_master` only when
+/// `known` cannot answer: every new commit to latest-only tables asks. The
+/// table is never dropped and only this connection writes the store, so an
+/// answer goes stale only by this connection's own `CREATE` (which records
+/// the new answer, [`pruned_txs_created`]) or by a rollback undoing that
+/// `CREATE` (which moves the rollback count, and the table is read again).
+/// [`PRUNED_TXS_DDL`] has one user, which records it: anything else that
+/// came to create the table on an open connection would have to as well.
+fn has_pruned_txs(
+    conn: &rusqlite::Connection,
+    known: &std::cell::Cell<Option<Known>>,
+) -> Result<bool, Error> {
+    let rollbacks = crate::values::rollbacks(conn);
+    if let Some(known) = known.get()
+        && known.rollbacks == rollbacks
+    {
+        return Ok(known.holds);
+    }
+    #[cfg(feature = "testing")]
+    PRUNED_TXS_LOOKUPS.with(|count| count.set(count.get() + 1));
+    let holds = conn
+        .cached_row(
+            "SELECT count(*) > 0 FROM sqlite_master \
+             WHERE type = 'table' AND name = '_jazz_pruned_txs'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    known.set(Some(Known { holds, rollbacks }));
+    Ok(holds)
+}
+
+/// Record that `_jazz_pruned_txs` was just created on `conn`.
+fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Option<Known>>) {
+    known.set(Some(Known {
+        holds: true,
+        rollbacks: crate::values::rollbacks(conn),
+    }));
+}
+
 #[cfg(test)]
 mod tests {
+    /// Whether `_jazz_pruned_txs` exists is read once and then answered from
+    /// memory; a rollback that undoes its `CREATE` makes it read again, so a
+    /// resend after that rollback is answered as on a store that never
+    /// pruned (no "no such table" error, no stale "exists").
+    #[test]
+    fn the_pruned_table_bit_follows_a_rolled_back_create() {
+        use crate::values::{begin_savepoint, end_savepoint};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let known = std::cell::Cell::new(None);
+        let on_disk = |conn: &rusqlite::Connection| -> bool {
+            conn.query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_pruned_txs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!super::has_pruned_txs(&conn, &known).unwrap());
+
+        begin_savepoint(&conn, "upload").unwrap();
+        conn.execute_batch(super::PRUNED_TXS_DDL).unwrap();
+        super::pruned_txs_created(&conn, &known);
+        assert!(super::has_pruned_txs(&conn, &known).unwrap());
+        end_savepoint(&conn, "upload", false).unwrap();
+        assert!(!on_disk(&conn));
+        assert!(
+            !super::has_pruned_txs(&conn, &known).unwrap(),
+            "the rolled-back CREATE is still believed"
+        );
+
+        conn.execute_batch(super::PRUNED_TXS_DDL).unwrap();
+        super::pruned_txs_created(&conn, &known);
+        assert!(super::has_pruned_txs(&conn, &known).unwrap());
+        // A rollback that undid nothing of it keeps the table.
+        begin_savepoint(&conn, "other").unwrap();
+        end_savepoint(&conn, "other", false).unwrap();
+        assert!(on_disk(&conn));
+        assert!(super::has_pruned_txs(&conn, &known).unwrap());
+    }
+
     /// A thin client's writer node carries its mark; a node minted as raw
     /// random bytes (alpha.59) that reads as version 8 does not.
     #[test]
@@ -15333,6 +15741,117 @@ mod tests {
     }
 
     use super::*;
+
+    /// A serializable commit's reads, at a branch view or not.
+    fn serializable(view: ReadViewSourceSpec) -> WireKind {
+        WireKind::Serializable {
+            snapshot: 7,
+            reads: vec![WireRead {
+                version: [1; 16],
+                query: Query::from("todos"),
+                binding: BTreeMap::new(),
+                include_deleted: false,
+                rows: vec![([2; 16], None, 5)],
+                view,
+            }],
+            own: vec![3],
+        }
+    }
+
+    fn draft_over_main() -> ReadViewSourceSpec {
+        let branch = |byte: u8| {
+            crate::protocol::BranchSelector::new([(
+                "branch_id",
+                Value::Uuid(uuid::Uuid::from_bytes([byte; 16])),
+            )])
+        };
+        ReadViewSourceSpec::BranchView {
+            head: branch(2),
+            base: Some(crate::protocol::BranchViewBase::current(branch(1))),
+        }
+    }
+
+    /// `WireKind` as it was encoded before branch reads (jazz#5806).
+    #[derive(Serialize, Deserialize)]
+    enum OldWireKind {
+        Mergeable,
+        Serializable {
+            snapshot: u64,
+            reads: Vec<OldWireRead>,
+            own: Vec<u64>,
+        },
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldWireRead {
+        version: [u8; 16],
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        rows: Vec<([u8; 16], Option<[u8; 16]>, u64)>,
+    }
+
+    /// A serializable commit whose reads all went through the root view
+    /// encodes exactly as before, so a peer without
+    /// `FEATURE_SERIALIZABLE_BRANCH_READS` takes it; one with a branch read
+    /// travels as the appended `SerializableViews`, which keeps each read's
+    /// view and which such a peer cannot decode (hence the feature gate).
+    #[test]
+    fn a_branch_read_commit_travels_as_serializable_views() {
+        let old = OldWireKind::Serializable {
+            snapshot: 7,
+            reads: vec![OldWireRead {
+                version: [1; 16],
+                query: Query::from("todos"),
+                binding: BTreeMap::new(),
+                include_deleted: false,
+                rows: vec![([2; 16], None, 5)],
+            }],
+            own: vec![3],
+        };
+        let root = serializable(ReadViewSourceSpec::Current);
+        assert!(!root.reads_branch_views());
+        assert_eq!(
+            postcard::to_allocvec(&root).unwrap(),
+            postcard::to_allocvec(&old).unwrap()
+        );
+        assert!(matches!(
+            postcard::to_allocvec(&WireKind::Mergeable)
+                .unwrap()
+                .as_slice(),
+            [0]
+        ));
+
+        let viewed = serializable(draft_over_main());
+        assert!(viewed.reads_branch_views());
+        let bytes = postcard::to_allocvec(&viewed).unwrap();
+        assert_eq!(bytes[0], 2, "the appended SerializableViews variant");
+        let WireKind::Serializable { reads, .. } = postcard::from_bytes(&bytes).unwrap() else {
+            panic!("not serializable");
+        };
+        assert_eq!(reads[0].view, draft_over_main());
+        assert!(postcard::from_bytes::<OldWireKind>(&bytes).is_err());
+
+        // A views list that does not match the reads is malformed.
+        let WireKindRepr::SerializableViews {
+            snapshot,
+            reads,
+            own,
+            mut views,
+        } = WireKindRepr::from(serializable(draft_over_main()))
+        else {
+            panic!("not SerializableViews");
+        };
+        views.push(ReadViewSourceSpec::Current);
+        let malformed = postcard::to_allocvec(&WireKindRepr::SerializableViews {
+            snapshot,
+            reads,
+            own,
+            views,
+        })
+        .unwrap();
+        assert!(postcard::from_bytes::<WireKind>(&malformed).is_err());
+    }
 
     fn holds(message: &SyncMessage) -> (u64, Vec<[u8; 16]>, Vec<[u8; 16]>) {
         let SyncMessage::Holds { id, added, removed } = message else {

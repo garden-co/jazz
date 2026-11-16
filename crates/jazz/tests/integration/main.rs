@@ -91,6 +91,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../late_enum_tags.rs"]
+mod late_enum_tags;
 #[path = "../latest_only_tables.rs"]
 mod latest_only_tables;
 #[path = "../link_identities.rs"]

@@ -7,7 +7,7 @@ Local-first todo app on React + Vite, anonymous device account via `<JazzProvide
 - Anonymous identity from a device account (its key lives on this device) — no login UI, no auth server.
 - `useAll` reactive queries with composable `where()` filters (filter by title substring, by done status).
 - Synchronous local writes through the `db` handle returned by `useAll` (`db.insert`, `db.update`, `db.delete`).
-- Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own surface as toast errors via `sonner`.
+- Row-level permissions — `owner_id` enforced by `jazz.permissions.json`; mutations on rows you don't own surface as toast errors via `sonner`.
 - IndexedDB-backed persistence across reload, synced through the app's own backend.
 - Jazz inside the app's backend: `jazz.server.ts` runs `createJazz` in the Vite server, so pages sync on their own origin under `/jazz`. In production, run the same `createJazz` in your server.
 
