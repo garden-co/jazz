@@ -467,7 +467,7 @@ impl Session {
         if linked.account != device {
             // The backend has linked the user by now: say so, as the
             // session stays the device's.
-            return Err(Error::Server(format!(
+            return Err(Error::Refused(format!(
                 "the backend linked its user to account {}, not this device's {}; \
                  the link stands on the backend, and this session stays the device's",
                 linked.account.0, device.0

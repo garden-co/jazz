@@ -217,7 +217,18 @@ pub(crate) async fn link(
         .await
         .map_err(|error| Error::Server(format!("linking the device account: {error}")))?;
     match response.status() {
-        reqwest::StatusCode::UNAUTHORIZED => return Err(Error::SignedOut),
+        // No one signed in any more; any other 401 refuses the device's
+        // proof (a retired key, another app's guest), for good.
+        reqwest::StatusCode::UNAUTHORIZED => {
+            let body = response.text().await.unwrap_or_default();
+            if body.trim() == "signed_out" || body.trim().is_empty() {
+                return Err(Error::SignedOut);
+            }
+            return Err(Error::Refused(format!(
+                "the backend refused the device account's proof: {}",
+                body.trim()
+            )));
+        }
         reqwest::StatusCode::CONFLICT => {
             return Err(Error::Refused(
                 "the backend refused the link: its user already has another account".into(),

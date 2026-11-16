@@ -108,10 +108,6 @@ impl From<&Error> for SessionError {
             Error::StoreHeld(_) => "storeHeld",
             Error::Stopped => "stopped",
             Error::Jazz(_) => "jazz",
-            // Variants added later (a trusted client's `bundle_mismatch`,
-            // jazz#5867): named by their message until listed here.
-            #[allow(unreachable_patterns)]
-            _ => "other",
         };
         Self {
             kind: kind.to_owned(),
@@ -176,8 +172,9 @@ pub struct SessionConfig {
     pub allow_insecure_http: bool,
     /// When the backend names a user who has no account yet while a device
     /// guest is signed in, link the guest to them, so it keeps its data (TS's
-    /// `linkGuest`, on by default). Off: sign them in on an account of
-    /// their own.
+    /// `linkGuest`, on by default). A link the backend refuses for good signs
+    /// them in on an account of their own instead, once. Off: the guest
+    /// stays, for the app to link ([`JazzSession::link_device_account`]).
     pub link_guest: bool,
 }
 
@@ -251,6 +248,9 @@ struct Current {
     device: Option<DeviceKey>,
     /// The device key kept with [`Storage::Memory`].
     kept: Option<DeviceKey>,
+    /// A guest's link the backend refused for good: that guest account and
+    /// that user (issuer, subject), never linked again.
+    refused_link: Option<(Option<AccountId>, String, String)>,
     last_failed: Option<Op>,
 }
 
@@ -625,8 +625,43 @@ impl JazzSession {
             }
             return Ok(());
         };
-        if guest && who.account.is_none() && self.inner.config.link_guest {
-            return self.link_with(&token).await;
+        if guest && who.account.is_none() {
+            if !self.inner.config.link_guest {
+                // The app decides what becomes of this guest
+                // (`link_device_account`), as TS's `linkGuest: false`.
+                self.set(|snapshot| snapshot.status = SessionStatus::Ready);
+                return Ok(());
+            }
+            let guest_account = self
+                .inner
+                .state
+                .borrow()
+                .user
+                .as_ref()
+                .map(|user| user.account);
+            let refusal = (
+                guest_account,
+                who.identity.issuer.clone(),
+                who.identity.subject.clone(),
+            );
+            let refused_before = self.lock().refused_link.as_ref() == Some(&refusal);
+            if !refused_before {
+                match self.link_with(&bearer, &token).await {
+                    Ok(()) => return Ok(()),
+                    // Refused for good (a retired key, another app's guest,
+                    // an account that appeared meanwhile): sign the user in
+                    // on their own account instead, and never try this link
+                    // again, as TS's `refusedLink`.
+                    Err(Error::Refused(_)) => self.lock().refused_link = Some(refusal),
+                    // Signed out while linking: no one to link to; the guest
+                    // stays.
+                    Err(Error::SignedOut) => {
+                        self.set(|snapshot| snapshot.status = SessionStatus::Ready);
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
         }
         let same = self.inner.state.borrow().user.as_ref().is_some_and(|user| {
             user.issuer == who.identity.issuer
@@ -679,11 +714,14 @@ impl JazzSession {
             .await?
             .ok_or(Error::SignedOut)?;
         drop(jazz);
-        self.link_with(&token).await
+        self.link_with(&bearer, &token).await
     }
 
-    /// Links the signed-in device account to the user `token` names.
-    async fn link_with(&self, token: &str) -> Result<()> {
+    /// Links the signed-in device account to the user `token` names, then
+    /// goes on as them: their account is the device's, and so is its store,
+    /// reopened on the app's bearer (a backend may retire the device key on
+    /// linking, `guestKeyAfterLink: "revoke"`).
+    async fn link_with(&self, bearer: &Bearer, token: &str) -> Result<()> {
         let Some(jazz) = self.lock().jazz.clone() else {
             return Err(Error::Config(
                 "link_device_account needs a signed-in device account".into(),
@@ -693,12 +731,12 @@ impl JazzSession {
             .session()
             .ok_or_else(|| Error::Config("the device account's client has no session".into()))?;
         let user = session.link(token).await?;
-        self.lock().device = None;
-        self.set(|snapshot| {
-            snapshot.user = Some(user);
-            snapshot.status = SessionStatus::Ready;
-        });
-        Ok(())
+        drop(jazz);
+        self.transition();
+        let config = self
+            .user_config(user.account)
+            .user(Auth::Bearer(bearer.clone()));
+        self.switch_to(config, None).await
     }
 
     fn transition(&self) {
