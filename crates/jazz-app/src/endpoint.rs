@@ -1181,8 +1181,27 @@ impl Endpoint {
         let mut hello_seen = false;
         let mut thin: Option<ThinSocket> = None;
         let (answers, mut answered) = tokio::sync::mpsc::unbounded_channel();
+        // Since when the thin socket's requests wait on an answer: one that
+        // never comes (the core dropped it) must not hold them forever.
+        let mut waiting_since: Option<tokio::time::Instant> = None;
         let closed = loop {
+            // (At the top: arms that `continue` pass through here too.)
+            waiting_since = match &thin {
+                Some(thin) if thin.router.is_waiting() => {
+                    Some(waiting_since.unwrap_or_else(tokio::time::Instant::now))
+                }
+                _ => None,
+            };
+            let waited_out = waiting_since.map(|since| since + thin::ANSWER_DEADLINE);
             tokio::select! {
+                () = async {
+                    match waited_out {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    break Closed { code: 1011, reason: "an answer never came".into() };
+                },
                 message = incoming.next() => match message {
                     // More than the core takes in one message: it would
                     // close the link, so the endpoint does, for this socket.
@@ -1212,7 +1231,7 @@ impl Endpoint {
                 },
                 Some(answer) = answered.recv() => {
                     if let Some(thin) = &mut thin {
-                        thin.router.answered(answer.id);
+                        thin.router.answered(&answer);
                     }
                     let mut sent = true;
                     for frame in thin::answer_frames(answer) {

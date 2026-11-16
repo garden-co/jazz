@@ -586,7 +586,10 @@ fn as_session(identity: &mut WriteIdentity, session: AuthorSubject) -> Result<()
 
 /// A staged write's answer. A refusal decided by the row's stored state, or
 /// a serializable conflict, does not fail the call: the transaction stays
-/// open and its commit reports the first one (as for the bindings).
+/// open and its commit reports the first one (as for the bindings). Any
+/// other refusal fails the call and the transaction with it: its commit
+/// reports the first refusal, whatever the client does after the failed
+/// call.
 fn staged(state: &mut Open, row: RowUuid, write: Result<WriteHandle, Error>) -> ThinBody {
     match write {
         Ok(_) => ThinBody::Staged {
@@ -600,7 +603,11 @@ fn staged(state: &mut Open, row: RowUuid, write: Result<WriteHandle, Error>) -> 
                 row: *row.as_bytes(),
             }
         }
-        Err(error) => error_body(&error),
+        Err(error) => {
+            let body = error_body(&error);
+            state.refused.get_or_insert(error);
+            body
+        }
     }
 }
 
@@ -775,9 +782,23 @@ impl ThinRouter {
         }
     }
 
-    /// Note that the backend answered request `id`.
-    pub fn answered(&mut self, id: u64) {
-        self.backend_pending.remove(&id);
+    /// Note the backend's `answer`. An upload it refused to begin is not
+    /// one: its chunks go to the core, which refuses them, and it takes no
+    /// room among the open ones.
+    pub fn answered(&mut self, answer: &ThinResponse) {
+        self.backend_pending.remove(&answer.id);
+        if matches!(answer.body, ThinBody::Error { .. }) {
+            self.streams.remove(&answer.id);
+        }
+    }
+
+    /// Whether something routed waits on an answer that has not come.
+    pub fn is_waiting(&self) -> bool {
+        match self.queue.front() {
+            Some(Routed::Core { .. }) => !self.backend_pending.is_empty(),
+            Some(Routed::Backend(_)) => !self.core_pending.is_empty(),
+            None => false,
+        }
     }
 
     /// What may go now, in order: frames for the core once no earlier

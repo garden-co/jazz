@@ -788,6 +788,14 @@ fn plain_read(row: RowUuid) -> ThinOp {
     }
 }
 
+/// An answer of `Ok` to request `id`.
+fn ok(id: u64) -> jazz::thin::ThinResponse {
+    jazz::thin::ThinResponse {
+        id,
+        body: ThinBody::Ok,
+    }
+}
+
 /// The core's answer to request `id`, as the client receives it.
 fn core_answer(id: u64) -> Vec<u8> {
     jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
@@ -883,7 +891,7 @@ fn a_plain_read_sent_after_a_commit_waits_for_the_commit() {
         .unwrap();
     assert_eq!(released(router.ready()), ["backend:5"]);
     assert!(router.ready().is_empty(), "the commit is not answered yet");
-    router.answered(5);
+    router.answered(&ok(5));
     assert_eq!(released(router.ready()), ["core:1"]);
     // Later backend requests wait for the read in turn.
     router.from_client(vec![frame(7, read(TX, row))]).unwrap();
@@ -954,7 +962,7 @@ fn an_upload_begun_in_a_transaction_is_the_backends_until_it_ends() {
         ["backend:7", "backend:8", "backend:9"]
     );
     for id in [7, 8, 9] {
-        router.answered(id);
+        router.answered(&ok(id));
     }
     // Finished: a chunk naming it is the core's now, as is an upload
     // outside a transaction.
@@ -980,19 +988,19 @@ fn an_upload_begun_in_a_transaction_is_the_backends_until_it_ends() {
     assert_eq!(steps.len(), MAX_OPEN_TRANSACTION_UPLOADS + 1, "{steps:?}");
     assert!(steps.iter().all(|step| step.starts_with("backend:")));
     for id in 100..=last {
-        router.answered(id);
+        router.answered(&ok(id));
     }
     // The chunk of the upload past the bound went to the core; the other,
     // the backend's, waits for its answer.
     assert_eq!(released(router.ready()), ["core:1"]);
     router.from_core(&[core_answer(117)]);
     assert_eq!(released(router.ready()), ["backend:118"]);
-    router.answered(118);
+    router.answered(&ok(118));
     router
         .from_client(vec![frame(200, commit(TX)), chunk(201, 100)])
         .unwrap();
     assert_eq!(released(router.ready()), ["backend:200"]);
-    router.answered(200);
+    router.answered(&ok(200));
     assert_eq!(
         released(router.ready()),
         ["core:1"],
@@ -1015,7 +1023,7 @@ fn a_split_request_is_joined_to_route_it_and_reaches_the_core_as_its_parts() {
         panic!("expected the joined request, got {steps:?}");
     };
     assert_eq!(request.op, insert(TX, &big));
-    router.answered(1);
+    router.answered(&ok(1));
 
     let plain = jazz::thin::thin_wire_frames(frame(2, plain_insert(&big))).unwrap();
     router.from_client(plain.clone()).unwrap();
@@ -1101,4 +1109,68 @@ fn routed_requests_are_served_by_the_sessions_transactions() {
     assert!(matches!(answers[1], ThinBody::Staged { .. }));
     assert!(matches!(answers[2], ThinBody::Written { .. }));
     assert_eq!(titles(&session.core), ["changed"]);
+}
+
+#[test]
+fn an_upload_the_backend_refused_to_begin_is_not_one() {
+    let mut router = ThinRouter::default();
+    router
+        .from_client(vec![frame(
+            7,
+            ThinOp::BeginStream {
+                table: "notes".to_owned(),
+                row: [3; 16],
+                cells: Vec::new(),
+                column: "title".to_owned(),
+                mutation: "insert".to_owned(),
+                options: Vec::new(),
+                transaction: Some(TX.to_owned()),
+            },
+        )])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["backend:7"]);
+    assert!(!router.is_waiting(), "nothing routed waits");
+    router.answered(&jazz::thin::ThinResponse {
+        id: 7,
+        body: ThinBody::Error {
+            code: "Argument".to_owned(),
+            message: "refused".to_owned(),
+        },
+    });
+    router
+        .from_client(vec![frame(
+            8,
+            ThinOp::StreamChunk {
+                stream: 7,
+                chunk: vec![1],
+            },
+        )])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["core:1"]);
+}
+
+#[test]
+fn the_router_says_when_it_waits_on_an_answer() {
+    let mut router = ThinRouter::default();
+    router
+        .from_client(vec![frame(1, plain_insert("x")), frame(2, commit(TX))])
+        .unwrap();
+    assert!(!router.ready().is_empty());
+    assert!(router.is_waiting(), "the commit waits on the core");
+    router.from_core(&[core_answer(1)]);
+    assert!(!router.is_waiting());
+}
+
+#[test]
+fn a_staged_write_refused_outright_fails_the_transaction() {
+    let mut session = Session::open();
+    let tx = session.begin("mergeable");
+    session.serve(2, insert(&tx, "kept out"));
+    // No such row: refused as it is staged.
+    let refused = session.serve(3, update(&tx, RowUuid::from_bytes([0x99; 16]), "nowhere"));
+    assert!(matches!(refused, ThinBody::Error { .. }), "{refused:?}");
+    // A client that commits all the same commits nothing.
+    let body = session.serve(4, commit(&tx));
+    assert!(matches!(body, ThinBody::Error { .. }), "{body:?}");
+    assert!(titles(&session.core).is_empty());
 }
