@@ -2053,8 +2053,72 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "jazz"
+name = "jazz-alpha59-alpha60-dump"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+]
+
+[[package]]
+name = "jazz-app"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "futures",
+ "futures-core",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hmac",
+ "jazz-codegen",
+ "jazz-core",
+ "jazz-native-transport",
+ "jazz-server",
+ "jazz-text",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
+name = "jazz-benchmark-guard"
 version = "0.1.0"
+dependencies = [
+ "mimalloc",
+]
+
+[[package]]
+name = "jazz-codegen"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "jazz-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jazz-compression"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "jazz-ruzstd",
+ "lz4_flex",
+ "zstd",
+]
+
+[[package]]
+name = "jazz-core"
+version = "2.0.0-alpha.64"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2070,9 +2134,9 @@ dependencies = [
  "hex",
  "insta",
  "internment",
- "jazz",
  "jazz-benchmark-guard",
  "jazz-compression",
+ "jazz-core",
  "jazz-db",
  "jazz-model",
  "jazz-protocol",
@@ -2103,32 +2167,339 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-alpha59-alpha60-dump"
-version = "0.0.0"
+name = "jazz-db"
+version = "2.0.0-alpha.64"
 dependencies = [
- "blake3",
- "ciborium",
+ "bytes",
+ "futures",
+ "jazz-model",
+ "jazz-protocol",
+ "jazz-text",
+ "jazz-types",
+ "postcard",
+ "rusqlite",
  "serde",
  "serde_bytes",
+ "serde_json",
+ "tracing",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
+name = "jazz-example-band-book-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "jazz-testkit",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-example-band-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "libsqlite3-sys",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-example-big-label-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "jazz-testkit",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-example-doc-shelf-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "jazz-example-epic-drop-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+]
+
+[[package]]
+name = "jazz-example-jamazon-warehouse-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+]
+
+[[package]]
+name = "jazz-example-music-agent-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "tempfile",
+]
+
+[[package]]
+name = "jazz-example-permissioned-resources-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "jazz-native-relay",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
+name = "jazz-example-poster-shop-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+]
+
+[[package]]
+name = "jazz-example-record-player-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
  "serde_json",
 ]
 
 [[package]]
-name = "jazz-app"
+name = "jazz-example-stage-plan-benchmark"
 version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-example-wequencer-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "tempfile",
+]
+
+[[package]]
+name = "jazz-example-world-tour-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz-benchmark-guard",
+ "jazz-core",
+]
+
+[[package]]
+name = "jazz-ffi"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "futures-executor",
+ "futures-util",
+ "jazz-app",
+ "jazz-server",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "uniffi",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-model"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "internment",
+ "jazz-text",
+ "jazz-types",
+ "jsonschema",
+ "postcard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-napi"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "jazz-codegen",
+ "jazz-core",
+ "jazz-native-relay",
+ "jazz-otel",
+ "jazz-server",
+ "jazz-text",
+ "libsodium-sys-stable",
+ "mimalloc-safe",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "jazz-native-relay"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "getrandom 0.3.4",
+ "jazz-core",
+ "jazz-native-transport",
+ "jazz-server",
+ "jazz-testkit",
+ "jazz-text",
+ "libc",
+ "postcard",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "stacker",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "jazz-native-transport"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "axum 0.8.9",
+ "bytes",
+ "futures",
+ "hex",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "jazz-server",
+ "postcard",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-otel"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "jazz-core",
+ "jazz-server",
+ "jazz-testkit",
+ "jsonwebtoken",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry-stdout",
+ "opentelemetry_sdk",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-protocol"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "hex",
+ "jazz-compression",
+ "jazz-model",
+ "jazz-types",
+ "postcard",
+ "rand 0.8.5",
+ "rustc-hash",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
+name = "jazz-ruzstd"
+version = "0.8.3"
+
+[[package]]
+name = "jazz-server"
+version = "2.0.0-alpha.64"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
+ "bytes",
+ "flate2",
  "futures",
- "futures-core",
  "futures-util",
- "getrandom 0.3.4",
+ "hex",
  "hmac",
- "jazz",
- "jazz-codegen",
- "jazz-native-transport",
- "jazz-server",
- "jazz-text",
+ "http",
+ "hyper",
+ "hyper-util",
+ "jazz-core",
+ "jazz-otel",
+ "jsonwebtoken",
+ "opentelemetry",
+ "postcard",
  "reqwest",
  "rusqlite",
  "serde",
@@ -2138,28 +2509,67 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
+ "tower",
+ "tower-http 0.6.8",
  "tracing",
+ "tungstenite",
+ "uuid",
 ]
 
 [[package]]
-name = "jazz-benchmark-guard"
+name = "jazz-sim"
 version = "0.1.0"
 dependencies = [
- "mimalloc",
+ "hdrhistogram",
+ "jazz-benchmark-guard",
+ "jazz-core",
+ "libc",
+ "postcard",
+ "pprof",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
-name = "jazz-cli"
+name = "jazz-testkit"
 version = "0.1.0"
+dependencies = [
+ "jazz-core",
+ "jazz-native-transport",
+ "jazz-server",
+ "jsonwebtoken",
+ "postcard",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
+name = "jazz-text"
+version = "2.0.0-alpha.64"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jazz-tools"
+version = "2.0.0-alpha.64"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "clap",
  "flate2",
  "futures-util",
- "jazz",
  "jazz-alpha59-alpha60-dump",
  "jazz-codegen",
+ "jazz-core",
  "jazz-native-transport",
  "jazz-otel",
  "jazz-server",
@@ -2186,418 +2596,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-codegen"
-version = "0.1.0"
-dependencies = [
- "jazz",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "jazz-compression"
-version = "0.1.0"
-dependencies = [
- "jazz-ruzstd",
- "lz4_flex",
- "zstd",
-]
-
-[[package]]
-name = "jazz-db"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "jazz-model",
- "jazz-protocol",
- "jazz-text",
- "jazz-types",
- "postcard",
- "rusqlite",
- "serde",
- "serde_bytes",
- "serde_json",
- "tracing",
- "uuid",
- "web-time",
-]
-
-[[package]]
-name = "jazz-example-band-book-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "jazz-testkit",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "jazz-example-band-chat-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "libsqlite3-sys",
- "uuid",
-]
-
-[[package]]
-name = "jazz-example-big-label-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "jazz-testkit",
- "sha2",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "jazz-example-doc-shelf-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "jazz-example-epic-drop-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
-]
-
-[[package]]
-name = "jazz-example-jamazon-warehouse-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
-]
-
-[[package]]
-name = "jazz-example-music-agent-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "tempfile",
-]
-
-[[package]]
-name = "jazz-example-permissioned-resources-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "jazz-native-relay",
- "tempfile",
- "zstd",
-]
-
-[[package]]
-name = "jazz-example-poster-shop-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
-]
-
-[[package]]
-name = "jazz-example-record-player-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "serde_json",
-]
-
-[[package]]
-name = "jazz-example-stage-plan-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "libc",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "jazz-example-wequencer-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "tempfile",
-]
-
-[[package]]
-name = "jazz-example-world-tour-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
-]
-
-[[package]]
-name = "jazz-ffi"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "futures",
- "futures-executor",
- "futures-util",
- "jazz-app",
- "jazz-server",
- "reqwest",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "uniffi",
- "uuid",
-]
-
-[[package]]
-name = "jazz-model"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "hex",
- "internment",
- "jazz-text",
- "jazz-types",
- "jsonschema",
- "postcard",
- "serde",
- "serde_bytes",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "jazz-napi"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "futures",
- "jazz",
- "jazz-codegen",
- "jazz-native-relay",
- "jazz-otel",
- "jazz-server",
- "jazz-text",
- "libsodium-sys-stable",
- "mimalloc-safe",
- "napi",
- "napi-build",
- "napi-derive",
- "postcard",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "jazz-native-relay"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "futures",
- "getrandom 0.3.4",
- "jazz",
- "jazz-native-transport",
- "jazz-server",
- "jazz-testkit",
- "jazz-text",
- "libc",
- "postcard",
- "rusqlite",
- "serde",
- "serde_json",
- "stacker",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "jazz-native-transport"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.9",
- "bytes",
- "futures",
- "hex",
- "jazz",
- "jazz-benchmark-guard",
- "jazz-server",
- "postcard",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "uuid",
-]
-
-[[package]]
-name = "jazz-otel"
-version = "0.1.0"
-dependencies = [
- "jazz",
- "jazz-server",
- "jazz-testkit",
- "jsonwebtoken",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry-stdout",
- "opentelemetry_sdk",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "jazz-protocol"
-version = "0.1.0"
-dependencies = [
- "hex",
- "jazz-compression",
- "jazz-model",
- "jazz-types",
- "postcard",
- "rand 0.8.5",
- "rustc-hash",
- "serde",
- "serde_bytes",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
- "web-time",
-]
-
-[[package]]
-name = "jazz-ruzstd"
-version = "0.8.3"
-
-[[package]]
-name = "jazz-server"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.9",
- "base64 0.22.1",
- "bytes",
- "flate2",
- "futures",
- "futures-util",
- "hex",
- "hmac",
- "http",
- "hyper",
- "hyper-util",
- "jazz",
- "jazz-otel",
- "jsonwebtoken",
- "opentelemetry",
- "postcard",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tower",
- "tower-http 0.6.8",
- "tracing",
- "tungstenite",
- "uuid",
-]
-
-[[package]]
-name = "jazz-sim"
-version = "0.1.0"
-dependencies = [
- "hdrhistogram",
- "jazz",
- "jazz-benchmark-guard",
- "libc",
- "postcard",
- "pprof",
- "rusqlite",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "jazz-testkit"
-version = "0.1.0"
-dependencies = [
- "jazz",
- "jazz-native-transport",
- "jazz-server",
- "jsonwebtoken",
- "postcard",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
- "zstd",
-]
-
-[[package]]
-name = "jazz-text"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "jazz-types"
-version = "0.1.0"
+version = "2.0.0-alpha.64"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2629,7 +2629,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "indexed_db_futures",
- "jazz",
+ "jazz-core",
  "jazz-text",
  "jazz-wasm-tracing",
  "js-sys",
