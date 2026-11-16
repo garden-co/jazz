@@ -354,11 +354,10 @@ fn an_expired_bearer_stops_the_worker_and_a_renewed_one_recovers() {
         Some(RemoteLinkHint::Failed),
         "reads must not wait on an upstream that refused the credential"
     );
-    assert!(
-        rejected
-            .as_deref()
-            .is_some_and(|reason| reason.contains("token expired")),
-        "the status names the refused credential: {rejected:?}"
+    assert_eq!(
+        rejected.as_deref(),
+        Some("expired"),
+        "the status names the classified refusal, not the server's wording"
     );
     thread::sleep(Duration::from_millis(50));
     assert_eq!(
@@ -445,7 +444,9 @@ fn a_renewed_bearer_refused_for_the_same_reason_is_a_new_refusal() {
         host.private_scope_workers[&scope].terminally_stopped()
     });
     let first = tick_auth_rejection(&mut host, alice).expect("the first refusal");
-    assert!(first.reason.contains("token expired"), "{first:?}");
+    // The relay forwards the link's classification (`AuthFailureReason`),
+    // so the host never re-reads "AuthFailed: token expired".
+    assert_eq!(first.reason, "expired", "{first:?}");
     assert_eq!(
         tick_auth_rejection(&mut host, alice),
         Some(first.clone()),
