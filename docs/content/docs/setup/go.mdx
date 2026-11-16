@@ -8,8 +8,8 @@ mobile app: it signs in as one of your users and syncs through your main backend
 route `createJazz` serves. It opens the app from the same `jazz.app.json` as every other language,
 with typed bindings generated from it.
 
-The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, uses only the standard library:
-`context` for every call and channels for subscriptions.
+The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, needs no cgo; its only dependency
+is purego. It uses `context` for every call and channels for subscriptions.
 
 ## Install
 
@@ -93,4 +93,6 @@ command-line app.
 - running your main backend in Go (publishing permissions, serving `/jazz`): run it in TypeScript
   with `createJazz`;
 - connecting as a backend client with a machine credential (trusted or scoped, `forUser`): see
-  [Backend Client](/docs/setup/backend-client).
+  [Backend Client](/docs/setup/backend-client);
+- non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column reads
+  them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the column.
