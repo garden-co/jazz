@@ -978,7 +978,11 @@ canonical root of that generation, and the current epoch with its position.
 A later read is refused with `stale-state` if its cut is earlier, its
 generation lower, or (same generation) the floor's epoch is not in its
 chain; it is `root-not-mine` if the chain's root of the floor's generation is
-not the floor's root. The floor then advances to the newer state.
+not the floor's root. A floor of the device's own account also records
+whether the device was active; a later generation is then `root-not-mine`
+on that device too, because an active device never needs a reset (§2.11). The
+floor then advances to the newer state. The client runtime keeps floors for
+spaces and groups as well (§6.3a).
 
 **Private verification.** A device that wants the account key also reads the
 private tables (same cut) and accepts: the identity only if it matches the
@@ -2778,6 +2782,28 @@ account (`Dₐ(account)`), not to the server URL. One install pointed at two
 datasets with the same application id and environment shares device keys and
 held keys.
 
+### 6.3a Floors
+
+The runtime persists, next to the held-key documents of each scope `Dₐ(self)`,
+a **floor** for every account, space and group whose state it has verified:
+
+- an account: the cut, generation, canonical root of that generation, and
+  current epoch with its position (§2.4, "Floors"); for the device's own
+  account and for every account it replays (recipients, authors);
+- a space or group: the cut, the root ID, and the current epoch with its
+  chain depth.
+
+Each floor is signed by the device like a lineage record (`B(format, …)`,
+format `jazz-e2ee-floor-v1`) and advances only forward, after a verification
+at a newer cut. Every later read is checked against the floor before its
+state is used: older evidence (an earlier cut, a lower generation, an epoch
+chain that no longer reaches the floor's epoch) is refused with
+`stale-state`, and the runtime fetches again; it never decrypts, writes or
+delivers with the older state. An account whose chain no longer contains the
+floor's root is `root-not-mine` (§2.4). Floors are wiped with the held keys
+(§6.4). Protection starts at the device's first observation of each account,
+space or group: before it, the device has nothing to compare with (§8).
+
 ### 6.4 Wipe rules
 
 - Normal sign-out retains device and held-key records, so a later offline
@@ -2970,6 +2996,22 @@ Non-goals and explicit limits:
   Jazz policy (R11–R27).
 - **Writes with a held key are not freshness-checked.** A device holding an
   older epoch's key may write under it until Jazz permissions refuse.
+- **Rollback is detected only after a first observation.** A server can
+  answer a read with an older cut, withholding rows accepted since (a device
+  removal, a rotation, a retired recovery root), so that a client acts on
+  stale membership. Each device keeps floors (§6.3a) and refuses evidence
+  older than what it has verified (`stale-state`); before its first
+  observation of an account, space or group, and after a wipe, it cannot
+  tell a rolled-back history from the real one. Other devices' floors do not
+  protect it.
+- **A forged reset of an app account denies service, within the trust
+  boundary.** Whoever can write as an app account (its sign-in or the server)
+  can write a reset root for it. The account's own devices then raise
+  `root-not-mine` or lose their active state, and other accounts' clients
+  follow the new generation; but the reset generation receives no space or
+  group key until a key manager approves it (§2.11), so the forgery gains no
+  content without that approval. A local-first account cannot be reset this
+  way: every generation's root must be signed by its identity (§2.4 step 1).
 - **Self-only reads hide metadata from other users, not from the server.**
   The server stores and evaluates every E2EE row, so it sees who is a
   recipient or member of which space and group, who manages them, and when

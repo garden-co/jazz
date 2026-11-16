@@ -335,7 +335,7 @@ fn substituted_app_root_is_not_mine() {
     ledger.request(&phone, &mut rng);
     ledger.approve(&env, &laptop, &phone, &mut rng);
     let state = ledger.state(&env);
-    let floor = state.floor(ledger.public.through);
+    let floor = state.floor(ledger.public.through, Some(&laptop.id));
     state.check_floor(ledger.public.through, &floor).unwrap();
 
     // The server replaces the root with one of its own device.
@@ -506,4 +506,31 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
         .unwrap()
         .unwrap();
     assert!(!state.is_removed(&phone.id));
+}
+
+/// A reset of an app account that one of its active devices did not expect
+/// is `root-not-mine` on that device; another account's floor follows the
+/// new generation.
+#[test]
+fn unexpected_reset_is_not_mine_for_an_active_device() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(107);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let before = ledger.state(&env);
+    let own = before.floor(ledger.public.through, Some(&laptop.id));
+    let other = before.floor(ledger.public.through, None);
+    assert_eq!(own.active_device.as_deref(), Some(laptop.id.as_str()));
+
+    let mallory = env.device(&mut rng);
+    ledger.request(&mallory, &mut rng);
+    ledger.root(&env, &mallory, 1, &mut rng);
+    let after = ledger.state(&env);
+    assert_eq!(
+        after.check_floor(ledger.public.through, &own),
+        Err(ProtocolError::RootNotMine)
+    );
+    after.check_floor(ledger.public.through, &other).unwrap();
 }

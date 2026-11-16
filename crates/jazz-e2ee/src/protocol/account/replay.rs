@@ -114,8 +114,10 @@ impl AccountState {
 
     /// What a device keeps of this state to refuse older evidence later
     /// (§2.4, "Floors"): the read's cut, the generation, the root of that
-    /// generation and the current epoch.
-    pub fn floor(&self, through: Position) -> AccountFloor {
+    /// generation and the current epoch. `own_device` is this device's ID
+    /// when the state is of its own account; the floor records it if it is
+    /// active.
+    pub fn floor(&self, through: Position, own_device: Option<&str>) -> AccountFloor {
         let epoch = self.current_epoch();
         AccountFloor {
             through,
@@ -123,6 +125,9 @@ impl AccountState {
             root_id: self.root.row.id.clone(),
             epoch_id: epoch.epoch_id.clone(),
             epoch_position: epoch.position,
+            active_device: own_device
+                .filter(|device| self.is_active(device))
+                .map(str::to_owned),
         }
     }
 
@@ -131,7 +136,10 @@ impl AccountState {
     /// older than the floor (an earlier cut, an earlier generation, or the
     /// floor's epoch missing from the chain) is
     /// [`ProtocolError::StaleState`]; a chain whose root of the floor's
-    /// generation is not the floor's root is [`ProtocolError::RootNotMine`].
+    /// generation is not the floor's root is [`ProtocolError::RootNotMine`],
+    /// and so is a later generation when the floor records this device as
+    /// active: an active device never needs a reset (§2.11), so a reset it
+    /// did not see coming is a replaced root.
     pub fn check_floor(&self, through: Position, floor: &AccountFloor) -> ProtocolResult<()> {
         if self.account_id.is_empty()
             || through < floor.through
@@ -142,7 +150,9 @@ impl AccountState {
         let root = usize::try_from(floor.generation)
             .ok()
             .and_then(|generation| self.roots.get(generation));
-        if root.is_none_or(|root| root.row.id != floor.root_id) {
+        if root.is_none_or(|root| root.row.id != floor.root_id)
+            || (self.generation > floor.generation && floor.active_device.is_some())
+        {
             return Err(ProtocolError::RootNotMine);
         }
         if self.generation == floor.generation
@@ -182,6 +192,8 @@ pub struct AccountFloor {
     pub root_id: String,
     pub epoch_id: String,
     pub epoch_position: Position,
+    /// This device, if the floor is of its own account and it was active.
+    pub active_device: Option<String>,
 }
 
 /// Replays one account's ledger read, and its states as of earlier
