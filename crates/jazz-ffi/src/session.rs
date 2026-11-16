@@ -192,6 +192,7 @@ fn session_config(
             "auth",
             "initial",
             "allowInsecureHttp",
+            "linkGuest",
             "contract",
         ]
         .contains(&key.as_str())
@@ -259,6 +260,13 @@ fn session_config(
                 "a session's config.auth is { \"bearer\": true }, or none (device accounts come from \"initial\" and the session's calls)",
             ));
         }
+    }
+    // Whether a signed-in user with no account yet links the device guest
+    // (TS's default) or the app links it with linkDeviceAccount.
+    match config.get("linkGuest") {
+        None | Some(Json::Null) => {}
+        Some(Json::Bool(link)) => session = session.link_guest(*link),
+        Some(_) => return Err(refused("config.linkGuest must be true or false")),
     }
     match config.get("allowInsecureHttp") {
         None | Some(Json::Null) | Some(Json::Bool(false)) => {}

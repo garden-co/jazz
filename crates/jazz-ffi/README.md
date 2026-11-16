@@ -111,7 +111,10 @@ with `serverUrl` (the app's `/jazz`), `appId`, `storage` / `dataDir` (each
 account's store under `dataDir/<account>/`, the device key in
 `dataDir/device.key`), `"auth": {"bearer": true}` with a token provider,
 and `"initial"`: `"backend"` (follow the bearer; the default, which needs
-one), `"device"` or `"signed-out"`.
+one), `"device"` or `"signed-out"`. `"linkGuest"` (default `true`, as TS):
+a user the bearer names who has no account yet takes over the device
+guest's account; `false` leaves the guest until `link_device_account()`.
+Linking reopens the account on the bearer: `clientEpoch` moves on.
 
 - `snapshot()` / `"snapshot"`: `{"status": "starting"|"ready"|"signed-out"|
   "transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:

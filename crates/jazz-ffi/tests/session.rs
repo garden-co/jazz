@@ -226,6 +226,53 @@ async fn a_session_keeps_a_device_account() {
     app.backend.shutdown().await.unwrap();
 }
 
+/// A guest whose user signs in with the app (no account yet) is linked:
+/// the same account, reopened on the bearer (a new client: the guest's
+/// handle is `Replaced`). With `linkGuest: false` it waits for
+/// `link_device_account`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guest_is_linked_when_its_user_signs_in() {
+    let app = App::start().await;
+    for link_guest in [true, false] {
+        let config = app.config(json!({ "auth": { "bearer": true }, "initial": "device",
+            "linkGuest": link_guest }));
+        tokio::task::spawn_blocking(move || {
+            let bearer = Arc::new(Bearer(Mutex::new(None)));
+            let session = Session::open(config, Some(bearer.clone())).unwrap();
+            let guest = snapshot_until(&session, |s| s["status"] == "ready");
+            assert_eq!(guest["user"]["kind"], "device", "{guest}");
+            let as_guest = session.jazz().unwrap();
+            let account = as_guest.account().unwrap().unwrap();
+
+            // The user signs up with the app: a new user, no account yet.
+            let user = format!("token-carol{}", if link_guest { "" } else { "-later" });
+            *bearer.0.lock().unwrap() = Some(user);
+            session.refresh().unwrap();
+            if !link_guest {
+                let still = parse(&session.snapshot().unwrap());
+                assert_eq!(still["user"]["kind"], "device", "{still}");
+                session.link_device_account().unwrap();
+            }
+            let linked = snapshot_until(&session, |s| {
+                s["status"] == "ready" && s["user"]["kind"] == "backend"
+            });
+            assert!(
+                linked["clientEpoch"].as_u64() > guest["clientEpoch"].as_u64(),
+                "{linked}"
+            );
+            assert!(matches!(
+                as_guest.account(),
+                Err(JazzError::Replaced { .. })
+            ));
+            assert_eq!(session.jazz().unwrap().account().unwrap(), Some(account));
+            session.shutdown().unwrap();
+        })
+        .await
+        .unwrap();
+    }
+    app.backend.shutdown().await.unwrap();
+}
+
 // --- The C ABI ---
 
 use jazz_ffi::c_abi::{

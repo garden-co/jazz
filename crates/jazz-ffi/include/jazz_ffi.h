@@ -231,7 +231,9 @@ int jazz_close_within(JazzHandle *handle, uint64_t timeout_ms, char **err);
  * account's store under dataDir/<account>/, the device key in
  * dataDir/device.key), "auth"?: {"bearer": true} (token_cb gives the
  * bearer; NULL without), "initial"?: "backend" (follow the bearer; the
- * default, needs one) | "device" | "signed-out", "contract"?: 2.
+ * default, needs one) | "device" | "signed-out", "linkGuest"?: true (a
+ * user with no account yet takes over the device guest's; false: only
+ * with "linkDeviceAccount"), "contract"?: 2.
  */
 typedef struct JazzSession JazzSession;
 JazzSession *jazz_session_open(const char *config_json, JazzTokenCallback token_cb, void *ctx,
