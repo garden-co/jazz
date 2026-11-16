@@ -246,18 +246,19 @@ async fn order_and_window_before_a_hop_apply_to_the_rows_it_reaches() {
     let f = fixture(&jazz).await;
 
     // The children of every todo are Skimmed and Low-fat. Ordered by title
-    // descending and limited to one, that's Skimmed. (Applied to the todos
-    // the hop starts from, it would be Skimmed's child, Low-fat.)
+    // and limited to one, that's Low-fat (unordered, the store's order
+    // gives Skimmed). Applied to the todos the hop starts from, the order
+    // and limit would pick Buy bread, which has no children.
     let first: Vec<Todo> = jazz
         .all(
             todos::query()
-                .order_by(todos::title(), Order::Desc)
+                .order_by(todos::title(), Order::Asc)
                 .limit(1)
                 .hop_to(todos::todos_via_parent()),
         )
         .await
         .unwrap();
-    assert_eq!(titles(&first), ["Skimmed"]);
+    assert_eq!(titles(&first), ["Low-fat"]);
 
     // The offset before the hop skips reached rows; a later order adds to
     // the earlier one.
