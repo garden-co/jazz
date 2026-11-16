@@ -115,7 +115,7 @@ impl Lang {
 
     /// Whether the app in `dir` (the directory of its `jazz.app.json`) is
     /// written in this language: a TS app has a `package.json`; a Rust app
-    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app` (a
+    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app-support` (a
     /// workspace root or another crate beside a TS app's files is not
     /// one); a Go app a `go.mod` that requires the Go runtime module.
     /// Committed bindings say so too; the caller checks those.

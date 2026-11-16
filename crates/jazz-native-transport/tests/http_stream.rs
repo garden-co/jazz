@@ -499,7 +499,7 @@ async fn an_upgrade_refused_with_401_is_an_auth_rejection() {
     assert_eq!(served.backend.opened.load(Ordering::SeqCst), 0);
 }
 
-/// A client that shuts down on its own runtime (as jazz-app's does) ends its
+/// A client that shuts down on its own runtime (as jazz-app-support's does) ends its
 /// stream session before the runtime goes: `settle` waits for the DELETE,
 /// which would otherwise die with the runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

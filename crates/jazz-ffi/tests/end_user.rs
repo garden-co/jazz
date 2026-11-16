@@ -1,5 +1,5 @@
 //! jazz-ffi v2: end users — a device account or the app's bearer, syncing
-//! through the app's Jazz endpoint (jazz-app's `relay/` stand-in for
+//! through the app's Jazz endpoint (jazz-app-support's `relay/` stand-in for
 //! `createJazz`), with session and sync states.
 
 mod common;
@@ -55,19 +55,19 @@ impl StateListener for States {
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn end_users_sign_in_and_sync_through_the_app() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
         .await
         .unwrap();
-    let files = jazz_app::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
+    let files = jazz_app_support::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
         .with_permissions(STAGE_PLAN_PERMISSIONS.as_bytes().to_vec());
-    let backend = jazz_app::Jazz::open(
+    let backend = jazz_app_support::Jazz::open(
         files,
-        jazz_app::Config::new(app_id)
+        jazz_app_support::Config::new(app_id)
             .server(server.base_url())
-            .backend(jazz_app::Backend::new(
+            .backend(jazz_app_support::Backend::new(
                 server.backend_secret(),
                 server.admin_secret(),
                 "stage-plan",

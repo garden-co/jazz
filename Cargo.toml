@@ -15,7 +15,7 @@ members = [
   "crates/jazz-native-transport",
   "crates/jazz-native-relay",
   "crates/jazz-app",
-  # JSON-in/JSON-out bindings of jazz-app: UniFFI (Swift, Kotlin), C ABI (Go).
+  # JSON-in/JSON-out bindings of jazz-app-support: UniFFI (Swift, Kotlin), C ABI (Go).
   "crates/jazz-ffi",
   "crates/jazz-cli",
   "crates/jazz-codegen",
@@ -24,7 +24,7 @@ members = [
   "crates/jazz-otel",
   "crates/jazz-sim",
   "crates/jazz-napi",
-  # Opens its app through jazz-app's Send + Clone handle.
+  # Opens its app through jazz-app-support's Send + Clone handle.
   "examples/todo-server-rs",
   "examples/stage-plan/apps/rust-cli",
   # The docs copy, whose snippets the docs include by region.
@@ -87,7 +87,7 @@ jazz-codegen = { version = "=2.0.0-alpha.65", path = "crates/jazz-codegen" }
 jazz-otel = { version = "=2.0.0-alpha.65", path = "crates/jazz-otel" }
 jazz-native-transport = { version = "=2.0.0-alpha.65", path = "crates/jazz-native-transport" }
 jazz-server = { version = "=2.0.0-alpha.65", path = "crates/jazz-server" }
-jazz-app = { version = "=2.0.0-alpha.65", path = "crates/jazz-app" }
+jazz-app-support = { version = "=2.0.0-alpha.65", path = "crates/jazz-app" }
 jazz-alpha59-alpha60-dump = { version = "=2.0.0-alpha.65", path = "crates/jazz-alpha59-alpha60-dump" }
 rustc-hash = "2.1.1"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
