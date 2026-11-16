@@ -86,6 +86,9 @@ final class DocsSnippetsTests: XCTestCase {
         let jazz = try await relay.user()
         let project = try await jazz.insert(JazzApp.NewProject(name: "Home"))
         let milk = try await add(jazz, "Buy milk", priority: 5)
+        // `where-order-limit` orders by `$createdAt` (milliseconds): rows
+        // inserted back to back can share one, so make Draft's later.
+        try await _Concurrency.Task.sleep(nanoseconds: 20_000_000)
         let draft = try await add(jazz, "Draft", priority: 12, parentId: milk.id)
         try await add(jazz, "Done", done: true, priority: 1, projectId: project.id)
 
