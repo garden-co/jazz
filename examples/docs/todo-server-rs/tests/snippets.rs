@@ -326,6 +326,22 @@ async fn durable_snippets_run_against_a_server() {
         .await
         .expect("the server answers")
         .unwrap();
+    // Accepted, the error snippets return what they wrote.
+    let inserted = within(snippets::insert_todo_and_wait(&jazz))
+        .await
+        .expect("the server answers")
+        .unwrap();
+    assert_eq!(
+        inserted.map(|todo| todo.title).as_deref(),
+        Some("Ship review fixes")
+    );
+    assert!(
+        within(snippets::complete_todo_in_transaction(&jazz, existing.id))
+            .await
+            .expect("the server answers")
+            .unwrap()
+    );
+
     let staged = jazz
         .all(todos::query().filter(todos::title().eq("Review staged changes")))
         .await
@@ -370,10 +386,11 @@ async fn error_snippets_report_rejections() {
         .insert(NewTodo::new("Local only", false))
         .await
         .unwrap();
-    within(snippets::complete_todo_in_transaction(&jazz, todo.id))
+    let committed = within(snippets::complete_todo_in_transaction(&jazz, todo.id))
         .await
         .expect("the server answers")
         .unwrap();
+    assert!(!committed);
     let remote = within(jazz.all_with(todos::query(), jazz_app::ReadTier::Remote))
         .await
         .expect("the server answers")
