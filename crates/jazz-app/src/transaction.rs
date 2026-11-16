@@ -92,7 +92,7 @@ impl Transaction {
         self.read_back(id).await
     }
 
-    async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub(crate) async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
         self.get::<T>(id)
             .await?
             .ok_or_else(|| crate::Error::Decode {
@@ -253,7 +253,7 @@ pub(crate) fn roll_back_parked() {
 /// awaits, and driven call by call. Commit it with
 /// [`OpenTransaction::commit`]; dropping it uncommitted rolls it back.
 pub struct OpenTransaction {
-    jazz: Jazz,
+    pub(crate) jazz: Jazz,
     key: u64,
     settle: crate::writes::Settler,
     finished: bool,

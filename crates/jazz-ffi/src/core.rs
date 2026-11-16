@@ -115,6 +115,31 @@ thread_local! {
     static TRANSACTIONS: RefCell<Transactions> = RefCell::new(Transactions::default());
 }
 
+/// The streaming uploads in progress on this thread's client.
+#[derive(Default)]
+struct Uploads(HashMap<u64, Upload>);
+
+struct Upload {
+    upload: jazz_app::jazz::tools::StreamingUpload,
+    kind: jazz_app::jazz::db::StreamingMutationKind,
+    id: Option<jazz_app::ObjectId>,
+    table: TableSchema,
+    name: String,
+}
+
+impl Drop for Uploads {
+    fn drop(&mut self) {
+        // As for transactions: the client is gone when the thread exits.
+        for entry in std::mem::take(&mut self.0).into_values() {
+            std::mem::forget(entry);
+        }
+    }
+}
+
+thread_local! {
+    static UPLOADS: RefCell<Uploads> = RefCell::new(Uploads::default());
+}
+
 /// The open transactions. Close rolls them back; any left when the client's
 /// thread exits are forgotten, not dropped: the client they belong to is
 /// already gone, and dropping them then would abort the process.
@@ -229,6 +254,11 @@ impl Core {
         convert::table(&self.schema, name)
     }
 
+    /// The permissions bundle a backend published and is pinned to.
+    pub fn bundle(&self) -> Result<Option<String>> {
+        Ok(self.open_jazz()?.bundle().map(str::to_owned))
+    }
+
     /// The account of the user a backend acts as (`session.user`).
     pub fn account(&self) -> Result<Option<String>> {
         Ok(self
@@ -243,6 +273,14 @@ impl Core {
     }
 
     pub fn one(&self, query_json: &str, opts: &Opts) -> Result<Option<String>> {
+        let parsed = convert::parse(query_json, "the query")?;
+        if crate::relational::is_relational(&parsed) {
+            return Ok(self
+                .relational_rows(&parsed, opts, Some(1))?
+                .into_iter()
+                .next()
+                .map(|row| row.to_string()));
+        }
         // Validated as given (a bad `limit` is refused), then limited to 1.
         let (_, mut query, shape) = convert::query(
             &self.schema,
@@ -258,8 +296,44 @@ impl Core {
     }
 
     fn rows(&self, query: &Json, opts: &Opts) -> Result<Vec<Json>> {
+        if crate::relational::is_relational(query) {
+            return self.relational_rows(query, opts, None);
+        }
         let (_, query, shape) = convert::query(&self.schema, &self.relations, query)?;
         self.run_query(shape, query, opts)
+    }
+
+    /// hopTo / gather / union / history / includeDeleted queries.
+    fn relational_rows(
+        &self,
+        query: &Json,
+        opts: &Opts,
+        limit: Option<usize>,
+    ) -> Result<Vec<Json>> {
+        // A limit goes in before lowering: a relation query carries its
+        // window inside the relation, not as an ordinary clause.
+        let limited;
+        let query = match limit {
+            Some(limit) => {
+                limited = crate::relational::with_limit(query, limit);
+                &limited
+            }
+            None => query,
+        };
+        let lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
+        let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
+        let core_query = lowered.query.clone();
+        let reads_deleted = lowered.reads_deleted;
+        let results = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let mut read = jazz_app::jazz::db::ReadOpts::for_read_tier(tier);
+            read.read_view.include_deleted = reads_deleted;
+            Ok(client.query_with_opts(core_query, read).await?)
+        }))?;
+        results
+            .into_iter()
+            .map(|row| crate::relational::row(&lowered, row))
+            .collect()
     }
 
     fn run_query(
@@ -486,16 +560,26 @@ impl Core {
             return Err(unsupported("subscribing inside a transaction"));
         }
         let tier = opts.read_tier.unwrap_or(ReadTier::LocalFirst);
-        let (_, query, table) = convert::query(
-            &self.schema,
-            &self.relations,
-            &convert::parse(query_json, "the query")?,
-        )?;
+        let parsed = convert::parse(query_json, "the query")?;
+        let (query, table, reads_deleted) = if crate::relational::is_relational(&parsed) {
+            let lowered = crate::relational::lower(&self.schema, &self.relations, &parsed)?;
+            if lowered.history {
+                return Err(unsupported(
+                    "subscribing to history: all versions of a row share its id",
+                ));
+            }
+            (lowered.query, lowered.shape, lowered.reads_deleted)
+        } else {
+            let (_, query, shape) = convert::query(&self.schema, &self.relations, &parsed)?;
+            (query, shape, false)
+        };
         let (events, received) = mpsc::channel::<Option<Event>>();
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         let forward = events.clone();
         block_on(self.open_jazz()?.with_client(move |client| async move {
-            let mut stream = client.subscribe_with_read_tier(query, tier).await?;
+            let mut read = jazz_app::jazz::db::ReadOpts::for_read_tier(tier);
+            read.read_view.include_deleted = reads_deleted;
+            let mut stream = client.subscribe_with_opts(query, read).await?;
             // Forwards on the client's thread until cancelled, the stream
             // ends, or the delivery thread is gone.
             tokio::task::spawn_local(async move {
@@ -653,6 +737,114 @@ impl Core {
         })
     }
 
+    /// Begins uploading a large value of `column` piece by piece: of a new
+    /// row (`id` none: an insert, its other columns `row_json`), or of the
+    /// row with `id` (`kind` `update` or `upsert`). Returns the upload's id.
+    pub fn upload_begin(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        kind: &str,
+        id: Option<&str>,
+        row_json: Option<&str>,
+    ) -> Result<String> {
+        use jazz_app::jazz::db::StreamingMutationKind as Kind;
+        let table = self.table(table_name)?.clone();
+        convert::column(&table, table_name, column_name)?;
+        let kind = match kind {
+            "insert" => Kind::Insert,
+            "update" => Kind::Update,
+            "upsert" => Kind::Upsert,
+            other => {
+                return Err(refused(format!(
+                    "an upload's kind is \"insert\", \"update\" or \"upsert\", not {other:?}"
+                )));
+            }
+        };
+        let id = id.map(|id| convert::parse_id(id, "the id")).transpose()?;
+        if id.is_none() != matches!(kind, Kind::Insert) {
+            return Err(refused(
+                "an insert upload takes no \"id\"; an update or upsert needs one",
+            ));
+        }
+        let cells = match row_json {
+            Some(row) => {
+                let (named, cells) = convert::cells(&table, table_name, row, "the row")?;
+                if named.is_some() {
+                    return Err(refused(
+                        "an upload's row takes no \"id\": give it as the upload's id (update/upsert)",
+                    ));
+                }
+                cells
+            }
+            None => Vec::new(),
+        };
+        let upload_id = self.next_tx.fetch_add(1, Ordering::Relaxed);
+        let (name, column) = (table_name.to_owned(), column_name.to_owned());
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let upload =
+                client.begin_streaming_upload(&name, cells.into_iter().collect(), &column)?;
+            UPLOADS.with(|u| {
+                u.borrow_mut().0.insert(
+                    upload_id,
+                    Upload {
+                        upload,
+                        kind,
+                        id,
+                        table,
+                        name,
+                    },
+                )
+            });
+            Ok(())
+        }))?;
+        Ok(upload_id.to_string())
+    }
+
+    /// Feeds the next piece of an upload.
+    pub fn upload_push(&self, upload: u64, bytes: Vec<u8>) -> Result<()> {
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let mut entry = UPLOADS
+                .with(|u| u.borrow_mut().0.remove(&upload))
+                .ok_or_else(|| jazz_app::Error::Config(format!("upload {upload} is not open")))?;
+            let pushed = client
+                .push_streaming_upload(&mut entry.upload, &bytes)
+                .await;
+            UPLOADS.with(|u| u.borrow_mut().0.insert(upload, entry));
+            Ok(pushed?)
+        }))?;
+        Ok(())
+    }
+
+    /// Finishes an upload, committing the row with its value; returns the
+    /// row.
+    pub fn upload_finish(&self, upload: u64, opts: &Opts) -> Result<String> {
+        self.reachable(opts.write_tier)?;
+        let tier = opts.write_tier;
+        let row = block_on(self.open_jazz()?.with_client(move |client| async move {
+            let entry = UPLOADS
+                .with(|u| u.borrow_mut().0.remove(&upload))
+                .ok_or_else(|| jazz_app::Error::Config(format!("upload {upload} is not open")))?;
+            let (id, committed) = client
+                .finish_streaming_upload(entry.upload, entry.kind, entry.id)
+                .await?;
+            settle(&client, committed, tier).await?;
+            read_back(&client, &entry.table, &entry.name, id).await
+        }))?;
+        Ok(row.to_string())
+    }
+
+    /// Abandons an upload: nothing is written.
+    pub fn upload_abort(&self, upload: u64) -> Result<()> {
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let entry = UPLOADS
+                .with(|u| u.borrow_mut().0.remove(&upload))
+                .ok_or_else(|| jazz_app::Error::Config(format!("upload {upload} is not open")))?;
+            Ok(client.abort_streaming_upload(entry.upload).await?)
+        }))?;
+        Ok(())
+    }
+
     /// Begins a serializable transaction: its reads see a snapshot and its
     /// own writes, and its writes commit together or not at all.
     pub fn tx_begin(&self, serializable: bool) -> Result<String> {
@@ -761,6 +953,25 @@ impl Core {
             .ok_or_else(|| refused("refresh is for an end user's app (\"auth\")"))?;
         block_on(session.refresh())?;
         Ok(())
+    }
+
+    /// Links this device account to the user's account with the app's
+    /// own sign-in (`bearer`, a token from it): the session becomes that
+    /// user's, on the device's account. Returns the user as JSON.
+    pub fn link(&self, bearer: &str) -> Result<String> {
+        let session = self
+            .open_jazz()?
+            .session()
+            .cloned()
+            .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
+        let bearer = bearer.to_owned();
+        // On the client's runtime: linking talks to the app's endpoint
+        // (tokio I/O), and the caller's thread may have no runtime at all.
+        let user = block_on(
+            self.open_jazz()?
+                .with_client(move |_| async move { session.link(&bearer).await }),
+        )?;
+        Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
     /// Signs the end user out and closes the app.
