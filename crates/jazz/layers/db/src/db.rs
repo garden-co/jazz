@@ -44,6 +44,11 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+#[cfg(any(test, feature = "testing"))]
+pub use sync::{
+    FollowMemoStats, FollowReadHook, follow_memo_stats_for_test, set_follow_memo_oracle_for_test,
+    set_follow_read_hook_for_test,
+};
 pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 
 #[path = "shard.rs"]
@@ -856,6 +861,10 @@ struct Inner {
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
+    /// While a server tick fans out to its sessions: the rows each
+    /// followed key found, read once for every session following it
+    /// (see `sync::FollowMemo`).
+    follow_memo: Rc<RefCell<Option<sync::FollowMemo>>>,
     /// Whether `_jazz_pruned_txs` exists, as last read (see
     /// `sync::has_pruned_txs`).
     pruned_txs: std::cell::Cell<Option<sync::Known>>,
@@ -2027,6 +2036,7 @@ impl Db {
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
+                follow_memo: Rc::default(),
                 pruned_txs: std::cell::Cell::new(None),
             })),
         };
