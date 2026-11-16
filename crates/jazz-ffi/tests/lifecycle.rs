@@ -169,6 +169,25 @@ fn delete_client_storage_empties_the_store() {
     .to_string();
     let jazz = JazzHandle::open(config.clone()).unwrap();
     jazz.insert("shows".into(), show(nil_uuid())).unwrap();
+    // Refused while another open app holds the store, which stays open.
+    let other_dir = dir.with_extension("held");
+    let _ = std::fs::remove_dir_all(&other_dir);
+    let mut held = parse(&config);
+    held["dataDir"] = json!(other_dir.to_str().unwrap());
+    let holder = JazzHandle::open(held.to_string()).unwrap();
+    let second = JazzHandle::open(held.to_string());
+    let second = second.expect("a second app on the same store opens");
+    {
+        let refused = second.delete_client_storage();
+        assert!(
+            matches!(refused, Err(JazzError::Refused { .. })),
+            "{refused:?}"
+        );
+        assert!(holder.all(json!({ "table": "shows" }).to_string()).is_ok());
+        second.shutdown().unwrap();
+    }
+    holder.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&other_dir);
     jazz.delete_client_storage().unwrap();
     assert!(matches!(
         jazz.all(json!({ "table": "shows" }).to_string()),
@@ -185,4 +204,102 @@ fn delete_client_storage_empties_the_store() {
     );
     reopened.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn until_closed(states: &mpsc::Receiver<Value>) -> Value {
+    loop {
+        let state = states
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a last state when the app closes");
+        if state["kind"] == "closed" {
+            return state;
+        }
+    }
+}
+
+/// Every watch ends with a last `{"kind": "closed"}` when the app closes,
+/// whichever way: shutdown, or deleting its store.
+#[test]
+fn watches_end_when_the_app_closes() {
+    let watch_all = |jazz: &JazzHandle| {
+        let (sync_sender, sync) = mpsc::channel();
+        let (errors_sender, errors) = mpsc::channel();
+        let watches = (
+            jazz.watch_sync(Arc::new(States(Mutex::new(sync_sender))))
+                .unwrap(),
+            jazz.watch_mutation_errors(Arc::new(States(Mutex::new(errors_sender))))
+                .unwrap(),
+        );
+        (watches, sync, errors)
+    };
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    let (_watches, sync, errors) = watch_all(&jazz);
+    jazz.shutdown().unwrap();
+    until_closed(&sync);
+    until_closed(&errors);
+    // Nothing after it.
+    assert!(sync.recv_timeout(Duration::from_millis(200)).is_err());
+
+    let dir = std::env::temp_dir().join(format!("jazz-ffi-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let jazz = JazzHandle::open(
+        json!({ "app": STAGE_PLAN_APP, "storage": "persistent",
+            "dataDir": dir.to_str().unwrap(), "appId": jazz_app::AppId::random().to_string() })
+        .to_string(),
+    )
+    .unwrap();
+    let (_watches, sync, errors) = watch_all(&jazz);
+    jazz.delete_client_storage().unwrap();
+    until_closed(&sync);
+    until_closed(&errors);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Through the C ABI: a watch's last callback is kind "error" with
+/// `{"kind": "closed"}`, by the time `jazz_close` has returned.
+#[test]
+fn a_c_watch_ends_with_closed() {
+    use std::ffi::{CStr, CString, c_char, c_void};
+    unsafe extern "C" fn cb(ctx: *mut c_void, kind: *const c_char, json: *const c_char) {
+        let seen = unsafe { &*(ctx as *const Mutex<Vec<(String, Value)>>) };
+        let (kind, json) = unsafe {
+            (
+                CStr::from_ptr(kind).to_str().unwrap().to_owned(),
+                parse(CStr::from_ptr(json).to_str().unwrap()),
+            )
+        };
+        seen.lock().unwrap().push((kind, json));
+    }
+    let seen: &'static Mutex<Vec<(String, Value)>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+    unsafe {
+        let mut err = std::ptr::null_mut();
+        let config = CString::new(client_config()).unwrap();
+        let h = jazz_ffi::c_abi::jazz_open(config.as_ptr(), &mut err);
+        let what = CString::new("sync").unwrap();
+        let watch = jazz_ffi::c_abi::jazz_watch(
+            h,
+            what.as_ptr(),
+            Some(cb),
+            seen as *const _ as *mut c_void,
+            &mut err,
+        );
+        assert!(!watch.is_null());
+        jazz_ffi::c_abi::jazz_close(h);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen
+            .lock()
+            .unwrap()
+            .last()
+            .is_none_or(|(kind, _)| kind != "error")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (kind, json) = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            (kind.as_str(), json["kind"].as_str()),
+            ("error", Some("closed"))
+        );
+        jazz_ffi::c_abi::jazz_unwatch(watch);
+    }
 }
