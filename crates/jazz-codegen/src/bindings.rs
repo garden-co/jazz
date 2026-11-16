@@ -58,6 +58,7 @@ pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
         Lang::Rust => crate::rust::read(bindings),
         Lang::Swift => crate::swift::read(bindings),
         Lang::Go => crate::go::read(bindings),
+        Lang::Kotlin => crate::kotlin::read(bindings),
     }
 }
 
