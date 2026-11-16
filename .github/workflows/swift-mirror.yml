@@ -1,0 +1,154 @@
+name: Swift mirror
+
+# Publishes Jazz for Swift to garden-co/jazz-swift, the SwiftPM package
+# (SwiftPM takes a package by URL only with Package.swift at a repository's
+# root, and reads binary targets' checksums from the tagged manifest):
+#   1. builds JazzFFI.xcframework (libjazz_ffi for macOS, iOS and the iOS
+#      simulator) from a garden-co/jazz ref;
+#   2. assembles the mirror tree: Package.swift with the XCFramework's URL
+#      and checksum, and packages/jazz-swift's sources;
+#   3. verifies it on macOS: a consumer package builds and runs against the
+#      mirror, and builds for the iOS simulator.
+# A dry run (pull requests touching Swift, or workflow_dispatch without
+# `publish`) stops there and uploads the XCFramework and the mirror as
+# artifacts. With `publish` (after the release `v<version>` exists), the
+# `publish` environment's approval gates attaching the XCFramework to the
+# release and pushing the mirror commit, tagged `<version>`, to jazz-swift.
+on:
+  pull_request:
+    paths:
+      - "packages/jazz-swift/**"
+      - "crates/jazz-ffi/**"
+      - "dev/scripts/build-swift-xcframework.sh"
+      - "dev/scripts/assemble-swift-mirror.sh"
+      - ".github/workflows/swift-mirror.yml"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "garden-co/jazz ref to build (the release tag, e.g. v2.0.0-alpha.65, or an rc)"
+        required: true
+      version:
+        description: "Version to publish, without the v (e.g. 2.0.0-alpha.65)"
+        required: true
+      publish:
+        description: "Attach the XCFramework to release v<version> and push + tag the mirror"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.inputs.version || github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REF: ${{ github.event.inputs.ref || github.sha }}
+  VERSION: ${{ github.event.inputs.version || format('0.0.0-dry-run.{0}', github.run_number) }}
+
+jobs:
+  xcframework:
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: "1.93.1"
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Build JazzFFI.xcframework
+        run: dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/xcf"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: JazzFFI.xcframework
+          path: |
+            ${{ runner.temp }}/xcf/JazzFFI.xcframework.zip
+            ${{ runner.temp }}/xcf/JazzFFI.xcframework.zip.checksum
+          if-no-files-found: error
+
+  mirror:
+    needs: xcframework
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: JazzFFI.xcframework
+          path: ${{ runner.temp }}/xcf
+      - name: Assemble the mirror
+        run: |
+          checksum=$(cat "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip.checksum")
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/JazzFFI.xcframework.zip"
+          dev/scripts/assemble-swift-mirror.sh "$VERSION" "$url" "$checksum" "$RUNNER_TEMP/jazz-swift"
+      - name: Verify on macOS and the iOS simulator
+        run: |
+          # The release asset doesn't exist before publishing: verify against
+          # the local zip, a copy of the mirror whose binary target is a path.
+          verify="$RUNNER_TEMP/verify"
+          cp -R "$RUNNER_TEMP/jazz-swift" "$verify"
+          (cd "$verify" && unzip -q "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip" \
+            && perl -0pi -e 's/\.binaryTarget\(\s*name: "jazz_ffiFFI", url: "[^"]*", checksum: "[^"]*"\)/.binaryTarget(name: "jazz_ffiFFI", path: "JazzFFI.xcframework")/' Package.swift \
+            && grep -n binaryTarget Package.swift)
+          consumer="$RUNNER_TEMP/consumer"
+          mkdir -p "$consumer/Sources/Smoke"
+          cat > "$consumer/Package.swift" <<SWIFT
+          // swift-tools-version:6.0
+          import PackageDescription
+          let package = Package(
+              name: "smoke",
+              platforms: [.macOS(.v13), .iOS(.v16)],
+              dependencies: [.package(path: "$verify")],
+              targets: [.executableTarget(name: "Smoke", dependencies: [.product(name: "Jazz", package: "verify")])]
+          )
+          SWIFT
+          cp packages/jazz-swift/mirror/Smoke.swift "$consumer/Sources/Smoke/main.swift"
+          (cd "$consumer" && swift run Smoke)
+          (cd "$consumer" && xcodebuild build -scheme Smoke -destination 'generic/platform=iOS Simulator' -quiet)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-swift-mirror
+          path: ${{ runner.temp }}/jazz-swift
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true'
+    needs: mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: JazzFFI.xcframework
+          path: xcf
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-swift-mirror
+          path: jazz-swift
+      - name: Attach the XCFramework to release v${{ env.VERSION }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "v$VERSION" xcf/JazzFFI.xcframework.zip --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Push and tag the mirror
+        env:
+          JAZZ_SWIFT_PUSH_TOKEN: ${{ secrets.JAZZ_SWIFT_PUSH_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${JAZZ_SWIFT_PUSH_TOKEN}@github.com/garden-co/jazz-swift.git" mirror
+          cd mirror
+          git rm -rq --ignore-unmatch . && cp -R ../jazz-swift/. .
+          git add -A
+          git -c user.name="jazz-release-bot" -c user.email="jazz-release-bot@users.noreply.github.com" \
+            commit -qm "Jazz for Swift $VERSION (garden-co/jazz@${REF})"
+          git tag "$VERSION"
+          git push origin HEAD:main "refs/tags/$VERSION"
