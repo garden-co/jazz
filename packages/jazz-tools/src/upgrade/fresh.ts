@@ -6,7 +6,15 @@
  * stale one would lose whatever it doesn't say.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { UpgradeRefusal } from "./errors.js";
@@ -68,7 +76,7 @@ export function findLegacyJazzTools(project: Project): LegacyJazzTools {
  * The environment for the app's own jazz-tools: everything but what points
  * Jazz at other native or WASM builds. jazz-napi and jazz-tools honour
  * `JAZZ_CORRECTNESS_*` (the monorepo's sealed test artifacts) and napi-rs
- * `NAPI_RS_*` overrides; inherited, they would run alpha.64's validate on
+ * `NAPI_RS_*` overrides; inherited, they would run alpha.65's validate on
  * this release's engine, which writes different files (no `slices`).
  */
 export function legacyEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -90,6 +98,87 @@ function validateDir(project: Project): string {
   return SCHEMA_ROOTS.some((r) => join(project.root, r) === project.schemaDir)
     ? project.root
     : project.schemaDir;
+}
+
+/** The bundle id and schema hashes of an app's two files. */
+export type Identity = (app: string, permissions: string) => Promise<unknown>;
+
+/**
+ * Freshness for a jazz.permissions.json with hand-written `defs`, which the
+ * old `validate` never writes (it inlines its helpers), so `--check` would
+ * call it stale: run the old `validate` on the project, put every file back,
+ * and compare what it wrote with the committed files, `defs` expanded, by
+ * what a deployment would get (schema hashes and bundle id).
+ */
+export async function checkLegacyFilesWithDefs(
+  project: Project,
+  legacy: LegacyJazzTools,
+  expanded: string,
+  identity: Identity,
+): Promise<string[]> {
+  const files = snapshot(project.root);
+  const bin = join(legacy.dir, "bin", "jazz-tools.js");
+  let result;
+  let written: { app: string; permissions: string };
+  try {
+    result = spawnSync(process.execPath, [bin, "validate", "--schema-dir", validateDir(project)], {
+      cwd: project.root,
+      encoding: "utf8",
+      env: { ...legacyEnvironment(process.env), NO_COLOR: "1" },
+    });
+    written = {
+      app: readFileSync(project.appFile, "utf8"),
+      permissions: readFileSync(project.permissionsJsonFile, "utf8"),
+    };
+  } finally {
+    restore(project.root, files);
+  }
+  const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
+  if (result.error) throw new UpgradeRefusal(`couldn't run ${bin}: ${result.error.message}`);
+  if (result.status !== 0) {
+    throw new UpgradeRefusal(
+      `jazz-tools ${legacy.version} \`validate\` refused the app:\n${indent(output)}\nFix what it says, then upgrade again.`,
+    );
+  }
+  const committed = await identity(files.get(project.appFile)!.toString("utf8"), expanded);
+  if (
+    JSON.stringify(await identity(written.app, written.permissions)) !== JSON.stringify(committed)
+  ) {
+    throw new UpgradeRefusal(
+      `jazz.app.json or jazz.permissions.json (its \`defs\` expanded) isn't what schema.ts and permissions.ts make with jazz-tools ${legacy.version}, so upgrade would convert stale files. ` +
+        `Run \`npx jazz-tools validate\` with jazz-tools ${legacy.version}, commit what it writes, then upgrade again.`,
+    );
+  }
+  if (/changed since the latest snapshot/.test(output)) {
+    throw new UpgradeRefusal(
+      `schema.ts changed since its latest snapshot in migrations/, so jazz.app.json's history lacks the version a store may hold. ` +
+        `Run \`npx jazz-tools migrations create --name <name>\` with jazz-tools ${legacy.version} first, then upgrade again.`,
+    );
+  }
+  return [];
+}
+
+/** Every file under `dir` but dependencies and VCS data, by path. */
+function snapshot(dir: string): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  const walk = (current: string) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else out.set(path, readFileSync(path));
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+function restore(dir: string, files: Map<string, Buffer>): void {
+  for (const path of snapshot(dir).keys()) if (!files.has(path)) rmSync(path, { force: true });
+  for (const [path, bytes] of files) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, bytes);
+  }
 }
 
 /** Run the old `validate --check`, refusing what it refuses. */
