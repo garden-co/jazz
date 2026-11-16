@@ -33,10 +33,19 @@ describe("thin client wire failure classification", () => {
     ).toBe("refused");
   });
 
-  it("stops when it could not read what the server sent", () => {
+  it("stops when it could not read what the server sent, or its socket ended for good", () => {
     expect(
       classifyWireLinkFailure({ code: "protocol_error", retry: "never", message: "" }, true),
     ).toBe("fatal");
+    expect(
+      classifyWireLinkFailure({ code: "websocket_closed", retry: "never", message: "" }, true),
+    ).toBe("fatal");
+  });
+
+  it("retries a refusal with a retry it doesn't know, as native clients do", () => {
+    expect(
+      classifyWireLinkFailure({ code: "auth_failed", retry: "unknown:9", message: "" }, false),
+    ).toBe("refused");
   });
 
   it("treats its own socket drops as an outage", () => {

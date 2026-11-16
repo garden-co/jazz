@@ -120,6 +120,11 @@ export type WireLinkFailureKind =
 export function classifyWireLinkFailure(error: WireError, admitted: boolean): WireLinkFailureKind {
   if (isSocketDropWireError(error)) return "network";
   if (isLocalProtocolWireError(error)) return "fatal";
+  // A code or retry from a newer server, even on `auth_failed`: native
+  // clients cannot decode it at all and retry it, so every host does.
+  if (!KNOWN_WIRE_ERROR_CODES.has(error.code) || !KNOWN_WIRE_RETRIES.has(error.retry)) {
+    return "refused";
+  }
   if (error.code === "auth_failed") {
     return isReauthenticateWireError(error) ? "reauthenticate" : "authRejected";
   }
@@ -128,18 +133,24 @@ export function classifyWireLinkFailure(error: WireError, admitted: boolean): Wi
     if (admitted) return "network";
     return error.code === "not_ready" ? "serverNotReady" : "refused";
   }
-  if (!KNOWN_WIRE_ERROR_CODES.has(error.code) || !KNOWN_WIRE_RETRIES.has(error.retry)) {
-    return "refused";
-  }
   return "fatal";
 }
 
 /**
- * Whether the carrier itself ended the link because it could not handle what
- * the server sent (`protocol_error`). Not a server's code: it stops the link.
+ * Whether the carrier itself ended the link for good: it could not handle
+ * what the server sent (`protocol_error`), or its socket ended in a way it
+ * does not retry (a `websocket_*` code without `later`). These are the
+ * carrier's codes, not a server's, so the link never sees them as unknown
+ * server codes: they stop the link.
  */
 export function isLocalProtocolWireError(error: WireError): boolean {
-  return error.code === "protocol_error";
+  if (error.code === "protocol_error") return true;
+  return (
+    (error.code === "websocket_closed" ||
+      error.code === "websocket_error" ||
+      error.code === "websocket_silent") &&
+    !isSocketDropWireError(error)
+  );
 }
 
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
