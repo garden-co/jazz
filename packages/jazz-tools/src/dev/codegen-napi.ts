@@ -38,6 +38,12 @@ interface CodegenNapi {
   loadAppArtifact(app: string, permissions: string): unknown;
   loadBackendApp(schema: string, permissions: string): unknown;
   compileApp(appJson: string): string;
+  writeAppFiles(
+    app: string,
+    permissions: string,
+    options?: { generated?: { by: string } },
+  ): { app: string; permissions: string };
+  verifyGenerated(text: string): "none" | "match" | "mismatch";
   generateForDir?(dir: string, options?: DirOptions): DirOutcome;
   migrationsCreateForDir?(dir: string, name: string, options?: DirOptions): DirOutcome;
 }
@@ -193,6 +199,36 @@ export async function migrationsCreateForDir(
 /** Read and check both files as a backend does; throws what a backend would refuse. */
 export async function loadAppFiles(app: string, permissions: string): Promise<unknown> {
   return (await codegen()).loadAppArtifact(app, permissions);
+}
+
+/** What `writeAppFiles` returns: both files' canonical text. */
+export interface WrittenAppFiles {
+  app: string;
+  permissions: string;
+}
+
+/**
+ * Check and print an app's two files from their readable input (what
+ * `jazz-tools generate` assembles from the app's TS): the Rust writer runs
+ * every check `load` runs and prints the canonical text, with a
+ * `$generated` marker when `options.generated` is given.
+ */
+export async function writeAppFiles(
+  app: string,
+  permissions: string,
+  options: { generated?: { by: string } } = {},
+): Promise<WrittenAppFiles> {
+  return (await codegen()).writeAppFiles(app, permissions, options);
+}
+
+/**
+ * Whether a file's `$generated` marker matches its contents: `"none"` when
+ * it has none (hand-written, or written before alpha.66), `"mismatch"` when
+ * it was edited by hand since it was generated. Reformatting (line endings,
+ * indentation) isn't an edit.
+ */
+export async function verifyGenerated(text: string): Promise<"none" | "match" | "mismatch"> {
+  return (await codegen()).verifyGenerated(text);
 }
 
 /** Check `jazz.permissions.json` against the bindings' compiled schema, as a deployed backend does. */
