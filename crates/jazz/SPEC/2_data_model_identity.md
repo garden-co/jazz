@@ -140,8 +140,7 @@ that column.
 Every table exposes an automatically generated UUID `id`. The table-column
 name `id` is reserved: schema compilation rejects explicit declarations,
 including UUID and nullable declarations. Queries, joins, projections, and
-ordering resolve `id` to the physical row UUID. Nested enum payload fields
-named `id` are ordinary payload data.
+ordering resolve `id` to the physical row UUID.
 
 The default merge strategy is column last-writer-wins by HLC
 (`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
@@ -206,20 +205,18 @@ without creating a second physical storage partition. Changing any storage-shape
 input yields a new `SchemaVersionId`. This content-addressing is what lets
 multiple storage schema versions coexist (ch. 10).
 
-Column-type encoding is recursive and tag-discriminated. In particular, a
-payload enum contributes its distinct type tag, declared case count and order,
-then each case's name, declared field count and order, and each field's name,
-recursive type, and nullability. Payload-field references, defaults, and merge
-metadata are not part of this inner type encoding. This exact byte layout is
+Column-type encoding is recursive and tag-discriminated. This exact byte layout is
 shared by the Rust and TypeScript structural hashers and is covered by their
 cross-runtime corpus. The corpus has a unique fixture hash for every portable
 column-type tag, top-level nullability, and representative recursively nested
-Array, Row, Enum, and payload-enum shapes; a change to any encoded schema
+Array, Row and Enum shapes; a change to any encoded schema
 component yields a different schema identity.
 
 _Further invariants._ `INV-DATA-7` — `SchemaVersionId` changes when a column's
-merge strategy changes. `INV-DATA-8` — every portable column type, including
-payload-enum case and field structure, is part of structural schema identity.
+merge strategy changes. `INV-DATA-8` — every portable column type is part of
+structural schema identity. (Enums whose cases carry fields were removed in
+2.0.0-alpha.65, before any store could hold them; see jazz#5758. Their type
+tags 13 and 15 stay unused.)
 
 ### 2.5 Rows, versions, and layers
 

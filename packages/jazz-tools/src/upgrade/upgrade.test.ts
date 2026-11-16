@@ -186,19 +186,6 @@ describe("jazz-tools upgrade: conversions", () => {
     }
   });
 
-  it("converts enum columns with cases (jazz#5621 makes their writes fail on alpha.64, not their declaration)", async () => {
-    const dir = fixture("enum-cases");
-    const report = await upgrade(dir);
-    const app = JSON.parse(readFileSync(join(dir, "jazz.app.json"), "utf8"));
-    expect(app.tables.issues.columns.kind).toEqual({
-      enum: { bug: { severity: "int" }, feature: { area: "string" } },
-    });
-    expect(report.todos).toBe(0);
-    expect(readFileSync(join(dir, "jazz.generated.ts"), "utf8")).toContain(
-      'export type IssueKind = { type: "bug"; severity: number } | { type: "feature"; area: string };',
-    );
-  });
-
   it("counts an identical error the conversion adds to a file that already had one", () => {
     const key = "server/jazz.ts\0TS2322\0Type 'string' is not assignable to type 'number'.";
     const error = (line: number) => ({ key, text: `server/jazz.ts:${line}:14: TS2322 …` });
@@ -343,6 +330,13 @@ describe("jazz-tools upgrade: refusals", () => {
     await refused(
       dir,
       /schema\.ts:\d+: schema\.ts doesn't pass its migrations module to s\.defineApp/,
+    );
+  });
+
+  it("refuses enum columns with cases, which alpha.65 removed, naming each", async () => {
+    await refused(
+      fixture("enum-cases"),
+      /column "issues\.kind" declares an enum whose cases carry fields, which Jazz no longer supports \(see https:\/\/github\.com\/garden-co\/jazz\/issues\/5758/,
     );
   });
 

@@ -8,8 +8,8 @@ use crate::query::{
 use crate::tools::deployment::{DeploymentCatalogue, prepare_deployment};
 use crate::tools::public_schema::Value;
 use crate::tools::public_schema::{
-    CmpOp, ColumnDescriptor, ColumnType, EnumCaseDescriptor, HistoryRetention, Operation,
-    OperationPolicy, PolicyExpr, PolicyValue, RowDescriptor, SchemaBuilder, TableName,
+    CmpOp, ColumnDescriptor, ColumnType, HistoryRetention, Operation, OperationPolicy, PolicyExpr,
+    PolicyValue, RowDescriptor, SchemaBuilder, TableName,
 };
 use std::collections::BTreeSet;
 
@@ -163,17 +163,8 @@ fn shared_todos() -> ArtifactInput {
                 ),
                 nullable(
                     "status",
-                    ColumnType::EnumPayload {
-                        cases: vec![
-                            EnumCaseDescriptor {
-                                name: "open".into(),
-                                fields: vec![],
-                            },
-                            EnumCaseDescriptor {
-                                name: "done".into(),
-                                fields: vec![ColumnDescriptor::new("at", ColumnType::Timestamp)],
-                            },
-                        ],
+                    ColumnType::Enum {
+                        variants: vec!["open".into(), "done".into()],
                     },
                 ),
                 nullable(
@@ -208,10 +199,7 @@ fn shared_todos() -> ArtifactInput {
                  "column_type": {"type": "Array", "element": {"type": "Text"}},
                  "value": {"type": "Array", "value": []}},
                 {"type": "introduce", "column": "status",
-                 "column_type": {"type": "EnumPayload", "cases": [
-                     {"name": "open", "fields": []},
-                     {"name": "done", "fields": [{"name": "at", "column_type": {"type": "Timestamp"}, "nullable": false}]}
-                 ]},
+                 "column_type": {"type": "Enum", "variants": ["open", "done"]},
                  "value": {"type": "Null"}},
                 {"type": "introduce", "column": "meta",
                  "column_type": {"type": "Json", "schema": {"type": "object"}},
@@ -882,14 +870,10 @@ fn every_policy_variant() -> PolicyExpr {
             left: column("g"),
             right: RelationValueRef::Literal(serde_json::json!("bare")),
         },
-        RelationPredicate::EnumMatch {
-            column: column("h"),
-            case: "done".into(),
-            payload: Box::new(RelationPredicate::True),
-        },
         RelationPredicate::And(vec![RelationPredicate::Not(Box::new(
             RelationPredicate::False,
         ))]),
+        RelationPredicate::Not(Box::new(RelationPredicate::True)),
     ]);
     let key = RelationKeyRef::Column(column("id"));
     let rel = RelationExpr::Limit {
@@ -1049,10 +1033,6 @@ fn every_policy_variant() -> PolicyExpr {
                 Value::Row {
                     id: None,
                     values: vec![],
-                },
-                Value::Enum {
-                    case: "done".into(),
-                    values: vec![Value::Timestamp(5)],
                 },
             ],
         },
@@ -1221,10 +1201,7 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
                 value(right, seen);
                 "Pred.Contains"
             }
-            RelationPredicate::EnumMatch { payload, .. } => {
-                pred(payload, seen);
-                "Pred.EnumMatch"
-            }
+            RelationPredicate::Removed(removed) => match *removed {},
             RelationPredicate::And(all) => {
                 all.iter().for_each(|p| pred(p, seen));
                 "Pred.And"
@@ -1356,8 +1333,8 @@ fn every_policy_and_relation_variant_round_trips_through_the_file() {
     let mut seen = BTreeSet::new();
     policy_variants(&expr, &mut seen);
     // 20 policy variants, 10 relation variants (+2 join kinds, 2 projections,
-    // 2 bounds), 11 predicates, 8 value refs.
-    assert_eq!(seen.len(), 20 + 10 + 6 + 11 + 8, "{seen:?}");
+    // 2 bounds), 10 predicates, 8 value refs.
+    assert_eq!(seen.len(), 20 + 10 + 6 + 10 + 8, "{seen:?}");
     through_the_permissions_file(&expr);
     // And each top-level alternative on its own, so a leaf the grammar spells
     // is checked as a string too.
@@ -2363,10 +2340,8 @@ fn the_permissions_json_schema_names_every_grammar_construct() {
         "id(outer)",
         "id(frontier)",
         "param.",
-        "enumcase(",
         "row(",
         "json(",
-        "is ",
     ] {
         assert!(
             text.contains(construct),
