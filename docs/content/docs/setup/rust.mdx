@@ -1,13 +1,12 @@
 ---
-title: Rust Backend
-description: "Open a Jazz app from Rust with the jazz-app crate and typed bindings generated from jazz.app.json."
+title: Rust Backend Client
+description: "Connect a Rust service to your TypeScript main backend as a backend client, with the jazz-app crate and typed bindings generated from jazz.app.json."
 languageTabs: backend
 ---
 
-A Rust service can be your app's backend. It opens the app from the same `jazz.app.json` and
-`jazz.permissions.json` as every other language, with typed bindings generated from them. On start
-it publishes the app's permissions bundle, as `createJazz` does. Then it acts as one user of the
-app, in a session pinned to that bundle.
+A Rust service can be a backend client of your app's TypeScript main backend (`createJazz`). It
+opens the app from the same `jazz.app.json` and `jazz.permissions.json`, with typed bindings, and
+the main backend decides whether it is trusted or acts as one user.
 
 The `jazz-app` crate isn't on crates.io yet, so depend on it from the Jazz repository:
 
@@ -59,10 +58,3 @@ authentication.
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Rust tab
 for each example. `examples/todo-server-rs` in the repository is a complete service.
-
-## Not supported yet
-
-In Rust, Jazz doesn't support these yet:
-
-- connecting as an end user with a JWT;
-- partial reads of large values (use `jazz.with_client(…)` for the low-level client).
