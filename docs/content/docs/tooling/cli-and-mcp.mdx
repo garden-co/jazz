@@ -18,8 +18,10 @@ description: "Learn what the jazz-tools command line does, and how agents use yo
 The commands look for `schema.ts` in the current directory, then in `./src` and `./src/lib`.
 Pass `--schema-dir <path>` to point them elsewhere.
 
-Projects without Node, such as a Rust backend client, use the standalone `jazz-tools` binary, which runs
-the same `generate [--check]` and `migrations create --name <name>` commands.
+Projects in other languages, such as a Rust backend client, generate their bindings with
+`npx jazz-tools generate` too, from a `schema.ts` beside their own manifest (`Cargo.toml`, `go.mod`,
+`Package.swift`, `build.gradle.kts`); no `package.json` is needed. The standalone `jazz-tools`
+binary can still check them (`generate --check`), but writing them needs `npx`.
 
 `npx jazz-tools --help` and `npx jazz-tools inspect --help` list every option.
 

@@ -115,7 +115,7 @@ file also starts with a `$generated` marker, left out here.)
   `permissions.ts` that imports `schema` from `./schema` and exports `permissions`; `generate`
   refuses an app that defines them in both files.
 
-Run `npx jazz-tools generate` before publishing: it compiles every policy against your schema, points at the exact spot of a mistake, and warns about missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
+TypeScript refuses permissions that leave out a table. Run `npx jazz-tools generate` before publishing: it compiles every policy against your schema, points at the exact spot of a mistake, and warns about operations without a grant, which will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
 
 Only backends read `jazz.permissions.json`: `createJazz({ app, permissions })` takes it, imported as JSON (`import permissions from "./jazz.permissions.json" with { type: "json" }`). Client bundles never include it, and nothing imports `schema.ts` at runtime.
 

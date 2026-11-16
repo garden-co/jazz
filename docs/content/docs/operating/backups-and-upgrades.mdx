@@ -104,7 +104,7 @@ directory, `src` or `src/lib`, `--dry-run` to see everything it would do without
    rename them, and bring back what the old `permissions.ts` said in comments or constants. A large
    `permissions.ts` (over 150 lines) keeps its own file, rewritten to import `schema` from
    `./schema`. A tables module `schema.ts` spreads, such as Better Auth's
-   `schema-better-auth/schema.ts`, now exports `tables` and `permissions`. Hand-written `defs` in
+   `schema-better-auth/schema.ts`, now exports `tables` and `permissions`. `defs` in
    `jazz.permissions.json` are expanded where they are called, and the checks they named become
    helper functions again; the report lists them.
 4. Rewrites imports and code, listing each change as `file:line`: `./schema` becomes
@@ -129,6 +129,22 @@ alpha.66 and reinstall. Things to check in the diff:
   they check.
 - **Left for you.** Code `upgrade` won't convert, such as other files still importing
   `permissions.ts` dynamically, is listed at the end.
+
+### Apps without `schema.ts`
+
+An alpha.65 app may have no `schema.ts` at all: its `jazz.app.json` and `jazz.permissions.json`
+are its source, written by hand or by an agent. `upgrade` converts it the same way:
+
+1. It prints `schema.ts` from the two files: the tables with `s.defineSchema`, and the permissions in
+   the new DSL. `defs` are expanded where they are called, and repeated checks become helper
+   functions.
+2. It writes `migrations/` from the files' `history` and `migrations`: a snapshot of each earlier
+   version and a migration file for each step.
+3. It runs `generate`, which writes the two JSON files back from `schema.ts`, and checks that the
+   schema hashes and the bundle id are the same as before. If they differ, it puts every file back
+   and stops.
+
+From then on, `schema.ts` is the source: change it and run `generate`, rather than editing the JSON.
 
 ### What it refuses
 

@@ -106,9 +106,9 @@ ignore file) to keep the two in step.
 Each table has `read`, `insert`, `update` and `delete`; a missing one is denied. `update` is one
 policy, or `{ "old": …, "new": … }` to check the row before and after the update. A policy is an expression
 string, `{ "anyOf": [...] }`, `{ "allOf": [...] }`, or `{ "$comment": "…", "where": … }`.
-`defs` holds named expressions, `"isChatMember($chat)": "exists chatMembers(chatId = $chat, userId = session.user)"`,
-which policies call as `isChatMember(this.id)`. Definitions may call each other, but never
-recursively. Policies can't refer to computed fields or transformed values. See
+alpha.66 removed `defs`, the named expressions of alpha.63–65: a file that has them is refused,
+with a hint to inline each one. In `schema.ts`, a repeated condition is a plain TypeScript helper,
+and `generate` writes it out wherever it's used. Policies can't refer to computed fields or transformed values. See
 [Declarative Permissions](/docs/schemas/policies) for how to write them.
 
 ## Expressions
