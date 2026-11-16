@@ -52,6 +52,7 @@ pub const TOP_KEYS: &[&str] = &[
     // Legacy (before alpha.66): `$schema` carries the version now.
     "format",
     "$schema",
+    "$generated",
     "tables",
     "history",
     "migrations",
