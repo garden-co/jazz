@@ -72,6 +72,10 @@ func (q *Query[R]) Live(ctx context.Context, db *DB) (*Live[R], error) {
 		if l.err == nil {
 			l.err = ctx.Err()
 		}
+		if l.err == nil {
+			// The stream ended with ctx live: the DB closed.
+			l.err = &Error{Kind: KindClosed, Message: "closed"}
+		}
 		l.mu.Unlock()
 	}()
 	return l, nil
