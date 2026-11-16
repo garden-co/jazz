@@ -562,3 +562,44 @@ fn the_diff_steps_are_what_every_stub_is_rendered_from() {
         })
     );
 }
+
+/// A row's branch columns decide which branch it belongs to, and a
+/// deployment refuses any migration that changes them: removing a column
+/// from `branchBy` or changing a branch column's default is refused here,
+/// before a stub no deploy accepts is written. Adding `branchBy` is not.
+#[test]
+fn branch_columns_are_kept_as_they_are() {
+    let notes = |branch_by: bool, default: &str| {
+        format!(
+            r#"{{ "notes": {{ "columns": {{ "title": "string", "branch": {{ "type": "string", "default": "{default}" }} }}{} }} }}"#,
+            if branch_by {
+                r#", "branchBy": ["branch"]"#
+            } else {
+                ""
+            }
+        )
+    };
+    let removed = refused(&notes(true, "main"), &notes(false, "main"));
+    assert!(
+        removed.contains("Removing `branch` from the branchBy of table `notes` is not supported"),
+        "{removed}"
+    );
+    let default = refused(&notes(true, "main"), &notes(true, "draft"));
+    assert!(
+        default.contains("Changing the default of branch column `notes.branch` is not supported"),
+        "{default}"
+    );
+    // Gaining branchBy is an empty migration, which deploys.
+    let added = migrate(&notes(false, "main"), &notes(true, "main"));
+    assert!(added.changed && added.todos.is_empty());
+    App::load(added.app.as_bytes()).unwrap();
+    // A default outside branchBy may change.
+    let created = migrate(
+        &notes(true, "main"),
+        &notes(true, "main").replace(
+            r#""title": "string""#,
+            r#""title": { "type": "string", "default": "x" }"#,
+        ),
+    );
+    App::load(created.app.as_bytes()).unwrap();
+}
