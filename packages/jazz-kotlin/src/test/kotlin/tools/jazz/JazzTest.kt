@@ -14,6 +14,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.builtins.serializer
 import kotlin.test.Test
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertFailsWith
@@ -264,6 +265,16 @@ class JazzTest {
         assertTrue(jazz.session.value is SessionState.SignedIn)
         jazz.signOut()
         assertEquals(SessionState.SignedOut, jazz.session.value)
+    }
+
+    @Test
+    fun text_positions_are_utf16_by_default(): Unit = runBlocking {
+        // Kotlin's String indices (as an EditText selection) are UTF-16 code units.
+        val edits = Edits().apply { splice(Items.title, 0, 2, Splice.text(0, 2, "é")) }.edits
+        assertEquals("\"utf16\"", edits.single()["within"]!!.jsonObject["units"].toString())
+        val explicit = Edits().apply { splice(Items.title, SpliceUnits.Utf8, 0, 2, Splice.text(0, 2, "é")) }.edits
+        assertEquals("\"utf8\"", explicit.single()["within"]!!.jsonObject["units"].toString())
+        assertEquals("\"utf16\"", Items.title.range(0, 4).selectJson().jsonObject["units"].toString())
     }
 
     @Test
