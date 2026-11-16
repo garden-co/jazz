@@ -63,6 +63,10 @@ mod fanout_differential;
 mod fanout_policy_pins;
 #[path = "../flat_joins.rs"]
 mod flat_joins;
+#[path = "../follow_memo.rs"]
+mod follow_memo;
+#[path = "../follow_memo_policy.rs"]
+mod follow_memo_policy;
 #[path = "../gather_policy_double_ref.rs"]
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
@@ -87,6 +91,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../late_enum_tags.rs"]
+mod late_enum_tags;
 #[path = "../latest_only_tables.rs"]
 mod latest_only_tables;
 #[path = "../link_identities.rs"]

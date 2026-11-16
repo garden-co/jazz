@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { APP_ID_ENV_VARS, SERVER_URL_ENV_VARS } from "./cli.js";
 import { describe, expect, it } from "vitest";
@@ -13,6 +13,7 @@ const {
   createWorkspace,
   fileExists,
   writeAppFiles,
+  writeTsApp,
   todosApp,
   emptyPermissions,
   runBin,
@@ -74,16 +75,22 @@ describe("bin integration", () => {
       }
     },
   );
-  it("routes generate through the TypeScript CLI for a root jazz.app.json project", async () => {
+  it("routes generate through the TypeScript CLI for a root schema.ts project", async () => {
     const { root } = await createWorkspace();
-    await writeAppFiles(root, todosApp(), emptyPermissions());
+    await writeTsApp(root);
 
     const result = runBin(["generate", "--schema-dir", root]);
 
+    expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
-    expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(true);
-    expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
-    expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
+    expect(result.stdout).toMatch(
+      /Wrote jazz\.app\.json, jazz\.permissions\.json, .*jazz\.generated\.ts/,
+    );
+    for (const file of ["jazz.app.json", "jazz.permissions.json", "jazz.generated.ts"]) {
+      expect(await fileExists(join(root, file))).toBe(true);
+    }
+    const check = runBin(["generate", "--check", "--schema-dir", root]);
+    expect(check.status).toBe(0);
   });
   it.each([
     ["generate --schema-dir", ["generate", "--schema-dir"]],
@@ -94,7 +101,7 @@ describe("bin integration", () => {
     ["generate --schema-dir with an empty value", ["generate", "--schema-dir", ""]],
   ])("rejects %s with a deterministic missing-value error", async (_description, args) => {
     const { root } = await createWorkspace();
-    await writeAppFiles(root);
+    await writeTsApp(root);
 
     // A valid cwd schema proves the parser does not silently fall back to cwd
     // when a recognized value flag is missing.
@@ -106,7 +113,7 @@ describe("bin integration", () => {
   });
   it("rejects a malformed later value after a valid occurrence", async () => {
     const { root } = await createWorkspace();
-    await writeAppFiles(root);
+    await writeTsApp(root);
 
     const result = runBin(["generate", "--schema-dir", root, "--schema-dir"], { cwd: root });
 
@@ -115,66 +122,58 @@ describe("bin integration", () => {
     expect(result.stderr).toContain("Missing value for --schema-dir.");
   });
 
-  it("rejects a missing jazz.permissions.json", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root, todosApp(), null);
-    const result = runBin(["generate", "--schema-dir", root]);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("jazz.permissions.json is missing");
-    expect(result.stdout).not.toContain("Checked");
-  });
-
-  it("validates root jazz.permissions.json through the generate command", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root);
-
-    const result = runBin(["generate", "--schema-dir", root]);
-
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain("Checked jazz.app.json and jazz.permissions.json");
-    expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
-  });
-
-  it("finds src/jazz.app.json and src/jazz.permissions.json through the generate command", async () => {
+  it("finds src/schema.ts through the generate command", async () => {
     const { root } = await createWorkspace();
     const srcDir = join(root, "src");
-    await writeAppFiles(srcDir);
+    await writeTsApp(srcDir);
 
     const result = runBin(["generate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("Checked jazz.app.json and jazz.permissions.json");
     expect(await fileExists(join(srcDir, "jazz.generated.ts"))).toBe(true);
+    expect(await fileExists(join(srcDir, "jazz.app.json"))).toBe(true);
   });
 
-  it("fails when generate is pointed at the legacy ./schema shim directory", async () => {
-    const { root, schemaDir } = await createWorkspace();
-    await writeAppFiles(root);
+  it.each([["generate"], ["generate", "--check"], ["migrations", "create", "--name", "x"]])(
+    "points a JSON-only app (jazz.app.json, no schema.ts) at upgrade: %s",
+    async (...command) => {
+      const { root } = await createWorkspace();
+      await writeAppFiles(root);
+      const before = await readFile(join(root, "jazz.app.json"), "utf8");
 
-    const result = runBin(["generate", "--schema-dir", schemaDir]);
+      const result = runBin([...command, "--schema-dir", root]);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(`No jazz.app.json in ${schemaDir}`);
-  });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. " +
+          "Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), " +
+          "then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, Package.swift, build.gradle, …) " +
+          "and run `npx jazz-tools generate`.",
+      );
+      expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(before);
+      expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
+      expect(await fileExists(join(root, "migrations"))).toBe(false);
+    },
+  );
 
-  it("fails when no jazz.app.json can be found", async () => {
+  it("fails when no schema.ts can be found", async () => {
     const { root } = await createWorkspace();
 
     const result = runBin(["generate", "--schema-dir", root]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(`No jazz.app.json in ${root} (looked in ., src, src/lib).`);
+    expect(result.stderr).toContain(`No schema.ts in ${root} (looked in ., src, src/lib).`);
   });
 
-  it("fails when multiple jazz.app.json candidate locations are present", async () => {
+  it("fails when multiple schema.ts candidate locations are present", async () => {
     const { root } = await createWorkspace();
-    await writeAppFiles(root);
-    await writeAppFiles(join(root, "src", "lib"));
+    await writeTsApp(root);
+    await writeTsApp(join(root, "src", "lib"));
 
     const result = runBin(["generate", "--schema-dir", root]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("found jazz.app.json in both");
+    expect(result.stderr).toContain("found schema.ts in both");
   });
 
   it("points the renamed validate command at generate", async () => {
@@ -211,7 +210,7 @@ describe("bin integration", () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(
-        `${flag} was removed: migrations go from the version in jazz.generated.ts to jazz.app.json's tables.`,
+        `${flag} was removed: migrations go from the latest snapshot in migrations/snapshots to schema.ts's tables.`,
       );
     },
   );

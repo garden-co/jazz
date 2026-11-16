@@ -23,6 +23,33 @@ pub struct Recorded {
     pub current_schema: Schema,
 }
 
+/// The digest of what the generator wrote that `lang`'s bindings record,
+/// if they record one (TS: `Output <hex>` on the format line, which
+/// formatters keep).
+pub fn output_digest(lang: Lang, bindings: &str) -> Option<String> {
+    match lang {
+        Lang::TypeScript => bindings.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("// Bindings format ")?;
+            let at = rest.find(ts::OUTPUT)? + ts::OUTPUT.len();
+            let digest = rest[at..].split('.').next()?;
+            (digest.len() == 16 && digest.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| digest.to_string())
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `committed` bindings are other than what the generator writes
+/// now (`generated`), formatting aside where the language records a digest
+/// of its output: what plain `generate` rewrites, so a generator fix
+/// reaches an app whose `jazz.app.json` didn't change.
+pub fn output_changed(lang: Lang, committed: &str, generated: &str) -> bool {
+    match output_digest(lang, generated) {
+        Some(digest) => output_digest(lang, committed).as_deref() != Some(digest.as_str()),
+        None => committed != generated,
+    }
+}
+
 /// Read what bindings generated in `lang` embed. Only a file this
 /// generator wrote is read; anything else is refused with what to do.
 pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
@@ -31,18 +58,20 @@ pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
         Lang::Rust => crate::rust::read(bindings),
         Lang::Swift => crate::swift::read(bindings),
         Lang::Go => crate::go::read(bindings),
+        Lang::Kotlin => crate::kotlin::read(bindings),
     }
 }
 
 fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
     let refuse = |what: &str| {
         CodegenError::new(format!(
-            "{}: {what}; regenerate it with `jazz-tools generate`",
+            "{}: {what}; regenerate it with `npx jazz-tools generate`",
             ts::FILE
         ))
     };
     let bindings = bindings.strip_prefix('\u{feff}').unwrap_or(bindings);
-    if !bindings.trim_start().starts_with(ts::HEADER) {
+    let first = bindings.trim_start();
+    if !first.starts_with(ts::HEADER) && !first.starts_with(ts::LEGACY_HEADER) {
         return Err(refuse(
             "not a module jazz-tools generated (its first line differs)",
         ));
@@ -252,11 +281,11 @@ pub enum Staleness {
 impl Staleness {
     pub fn message(&self, lang: Lang) -> String {
         match self {
-            Staleness::Missing => format!("no {}: run `jazz-tools generate`", lang.file()),
+            Staleness::Missing => format!("no {}: run `npx jazz-tools generate`", lang.file()),
             Staleness::SchemaChanged => "the schema changed since the last version: run \
-                 `jazz-tools migrations create --name <name>`"
+                 `npx jazz-tools migrations create --name <name>`"
                 .into(),
-            Staleness::OutOfDate => "bindings out of date: run `jazz-tools generate`".into(),
+            Staleness::OutOfDate => "bindings out of date: run `npx jazz-tools generate`".into(),
             Staleness::Unreadable(why) => why.clone(),
         }
     }

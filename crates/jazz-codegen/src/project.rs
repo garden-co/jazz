@@ -1,12 +1,14 @@
-//! `jazz-tools generate` and `jazz-tools migrations create` on an app's two
-//! files and its committed bindings, without Node: what an app in any
-//! language runs after editing `jazz.app.json`.
+//! `jazz-tools generate [--check]` and `jazz-tools migrations create` on an
+//! app's directory: its two files, the languages it's written in and their
+//! committed bindings. The one implementation: the `jazz-tools` binary runs
+//! it directly and the npm CLI through jazz-napi, so both pick the same
+//! languages and write the same bytes.
 
 use std::path::{Path, PathBuf};
 
+use crate::bindings::{self, Staleness};
+use crate::{App, Lang};
 use jazz::tools::deployment::artifact::{self, APP_FILE, PERMISSIONS_FILE};
-use jazz_codegen::bindings::{self, Staleness};
-use jazz_codegen::{App, Lang};
 
 /// What a command did, for the caller to print.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -15,17 +17,39 @@ pub struct Outcome {
     pub notes: Vec<String>,
     /// Lines for stderr (warnings).
     pub warnings: Vec<String>,
+    /// Bindings files written, relative to the directory.
+    pub written: Vec<String>,
+    /// Bindings files that were already up to date, relative to the directory.
+    pub current: Vec<String>,
+    /// `migrations create`: whether `jazz.app.json` changed.
+    pub changed: bool,
+    /// `migrations create`: JSON paths of the TODOs left to resolve.
+    pub todos: Vec<String>,
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))
+    std::fs::read(path).map_err(|error| format!("{}: {error}", shown(&path)))
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{}: {error}", path.display())),
+        Err(error) => Err(format!("{}: {error}", shown(&path))),
+    }
+}
+
+/// `path` as a message shows it: relative to the current directory when
+/// it's below it, as both CLIs print paths.
+fn shown<P: AsRef<Path> + ?Sized>(path: &P) -> String {
+    let path = path.as_ref();
+    let relative = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf));
+    match relative {
+        Some(relative) if relative.as_os_str().is_empty() => ".".into(),
+        Some(relative) => relative.display().to_string(),
+        None => path.display().to_string(),
     }
 }
 
@@ -55,9 +79,45 @@ impl From<Lang> for Selected {
 
 /// The languages `dir`'s app is written in: those given, or else each that
 /// [`Lang::detected_in`] finds there (a `package.json`; a `Cargo.toml` of
-/// a crate depending on `jazz-app`; a `go.mod` requiring `jazz-go`) or
+/// a crate depending on `jazz-app-support`; a `Package.swift` depending on Jazz;
+/// a `go.mod` requiring `jazz-go`) or
 /// whose bindings are committed there.
 pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
+    languages_or(dir, given, None)
+}
+
+/// Manifests of the ecosystems Jazz generates bindings for. A directory
+/// with one of these belongs to that language even while its bindings are
+/// switched off, so no fallback language is assumed there.
+pub const LANGUAGE_MANIFESTS: &[&str] = &[
+    "package.json",
+    "Cargo.toml",
+    "Package.swift",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "go.mod",
+];
+
+/// [`languages`], and `fallback` when nothing is detected and no
+/// [`LANGUAGE_MANIFESTS`] sits beside `jazz.app.json`: the npm CLI passes
+/// TypeScript, as running it says the app is a Node one, but never where
+/// another language's manifest says otherwise.
+pub fn languages_or(
+    dir: &Path,
+    given: &[Lang],
+    fallback: Option<Lang>,
+) -> Result<Vec<Selected>, String> {
+    if let Some(lang) = fallback
+        && given.is_empty()
+        && !Lang::ALL
+            .iter()
+            .any(|l| l.detected_in(dir) || bindings_path(dir, *l).exists())
+        && !LANGUAGE_MANIFESTS.iter().any(|m| dir.join(m).exists())
+    {
+        return Ok(vec![Selected::from(lang)]);
+    }
     if !given.is_empty() {
         return Ok(given.iter().copied().map(Selected::from).collect());
     }
@@ -78,8 +138,8 @@ pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, the Cargo.toml of a crate depending on jazz-app, or a go.mod requiring jazz-go); pass --lang",
-            dir.display(),
+             (a package.json, the Cargo.toml of a crate depending on jazz-app-support, a Package.swift depending on Jazz (jazz-swift), a build.gradle.kts or build.gradle depending on jazz-kotlin, or a go.mod requiring jazz-go); pass --lang",
+            shown(&dir),
         ));
     }
     Ok(found)
@@ -99,6 +159,9 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
         artifact::load(&app_json, permissions.as_bytes()).map_err(|error| error.to_string())?;
     }
     let mut stale = Vec::new();
+    // Current by their source and format; plain `generate` still rewrites
+    // those whose generated output changed (a generator fix).
+    let mut refresh = Vec::new();
     let mut skipped = Vec::new();
     let mut current = 0;
     for &selected in langs {
@@ -106,16 +169,21 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
         let path = bindings_path(dir, lang);
         let committed = read_optional(&path)?;
         match bindings::staleness(&app, lang, committed.as_deref()).map_err(|e| e.to_string())? {
+            None if !check => {
+                current += 1;
+                refresh.push((selected, path, committed.unwrap_or_default()));
+            }
             None => {
                 current += 1;
+                outcome.current.push(lang.file().to_string());
                 outcome
                     .notes
-                    .push(format!("{} is up to date", path.display()));
+                    .push(format!("{} is up to date", shown(&path)));
             }
             Some(Staleness::SchemaChanged) => {
                 return Err(format!(
                     "{}: {}",
-                    path.display(),
+                    shown(&path),
                     Staleness::SchemaChanged.message(lang)
                 ));
             }
@@ -132,23 +200,39 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
     // leaves no file half-updated.
     let mut generated = Vec::new();
     for (selected, path, staleness) in stale {
-        let text = match jazz_codegen::generate_app(selected.lang, &app) {
+        let text = match crate::generate_app(selected.lang, &app) {
             Ok(text) => text,
             // Found only by its marker: not this app's language yet.
             Err(error) if selected.detected && error.is_unsupported() => {
-                skipped.push(format!("{}: {error}", path.display()));
+                skipped.push(format!("{}: {error}", shown(&path)));
                 continue;
             }
-            Err(error) => return Err(format!("{}: {error}", path.display())),
+            Err(error) => return Err(format!("{}: {error}", shown(&path))),
         };
         if check {
-            return Err(format!(
-                "{}: {}",
-                path.display(),
-                staleness.message(selected.lang)
-            ));
+            return Err(match staleness {
+                // "no <file>: …" names the file already.
+                Staleness::Missing => Staleness::Missing.message(selected.lang),
+                other => format!("{}: {}", shown(&path), other.message(selected.lang)),
+            });
         }
-        generated.push((path, text));
+        generated.push((selected.lang, path, text));
+    }
+    for (selected, path, committed) in refresh {
+        let text = crate::generate_app(selected.lang, &app)
+            .map_err(|error| format!("{}: {error}", shown(&path)))?;
+        if bindings::output_changed(selected.lang, &committed, &text) {
+            outcome.notes.push(format!(
+                "{}: this jazz-tools generates it differently; rewriting it",
+                shown(&path)
+            ));
+            generated.push((selected.lang, path, text));
+        } else {
+            outcome.current.push(selected.lang.file().to_string());
+            outcome
+                .notes
+                .push(format!("{} is up to date", shown(&path)));
+        }
     }
     if !skipped.is_empty() {
         // Some other language must be the app's.
@@ -161,13 +245,14 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
                 .map(|why| format!("skipped {why} (pass --lang to make this an error)")),
         );
     }
-    for (path, text) in generated {
+    for (lang, path, text) in generated {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| format!("{}: {error}", parent.display()))?;
+                .map_err(|error| format!("{}: {error}", shown(&parent)))?;
         }
-        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
-        outcome.notes.push(format!("wrote {}", path.display()));
+        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", shown(&path)))?;
+        outcome.written.push(lang.file().to_string());
+        outcome.notes.push(format!("wrote {}", shown(&path)));
     }
     Ok(outcome)
 }
@@ -190,12 +275,12 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
     }
     let Some((lang, text)) = committed else {
         outcome.notes.push(
-            "no committed bindings, so no earlier version to migrate from: run `jazz-tools generate`"
+            "no committed bindings, so no earlier version to migrate from: run `npx jazz-tools generate`"
                 .into(),
         );
         return Ok(outcome);
     };
-    let created = jazz_codegen::migrations::create(lang, &app_json, Some(&text), name)
+    let created = crate::migrations::create(lang, &app_json, Some(&text), name)
         .map_err(|error| error.to_string())?;
     if !created.changed {
         outcome.notes.push(
@@ -206,16 +291,21 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
         return Ok(outcome);
     }
     std::fs::write(&app_path, &created.app)
-        .map_err(|error| format!("{}: {error}", app_path.display()))?;
-    outcome.notes.push(format!(
-        "wrote migration `{name}` in {}",
-        app_path.display()
-    ));
+        .map_err(|error| format!("{}: {error}", shown(&app_path)))?;
+    outcome.changed = true;
+    outcome.todos = created.todos.clone();
+    outcome
+        .notes
+        .push(format!("wrote migration `{name}` in {}", shown(&app_path)));
     if created.todos.is_empty() {
-        outcome.notes.extend(generate(dir, langs, false)?.notes);
+        let generated = generate(dir, langs, false)?;
+        outcome.notes.extend(generated.notes);
+        outcome.warnings.extend(generated.warnings);
+        outcome.written = generated.written;
+        outcome.current = generated.current;
     } else {
         outcome.notes.push(format!(
-            "resolve {} TODO{} in {}, then run `jazz-tools generate`:",
+            "resolve {} TODO{} in {}, then run `npx jazz-tools generate`:",
             created.todos.len(),
             if created.todos.len() == 1 { "" } else { "s" },
             APP_FILE
@@ -246,6 +336,103 @@ mod tests {
         dir
     }
 
+    /// Bindings headed as before alpha.66 still read: `--check` passes on
+    /// them, and plain `generate` rewrites them with today's header.
+    #[test]
+    fn bindings_with_the_old_header_stay_current_until_generate_rewrites_them() {
+        let dir = dir();
+        std::fs::write(dir.join(APP_FILE), V1).unwrap();
+        for (lang, old, new) in [
+            (
+                Lang::TypeScript,
+                crate::ts::LEGACY_HEADER,
+                crate::ts::HEADER,
+            ),
+            (Lang::Rust, crate::rust::LEGACY_HEADER, crate::rust::HEADER),
+            (
+                Lang::Swift,
+                crate::swift::LEGACY_HEADER,
+                crate::swift::HEADER,
+            ),
+            (
+                Lang::Kotlin,
+                crate::kotlin::LEGACY_HEADER,
+                crate::kotlin::HEADER,
+            ),
+            (Lang::Go, crate::go::LEGACY_HEADER, crate::go::HEADER),
+        ] {
+            generate(&dir, &[lang.into()], false).unwrap();
+            let path = dir.join(lang.file());
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(written.starts_with(new), "{lang:?}");
+            assert!(written.contains(crate::EDIT_NOTE), "{lang:?}");
+            let mut legacy = written.replacen(new, old, 1).replacen(
+                crate::EDIT_NOTE,
+                "Regenerate it after changing jazz.app.json.",
+                1,
+            );
+            // An older generator recorded the digest of what it wrote.
+            if let Some(digest) = bindings::output_digest(lang, &written) {
+                legacy = legacy.replacen(&digest, "0123456789abcdef", 1);
+            }
+            std::fs::write(&path, &legacy).unwrap();
+            let checked = generate(&dir, &[lang.into()], true).unwrap();
+            assert_eq!(checked.current, vec![lang.file().to_string()], "{lang:?}");
+            let outcome = generate(&dir, &[lang.into()], false).unwrap();
+            assert_eq!(outcome.written, vec![lang.file().to_string()], "{lang:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), written, "{lang:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Plain `generate` rewrites TS bindings an older generator wrote (another
+    /// output digest) and keeps ones a formatter reformatted (the same
+    /// digest); `--check` passes on both, as their source and format match.
+    #[test]
+    fn generate_rewrites_what_the_generator_now_writes_differently() {
+        let dir = dir();
+        std::fs::write(dir.join(APP_FILE), V1).unwrap();
+        let ts = Lang::TypeScript;
+        generate(&dir, &[ts.into()], false).unwrap();
+        let path = dir.join(ts.file());
+        let written = std::fs::read_to_string(&path).unwrap();
+        let digest = bindings::output_digest(ts, &written).unwrap();
+
+        // Reformatted: kept.
+        let reformatted = written.replace("\n\n", "\n\n\n");
+        std::fs::write(&path, &reformatted).unwrap();
+        let outcome = generate(&dir, &[ts.into()], false).unwrap();
+        assert_eq!(outcome.current, vec![ts.file().to_string()]);
+        assert!(outcome.written.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), reformatted);
+
+        // From an older generator (another digest, or none yet): `--check`
+        // passes, plain `generate` rewrites it.
+        for older in [
+            written.replace(&digest, "0123456789abcdef"),
+            written.replace(&format!(" Output {digest}."), ""),
+        ] {
+            std::fs::write(&path, &older).unwrap();
+            assert!(
+                generate(&dir, &[ts.into()], true)
+                    .unwrap()
+                    .written
+                    .is_empty()
+            );
+            let outcome = generate(&dir, &[ts.into()], false).unwrap();
+            assert_eq!(outcome.written, vec![ts.file().to_string()]);
+            assert!(
+                outcome
+                    .notes
+                    .iter()
+                    .any(|n| n.contains("generates it differently")),
+                "{outcome:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn generate_writes_checks_and_refuses_an_unmigrated_edit() {
         let dir = dir();
@@ -255,7 +442,7 @@ mod tests {
         assert!(
             generate(&dir, &[ts.into()], true)
                 .unwrap_err()
-                .contains("run `jazz-tools generate`")
+                .contains("run `npx jazz-tools generate`")
         );
         generate(&dir, &[ts.into()], false).unwrap();
         generate(&dir, &[ts.into()], true).unwrap();
@@ -349,7 +536,33 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    const RUST_APP: &str = "[package]\nname = \"todos\"\n\n[dependencies]\njazz-app = \"0.1\"\n";
+    #[test]
+    fn a_kotlin_app_is_found_by_either_build_script() {
+        let dir = dir();
+        let kotlin =
+            || languages(&dir, &[]).map(|l| l.iter().any(|s| s.lang == Lang::Kotlin && s.detected));
+        // Groovy, as an Android app's on Maven Central.
+        std::fs::write(
+            dir.join("build.gradle"),
+            "dependencies {\n    implementation 'tools.jazz:jazz-kotlin-android:2.0.0-alpha.66'\n}\n",
+        )
+        .unwrap();
+        assert_eq!(kotlin(), Ok(true));
+        // A Kotlin DSL script beside it that doesn't depend on jazz-kotlin
+        // doesn't hide it.
+        std::fs::write(
+            dir.join("build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") }\n",
+        )
+        .unwrap();
+        assert_eq!(kotlin(), Ok(true));
+        std::fs::write(dir.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        assert!(kotlin().is_err_and(|e| e.contains("build.gradle.kts or build.gradle")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const RUST_APP: &str =
+        "[package]\nname = \"todos\"\n\n[dependencies]\njazz-app-support = \"0.1\"\n";
 
     #[test]
     fn a_rust_app_generates_checks_and_migrates() {
@@ -390,13 +603,14 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A payload enum, which Rust bindings can't express yet.
-    const PAYLOAD_ENUM: &str = r#"{ "format": 1, "tables": { "todos": { "columns": { "status": { "enum": { "open": {}, "done": { "at": "timestamp" } } } } } } }"#;
+    /// Two enum values Rust names alike, which TS bindings express and Rust
+    /// bindings refuse.
+    const RUST_UNSUPPORTED: &str = r#"{ "format": 1, "tables": { "todos": { "columns": { "status": { "enum": ["in-progress", "in_progress"] } } } } }"#;
 
     #[test]
     fn a_language_found_only_by_its_marker_is_skipped_where_unsupported() {
         let dir = dir();
-        std::fs::write(dir.join(APP_FILE), PAYLOAD_ENUM).unwrap();
+        std::fs::write(dir.join(APP_FILE), RUST_UNSUPPORTED).unwrap();
         std::fs::write(dir.join("package.json"), "{}").unwrap();
         std::fs::write(dir.join("Cargo.toml"), RUST_APP).unwrap();
         let langs = languages(&dir, &[]).unwrap();
@@ -406,7 +620,7 @@ mod tests {
             outcome
                 .warnings
                 .iter()
-                .any(|w| w.contains("skipped") && w.contains("enum-with-payload")),
+                .any(|w| w.contains("skipped") && w.contains("Rust variant")),
             "{outcome:?}"
         );
         assert!(dir.join(Lang::TypeScript.file()).exists());
@@ -416,12 +630,74 @@ mod tests {
         std::fs::remove_file(dir.join(Lang::TypeScript.file())).unwrap();
         let error =
             generate(&dir, &[Lang::TypeScript.into(), Lang::Rust.into()], false).unwrap_err();
-        assert!(error.contains("enum-with-payload"), "{error}");
+        assert!(error.contains("Rust variant"), "{error}");
         assert!(!dir.join(Lang::TypeScript.file()).exists());
         // The only language found can't be skipped.
         std::fs::remove_file(dir.join("package.json")).unwrap();
         let error = generate(&dir, &languages(&dir, &[]).unwrap(), false).unwrap_err();
-        assert!(error.contains("enum-with-payload"), "{error}");
+        assert!(error.contains("Rust variant"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn messages_show_paths_below_the_current_directory_relative_to_it() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            shown(&cwd.join("app").join("jazz.generated.ts")),
+            format!("app{}jazz.generated.ts", std::path::MAIN_SEPARATOR)
+        );
+        assert_eq!(shown(&cwd), ".");
+        let outside = Path::new("/elsewhere/jazz.app.json");
+        if !outside.starts_with(&cwd) {
+            assert_eq!(shown(outside), "/elsewhere/jazz.app.json");
+        }
+    }
+
+    /// A TS app's files may sit in `src/` or `src/lib/` of the package whose
+    /// `package.json` says it's TS, where the npm CLI finds them.
+    #[test]
+    fn a_ts_app_is_found_from_its_package_above_src() {
+        let root = std::env::temp_dir().join(format!("jazz-codegen-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["src", "src/lib"] {
+            let dir = root.join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            assert!(languages(&dir, &[]).is_err(), "no package.json yet");
+        }
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        for dir in ["", "src", "src/lib"] {
+            assert_eq!(
+                languages(&root.join(dir), &[]).unwrap(),
+                vec![Selected {
+                    lang: Lang::TypeScript,
+                    detected: true
+                }],
+                "{dir}"
+            );
+        }
+        // Only those: a package two levels up of another directory isn't.
+        let other = root.join("src/other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(languages(&other, &[]).is_err());
+        // The npm CLI's fallback applies there, but not beside another
+        // language's manifest.
+        assert_eq!(
+            languages_or(&other, &[], Some(Lang::TypeScript)).unwrap(),
+            vec![Selected::from(Lang::TypeScript)]
+        );
+        for manifest in ["Package.swift", "build.gradle.kts", "go.mod"] {
+            std::fs::write(other.join(manifest), "").unwrap();
+            assert!(
+                languages_or(&other, &[], Some(Lang::TypeScript)).is_err(),
+                "{manifest}"
+            );
+            std::fs::remove_file(other.join(manifest)).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

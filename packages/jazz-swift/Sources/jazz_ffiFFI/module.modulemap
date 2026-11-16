@@ -1,0 +1,5 @@
+module jazz_ffiFFI {
+    header "jazz_ffiFFI.h"
+    link "jazz_ffi"
+    export *
+}

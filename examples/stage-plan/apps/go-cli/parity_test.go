@@ -373,3 +373,37 @@ func TestHopUnionAndHistory(t *testing.T) {
 		t.Fatalf("versions: %+v", versions)
 	}
 }
+
+func TestATransactionWhoseContextEndsRollsBack(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Cancel Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	txCtx, txCancel := context.WithCancel(ctx)
+	err = db.Tx(txCtx, func(tx *jazz.Tx) error {
+		if _, err := jazzapp.Tasks.Insert(txCtx, tx, jazzapp.NewTask{
+			ShowID: show.ID, Title: "Never", Status: jazzapp.TaskStatusTodo, Rank: 1,
+		}); err != nil {
+			return err
+		}
+		txCancel() // ctx ends after the writes, before the commit
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("tx with a cancelled ctx: %v", err)
+	}
+	if tasks, err := listTasks(ctx, db, show.ID); err != nil || len(tasks) != 0 {
+		t.Fatalf("rolled back: %+v %v", tasks, err)
+	}
+	// The handle isn't stuck: the next transaction commits.
+	if err := db.Tx(ctx, func(tx *jazz.Tx) error {
+		_, err := jazzapp.Tasks.Insert(ctx, tx, jazzapp.NewTask{ShowID: show.ID, Title: "Yes", Status: jazzapp.TaskStatusTodo, Rank: 1})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

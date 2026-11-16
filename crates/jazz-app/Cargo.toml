@@ -1,8 +1,14 @@
 [package]
-name = "jazz-app"
-version = "0.1.0"
+name = "jazz-app-support"
+version.workspace = true
 edition = "2024"
 description = "Typed, Send + Clone Rust handle for a Jazz app opened from its jazz.app.json"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Only what builds the library: tests, benches and their fixtures stay in the repo.
+include = ["src/**", "build.rs", "README.md"]
 
 [features]
 # Unstable, not part of a release yet: the app's Jazz endpoint (`endpoint`),
@@ -11,6 +17,18 @@ description = "Typed, Send + Clone Rust handle for a Jazz app opened from its ja
 unstable-endpoint = ["dep:hmac", "dep:sha2", "dep:tokio-tungstenite"]
 # `Endpoint::router`: the endpoint as an Axum router.
 axum = ["unstable-endpoint", "dep:axum"]
+# A stand-in for an app's Jazz endpoint, for testing bindings' end users:
+# see src/bin/jazz-app-test-relay.rs.
+test-relay = [
+  "dep:futures",
+  # The relay accepts sockets as well as connecting them.
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/handshake",
+  "tokio/net",
+  "tokio/io-util",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+]
 
 [dependencies]
 axum = { version = "0.8.9", optional = true, default-features = false, features = [
@@ -37,6 +55,17 @@ tokio-tungstenite = { version = "0.29", optional = true, default-features = fals
   "connect",
   "rustls-tls-native-roots",
 ] }
+# Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
+futures = { version = "0.3", optional = true }
+
+[[bin]]
+name = "jazz-app-test-relay"
+path = "src/bin/jazz-app-test-relay.rs"
+required-features = ["test-relay"]
+
+[[test]]
+name = "test_relay_bin"
+required-features = ["test-relay"]
 
 [dev-dependencies]
 hmac = "0.12"

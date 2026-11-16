@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "28581cb4bfb8c2df060316855cced3e4b643ac092b8bc8327ad9a7629144c3e5"
+  },
   "tables": {
     "artists": {
       "read": "exists memberships(organizationId = this.organizationId, userId = session.user)",

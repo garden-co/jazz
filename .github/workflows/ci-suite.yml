@@ -215,12 +215,31 @@ jobs:
       - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings, the Jazz Swift package and its example
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition jazz-ffi-bindings
 
+  test-crates-package:
+    if: inputs.scope == 'full'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Package and verify the crates published to crates.io
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition crates-package
+
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
   # test-storage-compat also runs the bounded differential oracle partition.
   test-rust:
     if: always() && inputs.scope == 'full'
-    needs: [test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings]
+    needs:
+      [
+        test-rust-workspace,
+        test-storage-compat,
+        test-jazz-ffi-bindings,
+        test-crates-package,
+        test-kotlin,
+        test-kotlin-android,
+      ]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -231,18 +250,23 @@ jobs:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
           STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
           JAZZ_FFI_BINDINGS_RESULT: ${{ needs.test-jazz-ffi-bindings.result }}
+          CRATES_PACKAGE_RESULT: ${{ needs.test-crates-package.result }}
+          KOTLIN_RESULT: ${{ needs.test-kotlin.result }}
+          KOTLIN_ANDROID_RESULT: ${{ needs.test-kotlin-android.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
           test "${JAZZ_FFI_BINDINGS_RESULT}" = success
+          test "${CRATES_PACKAGE_RESULT}" = success
+          test "${KOTLIN_RESULT}" = success
+          test "${KOTLIN_ANDROID_RESULT}" = success
 
   # The Go bindings (packages/jazz-go over crates/jazz-ffi's C ABI) and
-  # the StagePlan Go example: their bindings are current, and their tests
-  # (which open the app as a backend on a memory store) pass on Linux.
+  # the StagePlan Go example, on Linux: see dev/gates/go-bindings.sh.
   test-go:
     if: inputs.scope == 'full'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -251,47 +275,13 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      GO_VERSION: "1.23.4"
-      GO_SHA256: 6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # The toolchain image has Rust; this job needs no pnpm install.
-      - name: Trust the checkout
-        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-      - name: Install Go
-        run: |
-          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
-          echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c -
-          tar -C /usr/local -xzf /tmp/go.tgz
-          echo /usr/local/go/bin >> "${GITHUB_PATH}"
-      - name: Build jazz-ffi and jazz-tools
-        run: |
-          cargo build -p jazz-ffi
-          cargo build -p jazz-cli --bin jazz-tools
-      - name: StagePlan Go bindings are current
-        working-directory: examples/stage-plan/apps/go-cli
-        run: ../../../../target/debug/jazz-tools generate --check
-      - name: gofmt and go vet
-        run: |
-          test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
-          (cd packages/jazz-go && go vet ./...)
-          (cd examples/stage-plan/apps/go-cli && go vet ./...)
-      - name: go vet the jazz-codegen Go goldens
-        run: |
-          # Each committed golden, as the jazzapp package of a module of its own.
-          for dir in crates/jazz-codegen/tests/apps/*/jazzapp crates/jazz-codegen/tests/go-apps/*/jazzapp; do
-            [ -d "${dir}" ] || continue
-            module="$(mktemp -d)"
-            mkdir "${module}/jazzapp"
-            cp "${dir}/jazz_app.go" "${module}/jazzapp/"
-            printf 'module example.com/golden\n\ngo 1.22\n\nrequire github.com/garden-co/jazz/packages/jazz-go v0.0.0\n\nreplace github.com/garden-co/jazz/packages/jazz-go => %s/packages/jazz-go\n' "${GITHUB_WORKSPACE}" > "${module}/go.mod"
-            (cd "${module}" && go vet ./... && test -z "$(gofmt -l .)") || { echo "::error::${dir} fails go vet or gofmt"; exit 1; }
-          done
-      - name: Test the Go runtime and the StagePlan Go example
-        run: |
-          (cd packages/jazz-go && go test ./...)
-          (cd examples/stage-plan/apps/go-cli && go test -v ./...)
+      # The artifact lock path, safe.directory and pnpm install, as test-ts:
+      # the go partition builds jazz-tools for its TS main-backend e2e.
+      - uses: ./.github/actions/setup-blacksmith
+      - name: Build and test the Go bindings and the StagePlan Go example
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition go
 
   test-ts:
     if: inputs.scope == 'full'
@@ -499,6 +489,94 @@ jobs:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Run CI-equivalent React Native bridge partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition react-native
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # jazz-kotlin and the StagePlan Kotlin CLI (examples/stage-plan/apps/kotlin-cli)
+  # on the JVM, against jazz-ffi and an in-memory `jazz-tools server`.
+  test-kotlin:
+    if: inputs.scope == 'full'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
+      - name: Run CI-equivalent Kotlin partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition kotlin
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # jazz-kotlin-android: a build check of the AAR, with jazz-ffi cross-compiled
+  # for arm64-v8a, armeabi-v7a and x86_64 (no emulator or device tests).
+  test-kotlin-android:
+    if: inputs.scope == 'full'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
+      - name: Run CI-equivalent Kotlin Android partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition kotlin-android
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats

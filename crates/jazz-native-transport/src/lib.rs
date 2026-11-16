@@ -1,4 +1,10 @@
 use jazz::tools::native_transport_connector::NativeTransportLink;
+
+mod http_stream;
+pub use http_stream::{
+    HttpStreamError, HttpStreamFallbackConnector, HttpStreamTransportKind,
+    UPGRADE_FAILURES_BEFORE_STREAM, UPGRADE_HANGS_BEFORE_STREAM,
+};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -473,20 +479,49 @@ impl WebSocketTransport {
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
-        let Upgrade {
-            authorization,
-            bundle,
-        } = upgrade;
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
         let activity = LinkActivity::new();
-        let (mut ws, _) = tokio::time::timeout_at(
+        let (ws, _) = tokio::time::timeout_at(
             deadline,
-            open_client_websocket(url, authorization.as_deref(), Arc::clone(&activity)),
+            open_client_websocket(url, upgrade.authorization.as_deref(), Arc::clone(&activity)),
         )
         .await
         .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
+        Self::establish(
+            ws,
+            deadline,
+            Liveness::new(activity, WS_CLIENT_LIVENESS),
+            Session {
+                peer_identity,
+                auth,
+                bundle: upgrade.bundle,
+                requested_link,
+            },
+            wake,
+        )
+        .await
+        .map_err(NativeConnectFailure::from)
+    }
 
+    /// Opens the session over a carrier that is open: the prelude, both
+    /// hellos, then the pump.
+    pub(crate) async fn establish<C>(
+        mut ws: C,
+        deadline: tokio::time::Instant,
+        liveness: Liveness,
+        session: Session,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self, WebSocketClientError>
+    where
+        C: Carrier + Send + 'static,
+    {
+        let Session {
+            peer_identity,
+            auth,
+            bundle,
+            requested_link,
+        } = session;
         let prelude = encode_prelude(peer_identity, auth, bundle, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
@@ -522,8 +557,7 @@ impl WebSocketTransport {
         {
             return Err(WebSocketClientError::ServerRejected(
                 "upstream does not support requested scope_isolated_client_relay link".to_owned(),
-            )
-            .into());
+            ));
         }
 
         let (inbound_tx, inbound_rx) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
@@ -536,7 +570,7 @@ impl WebSocketTransport {
         let task = tokio::spawn(async move {
             let terminal = run_ws_pump(
                 ws,
-                Liveness::new(activity, WS_CLIENT_LIVENESS),
+                liveness,
                 inbound_tx,
                 inbound_budget,
                 outbound_rx,
@@ -611,6 +645,10 @@ impl WireTransport for WebSocketTransport {
         let frame = inbound.try_recv().ok();
         frame.map(|frame| frame.bytes)
     }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.features
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -623,6 +661,14 @@ struct WebSocketClientPrelude {
 
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
+}
+
+/// Who a session is for, as its prelude states it.
+pub(crate) struct Session {
+    pub(crate) peer_identity: AuthorSubject,
+    pub(crate) auth: AuthConfig,
+    pub(crate) bundle: Option<String>,
+    pub(crate) requested_link: NativeTransportLink,
 }
 
 /// What a socket carries beside its auth: the upgrade's `Authorization`
@@ -967,8 +1013,24 @@ impl Liveness {
 /// terminal the link waits on, for ever.
 const WS_CLIENT_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-type ClientSink<S> = futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>;
-type ClientSource<S> = futures::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>;
+type ClientSink<C> = futures::stream::SplitSink<C, Message>;
+type ClientSource<C> = futures::stream::SplitStream<C>;
+
+/// What the pump and the handshake run over: a WebSocket, or the HTTP
+/// stream transport's session, which carries the same messages.
+pub(crate) trait Carrier:
+    futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+    + futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+    + Unpin
+{
+}
+
+impl<C> Carrier for C where
+    C: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin
+{
+}
 
 /// How a pump ends: with this terminal, closing the socket first or not.
 struct Ending {
@@ -1071,16 +1133,16 @@ impl InboundSide {
 /// the signs of life, and frames it sends meanwhile reach the application, so
 /// neither side waits on the other. A socket whose peer has gone leaves the
 /// send pending with a full kernel buffer and nothing to read.
-async fn send_watched<S>(
-    sink: &mut ClientSink<S>,
-    source: &mut ClientSource<S>,
+async fn send_watched<C>(
+    sink: &mut ClientSink<C>,
+    source: &mut ClientSource<C>,
     inbound: &InboundSide,
     message: Message,
     liveness: &mut Liveness,
     ticker: &mut tokio::time::Interval,
 ) -> Result<(), Ending>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    C: Carrier,
 {
     let send = sink.send(message);
     tokio::pin!(send);
@@ -1109,12 +1171,12 @@ where
     }
 }
 
-async fn receive_server_hello<S>(
-    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+async fn receive_server_hello<C>(
+    ws: &mut C,
     deadline: tokio::time::Instant,
 ) -> Result<WireHello, WebSocketClientError>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    C: Carrier,
 {
     let message = tokio::time::timeout_at(deadline, ws.next())
         .await
@@ -1169,8 +1231,8 @@ fn finish_outbound_pump(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_ws_pump<S>(
-    ws: tokio_tungstenite::WebSocketStream<S>,
+async fn run_ws_pump<C>(
+    ws: C,
     mut liveness: Liveness,
     inbound: mpsc::Sender<InboundFrame>,
     inbound_budget: Arc<Semaphore>,
@@ -1179,7 +1241,7 @@ async fn run_ws_pump<S>(
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> NativeTransportTerminal
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    C: Carrier,
 {
     let (mut sink, mut source) = ws.split();
     let inbound = InboundSide {
@@ -2246,6 +2308,57 @@ mod tests {
                 assert!(!error.is_retryable());
                 assert!(error.to_string().contains("scope_isolated_client_relay"));
             }
+            server.await.unwrap();
+        }
+    }
+
+    /// The transport a client attaches reports what its `Hello` negotiated:
+    /// the database sends a serializable commit that read through a branch
+    /// view only over a link with the feature (jazz#5806), so a transport
+    /// that forgot to report it would refuse those commits for good.
+    #[tokio::test]
+    async fn the_attached_transport_reports_its_negotiated_features() {
+        for offered in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _prelude = socket.next().await.unwrap().unwrap();
+                let _hello = socket.next().await.unwrap().unwrap();
+                let mut features = current_wire_features();
+                if !offered {
+                    features &= !jazz::wire::FEATURE_SERIALIZABLE_BRANCH_READS;
+                }
+                let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+                    WirePeerRole::Core,
+                    features,
+                )))
+                .unwrap();
+                socket
+                    .send(Message::Binary(
+                        postcard::to_allocvec(&vec![hello]).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+            });
+            let connected = NativeWebSocketConnector
+                .connect(NativeTransportRequest {
+                    requested_link: NativeTransportLink::OrdinarySession,
+                    server_url: format!("http://{address}"),
+                    app_id: AppId::random(),
+                    peer_identity: AuthorSubject::SYSTEM,
+                    auth: AuthConfig::default(),
+                    authorization: None,
+                    bundle: None,
+                    wake: Arc::new(|| {}),
+                })
+                .await
+                .expect("handshake");
+            assert_eq!(
+                connected.transport.features() & jazz::wire::FEATURE_SERIALIZABLE_BRANCH_READS != 0,
+                offered
+            );
             server.await.unwrap();
         }
     }

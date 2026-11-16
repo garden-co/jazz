@@ -149,7 +149,7 @@ final class StagePlanTests: XCTestCase {
             _ = try await stranger.jazz.insert(
                 JazzApp.NewTask(showId: show.id, title: "Sneaky", status: .todo, rank: 1), tier: .global)
             XCTFail("a stranger's task in someone else's show must be refused")
-        } catch {
+        } catch let error as JazzError {
             guard case .permissionDenied = error else { return XCTFail("\(error)") }
         }
         try await stranger.jazz.close()
@@ -199,7 +199,7 @@ final class StagePlanTests: XCTestCase {
         do {
             try await notes.insert("X", at: 2)
             XCTFail("an offset inside a surrogate pair must be refused")
-        } catch {
+        } catch let error as JazzError {
             guard case .refused = error else { return XCTFail("\(error)") }
         }
         try await notes.insert("X", at: 3)  // after the emoji
@@ -299,5 +299,27 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(user.kind, .device)
         XCTAssertTrue(try Jazz.generateDeviceKey().hasPrefix("jazz-auth-v1:"))
         try await app.jazz.close()
+    }
+
+    /// The adopter gate's privacy check: B targets A's show by id, reads no
+    /// tasks and can't write into it.
+    func testAnotherUserCantReadOrWriteAShowById() async throws {
+        let relay = try await TestRelay()
+        let alice = try await relay.user("alice")
+        let show = try await alice.show(named: "Private")
+        try await alice.addTask("Secret", toShow: show.id)
+        let bob = try await relay.user("bob")
+        let seen = try await bob.tasks(ofShow: show.id)
+        XCTAssertEqual(seen.count, 0)
+        do {
+            try await bob.addTask("Sneaky", toShow: show.id)
+            XCTFail("bob must not write into alice's show")
+        } catch let error as JazzError {
+            guard case .permissionDenied = error else { return XCTFail("\(error)") }
+        }
+        let aliceSees = try await alice.tasks(ofShow: show.id)
+        XCTAssertEqual(aliceSees.map(\.title), ["Secret"])
+        try await bob.jazz.close()
+        try await alice.jazz.close()
     }
 }

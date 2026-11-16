@@ -27,11 +27,39 @@ pub struct Transaction {
     id: OpenTransactionId,
     wrote: Rc<Cell<bool>>,
     implementations: Implementations,
+    /// Mergeable ([`Jazz::transaction`]): it can read through a branch.
+    mergeable: bool,
 }
 
 impl Transaction {
+    /// `write`, which returns the row read back, is not supported yet
+    /// through a branch in a serializable transaction: refuse it before
+    /// staging anything, so a caller that ignores the error doesn't commit
+    /// it.
+    fn refuse_read_back_on_branch(&self, write: &str) -> Result<()> {
+        if self.client.is_on_branch() && !self.mergeable {
+            return Err(crate::Error::Unsupported(format!(
+                "{write} through a branch inside a serializable transaction (it reads the row back)"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn client(&self) -> &JazzClient {
         &self.client
+    }
+
+    /// This transaction, writing through `client` (the same transaction,
+    /// scoped to a branch, say).
+    pub(crate) fn with_client(&self, client: JazzClient) -> Transaction {
+        Transaction {
+            client,
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn implementations(&self) -> &Implementations {
+        &self.implementations
     }
 
     /// Marks the transaction as having written, so it commits.
@@ -55,6 +83,7 @@ impl Transaction {
     /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
     /// transaction now sees it.
     pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        self.refuse_read_back_on_branch("upsert")?;
         let cells = new.into_cells(&self.implementations)?;
         self.client
             .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
@@ -70,6 +99,7 @@ impl Transaction {
 
     /// Brings back a deleted row, as [`Jazz::restore`].
     pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+        self.refuse_read_back_on_branch("restore")?;
         self.client.restore(T::NAME, id, None)?;
         self.wrote.set(true);
         self.read_back(id).await
@@ -78,6 +108,7 @@ impl Transaction {
     /// Brings back a deleted row with `new`'s values, as
     /// [`Jazz::restore_with`].
     pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        self.refuse_read_back_on_branch("restore_with")?;
         let cells = new.into_cells(&self.implementations)?;
         self.client.restore(
             <N::Row as Table>::NAME,
@@ -88,7 +119,7 @@ impl Transaction {
         self.read_back(id).await
     }
 
-    async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub(crate) async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
         self.get::<T>(id)
             .await?
             .ok_or_else(|| crate::Error::Decode {
@@ -178,6 +209,7 @@ impl Jazz {
                 id: open.transaction_id(),
                 wrote: Rc::new(Cell::new(false)),
                 implementations,
+                mergeable,
             };
             let wrote = transaction.wrote.clone();
             let scoped = transaction.client.clone();
@@ -249,7 +281,7 @@ pub(crate) fn roll_back_parked() {
 /// awaits, and driven call by call. Commit it with
 /// [`OpenTransaction::commit`]; dropping it uncommitted rolls it back.
 pub struct OpenTransaction {
-    jazz: Jazz,
+    pub(crate) jazz: Jazz,
     key: u64,
     settle: crate::writes::Settler,
     finished: bool,
@@ -283,6 +315,7 @@ impl Jazz {
                     id: open.transaction_id(),
                     wrote: Rc::new(Cell::new(false)),
                     implementations,
+                    mergeable,
                 };
                 Ok(OPEN.with(|open| {
                     let mut open = open.borrow_mut();
@@ -320,7 +353,7 @@ fn parked(key: u64) -> Result<Transaction> {
 }
 
 impl OpenTransaction {
-    async fn on<F, Fut, R>(&self, call: F) -> Result<R>
+    pub(crate) async fn on<F, Fut, R>(&self, call: F) -> Result<R>
     where
         F: FnOnce(Transaction) -> Fut + Send + 'static,
         Fut: Future<Output = Result<R>> + 'static,

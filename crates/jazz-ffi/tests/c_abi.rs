@@ -257,7 +257,7 @@ fn returned_strings_are_the_callers_to_free() {
 /// she chiefs and reads its tasks under StagePlan's permissions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_through_the_c_abi() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
@@ -266,6 +266,8 @@ async fn a_backend_through_the_c_abi() {
     let config = backend_config(&server, &app_id.to_string(), "carol");
     let result = tokio::task::spawn_blocking(move || {
         let h = open(&config).unwrap();
+        let bundle = call(h, "bundle", json!({})).unwrap();
+        assert!(bundle.as_str().is_some_and(|b| !b.is_empty()), "{bundle}");
         let account = call(h, "account", json!({})).unwrap();
         let account = account.as_str().expect("carol's account").to_owned();
         let show = call(

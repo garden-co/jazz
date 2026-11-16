@@ -157,7 +157,9 @@ fn an_index_only_edit_needs_no_migration() {
     assert!(created.todos.is_empty());
     assert_eq!(
         created.note.as_deref(),
-        Some("only single-column indexes changed: no migration needed; run `jazz-tools generate`")
+        Some(
+            "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`"
+        )
     );
     // A composite index changes the version: still a migration.
     let composite = App::load(

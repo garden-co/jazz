@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /**
- * Every example app's committed bindings are what `jazz-tools generate`
- * writes from its jazz.app.json: `generate --check` in each directory that
- * commits a jazz.app.json (apps, the docs' recipe apps beside them, and
- * Rust crates, whose src/jazz_app.rs it checks too).
- * A stale or missing jazz.generated.ts otherwise only shows when a backend
+ * Every example app's committed jazz.app.json, jazz.permissions.json and
+ * bindings are what `jazz-tools generate` writes from its TS (schema.ts):
+ * `generate --check` in each directory that commits a jazz.app.json (apps,
+ * the docs' recipe apps beside them, Rust crates (src/jazz_app.rs), Go
+ * modules, Swift packages (JazzApp.swift) and Gradle projects (JazzApp.kt),
+ * whose language the directory names). StagePlan's go-cli, rust-cli,
+ * swift-cli and kotlin-cli re-export react-localfirst's TS, so this also keeps
+ * their JSON StagePlan's. A stale file otherwise only shows when a backend
  * starts. Runs against the jazz-tools CLI the TypeScript partition built.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,18 +30,7 @@ export function exampleAppDirs(cwd = root) {
     .split("\n")
     .filter(Boolean)
     .map((file) => dirname(file))
-    .filter((dir) => !isSwiftPackage(resolve(cwd, dir)))
     .sort();
-}
-
-/**
- * A Swift package of the Jazz Swift runtime (a Package.swift naming
- * jazz-swift): its bindings are JazzApp.swift, which jazz-codegen's golden
- * test and dev/gates/jazz-swift.sh check while the npm CLI has Swift off.
- */
-function isSwiftPackage(dir) {
-  const manifest = join(dir, "Package.swift");
-  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
 }
 
 /** `generate --check` in each app; the failures, as `dir: last line of output`. */

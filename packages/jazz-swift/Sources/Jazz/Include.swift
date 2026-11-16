@@ -86,11 +86,11 @@ public final class Included<Value: Codable & Hashable & Sendable>: Codable, Hash
 /// into a type of the app's (`jazz.all(selection, as: TaskTitle.self)`).
 public struct Selection<R: Row>: Sendable {
     let query: Query<R>
-    let columns: [String]
+    let entries: [JSONValue]
 
     func json() throws -> String {
         var object = try query.object(withTable: true)
-        object["select"] = .array(columns.map(JSONValue.string))
+        object["select"] = .array(entries)
         return try Coding.json(JSONValue.object(object))
     }
 }

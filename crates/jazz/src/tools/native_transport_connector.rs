@@ -42,7 +42,7 @@ pub struct NativeTransportRequest {
     /// as a browser's request carries the app's cookie. Never sent to a core.
     pub authorization: Option<String>,
     /// The published permissions bundle a stated session is pinned to
-    /// (see [`crate::tools::AppContext::bundle`]).
+    /// (see `AppContext::bundle`, with the `runtime` feature).
     pub bundle: Option<String>,
     pub wake: Arc<dyn Fn() + Send + Sync>,
 }

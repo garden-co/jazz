@@ -7,7 +7,7 @@ import { Center } from "@astryxdesign/core/Center";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { jazzTheme } from "@garden-co/design/jazz";
 import type { Db } from "jazz-tools";
-import { JazzProvider, useDb, useJazzSession, useSession } from "jazz-tools/react";
+import { JazzProvider, useDb, useJazzSession } from "jazz-tools/react";
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { authClient } from "@/src/lib/auth-client";
 import { claimGuestCart, readGuestCart, type GuestCartLine } from "@/src/store/cart";
@@ -87,12 +87,11 @@ export function useShopper(): Shopper {
 
 function ShopperProvider({ children }: { children: ReactNode }) {
   const db = useDb();
-  const session = useSession();
   const jazz = useJazzSession();
   const { user, refresh, linkDeviceAccount, createDeviceAccount } = jazz;
   const signOutOfJazz = jazz.signOut;
   const { data: auth, isPending, error: authError } = authClient.useSession();
-  const account = session?.user ?? user?.accountId ?? "";
+  const account = user?.accountId ?? "";
   // Signed in: an account the backend names, not this browser's guest.
   const isSignedIn = user?.kind === "backend";
 
