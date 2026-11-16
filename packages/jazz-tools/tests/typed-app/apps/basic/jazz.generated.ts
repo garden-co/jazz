@@ -1,5 +1,5 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Output e011c1a3e060f111. Formatters may reformat this file, except `app` below.
+// Bindings format 1. Output ecccd68a9b2ac94e. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type TableWithConstraintData = { datetime?: string; integer?: number; string?: string };

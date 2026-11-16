@@ -1,5 +1,5 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Output 1b9c69be1e36f070. Formatters may reformat this file, except `app` below.
+// Bindings format 1. Output 5ca8928c292d7eb3. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type Row = {
