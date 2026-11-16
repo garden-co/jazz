@@ -65,6 +65,7 @@ describe("generate", () => {
     await generateApp({ cwd: dir });
     const before = await readFile(join(dir, "jazz.generated.ts"), "utf8");
     const appBefore = await readFile(join(dir, "jazz.app.json"), "utf8");
+    const permissionsBefore = await readFile(join(dir, "jazz.permissions.json"), "utf8");
     await writeFile(
       join(dir, "schema.ts"),
       SCHEMA.replace("done: s.boolean() }", "done: s.boolean(), note: s.string().optional() }"),
@@ -75,6 +76,7 @@ describe("generate", () => {
     // Nothing is written when generate refuses: not the bindings, not jazz.app.json.
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe(before);
     expect(await readFile(join(dir, "jazz.app.json"), "utf8")).toBe(appBefore);
+    expect(await readFile(join(dir, "jazz.permissions.json"), "utf8")).toBe(permissionsBefore);
 
     const created = await createAppMigration({ cwd: dir, name: "add-note" });
     expect(created).toMatchObject({ changed: true, todos: [] });

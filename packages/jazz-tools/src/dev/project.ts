@@ -143,10 +143,11 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
   // The bindings are checked against the new jazz.app.json (a schema edited
   // without `migrations create` is refused there), so it is written first;
   // if the bindings refuse, both files go back to what they were.
-  for (const { file, text } of stale) await writeFile(join(app.dir, file), text);
   let outcome: Awaited<ReturnType<typeof generateForDir>>;
   try {
+    for (const { file, text } of stale) await writeFile(join(app.dir, file), text);
     outcome = await generateForDir(app.dir, { ...bindingsOptions, check: false });
+    await ensureFirstSnapshot(app, options.loadModule);
   } catch (error) {
     for (const { file, previous } of stale) {
       const path = join(app.dir, file);
@@ -155,7 +156,6 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
     }
     throw error;
   }
-  await ensureFirstSnapshot(app, options.loadModule);
   return {
     dir: app.dir,
     wroteFiles: stale.length > 0,
