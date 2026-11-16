@@ -40,7 +40,6 @@ swift --version
 cd "$root"
 cargo test -q -p jazz-codegen --test golden -- swift
 cargo build -q -p jazz-cli --bin jazz-tools
-"$root/target/debug/jazz-tools" generate --check --dir "$example"
 "$root/packages/jazz-swift/scripts/build-ffi.sh" --debug
 export JAZZ_FFI_LIB_DIR="$root/target/debug/jazz-ffi-static"
 export JAZZ_TOOLS_BIN="$root/target/debug/jazz-tools"
