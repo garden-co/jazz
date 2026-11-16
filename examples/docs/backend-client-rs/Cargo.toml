@@ -8,4 +8,5 @@ publish = false
 jazz-app = { path = "../../../crates/jazz-app" }
 # The todo app's generated bindings.
 todo-server-docs = { path = "../todo-server-rs" }
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
