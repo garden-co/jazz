@@ -32,7 +32,10 @@ The smallest useful model adds a normal string column to the table and lists it 
   "format": 1,
   "tables": {
     "documents": {
-      "columns": { "branch": "string", "title": "string" },
+      "columns": {
+        "branch": "string",
+        "title": "string"
+      },
       "branchBy": ["branch"]
     }
   }
@@ -89,8 +92,13 @@ branch needs queryable metadata, model it as an ordinary row and make the branch
       }
     },
     "documents": {
-      "columns": { "branch_id": "uuid", "title": "string" },
-      "relations": { "branch": { "rel": "branches", "column": "branch_id" } },
+      "columns": {
+        "branch_id": "uuid",
+        "title": "string"
+      },
+      "relations": {
+        "branch": { "rel": "branches", "column": "branch_id" }
+      },
       "branchBy": ["branch_id"]
     }
   }
@@ -140,7 +148,11 @@ are defined elsewhere in the file:
 {
   "tables": {
     "documents": {
-      "columns": { "workspace_id": "uuid", "branch_id": "uuid", "title": "string" },
+      "columns": {
+        "workspace_id": "uuid",
+        "branch_id": "uuid",
+        "title": "string"
+      },
       "relations": {
         "workspace": { "rel": "workspaces", "column": "workspace_id" },
         "branch": { "rel": "branches", "column": "branch_id" }

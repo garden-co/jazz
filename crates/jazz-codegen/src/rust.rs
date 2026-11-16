@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The version of the bindings' shape this generator writes: the second
 /// line records it.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 4;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
@@ -407,6 +407,15 @@ impl<'a> Writer<'a> {
         // Table.
         let _ = writeln!(out, "impl {RT}::Table for {row} {{");
         let _ = writeln!(out, "    const NAME: &'static str = {:?};", table.name);
+        let _ = writeln!(
+            out,
+            "    const COLUMNS: &'static [&'static str] = &[{}];",
+            fields
+                .iter()
+                .map(|f| format!("{:?}", f.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let _ = writeln!(out, "    type New = {new};");
         let _ = writeln!(out, "    type Update = {update};\n");
         let _ = writeln!(
@@ -524,7 +533,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(out, "pub mod {module} {{");
         out.push_str("    #[allow(unused_imports)]\n    use super::*;\n\n");
-        let mut fns = BTreeSet::from(["query".to_owned(), "id".to_owned()]);
+        let mut fns = BTreeSet::from(["query".to_owned(), "id".to_owned(), "history".to_owned()]);
         let _ = writeln!(
             out,
             "    /// Every row of `{}`; narrow it with `filter`.\n    pub fn query() -> {RT}::Query<{row}> {{\n        {RT}::Query::all()\n    }}",
@@ -532,10 +541,15 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
+            "\n    /// Every accepted version of `{}`'s rows; bound it to rows with `id` or `id().is_in`.\n    pub fn history() -> {RT}::Query<{RT}::Version<{row}>> {{\n        {RT}::Query::history()\n    }}",
+            table.name
+        );
+        let _ = writeln!(
+            out,
             "\n    /// The row's id. (`{RT}::created_at()` and `updated_at()` are columns of every table too.)\n    pub fn id() -> {RT}::Column<{row}, {RT}::ObjectId> {{\n        {RT}::id()\n    }}"
         );
         for field in &fields {
-            // A column named as the module's own `query` or `id` gets
+            // A column named as the module's own `query`, `id` or `history` gets
             // `_column` after it.
             let ident = if fns.contains(&field.ident) {
                 format!("{}_column", field.ident.trim_start_matches("r#"))
@@ -590,10 +604,29 @@ impl<'a> Writer<'a> {
                 ))
             })?;
         Ok(match &relation.kind {
-            RelationKind::One { column, .. } => format!(
-                "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}> {{\n        {RT}::One::new({column:?})\n    }}\n",
-                relation.name, relation.target
-            ),
+            RelationKind::One { column, nullable } => {
+                let nullable = if *nullable {
+                    format!(", {RT}::Nullable")
+                } else {
+                    String::new()
+                };
+                // A relation over a uuid array references several rows.
+                let array = table
+                    .columns
+                    .iter()
+                    .any(|c| &c.name == column && matches!(c.ty.ty, ColumnType::Array { .. }));
+                if array {
+                    format!(
+                        "\n    /// Relation `{}`: the `{}` rows `{column}` references.\n    pub fn {ident}() -> {RT}::Refs<{row}, {target}{nullable}> {{\n        {RT}::Refs::new({column:?})\n    }}\n",
+                        relation.name, relation.target
+                    )
+                } else {
+                    format!(
+                        "\n    /// Relation `{}`: the `{}` row `{column}` references.\n    pub fn {ident}() -> {RT}::One<{row}, {target}{nullable}> {{\n        {RT}::One::new({column:?})\n    }}\n",
+                        relation.name, relation.target
+                    )
+                }
+            }
             RelationKind::Many { relation: forward } => {
                 let column = self
                     .app
@@ -868,6 +901,19 @@ pub fn is_app_manifest(manifest: &str) -> bool {
                 .is_some_and(is_runtime_dependencies);
             continue;
         }
+        // A renamed dependency: `app = { package = "jazz-app", … }` in a
+        // dependencies table, or `package = "jazz-app"` in its own table.
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        let renamed =
+            compact.contains("package=\"jazz-app\"") || compact.contains("package='jazz-app'");
+        if renamed
+            && (is_runtime_dependencies(&section)
+                || section
+                    .rsplit_once('.')
+                    .is_some_and(|(table, _)| is_runtime_dependencies(table)))
+        {
+            depends = true;
+        }
         if is_runtime_dependencies(&section) {
             let key = line
                 .split(['=', '.'])
@@ -1031,6 +1077,16 @@ mod tests {
         let app =
             "[package]\nname = \"todo\"\n\n[dependencies]\njazz-app = { path = \"../jazz-app\" }\n";
         assert!(is_app_manifest(app));
+        // Under another name.
+        assert!(is_app_manifest(
+            "[package]\nname = \"a\"\n[dependencies]\njazz = { package = \"jazz-app\", version = \"0.1\" }\n"
+        ));
+        assert!(is_app_manifest(
+            "[package]\nname = \"a\"\n[dependencies.jazz]\npackage = \"jazz-app\"\nversion = \"0.1\"\n"
+        ));
+        assert!(!is_app_manifest(
+            "[package]\nname = \"a\"\n[dev-dependencies]\njazz = { package = \"jazz-app\" }\n"
+        ));
         assert!(is_app_manifest(
             "[package]\nname = \"x\"\n[dependencies]\njazz-app.workspace = true\n"
         ));

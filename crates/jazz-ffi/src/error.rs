@@ -131,7 +131,7 @@ impl From<jazz_app::Error> for JazzErrorKind {
         match error {
             E::Rejected(reason) => rejection(&reason, message),
             E::Unsupported(what) => unsupported(what),
-            E::App(_) | E::Config(_) | E::Decode { .. } => Self::Refused(message),
+            E::App(_) | E::Config(_) | E::Decode { .. } | E::Refused(_) => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
             E::Jazz(J::ChannelClosed) => Self::Closed,
