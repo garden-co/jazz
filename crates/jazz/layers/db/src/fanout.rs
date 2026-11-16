@@ -326,10 +326,10 @@ impl Inner {
         read: ReadSpec,
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
-        self.check_splices(&prepared.query, &read.splices)?;
+        self.check_splices(prepared, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
-            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
+            renames: renames(prepared.source_schema(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
@@ -410,13 +410,9 @@ impl Inner {
             )?
             .to_owned();
         let recheck = recheckable(&prepared.query, &root, &read, &compiled);
-        let branches = view_branches(
-            prepared.schema.as_ref().unwrap_or(&self.owner),
-            &read,
-            &watches,
-        );
+        let branches = view_branches(prepared.source_schema(&self.owner), &read, &watches);
         let masks = view_masks(
-            prepared.schema.as_ref().unwrap_or(&self.owner),
+            prepared.source_schema(&self.owner),
             prepared,
             &read,
             watches
@@ -474,7 +470,7 @@ impl Inner {
         if query.includes.iter().all(|include| include.require) {
             return Ok(Vec::new());
         }
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = prepared.source_schema(&self.owner);
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
@@ -562,7 +558,7 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = prepared.source_schema(&self.owner);
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -1152,7 +1148,7 @@ impl Inner {
             Some(crate::query::OrderDirection::Desc)
         );
         let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
-        let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = group.prepared.source_schema(&self.owner);
         if projected {
             // Cells sort as the compiled ORDER BY sorts them: an enum
             // variant by its tag, or its rank in a schema whose declaration
@@ -1351,12 +1347,14 @@ impl Inner {
 
     /// Refuse splices of a column that is not a large-capable column of the
     /// query's table, or that it selects by JSON pointer.
-    fn check_splices(&self, query: &Query, columns: &[String]) -> Result<(), Error> {
+    fn check_splices(&self, prepared: &PreparedQuery, columns: &[String]) -> Result<(), Error> {
         if columns.is_empty() {
             return Ok(());
         }
+        let query = &prepared.query;
         let table = &query.table;
-        let t = self.schema.table(table)?;
+        let schema = prepared.source_schema(&self.owner);
+        let t = schema.table(table)?;
         for column in columns {
             if !t.column(column).is_some_and(crate::large::large_capable) {
                 return Err(crate::values::query_error(format!(
@@ -1389,6 +1387,14 @@ impl Inner {
         let SubscriptionEvent::Delta { updated, .. } = event else {
             return;
         };
+        if group.key.splices.is_empty() || updated.is_empty() {
+            return;
+        }
+        let schema = group.prepared.source_schema(&self.owner);
+        let Ok(table) = schema.table(&group.prepared.query.table) else {
+            return;
+        };
+        let policies = schema.policy_schema();
         for out in updated {
             let Some(before) = prior.get(&out.row.id) else {
                 continue;
@@ -1426,14 +1432,9 @@ impl Inner {
                 }
                 // Read access is by the group's own policies: a pinned
                 // session's bundle, not the current schema.
-                let policies = group
-                    .prepared
-                    .schema
-                    .as_ref()
-                    .map_or(&*self.owner, |schema| schema.policy_schema());
                 if let Ok(splices) = self
                     .value_delta(
-                        &group.prepared.query.table,
+                        table,
                         out.row.id,
                         column,
                         (from, to),

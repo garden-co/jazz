@@ -3873,16 +3873,16 @@ mod tests {
                 exchange(owner);
             }
             let on_server = |owner: &Owner| {
-                owner
-                    .db
-                    .read(
+                block_on(
+                    owner.db.read(
                         &owner
                             .db
                             .prepare_query(&jazz::query::Query::from("docs"))
                             .unwrap(),
-                    )
-                    .unwrap()
-                    .len()
+                    ),
+                )
+                .unwrap()
+                .len()
             };
             let held = on_server(owner) == 1;
 

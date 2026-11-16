@@ -1792,16 +1792,6 @@ impl PendingQueue {
         self.commits.insert(pending.tx, pending);
     }
 
-    /// Take back commit `tx`, just pushed.
-    fn pop(&mut self, tx: u64) {
-        debug_assert_eq!(
-            self.commits.last_key_value().map(|(&last, _)| last),
-            Some(tx),
-            "the commit just pushed is the newest"
-        );
-        self.remove(tx);
-    }
-
     fn remove(&mut self, tx: u64) {
         if let Some(pending) = self.commits.remove(&tx) {
             self.unindex(&pending);
@@ -3469,20 +3459,24 @@ const ID_AT: &str = "id = ?1 AND +_clock = ?2";
 impl Inner {
     /// The supporting tables a remote query reads (see [`Support`]), by
     /// stored table and column names.
-    pub(crate) fn support_of(&self, query: &Query) -> Result<Vec<Support>, Error> {
+    pub(crate) fn support_of(
+        &self,
+        active_schema: &Rc<Schema>,
+        query: &Query,
+    ) -> Result<Vec<Support>, Error> {
         // History reads take no relationships.
         if is_history_table(&query.table) {
             return Ok(Vec::new());
         }
         // A union's rows are read through every arm: each arm's support.
-        if let Some(plan) = crate::db::union_plan(query, &self.schema)? {
+        if let Some(plan) = crate::db::union_plan(query, active_schema)? {
             let mut support = Vec::new();
             for (_, arm) in &plan.arms {
-                support.extend(self.support_of(arm)?);
+                support.extend(self.support_of(active_schema, arm)?);
             }
             return Ok(support);
         }
-        let table = self.schema.table(&query.table)?;
+        let table = active_schema.table(&query.table)?;
         let mut support = Vec::new();
         for include in &query.includes {
             let target = table
@@ -3491,12 +3485,13 @@ impl Inner {
                 .ok_or_else(|| query_error(format!("`{}` is not a reference", include.path)))?;
             support.push(Support::Include {
                 column: table.stored_name(&include.path).to_owned(),
-                target: self.schema.stored_table(target)?.to_owned(),
+                target: active_schema.stored_table(target)?.to_owned(),
             });
         }
-        support.extend(self.array_support(table, &query.array_subqueries)?);
-        support.extend(self.join_support(table, &query.joins)?);
+        support.extend(self.array_support(active_schema, table, &query.array_subqueries)?);
+        support.extend(self.join_support(active_schema, table, &query.joins)?);
         support.extend(self.policy_support(
+            active_schema,
             table,
             crate::compile::DEFAULT_INHERITS_DEPTH,
             &mut SupportMemo::new(),
@@ -3504,7 +3499,7 @@ impl Inner {
         for via in &query.reachable {
             // Seed rows that reference the rows the walk starts from.
             if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
-                let seeds = self.schema.table(&seed.table)?;
+                let seeds = active_schema.table(&seed.table)?;
                 support.push(Support::Array {
                     table: seeds.stored.clone(),
                     inner: seeds.stored_name(&seed.team_column).to_owned(),
@@ -3515,7 +3510,7 @@ impl Inner {
                     policy_depth: None,
                 });
             }
-            let edges = self.schema.table(&via.edge_table)?;
+            let edges = active_schema.table(&via.edge_table)?;
             support.push(Support::Reach {
                 frontier: table.stored_name(&via.access_team_column).to_owned(),
                 edges: edges.stored.clone(),
@@ -3530,19 +3525,20 @@ impl Inner {
     /// included.
     fn array_support(
         &self,
+        active_schema: &Rc<Schema>,
         parent: &crate::values::Table,
         arrays: &[crate::query::ArraySubquery],
     ) -> Result<Vec<Support>, Error> {
         let mut support = Vec::with_capacity(arrays.len());
         for array in arrays {
-            let child = self.schema.table(&array.table)?;
+            let child = active_schema.table(&array.table)?;
             support.push(Support::Array {
                 table: child.stored.clone(),
                 inner: child.stored_name(&array.inner_column).to_owned(),
                 outer: parent.stored_name(&array.outer_column).to_owned(),
                 outer_array: crate::compile::is_array(parent, &array.outer_column),
                 inner_array: crate::compile::is_array(child, &array.inner_column),
-                nested: Rc::new(self.array_support(child, &array.nested_arrays)?),
+                nested: Rc::new(self.array_support(active_schema, child, &array.nested_arrays)?),
                 policy_depth: None,
             });
         }
@@ -3555,18 +3551,20 @@ impl Inner {
     /// session) evaluates the policy locally over them.
     fn policy_support(
         &self,
+        active_schema: &Rc<Schema>,
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
-        let mut support = self.inherited_support(table, depth, memo)?;
-        support.extend(self.exists_support(table, depth, memo)?);
+        let mut support = self.inherited_support(active_schema, table, depth, memo)?;
+        support.extend(self.exists_support(active_schema, table, depth, memo)?);
         Ok(support)
     }
 
     /// [`Inner::policy_support`] as a node shared across `memo`'s tree.
     fn shared_support(
         &self,
+        active_schema: &Rc<Schema>,
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
@@ -3575,7 +3573,7 @@ impl Inner {
         if let Some(shared) = memo.get(&key) {
             return Ok(Rc::clone(shared));
         }
-        let support = Rc::new(self.policy_support(table, depth, memo)?);
+        let support = Rc::new(self.policy_support(active_schema, table, depth, memo)?);
         memo.insert(key, Rc::clone(&support));
         Ok(support)
     }
@@ -3586,6 +3584,7 @@ impl Inner {
     /// uncorrelated `EXISTS` has no per-row support.
     fn exists_support(
         &self,
+        active_schema: &Rc<Schema>,
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
@@ -3628,14 +3627,14 @@ impl Inner {
             let Some((inner, outer)) = correlation(condition) else {
                 continue;
             };
-            let consulted = self.schema.table(consulted)?;
+            let consulted = active_schema.table(consulted)?;
             support.push(Support::Array {
                 table: consulted.stored.clone(),
                 inner: consulted.stored_name(inner).to_owned(),
                 outer: table.stored_name(outer).to_owned(),
                 outer_array: crate::compile::is_array(table, outer),
                 inner_array: crate::compile::is_array(consulted, inner),
-                nested: self.shared_support(consulted, depth - 1, memo)?,
+                nested: self.shared_support(active_schema, consulted, depth - 1, memo)?,
                 policy_depth: Some(depth - 1),
             });
         }
@@ -3647,6 +3646,7 @@ impl Inner {
     /// row its read rests on, as it would had it read that row itself.
     fn inherited_support(
         &self,
+        active_schema: &Rc<Schema>,
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
@@ -3677,7 +3677,7 @@ impl Inner {
             let Some(target) = table.references.get(column) else {
                 continue;
             };
-            let parent = self.schema.table(target)?;
+            let parent = active_schema.table(target)?;
             let depth = max_depth.map_or(depth, |bound| bound.min(depth));
             if depth == 0 {
                 continue;
@@ -3691,7 +3691,7 @@ impl Inner {
                 // The parent's read rests on its own policy's support,
                 // its correlated `EXISTS` clauses included, not just on its
                 // parents in turn.
-                nested: self.shared_support(parent, depth - 1, memo)?,
+                nested: self.shared_support(active_schema, parent, depth - 1, memo)?,
                 policy_depth: Some(depth - 1),
             });
         }
@@ -3703,12 +3703,13 @@ impl Inner {
     /// (the client applies the join's filters), and its nested joins'.
     fn join_support(
         &self,
+        active_schema: &Rc<Schema>,
         parent: &crate::values::Table,
         joins: &[crate::query::JoinVia],
     ) -> Result<Vec<Support>, Error> {
         let mut support = Vec::with_capacity(joins.len());
         for join in joins {
-            let target = self.schema.table(&join.table)?;
+            let target = active_schema.table(&join.table)?;
             let source = join.source_column.as_deref().unwrap_or("id");
             support.push(Support::Array {
                 table: target.stored.clone(),
@@ -3716,7 +3717,7 @@ impl Inner {
                 outer: parent.stored_name(source).to_owned(),
                 outer_array: crate::compile::is_array(parent, source),
                 inner_array: crate::compile::is_array(target, &join.on_column),
-                nested: Rc::new(self.join_support(target, &join.nested_joins)?),
+                nested: Rc::new(self.join_support(active_schema, target, &join.nested_joins)?),
                 policy_depth: None,
             });
         }
@@ -6661,9 +6662,7 @@ impl Inner {
             || is_origin_node(node)
             || self.shard.awaits(crate::db::shard::CommitRef { node, tx })
             || !ops.iter().all(|op| {
-                self.schema
-                    .stored_table(op.table())
-                    .is_ok_and(|stored| self.latest_only(stored))
+                self.physical.tables.contains_key(op.table()) && self.latest_only(op.table())
             })
             || !self.has_pruned_txs().await?
         {
@@ -6709,7 +6708,7 @@ impl Inner {
     pub(crate) async fn prune_transactions(
         &self,
         (node, tx): ([u8; 16], u64),
-        ops: &[StagedOp],
+        ops: &[PreparedWrite],
     ) -> Result<(), Error> {
         if self.retention().is_empty() {
             return Ok(());
@@ -6729,11 +6728,7 @@ impl Inner {
         let latest_only = !ops.is_empty()
             && !is_origin_node(node)
             && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
-            && ops.iter().all(|op| {
-                self.schema
-                    .stored_table(op.table())
-                    .is_ok_and(|stored| self.prunes(stored))
-            });
+            && ops.iter().all(|op| self.prunes(op.op.table()));
         let waiting: Option<i64> = self
             .conn
             .sql()
@@ -7877,6 +7872,7 @@ impl Db {
         listed: &[[u8; 16]],
         through: u64,
     ) -> Result<(), Error> {
+        let active_schema = self.operation_schema();
         let Some((prepared, read)) = self
             .listed_view(&query, &binding, include_deleted, view, through)
             .await?
@@ -7885,8 +7881,7 @@ impl Db {
         };
         let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
         let (table, head, base) = {
-            let inner = self.inner.sql_borrow().await;
-            let schema = inner.schema.clone();
+            let schema = active_schema.clone();
             let table = schema.table(&prepared.query.table)?;
             let (head, base) = match &read.view {
                 Some(view) if !table.branch_by.is_empty() => (
@@ -8055,13 +8050,12 @@ impl Db {
     /// transaction the ops join it. It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
-    /// `ops` name tables and columns as the schema the write ran under
-    /// (`Inner::schema`: the owner's, or the view's that wrote them); they
-    /// upload by stored names (see [`Inner::stored_op`]), so no schema
-    /// version travels with the commit.
-    pub(crate) async fn record_upload(
+    /// `ops` already name stored tables and columns. Upload encoding adds
+    /// the source version's creation defaults without converting names again;
+    /// no schema version travels with the commit.
+    pub(super) async fn record_upload(
         &self,
-        ops: Vec<StagedOp>,
+        ops: &[PreparedWrite],
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
@@ -8071,10 +8065,9 @@ impl Db {
             if inner.client.is_none() {
                 return Ok(());
             }
-            let schema = inner.schema.clone();
             let mut stored = Vec::with_capacity(ops.len());
             for op in ops {
-                stored.push(inner.stored_op(op, &schema).await?);
+                stored.push(inner.upload_op(op).await?);
             }
             let ops = stored;
             if inner.tx.is_some() {
@@ -8098,25 +8091,6 @@ impl Db {
         if inner.client.is_none() {
             return Ok(());
         }
-        // Its ops are looked up by the names they travel by.
-        let view = inner.stored_view();
-        let active = std::mem::replace(&mut inner.schema, view);
-        drop(inner);
-        let recorded = self
-            .record_upload_under_stored_view(ops, seq, kind, relayed)
-            .await;
-        self.inner.sql_borrow_mut().await.schema = active;
-        recorded
-    }
-
-    async fn record_upload_under_stored_view(
-        &self,
-        ops: Vec<StagedOp>,
-        seq: u64,
-        kind: Kind,
-        relayed: Option<Relayed>,
-    ) -> Result<(), Error> {
-        let mut inner = self.inner.sql_borrow_mut().await;
         if inner.tx.is_some() {
             inner.capture.extend(ops);
             return Ok(());
@@ -8244,9 +8218,6 @@ impl Db {
         // does not echo a row it infers is exactly this, and names it
         // `as_written` instead.
         let expected = inner.expected_rows(seq, &ops, &rows, &over).await?;
-        let client = inner.client.as_mut().expect("client");
-        let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
-        client.baselines.extend(baselines);
         let serializable = matches!(kind, Kind::Serializable { .. });
         match wire {
             Ok(wire) => {
@@ -8269,6 +8240,11 @@ impl Db {
                     ops: wire,
                     acting,
                 };
+                // Persist before exposing this upload in the in-memory queues.
+                // The enclosing transaction still owns the commit boundary.
+                inner.persist_pending(seq, &commit, &rows).await?;
+                let client = inner.client.as_mut().expect("client");
+                client.baselines.extend(baselines);
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
                     tx: seq,
@@ -8279,16 +8255,6 @@ impl Db {
                     rows: rows.clone(),
                     expected: Some(expected),
                 });
-                let persisted = inner.persist_pending(seq, &commit, &rows).await;
-                if let Err(error) = persisted {
-                    let client = inner.client.as_mut().expect("client");
-                    client.unsent.pop();
-                    client.pending.pop(seq);
-                    for key in &added {
-                        client.baselines.remove(key);
-                    }
-                    return Err(error);
-                }
                 // A commit that orders before one already pending on a row
                 // it wrote (a session's, written earlier and delivered
                 // later) goes under it: the pending commits replay in
@@ -8302,6 +8268,8 @@ impl Db {
                 }
             }
             Err(error) => {
+                let client = inner.client.as_mut().expect("client");
+                client.baselines.extend(baselines);
                 client.fates.insert(seq, Err(error));
                 client.pending.push(Pending {
                     tx: seq,
@@ -8345,7 +8313,7 @@ impl Db {
     /// referenced row, gathers seeded by a claim, multi-hop includes) would
     /// see a partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(&self, query: &Query) -> Result<(), Error> {
-        let schema = self.metadata().schema.clone();
+        let schema = self.operation_schema();
         if let Some(plan) = crate::db::union_plan(query, &schema)? {
             return plan
                 .arms
@@ -9032,6 +9000,7 @@ impl Db {
         index: usize,
         action: PermissionAdviceAction,
     ) -> PermissionAdvice {
+        let active_schema = self.operation_schema();
         if self.is_client() {
             return PermissionAdvice::Unknown;
         }
@@ -9085,10 +9054,12 @@ impl Db {
         }
         let mark = inner.changed.borrow().len();
         // Dry-run under the session's policies: a pinned session's bundle.
-        let governed = inner.governed_view(&inner.schema.clone(), index);
-        let active = std::mem::replace(&mut inner.schema, governed);
-        let applied = inner.apply_as(&op, who, seq).await.map(drop);
-        inner.schema = active;
+        let governed = inner.governed_view(&active_schema.clone(), index);
+        let active_schema = governed;
+        let applied = match inner.prepare_write(active_schema, op) {
+            Ok(prepared) => inner.apply_as(&prepared, who, seq).await.map(drop),
+            Err(error) => Err(error),
+        };
         inner.changed.borrow_mut().truncate(mark);
         let undone = end_savepoint(&inner.conn, "advise", false).await;
         match (applied, undone) {
@@ -9124,7 +9095,10 @@ impl Db {
             std::mem::take(&mut client.arrived)
         };
         if arrived {
-            self.inner.sql_borrow().await.retry_awaiting().await;
+            {
+                let schema_inner = self.inner.sql_borrow().await;
+                schema_inner.retry_awaiting().await
+            };
         }
         self.flush_settled();
         self.client_send().await
@@ -10014,7 +9988,7 @@ impl Db {
         // view wrote that the current version lacks stays visible through
         // that view, and nothing is renamed across an upgrade.
         let view = inner.stored_view();
-        let active = std::mem::replace(&mut inner.schema, view);
+        let active_schema = view;
         inner.replayed_commits += pending.len() as u64;
         let replayed: Result<(), Error> = (async {
             for (order, tx, ops, rows) in pending.into_iter() {
@@ -10043,7 +10017,9 @@ impl Db {
                     let replayed: Result<(), Error> = (async {
                         let () = (async {
                             for op in ops.iter().filter(|op| shown(op)) {
-                                (match inner.apply(op, tx).await {
+                                let prepared =
+                                    inner.admit_stored_write(active_schema.clone(), op.clone())?;
+                                (match inner.apply(&prepared, tx).await {
                                     // A part of a cross-shard commit that landed before its fate
                                     // (another shard answered first) already holds its row. The
                                     // writer's version overlays that baseline as it overlays any
@@ -10069,7 +10045,7 @@ impl Db {
                                         };
                                         let at = image.at;
                                         inner.drop_row(table, *row, key, at).await?;
-                                        inner.apply(op, tx).await.map(drop)
+                                        inner.apply(&prepared, tx).await.map(drop)
                                     }
                                     other => other.map(drop),
                                 })?;
@@ -10103,7 +10079,6 @@ impl Db {
             Ok(())
         })
         .await;
-        inner.schema = active;
         replayed?;
         let client = inner.client.as_mut().expect("client");
         client
@@ -10751,7 +10726,7 @@ impl Inner {
         settled: &HashMap<RowKey, Image>,
     ) -> Result<(), Error> {
         for op in ops.iter_mut() {
-            let Ok(table) = self.schema.table(op.table()) else {
+            let Some(table) = self.physical.tables.get(op.table()) else {
                 continue;
             };
             let (row, cells) = match &mut op.write {
@@ -10781,7 +10756,7 @@ impl Inner {
                 let Value::Large(large) = value else {
                     continue;
                 };
-                let stored = table.stored_name(column);
+                let stored = column.as_str();
                 let old = match base.cells.iter().find(|(name, _)| name == stored) {
                     Some((_, old)) => self.large_of(&table.stored, stored, old).await?,
                     None => None,
@@ -12959,6 +12934,7 @@ impl Db {
         // Queries and held rows name tables and columns as the client's
         // schema version does; commits by stored names (see below).
         let db = self.session_db(index).await;
+        let active_schema = db.operation_schema();
         match message {
             SyncMessage::Read {
                 id,
@@ -13037,7 +13013,9 @@ impl Db {
                         );
                 }
                 let mut inner = db.inner().await;
-                let support = Rc::new(inner.support_of(&query)?);
+                let support = Rc::new(
+                    inner.support_of(prepared.source_schema(&inner.owner), &prepared.query)?,
+                );
                 let authority = inner.authority;
                 let subscribed = inner
                     .subscribe_member(
@@ -13364,8 +13342,7 @@ impl Db {
                 let mut inner = db.inner().await;
                 // A history read ships versions of its source table.
                 let history = history_source_table(&query.table);
-                let table = inner
-                    .schema
+                let table = active_schema
                     .stored_table(history.unwrap_or(&query.table))?
                     .to_owned();
                 // A strict Remote read leaves out this replica's pending
@@ -13413,7 +13390,8 @@ impl Db {
                     view: viewed.view,
                     splices: Vec::new(),
                 };
-                let support = inner.support_of(&query)?;
+                let support =
+                    inner.support_of(prepared.source_schema(&inner.owner), &prepared.query)?;
                 let resume = if at.is_none()
                     && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
                 {
@@ -13462,8 +13440,7 @@ impl Db {
                     .flat_map(|flat| &flat.sources)
                     .map(|source| {
                         let table = &source.table;
-                        inner
-                            .schema
+                        active_schema
                             .stored_table(history_source_table(table).unwrap_or(table))
                             .map(str::to_owned)
                     })
@@ -13657,12 +13634,10 @@ impl Db {
                 // a latest-only commit whose entry was dropped, the accepted
                 // fate it had (SPEC 4 §4.9).
                 let known = match self.inner.sql_borrow().await.applied_fate(node, tx).await? {
-                    None if self
-                        .inner
-                        .sql_borrow()
-                        .await
-                        .dropped(node, tx, &ops)
-                        .await? =>
+                    None if {
+                        let schema_inner = self.inner.sql_borrow().await;
+                        schema_inner.dropped(node, tx, &ops).await
+                    }? =>
                     {
                         Some(Ok(()))
                     }
@@ -13976,6 +13951,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         mut ops: Vec<WireOp>,
     ) -> Result<(Vec<WireOp>, BTreeSet<[u8; 32]>), Error> {
+        let active_schema = self.operation_schema();
         let policies = self.view_policies();
         let mut roots = BTreeSet::new();
         let unresolved = || {
@@ -14021,7 +13997,7 @@ impl Db {
         for op in &mut ops {
             let deltas = std::mem::take(&mut op.deltas);
             for delta in deltas {
-                let table = inner.schema.table(op.table())?;
+                let table = active_schema.table(op.table())?;
                 let stored = table.stored_name(&delta.column).to_owned();
                 let (row, cells) = match &mut op.write {
                     WireWrite::Insert { row, cells, .. }
@@ -14226,6 +14202,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         ops: &[WireOp],
     ) -> Result<BTreeSet<[u8; 32]>, Error> {
+        let active_schema = self.operation_schema();
         let policies = self.view_policies();
         let inner = self.inner().await;
         let mut roots = BTreeSet::new();
@@ -14233,7 +14210,7 @@ impl Db {
             let Some(proof) = &op.access_proof else {
                 continue;
             };
-            let (Ok(table), Some(row)) = (inner.schema.stored_table(op.table()), wire_row(op))
+            let (Ok(table), Some(row)) = (active_schema.stored_table(op.table()), wire_row(op))
             else {
                 continue;
             };
@@ -14271,6 +14248,7 @@ impl Db {
         clock: u64,
         possession: crate::large::Possession,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
+        let active_schema = self.operation_schema();
         // A clock past what this store counts (its own plus the offset
         // bound) is held there: the commit stores, relays and orders at the
         // bounded clock, so a far-ahead writer's commits never order past
@@ -14289,7 +14267,7 @@ impl Db {
         let mentioned = async |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
             for op in &ops {
-                let (Some(row), Ok(table)) = (op.row(), inner.schema.stored_table(op.table()))
+                let (Some(row), Ok(table)) = (op.row(), active_schema.stored_table(op.table()))
                 else {
                     continue;
                 };
@@ -14357,7 +14335,7 @@ impl Db {
             for op in &ops {
                 if let Some(row) = op.row()
                     && (async {
-                        let table = inner.schema.stored_table(op.table())?;
+                        let table = active_schema.stored_table(op.table())?;
                         inner.newest_seq(table, row).await
                     })
                     .await
@@ -14424,19 +14402,33 @@ impl Db {
         // What each row was built on (SPEC 4 §4.6), before anything is
         // applied: a base on a rejected commit rejects the upload. A relay
         // renames the bases for its upstream; the authority resolves them.
+        // Admit stored identities once before conflict checks and execution.
+        // Conflict helpers consume the same prepared operations as apply.
+        let prepared = {
+            let inner = self.inner().await;
+            let prepared = ops
+                .iter()
+                .cloned()
+                .map(|op| inner.admit_stored_write(active_schema.clone(), op))
+                .collect::<Result<Vec<_>, _>>();
+            match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => return Err((error, mentioned(&inner).await)),
+            }
+        };
         let by_row = self.inner().await.row_ops(&ops);
         let (bases, mut built, landed) = {
             let inner = self.inner().await;
-            let resolved = if let Err(error) = inner.check_bases(&ops, &by_row, &bases) {
+            let resolved = if let Err(error) = inner.check_bases(&prepared, &by_row, &bases) {
                 Err(error)
             } else if relay {
                 // Where the bases landed in this relay's own history, for
                 // the echo inference alone (see `Echoable`).
                 (async {
-                    let landed = inner.relay_landed(id, &ops, &bases).await?;
+                    let landed = inner.relay_landed(id, &prepared, &bases).await?;
                     {
                         inner
-                            .relay_bases(id, &ops, bases)
+                            .relay_bases(id, &prepared, bases)
                             .await
                             .map(|bases| (bases, HashMap::new(), landed))
                     }
@@ -14444,7 +14436,7 @@ impl Db {
                 .await
             } else {
                 inner
-                    .resolve_bases(id, identity.as_ref(), &ops, &bases)
+                    .resolve_bases(id, identity.as_ref(), &prepared, &bases)
                     .await
                     .map(|built| (Vec::new(), built, HashMap::new()))
             };
@@ -14488,7 +14480,7 @@ impl Db {
                 for op in &ops {
                     let Some(row) = op.row() else { continue };
                     let newest = (async {
-                        let table = inner.schema.stored_table(op.table())?;
+                        let table = active_schema.stored_table(op.table())?;
                         inner.newest_seq(table, row).await
                     })
                     .await
@@ -14528,8 +14520,8 @@ impl Db {
             let applied = (async {
                 let () = (async {
                     let () = (async {
-                        for op in ops.iter() {
-                            (inner.apply_as(op, who, seq).await.map(drop))?;
+                        for op in &prepared {
+                            inner.apply_as(op, who, seq).await?;
                         }
                         Ok::<(), Error>(())
                     })
@@ -14574,7 +14566,7 @@ impl Db {
                 .await?;
                 match relay {
                     true => Ok(()),
-                    false => inner.prune_transactions(id, &ops).await,
+                    false => inner.prune_transactions(id, &prepared).await,
                 }
             })
             .await;
@@ -14625,7 +14617,7 @@ impl Db {
                 if !relay {
                     let inner = self.inner.sql_borrow().await;
                     inner
-                        .record_bases(&ops, &by_row, &built, seq, &rows)
+                        .record_bases(&prepared, &by_row, &built, seq, &rows)
                         .await?;
                     inner.record_as_sent(seq, id.0, &built, &rows).await?;
                 }

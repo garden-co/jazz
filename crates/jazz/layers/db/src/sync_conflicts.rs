@@ -261,23 +261,17 @@ impl Inner {
     /// of them writes a full image (an insert or a move).
     async fn authored(
         &self,
-        ops: &[StagedOp],
+        ops: &[PreparedWrite],
         indexes: &[usize],
         table: &str,
     ) -> Result<Option<Vec<u8>>, Error> {
         let mut authored = BTreeSet::new();
         for op in indexes.iter().map(|&index| &ops[index]) {
-            let schema_table = self.schema.table(op.table())?;
-            let stored = |cells: &BTreeMap<String, Value>| {
-                cells
-                    .keys()
-                    .map(|name| schema_table.stored_name(name).to_owned())
-                    .collect::<Vec<_>>()
-            };
+            let op = &op.op;
             match op {
                 StagedOp::Insert(..) | StagedOp::Move(..) => return Ok(None),
                 StagedOp::Update(_, _, cells, _) | StagedOp::Upsert(_, _, cells, _, _) => {
-                    authored.extend(stored(cells));
+                    authored.extend(cells.keys().cloned());
                 }
                 StagedOp::Delete(..) => {
                     authored.insert(DELETION.to_owned());
@@ -285,7 +279,7 @@ impl Inner {
                 StagedOp::Restore(_, _, cells, _) => {
                     authored.insert(DELETION.to_owned());
                     if let Some(cells) = cells {
-                        authored.extend(stored(cells));
+                        authored.extend(cells.keys().cloned());
                     }
                 }
             }
@@ -316,7 +310,7 @@ impl Inner {
     pub(super) async fn relay_bases(
         &self,
         sender: ([u8; 16], u64),
-        ops: &[StagedOp],
+        ops: &[PreparedWrite],
         bases: Vec<(usize, WireBase)>,
     ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
@@ -404,7 +398,7 @@ impl Inner {
     /// other base names.
     pub(super) fn check_bases(
         &self,
-        ops: &[StagedOp],
+        ops: &[PreparedWrite],
         by_row: &RowOps,
         bases: &[(usize, WireBase)],
     ) -> Result<(), Error> {
@@ -427,12 +421,16 @@ impl Inner {
     }
 
     /// The stored table and row a base names, by the op it travels on.
-    fn based_row(&self, ops: &[StagedOp], op: usize) -> Result<(&str, RowUuid), Error> {
+    fn based_row<'a>(
+        &self,
+        ops: &'a [PreparedWrite],
+        op: usize,
+    ) -> Result<(&'a str, RowUuid), Error> {
         let op = ops.get(op).ok_or_else(|| unknown_base("an op"))?;
-        match (op.row(), self.schema.stored_table(op.table())) {
-            (Some(row), Ok(table)) => Ok((table, row)),
-            _ => Err(unknown_base("an op")),
-        }
+        op.op
+            .row()
+            .map(|row| (op.op.table(), row))
+            .ok_or_else(|| unknown_base("an op"))
     }
 
     /// The newest version of a row this store holds accepted upstream.
@@ -463,7 +461,7 @@ impl Inner {
         &self,
         sender: ([u8; 16], u64),
         identity: Option<&AuthorSubject>,
-        ops: &[StagedOp],
+        ops: &[PreparedWrite],
         bases: &[(usize, WireBase)],
     ) -> Result<HashMap<RowKey, Built>, Error> {
         let mut built = HashMap::new();
@@ -523,7 +521,7 @@ impl Inner {
     pub(super) async fn relay_landed(
         &self,
         sender: ([u8; 16], u64),
-        ops: &[StagedOp],
+        ops: &[PreparedWrite],
         bases: &[(usize, WireBase)],
     ) -> Result<HashMap<RowKey, Pos>, Error> {
         let me = *self.identity.node.as_bytes();
@@ -568,7 +566,7 @@ impl Inner {
     /// was built on and the columns it authored.
     pub(super) async fn record_bases(
         &self,
-        ops: &[StagedOp],
+        ops: &[PreparedWrite],
         by_row: &RowOps,
         built: &HashMap<RowKey, Built>,
         seq: u64,
@@ -814,8 +812,9 @@ impl Db {
         row: RowUuid,
         branch: Option<&BranchSelector>,
     ) -> Result<Vec<WriteConflict>, Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let stored = inner.schema.stored_table(table)?.to_owned();
+        let stored = active_schema.stored_table(table)?.to_owned();
         let key = branch.map_or_else(Vec::new, |branch| crate::values::branch_key(&branch.values));
         inner.row_write_conflicts(&stored, row, &key).await
     }
@@ -832,8 +831,9 @@ impl Db {
         seq: u64,
         column: &str,
     ) -> Result<Option<Value>, Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let schema_table = inner.schema.table(table)?;
+        let schema_table = active_schema.table(table)?;
         let stored = schema_table.stored.clone();
         let stored_column = schema_table.stored_name(column).to_owned();
         let built = inner
@@ -873,8 +873,9 @@ impl Db {
         table: &str,
         row: RowUuid,
     ) -> Result<Vec<(i64, Vec<u8>)>, Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let schema_table = inner.schema.table(table)?;
+        let schema_table = active_schema.table(table)?;
         let sql = format!(
             "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 ORDER BY _clock, _writer",
             quote(&format!("{}__h", schema_table.stored)),
@@ -901,8 +902,9 @@ impl Db {
         row: RowUuid,
         column: &str,
     ) -> Result<u64, Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let schema_table = inner.schema.table(table)?;
+        let schema_table = active_schema.table(table)?;
         let sql = format!(
             "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(schema_table.stored_name(column)),

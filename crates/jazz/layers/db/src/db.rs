@@ -107,6 +107,12 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// The query's vocabulary and governing policies. Explicit views retain
+    /// their context; owner queries follow catalogue updates on this store.
+    fn source_schema<'a>(&'a self, owner: &'a Rc<Schema>) -> &'a Rc<Schema> {
+        self.schema.as_ref().unwrap_or(owner)
+    }
+
     /// The same query without its window (limit and offset).
     pub(crate) fn unwindowed(&self) -> PreparedQuery {
         let mut query = self.query.clone();
@@ -594,9 +600,6 @@ struct Inner {
     reclaim_passes: u64,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
-    /// The schema the current operation runs under: the owner's, or the
-    /// schema view's that issued it.
-    schema: Rc<Schema>,
     /// The owner's current schema.
     owner: Rc<Schema>,
     /// `owner.jazz.version_id()`, which hashes the whole schema.
@@ -1486,7 +1489,6 @@ impl Db {
             let mut inner = db.inner().await;
             let owner = Rc::new(inner.named(&target));
             inner.owner_version = target.version_id();
-            inner.schema = owner.clone();
             inner.owner = owner;
             inner.reset_everything().await;
             // Pending writes upload under the version they were written
@@ -1681,7 +1683,6 @@ impl Db {
                 reclaimed_at: None,
                 reclaim_passes: 0,
                 ingress: RefCell::new((0, 0)),
-                schema: owner.clone(),
                 owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
@@ -1966,8 +1967,9 @@ impl Db {
         table: &str,
         column: Option<&str>,
     ) -> Result<Option<uuid::Uuid>, Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let schema = inner.schema.clone();
+        let schema = active_schema.clone();
         let version = schema.jazz.version_id();
         let namespace = inner.namespace().await?;
         let (Some(namespace), true) = (namespace, inner.names_confirmed(&version)) else {
@@ -1989,19 +1991,21 @@ impl Db {
         })
     }
 
-    /// State-only access: never runs SQL or invalidates a cached overlay.
-    fn metadata(&self) -> std::cell::RefMut<'_, Inner> {
-        let mut inner = self.inner.metadata_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        inner
+    /// Select this handle's schema without changing shared execution state.
+    fn operation_schema(&self) -> Rc<Schema> {
+        self.view
+            .clone()
+            .unwrap_or_else(|| self.inner.metadata().owner.clone())
     }
 
-    /// Storage access under this handle's schema, after undoing another
-    /// transaction handle's cached SQL overlay.
+    /// State-only access: never runs SQL or invalidates a cached overlay.
+    fn metadata(&self) -> std::cell::RefMut<'_, Inner> {
+        self.inner.metadata_mut()
+    }
+
+    /// Storage access after undoing another transaction handle's cached SQL overlay.
     async fn inner(&self) -> std::cell::RefMut<'_, Inner> {
-        let mut inner = self.inner.sql_borrow_mut().await;
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        inner
+        self.inner.sql_borrow_mut().await
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -2352,7 +2356,10 @@ impl Db {
             }
         }
         chunks.landed(wanted);
-        self.inner().await.retry_awaiting().await;
+        {
+            let schema_inner = self.inner().await;
+            schema_inner.retry_awaiting().await
+        };
     }
 
     /// Fetch `wanted` from the chunk store and install it.
@@ -2575,7 +2582,7 @@ impl Db {
     /// Diagnostics: large-value reclaim passes this store ran.
     #[doc(hidden)]
     pub fn large_value_reclaim_passes_for_test(&self) -> u64 {
-        self.metadata().reclaim_passes
+        self.inner.metadata().reclaim_passes
     }
 
     /// Diagnostics: (epochs, encoded edit bytes they hold).
@@ -2676,14 +2683,15 @@ impl Db {
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let table = inner.schema.table(table)?;
+        let table = active_schema.table(table)?;
         if !table.branch_by.is_empty() {
             return Err(unsupported("explain for a table with branches"));
         }
         // As `Ctx::under_policy_schema` judges reads: by the schema whose
         // policies govern this table's rows.
-        let governing = match inner.schema.policies_from.as_deref() {
+        let governing = match active_schema.policies_from.as_deref() {
             None => Some(table),
             Some(current) => current.by_stored(&table.stored),
         };
@@ -2698,7 +2706,7 @@ impl Db {
         let session = Session::for_author(author, claims);
         let binding = BTreeMap::new();
         let none = Session::default();
-        let mut ctx = Ctx::new(&inner.schema, None, &none, &binding);
+        let mut ctx = Ctx::new(&active_schema, None, &none, &binding);
         let mut columns = Vec::with_capacity(clauses.len());
         for clause in &clauses {
             let condition = ctx.policy_clause(Some(clause), table, "a", &session)?;
@@ -2804,11 +2812,14 @@ impl Db {
         author: AuthorSubject,
         grounded: &[RowUuid],
     ) -> Result<String, Error> {
+        let active_schema = self.operation_schema();
         let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
         let inner = self.inner().await;
-        let stored = inner.schema.table(table)?.stored.clone();
+        let stored = active_schema.table(table)?.stored.clone();
         let overlay = CutOverlay::Grounded(Arc::new(BTreeMap::from([(stored, ids)])));
-        inner.explain_write_check(table, row, author, overlay).await
+        inner
+            .explain_write_check(&active_schema, table, row, author, overlay)
+            .await
     }
 
     /// Diagnostics: SQLite's query plan for the INSERT check of `row` of
@@ -2821,14 +2832,17 @@ impl Db {
         row: RowUuid,
         author: AuthorSubject,
     ) -> Result<String, Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let stored = inner.schema.table(table)?.stored.clone();
+        let stored = active_schema.table(table)?.stored.clone();
         let overlay = CutOverlay::Except {
             table: stored,
             row: *row.0.as_bytes(),
             key: Vec::new(),
         };
-        inner.explain_write_check(table, row, author, overlay).await
+        inner
+            .explain_write_check(&active_schema, table, row, author, overlay)
+            .await
     }
 
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
@@ -2840,17 +2854,19 @@ impl Db {
         query: &Query,
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
-        let inner = self.metadata();
-        let normalized = normalize_relation(query, &inner.schema)?;
+        let schema = self
+            .view
+            .clone()
+            .unwrap_or_else(|| self.inner.metadata().owner.clone());
+        let normalized = normalize_relation(query, &schema)?;
         let query = normalized.as_ref().unwrap_or(query);
         // Validate: tables, columns, parameters, supported forms. Read
         // options are not known yet: validate the widest read (deleted rows
         // included, so their metadata columns are accepted).
         let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
-        let shape = jazz_types::sha256::hash(
-            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
-        );
+        Ctx::new(&schema, None, &session, &binding).compile_query(query, true)?;
+        let shape =
+            jazz_types::sha256::hash(format!("{query:?}{:?}", schema.jazz.version_id()).as_bytes());
         let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         Ok(PreparedQuery {
             query: query.clone(),
@@ -3070,8 +3086,9 @@ impl Db {
         table: &str,
         row: RowUuid,
     ) -> Result<Option<(u64, String, u64, String)>, Error> {
+        let active_schema = self.operation_schema();
         let inner = self.inner().await;
-        let schema = inner.schema.clone();
+        let schema = active_schema.clone();
         let Some(table) = schema.table(table).ok().or_else(|| schema.by_stored(table)) else {
             return Ok(None);
         };
@@ -3127,7 +3144,7 @@ impl Db {
     }
 
     pub fn runtime_stats_for_test(&self) -> RuntimeStats {
-        let live = self.metadata().fan.live_members();
+        let live = self.inner.metadata().fan.live_members();
         let shapes: BTreeSet<Shape> = live.iter().map(|(shape, _)| *shape).collect();
         RuntimeStats {
             active_subscriptions: live.len(),
@@ -3137,7 +3154,7 @@ impl Db {
     }
 
     pub fn fanout_stats(&self) -> fanout::FanoutStats {
-        self.metadata().fan.stats()
+        self.inner.metadata().fan.stats()
     }
 
     /// Deliver the rows written since the last dispatch to the groups they
@@ -3165,8 +3182,7 @@ impl Db {
         }
         let who = who(opts.identity);
         let op = StagedOp::Insert(table.to_owned(), cells, opts);
-        self.fetching_with(op, async |op| self.write_op(op, who).await)
-            .await
+        self.write_op(op, who).await
     }
 
     pub async fn update(
@@ -3178,8 +3194,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Update(table.to_owned(), row, cells, opts);
-        self.fetching_with(op, async |op| self.write_op(op, who).await)
-            .await
+        self.write_op(op, who).await
     }
 
     pub async fn upsert(
@@ -3191,8 +3206,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Upsert(table.to_owned(), row, cells, BTreeMap::new(), opts);
-        self.fetching_with(op, async |op| self.write_op(op, who).await)
-            .await
+        self.write_op(op, who).await
     }
 
     pub async fn delete(
@@ -3203,8 +3217,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Delete(table.to_owned(), row, opts);
-        self.fetching_with(op, async |op| self.write_op(op, who).await)
-            .await
+        self.write_op(op, who).await
     }
 
     pub async fn restore(
@@ -3216,16 +3229,26 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Restore(table.to_owned(), row, content, opts);
-        self.fetching_with(op, async |op| self.write_op(op, who).await)
-            .await
+        self.write_op(op, who).await
     }
 
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
-    async fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+    fn prepare_write(&self, op: StagedOp) -> Result<PreparedWrite, Error> {
+        let schema = self.operation_schema();
+        self.inner.metadata().prepare_write(schema, op)
+    }
+
+    async fn write_op(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        let op = self.prepare_write(op)?;
+        self.fetching_with(op, async |op| self.write_prepared(op, who).await)
+            .await
+    }
+
+    async fn write_prepared(&self, mut op: PreparedWrite, who: Who) -> Result<WriteHandle, Error> {
         self.inner().await.require_mutation_admission()?;
         self.with_upload(async || {
-            let table = op.table().to_owned();
+            let table = op.layout.source.name.clone();
             let (prior, mark) = {
                 let inner = self.inner().await;
                 let mark = inner.changed.borrow().len();
@@ -3251,7 +3274,7 @@ impl Db {
             // fails, `with_upload` rolls both back, and nobody has been told.
             if committed
                 && let Err(error) = self
-                    .record_upload(vec![op], handle.tx, sync::Kind::Mergeable, None)
+                    .record_upload(&[op], handle.tx, sync::Kind::Mergeable, None)
                     .await
             {
                 let mut inner = self.inner().await;
@@ -3618,7 +3641,7 @@ impl Db {
 
     /// The current schema, with its policies.
     pub fn current_schema(&self) -> JazzSchema {
-        self.metadata().owner.jazz.clone()
+        self.inner.metadata().owner.jazz.clone()
     }
 
     /// The store's catalogue: every schema, lens and permissions revision
@@ -3711,12 +3734,10 @@ impl Db {
             }
             inner.write_admission(&target, cells, make_current).await?;
             if make_current {
-                inner.owner_version = target.jazz.version_id();
-                inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
                 // here: a subscription resuming from before opens fresh.
                 let mut digest = jazz_types::sha256::Hasher::new();
-                for table in &inner.owner.jazz.runtime().tables {
+                for table in &target.jazz.runtime().tables {
                     digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
                 }
                 let digest =
@@ -3724,11 +3745,13 @@ impl Db {
                 crate::catalogue::record_activation(
                     &mut inner.conn.sql(),
                     current.flatten(),
-                    &inner.owner.jazz,
+                    &target.jazz,
                     digest,
                     inner.seq,
                 )
                 .await?;
+                inner.owner_version = target.jazz.version_id();
+                inner.owner = Rc::new(target);
             }
             if !inner
                 .admitted
@@ -3835,8 +3858,7 @@ impl Inner {
             return Err(error);
         }
         let owner = Rc::new(self.named(&self.owner.jazz));
-        self.schema = owner.clone();
-        self.owner = owner;
+        self.owner = owner.clone();
         self.reset_everything().await;
         // This store's own sessions (a worker's tabs) are sent the versions
         // it just took.
@@ -4469,30 +4491,19 @@ impl Inner {
         view
     }
 
-    /// `op`, written through `schema`, as it travels: by the stored names
-    /// of its table and cells. An insert carries every column `schema`
-    /// declares (its default, or null), so its receiver, which applies it
-    /// under [`Inner::stored_view`], fills only what that version lacks.
-    pub(crate) async fn stored_op(&self, op: StagedOp, schema: &Schema) -> Result<StagedOp, Error> {
-        if schema.stored_names {
-            return Ok(op);
+    /// Encode an already resolved write for upload. The source defaults
+    /// travel with creation writes; neither names nor layouts are resolved here.
+    async fn upload_op(&self, prepared: &PreparedWrite) -> Result<StagedOp, Error> {
+        let write = &*prepared.layout;
+        let op = &prepared.op;
+        if write.stored_names {
+            return Ok(op.clone());
         }
-        let table = schema.table(op.table())?;
-        let stored = |cells: BTreeMap<String, Value>| -> BTreeMap<String, Value> {
-            cells
-                .into_iter()
-                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
-                .collect()
-        };
-        let name = table.stored.clone();
+        let table = &write.table;
         // The columns this version's lineage dropped, with their backwards
         // defaults: a receiver cannot tell which lenses a writer descends
         // from, so the writer names them (SPEC 8.9).
-        let version = if std::ptr::eq(schema, &*self.owner) {
-            self.owner_version
-        } else {
-            schema.jazz.version_id()
-        };
+        let version = write.version;
         let mut dropped = BTreeMap::new();
         if self.names.has_lens_cells() {
             let physical = self.physical.tables.get(&table.stored);
@@ -4531,60 +4542,17 @@ impl Inner {
             created.extend(dropped.clone());
             created
         };
-        // Branch selectors name branch columns too.
-        let selector = |selector: BranchSelector| BranchSelector {
-            values: selector
-                .values
-                .into_iter()
-                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
-                .collect(),
+        let created = match op {
+            StagedOp::Insert(_, cells, _) | StagedOp::Upsert(_, _, cells, _, _) => created(cells),
+            _ => BTreeMap::new(),
         };
-        let exact = |target: ExactWriteTarget| match target {
-            ExactWriteTarget::Root => ExactWriteTarget::Root,
-            ExactWriteTarget::Branch(branch) => ExactWriteTarget::Branch(selector(branch)),
-        };
-        let view = |target: WriteTarget| match target {
-            WriteTarget::Root => WriteTarget::Root,
-            WriteTarget::BranchView { head, base } => WriteTarget::BranchView {
-                head: selector(head),
-                base: base.map(|base| match base {
-                    BranchViewBase::Current(base) => BranchViewBase::Current(selector(base)),
-                    BranchViewBase::Snapshot { branch, snapshot } => BranchViewBase::Snapshot {
-                        branch: selector(branch),
-                        snapshot,
-                    },
-                }),
-            },
-        };
-        Ok(match op {
-            StagedOp::Insert(_, cells, mut opts) => {
-                opts.target = exact(opts.target);
-                let created = created(&cells);
-                let mut cells = stored(cells);
-                cells.extend(created);
-                StagedOp::Insert(name, cells, opts)
-            }
-            StagedOp::Update(_, row, cells, mut opts) => {
-                opts.target = view(opts.target);
-                StagedOp::Update(name, row, stored(cells), opts)
-            }
-            StagedOp::Upsert(_, row, cells, mut extra, mut opts) => {
-                opts.target = view(opts.target);
-                extra.extend(created(&cells));
-                StagedOp::Upsert(name, row, stored(cells), extra, opts)
-            }
-            StagedOp::Delete(_, row, mut opts) => {
-                opts.target = view(opts.target);
-                StagedOp::Delete(name, row, opts)
-            }
-            StagedOp::Restore(_, row, cells, mut opts) => {
-                opts.target = exact(opts.target);
-                StagedOp::Restore(name, row, cells.map(stored), opts)
-            }
-            StagedOp::Move(_, from, to, row) => {
-                StagedOp::Move(name, selector(from), selector(to), row)
-            }
-        })
+        let mut stored = op.clone();
+        match &mut stored {
+            StagedOp::Insert(_, cells, _) => cells.extend(created),
+            StagedOp::Upsert(_, _, _, extra, _) => extra.extend(created),
+            _ => {}
+        }
+        Ok(stored)
     }
 
     /// The lens cells the lenses into `target` make on this store: a copy
@@ -4776,7 +4744,7 @@ impl Inner {
         claims: &'s Session,
         read: &ReadSpec,
     ) -> Ctx<'s> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = prepared.source_schema(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
@@ -4839,7 +4807,7 @@ impl Inner {
             Ok(())
         }
         let mut out = tables.clone();
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = prepared.source_schema(&self.owner);
         arrays(schema, &mut out, &prepared.query.array_subqueries)?;
         Ok(out)
     }
@@ -5472,25 +5440,28 @@ impl Inner {
     /// Evaluate a policy SQL boolean against one stored row.
     async fn holds(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
-        self.holds_at(table, row, key, None, policy).await
+        self.holds_at(active_schema, table, row, key, None, policy)
+            .await
     }
 
     /// [`Inner::holds`] with the policy's other rows read as of `cut`; the
     /// row under check is always its current version.
     async fn holds_at(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
-        self.holds_counting(table, row, key, cut, policy)
+        self.holds_counting(active_schema, table, row, key, cut, policy)
             .await
             .map(|(holds, _)| holds)
     }
@@ -5499,13 +5470,15 @@ impl Inner {
     /// the check read.
     async fn holds_counting(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(bool, OverlayRead), Error> {
-        let (sql, params, read) = self.policy_check(table, row, key, cut, policy)?;
+        let (sql, params, read) =
+            self.policy_check_in(active_schema, table, row, key, cut, policy)?;
         let value: i64 = self
             .conn
             .sql()
@@ -5522,18 +5495,6 @@ impl Inner {
     /// The statement [`Inner::holds_at`] runs: the policy SQL boolean for
     /// one stored row, its parameters, and what of the cut's overlay it
     /// reads.
-    fn policy_check(
-        &self,
-        table: &Table,
-        row: RowUuid,
-        key: &[u8],
-        cut: Option<Cut>,
-        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
-    ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
-        self.policy_check_in(&self.schema, table, row, key, cut, policy)
-    }
-
-    /// [`Inner::policy_check`], its policy compiled in `schema`.
     fn policy_check_in(
         &self,
         schema: &Schema,
@@ -5568,12 +5529,13 @@ impl Inner {
     /// unit's rows `overlay` names.
     async fn explain_write_check(
         &self,
+        active_schema: &Rc<Schema>,
         table: &str,
         row: RowUuid,
         author: AuthorSubject,
         overlay: CutOverlay,
     ) -> Result<String, Error> {
-        let table = self.schema.table(table)?;
+        let table = active_schema.table(table)?;
         let own = self.own_rank(self.seq + 1);
         let cut = Cut {
             unsettled: false,
@@ -5583,9 +5545,10 @@ impl Inner {
             overlay: Some(overlay),
         };
         let session = self.session(author);
-        let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
-            ctx.operation_policy(table, Operation::Insert, "a", &session)
-        })?;
+        let (sql, params, _) =
+            self.policy_check_in(active_schema, table, row, &[], Some(cut), |ctx| {
+                ctx.operation_policy(table, Operation::Insert, "a", &session)
+            })?;
         let plan: Vec<String> = self
             .conn
             .sql()
@@ -5670,13 +5633,14 @@ impl Inner {
 
     pub(crate) async fn check(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
-        self.check_in(&self.schema, table, row, key, author, operation)
+        self.check_in(active_schema, table, row, key, author, operation)
             .await
     }
 
@@ -5711,8 +5675,10 @@ impl Inner {
     /// overlaid with the unit's grounded rows. Inside a unit
     /// ([`Inner::defer_checks`]) the check waits for the unit's end;
     /// alone, nothing else is grounded and it runs now.
+    #[allow(clippy::too_many_arguments)]
     async fn write_check(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -5721,7 +5687,7 @@ impl Inner {
         seq: u64,
     ) -> Result<(), Error> {
         let deferred = DeferredCheck {
-            schema: self.schema.clone(),
+            schema: active_schema.clone(),
             table: table.name.clone(),
             row,
             key: key.to_vec(),
@@ -5897,7 +5863,7 @@ impl Inner {
     /// stored tables the policy read through the cut's overlay.
     async fn write_check_holds(
         &self,
-        schema: &Schema,
+        schema: &Rc<Schema>,
         check: &DeferredCheck,
         cut: Cut,
         evidence: &mut EvidenceBudget,
@@ -5905,7 +5871,7 @@ impl Inner {
         let table = schema.table(&check.table)?;
         let session = self.session(check.author);
         let (holds, read) = self
-            .holds_counting(table, check.row, &check.key, Some(cut), |ctx| {
+            .holds_counting(schema, table, check.row, &check.key, Some(cut), |ctx| {
                 match check.check {
                     WriteCheck::Insert => {
                         ctx.operation_policy(table, Operation::Insert, "a", &session)
@@ -6101,6 +6067,7 @@ impl Inner {
 
     async fn check_clause(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -6108,7 +6075,7 @@ impl Inner {
         clause: Option<&crate::tools::PolicyExpr>,
     ) -> Result<bool, Error> {
         let session = self.session(author);
-        self.holds(table, row, key, |ctx| {
+        self.holds(active_schema, table, row, key, |ctx| {
             ctx.policy_clause(clause, table, "a", &session)
         })
         .await
@@ -6222,8 +6189,25 @@ impl Inner {
         Ok(parts)
     }
 
-    fn validate_cells(&self, table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
-        for name in cells.keys() {
+    fn validate_write_cells(
+        &self,
+        write: &WriteTable,
+        cells: &BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        self.validate_named_cells(
+            &write.source,
+            cells
+                .iter()
+                .map(|(name, value)| (write.column_name(name), value)),
+        )
+    }
+
+    fn validate_named_cells<'a>(
+        &self,
+        table: &Table,
+        cells: impl Iterator<Item = (&'a str, &'a Value)>,
+    ) -> Result<(), Error> {
+        for (name, value) in cells {
             if name.starts_with('$') {
                 return Err(rejected(format!(
                     "`{}.{name}` is engine-maintained provenance and cannot be written",
@@ -6234,11 +6218,11 @@ impl Inner {
                 return Err(rejected(format!("unknown column `{}.{name}`", table.name)));
             };
             if let Some(variants) = &column.variants {
-                for variant in crate::values::enum_names(&cells[name]) {
+                for variant in crate::values::enum_names(value) {
                     if !variants.iter().any(|v| v == variant)
                         && !self
                             .kept_variants
-                            .get(&(table.name.clone(), name.clone()))
+                            .get(&(table.name.clone(), name.to_owned()))
                             .is_some_and(|kept| kept.contains(variant))
                     {
                         return Err(rejected(format!(
@@ -6613,24 +6597,25 @@ impl Inner {
     /// and in history.
     pub(crate) async fn chunk_large_cells(
         &mut self,
-        op: &mut StagedOp,
+        prepared: &mut PreparedWrite,
     ) -> Result<LargeEdits, Error> {
+        let write = &*prepared.layout;
+        let table = &write.table;
+        let op = &mut prepared.op;
         let mut edits = LargeEdits::default();
-        let (table_name, row, cells) = match op {
-            StagedOp::Insert(t, c, _) => (t.clone(), None, c),
-            StagedOp::Update(t, r, c, o) => {
+        let (row, cells) = match op {
+            StagedOp::Insert(_, c, _) => (None, c),
+            StagedOp::Update(_, r, c, o) => {
                 let root = matches!(o.target, crate::options::WriteTarget::Root);
-                (t.clone(), root.then_some((*r, o.identity)), c)
+                (root.then_some((*r, o.identity)), c)
             }
-            StagedOp::Upsert(t, r, c, _, o) => {
+            StagedOp::Upsert(_, r, c, _, o) => {
                 let root = matches!(o.target, crate::options::WriteTarget::Root);
-                (t.clone(), root.then_some((*r, o.identity)), c)
+                (root.then_some((*r, o.identity)), c)
             }
-            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), None, c),
+            StagedOp::Restore(_, _, Some(c), _) => (None, c),
             _ => return Ok(edits),
         };
-        let schema = self.schema.clone();
-        let table = schema.table(&table_name)?;
         for column in &table.columns {
             if !crate::large::large_capable(column) {
                 continue;
@@ -6651,9 +6636,18 @@ impl Inner {
             }
             if let Some((row, identity)) = &row {
                 let marks = (self.derived.len(), self.pending_nodes.len());
-                if let Some(edited) = self
-                    .whole_write_as_edit(&table_name, *row, column, logical, *identity)
-                    .await
+                let read = large_ops::PreparedCell::new(
+                    write.policies.clone(),
+                    &write.source.name,
+                    *row,
+                    &write
+                        .source
+                        .by_stored_column(&column.stored)
+                        .unwrap_or(column)
+                        .name,
+                );
+                if let Ok(read) = read
+                    && let Some(edited) = self.whole_write_as_edit(&read, logical, *identity).await
                 {
                     // The write carries what the edit made, as any edit's does.
                     edits.derived.extend(self.derived.drain(marks.0..));
@@ -6674,14 +6668,15 @@ impl Inner {
 
     /// Turn a write's counter cells from the values it sets into the
     /// changes it makes to what this node holds (see [`crate::merge`]).
-    pub(crate) async fn counter_deltas(&self, op: &mut StagedOp) -> Result<(), Error> {
-        let (table_name, row, cells, target) = match op {
-            StagedOp::Update(t, r, c, o) => (t.clone(), *r, c, &o.target),
-            StagedOp::Upsert(t, r, c, _, o) => (t.clone(), *r, c, &o.target),
+    pub(crate) async fn counter_deltas(&self, prepared: &mut PreparedWrite) -> Result<(), Error> {
+        let write = &*prepared.layout;
+        let table = &write.table;
+        let op = &mut prepared.op;
+        let (row, cells, target) = match op {
+            StagedOp::Update(_, r, c, o) => (*r, c, &o.target),
+            StagedOp::Upsert(_, r, c, _, o) => (*r, c, &o.target),
             _ => return Ok(()),
         };
-        let schema = self.schema.clone();
-        let table = schema.table(&table_name)?;
         let counters: Vec<String> = cells
             .keys()
             .filter(|name| {
@@ -7325,8 +7320,18 @@ impl Inner {
         )
         .await
         .map_err(storage)?;
-        self.set_cells(table, row, to, head_cells, Cells::Carried, seq, None, false)
-            .await
+        self.set_cells(
+            table,
+            table,
+            row,
+            to,
+            head_cells,
+            Cells::Carried,
+            seq,
+            None,
+            false,
+        )
+        .await
     }
 
     /// Write cells (and the deletion flag) into a row's current version
@@ -7336,6 +7341,7 @@ impl Inner {
     async fn set_cells(
         &self,
         table: &Table,
+        declared: &Table,
         row: RowUuid,
         key: &[u8],
         cells: &BTreeMap<String, Value>,
@@ -7371,7 +7377,15 @@ impl Inner {
         ];
         for (name, value) in cells {
             let cell = match table.column(name) {
-                Some(column) => self.bind_cell(table, column, value, source).await?,
+                Some(column) => {
+                    self.bind_cell(
+                        table,
+                        declared.by_stored_column(&column.stored).unwrap_or(column),
+                        value,
+                        source,
+                    )
+                    .await?
+                }
                 None => Self::bind_value(value)?,
             };
             values.push(cell);
@@ -7415,7 +7429,7 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     async fn insert(
         &mut self,
-        table_name: &str,
+        write: &WriteTable,
         mut cells: BTreeMap<String, Value>,
         source: Cells,
         row_id: Option<RowUuid>,
@@ -7423,9 +7437,9 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        let schema = self.schema.clone();
-        let table = schema.table(table_name)?;
-        self.validate_cells(table, &cells)?;
+        let table = &write.table;
+        let table_name = &write.source.name;
+        self.validate_write_cells(write, &cells)?;
         if let Target::Exact(selector) | Target::View { head: selector, .. } = target
             && !table.branch_by.is_empty()
         {
@@ -7444,7 +7458,7 @@ impl Inner {
         }
         // A replicated insert from a version without a branch column keys
         // its row by that column's immutable default (INV-BVIEW-19).
-        if schema.stored_names {
+        if write.stored_names {
             for column in &table.branch_by {
                 if !cells.contains_key(column)
                     && let Some(default) = table.column(column).and_then(|c| c.default.clone())
@@ -7466,17 +7480,13 @@ impl Inner {
         // (hashing a schema per insert would dominate a large batch's replay).
         let (copies, dropped) = if !self.names.has_lens_cells() {
             Default::default()
-        } else if schema.stored_names {
+        } else if write.stored_names {
             let copies = self
                 .names
                 .stored_copies(&table.stored, |column| cells.contains_key(column));
             (copies, Vec::new())
         } else {
-            let version = if Rc::ptr_eq(&schema, &self.owner) {
-                self.owner_version
-            } else {
-                schema.jazz.version_id()
-            };
+            let version = write.version;
             self.names.lens_cells(&version, table)
         };
         let mut names = vec![
@@ -7500,7 +7510,7 @@ impl Inner {
                 // added, so the stored column's own default or a copy fills
                 // it. Only a required column nothing fills is refused.
                 (None, default)
-                    if schema.stored_names
+                    if write.stored_names
                         && (default.is_some()
                             || column.nullable()
                             || copies.iter().any(|(_, copy)| *copy == column.stored)) =>
@@ -7510,11 +7520,25 @@ impl Inner {
                 (None, Some(default)) => Some((default, Cells::Authored)),
                 (None, None) if column.nullable() => None,
                 (None, None) => {
-                    return Err(missing_required(table_name, &column.name));
+                    return Err(missing_required(
+                        table_name,
+                        write.column_name(&column.stored),
+                    ));
                 }
             };
             let value = match given {
-                Some((value, cells)) => self.bind_cell(table, column, value, cells).await?,
+                Some((value, cells)) => {
+                    self.bind_cell(
+                        table,
+                        write
+                            .source
+                            .by_stored_column(&column.stored)
+                            .unwrap_or(column),
+                        value,
+                        cells,
+                    )
+                    .await?
+                }
                 None => Sql::Null,
             };
             for (_, copy) in copies.iter().filter(|(c, _)| *c == column.name) {
@@ -7567,8 +7591,16 @@ impl Inner {
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
         if let Some(author) = self.checked(who) {
-            self.write_check(table, row, &key, author, WriteCheck::Insert, seq)
-                .await?;
+            self.write_check(
+                &write.policies,
+                &write.source,
+                row,
+                &key,
+                author,
+                WriteCheck::Insert,
+                seq,
+            )
+            .await?;
         } else {
             self.note_trusted(table, row);
         }
@@ -7618,6 +7650,7 @@ impl Inner {
     /// session's write, so it gives every session the missing row's answer.
     async fn refuse_deleted(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -7627,7 +7660,7 @@ impl Inner {
         if let Who::Session(author) = *who
             && (self.client.is_some()
                 || !self
-                    .check(table, row, key, author, Operation::Select)
+                    .check(active_schema, table, row, key, author, Operation::Select)
                     .await?)
         {
             return Ok(if verb == "DELETE" {
@@ -7657,6 +7690,7 @@ impl Inner {
     /// their own policy; that is a backend's default read.
     async fn authorize_patch(
         &self,
+        active_schema: &Rc<Schema>,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -7665,7 +7699,7 @@ impl Inner {
     ) -> Result<(), Error> {
         if let Some(author) = self.checked(*who)
             && !self
-                .check(table, row, key, author, Operation::Select)
+                .check(active_schema, table, row, key, author, Operation::Select)
                 .await?
         {
             return Err(unreadable_target(verb, &table.name));
@@ -7673,6 +7707,7 @@ impl Inner {
         if let Some(author) = self.checked(*who)
             && !self
                 .check_clause(
+                    active_schema,
                     table,
                     row,
                     key,
@@ -7693,7 +7728,7 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     async fn patch(
         &mut self,
-        table_name: &str,
+        write: &WriteTable,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
         created: Option<BTreeMap<String, Value>>,
@@ -7704,9 +7739,9 @@ impl Inner {
         let upsert = created.is_some();
         let created = created.unwrap_or_default();
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
-        let schema = self.schema.clone();
-        let table = schema.table(table_name)?;
-        self.validate_cells(table, &cells)?;
+        let table = &write.table;
+        let table_name = &write.source.name;
+        self.validate_write_cells(write, &cells)?;
         let located = self.locate(table, row, target).await?;
         // A row's branch columns are its branch key: a write cannot move it
         // to another branch.
@@ -7731,7 +7766,7 @@ impl Inner {
                 }
                 return self
                     .insert(
-                        table_name,
+                        write,
                         cells,
                         Cells::Authored,
                         Some(row),
@@ -7768,7 +7803,9 @@ impl Inner {
                 seq: current,
                 key,
             } if !self.merging && (!upsert || current != self.own_pos(seq)) => {
-                return Err(self.refuse_deleted(table, row, &key, &who, verb).await?);
+                return Err(self
+                    .refuse_deleted(&write.policies, &write.source, row, &key, &who, verb)
+                    .await?);
             }
             Located::Row {
                 key,
@@ -7794,12 +7831,18 @@ impl Inner {
                         let value = match &column.default {
                             Some(default) => default.clone(),
                             None if column.nullable() => Value::Nullable(None),
-                            None => return Err(missing_required(table_name, &column.name)),
+                            None => {
+                                return Err(missing_required(
+                                    table_name,
+                                    write.column_name(&column.stored),
+                                ));
+                            }
                         };
                         cells.insert(column.name.clone(), value);
                     }
                 } else {
-                    self.authorize_patch(table, row, &key, &who, verb).await?;
+                    self.authorize_patch(&write.policies, &write.source, row, &key, &who, verb)
+                        .await?;
                 }
                 if cells.is_empty() && !staged_tombstone {
                     return Ok(WriteHandle {
@@ -7816,6 +7859,7 @@ impl Inner {
                 // An upsert over a tombstone replaces it.
                 self.set_cells(
                     table,
+                    &write.source,
                     row,
                     &key,
                     &cells,
@@ -7833,14 +7877,25 @@ impl Inner {
                 head_cells,
                 at,
             } => {
-                self.authorize_patch(table, row, &from, &who, verb).await?;
+                self.authorize_patch(&write.policies, &write.source, row, &from, &who, verb)
+                    .await?;
                 let cells = self
                     .merged_cells(table, row, Some(&from), Some((&to, seq)), cells)
                     .await?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)
                     .await?;
-                self.set_cells(table, row, &to, &cells, Cells::Authored, seq, None, true)
-                    .await?;
+                self.set_cells(
+                    table,
+                    &write.source,
+                    row,
+                    &to,
+                    &cells,
+                    Cells::Authored,
+                    seq,
+                    None,
+                    true,
+                )
+                .await?;
                 to
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
@@ -7850,7 +7905,8 @@ impl Inner {
         // with the old one, not with itself.
         if let Some(author) = self.checked(who) {
             self.write_check(
-                table,
+                &write.policies,
+                &write.source,
                 row,
                 &key,
                 author,
@@ -7872,25 +7928,26 @@ impl Inner {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn update(
         &mut self,
-        table: &str,
+        write: &WriteTable,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
         target: &Target,
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, None, target, who, seq).await
+        self.patch(write, row, cells, None, target, who, seq).await
     }
 
     /// Upsert `cells` into `row`; if it creates the row, `created` fills
     /// the columns `cells` leaves out (a replicated upsert's writer's
-    /// defaults, see `stored_op`).
+    /// defaults, see `upload_op`).
     #[allow(clippy::too_many_arguments)]
     async fn upsert(
         &mut self,
-        table: &str,
+        write: &WriteTable,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
         created: BTreeMap<String, Value>,
@@ -7898,26 +7955,33 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, Some(created), target, who, seq)
+        self.patch(write, row, cells, Some(created), target, who, seq)
             .await
     }
 
     async fn delete(
         &mut self,
-        table_name: &str,
+        write: &WriteTable,
         row: RowUuid,
         target: &Target,
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        let schema = self.schema.clone();
-        let table = schema.table(table_name)?;
+        let table = &write.table;
+        let table_name = &write.source.name;
         // A delete by row id reads no user data (SPEC 7): its DELETE policy
         // alone decides, so a write-only principal may delete.
         let check = async |inner: &Self, key: &[u8]| -> Result<(), Error> {
             if let Some(author) = inner.checked(who)
                 && !inner
-                    .check(table, row, key, author, Operation::Delete)
+                    .check(
+                        &write.policies,
+                        &write.source,
+                        row,
+                        key,
+                        author,
+                        Operation::Delete,
+                    )
                     .await?
             {
                 return Err(delete_denied());
@@ -7934,6 +7998,7 @@ impl Inner {
                 self.snapshot(table, row, &key, seq).await?;
                 self.set_cells(
                     table,
+                    &write.source,
                     row,
                     &key,
                     &BTreeMap::new(),
@@ -7957,6 +8022,7 @@ impl Inner {
                     .await?;
                 self.set_cells(
                     table,
+                    &write.source,
                     row,
                     &to,
                     &BTreeMap::new(),
@@ -7976,7 +8042,7 @@ impl Inner {
                 deleted: true, key, ..
             } => {
                 return Err(self
-                    .refuse_deleted(table, row, &key, &who, "DELETE")
+                    .refuse_deleted(&write.policies, &write.source, row, &key, &who, "DELETE")
                     .await?);
             }
             // As for an update: a session can't tell a missing row from one
@@ -7999,7 +8065,7 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     async fn restore(
         &mut self,
-        table_name: &str,
+        write: &WriteTable,
         row: RowUuid,
         content: Option<BTreeMap<String, Value>>,
         source: Cells,
@@ -8007,8 +8073,8 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        let schema = self.schema.clone();
-        let table = schema.table(table_name)?;
+        let table = &write.table;
+        let table_name = &write.source.name;
         let key = match self.locate(table, row, target).await? {
             Located::Row {
                 key, deleted: true, ..
@@ -8029,7 +8095,7 @@ impl Inner {
         self.snapshot(table, row, &key, seq).await?;
         let mut cells = BTreeMap::new();
         if let Some(content) = &content {
-            self.validate_cells(table, content)?;
+            self.validate_write_cells(write, content)?;
             for column in &table.columns {
                 if table.branch_by.contains(&column.name) {
                     continue;
@@ -8041,7 +8107,10 @@ impl Inner {
                     (None, Some(default)) => default.clone(),
                     (None, None) if column.nullable() => Value::Nullable(None),
                     (None, None) => {
-                        return Err(missing_required(table_name, &column.name));
+                        return Err(missing_required(
+                            table_name,
+                            write.column_name(&column.stored),
+                        ));
                     }
                 };
                 cells.insert(column.name.clone(), value);
@@ -8049,6 +8118,7 @@ impl Inner {
         }
         self.set_cells(
             table,
+            &write.source,
             row,
             &key,
             &cells,
@@ -8060,8 +8130,16 @@ impl Inner {
         .await?;
         // A restore writes an existing row back: the UPDATE policy decides.
         if let Some(author) = self.checked(who) {
-            self.write_check(table, row, &key, author, WriteCheck::Restore, seq)
-                .await?;
+            self.write_check(
+                &write.policies,
+                &write.source,
+                row,
+                &key,
+                author,
+                WriteCheck::Restore,
+                seq,
+            )
+            .await?;
         } else {
             self.note_trusted(table, row);
         }
@@ -8299,13 +8377,29 @@ enum Located {
     },
 }
 
+/// A write's resolved layout, source diagnostics and authorization. It is
+/// immutable and shared by every replay of the prepared operation.
+struct WriteTable {
+    table: Table,
+    source: Table,
+    policies: Rc<Schema>,
+    version: crate::ids::SchemaVersionId,
+    stored_names: bool,
+}
+
+#[derive(Clone)]
+struct PreparedWrite {
+    layout: Rc<WriteTable>,
+    op: StagedOp,
+}
+
 /// A staged mergeable transaction handle (`Db::mergeable_tx`). Writes are
 /// staged in order and applied as one commit; each staged write sees the
 /// earlier ones, as Jazz's transaction overlay does.
 pub struct MergeableTxHandle<'a> {
     db: &'a Db,
     identity: WriteIdentity,
-    ops: RefCell<Vec<StagedOp>>,
+    ops: RefCell<Vec<PreparedWrite>>,
 }
 
 #[derive(Clone, Debug)]
@@ -8314,7 +8408,7 @@ pub(crate) enum StagedOp {
     Update(String, RowUuid, BTreeMap<String, Value>, UpdateOptions),
     /// The fourth field is what the upsert gives the columns it leaves
     /// out if it creates the row, by stored names: a replicated upsert's
-    /// writer's defaults (see `Inner::stored_op`); empty on a local one.
+    /// writer's defaults (see `Inner::upload_op`); empty on a local one.
     Upsert(
         String,
         RowUuid,
@@ -8330,6 +8424,73 @@ pub(crate) enum StagedOp {
         RestoreOptions,
     ),
     Move(String, BranchSelector, BranchSelector, RowUuid),
+}
+
+impl StagedOp {
+    fn by_stored_names(self, table: &Table) -> Self {
+        let cells = |values: BTreeMap<String, Value>| {
+            values
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect()
+        };
+        let selector = |branch: BranchSelector| BranchSelector {
+            values: branch
+                .values
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect(),
+        };
+        let exact = |target| match target {
+            ExactWriteTarget::Root => ExactWriteTarget::Root,
+            ExactWriteTarget::Branch(branch) => ExactWriteTarget::Branch(selector(branch)),
+        };
+        let target = |target| match target {
+            WriteTarget::Root => WriteTarget::Root,
+            WriteTarget::BranchView { head, base } => WriteTarget::BranchView {
+                head: selector(head),
+                base: base.map(|base| match base {
+                    BranchViewBase::Current(branch) => BranchViewBase::Current(selector(branch)),
+                    BranchViewBase::Snapshot { branch, snapshot } => BranchViewBase::Snapshot {
+                        branch: selector(branch),
+                        snapshot,
+                    },
+                }),
+            },
+        };
+        let name = table.stored.clone();
+        match self {
+            Self::Insert(_, values, mut options) => {
+                options.target = exact(options.target);
+                Self::Insert(name, cells(values), options)
+            }
+            Self::Update(_, row, values, mut options) => {
+                options.target = target(options.target);
+                Self::Update(name, row, cells(values), options)
+            }
+            Self::Upsert(_, row, values, created, mut options) => {
+                options.target = target(options.target);
+                Self::Upsert(name, row, cells(values), created, options)
+            }
+            Self::Delete(_, row, mut options) => {
+                options.target = target(options.target);
+                Self::Delete(name, row, options)
+            }
+            Self::Restore(_, row, values, mut options) => {
+                options.target = exact(options.target);
+                Self::Restore(name, row, values.map(cells), options)
+            }
+            Self::Move(_, from, to, row) => Self::Move(name, selector(from), selector(to), row),
+        }
+    }
+}
+
+impl WriteTable {
+    fn column_name<'a>(&'a self, stored: &'a str) -> &'a str {
+        self.source
+            .by_stored_column(stored)
+            .map_or(stored, |column| &column.name)
+    }
 }
 
 impl Db {
@@ -8357,33 +8518,18 @@ impl Db {
     }
 }
 
-impl Db {
-    async fn move_row(
-        &self,
-        table: &str,
-        from: BranchSelector,
-        to: BranchSelector,
-        row: RowUuid,
-    ) -> Result<(), Error> {
-        self.write_op(StagedOp::Move(table.to_owned(), from, to, row), Who::Local)
-            .await
-            .map(drop)
-    }
-}
-
 impl Inner {
     /// A branch move: a source tombstone plus a destination insert (or a
     /// restore of an earlier destination tombstone), in one commit.
     async fn move_row(
         &mut self,
-        table: &str,
+        write: &WriteTable,
         from: BranchSelector,
         to: BranchSelector,
         row: RowUuid,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        let schema = self.schema.clone();
-        let t = schema.table(table)?;
+        let t = &write.table;
         let key = t.selector_key(&from)?;
         let mut cells = BTreeMap::new();
         for column in &t.columns {
@@ -8411,14 +8557,14 @@ impl Inner {
                 cells.insert(column.name.clone(), value);
             }
         }
-        self.delete(table, row, &Target::Exact(from), Who::Local, seq)
+        self.delete(write, row, &Target::Exact(from), Who::Local, seq)
             .await?;
         // The moved row carries its stored cells: they are not re-checked.
         let to = Target::Exact(to);
         match self.locate(t, row, &to).await? {
             Located::Row { deleted: true, .. } => {
                 self.restore(
-                    table,
+                    write,
                     row,
                     Some(cells),
                     Cells::Carried,
@@ -8430,7 +8576,7 @@ impl Inner {
             }
             _ => {
                 self.insert(
-                    table,
+                    write,
                     cells,
                     Cells::Carried,
                     Some(row),
@@ -8459,7 +8605,10 @@ impl MergeableTxHandle<'_> {
         opts.row_id = Some(row);
         self.ops
             .borrow_mut()
-            .push(StagedOp::Insert(table.to_owned(), cells, opts));
+            .push(
+                self.db
+                    .prepare_write(StagedOp::Insert(table.to_owned(), cells, opts))?,
+            );
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
@@ -8477,7 +8626,10 @@ impl MergeableTxHandle<'_> {
         self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
-            .push(StagedOp::Update(table.to_owned(), row, cells, opts));
+            .push(
+                self.db
+                    .prepare_write(StagedOp::Update(table.to_owned(), row, cells, opts))?,
+            );
         Ok(())
     }
 
@@ -8489,13 +8641,15 @@ impl MergeableTxHandle<'_> {
         opts: UpsertOptions,
     ) -> Result<(), Error> {
         self.db.inner().await.require_mutation_admission()?;
-        self.ops.borrow_mut().push(StagedOp::Upsert(
-            table.to_owned(),
-            row,
-            cells,
-            BTreeMap::new(),
-            opts,
-        ));
+        self.ops
+            .borrow_mut()
+            .push(self.db.prepare_write(StagedOp::Upsert(
+                table.to_owned(),
+                row,
+                cells,
+                BTreeMap::new(),
+                opts,
+            ))?);
         Ok(())
     }
 
@@ -8508,7 +8662,10 @@ impl MergeableTxHandle<'_> {
         self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
-            .push(StagedOp::Delete(table.to_owned(), row, opts));
+            .push(
+                self.db
+                    .prepare_write(StagedOp::Delete(table.to_owned(), row, opts))?,
+            );
         Ok(())
     }
 
@@ -8522,7 +8679,12 @@ impl MergeableTxHandle<'_> {
         self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
-            .push(StagedOp::Restore(table.to_owned(), row, content, opts));
+            .push(self.db.prepare_write(StagedOp::Restore(
+                table.to_owned(),
+                row,
+                content,
+                opts,
+            ))?);
         Ok(())
     }
 
@@ -8538,7 +8700,12 @@ impl MergeableTxHandle<'_> {
         self.db.inner().await.require_mutation_admission()?;
         self.ops
             .borrow_mut()
-            .push(StagedOp::Move(table.to_owned(), source, destination, row));
+            .push(self.db.prepare_write(StagedOp::Move(
+                table.to_owned(),
+                source,
+                destination,
+                row,
+            ))?);
         Ok(())
     }
 
@@ -8548,68 +8715,37 @@ impl MergeableTxHandle<'_> {
         let identity = self.identity;
         let ((), receipt) = db
             .transaction_as(identity, async |_tx| {
-                for op in ops {
-                    match op {
-                        StagedOp::Insert(t, c, o) => db
-                            .insert(
-                                &t,
-                                c,
-                                InsertOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Update(t, r, c, o) => db
-                            .update(
-                                &t,
-                                r,
-                                c,
-                                UpdateOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Upsert(t, r, c, _, o) => db
-                            .upsert(
-                                &t,
-                                r,
-                                c,
-                                UpsertOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Delete(t, r, o) => db
-                            .delete(
-                                &t,
-                                r,
-                                DeleteOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Restore(t, r, c, o) => db
-                            .restore(
-                                &t,
-                                r,
-                                c,
-                                RestoreOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Move(t, from, to, r) => db.move_row(&t, from, to, r).await?,
+                for mut prepared in ops {
+                    // Identity is decided by this transaction, just as when
+                    // these writes went back through the public methods.
+                    let selected = prepared
+                        .op
+                        .identity()
+                        .map(|own| in_transaction(own, identity))
+                        .transpose()?;
+                    match (&mut prepared.op, selected) {
+                        (StagedOp::Insert(_, _, options), Some(identity)) => {
+                            options.identity = identity
+                        }
+                        (StagedOp::Update(_, _, _, options), Some(identity)) => {
+                            options.identity = identity
+                        }
+                        (StagedOp::Upsert(_, _, _, _, options), Some(identity)) => {
+                            options.identity = identity
+                        }
+                        (StagedOp::Delete(_, _, options), Some(identity)) => {
+                            options.identity = identity
+                        }
+                        (StagedOp::Restore(_, _, _, options), Some(identity)) => {
+                            options.identity = identity
+                        }
+                        _ => {}
                     }
+                    let who = selected.map_or(Who::Local, who);
+                    db.fetching_with(prepared, async |prepared| {
+                        db.write_prepared(prepared, who).await
+                    })
+                    .await?;
                 }
                 Ok(())
             })
@@ -8977,7 +9113,7 @@ impl Store {
 
 struct Batch {
     kind: BatchKind,
-    ops: Vec<(Rc<Schema>, StagedOp)>,
+    ops: Vec<PreparedWrite>,
     /// The rows `ops` write, by stored table: a later staged write's
     /// evidence (see [`Db::in_overlay`]). Shared with that write's check
     /// rather than copied, so a stage costs the same however many writes
@@ -9170,9 +9306,9 @@ impl StagedOp {
 
 impl Inner {
     /// Re-apply a staged write unchecked, keeping its provenance.
-    async fn apply(&mut self, op: &StagedOp, seq: u64) -> Result<WriteHandle, Error> {
-        let who = op.author().map_or(Who::Local, Who::Attributed);
-        self.apply_as(op, who, seq).await
+    async fn apply(&mut self, prepared: &PreparedWrite, seq: u64) -> Result<WriteHandle, Error> {
+        let who = prepared.op.author().map_or(Who::Local, Who::Attributed);
+        self.apply_as(prepared, who, seq).await
     }
 
     /// Wall-clock Unix ms (or the one a test set).
@@ -9290,7 +9426,13 @@ impl Inner {
     }
 
     /// Apply one write as `who`: policies apply for a session identity.
-    async fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
+    async fn apply_as(
+        &mut self,
+        prepared: &PreparedWrite,
+        who: Who,
+        seq: u64,
+    ) -> Result<WriteHandle, Error> {
+        let op = &prepared.op;
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
@@ -9314,7 +9456,7 @@ impl Inner {
             at,
             author: self.author_code(&author_key(&author)).await?,
         });
-        let result = self.apply_op(op, who, seq).await;
+        let result = self.apply_op(prepared, who, seq).await;
         self.writer = None;
         result
     }
@@ -9342,31 +9484,90 @@ impl Inner {
         Ok(())
     }
 
-    async fn apply_op(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
-        match op.clone() {
-            StagedOp::Insert(t, c, o) => {
+    fn prepare_write(&self, schema: Rc<Schema>, op: StagedOp) -> Result<PreparedWrite, Error> {
+        let source = schema.table(op.table())?;
+        // Validate the caller's vocabulary before translating it. In
+        // particular, a physical column name is not an alias a caller may
+        // use to bypass the source version's declared columns.
+        let cells = match &op {
+            StagedOp::Insert(_, cells, _)
+            | StagedOp::Update(_, _, cells, _)
+            | StagedOp::Upsert(_, _, cells, _, _)
+            | StagedOp::Restore(_, _, Some(cells), _) => Some(cells),
+            _ => None,
+        };
+        if let Some(cells) = cells {
+            self.validate_named_cells(
+                source,
+                cells.iter().map(|(name, value)| (name.as_str(), value)),
+            )?;
+        }
+        let mut table = source.physical();
+        if table.branch_key_names.is_empty() {
+            table.branch_key_names = source.branch_by.clone();
+        }
+        let op = if schema.stored_names {
+            op
+        } else {
+            op.by_stored_names(source)
+        };
+        let source = source.clone();
+        let version = if Rc::ptr_eq(&schema, &self.owner) {
+            self.owner_version
+        } else {
+            schema.version
+        };
+        Ok(PreparedWrite {
+            op,
+            layout: Rc::new(WriteTable {
+                table,
+                source,
+                version,
+                stored_names: schema.stored_names,
+                policies: schema,
+            }),
+        })
+    }
+
+    /// Received and persisted commits already name storage identities and
+    /// carry the writer's defaults. They never pass through logical renaming.
+    fn admit_stored_write(&self, schema: Rc<Schema>, op: StagedOp) -> Result<PreparedWrite, Error> {
+        debug_assert!(schema.stored_names);
+        self.prepare_write(schema, op)
+    }
+
+    async fn apply_op(
+        &mut self,
+        prepared: &PreparedWrite,
+        who: Who,
+        seq: u64,
+    ) -> Result<WriteHandle, Error> {
+        let write = &*prepared.layout;
+        let op = prepared.op.clone();
+        match op {
+            StagedOp::Insert(_, c, o) => {
                 let target = Target::exact(&o.target);
-                self.insert(&t, c, Cells::Authored, o.row_id, &target, who, seq)
+                self.insert(write, c, Cells::Authored, o.row_id, &target, who, seq)
                     .await
             }
-            StagedOp::Update(t, r, c, o) => {
+            StagedOp::Update(_, r, c, o) => {
                 let target = Target::of(&o.target, self).await?;
-                self.update(&t, r, c, &target, who, seq).await
+                self.update(write, r, c, &target, who, seq).await
             }
-            StagedOp::Upsert(t, r, c, created, o) => {
+            StagedOp::Upsert(_, r, c, created, o) => {
                 let target = Target::of(&o.target, self).await?;
-                self.upsert(&t, r, c, created, &target, who, seq).await
+                self.upsert(write, r, c, created, &target, who, seq).await
             }
-            StagedOp::Delete(t, r, o) => {
+            StagedOp::Delete(_, r, o) => {
                 let target = Target::of(&o.target, self).await?;
-                self.delete(&t, r, &target, who, seq).await
+                self.delete(write, r, &target, who, seq).await
             }
-            StagedOp::Restore(t, r, c, o) => {
+            StagedOp::Restore(_, r, c, o) => {
                 let target = Target::exact(&o.target);
-                self.restore(&t, r, c, Cells::Authored, &target, who, seq)
+                self.restore(write, r, c, Cells::Authored, &target, who, seq)
                     .await
             }
-            StagedOp::Move(t, from, to, r) => self.move_row(&t, from, to, r, seq).await,
+            StagedOp::Move(_, from, to, r) => self.move_row(write, from, to, r, seq).await,
         }
     }
 
@@ -9376,35 +9577,26 @@ impl Inner {
     /// newly staged write is validated.
     async fn apply_all_checking(
         &mut self,
-        ops: &[(Rc<Schema>, StagedOp)],
+        ops: &[PreparedWrite],
         checked: usize,
         seq: u64,
     ) -> Result<(), Error> {
-        let active = self.schema.clone();
-        let result = (async {
-            for (i, (schema, op)) in ops.iter().enumerate() {
-                ({
-                    self.schema = schema.clone();
-                    if i < checked {
-                        self.apply(op, seq).await.map(drop)
-                    } else {
-                        let identity = op.identity().map_or(Who::Local, who);
-                        self.apply_as(op, identity, seq).await.map(drop)
-                    }
-                })?;
+        for (i, prepared) in ops.iter().enumerate() {
+            if i < checked {
+                self.apply(prepared, seq).await?;
+            } else {
+                let identity = prepared.op.identity().map_or(Who::Local, who);
+                self.apply_as(prepared, identity, seq).await?;
             }
-            Ok(())
-        })
-        .await;
-        self.schema = active;
-        result
+        }
+        Ok(())
     }
 
     /// [`Inner::apply_all_checking`] trusting and storing what a batch's partial
     /// large-value updates built.
     async fn apply_with_edits(
         &mut self,
-        ops: &[(Rc<Schema>, StagedOp)],
+        ops: &[PreparedWrite],
         edits: &LargeEdits,
         checked: usize,
         seq: u64,
@@ -9623,10 +9815,11 @@ impl Db {
             let landed = self.inner().await.own_landings(own).await?;
             {
                 let inner = self.inner().await;
-                for (schema, op) in &batch.ops {
+                for prepared in &batch.ops {
+                    let op = &prepared.op;
                     if let Some(row) = op.row()
                         && inner
-                            .newest_version(schema.stored_table(op.table())?, row)
+                            .newest_version(op.table(), row)
                             .await?
                             .is_some_and(|at| {
                                 let ours = inner.own_seq_at(at).is_some_and(|tx| own.contains(&tx))
@@ -9642,10 +9835,11 @@ impl Db {
             }
             if own.is_empty() {
                 let inner = self.inner().await;
-                for (schema, op) in &batch.ops {
+                for prepared in &batch.ops {
+                    let op = &prepared.op;
                     if let Some(row) = op.row()
                         && inner
-                            .settled_seq(schema.stored_table(op.table())?, row)
+                            .settled_seq(op.table(), row)
                             .await?
                             .is_some_and(|seq| Pos::at(seq) > *snapshot)
                     {
@@ -9729,10 +9923,11 @@ impl Db {
         }
         {
             let inner = self.inner().await;
-            for (schema, op) in &batch.ops {
+            for prepared in &batch.ops {
+                let op = &prepared.op;
                 if let Some(row) = op.row()
                     && inner
-                        .newest_seq(schema.stored_table(op.table())?, row)
+                        .newest_seq(op.table(), row)
                         .await?
                         .is_some_and(|at| at > *snapshot)
                 {
@@ -9778,7 +9973,7 @@ impl Db {
             // in a cycle.
             inner.defer_checks();
             let applied = (async {
-                let () = inner.apply_with_edits(ops, &batch.edits, 0, seq).await?;
+                let () = { inner.apply_with_edits(ops, &batch.edits, 0, seq).await }?;
                 inner.finish_checks(seq).await.map_err(refused_at_commit)
             })
             .await;
@@ -9799,15 +9994,7 @@ impl Db {
         // transaction and rolls both back on an error.
         // Each op travels by stored names, so one transaction may write
         // through views of several versions.
-        let recorded = (async {
-            let mut stored = Vec::with_capacity(ops.len());
-            for (schema, op) in ops {
-                stored.push(self.inner().await.stored_op(op.clone(), schema).await?);
-            }
-            let ops = stored;
-            self.record_stored_upload(ops, seq, kind, None).await
-        })
-        .await;
+        let recorded = self.record_upload(ops, seq, kind, None).await;
         if let Err(error) = recorded {
             let mut inner = self.inner().await;
             inner.seq = prior;
@@ -9830,12 +10017,11 @@ impl Db {
     async fn in_overlay<R>(
         &self,
         id: OpenTransactionId,
-        extra: Option<&mut StagedOp>,
+        extra: Option<&mut PreparedWrite>,
         read: impl AsyncFnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
         inner.conn.settle().await?;
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
         let batch = inner
             .batches
             .get(&id)
@@ -9845,8 +10031,8 @@ impl Db {
         let staged_rows = match extra.as_deref() {
             Some(op) => {
                 let mut rows = batch.rows.clone();
-                if let Some(row) = op.row() {
-                    let stored = &inner.schema.table(op.table())?.stored;
+                if let Some(row) = op.op.row() {
+                    let stored = op.op.table();
                     if rows
                         .get(stored)
                         .is_some_and(|set| set.contains(row.0.as_bytes()))
@@ -9885,7 +10071,7 @@ impl Db {
                 inner.overlay_replays += ops.len();
             }
             let mark = inner.changed.borrow().len();
-            if let Err(error) = inner.apply_all_checking(&ops, ops.len(), own).await {
+            if let Err(error) = { inner.apply_all_checking(&ops, ops.len(), own).await } {
                 inner.clear_derived();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "overlay", false).await?;
@@ -9909,16 +10095,17 @@ impl Db {
                 (async {
                     let () = inner.counter_deltas(op).await?;
                     {
-                        let schema = inner.schema.clone();
                         // The write continues the unit its batch staged so far:
                         // those writes passed their checks, so their rows are
                         // evidence for this one's (SPEC 7), as at the authority
                         // that receives the unit. The commit checks the whole unit.
                         inner.defer_checks();
                         let applied = (async {
-                            let () = inner
-                                .apply_all_checking(&[(schema, op.clone())], 0, own)
-                                .await?;
+                            let () = {
+                                inner
+                                    .apply_all_checking(std::slice::from_ref(op), 0, own)
+                                    .await
+                            }?;
                             inner.finish_checks_after(own, staged_rows).await
                         })
                         .await;
@@ -10031,11 +10218,7 @@ impl Db {
         result
     }
 
-    async fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
-        self.stage_with_edits(id, op, LargeEdits::default()).await
-    }
-
-    async fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
+    async fn stage_op(&self, id: OpenTransactionId, mut op: PreparedWrite) -> Result<(), Error> {
         // Validate against the overlay now, so errors surface at the call;
         // a counter write's change is from what the transaction sees.
         if let Err(error) = self
@@ -10045,11 +10228,7 @@ impl Db {
             return Err(self.serializable_write_conflict(id, &op, error).await);
         }
         let mut inner = self.inner.staging();
-        let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        let stored = match op.row() {
-            Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
-            None => None,
-        };
+        let stored = op.op.row().map(|row| (op.op.table().to_owned(), row));
         let batch = inner.batches.get_mut(&id).expect("validated");
         if let Some((table, row)) = stored {
             Arc::make_mut(&mut batch.rows)
@@ -10057,7 +10236,7 @@ impl Db {
                 .or_default()
                 .insert(*row.0.as_bytes());
         }
-        batch.ops.push((schema, op));
+        batch.ops.push(op);
         Ok(())
     }
 
@@ -10068,9 +10247,10 @@ impl Db {
     async fn serializable_write_conflict(
         &self,
         id: OpenTransactionId,
-        op: &StagedOp,
+        prepared: &PreparedWrite,
         error: Error,
     ) -> Error {
+        let op = &prepared.op;
         if !error.is_apply_time_rejection() {
             return error;
         }
@@ -10082,9 +10262,10 @@ impl Db {
         else {
             return error;
         };
-        let (Some(row), Ok(table)) = (op.row(), inner.schema.stored_table(op.table())) else {
+        let Some(row) = op.row() else {
             return error;
         };
+        let table = op.table();
         let moved: Result<bool, Error> = (async {
             let cut = inner.serializable_cut(*snapshot, own).await?;
             {
@@ -10101,12 +10282,22 @@ impl Db {
         }
     }
 
-    /// [`Self::stage`] a write whose large values a partial update built:
+    /// Stage a write whose large values a partial update built:
     /// the batch keeps what it built for every later apply.
     pub(crate) async fn stage_with_edits(
         &self,
         id: OpenTransactionId,
-        mut op: StagedOp,
+        op: StagedOp,
+        edits: LargeEdits,
+    ) -> Result<(), Error> {
+        let op = self.prepare_write(op)?;
+        self.stage_prepared_with_edits(id, op, edits).await
+    }
+
+    async fn stage_prepared_with_edits(
+        &self,
+        id: OpenTransactionId,
+        mut op: PreparedWrite,
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
         // A whole write over a chunked value becomes its edit of the value
@@ -10119,7 +10310,6 @@ impl Db {
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
             edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -10211,8 +10401,13 @@ impl TxRef<'_> {
     /// Stage one write, fetching what an asynchronous chunk store holds for
     /// it first if it needs that.
     async fn stage(&self, op: StagedOp) -> Result<(), Error> {
+        let op = self.db.prepare_write(op)?;
         self.db
-            .fetching_with(op, async |op| self.db.stage(self.id, op).await)
+            .fetching_with(op, async |op| {
+                self.db
+                    .stage_prepared_with_edits(self.id, op, LargeEdits::default())
+                    .await
+            })
             .await
     }
 

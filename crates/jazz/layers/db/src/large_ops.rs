@@ -151,6 +151,55 @@ fn utf16_byte(text: &str, at: u64) -> Option<usize> {
     (units == at).then_some(text.len())
 }
 
+/// A cell read prepared in the caller's vocabulary before SQL or retries.
+/// The query keeps its authorization context; the column keeps its layout.
+#[derive(Clone)]
+pub(super) struct PreparedCell {
+    query: PreparedQuery,
+    column: crate::values::Column,
+}
+
+impl PreparedCell {
+    pub(super) fn new(
+        schema: Rc<Schema>,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+    ) -> Result<Self, Error> {
+        let t = schema.table(table)?;
+        if !t.branch_by.is_empty() {
+            return Err(unsupported(
+                "large-value range reads and edits on branched tables",
+            ));
+        }
+        let col = t
+            .column(column)
+            .filter(|c| crate::large::large_capable(c))
+            .ok_or_else(|| not_large(table, column))?
+            .clone();
+        let query = Query::from(table)
+            .filter(crate::query::eq(
+                crate::query::col("id"),
+                crate::query::lit(Value::Uuid(row.0)),
+            ))
+            .select([column]);
+        let prepared = PreparedQuery {
+            query,
+            binding: BTreeMap::new(),
+            shape: Shape([0; 16]),
+            binding_id: Binding([0; 16]),
+            request_claims: None,
+            // Read under the schema this handle serves (a pinned session's
+            // view and its bundle's policies), as its own reads are.
+            schema: Some(schema),
+        };
+        Ok(Self {
+            query: prepared,
+            column: col,
+        })
+    }
+}
+
 impl Inner {
     async fn stage_upload(
         &self,
@@ -207,68 +256,41 @@ impl Inner {
     /// its column. Errors when the row is not visible.
     async fn physical_cell(
         &self,
-        table: &str,
-        row: RowUuid,
-        column: &str,
+        cell: &PreparedCell,
         identity: Option<AuthorSubject>,
     ) -> Result<(crate::values::Column, Sql), Error> {
-        let t = self.schema.table(table)?;
-        if !t.branch_by.is_empty() {
-            return Err(unsupported(
-                "large-value range reads and edits on branched tables",
-            ));
-        }
-        let col = t
-            .column(column)
-            .filter(|c| crate::large::large_capable(c))
-            .ok_or_else(|| not_large(table, column))?
-            .clone();
-        let query = Query::from(table)
-            .filter(crate::query::eq(
-                crate::query::col("id"),
-                crate::query::lit(Value::Uuid(row.0)),
-            ))
-            .select([column]);
-        let prepared = PreparedQuery {
-            query,
-            binding: BTreeMap::new(),
-            shape: Shape([0; 16]),
-            binding_id: Binding([0; 16]),
-            request_claims: None,
-            // Read under the schema this handle serves (a pinned session's
-            // view and its bundle's policies), as its own reads are.
-            schema: Some(self.schema.clone()),
-        };
-        let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
+        let compiled = self.compile(&cell.query, identity, &ReadSpec::default())?;
         let params: Vec<_> = compiled.params.iter().map(Sql::as_param).collect();
-        let cell: Option<Sql> = self
+        let value: Option<Sql> = self
             .conn
             .sql()
             .query_optional(&compiled.sql, &params, |r| r.get(3))
             .await
             .map_err(storage)?;
-        let cell = cell.ok_or_else(|| {
+        let value = value.ok_or_else(|| {
             Error::new(ErrorCode::NotObserved, "large-value cell is not observed")
         })?;
-        Ok((col, cell))
+        Ok((cell.column.clone(), value))
     }
 
     async fn read_range(
         &self,
-        table: &str,
-        row: RowUuid,
-        column: &str,
+        prepared: &PreparedCell,
         range: std::ops::Range<u64>,
         utf16: bool,
     ) -> Result<Vec<u8>, Error> {
-        let (col, cell) = self
-            .physical_cell(table, row, column, self.reader())
-            .await?;
+        let (col, cell) = self.physical_cell(prepared, self.reader()).await?;
         if !large_cell(&cell) {
-            return Err(not_large(table, column));
+            return Err(not_large(
+                &prepared.query.query.table,
+                &prepared.column.name,
+            ));
         }
         if utf16 && crate::large::kind(&col) == lv::LargeValueKind::Bytes {
-            return Err(not_large(table, column));
+            return Err(not_large(
+                &prepared.query.query.table,
+                &prepared.column.name,
+            ));
         }
         self.cell_range(&mut self.conn.sql(), cell.as_ref(), range, utf16)
             .await
@@ -278,17 +300,20 @@ impl Inner {
     /// in its versions `from` and `to`, for a reader allowed to read both by
     /// `policies` (a pinned session's bundle, or the current schema).
     /// Only the chunks in changed regions are read.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn value_delta(
         &self,
-        table: &str,
+        t: &Table,
         row: RowUuid,
         column: &str,
         (from, to): (sync::Rank, sync::Rank),
         reader: Option<AuthorSubject>,
         policies: &Schema,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
-        let t = self.schema.table(table)?;
-        let governed = policies.table(table)?;
+        let table = &t.name;
+        let governed = policies.by_stored(&t.stored).ok_or_else(|| {
+            Error::new(ErrorCode::NotObserved, "the row is not readable".to_owned())
+        })?;
         if !t.branch_by.is_empty() {
             return Err(unsupported("large-value deltas on branched tables"));
         }
@@ -590,17 +615,16 @@ impl Inner {
     /// `derived` and `pending_nodes` for the caller to take.
     pub(crate) async fn whole_write_as_edit(
         &mut self,
-        table: &str,
-        row: RowUuid,
-        column: &crate::values::Column,
+        prepared: &PreparedCell,
         logical: &[u8],
         identity: WriteIdentity,
     ) -> Option<Value> {
         let (col, cell) = self
-            .physical_cell(table, row, &column.name, identity_of(identity))
+            .physical_cell(prepared, identity_of(identity))
             .await
             .ok()?;
-        self.as_edit_of(table, &col, cell, logical).await
+        self.as_edit_of(&prepared.query.query.table, &col, cell, logical)
+            .await
     }
 
     /// `logical` as an edit of the chunked `cell` ([`Self::whole_write_as_edit`]);
@@ -767,10 +791,11 @@ impl Db {
         column: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
+        let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
         self.fetching(async || {
-            self.inner()
-                .await
-                .read_range(table, row, column, range.clone(), false)
+            let schema_inner = self.inner().await;
+            schema_inner
+                .read_range(&prepared, range.clone(), false)
                 .await
         })
         .await
@@ -787,6 +812,8 @@ impl Db {
         from: Pos,
         to: Pos,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
+        let schema = self.operation_schema();
+        let table = schema.table(table)?;
         self.fetching(async || {
             let inner = self.inner().await;
             inner
@@ -796,7 +823,7 @@ impl Db {
                     column,
                     ((from, None), (to, None)),
                     inner.reader(),
-                    &inner.schema,
+                    schema.policy_schema(),
                 )
                 .await
         })
@@ -812,11 +839,12 @@ impl Db {
         column: &str,
         range: std::ops::Range<u64>,
     ) -> Result<String, Error> {
+        let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
         let bytes = self
             .fetching(async || {
-                self.inner()
-                    .await
-                    .read_range(table, row, column, range.clone(), true)
+                let schema_inner = self.inner().await;
+                schema_inner
+                    .read_range(&prepared, range.clone(), true)
                     .await
             })
             .await?;
@@ -832,20 +860,19 @@ impl Db {
         column: &str,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        self.fetching(async || self.json_pointer(table, row, column, pointer).await)
+        let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
+        self.fetching(async || self.json_pointer(&prepared, pointer).await)
             .await
     }
 
     async fn json_pointer(
         &self,
-        table: &str,
-        row: RowUuid,
-        column: &str,
+        prepared: &PreparedCell,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
         let inner = self.inner().await;
         let reader = inner.reader();
-        let (col, cell) = inner.physical_cell(table, row, column, reader).await?;
+        let (col, cell) = inner.physical_cell(prepared, reader).await?;
         if crate::large::kind(&col) != lv::LargeValueKind::Json {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -881,8 +908,9 @@ impl Db {
         bytes: Vec<u8>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
         self.fetching_with((Edit::Append(bytes), opts), async |(edit, opts)| {
-            self.edit_cell(table, row, column, edit, opts).await
+            self.edit_cell(&prepared, row, edit, opts).await
         })
         .await
     }
@@ -902,26 +930,28 @@ impl Db {
             delete: splice.delete,
             insert: splice.insert,
         };
+        let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
         self.fetching_with((edit, opts), async |(edit, opts)| {
-            self.edit_cell(table, row, column, edit, opts).await
+            self.edit_cell(&prepared, row, edit, opts).await
         })
         .await
     }
 
     async fn edit_cell(
         &self,
-        table: &str,
+        prepared: &PreparedCell,
         row: RowUuid,
-        column: &str,
         edit: Edit,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        let table = &prepared.query.query.table;
+        let column = &prepared.column.name;
         let value = {
             let mut inner = self.inner().await;
             inner.require_mutation_admission()?;
             let edited = (async {
                 let (col, cell) = inner
-                    .physical_cell(table, row, column, identity_of(opts.identity))
+                    .physical_cell(prepared, identity_of(opts.identity))
                     .await?;
                 Ok(nullable(&col, inner.edited(table, &col, cell, edit).await?))
             })
@@ -937,12 +967,13 @@ impl Db {
             }
         };
         let cells = BTreeMap::from([(column.to_owned(), value)]);
-        let result = self
-            .write_op(
-                StagedOp::Update(table.to_owned(), row, cells, opts.clone()),
-                who(opts.identity),
-            )
-            .await;
+        // The outer edit already owns chunk-fetch retries and the operation lease.
+        let result = async {
+            let prepared =
+                self.prepare_write(StagedOp::Update(table.to_owned(), row, cells, opts.clone()))?;
+            self.write_prepared(prepared, who(opts.identity)).await
+        }
+        .await;
         self.inner().await.clear_derived();
         result
     }
@@ -957,6 +988,7 @@ impl Db {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        let mutations = prepare_mutations(self.operation_schema(), table, row, &patch, mutations)?;
         self.fetching_with(
             (patch, mutations, opts),
             async |(patch, mutations, opts)| {
@@ -972,7 +1004,7 @@ impl Db {
         table: &str,
         row: RowUuid,
         mut patch: BTreeMap<String, Value>,
-        mutations: Vec<LargeValueUpdate>,
+        mutations: Vec<(PreparedCell, LargeValueUpdate)>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let lowered = {
@@ -980,19 +1012,20 @@ impl Db {
             inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
             inner
-                .lower_large_mutations(table, row, &mut patch, mutations, identity)
+                .lower_large_mutations(&mut patch, mutations, identity)
                 .await
         };
         if let Err(error) = lowered {
             self.inner().await.clear_derived();
             return Err(error);
         }
-        let result = self
-            .write_op(
-                StagedOp::Update(table.to_owned(), row, patch, opts.clone()),
-                who(opts.identity),
-            )
-            .await;
+        // The outer edit already owns chunk-fetch retries and the operation lease.
+        let result = async {
+            let prepared =
+                self.prepare_write(StagedOp::Update(table.to_owned(), row, patch, opts.clone()))?;
+            self.write_prepared(prepared, who(opts.identity)).await
+        }
+        .await;
         self.inner().await.clear_derived();
         result
     }
@@ -1098,7 +1131,7 @@ impl Db {
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
         self.metadata().require_mutation_admission()?;
-        let col = streaming_column(&self.metadata(), table, column)?;
+        let col = streaming_column(self.operation_schema().table(table)?, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -1298,6 +1331,7 @@ impl Db {
         cells: &mut BTreeMap<String, Value>,
         column: &str,
     ) -> Result<Option<lv::LargeValueRef>, Error> {
+        let active_schema = self.operation_schema();
         self.inner().await.require_mutation_admission()?;
         self.check_streaming_upload(upload)?;
         if upload.table != table || upload.column != column {
@@ -1328,7 +1362,7 @@ impl Db {
             let value = (async {
                 let (value, _) = finished?;
                 {
-                    let col = streaming_column(&inner, table, column)?;
+                    let col = streaming_column(active_schema.table(table)?, column)?;
                     if crate::large::kind(&col) != upload.kind {
                         return Err(not_large(table, column));
                     }
@@ -1473,18 +1507,12 @@ pub(crate) async fn renew_upload_leases(
     Ok(())
 }
 
-fn streaming_column(
-    inner: &Inner,
-    table: &str,
-    column: &str,
-) -> Result<crate::values::Column, Error> {
-    inner
-        .schema
-        .table(table)?
+fn streaming_column(table: &Table, column: &str) -> Result<crate::values::Column, Error> {
+    table
         .column(column)
         .filter(|c| crate::large::large_capable(c))
         .cloned()
-        .ok_or_else(|| not_large(table, column))
+        .ok_or_else(|| not_large(&table.name, column))
 }
 
 fn view_target(head: Option<BranchSelector>, base: Option<BranchViewBase>) -> WriteTarget {
@@ -1629,29 +1657,44 @@ async fn lower_splices(
     Ok(edits)
 }
 
+fn prepare_mutations(
+    schema: Rc<Schema>,
+    table: &str,
+    row: RowUuid,
+    patch: &BTreeMap<String, Value>,
+    mutations: Vec<LargeValueUpdate>,
+) -> Result<Vec<(PreparedCell, LargeValueUpdate)>, Error> {
+    for mutation in &mutations {
+        let column = mutation.column();
+        if patch.contains_key(column) {
+            return Err(query(format!(
+                "`{column}` is both patched and partially updated"
+            )));
+        }
+    }
+    mutations
+        .into_iter()
+        .map(|mutation| {
+            let cell = PreparedCell::new(schema.clone(), table, row, mutation.column())?;
+            Ok((cell, mutation))
+        })
+        .collect()
+}
+
 impl Inner {
     /// Lower partial large-value updates into `patch` against the row as
     /// this store sees it now (inside a batch: with its staged writes).
     /// What the edits build is left in `derived` and `pending_nodes`.
     pub(crate) async fn lower_large_mutations(
         &mut self,
-        table: &str,
-        row: RowUuid,
         patch: &mut BTreeMap<String, Value>,
-        mutations: Vec<LargeValueUpdate>,
+        mutations: Vec<(PreparedCell, LargeValueUpdate)>,
         identity: Option<AuthorSubject>,
     ) -> Result<(), Error> {
-        for mutation in &mutations {
-            let column = mutation.column();
-            if patch.contains_key(column) {
-                return Err(query(format!(
-                    "`{column}` is both patched and partially updated"
-                )));
-            }
-        }
-        for mutation in mutations {
-            let column = mutation.column().to_owned();
-            let (col, mut cell) = self.physical_cell(table, row, &column, identity).await?;
+        for (prepared, mutation) in mutations {
+            let table = &prepared.query.query.table;
+            let column = prepared.column.name.clone();
+            let (col, mut cell) = self.physical_cell(&prepared, identity).await?;
             let value = match mutation {
                 LargeValueUpdate::Splice {
                     within, splices, ..
@@ -1834,13 +1877,15 @@ impl TxRef<'_> {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        let mutations =
+            prepare_mutations(self.db.operation_schema(), table, row, &patch, mutations)?;
         self.db.inner().await.require_mutation_admission()?;
         let edits = self
             .db
             .in_overlay(self.id, None, async |inner, _| {
                 let identity = identity_of(opts.identity);
                 let lowered = inner
-                    .lower_large_mutations(table, row, &mut patch, mutations, identity)
+                    .lower_large_mutations(&mut patch, mutations, identity)
                     .await;
                 let edits = crate::db::LargeEdits {
                     derived: std::mem::take(&mut inner.derived),
