@@ -9,7 +9,8 @@ use std::time::Duration;
 use bindings::{Document, DocumentUpdate, NewDocument, NewDraft, documents, drafts};
 use futures::StreamExt;
 use jazz_app_support::{
-    AppFiles, AppId, Backend, Branch, Config, Error, Jazz, Order, ReadTier, Rows, Snapshot,
+    AppFiles, AppId, Backend, Branch, Config, Error, Jazz, Order, ReadOptions, ReadTier, Rows,
+    Snapshot,
 };
 use jazz_server::JazzServer;
 
@@ -364,6 +365,92 @@ async fn a_serializable_transaction_writes_into_a_branch() {
         titles(&jazz.on_branch("main").all(by_title()).await.unwrap()),
         [("main", "Intro")]
     );
+    jazz.shutdown().await.unwrap();
+}
+
+/// `ReadOptions::branch` is TS's per-call `branch`/`base`: reads and
+/// subscriptions on the plain handle, through a branch view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_options_read_through_a_branch() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let main = jazz.on_branch("main");
+    let intro = main
+        .insert(NewDocument::new("main", "Intro"))
+        .await
+        .unwrap();
+    jazz.on_branch(Branch::from("draft").over("main"))
+        .update(
+            intro.id,
+            DocumentUpdate {
+                title: Some("Intro, drafted".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let at = jazz.capture_snapshot().await.unwrap();
+    main.insert(NewDocument::new("main", "Later"))
+        .await
+        .unwrap();
+
+    let draft = ReadOptions::default().branch(Branch::from("draft").over("main"));
+    assert_eq!(
+        titles(
+            &jazz
+                .all_with_options(by_title(), draft.clone())
+                .await
+                .unwrap()
+        ),
+        [("draft", "Intro, drafted"), ("draft", "Later")]
+    );
+    // Without a base: the draft's own rows.
+    assert_eq!(
+        titles(
+            &jazz
+                .all_with_options(by_title(), ReadOptions::default().branch("draft"))
+                .await
+                .unwrap()
+        ),
+        [("draft", "Intro, drafted")]
+    );
+    // A frozen base, with the other options.
+    let frozen = ReadOptions::default()
+        .tier(ReadTier::LocalFirst)
+        .branch(Branch::from("draft").over_snapshot("main", at));
+    assert_eq!(
+        titles(&jazz.all_with_options(by_title(), frozen).await.unwrap()),
+        [("draft", "Intro, drafted")]
+    );
+    // Without a branch, every branch-local row as stored.
+    assert_eq!(
+        jazz.all_with_options(by_title(), ReadOptions::default())
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let mut changes = jazz
+        .subscribe_with_options(documents::query(), draft)
+        .await
+        .unwrap();
+    let mut rows = Rows::default();
+    rows.apply(next(&mut changes).await);
+    assert_eq!(rows.as_slice().len(), 2);
+    main.insert(NewDocument::new("main", "Outro"))
+        .await
+        .unwrap();
+    while rows.as_slice().len() < 3 {
+        rows.apply(next(&mut changes).await);
+    }
+    assert!(rows.as_slice().iter().all(|row| row.branch == "draft"));
+
+    // A selector that doesn't match the schema fails the read.
+    let wrong = ReadOptions::default().branch(Branch::named("title", "x".to_owned()));
+    assert!(matches!(
+        jazz.all_with_options(by_title(), wrong).await,
+        Err(Error::Jazz(_))
+    ));
     jazz.shutdown().await.unwrap();
 }
 

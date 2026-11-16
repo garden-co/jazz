@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The version of the bindings' shape this generator writes: the second
 /// line records it.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
