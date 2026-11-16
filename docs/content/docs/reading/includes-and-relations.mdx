@@ -347,7 +347,7 @@ Depth is counted from the start relation: `maxDepth: 0` returns only the start r
 `maxDepth: 1` may also return rows reached by one `step` hop. A zero bound never performs an
 implicit first hop.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
@@ -362,6 +362,12 @@ implicit first hop.
   <Tab value="Swift">
     <include cwd lang="swift">
       ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-recursive-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-recursive-kotlin
     </include>
 
   </Tab>

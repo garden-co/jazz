@@ -9,7 +9,7 @@
 
 use std::ops::ControlFlow;
 
-use crate::jazz_app::jazz;
+use ::jazz_app_support::jazz;
 use futures_util::StreamExt;
 use jazz::query::{Query as UntypedQuery, col, eq, lit};
 use jazz::tools::{JazzClient, Value};
