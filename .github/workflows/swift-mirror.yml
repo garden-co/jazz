@@ -25,10 +25,10 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "garden-co/jazz ref to build (the release tag, e.g. v2.0.0-alpha.65, or an rc)"
+        description: "garden-co/jazz ref to build (the release tag, e.g. v2.0.0-alpha.66, or an rc)"
         required: true
       version:
-        description: "Version to publish, without the v (e.g. 2.0.0-alpha.65)"
+        description: "Version to publish, without the v (e.g. 2.0.0-alpha.66)"
         required: true
       publish:
         description: "Attach the XCFramework to release v<version> and push + tag the mirror"
