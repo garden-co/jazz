@@ -11,12 +11,11 @@ import (
 )
 
 // Source is the hash of the jazz.app.json these bindings were generated from.
-const Source = "sha256:e8cdc8c71ce4a4ec76e542704f1bbcf9be8c2f0f4928d79f93b7d7e36716bd5e"
+const Source = "sha256:392eedb6f00875a3d0fe9ac829b498e8abc79fdd65aefeed69fedff649ed54d2"
 
 // App is the jazz.app.json these bindings were generated from.
 const App = `{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "canvases": {
       "columns": { "chatId": "uuid" },

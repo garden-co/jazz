@@ -39,7 +39,7 @@ export type AppComputed = ComputedImpl<Types>;
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:43ecca833ab762a62baf15b0b2eeda3989e6286a1d707b17eabe965415c6b3c5",
+  "source": "sha256:da007cc52586351ca5bc021a266a15f171ef522ce29388888da774f35cd1fe69",
   "schema": {
     "current": "f503a38f7e8a1c10b006e158e225b32000303667e4cfe407b5bd290c356e89a0",
     "schemas": [

@@ -410,7 +410,7 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:2f388d180fadab798dd499912402af3e3cf40be8de835515497fd82e4b963bfe",
+  "source": "sha256:2ce75f9ae7ddb876ef6adaa4cdbe3e7c93aec8a0e7324140a32af6a9c1b8d4ed",
   "schema": {
     "current": "f2c0deb18cb27616ed641ba2a2f620fb74ed606a7f21237863bb479533299ee7",
     "schemas": [

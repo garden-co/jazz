@@ -1,7 +1,6 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "$comment": "The realistic benchmark's project board (dev/benchmarks/realistic/schema/project_board.schema.json), with its relations.",
-  "format": 1,
   "tables": {
     "activity_events": {
       "columns": {

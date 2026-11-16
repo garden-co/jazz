@@ -125,7 +125,7 @@ export type AppTransforms = TransformImpl<Transforms, Types>;
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types, Transforms>({
-  "source": "sha256:019eebe8a4aa9f75919d6cfd18bbc36487719aef45b19c6b77175373bd416977",
+  "source": "sha256:9a36c2bd44d469af0175b7f867f13e017d15a1622c7f56c60b6da103afe6c6a8",
   "schema": {
     "current": "1bd80ff5576c7aae0ba665a837ff48e2f20717cf0ea67fc0cf5b545078629a8f",
     "schemas": [

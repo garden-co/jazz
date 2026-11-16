@@ -32,7 +32,8 @@ export type Chat = {
   readonly id: string;
 };
 
-export type ChatInsert = {};
+export type ChatInsert = {
+};
 
 interface Types extends AppTypes {
   chatInvites: {
@@ -74,7 +75,7 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:d84985ee4e734a5c06d5c65123509aeddd8f1bb933ea76b2b143a603d9208ca7",
+  "source": "sha256:4e5059c375fb9cdc1399e2d3105f6b09e9e49e483f0b0859bf0568dc5ace3d93",
   "schema": {
     "current": "d276a8b864a5e91f27012e0ebbee3c2df84c4a24f1fc394271314b2d5edf8261",
     "schemas": [

@@ -1,1 +1,1 @@
-{ "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json", "format": 1, "tables": {} }
+{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }

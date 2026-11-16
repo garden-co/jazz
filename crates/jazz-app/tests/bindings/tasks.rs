@@ -4,7 +4,7 @@
 #![allow(dead_code, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:9260147bed8ae78573ec0408ce1e9d40b66134e81d5d8fc50b178f8f85bb8dd5";
+pub const SOURCE: &str = "sha256:dcc2538425c6c8309d3fcd8cf71c234f70190fc05661bfb9f8437aba7faf6f1b";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -569,8 +569,7 @@ struct Implementations(::std::boxed::Box<dyn Computed>);
 /// The app's `jazz.app.json`: its schema, every earlier version and the
 /// migrations between them.
 pub const APP: &str = r#"{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "boxes": {
       "columns": {
