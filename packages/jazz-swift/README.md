@@ -8,12 +8,12 @@
 >   includes and hops, subscriptions (`AsyncSequence`), writes at a durability
 >   tier, mergeable and serializable transactions, mergeable text, uploads,
 >   history reads, device accounts and your sign-in's bearer tokens, sync
->   status. Tested on Linux in CI; each release's package runs a command-line
->   app on macOS and builds for the iOS simulator.
-> - **Not supported yet:** running a backend or serving `/jazz`, a prebuilt
->   core on Linux, iOS and macOS UI apps (not tested yet), Keychain storage
->   for device keys, guest users, history subscriptions, payload enums and
->   nested rows.
+>   status, on macOS and iOS. Each release's package runs an app on macOS and
+>   builds for the iOS simulator.
+> - **Not supported yet:** running a backend or serving `/jazz`, Linux apps
+>   (no prebuilt core: ask on Discord), iOS and macOS UI apps (not tested
+>   yet), Keychain storage for device keys, guest users, history
+>   subscriptions, payload enums and nested rows.
 >
 > The full list is the Swift setup page's "Not supported yet"
 > (docs/content/docs/setup/swift.mdx) and
@@ -43,15 +43,9 @@ system library found through pkg-config.
 .product(name: "Jazz", package: "jazz-swift"),
 ```
 
-On macOS and iOS that's all: the Jazz core comes prebuilt. On Linux, build
-`libjazz_ffi` from the same release (needs Rust) and point pkg-config at it
-before `swift build`:
-
-```bash
-git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
-jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only
-export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
-```
+(or the same URL in Xcode, **File → Add Package Dependencies…**). That's all on
+macOS and iOS: the Jazz core comes prebuilt. Swift on Linux has no prebuilt
+core; ask on [Discord](https://discord.gg/RN9UKh52be) if you need it.
 
 ## Work on it
 
