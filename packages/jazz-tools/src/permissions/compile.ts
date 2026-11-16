@@ -172,7 +172,6 @@ const KEYWORDS = new Set([
   "allOf",
   "allowedTo",
   "param",
-  "id",
 ]);
 
 /** A name in the grammar: an identifier, or backticks around anything else. */

@@ -379,7 +379,7 @@ export type PermissionsInput<S, R> = {
 };
 
 /** Every table of `S`, each with any rules. */
-export type AllTables<S> = { [T in keyof S]: object };
+export type AllTables<S> = { [T in keyof S]: unknown };
 
 /** The readable `jazz.permissions.json` tree `definePermissions` returns, under {@link READABLE_PERMISSIONS}. */
 export interface ReadablePermissionsFile {
