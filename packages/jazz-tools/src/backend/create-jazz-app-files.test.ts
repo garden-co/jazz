@@ -57,3 +57,48 @@ describe("createJazz checks its bindings against the project's jazz.app.json", (
     );
   });
 });
+
+describe("createJazz takes jazz.permissions.json in every form a project may hold", () => {
+  const tables = { notes: { read: "true" } };
+  async function startWith(permissions: unknown) {
+    const jazz = createJazz({
+      app: testApp(notes),
+      permissions: permissions as never,
+      store: memory(),
+    });
+    cleanups.push(() => jazz.close());
+    return jazz.ready();
+  }
+
+  it("starts with a v1 file, whose $schema names its version", async () => {
+    await inProject();
+    await expect(
+      startWith({ $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json", tables }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("starts with a legacy (alpha.63/64) file: format and the unversioned URL", async () => {
+    await inProject();
+    await expect(
+      startWith({
+        $schema: "https://jazz.tools/schemas/jazz.permissions.schema.json",
+        format: 1,
+        tables,
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("starts with a legacy file whose $schema is a relative path", async () => {
+    await inProject();
+    await expect(
+      startWith({ $schema: "./jazz.permissions.schema.json", format: 1, tables }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("refuses a file with neither $schema nor format", async () => {
+    await inProject();
+    await expect(startWith({ tables })).rejects.toThrow(
+      /`permissions` must be the app's jazz\.permissions\.json/,
+    );
+  });
+});
