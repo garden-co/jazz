@@ -7,13 +7,13 @@ use crate::auth::Auth;
 /// How to open an app.
 ///
 /// ```no_run
-/// # async fn open() -> jazz_app::Result<()> {
-/// use jazz_app::{AppFiles, Backend, Config, Storage};
-/// let config = Config::new(jazz_app::AppId::from_name("todos"))
+/// # async fn open() -> jazz_app_support::Result<()> {
+/// use jazz_app_support::{AppFiles, Backend, Config, Storage};
+/// let config = Config::new(jazz_app_support::AppId::from_name("todos"))
 ///     .server("http://localhost:1625")
 ///     .storage(Storage::Dir("./todo-data".into()))
 ///     .backend(Backend::new("<backend secret>", "<admin secret>", "todo-service"));
-/// let jazz = jazz_app::Jazz::open(AppFiles::read(".")?, config).await?;
+/// let jazz = jazz_app_support::Jazz::open(AppFiles::read(".")?, config).await?;
 /// # Ok(()) }
 /// ```
 ///
@@ -21,14 +21,14 @@ use crate::auth::Auth;
 /// `createJazz` handler) as a browser does, never to the core:
 ///
 /// ```no_run
-/// # async fn open() -> jazz_app::Result<()> {
-/// use jazz_app::{AppFiles, Auth, Config, DeviceKey, Storage};
+/// # async fn open() -> jazz_app_support::Result<()> {
+/// use jazz_app_support::{AppFiles, Auth, Config, DeviceKey, Storage};
 /// let key = DeviceKey::generate()?; // keep it: it is the account
-/// let config = Config::new(jazz_app::AppId::from_name("todos"))
+/// let config = Config::new(jazz_app_support::AppId::from_name("todos"))
 ///     .server("https://todos.example/jazz")
 ///     .storage(Storage::Dir("./todo-data".into()))
 ///     .user(Auth::Device(key));
-/// let jazz = jazz_app::Jazz::open(AppFiles::read(".")?, config).await?;
+/// let jazz = jazz_app_support::Jazz::open(AppFiles::read(".")?, config).await?;
 /// let session = jazz.session().expect("an end user's session");
 /// # Ok(()) }
 /// ```
@@ -88,6 +88,10 @@ impl Config {
     /// credential, as TypeScript's `createJazzClient({ credential })`: see
     /// [`crate::BackendClientKind`]. The provider is asked for a fresh token
     /// for every connection and request, so short-lived tokens just work.
+    ///
+    /// The app files must carry the app's `jazz.permissions.json`, the one
+    /// its main backend publishes: a trusted client evaluates the reads of
+    /// the users it acts for ([`crate::Jazz::for_user`]) by them.
     pub fn credential(self, provider: impl crate::auth::TokenProvider + 'static) -> Self {
         let Auth::Bearer(bearer) = Auth::bearer(provider) else {
             unreachable!("Auth::bearer is a bearer")

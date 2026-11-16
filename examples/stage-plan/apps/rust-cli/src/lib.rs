@@ -11,14 +11,14 @@
 // `bindings_are_current` test) refuse a stale copy.
 pub mod jazz_app;
 
-use ::jazz_app::{Jazz, ObjectId, Order, ReadTier};
+use ::jazz_app_support::{Jazz, ObjectId, Order, ReadTier};
 
 use crate::jazz_app::{NewShow, NewTask, Show, Task, TaskStatus, TaskUpdate, shows, tasks};
 
 /// Errors of the slice: the client's, or a request it can't carry out.
 #[derive(Debug)]
 pub enum Error {
-    Jazz(::jazz_app::Error),
+    Jazz(::jazz_app_support::Error),
     /// The client acts as no user (a trusted client outside `for_user`).
     NoUser,
     NotFound(&'static str, ObjectId),
@@ -36,8 +36,8 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<::jazz_app::Error> for Error {
-    fn from(error: ::jazz_app::Error) -> Self {
+impl From<::jazz_app_support::Error> for Error {
+    fn from(error: ::jazz_app_support::Error) -> Self {
         Error::Jazz(error)
     }
 }

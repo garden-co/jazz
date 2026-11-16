@@ -1,7 +1,7 @@
 //! The typed docs snippets, run against a local app: they compile in the
 //! crate, and this checks that they also do what the docs say.
 
-use ::jazz_app::{AppId, Config, Storage};
+use ::jazz_app_support::{AppId, Config, Storage};
 use tempfile::TempDir;
 use todo_server_docs::docs_snippets as snippets;
 use todo_server_docs::jazz_app::{self, NewProject, NewTodo};

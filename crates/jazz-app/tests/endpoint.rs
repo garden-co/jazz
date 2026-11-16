@@ -1,5 +1,5 @@
 //! A Rust backend serving its users' clients: the app's Jazz endpoint
-//! ([`jazz_app::Endpoint`]) over a plain host server, with an in-process
+//! ([`jazz_app_support::Endpoint`]) over a plain host server, with an in-process
 //! core, the app's `authenticate` deciding who each request's user is, and
 //! the published permissions enforced on what they do.
 
@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use bindings::{NewProject, NewTodo, Todo, projects, todos};
 use futures::{SinkExt, StreamExt};
-use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, GuestKeyAfterLink, Request};
-use jazz_app::{
+use jazz_app_support::endpoint::{
+    Admitted, Answer, AuthUser, Endpoint, GuestKeyAfterLink, Request,
+};
+use jazz_app_support::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, DurabilityTier, Error, Jazz, ReadTier,
     SessionState, TokenReason,
 };
@@ -103,7 +105,9 @@ fn verify_jwt(token: &str) -> Option<AuthUser> {
 /// The app's sign-in: `Bearer token-<user>[:admin]` names a user (an admin
 /// with `:admin`), as does a JWT `verify_jwt` accepts; a request without a
 /// bearer may be a device account's.
-fn authenticate(request: Request) -> impl Future<Output = jazz_app::Result<Option<Answer>>> {
+fn authenticate(
+    request: Request,
+) -> impl Future<Output = jazz_app_support::Result<Option<Answer>>> {
     let answer = match request.bearer() {
         Some(token) if token.matches('.').count() == 2 => verify_jwt(token).map(Answer::User),
         Some(token) => token.strip_prefix("token-").map(|user| {
@@ -823,7 +827,7 @@ async fn only_the_vouched_credential_reaches_the_core() {
     let app = App::start().await;
     app.endpoint.create_account_for("hal").await.unwrap();
     let seed: [u8; 32] = rand_seed();
-    let device_token = jazz_app::jazz::tools::identity::mint_jazz_self_signed_token(
+    let device_token = jazz_app_support::jazz::tools::identity::mint_jazz_self_signed_token(
         &seed,
         "urn:jazz:local-first",
         &app.app_id.to_string(),
@@ -1064,7 +1068,7 @@ fn seed_of(key: &DeviceKey) -> [u8; 32] {
 }
 
 fn sign(seed: &[u8; 32], challenge: &str) -> String {
-    jazz_app::jazz::tools::identity::sign_local_first_challenge(seed, challenge).unwrap()
+    jazz_app_support::jazz::tools::identity::sign_local_first_challenge(seed, challenge).unwrap()
 }
 
 /// A link challenge `endpoint` issues for `user`.
@@ -1097,7 +1101,7 @@ async fn link_as(
     seed: &[u8; 32],
     proven: &str,
     presented: &str,
-) -> jazz_app::endpoint::Response {
+) -> jazz_app_support::endpoint::Response {
     let mut request = Request::new("POST", app.path("accounts/backend-link"))
         .header("authorization", format!("Bearer token-{user}"));
     request.body = serde_json::to_vec(&json!({
@@ -1192,7 +1196,7 @@ async fn an_expired_or_mismatched_challenge_links_nothing() {
     };
     let signed = |exp: u64| {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            json!({ "v": 1, "sub": "pia", "nonce": jazz_app::ObjectId::new().to_string(), "exp": exp })
+            json!({ "v": 1, "sub": "pia", "nonce": jazz_app_support::ObjectId::new().to_string(), "exp": exp })
                 .to_string(),
         );
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).unwrap();

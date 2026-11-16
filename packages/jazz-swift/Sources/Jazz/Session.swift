@@ -109,11 +109,16 @@ public enum Link: Decodable, Hashable, Sendable {
 /// Why the link is offline, as TS's `OfflineReason`.
 public enum OfflineReason: String, Decodable, Hashable, Sendable {
     case network, auth, stopped, disconnected
+    /// The server serves another history than this client's local store
+    /// (its store was recreated, or it is another app's server): nothing
+    /// syncs with it until the local store is deleted and the client opened
+    /// again, or the old server is back and the client reconnects.
+    case authorityChanged = "authority-changed"
 }
 
 /// Something that went wrong with sync, as TS's `SyncError`.
 public struct SyncError: Decodable, Hashable, Sendable {
-    /// `rejected`, `network`, `auth` or `stopped`.
+    /// `rejected`, `network`, `auth`, `stopped` or `authority-changed`.
     public var kind: String
     /// The rejection's code, for `rejected`.
     public var code: String?
@@ -140,7 +145,7 @@ final class Tokens: TokenProvider, @unchecked Sendable {
 
     // Called by jazz-ffi on a thread of its own, which may block. Returning
     // nil signs the user out; throwing is a failed fetch: the session stays
-    // signed in and jazz-app retries on its own backoff.
+    // signed in and jazz-app-support retries on its own backoff.
     func token(reason: String) throws -> String? {
         let reason = TokenReason(rawValue: reason) ?? .connect
         let result = Box()

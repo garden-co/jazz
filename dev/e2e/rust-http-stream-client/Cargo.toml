@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-jazz-app = { path = "../../../crates/jazz-app" }
+jazz-app-support = { path = "../../../crates/jazz-app" }
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 

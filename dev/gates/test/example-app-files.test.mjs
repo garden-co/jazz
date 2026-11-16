@@ -25,7 +25,7 @@ function usesJazzSwift(manifest) {
 
 /**
  * TS apps: every app with a jazz.app.json, except Rust crates (a Cargo.toml
- * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app`
+ * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app-support`
  * crate's checks cover, Swift packages (a Package.swift naming jazz-swift),
  * whose bindings are `JazzApp.swift` and which dev/gates/jazz-swift.sh
  * covers, Go modules (a go.mod beside it), whose bindings are

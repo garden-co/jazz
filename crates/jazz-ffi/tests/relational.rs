@@ -1,5 +1,5 @@
 //! jazz-ffi v2: hopTo, gather, union, history and includeDeleted, lowered
-//! through jazz-app's untyped builder.
+//! through jazz-app-support's untyped builder.
 
 mod common;
 
@@ -169,7 +169,7 @@ fn gather_follows_a_self_relation() {
 /// acceptance order, each with its `$history`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_reads_accepted_versions() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()

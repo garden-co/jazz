@@ -28,7 +28,7 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
   "--benches",
 ]);
 export const RUST_CI_FEATURES =
-  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/axum,jazz-app/test-relay";
+  "jazz-core/testing,jazz-core/transport-compression-zstd,jazz-server/test,jazz-tools/test,jazz-app-support/axum,jazz-app-support/test-relay";
 
 // CI setup supplies this one coordination input. Every other JAZZ_* variable
 // is a test, fixture, benchmark, timeout, or assertion control and would make
@@ -48,6 +48,7 @@ export const ciPartitionJobs = Object.freeze({
   "next-trace": "test-next-trace",
   "react-native": "test-react-native",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
+  "crates-package": "test-crates-package",
   go: "test-go",
   kotlin: "test-kotlin",
   "kotlin-android": "test-kotlin-android",
@@ -63,7 +64,7 @@ const command = (label, executable, args, options = {}) =>
 const differentialCommand = command("bounded maintained-vs-one-shot differential oracle", "bash", [
   "-lc",
   String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+test_binary="$(cargo test -p jazz-core --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
@@ -99,9 +100,12 @@ export const ciPartitions = Object.freeze({
     // Ready PRs run only this partition, so it carries the TypeScript
     // typecheck too. The binding declarations it needs are committed.
     command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
-    command("crate publication selector contract", "bash", [
-      "dev/scripts/publish-crates-alpha.test.sh",
+    command("crate publication selector contract", "node", [
+      "--test",
+      "dev/scripts/check-lockstep-versions.test.mjs",
     ]),
+    // npm packages, published Rust crates and the Go module share one version.
+    command("lockstep versions", "node", ["dev/scripts/check-lockstep-versions.mjs"]),
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
@@ -314,7 +318,7 @@ export const ciPartitions = Object.freeze({
       "test",
       "--workspace",
       "--features",
-      "jazz/durable-object-limits",
+      "jazz-core/durable-object-limits",
     ]),
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
@@ -325,6 +329,14 @@ export const ciPartitions = Object.freeze({
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
     command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
+  ]),
+  // Every crate publish-jazz-crates-alpha.yml publishes packages and builds from its
+  // .crate against the others, as crates.io will see them.
+  "crates-package": Object.freeze([
+    command("cargo package, published crates", "node", [
+      "dev/scripts/publish-crates.mjs",
+      "--verify",
+    ]),
   ]),
   // The Go bindings and the StagePlan Go example (installs Go when the
   // image has none). go-cli's suite also runs against StagePlan's main
@@ -368,7 +380,7 @@ export const focusedCommands = Object.freeze([
     "dev/gates/ignored-tests.mjs",
     "--self-test",
   ]),
-  command("core Rust library compile", "cargo", ["check", "-p", "jazz", "--lib"]),
+  command("core Rust library compile", "cargo", ["check", "-p", "jazz-core", "--lib"]),
   command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
 ]);
 
