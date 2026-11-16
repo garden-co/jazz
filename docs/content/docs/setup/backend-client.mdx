@@ -152,6 +152,12 @@ try {
   permissions see exactly the `claims` you pass as the user's claims, and `{}` when you pass none.
 - If your main backend refuses the identity, for example because it was revoked, `forUser`
   rejects with an error whose `status` is 403.
+- The user's reads are checked by the client itself, against the `permissions` you opened it
+  with, so they must match the `jazz.permissions.json` your main backend serves. The client
+  checks this: if its app and permissions make a different bundle from the one your main backend
+  publishes, `forUser` rejects with `code: "bundle_mismatch"`, naming both bundle ids. Redeploy
+  the client with the current `jazz.generated.ts` and `jazz.permissions.json`. The client's own
+  system reads and writes are unaffected.
 - Only a trusted client has `forUser`. On a scoped client it throws, because that client already
   acts as its user. In your main backend itself, use `jazz.forReqUser`.
 
