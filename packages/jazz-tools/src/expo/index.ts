@@ -7,7 +7,7 @@ export {
 } from "../classic-api.js";
 export * from "../accounts/exports.js";
 
-export { createJazzClient, type JazzClientConfig } from "./create-jazz-session.js";
+export { createJazzClient, startJazzClient, type JazzClientConfig } from "./create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionSnapshot,

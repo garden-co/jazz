@@ -22,8 +22,6 @@ import "C"
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"strings"
 	"sync"
 	"unsafe"
 )
@@ -67,22 +65,6 @@ type Session struct {
 	Subject string `json:"subject"`
 }
 
-// ErrClosed is returned by calls on a closed DB.
-var ErrClosed = errors.New("jazz: closed")
-
-// Error is what Jazz refused or failed at.
-type Error struct {
-	// Kind is "refused" (validation, permissions, not supported yet),
-	// "io" or "closed".
-	Kind    string
-	Message string
-}
-
-func (e *Error) Error() string { return "jazz: " + e.Message }
-
-// Is makes errors.Is(err, ErrClosed) hold for a closed handle.
-func (e *Error) Is(target error) bool { return target == ErrClosed && e.Kind == "closed" }
-
 func takeError(err *C.char) error {
 	if err == nil {
 		return nil
@@ -90,21 +72,6 @@ func takeError(err *C.char) error {
 	text := C.GoString(err)
 	C.jazz_string_free(err)
 	return parseError(text)
-}
-
-func parseError(text string) error {
-	// jazz-ffi errors are `{"kind","message"}` JSON, or plain text.
-	var e struct {
-		Kind    string `json:"kind"`
-		Message string `json:"message"`
-	}
-	if json.Unmarshal([]byte(text), &e) == nil && e.Message != "" {
-		return &Error{Kind: strings.ToLower(e.Kind), Message: e.Message}
-	}
-	if strings.EqualFold(text, "closed") {
-		return &Error{Kind: "closed", Message: "closed"}
-	}
-	return &Error{Kind: "refused", Message: text}
 }
 
 // DB is an open app. It is safe for concurrent use.
@@ -168,7 +135,7 @@ func (db *DB) Close() error {
 // Calls block in Jazz; a cancelled ctx returns at once and the call's
 // result is dropped, but the call itself runs to its end: a write may
 // still apply.
-func (db *DB) call(ctx context.Context, method string, args any, out any) error {
+func (db *DB) call(ctx context.Context, method string, args map[string]any, out any) error {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return err
@@ -185,7 +152,7 @@ func (db *DB) call(ctx context.Context, method string, args any, out any) error 
 		db.mu.RLock()
 		defer db.mu.RUnlock()
 		if db.handle == nil {
-			done <- result{err: &Error{Kind: "closed", Message: "closed"}}
+			done <- result{err: &Error{Kind: KindClosed, Message: "closed"}}
 			return
 		}
 		cmethod := C.CString(method)
@@ -220,12 +187,12 @@ func (db *DB) call(ctx context.Context, method string, args any, out any) error 
 // that marshals to a JSON object of columns) sets on the row of table
 // with id.
 func (db *DB) Update(ctx context.Context, table, id string, patch any) error {
-	return db.call(ctx, "update", map[string]any{"table": table, "id": id, "patch": patch}, nil)
+	return update(ctx, db, table, id, patch)
 }
 
 // Delete deletes the row of table with id.
 func (db *DB) Delete(ctx context.Context, table, id string) error {
-	return db.call(ctx, "delete", map[string]any{"table": table, "id": id}, nil)
+	return remove(ctx, db, table, id)
 }
 
 // Account is the id of the account the app acts as (its session's user),
