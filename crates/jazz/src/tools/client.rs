@@ -1932,12 +1932,14 @@ impl JazzClient {
                 // authority's verdict on the transaction.
                 if error.is_authorization_denied() {
                     JazzError::Sync(format!(
-                        "transaction was rejected before reaching {tier:?} durability: {}",
+                        "{} {tier:?} durability: {}",
+                        super::REJECTED_BEFORE,
                         crate::db::AUTHORIZATION_DENIED
                     ))
                 } else {
                     JazzError::Write(format!(
-                        "transaction was rejected before reaching {tier:?} durability: {error}"
+                        "{} {tier:?} durability: {error}",
+                        super::REJECTED_BEFORE
                     ))
                 }
             })
@@ -2070,6 +2072,100 @@ impl JazzClient {
     }
 }
 
+impl JazzClient {
+    /// Leave the server, keeping local reads and writes working (TS's
+    /// `db.disconnect()`); [`JazzClient::reconnect`] resumes sync with the
+    /// same client. Returns whether a link was attached: without a server
+    /// there is none, and nothing changes.
+    pub fn disconnect(&self) -> bool {
+        if self.shared.serverless {
+            return false;
+        }
+        self.shared.upstream_paused.send_replace(true);
+        let detached = detach(&self.shared);
+        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        detached
+    }
+
+    /// Resume sync after [`JazzClient::disconnect`] (TS's
+    /// `db.reconnect()`), waiting until the link is attached. Returns
+    /// whether there was anything to reattach: without a server there is
+    /// nothing, and it returns `false` at once.
+    pub async fn reconnect(&self) -> Result<bool> {
+        if self.shared.serverless {
+            return Ok(false);
+        }
+        // An attempt the keeper started before this call (a retry during an
+        // outage) may still fail after it: only attempts started from here
+        // on answer it.
+        let (started, attached) = {
+            let state = self.shared.state.borrow();
+            (state.connect_started, state.upstream.is_some())
+        };
+        // Neither detached nor reconnecting: nothing to reattach.
+        let resumed = self
+            .shared
+            .upstream_paused
+            .send_if_modified(|paused| std::mem::replace(paused, false));
+        if !resumed && attached {
+            return Ok(false);
+        }
+        // The first attempt either attaches or fails; the keeper retries
+        // after a failure on its own.
+        self.shared
+            .until(|| {
+                let state = self.shared.state.borrow();
+                if state.upstream.is_some() {
+                    return Some(Ok(true));
+                }
+                match &state.connect_failed {
+                    Some((attempt, error)) if *attempt > started => {
+                        Some(Err(JazzError::Connection(error.clone())))
+                    }
+                    _ => None,
+                }
+            })
+            .await?
+    }
+
+    /// Keep the writes the server refuses, for
+    /// [`JazzClient::take_mutation_errors`] (TS's `onMutationError`).
+    /// Owned by `jazz-app`, like that: not public API.
+    #[doc(hidden)]
+    pub fn track_mutation_errors(&self) {
+        self.shared.db.track_upstream_rejections();
+    }
+
+    /// This client's writes the server refused since the last call (with
+    /// [`JazzClient::track_mutation_errors`] on), oldest first. Each is
+    /// reported once; their payloads are released.
+    ///
+    /// Destructive, and owned by `jazz-app`: its reporter takes these for
+    /// `Jazz::mutation_errors`, so another caller (say through
+    /// `Jazz::with_client`) would steal refusals from it. Not public API.
+    #[doc(hidden)]
+    pub fn take_mutation_errors(&self) -> Vec<MutationError> {
+        let node = self.shared.identity.node;
+        let mut errors = Vec::new();
+        for rejection in self.shared.db.take_upstream_rejections() {
+            if rejection.writer != *node.as_bytes() {
+                continue;
+            }
+            let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            errors.push(MutationError {
+                transaction: TransactionId::from_committed_tx(TxId {
+                    time: crate::time::TxTime(rejection.seq),
+                    node,
+                }),
+                message: rejection.error.to_string(),
+                denied: rejection.error.is_authorization_denied(),
+                serializable: rejection.serializable,
+            });
+        }
+        errors
+    }
+}
+
 #[cfg(feature = "testing")]
 impl JazzClient {
     pub fn client_id(&self) -> Option<crate::tools::ClientId> {
@@ -2103,10 +2199,7 @@ impl JazzClient {
     }
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
-        self.shared.upstream_paused.send_replace(true);
-        let detached = detach(&self.shared);
-        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-        detached
+        self.disconnect()
     }
 
     /// Wait for a durability tier using an exact timeout rather than the
@@ -2125,37 +2218,7 @@ impl JazzClient {
     /// Let the keeper open a fresh link for the preserved client state and
     /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        // An attempt the keeper started before this call (a retry during an
-        // outage) may still fail after it: only attempts started from here
-        // on answer it.
-        let (started, attached) = {
-            let state = self.shared.state.borrow();
-            (state.connect_started, state.upstream.is_some())
-        };
-        // Neither detached nor reconnecting: nothing to reattach.
-        let resumed = self
-            .shared
-            .upstream_paused
-            .send_if_modified(|paused| std::mem::replace(paused, false));
-        if !resumed && attached {
-            return Ok(false);
-        }
-        // The first attempt either attaches or fails; the keeper retries
-        // after a failure on its own.
-        self.shared
-            .until(|| {
-                let state = self.shared.state.borrow();
-                if state.upstream.is_some() {
-                    return Some(Ok(true));
-                }
-                match &state.connect_failed {
-                    Some((attempt, error)) if *attempt > started => {
-                        Some(Err(JazzError::Connection(error.clone())))
-                    }
-                    _ => None,
-                }
-            })
-            .await?
+        self.reconnect().await
     }
 }
 
@@ -2188,6 +2251,31 @@ pub struct StreamingUpload {
     table: String,
     column: String,
     cells: BTreeMap<String, CoreValue>,
+}
+
+/// A write of this client the server refused: see
+/// [`JazzClient::take_mutation_errors`].
+///
+/// Serializes as `{"transaction": "<id>", "message", "denied",
+/// "serializable"}`, the transaction as its string id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationError {
+    /// The refused commit, as its write returned it.
+    #[serde(serialize_with = "serialize_display")]
+    pub transaction: TransactionId,
+    pub message: String,
+    /// Refused by a permission.
+    pub denied: bool,
+    /// A serializable transaction's commit.
+    pub serializable: bool,
+}
+
+fn serialize_display<T: std::fmt::Display, S: serde::Serializer>(
+    value: &T,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
 }
 
 /// A transaction-scoped client handle.
