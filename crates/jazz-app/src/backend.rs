@@ -219,7 +219,7 @@ pub(crate) async fn link(
     match response.status() {
         reqwest::StatusCode::UNAUTHORIZED => return Err(Error::SignedOut),
         reqwest::StatusCode::CONFLICT => {
-            return Err(Error::Server(
+            return Err(Error::Refused(
                 "the backend refused the link: its user already has another account".into(),
             ));
         }
