@@ -26,9 +26,11 @@
 //! what it commits, so every call below except `served_through` is
 //! refused there.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
-use super::{Db, Inner};
+use super::{Db, Store};
 use crate::options::{Error, ErrorCode};
 use crate::values::storage;
 use jazz_sql::{Row as _, Sql as _};
@@ -117,18 +119,35 @@ impl HeldRow {
 /// cross-shard parts still to land.
 pub(crate) struct ShardState {
     /// The wall clock (Unix ms) positions are drawn from.
-    pub(crate) clock: Box<dyn Fn() -> u64>,
+    pub(crate) clock: Rc<ShardClock>,
     /// Held position → the part it is held for.
     holds: BTreeMap<u64, CommitRef>,
     /// Parts to land at a fixed position when they arrive.
     fixed: HashMap<CommitRef, u64>,
     /// The rows each held part writes, and who holds each row.
     rows: HashMap<HeldRow, CommitRef>,
-    /// On a reopened shard, the clock reading (ms) it waits out before
-    /// numbering: its clock at reopen plus the offset bound.
-    resumes_after: Option<u64>,
     /// Whether [`SHARD_OBSERVED`] is set.
     observed: bool,
+}
+
+/// Shared opening state; querying the clock never borrows SQL execution state.
+pub(crate) struct ShardClock {
+    now: Box<dyn Fn() -> u64>,
+    // Set only during opening, before any database handle is returned.
+    resumes_after: OnceCell<u64>,
+}
+
+impl ShardClock {
+    pub(crate) fn now(&self) -> u64 {
+        (self.now)()
+    }
+
+    pub(crate) fn waits_out(&self) -> Option<u64> {
+        self.resumes_after
+            .get()
+            .copied()
+            .filter(|&after| self.now() <= after)
+    }
 }
 
 /// The `_jazz_meta` key a clocked store sets the first time it observes a
@@ -146,11 +165,13 @@ const HOLDS_DDL: &str = "\
 impl ShardState {
     pub(crate) fn new(clock: Box<dyn Fn() -> u64>) -> Self {
         Self {
-            clock,
+            clock: Rc::new(ShardClock {
+                now: clock,
+                resumes_after: OnceCell::new(),
+            }),
             holds: BTreeMap::new(),
             fixed: HashMap::new(),
             rows: HashMap::new(),
-            resumes_after: None,
             observed: false,
         }
     }
@@ -194,13 +215,13 @@ impl ShardState {
     }
 }
 
-impl Inner {
+impl Store {
     /// The position the next commit lands at: above every position handed
     /// out or observed, and on a shard no earlier than its clock (past the
     /// offset bound it waits out after a reopen, for a write that does not
     /// wait).
     /// A replica numbers its own commits locally: their versions sit at
-    /// their commit HLCs (see [`Inner::stamp_commit`]). Its transaction ids
+    /// their commit HLCs (see [`Store::stamp_commit`]). Its transaction ids
     /// are `(seq, node)`, and the authority deduplicates uploads by them
     /// (INV-EDGE-16). A replica in a file numbers no lower than its wall
     /// clock's first position ([`hlc`]): the file may reopen without commits
@@ -210,22 +231,23 @@ impl Inner {
     /// a host that gives its node to a fresh one seeds the floor instead
     /// ([`crate::db::Db::seed_seq_floor`]).
     pub(crate) fn next_seq(&self) -> u64 {
-        if self.me != crate::db::sync::ACCEPTED {
-            let next = self.seq + 1;
+        if self.me.get() != crate::db::sync::ACCEPTED {
+            let next = self.seq.get() + 1;
             if !self.reopenable {
                 return next;
             }
             return next.max(hlc(self.hlc_clock_ms()));
         }
         let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
-        (self.seq + 1).max(hlc((self.shard.clock)())).max(floor)
+        (self.seq.get() + 1)
+            .max(hlc(self.shard.borrow().clock.now()))
+            .max(floor)
     }
 
     /// While a reopened shard waits out its offset bound: the clock reading
     /// (ms) it waits to pass.
     pub(crate) fn waits_out(&self) -> Option<u64> {
-        let clock = &self.shard.clock;
-        self.shard.resumes_after.filter(|&after| clock() <= after)
+        self.shard.borrow().clock.waits_out()
     }
 
     /// Whether the session commit `by` writing `ops` waits: another part
@@ -238,10 +260,11 @@ impl Inner {
         ops: &[super::WireOp],
     ) -> Result<bool, Error> {
         // Most stores hold nothing: they skip naming the rows.
-        if !self.shard.rows.is_empty() && self.shard.blocks(by, &HeldRow::of(ops)) {
+        if !self.shard.borrow().rows.is_empty() && self.shard.borrow().blocks(by, &HeldRow::of(ops))
+        {
             return Ok(true);
         }
-        if self.waits_out().is_none() || self.shard.fixed(by).is_some() {
+        if self.waits_out().is_none() || self.shard.borrow().fixed(by).is_some() {
             return Ok(false);
         }
         Ok(self.applied_fate(by.node, by.tx).await?.is_none())
@@ -254,15 +277,18 @@ impl Inner {
     /// at. Numbering from its clock afterwards (rather than from the bound
     /// at once) keeps its positions no further ahead of its peers' clocks
     /// than its own clock is. A hold whose part already landed is dropped.
-    pub(crate) async fn load_shard(&mut self) -> Result<(), Error> {
-        let clock = &self.shard.clock;
+    pub(crate) async fn load_shard(&self) -> Result<(), Error> {
+        let clock = self.shard_clock.clone();
         // A reopened shard that observed positions past what it numbered
         // may have served them, up to its clock plus the offset bound,
         // before it stopped; it waits that bound out. (What it numbered or
         // held, it reloads.)
         if self.meta(SHARD_OBSERVED).await?.is_some() {
-            self.shard.observed = true;
-            self.shard.resumes_after = Some(clock().saturating_add(HLC_MAX_OFFSET_MS));
+            self.shard.borrow_mut().observed = true;
+            clock
+                .resumes_after
+                .set(clock.now().saturating_add(HLC_MAX_OFFSET_MS))
+                .expect("shard opening deadline is initialized once");
         }
         let kept: bool = self
             .conn
@@ -325,16 +351,16 @@ impl Inner {
                 self.forget_hold(commit).await?;
                 continue;
             }
-            self.shard.holds.insert(at, commit);
+            self.shard.borrow_mut().holds.insert(at, commit);
             if let Some(fixed) = fixed {
-                self.shard.fixed.insert(commit, fixed);
-                self.seq = self.seq.max(fixed);
+                self.shard.borrow_mut().fixed.insert(commit, fixed);
+                self.seq.set(self.seq.get().max(fixed));
             }
-            self.seq = self.seq.max(at);
+            self.seq.set(self.seq.get().max(at));
         }
         for (row, commit) in rows {
-            if self.shard.held(commit).is_some() {
-                self.shard.rows.insert(row, commit);
+            if self.shard.borrow().held(commit).is_some() {
+                self.shard.borrow_mut().rows.insert(row, commit);
             }
         }
         Ok(())
@@ -362,7 +388,7 @@ impl Inner {
     pub(crate) async fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
         // Every durable hold is loaded on reopen, so a store holding
         // nothing in memory has none on disk either.
-        if self.shard.holds.is_empty() && self.shard.fixed.is_empty() {
+        if self.shard.borrow().holds.is_empty() && self.shard.borrow().fixed.is_empty() {
             return Ok(());
         }
         let kept: bool = self
@@ -414,12 +440,12 @@ impl ShardRole<'_> {
     /// Whether the store takes the shard role: it is the last word on what
     /// it commits (an authority, not a replica of an upstream).
     pub fn is_shard(&self) -> bool {
-        self.db.inner.metadata().client.is_none()
+        self.db.inner.as_ref().client.borrow().is_none()
     }
 
     /// The store must be a shard (see [`Self::is_shard`]).
-    fn require(&self, inner: &Inner) -> Result<(), Error> {
-        if inner.client.is_some() {
+    fn require(&self, inner: &Store) -> Result<(), Error> {
+        if inner.client.borrow().is_some() {
             return Err(Error::new(
                 ErrorCode::Protocol,
                 "not supported: a replica of an upstream takes no shard role",
@@ -436,29 +462,34 @@ impl ShardRole<'_> {
     /// that: returns the position observed, which the caller observes again
     /// once the clock has caught up.
     pub async fn observe(&self, position: u64) -> Result<u64, Error> {
-        let mut inner = self.db.inner.sql_borrow_mut().await;
-        self.require(&inner)?;
-        let observed = position.min(hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS)));
-        observe(&mut inner, observed).await?;
+        let inner = self.db.inner.ready().await;
+        self.require(inner)?;
+        let observed = position.min(hlc(inner
+            .shard
+            .borrow()
+            .clock
+            .now()
+            .saturating_add(HLC_MAX_OFFSET_MS)));
+        observe(inner, observed).await?;
         Ok(observed)
     }
 
     /// The position the store serves its sessions as settled: its newest,
     /// or just below its lowest hold while one stands.
     pub fn served_through(&self) -> u64 {
-        self.db.inner.metadata().served_through()
+        self.db.inner.as_ref().served_through()
     }
 
     /// While a reopened shard waits out its offset bound, the clock reading
     /// (ms) it waits to pass: until then its sessions' commits wait (but a
     /// fixed part's), and a caller holds nothing yet.
     pub fn waits_out(&self) -> Option<u64> {
-        self.db.inner.metadata().waits_out()
+        self.db.inner.shard_clock.waits_out()
     }
 
     /// The lowest position held for a part still to land, if any.
     pub fn lowest_hold(&self) -> Option<u64> {
-        self.db.inner.metadata().shard.lowest_hold()
+        self.db.inner.as_ref().shard.borrow().lowest_hold()
     }
 
     /// Hold a position for the cross-shard part `commit`, which writes
@@ -470,12 +501,12 @@ impl ShardRole<'_> {
     /// cross-shard commits holding each other's rows on two shards would
     /// otherwise wait on each other.
     pub async fn hold(&self, commit: CommitRef, rows: &[HeldRow]) -> Result<u64, Error> {
-        let mut inner = self.db.inner.sql_borrow_mut().await;
-        self.require(&inner)?;
-        if let Some(at) = inner.shard.held(commit) {
+        let inner = self.db.inner.ready().await;
+        self.require(inner)?;
+        if let Some(at) = inner.shard.borrow().held(commit) {
             return Ok(at);
         }
-        if inner.shard.blocks(commit, rows) {
+        if inner.shard.borrow().blocks(commit, rows) {
             return Err(Error::new(
                 ErrorCode::Protocol,
                 "not supported yet: a row of this cross-shard part is held by another \
@@ -506,10 +537,10 @@ impl ShardRole<'_> {
                 .await
                 .map_err(storage)?;
         }
-        inner.seq = at;
-        inner.shard.holds.insert(at, commit);
+        inner.seq.set(at);
+        inner.shard.borrow_mut().holds.insert(at, commit);
         for row in rows {
-            inner.shard.rows.insert(row.clone(), commit);
+            inner.shard.borrow_mut().rows.insert(row.clone(), commit);
         }
         Ok(at)
     }
@@ -519,9 +550,9 @@ impl ShardRole<'_> {
     /// hold here. Commits the store accepted since the hold may sit above
     /// it; none sits in what it served as settled. The part must be held.
     pub async fn fix(&self, commit: CommitRef, position: u64) -> Result<(), Error> {
-        let mut inner = self.db.inner.sql_borrow_mut().await;
-        self.require(&inner)?;
-        let Some(held) = inner.shard.held(commit) else {
+        let inner = self.db.inner.ready().await;
+        self.require(inner)?;
+        let Some(held) = inner.shard.borrow().held(commit) else {
             return Err(Error::new(
                 ErrorCode::Protocol,
                 "a cross-shard part is fixed only once it is held",
@@ -533,7 +564,7 @@ impl ShardRole<'_> {
                 format!("position {position} is below the part's hold at {held}"),
             ));
         }
-        observe(&mut inner, position).await?;
+        observe(inner, position).await?;
         inner
             .exec(
                 "UPDATE _jazz_shard_holds SET fixed = ?3 WHERE node = ?1 AND tx = ?2",
@@ -541,20 +572,20 @@ impl ShardRole<'_> {
             )
             .await
             .map_err(storage)?;
-        inner.shard.fixed.insert(commit, position);
+        inner.shard.borrow_mut().fixed.insert(commit, position);
         Ok(())
     }
 
     /// Drop the part `commit`'s hold without it landing: its cross-shard
     /// commit was refused. Releasing a part not held does nothing.
     pub async fn release(&self, commit: CommitRef) -> Result<(), Error> {
-        let mut inner = self.db.inner.sql_borrow_mut().await;
-        self.require(&inner)?;
-        if inner.shard.held(commit).is_none() {
+        let inner = self.db.inner.ready().await;
+        self.require(inner)?;
+        if inner.shard.borrow().held(commit).is_none() {
             return Ok(());
         }
         inner.forget_hold(commit).await?;
-        inner.shard.landed(commit);
+        inner.shard.borrow_mut().landed(commit);
         Ok(())
     }
 }
@@ -562,9 +593,15 @@ impl ShardRole<'_> {
 /// Note a position a peer named: nothing the store commits later lands at
 /// or below it. One further ahead of the clock than [`HLC_MAX_OFFSET_MS`]
 /// is refused, unless the store already numbered or held past it.
-async fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
-    if position > inner.seq
-        && position > hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS))
+async fn observe(inner: &Store, position: u64) -> Result<(), Error> {
+    if position > inner.seq.get()
+        && position
+            > hlc(inner
+                .shard
+                .borrow()
+                .clock
+                .now()
+                .saturating_add(HLC_MAX_OFFSET_MS))
     {
         return Err(Error::new(
             ErrorCode::Protocol,
@@ -573,10 +610,10 @@ async fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
             ),
         ));
     }
-    if position > inner.seq && !inner.shard.observed {
+    if position > inner.seq.get() && !inner.shard.borrow().observed {
         inner.persist_meta(SHARD_OBSERVED, 1).await?;
-        inner.shard.observed = true;
+        inner.shard.borrow_mut().observed = true;
     }
-    inner.seq = inner.seq.max(position);
+    inner.seq.set(inner.seq.get().max(position));
     Ok(())
 }

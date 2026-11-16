@@ -171,7 +171,7 @@ fn predecessor(commit: Option<Option<Pos>>) -> Result<Pos, Error> {
 /// Which of a commit's ops write each (stored table, row), in op order.
 pub(super) type RowOps = HashMap<(String, RowUuid), Vec<usize>>;
 
-impl Inner {
+impl Store {
     /// Where the predecessor commit `tx` of `node` landed; refused if the
     /// authority rejected it (naming why) or never received it.
     async fn predecessor_at(&self, node: [u8; 16], tx: u64) -> Result<Pos, Error> {
@@ -314,7 +314,8 @@ impl Inner {
         bases: Vec<(usize, WireBase)>,
     ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
-        let pending = &self.client.as_ref().expect("a relay is a client").pending;
+        let client_state = self.client.borrow();
+        let pending = &client_state.as_ref().expect("a relay is a client").pending;
         {
             let mut out = Vec::new();
             for (op, base) in bases.into_iter() {
@@ -528,7 +529,7 @@ impl Inner {
         // A session commit this relay carries, by its writer's id: its
         // local tx here.
         let carried = |node: [u8; 16], tx: u64| {
-            self.client.as_ref().and_then(|client| {
+            self.client.borrow().as_ref().and_then(|client| {
                 client
                     .pending
                     .iter()

@@ -103,7 +103,7 @@ pub(super) struct Group {
     /// The stored tables the query reads: a cut is taken only while the
     /// store holds others' versions of them past the result's position.
     tables: BTreeSet<String>,
-    /// The cut the last run read through (see [`Inner::visible_read`]):
+    /// The cut the last run read through (see [`Store::visible_read`]):
     /// its position and the own commits past it, or `None` for the
     /// current state.
     applied: Option<(sync::Pos, usize)>,
@@ -313,10 +313,10 @@ impl Fanout {
     }
 }
 
-impl Inner {
+impl Store {
     /// Open a subscription: join the group with identical SQL, or start one.
     pub(super) async fn subscribe_member(
-        &mut self,
+        &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: ReadSpec,
@@ -325,7 +325,7 @@ impl Inner {
         self.check_splices(prepared, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
-            renames: renames(prepared.source_schema(&self.owner)),
+            renames: renames(prepared.source_schema(&self.owner.borrow())),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
@@ -357,10 +357,10 @@ impl Inner {
         };
         if let Some(handle) = self
             .fan
+            .borrow()
             .by_key
             .get(&key)
-            .and_then(|gid| self.fan.groups.get(gid))
-            .cloned()
+            .and_then(|gid| self.fan.borrow().groups.get(gid).cloned())
         {
             let mut group = handle.borrow_mut();
             let queue: Queue = Rc::new(RefCell::new(if group.opened {
@@ -369,7 +369,7 @@ impl Inner {
                 VecDeque::new()
             }));
             group.members.push(member(&queue));
-            self.fan.stats.borrow_mut().shared_joins += 1;
+            self.fan.borrow().stats.borrow_mut().shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they
@@ -400,15 +400,19 @@ impl Inner {
         let root = prepared
             .schema
             .as_ref()
-            .unwrap_or(&self.owner)
+            .unwrap_or(&self.owner.borrow())
             .stored_table(
                 history_source_table(&prepared.query.table).unwrap_or(&prepared.query.table),
             )?
             .to_owned();
         let recheck = recheckable(&prepared.query, &root, &read, &compiled);
-        let branches = view_branches(prepared.source_schema(&self.owner), &read, &watches);
+        let branches = view_branches(
+            prepared.source_schema(&self.owner.borrow()),
+            &read,
+            &watches,
+        );
         let masks = view_masks(
-            prepared.source_schema(&self.owner),
+            prepared.source_schema(&self.owner.borrow()),
             prepared,
             &read,
             watches
@@ -422,10 +426,10 @@ impl Inner {
         } else {
             VecDeque::from([open(&rows)])
         }));
-        let gid = self.fan.next;
-        self.fan.next += 1;
-        self.fan.index(gid, &watches);
-        self.fan.by_key.insert(key.clone(), gid);
+        let gid = self.fan.borrow().next;
+        self.fan.borrow_mut().next += 1;
+        self.fan.borrow_mut().index(gid, &watches);
+        self.fan.borrow_mut().by_key.insert(key.clone(), gid);
         let handle = Rc::new(RefCell::new(Group {
             key,
             prepared: prepared.clone(),
@@ -448,7 +452,7 @@ impl Inner {
         }));
         self.read_keys(&mut handle.borrow_mut()).await;
         let weak = Rc::downgrade(&handle);
-        self.fan.groups.insert(gid, handle);
+        self.fan.borrow_mut().groups.insert(gid, handle);
         Ok((queue, weak))
     }
 
@@ -466,7 +470,8 @@ impl Inner {
         if query.includes.iter().all(|include| include.require) {
             return Ok(Vec::new());
         }
-        let schema = prepared.source_schema(&self.owner);
+        let owner_state = self.owner.borrow();
+        let schema = prepared.source_schema(&owner_state);
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
@@ -517,10 +522,11 @@ impl Inner {
             }
         }
         if let Some(author) = identity {
+            let owner_state = self.owner.borrow();
             let policies = prepared
                 .schema
                 .as_ref()
-                .map_or(&*self.owner, |schema| schema.policy_schema());
+                .map_or(&**owner_state, |schema| schema.policy_schema());
             for table in tables.clone() {
                 // Internal tables (history, branches) carry no policy.
                 if policies.by_stored(&table).is_some() {
@@ -538,8 +544,9 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let owner = self.owner.borrow().clone();
         let compiled = self
-            .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .read_ctx(prepared, &owner, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
@@ -554,7 +561,8 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
-        let schema = prepared.source_schema(&self.owner);
+        let owner_state = self.owner.borrow();
+        let schema = prepared.source_schema(&owner_state);
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -689,7 +697,7 @@ impl Inner {
     }
 
     /// Wake the groups a commit's changed rows hit, re-run and diff them.
-    pub(super) async fn dispatch(&mut self, mut changes: Vec<(String, RowUuid, Vec<u8>)>) {
+    pub(super) async fn dispatch(&self, mut changes: Vec<(String, RowUuid, Vec<u8>)>) {
         changes.sort();
         changes.dedup();
         // Per woken group: the root rows that woke it, or `None` once any
@@ -697,7 +705,7 @@ impl Inner {
         let mut woken: BTreeMap<u64, Option<BTreeSet<RowUuid>>> = BTreeMap::new();
         // Per woken group: include targets that changed, as (root column, id).
         let mut targets: BTreeMap<u64, BTreeSet<(String, RowUuid)>> = BTreeMap::new();
-        let groups = &self.fan.groups;
+        let groups = &self.fan.borrow().groups;
         let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid, key: &[u8]| {
             for gid in gids {
                 let Some(group) = groups.get(gid) else {
@@ -733,15 +741,18 @@ impl Inner {
             }
         };
         for (table, row, key) in &changes {
-            if let Some(groups) = self.fan.tables.get(table) {
+            if let Some(groups) = self.fan.borrow().tables.get(table) {
                 wake(groups, table, *row, key);
             }
-            let Some(columns) = self.fan.key_columns.get(table) else {
+            let fan_state = self.fan.borrow();
+            let Some(columns) = fan_state.key_columns.get(table) else {
                 continue;
             };
             for image in self.images(table, *row, key, columns).await {
                 for (column, value) in image {
-                    if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
+                    if let Some(groups) =
+                        self.fan.borrow().keys.get(&(table.clone(), column, value))
+                    {
                         wake(groups, table, *row, key);
                     }
                 }
@@ -749,15 +760,16 @@ impl Inner {
         }
         for image in std::mem::take(&mut *self.gone.borrow_mut()) {
             let row = RowUuid::from_bytes(image.id);
-            if let Some(groups) = self.fan.tables.get(&image.table) {
+            if let Some(groups) = self.fan.borrow().tables.get(&image.table) {
                 wake(groups, &image.table, row, &image.key);
             }
-            let Some(columns) = self.fan.key_columns.get(&image.table) else {
+            let fan_state = self.fan.borrow();
+            let Some(columns) = fan_state.key_columns.get(&image.table) else {
                 continue;
             };
             for (column, cell) in &image.cells {
                 if columns.contains(column)
-                    && let Some(groups) = self.fan.keys.get(&(
+                    && let Some(groups) = self.fan.borrow().keys.get(&(
                         image.table.clone(),
                         column.clone(),
                         canon(&Sql::from(cell)),
@@ -767,20 +779,21 @@ impl Inner {
                 }
             }
         }
-        self.fan.stats.borrow_mut().woken += woken.len() as u64;
-        self.fan.stats.borrow_mut().skipped += (self.fan.groups.len() - woken.len()) as u64;
+        self.fan.borrow().stats.borrow_mut().woken += woken.len() as u64;
+        self.fan.borrow().stats.borrow_mut().skipped +=
+            (self.fan.borrow().groups.len() - woken.len()) as u64;
         let groups: Vec<_> = woken
             .into_iter()
-            .filter_map(|(gid, ids)| Some((gid, self.fan.groups.get(&gid).cloned()?, ids)))
+            .filter_map(|(gid, ids)| Some((gid, self.fan.borrow().groups.get(&gid).cloned()?, ids)))
             .collect();
         for (gid, group, ids) in groups {
             let mut group = group.borrow_mut();
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
                 if self.refresh_group(&mut group, ids.as_ref()).await {
-                    self.fan.stats.borrow_mut().reran += 1;
+                    self.fan.borrow().stats.borrow_mut().reran += 1;
                 } else {
-                    self.fan.stats.borrow_mut().rechecked += 1;
+                    self.fan.borrow().stats.borrow_mut().rechecked += 1;
                 }
             }
             if let Some(changed) = targets.remove(&gid) {
@@ -793,7 +806,7 @@ impl Inner {
     /// they can depend on session values.
     /// The active schema changed: every subscription re-runs and restates
     /// its rows (a reset), since their shape may have changed.
-    pub(super) async fn reset_everything(&mut self) {
+    pub(super) async fn reset_everything(&self) {
         self.refresh_where(|_| true, true).await;
     }
 
@@ -801,7 +814,7 @@ impl Inner {
     /// claim operands read them. A group with no policy identity takes its
     /// claims from this node's own author; one with request claims carries
     /// its own and is unaffected.
-    pub(super) async fn refresh_identity(&mut self, author: AuthorSubject) {
+    pub(super) async fn refresh_identity(&self, author: AuthorSubject) {
         let own = self.identity.author;
         self.refresh_where(
             |group| {
@@ -814,9 +827,10 @@ impl Inner {
         .await;
     }
 
-    async fn refresh_where(&mut self, affected: impl Fn(&Group) -> bool, reset: bool) {
+    async fn refresh_where(&self, affected: impl Fn(&Group) -> bool, reset: bool) {
         let groups: Vec<(u64, Rc<RefCell<Group>>)> = self
             .fan
+            .borrow()
             .groups
             .iter()
             .filter(|(_, g)| affected(&g.borrow()))
@@ -835,14 +849,14 @@ impl Inner {
                 group.prepared.schema = Some(governed);
             }
             let old = std::mem::take(&mut group.watches);
-            self.fan.unindex(gid, &old);
+            self.fan.borrow_mut().unindex(gid, &old);
             let watches = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
                     self.watches(&group.prepared, group.identity, &group.read, &compiled)
                 })
                 .unwrap_or(old);
-            self.fan.index(gid, &watches);
+            self.fan.borrow_mut().index(gid, &watches);
             group.watches = watches;
             if reset {
                 self.reset_group(&mut group).await;
@@ -1144,7 +1158,8 @@ impl Inner {
             Some(crate::query::OrderDirection::Desc)
         );
         let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
-        let schema = group.prepared.source_schema(&self.owner);
+        let owner_state = self.owner.borrow();
+        let schema = group.prepared.source_schema(&owner_state);
         if projected {
             // Cells sort as the compiled ORDER BY sorts them: an enum
             // variant by its tag, or its rank in a schema whose declaration
@@ -1259,7 +1274,7 @@ impl Inner {
 
     /// Re-run every result that waited for large-value chunks.
     pub(super) async fn retry_awaiting(&self) {
-        for handle in self.fan.groups.values() {
+        for handle in self.fan.borrow().groups.values() {
             let mut group = handle.borrow_mut();
             if !group.awaiting {
                 continue;
@@ -1284,8 +1299,8 @@ impl Inner {
     /// Re-run the live results whose cut moved: their read's settle rose,
     /// the connection's position did, or an own commit was accepted past
     /// them.
-    pub(super) async fn refresh_visibility(&mut self) -> Result<(), Error> {
-        let groups: Vec<Rc<RefCell<Group>>> = self.fan.groups.values().cloned().collect();
+    pub(super) async fn refresh_visibility(&self) -> Result<(), Error> {
+        let groups: Vec<Rc<RefCell<Group>>> = self.fan.borrow().groups.values().cloned().collect();
         for group in groups {
             let mut group = group.borrow_mut();
             if group.read.position == Position::Current
@@ -1349,7 +1364,8 @@ impl Inner {
         }
         let query = &prepared.query;
         let table = &query.table;
-        let schema = prepared.source_schema(&self.owner);
+        let owner_state = self.owner.borrow();
+        let schema = prepared.source_schema(&owner_state);
         let t = schema.table(table)?;
         for column in columns {
             if !t.column(column).is_some_and(crate::large::large_capable) {
@@ -1386,7 +1402,8 @@ impl Inner {
         if group.key.splices.is_empty() || updated.is_empty() {
             return;
         }
-        let schema = group.prepared.source_schema(&self.owner);
+        let owner_state = self.owner.borrow();
+        let schema = group.prepared.source_schema(&owner_state);
         let Ok(table) = schema.table(&group.prepared.query.table) else {
             return;
         };

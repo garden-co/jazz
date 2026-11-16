@@ -200,7 +200,7 @@ impl PreparedCell {
     }
 }
 
-impl Inner {
+impl Store {
     async fn stage_upload(
         &self,
         id: &[u8; 32],
@@ -240,9 +240,9 @@ impl Inner {
     }
 
     /// Forget what the finished write's edits derived.
-    pub(crate) fn clear_derived(&mut self) {
-        self.pending_nodes.clear();
-        self.derived.clear();
+    pub(crate) fn clear_derived(&self) {
+        self.pending_nodes.borrow_mut().clear();
+        self.derived.borrow_mut().clear();
     }
 
     /// Whose read policy a cell-level read or edit runs under: the store's
@@ -614,7 +614,7 @@ impl Inner {
     /// holds. The edit's derived value and any nodes it wrote are left in
     /// `derived` and `pending_nodes` for the caller to take.
     pub(crate) async fn whole_write_as_edit(
-        &mut self,
+        &self,
         prepared: &PreparedCell,
         logical: &[u8],
         identity: WriteIdentity,
@@ -631,7 +631,7 @@ impl Inner {
     /// a value equal to the held one is the held value, so rewriting a
     /// document unchanged costs nothing.
     pub(crate) async fn as_edit_of(
-        &mut self,
+        &self,
         table: &str,
         column: &crate::values::Column,
         cell: Sql,
@@ -647,7 +647,7 @@ impl Inner {
             .ok()?;
         let text = crate::large::kind(column) != lv::LargeValueKind::Bytes;
         let Some(splice) = byte_splices(&current, logical, text).pop() else {
-            self.derived.push((*held).clone());
+            self.derived.borrow_mut().push((*held).clone());
             return Some(Value::Large(held));
         };
         // A longer insertion materializes a new tree either way (SPEC 19.4),
@@ -667,7 +667,7 @@ impl Inner {
     /// tail entry, or is consolidated when its tail is full; the nodes a
     /// consolidation writes are stored with the row update.
     pub(crate) async fn edited(
-        &mut self,
+        &self,
         table: &str,
         column: &crate::values::Column,
         cell: Sql,
@@ -716,7 +716,7 @@ impl Inner {
         };
         let next = match outcome {
             lv::TailOutcome::Updated(next) => {
-                self.derived.push(next.clone());
+                self.derived.borrow_mut().push(next.clone());
                 next
             }
             lv::TailOutcome::ConsolidationRequired(transient) => {
@@ -738,7 +738,7 @@ impl Inner {
                 // A later edit of the same write reads the new tree before
                 // the row update stores it.
                 self.chunks.cache_pinned(&prepared);
-                self.pending_nodes.push(prepared);
+                self.pending_nodes.borrow_mut().push(prepared);
                 next
             }
         };
@@ -947,7 +947,7 @@ impl Db {
         let table = &prepared.query.query.table;
         let column = &prepared.column.name;
         let value = {
-            let mut inner = self.inner().await;
+            let inner = self.inner().await;
             let edited = (async {
                 let (col, cell) = inner
                     .physical_cell(prepared, identity_of(opts.identity))
@@ -1007,7 +1007,7 @@ impl Db {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let lowered = {
-            let mut inner = self.inner().await;
+            let inner = self.inner().await;
             let identity = identity_of(opts.identity);
             inner
                 .lower_large_mutations(&mut patch, mutations, identity)
@@ -1140,8 +1140,8 @@ impl Db {
         let stage = Rc::clone(&emitted);
         let id = upload_id();
         let schema_instance = {
-            let inner = self.inner.metadata();
-            Rc::downgrade(self.view.as_ref().unwrap_or(&inner.owner))
+            let inner = self.inner.as_ref();
+            Rc::downgrade(self.view.as_ref().unwrap_or(&inner.owner.borrow()))
         };
         Ok(StreamingValueUpload {
             id,
@@ -1152,7 +1152,7 @@ impl Db {
             column: column.to_owned(),
             _lease: UploadLease {
                 id,
-                cleanup: self.metadata().upload_cleanup.clone(),
+                cleanup: self.inner.as_ref().upload_cleanup.clone(),
             },
             kind,
             initialized: false,
@@ -1197,10 +1197,9 @@ impl Db {
                 .map_err(|e| rejected(e.to_string()))
                 .map(|()| std::mem::take(&mut *upload.emitted.borrow_mut()))?;
             {
-                admit_ingress(&inner, &staged, now)?;
-                inner
-                    .stage_upload(&upload.id, &staged, inner.client.is_some())
-                    .await
+                admit_ingress(inner, &staged, now)?;
+                let replica = inner.client.borrow().is_some();
+                inner.stage_upload(&upload.id, &staged, replica).await
             }
         })
         .await;
@@ -1227,8 +1226,9 @@ impl Db {
         if !upload.owner.ptr_eq(&Rc::downgrade(&self.inner)) {
             return Err(mismatch());
         }
-        let inner = self.inner.metadata();
-        let schema = self.view.as_ref().unwrap_or(&inner.owner);
+        let inner = self.inner.as_ref();
+        let owner_state = inner.owner.borrow();
+        let schema = self.view.as_ref().unwrap_or(&owner_state);
         let instance = Rc::downgrade(schema);
         if !upload.schema_instance.ptr_eq(&instance) {
             // An equivalent registered handle is allowed. Remember it so each
@@ -1262,7 +1262,7 @@ impl Db {
             .seal_streaming_upload(&mut upload, table, &mut cells, column)
             .await?
         {
-            self.inner().await.derived.push(value);
+            self.inner().await.derived.borrow_mut().push(value);
         }
         let result = match mutation {
             StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
@@ -1311,7 +1311,7 @@ impl Db {
                 .await
             }
         };
-        let mut inner = self.inner().await;
+        let inner = self.inner().await;
         inner.clear_derived();
         crate::large::end_upload(&mut inner.conn.sql(), &upload.id).await?;
         result
@@ -1361,10 +1361,9 @@ impl Db {
                     if crate::large::kind(&col) != upload.kind {
                         return Err(not_large(table, column));
                     }
-                    admit_ingress(&inner, &staged, now)?;
-                    inner
-                        .stage_upload(&upload.id, &staged, inner.client.is_some())
-                        .await?;
+                    admit_ingress(inner, &staged, now)?;
+                    let replica = inner.client.borrow().is_some();
+                    inner.stage_upload(&upload.id, &staged, replica).await?;
                     crate::large::finish_upload(&mut inner.conn.sql(), &value).await?;
                     Ok((col, value))
                 }
@@ -1397,7 +1396,7 @@ impl Db {
 
     /// Replace the limits on local streaming uploads.
     pub fn set_large_value_staging_policy(&self, policy: LargeValueStagingPolicy) {
-        self.inner.staging_policy.set(policy);
+        self.inner.staging.set(policy);
     }
 
     /// End every streaming upload left untouched past the staging policy's
@@ -1490,7 +1489,7 @@ impl Drop for UploadLease {
 /// Renew the leases a batch holds before it commits; a lease that expired
 /// while the batch was open refuses the commit, as its chunks may be gone.
 pub(crate) async fn renew_upload_leases(
-    inner: &Inner,
+    inner: &Store,
     leases: &[UploadLease],
 ) -> Result<(), Error> {
     let now = streaming_now_ms();
@@ -1518,7 +1517,7 @@ fn view_target(head: Option<BranchSelector>, base: Option<BranchViewBase>) -> Wr
 }
 
 /// Charge `staged` to the staging policy's ingress window.
-fn admit_ingress(inner: &Inner, staged: &[lv::StagedChunk], now: i64) -> Result<(), Error> {
+fn admit_ingress(inner: &Store, staged: &[lv::StagedChunk], now: i64) -> Result<(), Error> {
     let bytes: u64 = staged.iter().map(|chunk| chunk.encoded.len() as u64).sum();
     if bytes == 0 {
         return Ok(());
@@ -1563,7 +1562,7 @@ fn closed() -> Error {
 /// current value. Each later splice is relative to the value the earlier
 /// ones produced.
 async fn lower_splices(
-    inner: &Inner,
+    inner: &Store,
     column: &crate::values::Column,
     cell: &Sql,
     within: &LargeValueUpdatePage,
@@ -1676,12 +1675,12 @@ fn prepare_mutations(
         .collect()
 }
 
-impl Inner {
+impl Store {
     /// Lower partial large-value updates into `patch` against the row as
     /// this store sees it now (inside a batch: with its staged writes).
     /// What the edits build is left in `derived` and `pending_nodes`.
     pub(crate) async fn lower_large_mutations(
-        &mut self,
+        &self,
         patch: &mut BTreeMap<String, Value>,
         mutations: Vec<(PreparedCell, LargeValueUpdate)>,
         identity: Option<AuthorSubject>,
@@ -1771,7 +1770,7 @@ impl Inner {
                             &edited_from,
                             &current,
                             &text,
-                            self.merge_budget,
+                            self.merge_budget(),
                         )
                     };
                     Value::String(value)
@@ -1884,8 +1883,8 @@ impl TxRef<'_> {
                     .lower_large_mutations(&mut patch, mutations, identity)
                     .await;
                 let edits = crate::db::LargeEdits {
-                    derived: std::mem::take(&mut inner.derived),
-                    pending_nodes: std::mem::take(&mut inner.pending_nodes),
+                    derived: inner.derived.take(),
+                    pending_nodes: inner.pending_nodes.take(),
                 };
                 lowered.map(|()| edits)
             })
