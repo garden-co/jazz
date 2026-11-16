@@ -164,6 +164,10 @@ struct State {
     /// How many times the server refused the credential: each refusal,
     /// even one that leaves the status as it was.
     auth_refusals: u64,
+    /// Why the database dropped the upstream link on its own
+    /// ([`crate::db::Db::upstream_refusal`]), until an explicit reconnect
+    /// admits a new one.
+    upstream_refusal: Option<CoreError>,
     link_status: Option<LinkStatus>,
     /// Consecutive recoverable tick failures.
     tick_failures: u32,
@@ -571,6 +575,13 @@ async fn keep_upstream(
 ) {
     let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
     let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
+    // Each tick may leave the database refusing the upstream on its own (a
+    // server serving another history): the link then stops, as a binding
+    // host stops it, instead of keeping a socket nothing syncs over.
+    let mut progress = match shared.upgrade() {
+        Some(shared) => shared.progress.subscribe(),
+        None => return,
+    };
     loop {
         for action in std::mem::take(&mut keeper.actions) {
             match action {
@@ -627,6 +638,7 @@ async fn keep_upstream(
                             return;
                         };
                         attach(&shared, link.transport).await;
+                        shared.state().upstream_refusal = None;
                         keeper.live = Some((attempt, link.terminal));
                         LinkInput::Admitted(attempt)
                     }
@@ -648,6 +660,30 @@ async fn keep_upstream(
                     detach(&shared);
                 }
                 LinkInput::Ended(attempt, terminal_failure(stopped))
+            }
+            changed = progress.changed(), if keeper.live.is_some() => {
+                if changed.is_err() {
+                    return;
+                }
+                let Some(shared) = shared.upgrade() else {
+                    return;
+                };
+                let refusal = {
+                    let state = shared.state.borrow();
+                    state
+                        .upstream
+                        .as_ref()
+                        .and_then(|upstream| shared.db.upstream_refusal(upstream))
+                };
+                let Some(refusal) = refusal else {
+                    continue;
+                };
+                tracing::warn!(%refusal, "jazz client upstream refused by the database");
+                let (attempt, _) = keeper.live.take().expect("guarded");
+                detach(&shared);
+                let message = refusal.to_string();
+                shared.state().upstream_refusal = Some(refusal);
+                LinkInput::Ended(attempt, LinkFailure::Fatal(message))
             }
             () = async { timer.as_mut().expect("guarded").1.as_mut().await },
                 if timer.is_some() =>
@@ -2076,6 +2112,16 @@ impl JazzClient {
     /// when), and those it refused since the client opened.
     pub fn upload_status(&self) -> crate::db::UploadStatus {
         self.shared.db.upload_status()
+    }
+
+    /// Why the database stopped the upstream link on its own, until a new
+    /// link is admitted: [`crate::db::ErrorCode::AuthorityChanged`] when the
+    /// server serves another history than this store (its store was
+    /// recreated, or it is another app's server). The link is then
+    /// [`crate::link::LinkPhase::Stopped`]; local reads and writes go on, and
+    /// unsynced writes are kept.
+    pub fn upstream_refusal(&self) -> Option<CoreError> {
+        self.shared.state.borrow().upstream_refusal.clone()
     }
 
     /// How many times the server has refused this client's credential. A
