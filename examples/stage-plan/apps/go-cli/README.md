@@ -27,7 +27,7 @@ them with `cargo build -p jazz-ffi -p jazz-cli` and
 `cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay`.
 
 `JAZZ_MAIN_BACKEND=ts go test ./...` runs the same suite with StagePlan's
-real main backend in TypeScript as the server (`ts-main/main-backend.ts`,
+real main backend in TypeScript as the server (`ts-main/jazz.server.ts`,
 `createJazz` with a loopback OIDC issuer for its backend clients), plus
 `TestBackendClient`: a trusted Go backend client acting for an end user
 with `ForUser`, and a scoped one. It needs the repository's jazz-tools

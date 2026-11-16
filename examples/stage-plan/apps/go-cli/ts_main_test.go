@@ -25,7 +25,7 @@ type workloadTokens struct{ Trusted, Scoped string }
 var workloads sync.Map // url → workloadTokens
 
 // tsMainBackend is StagePlan's main backend in TypeScript (createJazz,
-// ts-main/main-backend.ts), run with tsx from JAZZ_TS_MAIN_DIR (a
+// ts-main/jazz.server.ts), run with tsx from JAZZ_TS_MAIN_DIR (a
 // directory with jazz-tools installed and StagePlan's generated files:
 // ../react-localfirst by default). Go's end users and backend clients
 // sync through its /jazz, as they do in production.
@@ -42,7 +42,7 @@ func tsMainBackend(t *testing.T) server {
 	if abs, err := filepath.Abs(tsx); err == nil {
 		tsx = abs
 	}
-	script, err := os.ReadFile("ts-main/main-backend.ts")
+	script, err := os.ReadFile("ts-main/jazz.server.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
