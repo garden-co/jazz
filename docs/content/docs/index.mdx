@@ -9,8 +9,7 @@ Every Jazz app is defined first by its database schema and permission policies. 
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "todos": {
       "columns": {
@@ -24,8 +23,7 @@ Every Jazz app is defined first by its database schema and permission policies. 
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "$comment": "Each user sees and edits only the todos they created",
   "defs": {
     "isCreator": "$createdBy.account = session.user"

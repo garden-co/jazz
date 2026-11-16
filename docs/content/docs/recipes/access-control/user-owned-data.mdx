@@ -12,8 +12,7 @@ There's no need to add an explicit owner column&hairsp;—&hairsp;Jazz tracks wh
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "todos": {
       "columns": {
@@ -33,8 +32,7 @@ Match `$createdBy` to `session.user` to validate whether the current user is the
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": "$createdBy.account = session.user",
@@ -78,8 +76,7 @@ If ownership can be transferred after creation, use an explicit `owner_id` colum
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "todos": {
       "columns": {
@@ -94,8 +91,7 @@ If ownership can be transferred after creation, use an explicit `owner_id` colum
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": "owner_id = session.user",

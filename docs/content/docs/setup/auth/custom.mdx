@@ -249,8 +249,7 @@ For an app with this `todos` table:
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "todos": {
       "columns": {
@@ -266,8 +265,7 @@ a user reads their own todos, and a user whose `role` claim is `manager` reads a
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "todos": {
       "read": { "anyOf": ["owner_id = session.user", "session.claims.role = 'manager'"] }

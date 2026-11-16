@@ -122,6 +122,7 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
     for (const [file, text] of targets) {
       if (stale.includes(file)) await writeFile(join(app.dir, file), text);
     }
+    await ensureFirstSnapshot(app, options.loadModule);
   }
   // Running the npm CLI says the app is a Node one, unless the directory
   // names another language (a Package.swift, go.mod, …).
@@ -137,6 +138,22 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
     bindings: [...outcome.current, ...outcome.written],
     warnings: [...outcome.warnings, ...warnings],
   };
+}
+
+/**
+ * An app without snapshots gets one of its current schema, as alpha.64's
+ * `validate` wrote it: the baseline the first `migrations create` diffs
+ * against, so a schema change can always be migrated.
+ */
+async function ensureFirstSnapshot(app: TsApp, loadModule?: LoadModule): Promise<void> {
+  const tooling = await migrationsTooling();
+  const migrationsDir = join(app.dir, MIGRATIONS_DIR);
+  if ((await tooling.listSnapshots(migrationsDir)).length > 0) return;
+  await tooling.createMigration({
+    migrationsDir,
+    currentTables: app.app.tables as Parameters<typeof tooling.createMigration>[0]["currentTables"],
+    loadModule: loadModule ?? (await import("../schema-loader.js")).loadModule,
+  });
 }
 
 export interface CreateMigrationOptions {

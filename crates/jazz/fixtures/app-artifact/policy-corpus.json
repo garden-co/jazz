@@ -1,5 +1,5 @@
 {
-  "app": "{\n  \"$schema\": \"https://jazz.tools/schemas/jazz.app.schema.json\",\n  \"format\": 1,\n  \"tables\": {\n    \"shares\": {\n      \"columns\": { \"todo\": \"uuid?\", \"user\": \"uuid\" },\n      \"relations\": { \"todoRow\": { \"rel\": \"todos\", \"column\": \"todo\" } },\n      \"history\": \"latest\"\n    },\n    \"todos\": {\n      \"columns\": {\n        \"name\": \"string\",\n        \"owner\": \"uuid?\",\n        \"tags\": { \"array\": \"string\" },\n        \"status\": { \"enum\": [\"open\", \"done\"], \"optional\": true },\n        \"meta\": { \"json\": { \"type\": \"object\" }, \"optional\": true, \"transform\": \"jsonText\" }\n      },\n      \"relations\": { \"shares\": { \"reverse\": \"shares\", \"relation\": \"todoRow\" } },\n      \"indexes\": [\"owner\"],\n      \"computed\": { \"shareCount\": { \"type\": \"int\", \"from\": [\"id\"] } }\n    }\n  },\n  \"history\": {\n    \"00304e9bce65\": {\n      \"tables\": {\n        \"shares\": {\n          \"columns\": {\n            \"todo\": { \"type\": \"uuid\", \"optional\": true, \"references\": \"todos\" },\n            \"user\": \"uuid\"\n          }\n        },\n        \"todos\": { \"columns\": { \"title\": \"string\", \"owner\": \"uuid?\" } }\n      }\n    }\n  },\n  \"migrations\": [\n    {\n      \"from\": \"00304e9bce65\",\n      \"migrate\": {\n        \"todos\": {\n          \"name\": { \"renameFrom\": \"title\" },\n          \"tags\": { \"add\": { \"array\": \"string\" }, \"default\": [] },\n          \"status\": { \"add\": { \"enum\": [\"open\", \"done\"] }, \"default\": null },\n          \"meta\": { \"add\": { \"json\": { \"type\": \"object\" } }, \"default\": null }\n        }\n      }\n    }\n  ],\n  \"transforms\": { \"jsonText\": { \"stored\": { \"json\": { \"type\": \"object\" } }, \"view\": \"string\" } }\n}\n",
+  "app": "{\n  \"$schema\": \"https://jazz.tools/schemas/jazz.app.v1.json\",\n  \"tables\": {\n    \"shares\": {\n      \"columns\": { \"todo\": \"uuid?\", \"user\": \"uuid\" },\n      \"relations\": { \"todoRow\": { \"rel\": \"todos\", \"column\": \"todo\" } },\n      \"history\": \"latest\"\n    },\n    \"todos\": {\n      \"columns\": {\n        \"name\": \"string\",\n        \"owner\": \"uuid?\",\n        \"tags\": { \"array\": \"string\" },\n        \"status\": { \"enum\": [\"open\", \"done\"], \"optional\": true },\n        \"meta\": { \"json\": { \"type\": \"object\" }, \"optional\": true, \"transform\": \"jsonText\" }\n      },\n      \"relations\": { \"shares\": { \"reverse\": \"shares\", \"relation\": \"todoRow\" } },\n      \"indexes\": [\"owner\"],\n      \"computed\": { \"shareCount\": { \"type\": \"int\", \"from\": [\"id\"] } }\n    }\n  },\n  \"history\": {\n    \"00304e9bce65\": {\n      \"tables\": {\n        \"shares\": {\n          \"columns\": {\n            \"todo\": { \"type\": \"uuid\", \"optional\": true, \"references\": \"todos\" },\n            \"user\": \"uuid\"\n          }\n        },\n        \"todos\": { \"columns\": { \"title\": \"string\", \"owner\": \"uuid?\" } }\n      }\n    }\n  },\n  \"migrations\": [\n    {\n      \"from\": \"00304e9bce65\",\n      \"migrate\": {\n        \"todos\": {\n          \"name\": { \"renameFrom\": \"title\" },\n          \"tags\": { \"add\": { \"array\": \"string\" }, \"default\": [] },\n          \"status\": { \"add\": { \"enum\": [\"open\", \"done\"] }, \"default\": null },\n          \"meta\": { \"add\": { \"json\": { \"type\": \"object\" } }, \"default\": null }\n        }\n      }\n    }\n  ],\n  \"transforms\": { \"jsonText\": { \"stored\": { \"json\": { \"type\": \"object\" } }, \"view\": \"string\" } }\n}\n",
   "cases": [
     {
       "name": "true",
@@ -469,7 +469,6 @@
     {
       "name": "every policy variant",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -511,7 +510,6 @@
     {
       "name": "every policy variant, item 0",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -526,7 +524,6 @@
     {
       "name": "every policy variant, item 1",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -541,7 +538,6 @@
     {
       "name": "every policy variant, item 2",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -556,7 +552,6 @@
     {
       "name": "every policy variant, item 3",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -571,7 +566,6 @@
     {
       "name": "every policy variant, item 4",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -586,7 +580,6 @@
     {
       "name": "every policy variant, item 5",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -601,7 +594,6 @@
     {
       "name": "every policy variant, item 6",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -616,7 +608,6 @@
     {
       "name": "every policy variant, item 7",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -631,7 +622,6 @@
     {
       "name": "every policy variant, item 8",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -646,7 +636,6 @@
     {
       "name": "every policy variant, item 9",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -661,7 +650,6 @@
     {
       "name": "every policy variant, item 10",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -676,7 +664,6 @@
     {
       "name": "every policy variant, item 11",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -691,7 +678,6 @@
     {
       "name": "every policy variant, item 12",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -706,7 +692,6 @@
     {
       "name": "every policy variant, item 13",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -721,7 +706,6 @@
     {
       "name": "every policy variant, item 14",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -736,7 +720,6 @@
     {
       "name": "every policy variant, item 15",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -751,7 +734,6 @@
     {
       "name": "every policy variant, item 16",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -766,7 +748,6 @@
     {
       "name": "every policy variant, item 17",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -781,7 +762,6 @@
     {
       "name": "every policy variant, item 18",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -796,7 +776,6 @@
     {
       "name": "every policy variant, item 19",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -811,7 +790,6 @@
     {
       "name": "every policy variant, item 20",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -826,7 +804,6 @@
     {
       "name": "every policy variant, item 21",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -841,7 +818,6 @@
     {
       "name": "every policy variant, item 22",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",
@@ -856,7 +832,6 @@
     {
       "name": "every policy variant, item 23",
       "permissions": {
-        "format": 1,
         "tables": {
           "shares": {
             "read": "true",

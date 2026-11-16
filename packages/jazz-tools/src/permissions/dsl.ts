@@ -25,6 +25,7 @@ import {
 import { makeFrom, union, recursive, outer, frontier, param, rowId, jsonValue, type From } from "./relation.js";
 import {
   READABLE_PERMISSIONS,
+  PERMISSIONS_SCHEMA_URL,
   type CheckPermissions,
   type CompareOp,
   type Conditions,
@@ -460,7 +461,7 @@ export function compilePermissions(
     }
     tables[table] = out;
   }
-  return { format: 1, tables };
+  return { $schema: PERMISSIONS_SCHEMA_URL, tables };
 }
 
 /** The readable tree of `definePermissions`' result. */

@@ -381,9 +381,12 @@ export type PermissionsInput<S, R> = {
 /** Every table of `S`, each with any rules. */
 export type AllTables<S> = { [T in keyof S]: unknown };
 
+/** `jazz.permissions.json`'s `$schema`, which names its format version. */
+export const PERMISSIONS_SCHEMA_URL = "https://jazz.tools/schemas/jazz.permissions.v1.json" as const;
+
 /** The readable `jazz.permissions.json` tree `definePermissions` returns, under {@link READABLE_PERMISSIONS}. */
 export interface ReadablePermissionsFile {
-  format: 1;
+  $schema: typeof PERMISSIONS_SCHEMA_URL;
   tables: Record<string, Record<string, unknown>>;
 }
 
