@@ -23,16 +23,24 @@ go build ./...
 
 ## Generate the bindings
 
-With a `go.mod` that requires `jazz-go/v2` beside your app's schema, `npx jazz-tools generate` writes
-the `jazzapp` package to `jazzapp/jazz_app.go`, along with the app's other bindings. Run it with
-`npx`: the standalone `jazz-tools` binary refuses `generate` in an app with a `schema.ts`.
+Author your app's schema and permissions in TypeScript, in a `schema.ts` beside your `go.mod` (which
+requires `jazz-go/v2`). If your app's TypeScript side already has one, re-export it:
 
-```bash
-npx jazz-tools generate            # checks the files, writes jazzapp/jazz_app.go
-npx jazz-tools generate --check    # in CI: fails if jazzapp/jazz_app.go is stale
+```ts title="schema.ts"
+export { schema, permissions } from "../web/schema";
 ```
 
-Commit `jazzapp/jazz_app.go` and import it as `<your module>/jazzapp`. Per table it gives you:
+Then run `npx jazz-tools generate` there. It writes `jazz.app.json`, `jazz.permissions.json` and the
+`jazzapp` package, `jazzapp/jazz_app.go`:
+
+```bash
+npx jazz-tools generate            # writes jazz.app.json, jazz.permissions.json, jazzapp/jazz_app.go
+npx jazz-tools generate --check    # in CI: fails if any of them is stale
+```
+
+Run it with `npx`: the standalone `jazz-tools` binary refuses to write beside a `schema.ts`, though
+its `generate --check` still works. Commit the generated files, and import the bindings as
+`<your module>/jazzapp`. Per table they give you:
 
 - a row struct (`Task`), with `json` tags of the column names. Nullable columns are pointers;
 - `NewTask`, the row to insert. Nullable and defaulted columns are pointers you may leave nil;
