@@ -209,8 +209,7 @@ next to the `better_auth_*` tables the Better Auth CLI wrote:
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "better_auth_account": {
       "columns": {
@@ -304,8 +303,7 @@ tables: client sessions have no business reading them.
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "better_auth_account": {
       "read": "false",

@@ -44,8 +44,7 @@ It writes the `better_auth_*` tables and leaves `messages` alone:
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "better_auth_account": {
       "columns": {
@@ -140,8 +139,7 @@ your own:
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "better_auth_account": {
       "read": "false",

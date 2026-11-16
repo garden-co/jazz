@@ -12,8 +12,7 @@ A shared project with collaboratively-edited tasks.
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "projects": {
       "columns": {
@@ -54,8 +53,7 @@ Project members can read and write tasks. The creator can manage membership. Tas
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "projects": {
       "$comment": "The creator and members.",
