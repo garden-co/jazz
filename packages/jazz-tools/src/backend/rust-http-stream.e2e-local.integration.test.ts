@@ -3,7 +3,7 @@
 // the HTTP stream, and an idle stream session outlives the socket's silence
 // deadline. See dev/e2e/rust-http-stream-client/README.md.
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -173,8 +173,13 @@ it.skipIf(!CLIENT)(
     // The workload's token file, rewritten with a fresh token every 2 s.
     const dir = mkdtempSync(join(tmpdir(), "rust-stream-token-"));
     const tokenFile = join(dir, "token");
-    const refresh = async () =>
-      writeFileSync(tokenFile, await sign({ sub: "ci" }, `${TOKEN_TTL_SECS}s`));
+    // Written beside it and renamed over it, so the client never reads a
+    // half-written token.
+    const refresh = async () => {
+      const next = `${tokenFile}.next`;
+      writeFileSync(next, await sign({ sub: "ci" }, `${TOKEN_TTL_SECS}s`));
+      renameSync(next, tokenFile);
+    };
     await refresh();
     const timer = setInterval(() => void refresh(), 2_000);
     try {
