@@ -392,12 +392,12 @@ application's encryption declarations (§1.4); the application writes no
 policy for them. Every row carries the space's address, `scopeId` and
 `identifier`, through which its policies reach the space row.
 
-| Table                     | Columns                                                                                                                                                                              | Row ID | Meaning and writer                                                                                 |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | -------------------------------------------------------------------------------------------------- |
-| `__e2ee_members`          | `scopeId`, `identifier`, `accountId`                                                                                                                                                 | random | `accountId` is a member of the space. Inserted and deleted by an updater (R12).                    |
-| `__e2ee_spaces`           | `scopeId`, `identifier`, `creatorAccountId`, `deviceId`, `accountEpochId`, `epochId`, `mechanism`, `version`, `verification`, `accountEnvelope`, `signature`                         | random | A space root candidate: the first key version. Written by an updater (§3.2).                       |
-| `__e2ee_space_successors` | `scopeId`, `identifier`, `predecessor`, `historyEpochId`, `epochId`, `authorAccountId`, `authorDeviceId`, `authorEpochId`, `verification`, `history`, `accountEnvelope`, `signature` | random | A rotation: the next key version, linked to the previous one. Written by an updater (§3.5).        |
-| `__e2ee_space_deliveries` | `scopeId`, `identifier`, `keyEpochId`, `senderAccountId`, `recipientAccountId`, `recipientAccountEpochId`, `envelope`                                                                | random | A key version sealed to a member's account. Written by a member that holds it, to a member (§3.4). |
+| Table                     | Columns                                                                                                                                                                              | Row ID | Meaning and writer                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------- |
+| `__e2ee_members`          | `scopeId`, `identifier`, `accountId`                                                                                                                                                 | random | `accountId` is a member of the space. Inserted by an updater; deleted by an updater or by `accountId` itself (R12). |
+| `__e2ee_spaces`           | `scopeId`, `identifier`, `creatorAccountId`, `deviceId`, `accountEpochId`, `epochId`, `mechanism`, `version`, `verification`, `accountEnvelope`, `signature`                         | random | A space root candidate: the first key version. Written by an updater (§3.2).                                        |
+| `__e2ee_space_successors` | `scopeId`, `identifier`, `predecessor`, `historyEpochId`, `epochId`, `authorAccountId`, `authorDeviceId`, `authorEpochId`, `verification`, `history`, `accountEnvelope`, `signature` | random | A rotation: the next key version, linked to the previous one. Written by an updater (§3.5).                         |
+| `__e2ee_space_deliveries` | `scopeId`, `identifier`, `keyEpochId`, `senderAccountId`, `recipientAccountId`, `recipientAccountEpochId`, `envelope`                                                                | random | A key version sealed to a member's account. Written by a member that holds it, to a member (§3.4).                  |
 
 **The members table** is the one internal table the application uses
 directly. It appears in generated client code; the application reads it (for
@@ -527,9 +527,12 @@ over the members table, correlated with the checked row).
 
 - R12. **Members.** A member row is readable iff its `accountId` is the
   session account or member(session account): members see the space's
-  other members. Insert and delete iff read(row) and update(row). A delete
-  is checked against the state before the transaction's own writes (its
-  pre-state), so an updater may remove itself.
+  other members. Insert iff read(row) and update(row). Delete iff
+  `accountId` is the session account (anyone may leave a space), or
+  read(row) and update(row). A delete is checked against the state before
+  the transaction's own writes (its pre-state). Leaving is a removal like
+  any other: the leaver still holds the current key, so the space needs
+  rotation (§3.5).
 - R13. **Space row read rule.** Every space table that any encrypted table
   with at least one encrypted column names as its `scope` has a read
   (`select`) policy that is `M(T)` or a conjunction that has `M(T)` as one of its conjuncts, where
