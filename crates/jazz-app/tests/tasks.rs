@@ -580,3 +580,160 @@ async fn restore_with_values() {
     assert_eq!(restored.title, "Third time");
     assert_eq!(restored.score, 1);
 }
+
+/// Streaming inside a transaction, as TS's `tx.insertStreaming`: the
+/// streamed row commits with the transaction, rolls back with it, and an
+/// upload dropped mid-stream is aborted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_in_a_transaction() {
+    use futures::StreamExt;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+
+    // Closure form: the streamed row commits with the transaction's other
+    // writes, and the transaction sees it before then.
+    let streamed = data.clone();
+    let (task, other) = jazz
+        .transaction(move |tx| async move {
+            let task = tx
+                .insert_streaming(
+                    NewTask::new("In tx", 0, Vec::new()),
+                    tasks::attachment(),
+                    chunked(&streamed, 64 * 1024),
+                )
+                .await?;
+            assert_eq!(task.attachment.as_deref(), Some(streamed.as_slice()));
+            let other = tx.insert(NewTask::new("Beside it", 0, Vec::new()))?;
+            Ok((task, other))
+        })
+        .await
+        .unwrap();
+    let stored = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment.as_deref(), Some(data.as_slice()));
+    assert!(jazz.get::<Task>(other.id).await.unwrap().is_some());
+
+    // Updating and upserting in a transaction.
+    let id = task.id;
+    let new_id = jazz_app::ObjectId::new();
+    jazz.transaction(move |tx| async move {
+        let updated = tx
+            .update_streaming(
+                id,
+                TaskUpdate {
+                    score: Some(4),
+                    ..Default::default()
+                },
+                tasks::attachment(),
+                chunked(&[7; 5], 2),
+            )
+            .await?;
+        assert_eq!(updated.attachment, Some(vec![7; 5]));
+        tx.upsert_streaming(
+            new_id,
+            NewTask::new("Upserted", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&[3; 3], 1),
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    let updated = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((updated.score, updated.attachment), (4, Some(vec![7; 5])));
+    let upserted = jazz.get::<Task>(new_id).await.unwrap().unwrap();
+    assert_eq!(upserted.attachment, Some(vec![3; 3]));
+
+    // A transaction that fails after streaming rolls the row back.
+    let before = jazz.all(tasks::query()).await.unwrap().len();
+    let failed = jazz
+        .transaction(move |tx| async move {
+            tx.insert_streaming(
+                NewTask::new("Rolled back", 0, Vec::new()),
+                tasks::attachment(),
+                chunked(&[1; 10], 3),
+            )
+            .await?;
+            Err::<(), _>(Error::Config("changed my mind".into()))
+        })
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(jazz.all(tasks::query()).await.unwrap().len(), before);
+
+    // A failing stream fails the call; the transaction decides the rest.
+    let failing = jazz
+        .transaction(move |tx| async move {
+            tx.insert_streaming(
+                NewTask::new("Broken", 0, Vec::new()),
+                tasks::attachment(),
+                futures::stream::iter([Ok(vec![1u8; 10]), Err("disk on fire")]),
+            )
+            .await
+        })
+        .await;
+    assert!(
+        matches!(&failing, Err(Error::Upload(message)) if message == "disk on fire"),
+        "{failing:?}"
+    );
+    assert_eq!(jazz.all(tasks::query()).await.unwrap().len(), before);
+
+    // Open form: commits with the transaction...
+    let open = jazz.begin_transaction().await.unwrap();
+    let streamed = open
+        .insert_streaming(
+            NewTask::new("Open", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&data, 50_000),
+        )
+        .await
+        .unwrap();
+    assert!(jazz.get::<Task>(streamed.id).await.unwrap().is_none());
+    assert!(open.get::<Task>(streamed.id).await.unwrap().is_some());
+    open.commit().await.unwrap();
+    let stored = jazz.get::<Task>(streamed.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment.as_deref(), Some(data.as_slice()));
+
+    // ...rolls back with it...
+    let open = jazz.begin_transaction().await.unwrap();
+    let streamed = open
+        .insert_streaming(
+            NewTask::new("Open, rolled back", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&[2; 4], 2),
+        )
+        .await
+        .unwrap();
+    open.rollback().await.unwrap();
+    assert!(jazz.get::<Task>(streamed.id).await.unwrap().is_none());
+
+    // ...and an upload dropped mid-stream is aborted, leaving the
+    // transaction usable.
+    let open = jazz.begin_transaction().await.unwrap();
+    let endless = futures::stream::iter(0..).then(|_| async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        Ok::<_, std::convert::Infallible>(vec![1u8; 100])
+    });
+    let upload = open.insert_streaming(
+        NewTask::new("Endless", 0, Vec::new()),
+        tasks::attachment(),
+        endless,
+    );
+    let timed_out = tokio::time::timeout(std::time::Duration::from_millis(100), upload).await;
+    assert!(timed_out.is_err());
+    assert_eq!(jazz.uploads_in_progress().await.unwrap(), 0);
+    let kept = open
+        .insert(NewTask::new("After the drop", 0, Vec::new()))
+        .await
+        .unwrap();
+    open.commit().await.unwrap();
+    assert!(jazz.get::<Task>(kept.id).await.unwrap().is_some());
+    let titles: Vec<_> = jazz
+        .all(tasks::query())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| task.title)
+        .collect();
+    assert!(!titles.iter().any(|title| title == "Endless"), "{titles:?}");
+}
