@@ -217,7 +217,18 @@ pub(crate) async fn link(
         .await
         .map_err(|error| Error::Server(format!("linking the device account: {error}")))?;
     match response.status() {
-        reqwest::StatusCode::UNAUTHORIZED => return Err(Error::SignedOut),
+        // No one signed in any more; any other 401 refuses the device's
+        // proof (a retired key, another app's guest), for good.
+        reqwest::StatusCode::UNAUTHORIZED => {
+            let body = response.text().await.unwrap_or_default();
+            if body.trim() == "signed_out" || body.trim().is_empty() {
+                return Err(Error::SignedOut);
+            }
+            return Err(Error::Refused(format!(
+                "the backend refused the device account's proof: {}",
+                body.trim()
+            )));
+        }
         reqwest::StatusCode::CONFLICT => {
             return Err(Error::Refused(
                 "the backend refused the link: its user already has another account".into(),
@@ -232,4 +243,43 @@ pub(crate) async fn link(
         .json()
         .await
         .map_err(|error| Error::Server(format!("linking the device account: {error}")))
+}
+
+/// Who the app's backend says the bearer names (`backend-user`), without
+/// assigning an account: `None` for no one; a user with `account: None`
+/// has none yet (a guest on this device may link to them).
+#[derive(Debug, Deserialize)]
+pub(crate) struct BackendUser {
+    pub account: Option<AccountId>,
+    pub identity: SignedInIdentity,
+}
+
+pub(crate) async fn backend_user(
+    endpoint: &str,
+    app_id: AppId,
+    bearer: &str,
+) -> Result<Option<BackendUser>> {
+    let response = http()?
+        .post(app_url(endpoint, app_id, "accounts/backend-user"))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))?;
+    // Older backends answer no one with a 401.
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(refusal("asking who is signed in", response).await);
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))?;
+    if body.get("identity").is_none() {
+        return Ok(None);
+    }
+    serde_json::from_value(body)
+        .map(Some)
+        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))
 }
