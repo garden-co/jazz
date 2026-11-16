@@ -43,7 +43,7 @@ export function findSchemaDir(cwd: string): string {
   throw new Error(
     json
       ? `No ${SCHEMA_FILE} next to ${relative(cwd, json) || APP_FILE}: from alpha.66 the app's schema and permissions are written in TS, and ${APP_FILE} is generated from them. ` +
-          "Run `npx jazz-tools upgrade` to convert an alpha.65 app; apps in other languages run the `jazz-tools` binary instead."
+          "Run `npx jazz-tools upgrade` to convert an alpha.65 app, in any language: it writes schema.ts from these files. Then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, Package.swift, build.gradle, …) and run `npx jazz-tools generate`."
       : `No ${SCHEMA_FILE} in ${cwd} (looked in ${SCHEMA_ROOTS.join(", ")}). See ${APP_FILES_DOCS}.`,
   );
 }
