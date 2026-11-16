@@ -99,9 +99,12 @@ protocol:
   depends on it unverifiable (an unsupported capability, §2.4 step 4, §7),
   for every reader of the application. There is no grace period, fallback
   or partial acceptance. Before retiring, the developer migrates: switches
-  the selection (below), lets every space, group and account rotate onto the
-  new mechanism, re-encrypts content that must stay readable, and only then
-  removes the old mechanism. Writers can select only listed mechanisms.
+  the selection (below), lets every space and account rotate onto the new
+  mechanism, re-encrypts content that must stay readable, and only then
+  removes the old mechanism. Groups need more than a rotation: a group whose
+  key chain ever used a retired sealing mechanism stays unreadable after
+  rotating, so the developer replaces it before retiring (creates a new
+  group and re-adds its members). Writers can select only listed mechanisms.
 - **No delivery can be downgraded.** Every delivered key is bound by its
   sender to the bytes of its envelope, or authenticated before use by a
   marker only a holder of the key can make, so nobody without the key (the
@@ -122,7 +125,8 @@ protocol:
   and wraps its new epoch key with it. Until a recipient has a key of the
   selected mechanism, sealing to it fails with "recipient unsupported" and the
   sender keeps the old configuration for that recipient's delivery pending.
-  Old records are not rewritten.
+  Old records are not rewritten. Rotation keeps a group readable while the
+  old mechanism stays listed; to retire it, groups are replaced as above.
 
 ### Identifiers
 
