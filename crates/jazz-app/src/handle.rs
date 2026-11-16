@@ -489,8 +489,10 @@ impl Jazz {
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
     ///
-    /// On a handle acting for a user (`Endpoint::for_user`) it does
-    /// nothing: `Endpoint::shutdown` stops the client it shares.
+    /// On a handle acting for a user ([`Jazz::for_user`], or
+    /// `Endpoint::for_user`) it does nothing: the client it shares stops
+    /// with the trusted client's own `shutdown` or `close`, or with
+    /// `Endpoint::shutdown`.
     pub async fn shutdown(&self) -> Result<()> {
         if self.for_user {
             return Ok(());
