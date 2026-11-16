@@ -5,7 +5,7 @@
 package jazzapp
 
 /** `sha256:…` of the `jazz.app.json` these bindings were generated from. */
-public const val SOURCE: kotlin.String = "sha256:13613b0132c17b0e3b37a865eceb5d2c4ed6b8c77a6bda454869edfa3df26d4a";
+public const val SOURCE: kotlin.String = "sha256:6c370abe248b1e925ca43441d4d3bbfafbc16dedec93c0bc053bb81a9ba05eee";
 
 /** The app's `jazz.app.json`: its schema, every earlier version and the migrations between them. */
 public val APP: kotlin.String = kotlin.arrayOf(
@@ -28,7 +28,7 @@ public val APP: kotlin.String = kotlin.arrayOf(
     "      \"columns\": {\n",
     "        \"tableName\": \"string\",\n",
     "        \"result\": \"uuid?\",\n",
-    "        \"tags\": { \"type\": { \"array\": \"string\" } }\n",
+    "        \"tags\": { \"array\": \"string\" }\n",
     "      }\n",
     "    }\n",
     "  }\n",
