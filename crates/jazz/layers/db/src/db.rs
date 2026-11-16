@@ -631,8 +631,6 @@ struct Inner {
     /// Views governed by a bundle's policies (see `Inner::governed_view`),
     /// by bundle, with the view each was built from.
     bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
-    /// Open transaction batches, by id.
-    batches: HashMap<OpenTransactionId, Batch>,
     identity: Rc<DbIdentity>,
     /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
     system_node: crate::ids::NodeUuid,
@@ -1677,7 +1675,6 @@ impl Db {
                 views: BTreeMap::new(),
                 bundles: HashMap::new(),
                 bundle_views: RefCell::default(),
-                batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: Rc::new(config.identity),
                 last_stamp: (0, 0),
@@ -2480,7 +2477,7 @@ impl Db {
         &self,
         id: OpenTransactionId,
     ) -> Vec<(RowUuid, Pos, Option<([u8; 16], u64)>)> {
-        match self.metadata().batches.get(&id) {
+        match self.inner.batches.borrow().get(&id) {
             Some(Batch {
                 kind: BatchKind::Serializable { reads, .. },
                 ..
@@ -8956,7 +8953,7 @@ impl Db {
 /// view that staged them) and applied at commit; reads overlay them.
 /// A batch's staged writes applied in the open `overlay` savepoint.
 struct Overlay {
-    batch: OpenTransactionId,
+    batch: Rc<()>,
     /// How many of the batch's writes it holds.
     applied: usize,
     /// `changed` before the overlay, restored when it is undone.
@@ -8969,6 +8966,8 @@ pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
 /// State-only borrows never run SQL. Storage borrows await rollback of a
 /// transaction handle's cached overlay; only staging may retain that overlay.
 struct Store {
+    // Map borrows end before SQL awaits; abandonment never borrows Inner.
+    batches: RefCell<HashMap<OpenTransactionId, Batch>>,
     replayed_commits: Rc<Cell<u64>>,
     echo_probes: Rc<Cell<u64>>,
     fanout_stats: Rc<RefCell<fanout::FanoutStats>>,
@@ -9020,6 +9019,7 @@ impl Store {
             authority: inner.authority.clone(),
             pins_required: inner.pins_required.clone(),
             staging_policy: inner.staging.clone(),
+            batches: RefCell::default(),
             replayed_commits: inner.replayed_commits.clone(),
             echo_probes: inner.echo_probes.clone(),
             fanout_stats: inner.fan.stats(),
@@ -9088,6 +9088,8 @@ impl Store {
 }
 
 struct Batch {
+    // Distinguishes a replacement transaction that reuses the same public ID.
+    token: Rc<()>,
     kind: BatchKind,
     ops: Vec<PreparedWrite>,
     /// The rows `ops` write, by stored table: a later staged write's
@@ -9721,13 +9723,14 @@ impl Db {
     }
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
-        let mut inner = self.inner.metadata_mut();
-        if inner.batches.contains_key(&id) {
+        let mut batches = self.inner.batches.borrow_mut();
+        if batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
-        inner.batches.insert(
+        batches.insert(
             id,
             Batch {
+                token: Rc::new(()),
                 kind,
                 ops: Vec::new(),
                 rows: Arc::default(),
@@ -9771,10 +9774,33 @@ impl Db {
         TxRef { db: self, id }
     }
 
+    fn batch_token(&self, id: OpenTransactionId) -> Result<Rc<()>, Error> {
+        self.inner
+            .batches
+            .borrow()
+            .get(&id)
+            .map(|batch| batch.token.clone())
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+    }
+
+    fn check_batch(&self, id: OpenTransactionId, token: &Rc<()>) -> Result<(), Error> {
+        if self
+            .inner
+            .batches
+            .borrow()
+            .get(&id)
+            .is_some_and(|batch| Rc::ptr_eq(&batch.token, token))
+        {
+            Ok(())
+        } else {
+            Err(rejected(format!("transaction {id:?} is no longer open")))
+        }
+    }
+
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.inner
-            .metadata_mut()
             .batches
+            .borrow_mut()
             .remove(&id)
             .map(drop)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
@@ -9782,8 +9808,8 @@ impl Db {
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
         self.inner
-            .metadata_mut()
             .batches
+            .borrow_mut()
             .remove(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
     }
@@ -10033,10 +10059,12 @@ impl Db {
         extra: Option<&mut PreparedWrite>,
         read: impl AsyncFnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        let token = self.batch_token(id)?;
         let mut inner = self.inner.staging();
         inner.conn.settle().await?;
-        let batch = inner
-            .batches
+        self.check_batch(id, &token)?;
+        let batches = self.inner.batches.borrow();
+        let batch = batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let staged = batch.ops.len();
@@ -10058,20 +10086,23 @@ impl Db {
             }
             None => Arc::default(),
         };
-        let live = inner
-            .overlay
-            .as_ref()
-            .is_some_and(|overlay| overlay.batch == id && overlay.applied == staged);
+        let live = inner.overlay.as_ref().is_some_and(|overlay| {
+            Rc::ptr_eq(&overlay.batch, &batch.token) && overlay.applied == staged
+        });
         let ops = (!live).then(|| batch.ops.clone());
         let edits = LargeEdits {
             derived: batch.edits.derived.clone(),
             pending_nodes: batch.edits.pending_nodes.clone(),
         };
+        let token = batch.token.clone();
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
-            BatchKind::Serializable { snapshot, own, .. } => {
-                Some(inner.serializable_cut(*snapshot, own).await?)
-            }
+            BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
+        };
+        drop(batches);
+        let snapshot = match snapshot {
+            Some((snapshot, own)) => Some(inner.serializable_cut(snapshot, &own).await?),
+            None => None,
         };
         let own = inner.seq + 1;
         inner.derived.extend(edits.derived);
@@ -10091,7 +10122,7 @@ impl Db {
                 return Err(error);
             }
             inner.overlay = Some(Overlay {
-                batch: id,
+                batch: token.clone(),
                 applied: staged,
                 mark,
             });
@@ -10140,11 +10171,19 @@ impl Db {
             }
             Err(error) => Err(error),
         };
+        let result = result.and_then(|value| {
+            self.check_batch(id, &token)?;
+            Ok(value)
+        });
         let keep = joins && result.is_ok();
         if !keep {
             inner.changed.borrow_mut().truncate(mark);
         }
         if let Err(error) = end_savepoint(&inner.conn, "overlay_step", keep).await {
+            inner.settle_overlay().await?;
+            return Err(error);
+        }
+        if let Err(error) = self.check_batch(id, &token) {
             inner.settle_overlay().await?;
             return Err(error);
         }
@@ -10166,19 +10205,21 @@ impl Db {
         prefix: BatchPrefix,
         read: impl AsyncFnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        let token = self.batch_token(id)?;
         // Peek without the store gate, which would undo the cached overlay.
         let grown = self
             .inner
-            .staging()
             .batches
+            .borrow()
             .get(&id)
             .is_none_or(|batch| batch.prefix() != prefix);
         if !grown {
             return self.in_overlay(id, None, read).await;
         }
         let mut inner = self.inner().await;
-        let batch = inner
-            .batches
+        self.check_batch(id, &token)?;
+        let batches = self.inner.batches.borrow();
+        let batch = batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let unavailable = || {
@@ -10206,11 +10247,15 @@ impl Db {
                 .ok_or_else(unavailable)?
                 .to_vec(),
         };
+        let token = batch.token.clone();
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
-            BatchKind::Serializable { snapshot, own, .. } => {
-                Some(inner.serializable_cut(*snapshot, own).await?)
-            }
+            BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
+        };
+        drop(batches);
+        let snapshot = match snapshot {
+            Some((snapshot, own)) => Some(inner.serializable_cut(snapshot, &own).await?),
+            None => None,
         };
         let own = inner.seq + 1;
         begin_savepoint(&inner.conn, "overlay").await?;
@@ -10228,6 +10273,7 @@ impl Db {
         };
         inner.changed.borrow_mut().truncate(mark);
         end_savepoint(&inner.conn, "overlay", false).await?;
+        self.check_batch(id, &token)?;
         result
     }
 
@@ -10240,9 +10286,11 @@ impl Db {
         {
             return Err(self.serializable_write_conflict(id, &op, error).await);
         }
-        let mut inner = self.inner.staging();
+        let mut batches = self.inner.batches.borrow_mut();
         let stored = op.op.row().map(|row| (op.op.table().to_owned(), row));
-        let batch = inner.batches.get_mut(&id).expect("validated");
+        let batch = batches
+            .get_mut(&id)
+            .ok_or_else(|| rejected("transaction is not open"))?;
         if let Some((table, row)) = stored {
             Arc::make_mut(&mut batch.rows)
                 .entry(table)
@@ -10268,11 +10316,16 @@ impl Db {
             return error;
         }
         let inner = self.inner().await;
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, own, .. },
-            ..
-        }) = inner.batches.get(&id)
-        else {
+        let snapshot = self
+            .inner
+            .batches
+            .borrow()
+            .get(&id)
+            .and_then(|batch| match &batch.kind {
+                BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
+                _ => None,
+            });
+        let Some((snapshot, own)) = snapshot else {
             return error;
         };
         let Some(row) = op.row() else {
@@ -10280,7 +10333,7 @@ impl Db {
         };
         let table = op.table();
         let moved: Result<bool, Error> = (async {
-            let cut = inner.serializable_cut(*snapshot, own).await?;
+            let cut = inner.serializable_cut(snapshot, &own).await?;
             {
                 Ok(inner
                     .newest_version(table, row)
@@ -10313,6 +10366,7 @@ impl Db {
         mut op: PreparedWrite,
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
+        let token = self.batch_token(id)?;
         // A whole write over a chunked value becomes its edit of the value
         // the batch sees: its earlier writes applied, no other batch's.
         let chunked = self
@@ -10320,12 +10374,12 @@ impl Db {
                 inner.chunk_large_cells(&mut op).await
             })
             .await?;
+        self.check_batch(id, &token)?;
         let marks = {
-            let mut inner = self.inner.staging();
+            let mut batches = self.inner.batches.borrow_mut();
             edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
-            let batch = inner
-                .batches
+            let batch = batches
                 .get_mut(&id)
                 .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
             let marks = (batch.edits.derived.len(), batch.edits.pending_nodes.len());
@@ -10335,7 +10389,8 @@ impl Db {
         };
         let staged = self.stage_op(id, op).await;
         if staged.is_err()
-            && let Some(batch) = self.inner.staging().batches.get_mut(&id)
+            && self.check_batch(id, &token).is_ok()
+            && let Some(batch) = self.inner.batches.borrow_mut().get_mut(&id)
         {
             batch.edits.derived.truncate(marks.0);
             batch.edits.pending_nodes.truncate(marks.1);
@@ -10351,8 +10406,8 @@ impl Db {
         lease: crate::db::large_ops::UploadLease,
     ) -> Result<(), Error> {
         self.inner
-            .staging()
             .batches
+            .borrow_mut()
             .get_mut(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?
             .uploads
@@ -10366,10 +10421,11 @@ impl Db {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<(), Error> {
+        let token = self.batch_token(id)?;
         // A mergeable read records nothing: peek without the store gate,
         // so the batch's cached overlay stays for its next stage or read.
         if !matches!(
-            self.inner.staging().batches.get(&id),
+            self.inner.batches.borrow().get(&id),
             Some(Batch {
                 kind: BatchKind::Serializable { .. },
                 ..
@@ -10377,24 +10433,31 @@ impl Db {
         ) {
             return Ok(());
         }
-        let mut inner = self.inner().await;
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, own, .. },
-            ..
-        }) = inner.batches.get(&id)
-        else {
+        let inner = self.inner().await;
+        self.check_batch(id, &token)?;
+        let snapshot = self
+            .inner
+            .batches
+            .borrow()
+            .get(&id)
+            .and_then(|batch| match &batch.kind {
+                BatchKind::Serializable { snapshot, own, .. } => Some((*snapshot, own.clone())),
+                _ => None,
+            });
+        let Some((snapshot, own)) = snapshot else {
             return Ok(());
         };
         let read = ReadSpec {
             include_deleted,
-            cut: Some(inner.serializable_cut(*snapshot, own).await?),
+            cut: Some(inner.serializable_cut(snapshot, &own).await?),
             ..ReadSpec::default()
         };
         let rows = inner.read_versions(prepared, None, &read).await?;
+        self.check_batch(id, &token)?;
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
-        }) = inner.batches.get_mut(&id)
+        }) = self.inner.batches.borrow_mut().get_mut(&id)
         {
             // Even a LocalOnly read observes this cut. Later remote coverage
             // must not move a snapshot whose results have already escaped.
@@ -10413,9 +10476,11 @@ impl TxRef<'_> {
     /// Stage one write, fetching what an asynchronous chunk store holds for
     /// it first if it needs that.
     async fn stage(&self, op: StagedOp) -> Result<(), Error> {
+        let token = self.db.batch_token(self.id)?;
         let op = self.db.prepare_write(op)?;
         self.db
             .fetching_with(op, async |op| {
+                self.db.check_batch(self.id, &token)?;
                 self.db
                     .stage_prepared_with_edits(self.id, op, LargeEdits::default())
                     .await
@@ -10552,21 +10617,22 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let token = self.db.batch_token(self.id)?;
         // Capture before hydration: later writes must not leak into an
         // already admitted read, including when another read is cancelled.
         // Peeks skip the store gate, which would undo the cached overlay.
         let prefix = self
             .db
             .inner
-            .staging()
             .batches
+            .borrow()
             .get(&self.id)
             .ok_or_else(|| rejected("transaction is not open"))?
             .prefix();
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
-        let snapshot = match self.db.inner.staging().batches.get(&self.id) {
+        let snapshot = match self.db.inner.batches.borrow().get(&self.id) {
             Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -10634,19 +10700,14 @@ impl TxRef<'_> {
                     &ReadViewSourceSpec::Current,
                 )
                 .await?;
+            self.db.check_batch(self.id, &token)?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
                         snapshot, pinned, ..
                     },
                 ..
-            }) = self
-                .db
-                .inner
-                .sql_borrow_mut()
-                .await
-                .batches
-                .get_mut(&self.id)
+            }) = self.db.inner.batches.borrow_mut().get_mut(&self.id)
                 && !*pinned
             {
                 // Pinned by the authority's answer, or (offline) at the
@@ -10662,6 +10723,7 @@ impl TxRef<'_> {
         let rows = self
             .db
             .fetching_with((), async |()| {
+                self.db.check_batch(self.id, &token)?;
                 self.db
                     .in_overlay_prefix(self.id, prefix, async |inner, cut| {
                         let read = ReadSpec {
@@ -10675,6 +10737,7 @@ impl TxRef<'_> {
                     .await
             })
             .await?;
+        self.db.check_batch(self.id, &token)?;
         self.db
             .record_read(self.id, prepared, include_deleted)
             .await?;
@@ -10883,6 +10946,98 @@ fn migration_path(
 
 #[cfg(all(test, feature = "sqlite"))]
 mod async_row_tests {
+
+    /// Alice abandons a batch at each SQL suspension while staging a write and
+    /// reuses its ID for Bob's empty batch. No resumed work may enter Bob's batch.
+    /// This lower-level test injects suspension into SQL, which public native
+    /// constructors cannot do; assertions use transaction and query APIs.
+    #[test]
+    fn abandoned_staging_cannot_modify_a_reused_transaction_id() {
+        use crate::tools::{ColumnType, TablePolicies};
+        use jazz_model::model::public_schema::{SchemaBuilder, TableSchemaBuilder};
+        use std::future::Future;
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Context, Waker};
+
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("body", ColumnType::Text)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::True)
+                                .with_insert(PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+        .unwrap();
+        let mut abandoned = 0;
+        for stop in 0..256 {
+            let mut conn: crate::host::OwnedConnection =
+                Connection::open_in_memory().unwrap().into();
+            conn.sql_suspensions = Some(Arc::new(AtomicUsize::new(0)));
+            let db = block_on(async {
+                crate::format::admit(&mut conn.sql()).await.unwrap();
+                Db::open_on(
+                    DbConfig::new(
+                        schema.clone(),
+                        DbIdentity {
+                            node: crate::ids::NodeUuid::from_bytes([71; 16]),
+                            author: AuthorSubject::SYSTEM,
+                        },
+                    ),
+                    conn.into(),
+                    None,
+                )
+                .await
+                .unwrap()
+            });
+            let id = OpenTransactionId::new();
+            block_on(db.begin_mergeable(id)).unwrap();
+            let tx = db.tx_ref(id);
+            let mut stage = Box::pin(tx.insert(
+                "notes",
+                BTreeMap::from([("body".to_owned(), Value::String("alice".to_owned()))]),
+                Default::default(),
+            ));
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut completed = false;
+            for _ in 0..=stop {
+                if let std::task::Poll::Ready(result) = stage.as_mut().poll(&mut cx) {
+                    result.unwrap();
+                    completed = true;
+                    break;
+                }
+            }
+            if completed {
+                // Commit takes the batch before its first SQL suspension. A
+                // later abandon cannot cancel or remove that admitted commit.
+                let mut commit = Box::pin(db.commit_mergeable_handle(id));
+                assert!(commit.as_mut().poll(&mut cx).is_pending());
+                assert!(db.abandon_transaction_handle(id).is_err());
+                block_on(commit).unwrap();
+                let query = db.prepare_query(&Query::from("notes")).unwrap();
+                assert_eq!(block_on(db.read(&query)).unwrap().len(), 1);
+                break;
+            }
+            db.abandon_transaction_handle(id).unwrap();
+            block_on(db.begin_mergeable(id)).unwrap();
+            assert!(block_on(stage).is_err(), "suspension {stop}");
+            block_on(db.commit_mergeable_handle(id)).unwrap();
+            let query = db.prepare_query(&Query::from("notes")).unwrap();
+            assert!(
+                block_on(db.read(&query)).unwrap().is_empty(),
+                "suspension {stop}"
+            );
+            abandoned += 1;
+        }
+        assert!(
+            abandoned > 0 && abandoned < 256,
+            "covered {abandoned} suspension points"
+        );
+    }
     use super::*;
 
     /// Alice's replica uploads a large enum-bearing row to Bob's authority;

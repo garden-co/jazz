@@ -1808,10 +1808,12 @@ impl TxRef<'_> {
                 "a streamed insert writes one exact branch, not a branch view",
             ));
         }
+        let token = self.db.batch_token(self.id)?;
         let large = self
             .db
             .seal_streaming_upload(&mut upload, table, &mut cells, column)
             .await?;
+        self.db.check_batch(self.id, &token)?;
         let op = match mutation {
             StreamingMutationKind::Insert => StagedOp::Insert(
                 table.to_owned(),

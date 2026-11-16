@@ -374,3 +374,83 @@ fn suspended_storage_operation_serializes_reads_and_writes() {
     block_on(db.catalogue()).unwrap();
     block_on(db.close()).unwrap();
 }
+
+/// Alice abandons a staged batch and drops another transaction while Bob's
+/// host SQL is suspended. Neither cleanup borrows execution state, and reusing
+/// the first ID must not revive its cached writes.
+#[test]
+fn transaction_cleanup_remains_available_during_suspended_storage() {
+    use jazz::tools::OpenTransactionId;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let db = block_on(Db::open(config())).unwrap();
+    let id = OpenTransactionId::new();
+    block_on(db.begin_mergeable(id)).unwrap();
+    block_on(db.tx_ref(id).insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("abandoned".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx = block_on(db.serializable_tx()).unwrap();
+    let mut write = Box::pin(db.host_put_then_wait_for_test(
+        JOURNAL,
+        b"pending",
+        b"bob",
+        std::future::pending(),
+    ));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    db.abandon_transaction_handle(id).unwrap();
+    assert!(db.abandon_transaction_handle(id).is_err());
+    drop(tx);
+    drop(write);
+    block_on(db.begin_mergeable(id)).unwrap();
+    block_on(db.tx_ref(id).insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("replacement".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(db.commit_mergeable_handle(id)).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(db.read(&query)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell("title"),
+        Some(Value::String("replacement".to_owned()))
+    );
+}
+
+/// Alice abandons a batch with a cached SQL overlay, then reuses its ID for a
+/// batch of the same length. Bob must see only the replacement's staged row.
+#[test]
+fn reused_transaction_id_does_not_reuse_an_abandoned_overlay() {
+    use jazz::tools::OpenTransactionId;
+    let db = block_on(Db::open(config())).unwrap();
+    let id = OpenTransactionId::new();
+    for title in ["abandoned", "replacement"] {
+        block_on(db.begin_mergeable(id)).unwrap();
+        block_on(db.tx_ref(id).insert(
+            "notes",
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap();
+        if title == "abandoned" {
+            db.abandon_transaction_handle(id).unwrap();
+        }
+    }
+    block_on(db.commit_mergeable_handle(id)).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(db.read(&query)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell("title"),
+        Some(Value::String("replacement".to_owned()))
+    );
+}
