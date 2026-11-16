@@ -80,7 +80,9 @@ install_zip "$platform_url" "$platform_sha256" "$sdk/platforms/android-36"
 install_zip "$build_tools_url" "$build_tools_sha256" "$sdk/build-tools/36.0.0"
 install_zip "$ndk_url" "$ndk_sha256" "$sdk/ndk/$ndk_revision"
 grep -qx "Pkg.Revision = $ndk_revision" "$sdk/ndk/$ndk_revision/source.properties"
-export ANDROID_HOME="$sdk" ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
+# ANDROID_SDK_ROOT too: a runner image may set it to its own SDK, and AGP refuses
+# two different SDK paths.
+export ANDROID_HOME="$sdk" ANDROID_SDK_ROOT="$sdk" ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
 
 rustup target add "${rust_targets[@]}"
 if ! "$cache/cargo/bin/cargo-ndk" --version 2>/dev/null | grep -q " $cargo_ndk_version\$"; then
