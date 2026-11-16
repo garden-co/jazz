@@ -19,9 +19,8 @@ name: Go module tag
 #      the publish environment (Anselm approves), refusing if it exists.
 #
 # A pull request changing this file runs it dry (read access only), on its
-# own head, or on feat/go-parity while main has no packages/jazz-go yet (a
-# fallback to remove once Go lands), with an archive it builds itself
-# (linux-x86_64 only) instead of a release's.
+# own head, with an archive it builds itself (linux-x86_64 only) instead of
+# a release's.
 on:
   pull_request:
     paths:
@@ -119,16 +118,6 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/packages/jazz-go/v${VERSION}" >/dev/null; then
             echo "::error::packages/jazz-go/v${VERSION} already exists: tags are never moved"
             exit 1
-          fi
-
-      # The PR proof needs jazz-go: from feat/go-parity until main has it.
-      - name: Use a branch with jazz-go (pull request only)
-        if: github.event_name == 'pull_request'
-        run: |
-          if [ ! -d packages/jazz-go ]; then
-            git fetch --depth=1 origin feat/go-parity
-            git checkout --detach FETCH_HEAD
-            git checkout "${GITHUB_SHA}" -- dev/scripts/go-embed-ffi-libraries.sh
           fi
 
       - name: Install Go
