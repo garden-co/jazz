@@ -120,9 +120,9 @@ jobs:
           SWIFT
           cp packages/jazz-swift/mirror/Smoke.swift "$consumer/Sources/Smoke/Smoke.swift"
           (cd "$consumer" && swift run Smoke)
-          # The Jazz product's scheme in the mirror: compiles the sources and
+          # The mirror package's scheme (jazz-swift): compiles the sources and
           # resolves the XCFramework's iOS simulator slice.
-          (cd "$verify" && xcodebuild -list && xcodebuild build -scheme Jazz -destination 'generic/platform=iOS Simulator' -quiet)
+          (cd "$verify" && xcodebuild build -scheme jazz-swift -destination 'generic/platform=iOS Simulator' -quiet)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-swift-mirror
