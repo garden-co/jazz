@@ -47,8 +47,12 @@ table with no relations leaves `relations` out.
   "format": 1,
   "tables": {
     "projects": {
-      "columns": { "name": "string" },
-      "relations": { "todos": { "reverse": "todos", "relation": "project" } }
+      "columns": {
+        "name": "string"
+      },
+      "relations": {
+        "todos": { "reverse": "todos", "relation": "project" }
+      }
     },
     "todos": {
       "columns": {
@@ -86,12 +90,21 @@ relation lets a user find their `authoredPosts`:
   "format": 1,
   "tables": {
     "posts": {
-      "columns": { "authorId": "uuid", "title": "string" },
-      "relations": { "author": { "rel": "users", "column": "authorId" } }
+      "columns": {
+        "authorId": "uuid",
+        "title": "string"
+      },
+      "relations": {
+        "author": { "rel": "users", "column": "authorId" }
+      }
     },
     "users": {
-      "columns": { "name": "string" },
-      "relations": { "authoredPosts": { "reverse": "posts", "relation": "author" } }
+      "columns": {
+        "name": "string"
+      },
+      "relations": {
+        "authoredPosts": { "reverse": "posts", "relation": "author" }
+      }
     }
   }
 }
@@ -145,7 +158,10 @@ instead of the whole table.
   "format": 1,
   "tables": {
     "messages": {
-      "columns": { "chatId": "uuid", "text": "string" },
+      "columns": {
+        "chatId": "uuid",
+        "text": "string"
+      },
       "indexes": ["chatId", ["chatId", "$createdAt"]]
     }
   }
@@ -168,7 +184,10 @@ as editor presence or cursors, keep only each row's latest version with `"histor
   "format": 1,
   "tables": {
     "presence": {
-      "columns": { "doc": "string", "cursor": "string" },
+      "columns": {
+        "doc": "string",
+        "cursor": "string"
+      },
       "history": "latest"
     }
   }

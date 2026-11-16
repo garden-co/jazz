@@ -240,4 +240,15 @@ public enum DocsSnippets {
         // #endregion writing-durability-tier-swift
         return task
     }
+
+    public static func mergeableText(_ jazz: Jazz.Client, task: JazzApp.Task) async throws -> String {
+        // #region writing-mergeable-text-swift
+        // Edits of a text-merge column (`"merge": "text"`) merge with others'
+        // changes instead of replacing the whole value.
+        let notes = try await jazz.text(task, JazzApp.tasks.notes)
+        try await notes.insert("Bring gaffer tape. ", at: 0) // UTF-16 offsets
+        try await notes.replace(0..<5, with: "Pack")
+        // #endregion writing-mergeable-text-swift
+        return notes.current
+    }
 }
