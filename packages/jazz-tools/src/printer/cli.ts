@@ -69,20 +69,9 @@ export async function printTs(options: PrintTsOptions): Promise<string[]> {
   return written;
 }
 
-async function defaultSnapshot(): Promise<
-  (tables: Record<string, TableJson>) => Snapshot | Promise<Snapshot>
-> {
-  // Restored by the core DSL work; resolved at run time until it lands.
-  const specifier = "../dev/migrations.js";
-  const migrations = (await import(specifier)) as {
-    snapshotFromVersion?: (tables: Record<string, TableJson>) => Snapshot | Promise<Snapshot>;
-  };
-  if (typeof migrations.snapshotFromVersion !== "function") {
-    throw new Error(
-      "this jazz-tools can't write migration snapshots yet (no `snapshotFromVersion`)",
-    );
-  }
-  return migrations.snapshotFromVersion;
+async function defaultSnapshot(): Promise<(tables: Record<string, TableJson>) => Promise<Snapshot>> {
+  const { snapshotFromVersion } = await import("../dev/migrations.js");
+  return (tables) => snapshotFromVersion(tables as never);
 }
 
 export async function runPrintTs(args: string[]): Promise<void> {
