@@ -27,9 +27,9 @@
 //! [`Jazz::session`] follows it; [`Session::link`] carries a device account
 //! over to the user's provider sign-in.
 //!
-//! A backend serves its users' clients with an [`Endpoint`]: the app's
-//! `/jazz` handler, as TS `createJazz` serves it, with the app's own
-//! sign-in deciding who each request's user is.
+//! Unstable, behind the non-default `unstable-endpoint` feature and not
+//! part of a release yet: `Endpoint`, the app's `/jazz` handler served
+//! natively. Run an app's main backend with TS `createJazz`.
 //!
 //! Not supported yet: subscribing to history, and partial reads of large
 //! values. A bearer session is renewed by reconnecting with a fresh bearer,
@@ -42,6 +42,7 @@ mod auth;
 mod backend;
 mod config;
 mod edit;
+#[cfg(feature = "unstable-endpoint")]
 pub mod endpoint;
 mod error;
 mod handle;
@@ -64,6 +65,7 @@ pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
+#[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::Jazz;
