@@ -1,5 +1,5 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Output 7114eeb8c932b155. Formatters may reformat this file, except `app` below.
+// Bindings format 1. Output 9bc8251b96fcf163. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type Project = {
@@ -64,7 +64,7 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:f6dd14f493f37d9f10a45aac6501723719bcf8f4aab5bc7afd685d5cbb3bff30",
+  "source": "sha256:b439c7555c5191de9b759bbc416891e4b1b88b65dda84da2ac216d2f2f2f7190",
   "schema": {
     "current": "86cb6a677db0e9bcf52e9907941801bcbf2cb3944c7a8c5ff6b257051c1bc104",
     "schemas": [
