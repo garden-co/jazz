@@ -1,0 +1,12 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "notes": {
+      "read": "owner = session.user",
+      "insert": "owner = session.user",
+      "update": "owner = session.user",
+      "delete": "owner = session.user"
+    }
+  }
+}

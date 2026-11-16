@@ -175,7 +175,7 @@ fn a_backend_with_only_the_bindings_loads_what_the_files_load() {
 
 /// Go bindings for each app Go can bind, committed as
 /// `jazzapp/jazz_app.go` beside its `jazz.app.json`; the others are
-/// refused as unsupported (computed fields, transforms, payload enums).
+/// refused as unsupported (computed fields, transforms).
 #[test]
 fn every_go_app_generates_its_committed_go_byte_for_byte() {
     let mut generated_any = 0;
@@ -305,4 +305,105 @@ fn go_is_a_language_the_cli_selects() {
     assert_eq!(Lang::parse("go").unwrap(), Lang::Go);
     assert!(Lang::ALL.contains(&Lang::Go));
     assert_eq!(Lang::Go.marker(), "go.mod");
+}
+
+/// Each app's Swift bindings, committed beside it as `JazzApp.swift`; an
+/// app the Swift back end refuses (computed fields, transforms) commits
+/// none and is refused as unsupported.
+#[test]
+fn every_app_generates_its_committed_swift_byte_for_byte() {
+    let mut generated_any = false;
+    for dir in apps() {
+        let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+        let path = dir.join(jazz_codegen::swift::FILE);
+        let generated = match generate(Lang::Swift, &app_json) {
+            Ok(generated) => generated,
+            Err(error) => {
+                assert!(error.is_unsupported(), "{}: {error}", dir.display());
+                assert!(!path.exists(), "{} should not exist", path.display());
+                continue;
+            }
+        };
+        generated_any = true;
+        assert_eq!(generated, generate(Lang::Swift, &app_json).unwrap());
+        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+            std::fs::write(&path, &generated).unwrap();
+            continue;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing; run with JAZZ_UPDATE_FIXTURES=1",
+                path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            committed,
+            "{} differs from what the generator writes",
+            path.display()
+        );
+        let app = App::load(&app_json).unwrap();
+        let recorded = bindings::read(Lang::Swift, &committed).unwrap();
+        assert_eq!(recorded.source, app.source);
+        assert_eq!(recorded.current, app.compiled.current);
+        assert_eq!(recorded.format, Lang::Swift.format());
+        assert_eq!(
+            bindings::staleness(&app, Lang::Swift, Some(&committed)).unwrap(),
+            None
+        );
+        // An edited embedded app is caught.
+        let edited = committed.replacen(": \"string\"", ": \"boolean\"", 1);
+        assert_ne!(edited, committed);
+        assert!(bindings::read(Lang::Swift, &edited).is_err());
+    }
+    assert!(generated_any);
+}
+
+/// The StagePlan Swift example commits its bindings (`jazz-tools generate`
+/// doesn't write Swift yet, so this test keeps them current).
+/// `JAZZ_UPDATE_FIXTURES=1` rewrites them.
+#[test]
+fn the_stage_plan_swift_example_commits_its_bindings() {
+    let dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stage-plan/apps/swift-cli");
+    let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+    let generated = generate(Lang::Swift, &app_json).unwrap();
+    let path = dir.join(jazz_codegen::swift::FILE);
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &generated).unwrap();
+        return;
+    }
+    let committed = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        generated,
+        committed,
+        "{} is stale: run with JAZZ_UPDATE_FIXTURES=1",
+        path.display()
+    );
+}
+
+/// The Jazz Swift package's tests compile and run the bindings of
+/// `tests/apps/computed` (computed fields and transforms) from a copy.
+/// `JAZZ_UPDATE_FIXTURES=1` rewrites it.
+#[test]
+fn the_swift_package_tests_the_computed_bindings() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let app_json = std::fs::read(root.join("tests/apps/computed/jazz.app.json")).unwrap();
+    let generated = generate(Lang::Swift, &app_json).unwrap();
+    let path = root.join("../../packages/jazz-swift/Tests/JazzTests/ComputedApp.swift");
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        if path.parent().unwrap().exists() {
+            std::fs::write(&path, &generated).unwrap();
+        }
+        return;
+    }
+    // Absent where the package isn't in the checkout.
+    if let Ok(committed) = std::fs::read_to_string(&path) {
+        assert_eq!(
+            generated,
+            committed,
+            "{} is stale: run with JAZZ_UPDATE_FIXTURES=1",
+            path.display()
+        );
+    }
 }

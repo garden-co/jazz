@@ -5,17 +5,25 @@
 // deletes those, and a leftover would read as a second source of truth.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
+/** A Swift package of the Jazz Swift runtime: its bindings are JazzApp.swift. */
+function isSwiftApp(dir) {
+  const manifest = join(root, dir, "Package.swift");
+  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
+}
+
 /**
  * TS apps: every app with a jazz.app.json, except Rust crates (a Cargo.toml
  * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app`
- * crate's checks cover.
+ * crate's checks cover, and Swift packages (a Package.swift naming
+ * jazz-swift), whose bindings are `JazzApp.swift` and which
+ * dev/gates/jazz-swift.sh covers.
  */
 function projects() {
   return execFileSync(
@@ -26,7 +34,7 @@ function projects() {
     .split("\n")
     .filter(Boolean)
     .map(dirname)
-    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")));
+    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")) && !isSwiftApp(dir));
 }
 
 test("every example app commits its files and its bindings", () => {
@@ -54,5 +62,54 @@ test("no example keeps an alpha.64 schema source beside its files", () => {
     leftovers,
     [],
     `jazz.app.json and jazz.permissions.json are the app's only source; \`jazz-tools upgrade\` removes these:\n${leftovers.join("\n")}`,
+  );
+});
+
+function tracked(...patterns) {
+  return execFileSync("git", ["ls-files", "--", ...patterns], { cwd: root, encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean);
+}
+
+/**
+ * Found independently of jazz.app.json, so a deleted one is caught: every
+ * jazz.generated.ts or jazz.permissions.json is generated from or checked
+ * against the jazz.app.json beside it.
+ */
+test("every committed app file has its jazz.app.json beside it", () => {
+  const orphans = tracked(
+    "examples/**/jazz.generated.ts",
+    "examples/**/jazz.permissions.json",
+    "dev/stress-tests/**/jazz.generated.ts",
+    "dev/stress-tests/**/jazz.permissions.json",
+  ).filter((file) => !existsSync(join(root, dirname(file), "jazz.app.json")));
+  assert.deepEqual(
+    orphans,
+    [],
+    `These have no jazz.app.json, the app's source, beside them:\n${orphans.join("\n")}`,
+  );
+});
+
+/** Example packages: a package.json that depends on jazz-tools. */
+function jazzPackages() {
+  return tracked("examples/**/package.json", "dev/stress-tests/**/package.json")
+    .filter((file) => {
+      const manifest = JSON.parse(readFileSync(join(root, file), "utf8"));
+      return ["dependencies", "devDependencies", "peerDependencies"].some(
+        (field) => manifest[field]?.["jazz-tools"],
+      );
+    })
+    .map(dirname);
+}
+
+test("every example package that depends on jazz-tools commits a jazz.app.json", () => {
+  const packages = jazzPackages();
+  assert.ok(packages.length > 30, `found only ${packages.length} jazz-tools packages`);
+  const apps = tracked("examples/**/jazz.app.json", "dev/stress-tests/**/jazz.app.json");
+  const without = packages.filter((dir) => !apps.some((file) => file.startsWith(`${dir}/`)));
+  assert.deepEqual(
+    without,
+    [],
+    `These depend on jazz-tools but commit no jazz.app.json:\n${without.join("\n")}`,
   );
 });

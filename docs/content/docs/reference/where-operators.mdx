@@ -77,7 +77,7 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
 
 ### Null checks on optional columns
 
-In TypeScript, `isNull: true` matches missing values and `isNull: false` matches present values. Nullable columns with ordinary filter operators support it, including scalar and array columns, not just references; required columns and payload enums do not expose it.
+In TypeScript, `isNull: true` matches missing values and `isNull: false` matches present values. Nullable columns with ordinary filter operators support it, including scalar and array columns, not just references; required columns do not expose it.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">

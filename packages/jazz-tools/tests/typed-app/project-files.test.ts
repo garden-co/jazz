@@ -42,11 +42,13 @@ describe("generate", () => {
   it("--check refuses missing or stale bindings without writing", async () => {
     const dir = await project();
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(
-      /no jazz\.generated\.ts: run `jazz-tools (generate|validate)`/,
+      "no jazz.generated.ts: run `jazz-tools generate`",
     );
     await generateApp({ cwd: dir });
     await writeFile(join(dir, "jazz.generated.ts"), "// edited\n");
-    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/jazz-tools generate/);
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(
+      "jazz.generated.ts: not a module jazz-tools generated (its first line differs); regenerate it with `jazz-tools generate`",
+    );
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe("// edited\n");
   });
 
@@ -59,7 +61,9 @@ describe("generate", () => {
       tables: { todos: { columns: { title: "string", done: "boolean", note: "string?" } } },
     };
     await writeFile(join(dir, "jazz.app.json"), JSON.stringify(edited, null, 2));
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/migrations create/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      "the schema changed since the last version: run `jazz-tools migrations create --name <name>`",
+    );
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe(before);
 
     const created = await createAppMigration({ cwd: dir, name: "add-note" });
@@ -71,14 +75,20 @@ describe("generate", () => {
 
   it("refuses a missing permissions file and a name-less migration", async () => {
     const dir = await project(APP, null);
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/jazz\.permissions\.json is missing/);
-    await expect(createAppMigration({ cwd: dir, name: "" })).rejects.toThrow(/--name/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      /jazz\.permissions\.json is missing\. Every app has one, even if only backends read it: start from `\{ "format": 1, "tables": \{\} \}`, which denies everything\.$/,
+    );
+    await expect(createAppMigration({ cwd: dir, name: "" })).rejects.toThrow(
+      "`jazz-tools migrations create` needs `--name <name>`: letters, digits, `-` and `_`, e.g. `--name add-due-date`.",
+    );
   });
 
   it("points an alpha.64 project at upgrade", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-legacy-"));
     await writeFile(join(dir, "schema.ts"), "export {};\n");
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/jazz-tools upgrade/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      "schema.ts is an alpha.64 schema: jazz.app.json is now the app's schema. Run `npx jazz-tools upgrade` to convert the app.",
+    );
   });
 });
 
@@ -86,7 +96,7 @@ describe("createJazz's bindings check", () => {
   it("refuses bindings generated from another jazz.app.json, and passes without one", async () => {
     const dir = await project();
     await expect(checkRunningBindings("sha256:" + "0".repeat(64), dir)).rejects.toThrow(
-      /bindings out of date/,
+      "bindings out of date: jazz.generated.ts was generated from another jazz.app.json. Run `npx jazz-tools generate` and commit the jazz.generated.ts it writes.",
     );
     const empty = await mkdtemp(join(tmpdir(), "jazz-none-"));
     const warnings: string[] = [];
@@ -97,11 +107,14 @@ describe("createJazz's bindings check", () => {
   });
 });
 
+/** A crate using `jazz-app`: what makes a Cargo.toml a Rust app's, for the npm CLI as for the binary. */
+const JAZZ_APP_CRATE = '[package]\nname = "app"\n\n[dependencies]\njazz-app = "0.1"\n';
+
 describe("generate in a Rust crate", () => {
   it("writes src/jazz_app.rs beside the TS bindings of a crate that has them", async () => {
     const dir = await project();
     await generateApp({ cwd: dir });
-    await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
+    await writeFile(join(dir, "Cargo.toml"), JAZZ_APP_CRATE);
     const result = await generateApp({ cwd: dir });
     expect(result.bindings).toEqual(["jazz.generated.ts", join("src", "jazz_app.rs")]);
     expect(await readFile(join(dir, "src", "jazz_app.rs"), "utf8")).toContain("jazz_app.rs");
@@ -110,11 +123,22 @@ describe("generate in a Rust crate", () => {
 
   it("gives a Rust-only crate only its Rust bindings, and --check passes on them", async () => {
     const dir = await project();
-    await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
+    await writeFile(join(dir, "Cargo.toml"), JAZZ_APP_CRATE);
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/src.jazz_app\.rs/);
     expect((await generateApp({ cwd: dir })).bindings).toEqual([join("src", "jazz_app.rs")]);
     await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
     await expect(readFile(join(dir, "jazz.generated.ts"), "utf8")).rejects.toThrow();
+  });
+});
+
+describe("generate beside a Cargo.toml that isn't a jazz-app crate", () => {
+  it("writes only the TS bindings, as the binary does", async () => {
+    const dir = await project();
+    await generateApp({ cwd: dir });
+    await writeFile(join(dir, "Cargo.toml"), '[workspace]\nmembers = ["crates/*"]\n');
+    const result = await generateApp({ cwd: dir });
+    expect(result.bindings).toEqual(["jazz.generated.ts"]);
+    await expect(readFile(join(dir, "src", "jazz_app.rs"), "utf8")).rejects.toThrow();
   });
 });
 
@@ -124,6 +148,8 @@ describe("finding the app's files", () => {
     const { mkdir } = await import("node:fs/promises");
     await mkdir(join(dir, "src"));
     await writeFile(join(dir, "src", "jazz.app.json"), JSON.stringify(APP));
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/found jazz\.app\.json in both/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      "found jazz.app.json in both jazz.app.json and src/jazz.app.json: keep one, or point the command at the app with --schema-dir.",
+    );
   });
 });
