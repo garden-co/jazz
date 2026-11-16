@@ -1512,13 +1512,13 @@ export type ComputedImpl<TTypes extends SchemaLike> = {
  * turns a stored value into the value the app sees, `to` turns it back.
  *
  * Null passes through: Jazz never calls a transform with null, so a null
- * branch is never reached. Either may still return null, so an alpha.64
+ * branch is never reached. Either may still return null, so an alpha.65
  * transform on an optional column, which handled null itself and which
  * `jazz-tools upgrade` moves here unchanged, keeps typechecking.
  */
 /**
  * Whether every column stored through the transform `TName` is nullable: only
- * then may its callbacks return `null` (an alpha.64 transform on an optional
+ * then may its callbacks return `null` (an alpha.65 transform on an optional
  * column that handled null itself). Jazz never calls a transform with null.
  */
 type TransformColumnsNullable<TTypes extends SchemaLike, TName> = false extends {

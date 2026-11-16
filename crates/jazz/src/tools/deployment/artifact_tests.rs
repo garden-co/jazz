@@ -1937,10 +1937,10 @@ fn slices_and_ts_only_from_alpha63_load_with_a_warning() {
     assert!(
         app.warnings()
             .iter()
-            .any(|w| w.contains("slices: schema slicing is gone in alpha.65"))
+            .any(|w| w.contains("slices: schema slicing is gone in alpha.66"))
     );
     assert!(app.warnings().iter().any(|w| {
-        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.65) is ignored")
+        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.66) is ignored")
     }));
     assert!(edited_app_loads(|_| {}).warnings().is_empty());
 }
@@ -2101,7 +2101,7 @@ fn the_exact_login_is_session_identity() {
 
 #[test]
 fn a_version_no_migration_leads_from_loads_with_a_warning() {
-    // As `jazz-tools validate` wrote files before alpha.65 while a
+    // As `jazz-tools validate` wrote files before alpha.66 while a
     // migration was still to be written; `generate` refuses them.
     let written = write(shared_todos()).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
@@ -2198,7 +2198,7 @@ fn every_committed_app_file_fits_its_json_schema() {
         (PERMISSIONS_FILE, "jazz.permissions.schema.json"),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
-        // `jazz-tools upgrade`'s input fixtures are alpha.64 apps on purpose:
+        // `jazz-tools upgrade`'s input fixtures are alpha.65 apps on purpose:
         // their files carry alpha.63's `tsOnly`, which upgrade converts. What
         // upgrade writes from them (`expected/`) is checked like any app.
         let legacy = repo_root().join("packages/jazz-tools/tests/upgrade/fixtures");

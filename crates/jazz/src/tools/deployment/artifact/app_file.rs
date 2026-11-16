@@ -22,7 +22,7 @@ pub type Refusal = (String, String);
 
 /// Why an `enum` given as an object of cases with fields is refused: Jazz
 /// had such columns declared but no store could hold them, and they were
-/// removed in 2.0.0-alpha.65.
+/// removed in 2.0.0-alpha.66.
 const PAYLOAD_ENUM_REFUSAL: &str = "enum cases with fields are not supported; use a string enum plus a nullable column per field, or a json column (see https://github.com/garden-co/jazz/issues/5758)";
 
 fn refuse(path: impl Into<String>, message: impl Into<String>) -> Refusal {
@@ -246,7 +246,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
 
     if root.get("slices").is_some() {
         warnings.push(
-            "slices: schema slicing is gone in alpha.65, so `slices` is ignored; \
+            "slices: schema slicing is gone in alpha.66, so `slices` is ignored; \
              `jazz-tools upgrade` removes it"
                 .to_string(),
         );
@@ -461,7 +461,7 @@ fn read_tables(
         if let Some(fields) = table.get("tsOnly") {
             if let Some((_, warnings)) = codegen.as_mut() {
                 warnings.push(format!(
-                    "{path}.tsOnly: `tsOnly` (written before alpha.65) is ignored; \
+                    "{path}.tsOnly: `tsOnly` (written before alpha.66) is ignored; \
                      `jazz-tools upgrade` turns it into `computed` and `transforms`"
                 ));
             }
