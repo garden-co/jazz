@@ -183,6 +183,14 @@ field`), for an existing row the columns `row` names (a partial row
   deleted row as it was, or with `patch` (a whole row) as its content; a
   patch naming another row's `id` is refused. Both
   return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
+- **Streaming uploads:** UniFFI `begin_upload(table, column, kind, id?,
+row?) -> Upload` (`push(bytes)`, `finish() -> row`, `abort()`); C ABI
+  `uploadBegin {table, column, kind?: "insert"|"update"|"upsert", id?,
+row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
+{upload, tier?}` → the row, `uploadAbort {upload}`. An insert takes the
+  row's other columns as `row` and no `id`; update and upsert take the `id`.
+  Not inside a transaction. Read a large value back in pages with `select`
+  parts.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`
