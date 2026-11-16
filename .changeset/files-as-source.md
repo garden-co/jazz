@@ -5,7 +5,7 @@
 
 ### Upgrading from alpha.65: run `jazz-tools upgrade` and review the diff
 
-Breaking: alpha.66 gives the schema a cleaner home and permissions a much leaner DSL. Each app defines its tables, permissions and migrations in one `schema.ts`, in every language, and one command, `npx jazz-tools generate`, turns it into readable `jazz.app.json` / `jazz.permissions.json` files and typed bindings for TypeScript, Rust, Go, Swift and Kotlin. The table, column and migration builders are the ones you know from alpha.65; how the schema is mounted (`defineApp`) and how permissions are written change. `jazz-tools upgrade` converts an alpha.65 app for you and proves nothing it deploys changed.
+Breaking: alpha.66 gives the schema a cleaner home and permissions a much leaner DSL. Each app defines its tables, permissions and migrations in one `schema.ts`, in every language, and one command, `npx jazz-tools generate`, turns it into readable `jazz.app.json` / `jazz.permissions.json` files and typed bindings for TypeScript, Rust, Go, Swift and Kotlin. The table, column and migration builders are the ones you know from alpha.65; how the schema is mounted (`defineApp`) and how permissions are written change. `jazz-tools upgrade` converts an alpha.65 app for you and checks that its schema hashes and bundle id stay the same.
 
 **`schema.ts`** (beside the app's manifest: package.json, Cargo.toml, go.mod, Package.swift or build.gradle):
 
