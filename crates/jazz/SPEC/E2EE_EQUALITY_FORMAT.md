@@ -3,7 +3,10 @@
 > **Status.** The normative reference implementation of this format is the
 > pure-Rust crate `crates/jazz-e2ee`, with the independent generator
 > `fixtures/e2ee-vectors.c`. The earlier TypeScript implementation
-> and the libsodium N-API primitives are historical and not normative.
+> and the libsodium N-API primitives are historical and not normative. The
+> format changes since then mean records written by that experimental
+> TypeScript layer do not decrypt or match with this one; nothing shipped
+> data on it.
 
 This companion specifies the built-in equality mechanism, the equality
 context `C` and the value encoding `V`. Encrypted query integration is a
@@ -40,9 +43,9 @@ scope the space table's catalogue identity, identifier the space identifier,
 table and column the column's catalogue identities, epoch the space epoch,
 and empty row and recipient: a token does not bind its row, so equal values
 of one column and epoch match across rows. `T` is the column's logical type
-bytes, as for a cell record. The epoch must be a lowercase UUID and the
-table and column non-empty, as for cell contexts; anything else is
-`InvalidInput`.
+bytes, as for a cell record. The epoch must be a lowercase hyphenated UUID
+of version 4 or 7 with the RFC variant (`[89ab]`), and the table and column
+non-empty, as for cell contexts; anything else is `InvalidInput`.
 
 ## Value encoding
 
@@ -59,8 +62,18 @@ followed by:
 | Bytes                 | the bytes                                             |
 | UUID                  | the 16 bytes                                          |
 
-The canonical bit pattern of a float makes tokens match Jazz's plaintext
-equality: every NaN is `7ff8000000000000` and `-0.0` is encoded as `0.0`.
+The canonical bit pattern of a float is a design choice of the token
+encoding: every NaN is encoded as `7ff8000000000000` and `-0.0` as `0.0`, so
+all NaNs share one token and `0.0` and `-0.0` share another. This is not
+exactly Jazz's plaintext equality, which is not one rule either: stored
+values compare by bits (so `0.0` and `-0.0` differ, and two NaNs with the
+same bits are equal), while SQL comparisons use IEEE comparison (`0.0 =
+-0.0`, and a NaN equals nothing), and the record reader refuses NaN values.
+Since a token match only selects candidates, which the client decrypts and
+compares with the query's own plaintext rule (see "Security and
+compatibility"), the encoding errs towards matching: it never leaves out a
+row that a plaintext rule would accept for `0.0`/`-0.0`, and NaN, which
+plaintext rows cannot hold, needs no exact rule.
 Text is compared by exact bytes: there is no Unicode, case or whitespace
 normalisation, so `é` (`c3a9`) and `e` followed by U+0301 (`65cc81`) have
 different tokens, as they are different Jazz text values. The column type is
@@ -68,6 +81,20 @@ bound by `T`, so values of different types are never compared. Fixtures
 (asserted by the crate's `equality_values` test): `0.0` and `-0.0` both
 encode as `010000000000000000`, every NaN as `017ff8000000000000`, `-2` as
 `01fffffffffffffffe`, null as `00` and the empty text as `01`.
+
+## Column types
+
+An equality index is declared per column, and its type decides the
+encoding: boolean, integer (32-bit, values must fit), bigint, timestamp,
+double, text, bytes and UUID columns, as in the table above. Array, row and
+transaction-ID columns have no value encoding and cannot be equality-indexed:
+a declaration naming one is refused when it is declared, with a typed error
+that names the type (`records::EqualityColumn::declare`,
+`UnsupportedEqualityColumn`: "Equality indexes are not supported for array
+columns"), never at write time. Tokens are computed only through a declared
+column (`records::equality_token_of`), which refuses a value of another
+type with `InvalidInput`; there is no public entry point that hashes
+caller-supplied bytes, so every token hashes the canonical encoding.
 
 ## Independent fixture
 

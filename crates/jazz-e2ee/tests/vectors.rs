@@ -761,9 +761,9 @@ fn spec_wrapper_examples() {
     assert_eq!(record.ciphertext, test_envelope);
 }
 
-/// The equality value encoding `V` and its tokens: tokens match Jazz's
-/// plaintext equality (every NaN alike, `-0.0` equal to `0.0`, text by exact
-/// bytes with no Unicode normalisation), and null differs from every value.
+/// The equality value encoding `V` and its tokens: the encoding makes every
+/// NaN alike and `-0.0` equal to `0.0`, compares text by exact bytes with no
+/// Unicode normalisation, and keeps null apart from every value.
 #[test]
 fn equality_values() {
     use records::{EqualityValue as E, equality_value};
@@ -803,19 +803,60 @@ fn equality_values() {
         epoch_id: IDENTITY.epoch_id,
     };
     let float_type = br#"{"column_type":{"type":"Double"},"nullable":true}"#;
-    let token = |value: E<'_>| {
-        to_hex(
-            &records::equality_token_of(&equality::Builtin, &root(), &identity, float_type, &value)
-                .unwrap(),
+    let token_in = |column: records::EqualityColumnType, value: E<'_>| {
+        records::equality_token_of(
+            &equality::Builtin,
+            &root(),
+            &identity,
+            float_type,
+            &records::EqualityColumn::declare(column).unwrap(),
+            &value,
         )
+        .map(|token| to_hex(&token))
     };
+    let token = |value: E<'_>| token_in(records::EqualityColumnType::Double, value).unwrap();
+    let text = |value: E<'_>| token_in(records::EqualityColumnType::Text, value).unwrap();
     assert_eq!(token(E::Float(0.0)), token(E::Float(-0.0)));
     assert_eq!(token(E::Float(f64::NAN)), token(E::Float(-f64::NAN)));
     assert_ne!(token(E::Float(0.0)), token(E::Null));
-    assert_ne!(token(E::Text("é")), token(E::Text("e\u{301}")));
+    assert_ne!(text(E::Text("é")), text(E::Text("e\u{301}")));
+    // A value of another type than the declared column's is refused, and so
+    // is an integer column's value beyond 32 bits.
+    assert_eq!(
+        token_in(records::EqualityColumnType::Double, E::Text("1")),
+        Err(Error::InvalidInput)
+    );
+    assert_eq!(
+        token_in(records::EqualityColumnType::Integer, E::Int(1 << 40)),
+        Err(Error::InvalidInput)
+    );
+    assert!(token_in(records::EqualityColumnType::BigInt, E::Int(1 << 40)).is_ok());
     assert_eq!(
         token(E::Float(-0.0)),
         "4a45324501146a617a7a2e736f6469756d2e657175616c69747900000001cd771c3a1e2f0e55f0cfe1cfc6f1ff86eb4ae15f9b5c9270e769602f74f956f6"
+    );
+    // Arrays, rows and transaction IDs cannot be equality-indexed: the
+    // declaration is refused, naming the type.
+    for column in [
+        records::EqualityColumnType::Array,
+        records::EqualityColumnType::Row,
+        records::EqualityColumnType::TransactionId,
+    ] {
+        let refused = records::EqualityColumn::declare(column).unwrap_err();
+        assert_eq!(refused.column_type, column);
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "Equality indexes are not supported for {} columns",
+                column.name()
+            )
+        );
+    }
+    assert_eq!(
+        records::EqualityColumn::declare(records::EqualityColumnType::TransactionId)
+            .unwrap_err()
+            .to_string(),
+        "Equality indexes are not supported for transaction-id columns"
     );
     // An equality identity is checked like a cell identity.
     assert_eq!(

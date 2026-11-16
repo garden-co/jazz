@@ -307,6 +307,106 @@ pub fn decrypt_stream_value(
     Ok(out)
 }
 
+/// A column type as an equality-index declaration names it
+/// (`E2EE_EQUALITY_FORMAT.md`, "Column types"). The scalar types have a
+/// value encoding; arrays, rows and transaction IDs do not, and a
+/// declaration naming one is refused ([`EqualityColumn::declare`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EqualityColumnType {
+    Boolean,
+    /// A 32-bit integer.
+    Integer,
+    /// A 64-bit integer.
+    BigInt,
+    Timestamp,
+    Double,
+    Text,
+    Bytes,
+    Uuid,
+    Array,
+    Row,
+    TransactionId,
+}
+
+impl EqualityColumnType {
+    /// The type's name, as refusals report it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Integer => "integer",
+            Self::BigInt => "bigint",
+            Self::Timestamp => "timestamp",
+            Self::Double => "double",
+            Self::Text => "text",
+            Self::Bytes => "bytes",
+            Self::Uuid => "uuid",
+            Self::Array => "array",
+            Self::Row => "row",
+            Self::TransactionId => "transaction-id",
+        }
+    }
+}
+
+/// An equality index declared on a column whose type has no value
+/// encoding. Names the type; refused at declaration, never at write time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("Equality indexes are not supported for {} columns", .column_type.name())]
+pub struct UnsupportedEqualityColumn {
+    pub column_type: EqualityColumnType,
+}
+
+/// A declared equality-indexed column: its type has a value encoding.
+/// Tokens are computed only through it, so every token hashes the canonical
+/// encoding of a value of the column's type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EqualityColumn {
+    column_type: EqualityColumnType,
+}
+
+impl EqualityColumn {
+    /// Declares an equality index on a column of `column_type`. Arrays, rows
+    /// and transaction IDs are refused with the type named.
+    pub fn declare(
+        column_type: EqualityColumnType,
+    ) -> core::result::Result<Self, UnsupportedEqualityColumn> {
+        match column_type {
+            EqualityColumnType::Array
+            | EqualityColumnType::Row
+            | EqualityColumnType::TransactionId => Err(UnsupportedEqualityColumn { column_type }),
+            column_type => Ok(Self { column_type }),
+        }
+    }
+
+    pub fn column_type(&self) -> EqualityColumnType {
+        self.column_type
+    }
+
+    /// `V` for `value`, which must be null or of the column's type (an
+    /// integer column's values fit 32 bits); anything else is
+    /// [`Error::InvalidInput`].
+    pub fn encode(&self, value: &EqualityValue<'_>) -> Result<Vec<u8>> {
+        let fits = match (self.column_type, value) {
+            (_, EqualityValue::Null) => true,
+            (EqualityColumnType::Boolean, EqualityValue::Bool(_)) => true,
+            (EqualityColumnType::Integer, EqualityValue::Int(value)) => {
+                i32::try_from(*value).is_ok()
+            }
+            (EqualityColumnType::BigInt, EqualityValue::Int(_)) => true,
+            (EqualityColumnType::Timestamp, EqualityValue::Timestamp(_)) => true,
+            (EqualityColumnType::Double, EqualityValue::Float(_)) => true,
+            (EqualityColumnType::Text, EqualityValue::Text(_)) => true,
+            (EqualityColumnType::Bytes, EqualityValue::Bytes(_)) => true,
+            (EqualityColumnType::Uuid, EqualityValue::Uuid(_)) => true,
+            _ => false,
+        };
+        if fits {
+            Ok(equality_value(value))
+        } else {
+            Err(Error::InvalidInput)
+        }
+    }
+}
+
 /// A logical value as an equality index encodes it (`E2EE_EQUALITY_FORMAT.md`,
 /// "Value encoding"). The column's type is bound by the context, so values
 /// of different types are never compared.
@@ -324,9 +424,9 @@ pub enum EqualityValue<'a> {
     Uuid([u8; 16]),
 }
 
-/// The canonical bit pattern of an equality-indexed float: every NaN is
-/// `0x7ff8000000000000` and `-0.0` is `0.0`, so tokens match Jazz's
-/// plaintext equality, where `-0.0 == 0.0`.
+/// The canonical bit pattern the token encoding gives every NaN; `-0.0` is
+/// encoded as `0.0`. A design choice of the encoding, not a statement about
+/// Jazz's plaintext comparisons (`E2EE_EQUALITY_FORMAT.md`).
 const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
 
 /// `V`, the encoded value an equality token hashes: `00` for null;
@@ -358,20 +458,23 @@ pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
     out
 }
 
-/// The equality token of a logical value: [`equality_token`] of
-/// [`equality_value`].
+/// The equality token of a logical value of a declared column: the
+/// column's canonical encoding of `value`, hashed by `tagger`. The only
+/// public way to compute a token, so no caller can hash bytes that bypass
+/// the encoding.
 pub fn equality_token_of(
     tagger: &dyn EqualityTagger,
     key: &[u8; 32],
     identity: &EqualityIdentity<'_>,
     cell_type: &[u8],
+    column: &EqualityColumn,
     value: &EqualityValue<'_>,
 ) -> Result<Vec<u8>> {
-    equality_token(tagger, key, identity, cell_type, &equality_value(value))
+    equality_token(tagger, key, identity, cell_type, &column.encode(value)?)
 }
 
-/// The equality token for an encoded value, with `tagger`.
-pub fn equality_token(
+/// The equality token for an already encoded value.
+fn equality_token(
     tagger: &dyn EqualityTagger,
     key: &[u8; 32],
     identity: &EqualityIdentity<'_>,
