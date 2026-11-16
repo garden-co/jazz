@@ -6747,14 +6747,7 @@ impl Inner {
     }
 
     fn has_pruned_txs(&self) -> Result<bool, Error> {
-        self.conn
-            .cached_row(
-                "SELECT count(*) > 0 FROM sqlite_master \
-                 WHERE type = 'table' AND name = '_jazz_pruned_txs'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(storage)
+        has_pruned_txs(&self.conn, &self.pruned_txs)
     }
 
     /// Drop the dedupe entries of accepted commits that wrote only tables
@@ -6776,12 +6769,8 @@ impl Inner {
         if self.retention().is_empty() {
             return Ok(());
         }
-        self.exec(
-            "CREATE TABLE IF NOT EXISTS _jazz_pruned_txs \
-             (n INTEGER PRIMARY KEY, waiting INTEGER, through INTEGER NOT NULL)",
-            [],
-        )
-        .map_err(storage)?;
+        self.exec(PRUNED_TXS_DDL, []).map_err(storage)?;
+        pruned_txs_created(&self.conn, &self.pruned_txs);
         // The commit's own version decides, as for its history.
         let latest_only = !ops.is_empty()
             && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
@@ -15340,8 +15329,112 @@ fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
     }
 }
 
+const PRUNED_TXS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_pruned_txs \
+     (n INTEGER PRIMARY KEY, waiting INTEGER, through INTEGER NOT NULL)";
+
+/// What a store was last seen to hold, and the connection's rollback count
+/// ([`crate::values::rollbacks`]) when it was seen.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Known {
+    holds: bool,
+    rollbacks: u64,
+}
+
+#[cfg(feature = "testing")]
+thread_local! {
+    static PRUNED_TXS_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread asked `sqlite_master` whether a store holds
+/// `_jazz_pruned_txs`.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn pruned_txs_lookups_for_test() -> usize {
+    PRUNED_TXS_LOOKUPS.with(std::cell::Cell::get)
+}
+
+/// Whether `_jazz_pruned_txs` exists, asked of `sqlite_master` only when
+/// `known` cannot answer: every new commit to latest-only tables asks. The
+/// table is never dropped and only this connection writes the store, so an
+/// answer goes stale only by this connection's own `CREATE` (which records
+/// the new answer, [`pruned_txs_created`]) or by a rollback undoing that
+/// `CREATE` (which moves the rollback count, and the table is read again).
+/// [`PRUNED_TXS_DDL`] has one user, which records it: anything else that
+/// came to create the table on an open connection would have to as well.
+fn has_pruned_txs(
+    conn: &rusqlite::Connection,
+    known: &std::cell::Cell<Option<Known>>,
+) -> Result<bool, Error> {
+    let rollbacks = crate::values::rollbacks(conn);
+    if let Some(known) = known.get()
+        && known.rollbacks == rollbacks
+    {
+        return Ok(known.holds);
+    }
+    #[cfg(feature = "testing")]
+    PRUNED_TXS_LOOKUPS.with(|count| count.set(count.get() + 1));
+    let holds = conn
+        .cached_row(
+            "SELECT count(*) > 0 FROM sqlite_master \
+             WHERE type = 'table' AND name = '_jazz_pruned_txs'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    known.set(Some(Known { holds, rollbacks }));
+    Ok(holds)
+}
+
+/// Record that `_jazz_pruned_txs` was just created on `conn`.
+fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Option<Known>>) {
+    known.set(Some(Known {
+        holds: true,
+        rollbacks: crate::values::rollbacks(conn),
+    }));
+}
+
 #[cfg(test)]
 mod tests {
+    /// Whether `_jazz_pruned_txs` exists is read once and then answered from
+    /// memory; a rollback that undoes its `CREATE` makes it read again, so a
+    /// resend after that rollback is answered as on a store that never
+    /// pruned (no "no such table" error, no stale "exists").
+    #[test]
+    fn the_pruned_table_bit_follows_a_rolled_back_create() {
+        use crate::values::{begin_savepoint, end_savepoint};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let known = std::cell::Cell::new(None);
+        let on_disk = |conn: &rusqlite::Connection| -> bool {
+            conn.query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_pruned_txs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!super::has_pruned_txs(&conn, &known).unwrap());
+
+        begin_savepoint(&conn, "upload").unwrap();
+        conn.execute_batch(super::PRUNED_TXS_DDL).unwrap();
+        super::pruned_txs_created(&conn, &known);
+        assert!(super::has_pruned_txs(&conn, &known).unwrap());
+        end_savepoint(&conn, "upload", false).unwrap();
+        assert!(!on_disk(&conn));
+        assert!(
+            !super::has_pruned_txs(&conn, &known).unwrap(),
+            "the rolled-back CREATE is still believed"
+        );
+
+        conn.execute_batch(super::PRUNED_TXS_DDL).unwrap();
+        super::pruned_txs_created(&conn, &known);
+        assert!(super::has_pruned_txs(&conn, &known).unwrap());
+        // A rollback that undid nothing of it keeps the table.
+        begin_savepoint(&conn, "other").unwrap();
+        end_savepoint(&conn, "other", false).unwrap();
+        assert!(on_disk(&conn));
+        assert!(super::has_pruned_txs(&conn, &known).unwrap());
+    }
+
     /// A thin client's writer node carries its mark; a node minted as raw
     /// random bytes (alpha.59) that reads as version 8 does not.
     #[test]
