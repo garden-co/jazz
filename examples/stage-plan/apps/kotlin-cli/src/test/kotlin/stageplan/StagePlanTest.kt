@@ -7,6 +7,7 @@ import jazzapp.NewCrew
 import jazzapp.TaskStatus
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import tools.jazz.history
 import tools.jazz.include
 import jazzapp.Tasks
 import kotlinx.coroutines.async
@@ -341,5 +342,48 @@ class StagePlanTest {
             val hers = alice.all(Tasks.where(Tasks.showId eq showId), tools.jazz.ReadTier.Remote)
             assertEquals(listOf("Secret setlist" to TaskStatus.Todo), hers.map { it.title to it.status })
         }
+    }
+
+    @Test
+    fun lifecycle_disconnect_mutation_errors_delete_storage_and_history_watch(): Unit = runBlocking {
+        val me: String
+        open("user-8").use { jazz ->
+            me = me(jazz)
+            val show = showNamed(jazz, "Lifecycle")
+            // Offline writes sync after reconnecting.
+            jazz.disconnect()
+            val offline = jazz.insert(Tasks, jazzapp.NewTask(showId = show.id, title = "Offline", status = TaskStatus.Todo, rank = 1.0))
+            jazz.reconnect()
+            jazz.waitForSync(tools.jazz.WriteTier.Global)
+            assertEquals("Offline", jazz.one(Tasks.where(Tasks.id eq offline.id), tools.jazz.ReadTier.Remote)?.title)
+            // A local-first write the server refuses arrives as a mutation error.
+            val errors = kotlinx.coroutines.channels.Channel<tools.jazz.MutationError>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val watching = launch { jazz.mutationErrors.collect { errors.send(it) } }
+            kotlinx.coroutines.delay(200)
+            val stranger = jazz.insert(CrewTable, NewCrew(account = me, name = "Stranger"), tier = tools.jazz.WriteTier.Global)
+            jazz.update(Tasks, offline.id) { assigneeId(stranger.id) }
+            val error = kotlinx.coroutines.withTimeout(30_000) { errors.receive() }
+            kotlin.test.assertTrue(error.denied, "$error")
+            watching.cancel()
+            // Both transaction kinds commit.
+            // (At WriteTier.Global: waitForSync would rethrow the refusal above.)
+            val global = tools.jazz.WriteTier.Global
+            assertEquals(1, jazz.transaction(global) { tx -> tx.update(Tasks, offline.id) { title("Merged") }; 1 })
+            assertEquals(2, jazz.transaction(global, serializable = true) { tx -> tx.update(Tasks, offline.id) { title("Serial") }; 2 })
+            // A history query can be watched: each accepted version is a result of its own.
+            val versions = kotlinx.coroutines.withTimeout(30_000) {
+                jazz.watch(Tasks.where(Tasks.id eq offline.id).history(), tools.jazz.ReadTier.Remote).first { it.size >= 2 }
+            }
+            kotlin.test.assertTrue(versions.map { it.row.title }.toSet().size >= 2, "$versions")
+        }
+        // Deleting a persistent client's storage closes it and removes its store.
+        val dir = kotlin.io.path.createTempDirectory("jazz-delete").toFile()
+        val jazz = openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { "token-user-8" }, dir.path)
+        showNamed(jazz, "Lifecycle")
+        jazz.deleteClientStorage()
+        kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { tasksOf(jazz, jazzapp.Show("x", "x", "x", "x", "x", me)) }
+        // The store is gone (an empty lock file may stay behind).
+        val left = dir.listFiles()?.filter { it.name != "jazz.lock" }.orEmpty()
+        kotlin.test.assertTrue(left.isEmpty(), "$left")
     }
 }
