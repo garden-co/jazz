@@ -29,9 +29,21 @@ pub const HEADER: &str =
 /// bindings an older Jazz wrote for the same file.
 pub const FORMAT: u32 = 1;
 
-/// The second line.
-pub(crate) fn format_line() -> String {
-    format!("// Bindings format {FORMAT}. Formatters may reformat this file, except `app` below.")
+/// The marker of the output digest on the second line.
+pub(crate) const OUTPUT: &str = "Output ";
+
+/// The digest stands in for this while it's computed.
+const OUTPUT_PLACEHOLDER: &str = "................";
+
+/// The second line: the format, and a digest of what this generator wrote
+/// (the module with the digest itself left out). Formatters keep comments,
+/// so plain `jazz-tools generate` tells a module a formatter reformatted
+/// (same digest: kept) from one an older generator wrote (another digest:
+/// rewritten), while `--check` looks at the source and format only.
+pub(crate) fn format_line(output: &str) -> String {
+    format!(
+        "// Bindings format {FORMAT}. {OUTPUT}{output}. Formatters may reformat this file, except `app` below."
+    )
 }
 
 /// The marker before the embedded `bindApp` options, which
@@ -140,7 +152,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
 
     let mut out = String::new();
     let _ = writeln!(out, "{HEADER}");
-    let _ = writeln!(out, "{}", format_line());
+    let _ = writeln!(out, "{}", format_line(OUTPUT_PLACEHOLDER));
     let mut imports = vec!["bindApp", "type AppTypes"];
     if has_computed {
         imports.push("type ComputedImpl");
@@ -369,7 +381,12 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
     }
     out.push('}');
     out.push_str(");\n");
-    Ok(out)
+    let digest = jazz::tools::deployment::artifact::sha256_hex(out.as_bytes());
+    Ok(out.replacen(
+        &format!("{OUTPUT}{OUTPUT_PLACEHOLDER}."),
+        &format!("{OUTPUT}{}.", &digest[..16]),
+        1,
+    ))
 }
 
 /// The `bindApp` options as JSON, without the callbacks:

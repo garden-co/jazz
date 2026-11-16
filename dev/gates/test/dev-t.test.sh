@@ -42,7 +42,7 @@ grep -F -- '-p jazz-db --no-default-features --features testing,transport-compre
 # A filter naming no extracted layer module stays on jazz.
 : >"$TEMP/cargo.log"
 run round_trips
-grep -F -- '-p jazz --no-default-features --features testing,transport-compression-zstd --lib -- --list' "$TEMP/cargo.log" >/dev/null
+grep -F -- '-p jazz-core --no-default-features --features testing,transport-compression-zstd --lib -- --list' "$TEMP/cargo.log" >/dev/null
 
 : >"$TEMP/cargo.log"
 run --exact db::tests::round_trips

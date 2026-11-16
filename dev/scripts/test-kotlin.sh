@@ -19,7 +19,7 @@ source dev/scripts/kotlin-toolchain.sh
 cargo build -p jazz-ffi -p jazz-cli --bin jazz-tools
 # The e2e tests' StagePlan backend, a test harness (Kotlin is a client): a
 # Jazz server and the test stand-in for its Jazz endpoint.
-cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay
+cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 # Kotlin is switched off in the CLI until it ships: the codegen golden test
 # checks the example's committed bindings byte for byte instead.
 cargo test -p jazz-codegen --test golden the_stage_plan_kotlin_cli_commits_its_bindings_byte_for_byte

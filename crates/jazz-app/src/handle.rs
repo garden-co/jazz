@@ -37,7 +37,9 @@ type Job = Box<dyn FnOnce(JazzClient) -> Pin<Box<dyn Future<Output = ()>>> + Sen
 
 pub(crate) enum Command {
     Run(Job),
-    Shutdown(oneshot::Sender<Result<()>>),
+    /// Stop, giving the backend at most this long to answer the requests
+    /// that end the client's HTTP stream sessions (see [`STREAM_SESSION_END`]).
+    Shutdown(oneshot::Sender<Result<()>>, std::time::Duration),
 }
 
 /// How long [`Jazz::shutdown`] lets the calls already made run before it
@@ -473,8 +475,23 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        self.shutdown_within(STREAM_SESSION_END).await
+    }
+
+    /// [`Self::shutdown`], giving the backend at most `session_end` to
+    /// answer the requests that end the client's HTTP stream sessions:
+    /// `close(timeout)` passes what is left of its `timeout`, and nothing
+    /// (no wait at all) for `Duration::ZERO`.
+    pub(crate) async fn shutdown_within(&self, session_end: std::time::Duration) -> Result<()> {
+        if self.for_user {
+            return Ok(());
+        }
         let (reply, done) = oneshot::channel();
-        if self.commands.send(Command::Shutdown(reply)).is_err() {
+        if self
+            .commands
+            .send(Command::Shutdown(reply, session_end))
+            .is_err()
+        {
             return Ok(());
         }
         done.await.unwrap_or(Ok(()))
@@ -639,14 +656,17 @@ fn run(
         // here: they end with the client.
         let mut jobs = tokio::task::JoinSet::new();
         let mut stopped = Vec::new();
+        // What the shutdown asked for, or the default when every handle went.
+        let mut session_end = STREAM_SESSION_END;
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(Command::Run(job)) => {
                         jobs.spawn_local(job(client.clone()));
                     }
-                    Some(Command::Shutdown(reply)) => {
+                    Some(Command::Shutdown(reply, budget)) => {
                         stopped.push(reply);
+                        session_end = budget;
                         break;
                     }
                     None => break,
@@ -665,7 +685,7 @@ fn run(
                     command = commands.recv(), if open => match command {
                         // Dropping the job drops its reply: `Stopped`.
                         Some(Command::Run(job)) => drop(job),
-                        Some(Command::Shutdown(reply)) => stopped.push(reply),
+                        Some(Command::Shutdown(reply, _)) => stopped.push(reply),
                         None => open = false,
                     },
                     joined = jobs.join_next() => {
@@ -686,7 +706,7 @@ fn run(
         // client runs, so none is dropped with the thread's locals.
         crate::transaction::roll_back_parked();
         let result = client.shutdown().await;
-        endpoint_connector.settle(STREAM_SESSION_END).await;
+        endpoint_connector.settle(session_end).await;
         Some((result, stopped))
     });
     // The store's connections close with the last clone of the client, and
@@ -804,11 +824,19 @@ async fn connect(
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
     let memory = context.storage == ClientStorage::Memory;
     let mut backend_client = None;
+    // The permissions bundle this client's files make: a trusted backend
+    // client checks it against the one its main backend serves.
+    let own_bundle = loaded.backend.as_ref().map(|app| app.bundle().to_string());
     let (client, user) = match (config.user, &config.server_url) {
         (Some(Auth::Credential(credential)), Some(endpoint)) => {
-            let (client, user, credential, link) =
-                crate::backend_client::connect(context, endpoint_connector, credential, endpoint)
-                    .await?;
+            let (client, user, credential, link) = crate::backend_client::connect(
+                context,
+                endpoint_connector,
+                credential,
+                endpoint,
+                own_bundle,
+            )
+            .await?;
             if !user.account.is_system() {
                 admitted = Some(user.account);
             }
@@ -832,7 +860,7 @@ async fn connect(
         let stop = Box::new(move || {
             if let Some(commands) = stopper.upgrade() {
                 let (reply, _) = oneshot::channel();
-                let _ = commands.send(Command::Shutdown(reply));
+                let _ = commands.send(Command::Shutdown(reply, STREAM_SESSION_END));
             }
         });
         user_session::start(

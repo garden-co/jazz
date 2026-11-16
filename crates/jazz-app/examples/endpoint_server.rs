@@ -7,7 +7,7 @@
 //! cargo run -p jazz-cli --bin jazz-tools -- server "$JAZZ_APP_ID" --in-memory \
 //!   --backend-secret "$JAZZ_BACKEND_SECRET" --admin-secret "$JAZZ_ADMIN_SECRET"
 //! # The backend, serving examples/stage-plan/apps/rust-cli's files:
-//! cargo run -p jazz-app --features axum --example endpoint_server -- examples/stage-plan/apps/rust-cli
+//! cargo run -p jazz-app-support --features axum --example endpoint_server -- examples/stage-plan/apps/rust-cli
 //! ```
 //!
 //! Environment:
@@ -31,8 +31,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use hmac::Mac as _;
-use jazz_app::endpoint::{Answer, AuthUser, Endpoint, Request};
-use jazz_app::{AppFiles, AppId, Backend, Config, Jazz};
+use jazz_app_support::endpoint::{Answer, AuthUser, Endpoint, Request};
+use jazz_app_support::{AppFiles, AppId, Backend, Config, Jazz};
 use serde_json::Value;
 
 fn env(name: &str) -> String {
@@ -72,7 +72,7 @@ fn verify(token: &str, secret: &[u8], issuer: &str) -> Option<AuthUser> {
 }
 
 #[tokio::main]
-async fn main() -> jazz_app::Result<()> {
+async fn main() -> jazz_app_support::Result<()> {
     let dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
     let app_id = AppId::from_string(&env("JAZZ_APP_ID")).expect("JAZZ_APP_ID is a UUID");
     let core = std::env::var("JAZZ_CORE_URL").unwrap_or_else(|_| "http://localhost:1625".into());

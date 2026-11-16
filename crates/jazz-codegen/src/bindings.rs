@@ -23,6 +23,33 @@ pub struct Recorded {
     pub current_schema: Schema,
 }
 
+/// The digest of what the generator wrote that `lang`'s bindings record,
+/// if they record one (TS: `Output <hex>` on the format line, which
+/// formatters keep).
+pub fn output_digest(lang: Lang, bindings: &str) -> Option<String> {
+    match lang {
+        Lang::TypeScript => bindings.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("// Bindings format ")?;
+            let at = rest.find(ts::OUTPUT)? + ts::OUTPUT.len();
+            let digest = rest[at..].split('.').next()?;
+            (digest.len() == 16 && digest.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| digest.to_string())
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `committed` bindings are other than what the generator writes
+/// now (`generated`), formatting aside where the language records a digest
+/// of its output: what plain `generate` rewrites, so a generator fix
+/// reaches an app whose `jazz.app.json` didn't change.
+pub fn output_changed(lang: Lang, committed: &str, generated: &str) -> bool {
+    match output_digest(lang, generated) {
+        Some(digest) => output_digest(lang, committed).as_deref() != Some(digest.as_str()),
+        None => committed != generated,
+    }
+}
+
 /// Read what bindings generated in `lang` embed. Only a file this
 /// generator wrote is read; anything else is refused with what to do.
 pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {

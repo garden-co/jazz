@@ -415,6 +415,47 @@ describe("trusted backend clients", () => {
     expect(code).toBe(1008);
   });
 
+  it("acts for users only with the permissions the main backend publishes (jazz#5808)", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    await jazz.createAccountFor("alice");
+    // The main backend names the bundle it pins a trusted client to.
+    const admit = await fetch(`${origin}/jazz/apps/${appId}/backend/admit`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+    });
+    expect(admit.status).toBe(204);
+    expect(admit.headers.get("x-jazz-bundle")).toMatch(/^[0-9a-f]+$/);
+    const open = async (file: typeof permissionsFile) => {
+      const session = await createJazzClient({
+        appId,
+        app,
+        permissions: file,
+        serverUrl: `${origin}/jazz`,
+        driver: { type: "memory" },
+        credential: () => sign({ sub: "ops" }),
+      });
+      cleanups.push(() => session.close());
+      return session.getSnapshot().client!;
+    };
+    // The same jazz.permissions.json: the bundles agree.
+    const current = await open(permissionsFile);
+    await expect(current.forUser("alice")).resolves.toBeDefined();
+    // A laxer copy would widen what alice's reads return: refused, naming both bundles.
+    const lax = await open({
+      format: 1,
+      tables: { todos: { read: "true", insert: "owner = session.user" } },
+    });
+    const refusal = await lax.forUser("alice").catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ code: "bundle_mismatch" });
+    expect((refusal as Error).message).toMatch(
+      /^forUser: this client's permissions \(bundle [0-9a-f]+\) are not the ones the main backend publishes \(bundle [0-9a-f]+\)/,
+    );
+    // The client itself still syncs with backend authority.
+    await expect(lax.db.all(app.todos)).resolves.toBeDefined();
+  });
+
   it("acts for a user with no account only once one is created", async () => {
     const { jazz, appId, origin } = await appWith([
       trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),

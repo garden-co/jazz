@@ -6,9 +6,9 @@
 //! any JSON; bytes → base64 string; array → JSON array; optional → null.
 
 use base64::Engine as _;
-use jazz_app::jazz::query::{self as q, OrderDirection, Predicate};
-use jazz_app::jazz::records::Value as CoreValue;
-use jazz_app::jazz::tools::{
+use jazz_app_support::jazz::query::{self as q, OrderDirection, Predicate};
+use jazz_app_support::jazz::records::Value as CoreValue;
+use jazz_app_support::jazz::tools::{
     ColumnType, ObjectId, OrderedRowDelta, QueryResultField, Schema, TableName, TableSchema, Value,
 };
 use serde_json::{Map, Number, Value as Json, json};
@@ -834,7 +834,7 @@ fn lit(value: Value) -> q::Operand {
     q::lit(core(value))
 }
 
-/// As jazz-app turns column values into query literals.
+/// As jazz-app-support turns column values into query literals.
 fn core(value: Value) -> CoreValue {
     match value {
         Value::Boolean(value) => CoreValue::Bool(value),
@@ -857,7 +857,7 @@ fn core(value: Value) -> CoreValue {
 /// A result's key as opaque text: base64 of jazz's versioned `ResultKey`
 /// encoding. Each result occurrence has its own (a history read's
 /// versions, a union's arms), where they share the row's id.
-pub(crate) fn result_key(key: &jazz_app::jazz::tools::ResultKey) -> Result<String> {
+pub(crate) fn result_key(key: &jazz_app_support::jazz::tools::ResultKey) -> Result<String> {
     let bytes: Vec<u8> = match serde_json::to_value(key) {
         Ok(Json::Array(bytes)) => bytes
             .iter()
@@ -878,11 +878,11 @@ pub(crate) fn delta_json(
     delta: OrderedRowDelta,
     reset: bool,
 ) -> Result<String> {
-    let id = |key: &jazz_app::jazz::tools::ResultKey| {
+    let id = |key: &jazz_app_support::jazz::tools::ResultKey| {
         key.row_id()
             .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))
     };
-    let keyed = |key: &jazz_app::jazz::tools::ResultKey, fields| -> Result<Json> {
+    let keyed = |key: &jazz_app_support::jazz::tools::ResultKey, fields| -> Result<Json> {
         let mut row = crate::relational::row_of(table, history, id(key)?, fields);
         if let Json::Object(object) = &mut row {
             object.insert("$key".into(), Json::String(result_key(key)?));
@@ -932,8 +932,8 @@ pub(crate) fn edits(
     table: &TableSchema,
     table_name: &str,
     edits: &Json,
-) -> Result<Vec<jazz_app::jazz::db::LargeValueUpdate>> {
-    use jazz_app::jazz::db::{
+) -> Result<Vec<jazz_app_support::jazz::db::LargeValueUpdate>> {
+    use jazz_app_support::jazz::db::{
         JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
     };
     let edits = edits

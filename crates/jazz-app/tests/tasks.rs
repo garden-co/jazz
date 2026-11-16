@@ -5,7 +5,7 @@
 mod bindings;
 
 use bindings::{Computed, NewTask, Task, TaskPriority, TaskUpdate, tasks};
-use jazz_app::{AppId, Config, Error, Json, Timestamp};
+use jazz_app_support::{AppId, Config, Error, Json, Timestamp};
 
 /// Due dates as `YYYY-MM-DD`, stored as midnight UTC.
 struct App;
@@ -92,8 +92,8 @@ async fn computed_fields_and_transforms() {
 
 #[tokio::test]
 async fn computed_fields_need_their_implementation() {
-    let jazz = jazz_app::Jazz::open(
-        jazz_app::AppFiles::new(bindings::APP, None),
+    let jazz = jazz_app_support::Jazz::open(
+        jazz_app_support::AppFiles::new(bindings::APP, None),
         Config::new(AppId::random()),
     )
     .await
@@ -184,7 +184,7 @@ async fn text_edits_merge() {
     assert!(plain.is_err(), "{plain:?}");
     // A row that isn't there.
     let missing = jazz
-        .edit_text(jazz_app::ObjectId::new(), tasks::notes(), "", "x")
+        .edit_text(jazz_app_support::ObjectId::new(), tasks::notes(), "", "x")
         .await;
     assert!(
         matches!(missing, Err(Error::NotFound { .. })),
@@ -211,7 +211,7 @@ async fn text_edits_merge() {
 /// `update(table, id, data, { editedFrom })`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_edit_with_other_columns() {
-    use jazz_app::Edits;
+    use jazz_app_support::Edits;
     let jazz = bindings::open(Config::new(AppId::random()), App)
         .await
         .unwrap();
@@ -311,7 +311,7 @@ async fn text_edit_with_other_columns() {
     assert!(plain.is_err(), "{plain:?}");
     let missing = jazz
         .update_edited(
-            jazz_app::ObjectId::new(),
+            jazz_app_support::ObjectId::new(),
             TaskUpdate {
                 notes: Some(Some("x".into())),
                 ..Default::default()
@@ -331,7 +331,7 @@ async fn text_edit_with_other_columns() {
 /// in one update: TS's `update(table, id, data, { applyDiffs, editedFrom })`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn diffs_with_other_columns() {
-    use jazz_app::{Edits, Page, Splice};
+    use jazz_app_support::{Edits, Page, Splice};
     let jazz = bindings::open(Config::new(AppId::random()), App)
         .await
         .unwrap();
@@ -478,8 +478,8 @@ async fn large_values() {
     jazz.splice(
         task.id,
         tasks::attachment(),
-        jazz_app::Page::Bytes { from: 0, to: 4 },
-        vec![jazz_app::Splice {
+        jazz_app_support::Page::Bytes { from: 0, to: 4 },
+        vec![jazz_app_support::Splice {
             at: 1,
             delete: 2,
             insert: vec![7, 7, 7],
@@ -613,8 +613,8 @@ async fn large_value_errors() {
         .splice(
             task.id,
             tasks::attachment(),
-            jazz_app::Page::Bytes { from: 100, to: 200 },
-            vec![jazz_app::Splice {
+            jazz_app_support::Page::Bytes { from: 100, to: 200 },
+            vec![jazz_app_support::Splice {
                 at: 0,
                 delete: 1,
                 insert: vec![9],
@@ -624,7 +624,7 @@ async fn large_value_errors() {
     assert!(page.is_err(), "{page:?}");
     let missing = jazz
         .json_set(
-            jazz_app::ObjectId::new(),
+            jazz_app_support::ObjectId::new(),
             tasks::meta(),
             [("/owner".to_owned(), serde_json::json!(1))],
         )
@@ -645,8 +645,8 @@ async fn large_value_errors() {
         tx.splice(
             id,
             tasks::attachment(),
-            jazz_app::Page::Bytes { from: 0, to: 8 },
-            vec![jazz_app::Splice {
+            jazz_app_support::Page::Bytes { from: 0, to: 8 },
+            vec![jazz_app_support::Splice {
                 at: 0,
                 delete: 0,
                 insert: vec![1],
@@ -675,7 +675,7 @@ async fn large_value_errors() {
         .await
         .unwrap();
     assert_eq!(updated.attachment, Some(vec![7; 5]));
-    let id = jazz_app::ObjectId::new();
+    let id = jazz_app_support::ObjectId::new();
     let upserted = jazz
         .upsert_streaming(
             id,
@@ -869,7 +869,7 @@ async fn streaming_in_a_transaction() {
 
     // Updating and upserting in a transaction.
     let id = task.id;
-    let new_id = jazz_app::ObjectId::new();
+    let new_id = jazz_app_support::ObjectId::new();
     jazz.transaction(move |tx| async move {
         let updated = tx
             .update_streaming(
@@ -1025,7 +1025,7 @@ async fn streaming_in_a_transaction() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_options() {
     use futures::StreamExt;
-    use jazz_app::ReadOptions;
+    use jazz_app_support::ReadOptions;
     let jazz = bindings::open(Config::new(AppId::random()), App)
         .await
         .unwrap();
@@ -1085,7 +1085,7 @@ async fn read_options() {
 /// subtree, of the full row or of a selection.
 #[tokio::test]
 async fn partial_reads() {
-    use jazz_app::ValuePart;
+    use jazz_app_support::ValuePart;
     let jazz = bindings::open(Config::new(AppId::random()), App)
         .await
         .unwrap();
@@ -1198,7 +1198,7 @@ async fn select_reads_transformed_columns_as_viewed() {
     let due: Vec<Option<String>> = jazz
         .all(
             tasks::query()
-                .order_by(tasks::title(), jazz_app::Order::Asc)
+                .order_by(tasks::title(), jazz_app_support::Order::Asc)
                 .select(tasks::due_at()),
         )
         .await
