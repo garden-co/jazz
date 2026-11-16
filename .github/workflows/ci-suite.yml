@@ -215,12 +215,23 @@ jobs:
       - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings, the Jazz Swift package and its example
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition jazz-ffi-bindings
 
+  test-crates-package:
+    if: inputs.scope == 'full'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Package and verify the crates published to crates.io
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition crates-package
+
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
   # test-storage-compat also runs the bounded differential oracle partition.
   test-rust:
     if: always() && inputs.scope == 'full'
-    needs: [test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings]
+    needs: [test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings, test-crates-package]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -231,10 +242,12 @@ jobs:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
           STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
           JAZZ_FFI_BINDINGS_RESULT: ${{ needs.test-jazz-ffi-bindings.result }}
+          CRATES_PACKAGE_RESULT: ${{ needs.test-crates-package.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
           test "${JAZZ_FFI_BINDINGS_RESULT}" = success
+          test "${CRATES_PACKAGE_RESULT}" = success
 
   # The Go bindings (packages/jazz-go over crates/jazz-ffi's C ABI) and
   # the StagePlan Go example, on Linux: see dev/gates/go-bindings.sh.

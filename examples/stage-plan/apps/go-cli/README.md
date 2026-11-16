@@ -21,10 +21,10 @@ go run . move <task-id> doing    # todo, doing, done or blocked
 `-data` (before the command) is where rows are kept, by default `.jazz`.
 
 `go test ./...` runs the board flow, the docs snippets and every feature
-against a real Jazz core (`jazz-tools server`) behind jazz-app's test relay,
+against a real Jazz core (`jazz-tools server`) behind jazz-app-support's test relay,
 the stand-in for a main backend's `/jazz`: from the repository root, build
 them with `cargo build -p jazz-ffi -p jazz-cli` and
-`cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay`.
+`cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay`.
 
 `JAZZ_MAIN_BACKEND=ts go test ./...` runs the same suite with StagePlan's
 real main backend in TypeScript as the server (`ts-main/jazz.server.ts`,
