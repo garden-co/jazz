@@ -31,6 +31,16 @@ pub enum JazzError {
     /// (memory storage, where they are lost).
     #[error("{reason}")]
     Unsynced { pending: u64, reason: String },
+    /// Contract 2: a trusted backend client's `for_user` refused because
+    /// the client's permissions bundle (`own`) isn't the one the main
+    /// backend serves (`served`): reopen it with the app's published
+    /// `jazz.permissions.json` (TS's `code: "bundle_mismatch"`).
+    #[error("{reason}")]
+    BundleMismatch {
+        own: String,
+        served: String,
+        reason: String,
+    },
 }
 
 impl JazzError {
@@ -46,6 +56,7 @@ impl JazzError {
             | Self::Conflict { reason }
             | Self::NoAccount { reason, .. } => Self::Refused { reason },
             Self::Unsynced { reason, .. } => Self::Io { reason },
+            Self::BundleMismatch { reason, .. } => Self::Refused { reason },
             other => other,
         }
     }
@@ -61,6 +72,7 @@ impl JazzError {
             Self::Conflict { .. } => "conflict",
             Self::NoAccount { .. } => "noAccount",
             Self::Unsynced { .. } => "unsynced",
+            Self::BundleMismatch { .. } => "bundleMismatch",
         }
     }
 }
@@ -85,8 +97,19 @@ pub(crate) enum JazzErrorKind {
     Permission(String),
     NotSupported(String),
     Conflict(String),
-    NoAccount { user_id: String, reason: String },
-    Unsynced { pending: u64, reason: String },
+    NoAccount {
+        user_id: String,
+        reason: String,
+    },
+    Unsynced {
+        pending: u64,
+        reason: String,
+    },
+    BundleMismatch {
+        own: String,
+        served: String,
+        reason: String,
+    },
 }
 
 impl From<JazzErrorKind> for JazzError {
@@ -100,6 +123,15 @@ impl From<JazzErrorKind> for JazzError {
             JazzErrorKind::Conflict(reason) => Self::Conflict { reason },
             JazzErrorKind::NoAccount { user_id, reason } => Self::NoAccount { user_id, reason },
             JazzErrorKind::Unsynced { pending, reason } => Self::Unsynced { pending, reason },
+            JazzErrorKind::BundleMismatch {
+                own,
+                served,
+                reason,
+            } => Self::BundleMismatch {
+                own,
+                served,
+                reason,
+            },
         }
     }
 }
@@ -166,6 +198,11 @@ impl From<jazz_app::Error> for JazzErrorKind {
             E::StoreHeld(_) => Self::Refused(message),
             E::NoAccount(user_id) => Self::NoAccount {
                 user_id,
+                reason: message,
+            },
+            E::BundleMismatch { own, served } => Self::BundleMismatch {
+                own,
+                served,
                 reason: message,
             },
             E::Unsynced { pending } => Self::Unsynced {

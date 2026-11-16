@@ -13,7 +13,10 @@
  * (with "contract": 2 in the open config, also "permission" (the app's
  * permissions refuse it), "notSupported" (not supported yet) and "conflict"
  * (a serializable transaction lost to another write; retry it),
- * "noAccount" (jazz_for_user: the user has no account yet; with "userId")
+ * "bundleMismatch" (jazz_for_user: this client's permissions bundle isn't
+ * the one the main backend serves; with "own" and "served", the two
+ * bundle ids), "noAccount" (jazz_for_user: the user has no account yet;
+ * with "userId")
  * and "unsynced" (jazz_close_within: writes left unsent; with "pending"))
  * (*err is set to NULL on success). Functions block until done. Calls on
  * one handle may come from any threads at once, except jazz_close: no call
