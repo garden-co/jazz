@@ -1,7 +1,7 @@
 // Package jazz is the Go runtime for Jazz: it opens an app through the
-// jazz-ffi C ABI (cgo) and reads and writes its rows as JSON, typed by the
-// bindings `jazz-tools generate` writes into a `jazzapp` package beside an
-// app's jazz.app.json and go.mod.
+// jazz-ffi C ABI and reads and writes its rows as JSON, typed by the
+// bindings `npx jazz-tools generate` writes from the app's schema into a
+// `jazzapp` package beside its go.mod.
 //
 // It needs no cgo and no C compiler: it loads jazz-ffi's shared library
 // at run time (see ffi.go for where it finds it).
