@@ -17,6 +17,11 @@
 //! row: `(Todo, Option<Project>)`), and `select` reads only some columns
 //! (a [`Partial`] row); see [`Query::include`] and [`Query::select`].
 //!
+//! [`Query::hop_to`] reads the rows a relation reaches, [`Query::gather`]
+//! rows recursively and [`Query::union`] several queries' rows; a table's
+//! `history()` reads its rows' accepted versions ([`Version`]) and
+//! [`Query::include_deleted`] reads deleted rows too.
+//!
 //! An end user's client ([`Config::user`]) signs in with a device account
 //! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
 //! [`Jazz::session`] follows it; [`Session::link`] carries a device account
@@ -26,11 +31,10 @@
 //! `/jazz` handler, as TS `createJazz` serves it, with the app's own
 //! sign-in deciding who each request's user is.
 //!
-//! Not supported yet: these query forms the TypeScript client has:
-//! `hopTo`, `gather`, `union`, history (`$history`) and partial reads of
-//! large values. A bearer session is renewed by reconnecting with a fresh
-//! bearer, as TypeScript's bearer clients do (in-place renewal is for
-//! cookie sessions).
+//! Not supported yet: subscribing to history, and partial reads of large
+//! values. A bearer session is renewed by reconnecting with a fresh bearer,
+//! as TypeScript's bearer clients do (in-place renewal is for cookie
+//! sessions).
 
 mod advice;
 mod app;
@@ -41,14 +45,17 @@ mod edit;
 pub mod endpoint;
 mod error;
 mod handle;
+mod history;
 mod include;
 mod large;
 mod lifecycle;
 mod query;
+mod relation;
 mod session;
 mod subscription;
 mod table;
 mod transaction;
+pub mod untyped;
 mod value;
 mod writes;
 
@@ -60,6 +67,7 @@ pub use edit::TextColumn;
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::Jazz;
+pub use history::Version;
 pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
 };
@@ -67,8 +75,10 @@ pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, id, updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, deleted_at,
+    id, updated_at,
 };
+pub use relation::{Hop, Step};
 pub use session::{
     AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
 };
@@ -78,7 +88,7 @@ pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier};
+pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, TransactionId};
 
 /// Stateless anchors and ranges into text values (cursors, selections,
 /// comments), captured from one value and found again in later ones, as
