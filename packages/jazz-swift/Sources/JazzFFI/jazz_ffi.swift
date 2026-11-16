@@ -2878,7 +2878,7 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Permission(reason: String
     )
     /**
-     * Contract 2: something this layer or jazz-app doesn't support yet.
+     * Contract 2: something this layer or jazz-app-support doesn't support yet.
      */
     case NotSupported(reason: String
     )

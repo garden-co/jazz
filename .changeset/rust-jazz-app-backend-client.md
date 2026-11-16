@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-**Rust (`jazz-app`): backend clients.** A trusted machine can now sync with an app through its main backend's `/jazz`, as TypeScript's `createJazzClient({ serverUrl, credential })` does.
+**Rust (`jazz-app-support`): backend clients.** A trusted machine can now sync with an app through its main backend's `/jazz`, as TypeScript's `createJazzClient({ serverUrl, credential })` does.
 
 - **Opening:** `Config::new(app_id).server("https://my-app.com/jazz").credential(provider)` opens as a backend client. It needs the app's `jazz.permissions.json`, as `createJazzClient` takes `permissions`. `provider` gives a fresh machine credential, such as an OIDC workload token, for every connection and request.
 - **Trusted or scoped:** the main backend's `backendClients` (`trustWorkload`) decides, and `jazz.backend_client()` reports which.

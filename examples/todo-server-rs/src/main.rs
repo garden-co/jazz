@@ -25,7 +25,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::net::SocketAddr;
 
-use ::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
+use ::jazz_app_support::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use std::future::IntoFuture;
 use std::time::Duration;
 

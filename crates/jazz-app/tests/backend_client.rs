@@ -9,7 +9,7 @@ mod relay;
 use std::time::Duration;
 
 use guarded::{NewNote, notes};
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, Auth, Backend, Config, Error, Jazz, ObjectId, ReadTier, TokenReason,
 };
 use jazz_server::JazzServer;
@@ -20,7 +20,7 @@ fn files() -> AppFiles {
     AppFiles::read(FIXTURE).unwrap()
 }
 
-fn token(token: &'static str) -> impl jazz_app::TokenProvider + 'static {
+fn token(token: &'static str) -> impl jazz_app_support::TokenProvider + 'static {
     move |_: TokenReason| async move { Ok(Some(token.to_owned())) }
 }
 
@@ -101,7 +101,7 @@ async fn a_trusted_client_reads_as_each_user_by_the_apps_permissions() {
     // B sees none of it, and may not write as A.
     assert_eq!(as_b.all(notes::query()).await.unwrap(), vec![]);
     let refused = as_b
-        .durable(jazz_app::DurabilityTier::GlobalServer)
+        .durable(jazz_app_support::DurabilityTier::GlobalServer)
         .insert(NewNote::new(owner_a, "Not B's"))
         .await;
     assert!(refused.is_err(), "{refused:?}");
@@ -119,7 +119,7 @@ async fn a_trusted_client_reads_as_each_user_by_the_apps_permissions() {
     .unwrap();
     assert_eq!(mine, vec![note]);
 
-    job.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+    job.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
     backend.shutdown().await.unwrap();
@@ -208,7 +208,7 @@ async fn a_trusted_client_with_other_permissions_acts_for_no_user() {
     assert_eq!(served, backend.bundle().unwrap());
     assert_ne!(own, served);
 
-    job.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+    job.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
     a.shutdown().await.unwrap();
     backend.shutdown().await.unwrap();
     server.shutdown().await;
