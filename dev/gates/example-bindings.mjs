@@ -23,12 +23,18 @@ export function exampleAppDirs(cwd = root) {
     { cwd, encoding: "utf8" },
   );
   if (listed.status !== 0) throw new Error(`git ls-files failed: ${listed.stderr}`);
-  return listed.stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((file) => dirname(file))
-    .filter((dir) => !isSwiftPackage(resolve(cwd, dir)))
-    .sort();
+  return (
+    listed.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((file) => dirname(file))
+      // Go apps: Go is switched off in `jazz-tools generate` until its
+      // bindings reach parity; jazz-codegen's golden tests check that their
+      // committed jazzapp/jazz_app.go is current.
+      .filter((dir) => !existsSync(join(resolve(cwd, dir), "go.mod")))
+      .filter((dir) => !isSwiftPackage(resolve(cwd, dir)))
+      .sort()
+  );
 }
 
 /**
