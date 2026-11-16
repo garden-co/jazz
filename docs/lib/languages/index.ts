@@ -57,7 +57,7 @@ export const LANGUAGES: readonly Language[] = [
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
     setupPage: "setup/rust",
-    enabled: true,
+    enabled: false,
   },
   {
     label: "Swift",
