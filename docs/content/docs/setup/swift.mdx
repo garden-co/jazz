@@ -10,14 +10,15 @@ with typed bindings generated from your app's schema with `npx jazz-tools genera
 in, and syncs through your backend's Jazz endpoint. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
 `async`, and subscriptions are `AsyncSequence`s.
 
-CI tests the Swift package on Linux, and each release's package is checked on macOS (a command-line
-app builds and runs) and built for the iOS simulator. iOS and macOS UI apps aren't tested yet (see
+Jazz for Swift is for macOS and iOS apps (Swift 6.0 or newer, Xcode 16 or newer; macOS 13 and iOS
+16 or newer). Each release's package is checked on macOS, where an app builds and runs, and built
+for the iOS simulator; iOS and macOS UI apps aren't tested yet (see
 [Not supported yet](#not-supported-yet)).
 
 ## Install
 
-Depend on `garden-co/jazz-swift`, the Swift package each Jazz release publishes, with the `Jazz`
-product (Swift 6.0 or newer, Xcode 16 or newer; macOS 13 and iOS 16 or newer):
+Add the package `https://github.com/garden-co/jazz-swift` at version `2.0.0-alpha.66` with the `Jazz`
+product: in Xcode under **File → Add Package Dependencies…**, or in your `Package.swift`:
 
 ```swift title="Package.swift"
 dependencies: [
@@ -33,27 +34,11 @@ targets: [
 ]
 ```
 
-On macOS and iOS that's all: the package brings the Jazz core prebuilt, as an XCFramework that
-SwiftPM checks against the checksum the release pins. In Xcode, add the same URL under **File → Add
-Package Dependencies…**.
+That's all: the package brings the Jazz core prebuilt, and SwiftPM checks it against the checksum
+the release pins. There's nothing to build besides your app.
 
-On Linux there's no prebuilt core yet. Build `libjazz_ffi` once from the same release (this needs
-Rust) and point pkg-config at it before `swift build`:
-
-```bash
-git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
-jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only   # builds libjazz_ffi.a and jazz_ffi.pc
-export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
-swift build
-```
-
-If `swift build` on Linux warns "couldn't find pc file for jazz_ffi" and then fails to link,
-`PKG_CONFIG_PATH` isn't set. The library and the package must come from the same release.
-
-Contributing to Jazz for Swift itself: its sources are `packages/jazz-swift` in
-[garden-co/jazz](https://github.com/garden-co/jazz), whose root `Package.swift` is the same package
-built from source (depend on a checkout with `.package(path: "../jazz")`, after building
-`libjazz_ffi` as above); see `packages/jazz-swift/README.md`.
+Swift on Linux has no prebuilt core: if you need it, ask on
+[Discord](https://discord.gg/RN9UKh52be).
 
 ## Generate the bindings
 
@@ -115,8 +100,8 @@ tab for each example. `examples/stage-plan/apps/swift-cli` in the repository is 
 command-line client of StagePlan: it signs in with a device account, whose key it keeps in a file
 only its user can read, or with a bearer token, and creates a show, lists, adds and moves tasks.
 
-A device key is the account: keep it as a password in the Keychain on Apple platforms, and in a
-file only its user can read on Linux. The Jazz Swift package has no helper for either yet.
+A device key is the account: keep it as a password in the Keychain. The Jazz Swift package has no
+helper for that yet.
 
 ## Sessions
 
@@ -233,7 +218,7 @@ Not supported yet:
 
 - iOS, iPadOS and macOS UI apps: each release's package runs a command-line app on macOS and builds
   for the iOS simulator, but UI apps aren't tested yet. watchOS, tvOS and visionOS aren't built.
-- A prebuilt core on Linux: build `libjazz_ffi` from the release's source, as above.
+- Linux: there's no prebuilt core. Ask on [Discord](https://discord.gg/RN9UKh52be) if you need it.
 - A SwiftUI `Binding` for `JazzText`.
 - Running a backend in Swift (publishing permissions, acting for users) or serving the app's Jazz
   endpoint: run your backend in TypeScript.
