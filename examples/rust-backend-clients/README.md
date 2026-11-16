@@ -4,7 +4,7 @@ The Rust examples are **backend clients**: they sync through a TypeScript main b
 
 This package runs each example's binary against a real main backend:
 
-- `main-backend.ts`: a stock `createJazz` serving an example's own `jazz.app.json` and `jazz.permissions.json`, with a stand-in OIDC issuer on loopback. It trusts one workload as `"backend"` (trusted) and another as the user `machine:rust-example` (scoped). Users `user-a` and `user-b` have accounts, so a trusted client can act for them.
+- `main-backend.ts`: a stock `createJazz` serving an example's own `jazz.app.json` and `jazz.permissions.json` (what `npx jazz-tools generate` writes from its `schema.ts`), with a stand-in OIDC issuer on loopback. It trusts one workload as `"backend"` (trusted) and another as the user `machine:rust-example` (scoped). Users `user-a` and `user-b` have accounts, so a trusted client can act for them.
 - `tests/stage-plan-cli.test.ts`: [`stage-plan gate`](../stage-plan/apps/rust-cli) in both modes.
   - Scoped: a write, a read from a fresh client, and being kept out of another user's show.
   - Trusted: a system write and read, then `for_user` as A, and B kept out of A's show.

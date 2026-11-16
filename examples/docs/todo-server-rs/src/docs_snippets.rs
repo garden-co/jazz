@@ -1,10 +1,9 @@
 //! Documentation snippet sources compiled with the example crate.
 //!
 //! The docs include each `#region` by name. Most use the typed API the
-//! generated bindings (`crate::jazz_app`) give the [`Jazz`] handle. What it
-//! doesn't cover yet (includes, select, recursive queries, files,
-//! serializable transactions with reads) uses the
-//! low-level `JazzClient`, either directly or through [`Jazz::with_client`].
+//! generated bindings (`crate::jazz_app`) give the [`Jazz`] handle. The
+//! includes, select and files snippets still use the low-level `JazzClient`,
+//! either directly or through [`Jazz::with_client`].
 //! Permissions are the app's `jazz.permissions.json`.
 #![allow(dead_code)]
 

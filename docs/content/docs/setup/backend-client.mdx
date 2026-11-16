@@ -108,8 +108,10 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
 
   </Tab>
   <Tab value="Rust">
-    Depend on the `jazz-app-support` crate, and let `npx jazz-tools generate` write
-    `src/jazz_app.rs` from your app's `jazz.app.json`:
+    Depend on the `jazz-app-support` crate. Write your app's schema and permissions in `schema.ts`
+    beside `Cargo.toml` (the same schema and permissions as your TypeScript main backend), and run
+    `npx jazz-tools generate`: it writes `jazz.app.json`, `jazz.permissions.json` and
+    `src/jazz_app.rs`, the typed bindings. The crate needs no `package.json`:
 
     ```toml title="Cargo.toml"
     [dependencies]
@@ -118,7 +120,9 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
     tokio = { version = "1", features = ["full"] }
     ```
 
-    Commit `src/jazz_app.rs` and declare it with `mod jazz_app;`. The [Reading](/docs/reading/queries)
+    Run it with `npx`: the standalone `jazz-tools` binary refuses to write beside a `schema.ts`,
+    though its `generate --check` still works. Commit `schema.ts` and the generated files, and
+    declare the bindings with `mod jazz_app;`. The [Reading](/docs/reading/queries)
     and [Writing](/docs/writing/writing-data) pages have a Rust tab for each example.
 
     `Config::credential(…)` takes a function that returns a fresh token, like TS's `credential`. Your
