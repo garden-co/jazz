@@ -681,7 +681,7 @@ const MIGRATION_FILE = /-([0-9a-f]{12})-([0-9a-f]{12})\.ts$/i;
 export async function snapshotFromVersion(
   versionTables: Record<string, ReadableTable>,
 ): Promise<{ hash: string; schema: WasmSchema }> {
-  const compiled = (await compileApp(JSON.stringify({ format: 1, tables: versionTables }))) as {
+  const compiled = (await compileApp(JSON.stringify({ $schema: "https://jazz.tools/schemas/jazz.app.v1.json", tables: versionTables }))) as {
     schema: { current: string; schemas: Array<{ hash: string; schema: { tables: WasmSchema } }> };
   };
   const current = compiled.schema.schemas.find((entry) => entry.hash === compiled.schema.current);

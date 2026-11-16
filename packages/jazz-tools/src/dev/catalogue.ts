@@ -126,7 +126,7 @@ export function permissionCoverageWarnings(deployment: DeploymentBody): string[]
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
   if (!isPermissionsFile(options.permissions)) {
     throw new Error(
-      'deploy requires the app\'s jazz.permissions.json (`{ "format": 1, "tables": {} }` denies all access).',
+      'deploy requires the app\'s jazz.permissions.json (`{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }` denies all access).',
     );
   }
   return publishLoadedDeployment(
