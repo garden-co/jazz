@@ -103,6 +103,10 @@ const found = anchors.resolveRange(range, latestBody);
   positions: a range with just the `matched` text, and `before` and `after` left empty, is found
   wherever that text is.
 
-Positions count UTF-16 code units, like JavaScript strings. In ProseMirror, `captureRange`,
+Positions count UTF-16 code units, like JavaScript strings. In Rust, use `Anchor::capture_utf8`,
+`Anchor::resolve_utf8`, `Range::capture_utf8` and `Range::resolve_utf8` from
+`jazz_app_support::text`: they take and return UTF-8 byte offsets (`str` indices) and refuse an
+offset inside a code point. The anchors themselves are the same, so a Rust server and a TypeScript
+client share them. In ProseMirror, `captureRange`,
 `resolveRange` and `overlays` from `jazz-tools/prosemirror` work in editor positions instead; see
 [comments that stay on their words](/docs/recipes/data-patterns/rich-text-editor#comments-that-stay-on-their-words).

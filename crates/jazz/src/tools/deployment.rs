@@ -316,6 +316,14 @@ pub fn prepare_deployment(
             reason: error.to_string(),
         },
     )?;
+    // Declared JSON Schemas the browser runtime would refuse (see
+    // `json_schema_support`); a store already holding one still opens.
+    jazz_model::model::public_schema_convert::check_deployable_json_schemas(&target).map_err(
+        |error| DeploymentError::InvalidSchema {
+            schema: request.target_schema_hash,
+            reason: error.to_string(),
+        },
+    )?;
     let active_schema =
         JazzSchema::new(&target).map_err(|error| DeploymentError::InvalidPermissions {
             schema: request.target_schema_hash,

@@ -766,6 +766,19 @@ pub fn schema_hash(schema_json: &[u8]) -> Result<SchemaHash, ArtifactError> {
     Ok(SchemaHash::compute(&structural(schema)))
 }
 
+/// [`super::schemas_are_compatible`] of two schemas in the engine's JSON
+/// form, as [`schema_hash`] reads them.
+pub fn schemas_are_compatible(left_json: &[u8], right_json: &[u8]) -> Result<bool, ArtifactError> {
+    let read = |json: &[u8]| {
+        serde_json::from_slice::<Schema>(json)
+            .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))
+    };
+    Ok(super::schemas_are_compatible(
+        &read(left_json)?,
+        &read(right_json)?,
+    ))
+}
+
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
 /// opens along. Its references are checked as [`load`] checks them and
 /// every lens is lowered; the deployment's review of each lens is the
@@ -1455,6 +1468,14 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
 pub fn version_tables(schema: &Schema) -> Result<Json, ArtifactError> {
     app_file::write_version_tables(schema)
         .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// [`version_tables`] of a schema in the engine's JSON form, as
+/// [`schema_hash`] reads it, printed.
+pub fn version_tables_json(schema_json: &[u8]) -> Result<String, ArtifactError> {
+    let schema: Schema = serde_json::from_slice(schema_json)
+        .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))?;
+    Ok(json::print(&version_tables(&schema)?))
 }
 
 /// A column type in the file's form (`"string"`, `{ "enum": […] }`).
