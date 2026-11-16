@@ -144,9 +144,12 @@ impl Lang {
                             .and_then(|p| p.parent())
                             .is_some_and(|p| p.join(self.marker()).exists()))
             }
-            Lang::Kotlin => {
-                std::fs::read_to_string(marker).is_ok_and(|build| kotlin::is_app_build(&build))
-            }
+            // Either build script, Kotlin DSL or Groovy.
+            Lang::Kotlin => [marker, dir.join(kotlin::GROOVY_MARKER)]
+                .iter()
+                .any(|script| {
+                    std::fs::read_to_string(script).is_ok_and(|build| kotlin::is_app_build(&build))
+                }),
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
             Lang::Swift => std::fs::read_to_string(marker)
