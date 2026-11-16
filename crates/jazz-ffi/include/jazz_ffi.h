@@ -73,6 +73,10 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
  *              every required column; an existing row: the columns it names)
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
+ *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
+ *   "uploadPush"   {"upload", "bytes": base64}                -> null
+ *   "uploadFinish" {"upload", "tier"?}                        -> the row
+ *   "uploadAbort"  {"upload"}                                 -> null
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
  *                     | null (a local app or a backend)
  *   "syncStatus" {} -> {"link": ...}
