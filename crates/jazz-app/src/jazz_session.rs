@@ -277,11 +277,11 @@ impl Drop for Inner {
 /// A user-following session: `Send + Sync + Clone`. See the module docs.
 ///
 /// ```no_run
-/// # async fn open() -> jazz_app::Result<()> {
-/// use jazz_app::{AppFiles, Initial, JazzSession, SessionConfig, Storage, TokenReason};
+/// # async fn open() -> jazz_app_support::Result<()> {
+/// use jazz_app_support::{AppFiles, Initial, JazzSession, SessionConfig, Storage, TokenReason};
 /// let session = JazzSession::open(
 ///     AppFiles::read(".")?,
-///     SessionConfig::new(jazz_app::AppId::from_name("todos"))
+///     SessionConfig::new(jazz_app_support::AppId::from_name("todos"))
 ///         .server("https://todos.example/jazz")
 ///         .storage(Storage::Dir("./jazz".into()))
 ///         .bearer(|_: TokenReason| async { Ok(Some("…".to_owned())) }),

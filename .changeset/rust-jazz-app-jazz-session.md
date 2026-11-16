@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-**Rust (`jazz-app`): `JazzSession`, a user-following session, as TypeScript's `JazzSession`.**
+**Rust (`jazz-app-support`): `JazzSession`, a user-following session, as TypeScript's `JazzSession`.**
 
 - **Opening:** `JazzSession::open(files, SessionConfig::new(app_id).server(url).storage(..).bearer(provider))`.
 - **Following the app's backend:** the session follows the user the app's bearer names. Call `refresh()` when the app's own auth changes.
