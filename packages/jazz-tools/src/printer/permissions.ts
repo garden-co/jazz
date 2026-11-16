@@ -734,15 +734,18 @@ class Printer {
         return `${this.relation(rel.input)}.limit(${rel.limit})`;
       case "offset":
         return `${this.relation(rel.input)}.offset(${rel.offset})`;
+      // `union` and `recursive` are sources: a query starts from them with `from(…)`.
       case "union": {
         this.tools.add("union");
+        this.tools.add("from");
         const arms = rel.inputs.map((a) => `${propKey(a.label)}: ${this.relation(a.input)}`);
-        return `union({ ${arms.join(", ")} })`;
+        return `from(union({ ${arms.join(", ")} }))`;
       }
       case "gather": {
         this.tools.add("recursive");
         const depth = rel.maxDepth === "fixpoint" ? '"fixpoint"' : String(rel.maxDepth);
-        return `recursive({ seed: ${this.relation(rel.seed)}, step: ${this.relation(rel.step)}, frontier: ${this.keyText(rel.frontierKey)}, dedupe: [${rel.dedupeKey.map((k) => this.keyText(k)).join(", ")}], maxDepth: ${depth} })`;
+        this.tools.add("from");
+        return `from(recursive({ seed: ${this.relation(rel.seed)}, step: ${this.relation(rel.step)}, frontier: ${this.keyText(rel.frontierKey)}, dedupe: [${rel.dedupeKey.map((k) => this.keyText(k)).join(", ")}], maxDepth: ${depth} }))`;
       }
     }
   }

@@ -206,6 +206,28 @@ export const schema = s.defineSchema({ todos: s.table({ status: s.enum(...STATUS
 `);
   });
 
+  it("puts the app-extras import after the last import that stays, not the removed migrations one", () => {
+    const exports = new Map([
+      ["app", { module: "generated", name: "app", typeOnly: false }],
+      ["STATUSES", { module: "extras", name: "STATUSES", typeOnly: false }],
+    ]);
+    const out = codemod(
+      `import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
+
+export const STATUSES = ["open", "done"] as const;
+const schema = { todos: s.table({ status: s.enum(...STATUSES) }) };
+export const app = s.defineApp(schema, { migrations });
+`,
+      exports,
+    );
+    expect(out.text).toBe(`import { schema as s } from "jazz-tools";
+import { STATUSES } from "./app-extras";
+
+export const schema = s.defineSchema({ todos: s.table({ status: s.enum(...STATUSES) }) });
+`);
+  });
+
   it("finds spread tables modules and imports their `tables`", () => {
     const out = codemod(
       `import { schema as s } from "jazz-tools";

@@ -61,7 +61,9 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
     `${relative(input.root, file) || file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`;
   const edits: TextEdit[] = [];
   const changes: string[] = [];
+  const removed = new Set<TS.Node>();
   const removeStatement = (statement: TS.Statement) => {
+    removed.add(statement);
     // The statement and its line break; its leading comments go with it.
     const start = statement.getFullStart();
     let end = statement.getEnd();
@@ -201,7 +203,6 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
   }
 
   // 1. `const schema = {…}` → `export const schema = s.defineSchema({…})`.
-  const removed = new Set<TS.Node>();
   if (tablesStatement) {
     edits.push({
       start: tablesStatement.getStart(source),
@@ -318,10 +319,15 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
   }
 
   if (extrasUsed.size > 0) {
-    const last = [...source.statements].filter(ts.isImportDeclaration).pop();
-    const at = last ? last.getEnd() : 0;
+    // After the last import that stays, or before the first statement that does.
+    const kept = source.statements.filter((statement) => !removed.has(statement));
+    const last = kept.filter(ts.isImportDeclaration).pop();
     const line = `import { ${[...extrasUsed].sort().join(", ")} } from ${JSON.stringify(input.extrasSpecifier)};`;
-    edits.push({ start: at, end: at, text: last ? `\n${line}` : `${line}\n` });
+    if (last) edits.push({ start: last.getEnd(), end: last.getEnd(), text: `\n${line}` });
+    else {
+      const at = kept[0]?.getStart(source) ?? text.length;
+      edits.push({ start: at, end: at, text: `${line}\n\n` });
+    }
     changes.push(
       `${relative(input.root, file)}: imports ${[...extrasUsed].join(", ")} from app-extras.ts`,
     );
