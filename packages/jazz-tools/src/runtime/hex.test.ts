@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bytesToHex, formatUuidAt } from "./hex.js";
+import { bytesToHex, formatUuidAt, parseUuidBytes } from "./hex.js";
 
 // The previous per-byte formatting, kept as the reference the table must match.
 function referenceHex(bytes: ArrayLike<number>): string {
@@ -37,6 +37,26 @@ describe("hex", () => {
       expect(bytesToHex(bytes)).toBe(referenceHex(bytes));
       const offset = seed % (bytes.length - 15);
       expect(formatUuidAt(bytes, offset)).toBe(referenceUuid(bytes, offset));
+    }
+  });
+
+  // Rust's `Uuid::parse_str` reads hyphenated `8-4-4-4-12` and 32 plain hex
+  // digits; dashes anywhere else used to be ignored here.
+  it("parses only hyphenated or plain UUID text", () => {
+    const canonical = "0cae56e7-0f54-421c-ba8b-54fcbfec8dd2";
+    const bytes = parseUuidBytes(canonical);
+    expect(bytes && formatUuidAt(bytes, 0)).toBe(canonical);
+    expect(parseUuidBytes(canonical.replaceAll("-", ""))).toEqual(bytes);
+    expect(parseUuidBytes(canonical.toUpperCase())).toEqual(bytes);
+    for (const malformed of [
+      "0cae56e70f54421cba8b54fcbfec8dd2-",
+      "-0cae56e70f54421cba8b54fcbfec8dd2",
+      "0cae-56e7-0f54-421c-ba8b-54fcbfec8dd2",
+      "0cae56e7-0f54421c-ba8b-54fcbfec8dd2",
+      "0c-ae-56-e7-0f-54-42-1c-ba-8b-54-fc-bf-ec-8d-d2",
+      "0cae56e7-0f54-421c-ba8b-54fcbfec8dd",
+    ]) {
+      expect(parseUuidBytes(malformed), malformed).toBeUndefined();
     }
   });
 });

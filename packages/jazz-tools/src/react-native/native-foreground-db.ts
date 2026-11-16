@@ -1045,8 +1045,17 @@ function formatTransactionId(bytes: Uint8Array<ArrayBufferLike>): string {
   return hex;
 }
 
-/** Whether the native host refused a command it does not know. */
+/**
+ * Whether the native host refused a command it does not know. A native build
+ * sets the relay status as `error.code` (`invalid_command` for an unknown
+ * command); a lifecycle or encode failure is not a missing command. A build
+ * older than the code threw the same text for every failure, so without a
+ * code only that text says so.
+ */
 function rejectsCommand(error: unknown): boolean {
+  const code =
+    typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  if (typeof code === "string") return code === "invalid_command";
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("runtime failed during execute");
 }
