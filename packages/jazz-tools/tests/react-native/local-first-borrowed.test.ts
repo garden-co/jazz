@@ -2,7 +2,7 @@ import { expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { schema } from "../../src/schema-namespace.js";
+import { testApp } from "../../src/testing/index.js";
 import { createAccountManager } from "../../src/react-native/create-account-manager.js";
 import {
   createNativeAccountTestSession,
@@ -35,10 +35,7 @@ it("opens a borrowed local-first account foreground and subscribes without brows
     });
     const account = accounts.createLocalFirst();
     const config = { appId: "rn-local-first-borrowed", account };
-    const app = schema.defineApp(
-      { todos: schema.table({ title: schema.string() }, {}) },
-      { migrations: "none" },
-    );
+    const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
     lease = await createNativeAccountTestSession(config, serializeSchemaSource(app.wasmSchema));
     client = await openJazzClient({ ...config, nativeRelay: { capability: lease.capability } });
     expect(client.session).toMatchObject({

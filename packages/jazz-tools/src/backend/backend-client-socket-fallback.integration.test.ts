@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { createJazz, createJazzClient, memory, trustWorkload, type Jazz } from "./index.js";
 
 // #5055: a backend client whose main backend can't upgrade sync sockets
@@ -11,16 +11,14 @@ import { createJazz, createJazzClient, memory, trustWorkload, type Jazz } from "
 // 500) must sync over the HTTP stream, as a browser does, or say why its
 // socket failed: never crash its process.
 
-const app = s.defineApp(
-  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+// Updates and deletes are denied.
+const permissions = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
 
 const AUDIENCE = "https://app.example.test";
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -111,7 +109,7 @@ async function backendClient(appId: string, origin: string) {
   const session = await createJazzClient({
     appId,
     app,
-    permissions,
+    permissions: testPermissions(app, permissions),
     serverUrl: `${origin}/jazz`,
     driver: { type: "memory" },
     credential: () => sign("ops"),

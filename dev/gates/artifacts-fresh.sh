@@ -78,7 +78,7 @@ check_layer \
 source_roots=(crates/jazz-cli/src crates/jazz-cli/Cargo.toml crates/jazz/src crates/jazz/layers crates/jazz/Cargo.toml Cargo.toml Cargo.lock)
 check_layer \
   "target/debug/jazz-tools" \
-  "cargo build -p jazz-cli --bin jazz-tools" \
+  "cargo build -p jazz-tools --bin jazz-tools" \
   target/debug/jazz-tools
 
 # napi-rs's generated loader/declarations live in an immutable staged

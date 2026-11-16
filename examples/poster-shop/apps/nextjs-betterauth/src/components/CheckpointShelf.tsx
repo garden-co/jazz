@@ -14,7 +14,7 @@ import {
 import { useAll } from "jazz-tools/react";
 import { History } from "lucide-react";
 import { useState } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { takeSnapshot } from "@/src/lib/poster";
 
 /**

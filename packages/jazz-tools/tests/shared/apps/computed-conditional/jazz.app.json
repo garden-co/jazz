@@ -1,0 +1,23 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "useLeft": "boolean",
+        "left": "int",
+        "right": "int"
+      },
+      "computed": {
+        "value": {
+          "type": "int",
+          "from": [
+            "useLeft",
+            "left",
+            "right"
+          ]
+        }
+      }
+    }
+  }
+}

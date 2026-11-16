@@ -6,7 +6,7 @@ import { FileInput } from "@astryxdesign/core/FileInput";
 import { MoreMenu } from "@astryxdesign/core/MoreMenu";
 import { HStack, StackItem, VStack } from "@astryxdesign/core/Stack";
 import { Heading } from "@astryxdesign/core/Text";
-import { MAX_FOLDER_DEPTH } from "../../schema.js";
+import { MAX_FOLDER_DEPTH } from "../../app-extras.js";
 import type { DropPayload } from "../drag.js";
 import type { Folder, FolderIndex } from "../folders.js";
 import type { BrowserAdvice } from "../use-browser-advice.js";

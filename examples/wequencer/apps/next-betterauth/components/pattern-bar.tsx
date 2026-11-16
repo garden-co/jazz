@@ -5,7 +5,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/HStack";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
-import { app, type Pattern } from "@/schema";
+import { app, type Pattern } from "@/jazz.generated";
 import type { ReportWrite } from "@/lib/report-write";
 import { PATTERN_LENGTHS } from "@/lib/instruments";
 import { addPattern } from "@/lib/session-setup";

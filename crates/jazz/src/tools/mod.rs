@@ -42,7 +42,9 @@ pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;
 
 #[cfg(feature = "runtime")]
-pub use client::{JazzClient, JazzTransaction};
+pub use client::{
+    JazzClient, JazzTransaction, MutationError, PermissionAdviceRequest, StreamingUpload,
+};
 
 pub use crate::object::{BranchName, ObjectId, ResultKey};
 #[cfg(feature = "runtime")]
@@ -169,6 +171,21 @@ pub enum JazzError {
 
     #[error("Channel closed")]
     ChannelClosed,
+}
+
+/// How a durable wait's error for a refused transaction begins.
+#[cfg(feature = "runtime")]
+pub(crate) const REJECTED_BEFORE: &str = "transaction was rejected before reaching";
+
+#[cfg(feature = "runtime")]
+impl JazzError {
+    /// Whether this is [`JazzClient::wait_for_transaction`]'s error for a
+    /// transaction the server refused, rather than a wait that failed for
+    /// another reason. For `jazz-app-support`'s mutation-error reporting.
+    #[doc(hidden)]
+    pub fn is_transaction_rejection(&self) -> bool {
+        matches!(self, Self::Sync(message) | Self::Write(message) if message.starts_with(REJECTED_BEFORE))
+    }
 }
 
 /// Result type for Jazz operations.

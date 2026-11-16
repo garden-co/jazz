@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "better_auth_session": { "columns": { "token": "string", "userId": "uuid" } },
+    "better_auth_user": { "columns": { "name": "string", "email": "string" } },
+    "messages": { "columns": { "text": "string" } }
+  }
+}

@@ -428,7 +428,7 @@ fn an_aged_out_thin_writer_leaves_no_rows_behind() {
     assert_eq!(entries_of(&path, laptop), (false, 0));
     assert_eq!(entries_of(&path, tab), (true, 1));
     assert_eq!(entries_of(&path, phone), (true, 1));
-    assert!(ORIGIN_ENTRY_RETENTION_MS == 60 * MINUTE);
+    assert_eq!(ORIGIN_ENTRY_RETENTION_MS, 60 * MINUTE);
 }
 
 /// An earlier thin runtime (alpha.60/.61) names an unmarked node: it may

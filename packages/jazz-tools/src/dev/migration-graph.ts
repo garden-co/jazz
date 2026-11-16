@@ -144,7 +144,7 @@ export function renderMigrationGraph(graph: MigrationGraph, color = false): stri
       let label =
         hash.slice(0, prefixLength) +
         (latest ? " (latest bundle)" : "") +
-        (hash === graph.localSchemaHash ? " (schema.ts)" : "") +
+        (hash === graph.localSchemaHash ? " (jazz.app.json)" : "") +
         presenceLabel(graph.schemaPresence?.get(hash));
       if (latest && color) label = `\x1b[1;36m${label}\x1b[0m`;
       lines.push(`${prefix}${connector}● ${label}${repeated ? " (shown above)" : ""}`);

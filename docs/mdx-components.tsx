@@ -3,7 +3,6 @@ import { CodeBlock, Pre, type CodeBlockProps } from "fumadocs-ui/components/code
 import * as TabsComponents from "./components/mdx/tabs";
 import type { MDXComponents } from "mdx/types";
 import type { ReactNode } from "react";
-import { GenerateAppId } from "./components/mdx/generate-app-id";
 import { CloudConfig } from "./components/mdx/cloud-config";
 import { DeployCommand } from "./components/mdx/deploy-command";
 import { LensDiagram } from "./components/mdx/lens-diagram";
@@ -53,7 +52,6 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     ...defaultMdxComponents,
     pre: CodeBlockPre,
     ...TabsComponents,
-    GenerateAppId,
     CloudConfig,
     DeployCommand,
     LensDiagram,

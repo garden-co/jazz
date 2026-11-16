@@ -1,0 +1,11 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "authors": { "read": "true", "insert": "true" },
+    "items": { "read": "true", "insert": "true" },
+    "labels": { "read": "true", "insert": "true" },
+    "parents": { "read": "true", "insert": "true" },
+    "unrelated": { "read": "true", "insert": "true" }
+  }
+}

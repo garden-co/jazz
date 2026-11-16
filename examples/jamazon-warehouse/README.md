@@ -53,7 +53,7 @@ Configuration fails closed (`src/lib/config.ts`). A development run on a loopbac
 local defaults, so `pnpm dev` works without setup. A production process (`pnpm build`,
 `pnpm start`) is always a deployment: it refuses to start without `NEXT_PUBLIC_APP_ORIGIN` and
 `BETTER_AUTH_SECRET`, and never falls back to localhost or the development secret. A deployment
-also sets `JAZZ_APP_ID`, and, to keep the data on a sync server such as Jazz Cloud,
+also sets `JAZZ_APP_ID`, and, to keep the data on a sync server such as Jazz Cloud (deprecated),
 `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`.
 
 ## Two-phase checkout
@@ -84,7 +84,7 @@ key is lost. Dashboard counts ignore drafts and cancelled orders.
 
 ## Permissions
 
-`permissions.ts` answers two questions for every operational row:
+`jazz.permissions.json` answers two questions for every operational row:
 
 - **Who may write it** ([#1899](https://github.com/garden-co/jazz/issues/1899)): the manager of
   the row's own warehouse (`warehouses.operator_id`) or an operator staffed on that warehouse

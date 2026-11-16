@@ -1,14 +1,8 @@
 import { expect, it } from "vitest";
-import { generateAuthSecret, schema, type RowOf } from "../../src/index.js";
+import { generateAuthSecret } from "../../src/index.js";
 import { createBrowserTestDb as createDb } from "./account-fixtures.js";
 import { waitForCondition } from "./support.js";
-
-const app = schema.defineApp(
-  {
-    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+import { app, type Todo } from "./apps/todos-title-done/jazz.generated.js";
 
 it("delivers a queued memory transaction to an existing local subscription", async () => {
   const db = await createDb({
@@ -17,7 +11,7 @@ it("delivers a queued memory transaction to an existing local subscription", asy
     driver: { type: "memory" },
   });
   let stop = () => {};
-  let visible: RowOf<typeof app.todos>[] = [];
+  let visible: Todo[] = [];
   const errors: Error[] = [];
   const subscribe = () =>
     db.subscribe(

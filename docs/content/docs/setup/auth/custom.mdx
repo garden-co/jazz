@@ -10,8 +10,8 @@ the same: a function that reads your session and returns a user id.
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 import { getUser } from "./your-auth";
 
 export const jazz = createJazz({
@@ -245,11 +245,36 @@ issued), call `jazz.linkIdentity({ from, to })`.
 
 `claims` from `authenticate` are available to your policies under `session.claims`.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
-</include>
+For an app with this `todos` table:
 
-See [Declarative Permissions](/docs/schemas/policies) for the full claims API.
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "todos": {
+      "columns": {
+        "title": "string",
+        "owner_id": "uuid"
+      }
+    }
+  }
+}
+```
+
+a user reads their own todos, and a user whose `role` claim is `manager` reads all of them:
+
+```json title="jazz.permissions.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "todos": {
+      "read": { "anyOf": ["owner_id = session.user", "session.claims.role = 'manager'"] }
+    }
+  }
+}
+```
+
+See [Declarative Permissions](/docs/schemas/policies) for more on claims.
 
 ## Ownership and provenance
 
@@ -264,7 +289,7 @@ returned. Author columns (`$createdBy`, `$updatedBy`) hold both:
 }
 ```
 
-Compare `session.user` for account-owned data, such as `{ $createdBy: session.user }`. Two linked
+Compare `session.user` for account-owned data, such as `$createdBy.account = session.user`. Two linked
 identities (a guest and the user it became) share account ownership while keeping distinct
 authorship.
 
@@ -275,7 +300,7 @@ Apps on alpha.59 signed users in with JWTs, so their accounts belong to identiti
 `{ issuer: "jazz:backend", subject: userId }` instead. The alpha.59 import
 (`jazz-alpha59-alpha60-import import`, a binary on the release's GitHub page) links each user's `jazz:backend` identity to their existing account. Its
 `--app-id` must be exactly the app ID your alpha.59 app used, which is the `appId` you pass to
-`remote()` on Jazz Cloud. With `sqlite()` the import writes it into the data directory, so your
+`remote()` on Jazz Cloud (deprecated). With `sqlite()` the import writes it into the data directory, so your
 code doesn't pass it. If your
 `authenticate` returns the old token's `sub` as `userId` (which `fromJWT` does), returning users
 open their old accounts and keep all their data. Pass `--no-backend-identity-links` to skip this.

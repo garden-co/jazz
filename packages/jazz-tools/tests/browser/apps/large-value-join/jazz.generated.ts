@@ -1,0 +1,53 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
+// Bindings format 1. Output 5e623dcf957098c5. Formatters may reformat this file, except `app` below.
+import { bindApp, type AppTypes } from "jazz-tools";
+
+export type File = {
+  readonly id: string;
+  name: string;
+  contents: Uint8Array;
+};
+
+export type FileInsert = {
+  name: string;
+  contents: Uint8Array;
+};
+
+interface Types extends AppTypes {
+  files: {
+    row: File;
+    insert: FileInsert;
+    columns: {
+      name: { kind: "string"; nullable: false; value: string };
+      contents: { kind: "bytes"; nullable: false; value: Uint8Array };
+    };
+    relations: {};
+  };
+}
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types>({
+  "source": "sha256:781450bfbd97157a75a609d3d800703a7e37dd9ecce2bf9cc0156f2164cc6a81",
+  "schema": {
+    "current": "3e82ba837c50230eb1eba01fa8d47367cc002e0deaec734b622ad2ce6fab4519",
+    "schemas": [
+      {
+        "hash": "3e82ba837c50230eb1eba01fa8d47367cc002e0deaec734b622ad2ce6fab4519",
+        "schema": {
+          "tables": {
+            "files": {
+              "columns": [
+                { "column_type": { "type": "Text" }, "name": "name", "nullable": false },
+                { "column_type": { "type": "Bytea" }, "name": "contents", "nullable": false },
+              ],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+  },
+  "relations": { "files": {} },
+});

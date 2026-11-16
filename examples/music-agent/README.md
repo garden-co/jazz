@@ -33,7 +33,7 @@ Jazz runs inside the Next app (`createJazz` in `src/lib/backend-jazz-client.ts`)
 mounted under `/jazz`. Its `authenticate` reads the Better Auth session cookie:
 there are no JWTs or token routes. Data lives in the git-ignored `.jazz/`
 directory; set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` to
-sync through Jazz Cloud or your own sync server with `remote()` instead.
+sync through Jazz Cloud (deprecated) or your own sync server with `remote()` instead.
 
 Open <http://127.0.0.1:3000>, create an account and the first conversation
 seeds itself: a request with an attached rough mix, answered live by the agent.

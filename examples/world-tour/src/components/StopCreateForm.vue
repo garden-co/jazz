@@ -103,7 +103,8 @@
 import { asLines } from "../lib/text.js";
 import { reactive, ref } from "vue";
 import { useAll } from "jazz-tools/vue";
-import { app, type StopStatus } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
+import { type StopStatus } from "../../app-extras.js";
 import { fromDateInput, statusLabels } from "../lib/format.js";
 import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";

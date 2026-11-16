@@ -24,9 +24,40 @@ Keep invite codes in their own table, not on the resource row. Jazz permissions 
 only the backend checks its code. The members table records which invite each user used to join, so
 you can audit or revoke individual memberships later.
 
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-schema
-</include>
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "chats": {
+      "columns": {},
+      "relations": {
+        "members": { "reverse": "chatMembers", "relation": "chat" },
+        "invites": { "reverse": "chatInvites", "relation": "chat" }
+      }
+    },
+    "chatMembers": {
+      "columns": {
+        "chatId": "uuid",
+        "user_id": "uuid",
+        "inviteId": "string?"
+      },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" }
+      }
+    },
+    "chatInvites": {
+      "columns": {
+        "chatId": "uuid",
+        "code": "string",
+        "singleUse": "boolean"
+      },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" }
+      }
+    }
+  }
+}
+```
 
 ## Permissions
 
@@ -36,11 +67,44 @@ else. The only way for an invitee to join is the server route below. The server 
 [backend identity](/docs/setup/deployment/own-server#trusted-backend-use) and inserts the row
 on their behalf after validating the join code.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions
-</include>
+```json title="jazz.permissions.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "defs": {
+    "isChatCreator($chat)": "exists chats(id = $chat, $createdBy.account = session.user)"
+  },
+  "tables": {
+    "chats": {
+      "read": "exists chatMembers(chatId = this.id, user_id = session.user)",
+      "insert": "true"
+    },
+    "chatMembers": {
+      "read": {
+        "$comment": "Users can read their own membership row; chat creators can read every member of their chats.",
+        "where": { "anyOf": ["user_id = session.user", "isChatCreator(this.chatId)"] }
+      },
+      "insert": {
+        "$comment": "The creator can insert their own membership in their own chat. Everyone else comes through the server route, which writes with backend privileges.",
+        "where": { "allOf": ["user_id = session.user", "isChatCreator(this.chatId)"] }
+      },
+      "delete": {
+        "$comment": "Users can leave; chat creators can remove any member.",
+        "where": { "anyOf": ["user_id = session.user", "isChatCreator(this.chatId)"] }
+      }
+    },
+    "chatInvites": {
+      "read": {
+        "$comment": "Invite codes are bearer capabilities. They never sync back down to a client.",
+        "where": "false"
+      },
+      "insert": "isChatCreator(this.chatId)",
+      "delete": "isChatCreator(this.chatId)"
+    }
+  }
+}
+```
 
-See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`, `allOf`, and `anyOf`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `allOf`, `anyOf` and `defs`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
 
 ## Generating a link
 
@@ -70,7 +134,7 @@ link or retrying after a transient error won't create duplicate rows.
 ### Server route
 
 The route reads and writes as the backend: the invitee has no read access to the chat until they're
-a member, and the `chatMembers.allowInsert` rule only admits the chat's creator, so they can't
+a member, and the `chatMembers` insert policy only admits the chat's creator, so they can't
 insert their own membership directly. `await jazz.withAttribution(request)` asks your
 `authenticate` who the caller is, then keeps backend permissions while stamping the membership's
 edit metadata to that user.

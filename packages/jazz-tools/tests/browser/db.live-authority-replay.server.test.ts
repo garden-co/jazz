@@ -1,13 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { generateAuthSecret, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import {
   liveAuthorityApp as app,
   liveAuthorityPermissions,
   type LiveAuthoritySeed,
 } from "./live-authority-replay-schema.js";
-import { type JazzServerInfo, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, type JazzServerInfo, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -40,9 +39,13 @@ afterEach(async () => {
 describe("live authoritative overlapping relation replay", () => {
   it("keeps fresh, reopened and reconnected persistent roots usable after live inserts", async () => {
     const info = await getJazzServerInfo(uniqueDbName("live-authority-replay"));
-    await deploy({ ...info, schema: app.wasmSchema, permissions: liveAuthorityPermissions });
+    await deploy({
+      ...info,
+      app,
+      permissions: liveAuthorityPermissions,
+    });
     const appBackend = await startJazzApp(info, {
-      schema: app.wasmSchema,
+      schema: app,
       permissions: liveAuthorityPermissions,
     });
     backendAppId = info.appId;

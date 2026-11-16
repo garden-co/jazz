@@ -1,0 +1,5 @@
+{
+  "name": "upgrade-fixture-depends-on",
+  "private": true,
+  "type": "module"
+}

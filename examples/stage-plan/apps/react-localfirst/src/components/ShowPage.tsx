@@ -5,7 +5,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { ensureChiefSetup, updateShow } from "../model/actions.js";
 import { useMe } from "../model/me.js";
 import { href, navigate, type ShowTab } from "../router.js";

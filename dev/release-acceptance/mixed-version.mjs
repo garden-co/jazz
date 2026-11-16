@@ -92,6 +92,15 @@ const FIXTURE_SCHEMA = `import {schema as s} from 'jazz-tools';
 export const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),author:s.string()},{})},{migrations:"none"});
 export default app;
 `;
+// The same app as files, which alpha.65 and later read instead.
+const FIXTURE_APP_FILE = JSON.stringify({
+  format: 1,
+  tables: { docs: { columns: { label: "string", body: "string", author: "string" } } },
+});
+const FIXTURE_PERMISSIONS_FILE = JSON.stringify({
+  format: 1,
+  tables: { docs: { read: "true", insert: "true", update: "true", delete: "true" } },
+});
 const FIXTURE_PERMISSIONS = `import {schema as s} from 'jazz-tools';
 import {app} from './schema';
 export default s.definePermissions(app,({policy})=>{policy.docs.allowRead.always();policy.docs.allowInsert.always();policy.docs.allowUpdate.always();policy.docs.allowDelete.always();});
@@ -253,6 +262,8 @@ async function deploy(cell, dir, server, deployer) {
   mkdirSync(fixture);
   writeFileSync(join(fixture, "schema.ts"), FIXTURE_SCHEMA);
   writeFileSync(join(fixture, "permissions.ts"), FIXTURE_PERMISSIONS);
+  writeFileSync(join(fixture, "jazz.app.json"), FIXTURE_APP_FILE);
+  writeFileSync(join(fixture, "jazz.permissions.json"), FIXTURE_PERMISSIONS_FILE);
   const env = { JAZZ_ADMIN_SECRET: server.ctx.adminSecret };
   try {
     let r = await run(

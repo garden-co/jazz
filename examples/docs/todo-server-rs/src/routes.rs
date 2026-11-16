@@ -1,30 +1,28 @@
 //! HTTP routes for the todo API.
 
 use std::convert::Infallible;
-use std::sync::Arc;
 
+use ::jazz_app_support::{Jazz, ObjectId, Rows};
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, Sse},
     },
-    routing::{delete, get, post, put},
+    routing::get,
 };
-use futures_util::StreamExt as FuturesStreamExt;
-use futures_util::stream::Stream;
-use jazz::query::Query;
-use jazz::tools::{ObjectId, Value};
+use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared};
+use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::jazz_app::{self, NewTodo, TodoUpdate, todos};
 
-/// Todo item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A todo, as the API serves it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Todo {
     pub id: Uuid,
     pub title: String,
@@ -33,301 +31,169 @@ pub struct Todo {
     pub description: Option<String>,
 }
 
-/// Request to create a new todo.
+impl From<jazz_app::Todo> for Todo {
+    fn from(todo: jazz_app::Todo) -> Self {
+        Self {
+            id: *todo.id.uuid(),
+            title: todo.title,
+            done: todo.done,
+            description: todo.description,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTodoRequest {
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-/// Request to update a todo.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateTodoRequest {
     pub title: Option<String>,
     pub done: Option<bool>,
     pub description: Option<String>,
 }
 
-/// Create the router with all routes.
-pub fn create_router() -> Router<Arc<AppState>> {
+/// Resolves when the service is stopping: the live streams end then, so a
+/// graceful shutdown isn't held open by them.
+pub type Stopping = Shared<BoxFuture<'static, ()>>;
+
+#[derive(Clone)]
+struct AppState {
+    jazz: Jazz,
+    stopping: Stopping,
+}
+
+impl axum::extract::FromRef<AppState> for Jazz {
+    fn from_ref(state: &AppState) -> Jazz {
+        state.jazz.clone()
+    }
+}
+
+/// The API over the open app, serving until the process ends.
+pub fn router(jazz: Jazz) -> Router {
+    router_until(jazz, std::future::pending().boxed().shared())
+}
+
+/// The API over the open app; its live streams end once `stopping` resolves.
+pub fn router_until(jazz: Jazz, stopping: Stopping) -> Router {
     Router::new()
-        .route("/todos", get(list_todos))
-        .route("/todos", post(create_todo))
+        .route("/todos", get(list_todos).post(create_todo))
         .route("/todos/live", get(todos_live))
-        .route("/todos/:id", get(get_todo))
-        .route("/todos/:id", put(update_todo))
-        .route("/todos/:id", delete(delete_todo))
+        .route(
+            "/todos/:id",
+            get(get_todo).put(update_todo).delete(delete_todo),
+        )
         .route("/health", get(health))
+        .with_state(AppState { jazz, stopping })
 }
 
-/// Broadcast current todos to all SSE connections.
-async fn broadcast_todos(state: &AppState) {
-    let query = Query::from("todos");
-    if let Ok(rows) = state.client.query(query, None).await {
-        let todos: Vec<Todo> = rows
-            .iter()
-            .filter_map(|(id, values)| row_to_todo(*id, values))
-            .collect();
-        // Ignore send errors (no receivers is fine)
-        let _ = state.sse_tx.send(todos);
-    }
-}
-
-/// Convert a query result row to a Todo.
-fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
-    if values.len() < 2 {
-        return None;
-    }
-    let title = match &values[0] {
-        Value::Text(s) => s.clone(),
-        _ => return None,
-    };
-    let done = match &values[1] {
-        Value::Boolean(b) => *b,
-        _ => return None,
-    };
-    let description = values.get(2).and_then(|v| match v {
-        Value::Text(s) if !s.is_empty() => Some(s.clone()),
-        _ => None,
-    });
-    Some(Todo {
-        id: *object_id.uuid(),
-        title,
-        done,
-        description,
-    })
-}
-
-fn todo_values(title: String, description: String) -> std::collections::HashMap<String, Value> {
-    jazz::row_input!(
-        "title" => title, "done" => false, "description" => description,
-        "parent" => Value::Null, "project" => Value::Null,
+fn failed(error: ::jazz_app_support::Error) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": error.to_string() })),
     )
+        .into_response()
 }
 
-/// List all todos.
-async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let query = Query::from("todos");
-    match state.client.query(query, None).await {
-        Ok(rows) => {
-            let todos: Vec<Todo> = rows
-                .iter()
-                .filter_map(|(id, values)| row_to_todo(*id, values))
-                .collect();
-            Json(todos).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+fn not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "Todo not found" })),
+    )
+        .into_response()
+}
+
+async fn list_todos(State(jazz): State<Jazz>) -> Response {
+    match jazz.all(todos::query()).await {
+        Ok(rows) => Json(rows.into_iter().map(Todo::from).collect::<Vec<_>>()).into_response(),
+        Err(error) => failed(error),
     }
 }
 
-/// Create a new todo.
-async fn create_todo(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<CreateTodoRequest>,
-) -> impl IntoResponse {
-    let description = request.description.clone().unwrap_or_default();
-    let values = todo_values(request.title.clone(), description.clone());
-
-    match state.client.insert("todos", values).await {
-        Ok((row_id, row_values, _transaction_id)) => {
-            let todo = row_to_todo(row_id, &row_values);
-
-            // Broadcast to SSE connections
-            broadcast_todos(&state).await;
-
-            (StatusCode::CREATED, Json(todo)).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+async fn create_todo(State(jazz): State<Jazz>, Json(request): Json<CreateTodoRequest>) -> Response {
+    let new = NewTodo {
+        description: request.description,
+        ..NewTodo::new(request.title, false)
+    };
+    match jazz.insert(new).await {
+        Ok(todo) => (StatusCode::CREATED, Json(Todo::from(todo))).into_response(),
+        Err(error) => failed(error),
     }
 }
 
-/// Get a single todo.
-async fn get_todo(State(state): State<Arc<AppState>>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    let query = Query::from("todos");
-
-    match state.client.query(query, None).await {
-        Ok(rows) => {
-            // Find the todo with matching id
-            for (object_id, values) in &rows {
-                if *object_id.uuid() != id {
-                    continue;
-                }
-                if let Some(todo) = row_to_todo(*object_id, values) {
-                    return Json(todo).into_response();
-                }
-            }
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Todo not found" })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+async fn get_todo(State(jazz): State<Jazz>, Path(id): Path<Uuid>) -> Response {
+    match jazz.get::<jazz_app::Todo>(ObjectId::from_uuid(id)).await {
+        Ok(Some(todo)) => Json(Todo::from(todo)).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => failed(error),
     }
 }
 
-/// Update a todo.
 async fn update_todo(
-    State(state): State<Arc<AppState>>,
+    State(jazz): State<Jazz>,
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateTodoRequest>,
-) -> impl IntoResponse {
-    let object_id = ObjectId::from_uuid(id);
-
-    // Build partial updates
-    let mut updates = Vec::new();
-    if let Some(title) = request.title {
-        updates.push(("title".to_string(), Value::Text(title)));
+) -> Response {
+    let id = ObjectId::from_uuid(id);
+    match jazz.get::<jazz_app::Todo>(id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(),
+        Err(error) => return failed(error),
     }
-    if let Some(done) = request.done {
-        updates.push(("done".to_string(), Value::Boolean(done)));
+    let update = TodoUpdate {
+        title: request.title,
+        done: request.done,
+        description: request.description.map(Some),
+        ..Default::default()
+    };
+    if update != TodoUpdate::default()
+        && let Err(error) = jazz.update(id, update).await
+    {
+        return failed(error);
     }
-    if let Some(description) = request.description {
-        updates.push(("description".to_string(), Value::Text(description)));
+    get_todo(State(jazz), Path(*id.uuid())).await
+}
+
+async fn delete_todo(State(jazz): State<Jazz>, Path(id): Path<Uuid>) -> Response {
+    let id = ObjectId::from_uuid(id);
+    match jazz.get::<jazz_app::Todo>(id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(),
+        Err(error) => return failed(error),
     }
-
-    if updates.is_empty() {
-        // No changes, fetch and return current
-        let query = Query::from("todos");
-        if let Ok(rows) = state.client.query(query, None).await {
-            for (oid, values) in &rows {
-                if *oid.uuid() != id {
-                    continue;
-                }
-                if let Some(todo) = row_to_todo(*oid, values) {
-                    return Json(todo).into_response();
-                }
-            }
-        }
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Todo not found" })),
-        )
-            .into_response();
-    }
-
-    match state.client.update(object_id, updates).await {
-        Ok(_transaction_id) => {
-            // Broadcast to SSE connections
-            broadcast_todos(&state).await;
-
-            // Re-fetch the updated todo
-            let query = Query::from("todos");
-            match state.client.query(query, None).await {
-                Ok(rows) => {
-                    for (oid, values) in &rows {
-                        if *oid.uuid() != id {
-                            continue;
-                        }
-                        if let Some(todo) = row_to_todo(*oid, values) {
-                            return Json(todo).into_response();
-                        }
-                    }
-                    (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({ "error": "Todo not found after update" })),
-                    )
-                        .into_response()
-                }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response(),
-            }
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+    match jazz.delete::<jazz_app::Todo>(id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => failed(error),
     }
 }
 
-/// Delete a todo.
-async fn delete_todo(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let object_id = ObjectId::from_uuid(id);
-
-    match state.client.delete(object_id).await {
-        Ok(_transaction_id) => {
-            // Broadcast to SSE connections
-            broadcast_todos(&state).await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("NotFound") || err_str.contains("ObjectNotFound") {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": "Todo not found" })),
-                )
-                    .into_response()
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": err_str })),
-                )
-                    .into_response()
-            }
-        }
-    }
-}
-
-/// Health check.
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "healthy" }))
 }
 
-/// SSE endpoint streaming all todos on changes.
+/// Every todo, sent again whenever one changes: the subscription's deltas
+/// applied to the list it holds.
 async fn todos_live(
-    State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    // Subscribe to broadcast channel
-    let rx = state.sse_tx.subscribe();
-
-    // Get initial state
-    let query = Query::from("todos");
-    let initial_todos: Vec<Todo> = state
-        .client
-        .query(query, None)
-        .await
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|(id, values)| row_to_todo(*id, values))
-                .collect()
+    State(state): State<AppState>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
+    let changes = state.jazz.subscribe(todos::query()).await.map_err(failed)?;
+    let lists = changes
+        .scan(Rows::default(), |rows, delta| {
+            let list = delta.map(|delta| {
+                rows.apply(delta);
+                rows.as_slice()
+                    .iter()
+                    .cloned()
+                    .map(Todo::from)
+                    .collect::<Vec<_>>()
+            });
+            // A failed subscription ends the stream.
+            std::future::ready(list.ok())
         })
-        .unwrap_or_default();
-
-    // Create stream that yields initial state then updates
-    let initial_event = futures_util::stream::once(async move {
-        Ok::<_, Infallible>(
-            Event::default().data(serde_json::to_string(&initial_todos).unwrap_or_default()),
-        )
-    });
-
-    let update_stream = BroadcastStream::new(rx).filter_map(|result| async move {
-        match result {
-            Ok(todos) => Some(Ok::<_, Infallible>(
-                Event::default().data(serde_json::to_string(&todos).unwrap_or_default()),
-            )),
-            Err(_) => None, // Ignore lagged errors
-        }
-    });
-
-    Sse::new(initial_event.chain(update_stream))
+        .map(|list| Ok(Event::default().data(serde_json::to_string(&list).unwrap_or_default())))
+        .take_until(state.stopping);
+    Ok(Sse::new(lists))
 }

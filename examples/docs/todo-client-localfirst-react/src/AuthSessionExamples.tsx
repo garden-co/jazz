@@ -1,13 +1,13 @@
-import { useAll, useSession } from "jazz-tools/react";
-import { app } from "../session-app.js";
+import { useAll, useJazzSession } from "jazz-tools/react";
+import { app } from "../session-app/jazz.generated.js";
 
 export function AuthSessionExamples() {
   // #region auth-session-react-hook
-  const session = useSession();
+  const { user } = useJazzSession();
   // #endregion auth-session-react-hook
 
   // #region auth-session-react-user
-  const sessionUser = session?.user ?? null;
+  const sessionUser = user?.accountId ?? null;
   // #endregion auth-session-react-user
 
   // #region auth-session-react-query

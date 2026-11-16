@@ -23,12 +23,42 @@ pub struct Recorded {
     pub current_schema: Schema,
 }
 
+/// The digest of what the generator wrote that `lang`'s bindings record,
+/// if they record one (TS: `Output <hex>` on the format line, which
+/// formatters keep).
+pub fn output_digest(lang: Lang, bindings: &str) -> Option<String> {
+    match lang {
+        Lang::TypeScript => bindings.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("// Bindings format ")?;
+            let at = rest.find(ts::OUTPUT)? + ts::OUTPUT.len();
+            let digest = rest[at..].split('.').next()?;
+            (digest.len() == 16 && digest.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| digest.to_string())
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `committed` bindings are other than what the generator writes
+/// now (`generated`), formatting aside where the language records a digest
+/// of its output: what plain `generate` rewrites, so a generator fix
+/// reaches an app whose `jazz.app.json` didn't change.
+pub fn output_changed(lang: Lang, committed: &str, generated: &str) -> bool {
+    match output_digest(lang, generated) {
+        Some(digest) => output_digest(lang, committed).as_deref() != Some(digest.as_str()),
+        None => committed != generated,
+    }
+}
+
 /// Read what bindings generated in `lang` embed. Only a file this
 /// generator wrote is read; anything else is refused with what to do.
 pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
     match lang {
         Lang::TypeScript => read_ts(bindings),
         Lang::Rust => crate::rust::read(bindings),
+        Lang::Swift => crate::swift::read(bindings),
+        Lang::Go => crate::go::read(bindings),
+        Lang::Kotlin => crate::kotlin::read(bindings),
     }
 }
 
@@ -279,10 +309,43 @@ pub fn staleness(
         .iter()
         .any(|(h, _)| *h == recorded.current)
     {
+        // A change of single-column indexes changes the schema's hash, not
+        // its version or its rows (#5494): regenerating is enough.
+        if differs_only_in_indexes(&recorded.current_schema, app.compiled.current_schema()) {
+            return Ok(Some(Staleness::OutOfDate));
+        }
         return Ok(Some(Staleness::SchemaChanged));
     }
     if recorded.source != app.source || recorded.format != lang.format() {
         return Ok(Some(Staleness::OutOfDate));
     }
     Ok(None)
+}
+
+/// Whether going from `from` to `to` needs no migration because only
+/// indexes changed: their tables differ in nothing but `indexed_columns` /
+/// `composite_indexes`, and they are the same runtime version. That second
+/// condition is the invariant deploys rely on (they check admitted versions,
+/// not hashes). Single-column indexes keep the version; a composite index is
+/// part of it (`tests/composite_indexes.rs`), so a composite change still
+/// needs its (empty) migration.
+pub(crate) fn differs_only_in_indexes(from: &Schema, to: &Schema) -> bool {
+    let version = |schema: &Schema| {
+        jazz::schema::JazzSchema::new(schema)
+            .ok()
+            .map(|schema| schema.version_id())
+    };
+    without_indexes(from) == without_indexes(to)
+        && version(from).is_some()
+        && version(from) == version(to)
+}
+
+/// `schema` with every table's indexes removed.
+fn without_indexes(schema: &Schema) -> Schema {
+    let mut schema = schema.clone();
+    for table in schema.values_mut() {
+        table.indexed_columns = Default::default();
+        table.composite_indexes = Default::default();
+    }
+    schema
 }

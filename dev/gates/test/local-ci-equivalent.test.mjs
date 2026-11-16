@@ -103,7 +103,14 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const aggregateRuns = (aggregate.steps ?? []).filter(({ run }) => typeof run === "string");
   assert.deepEqual(
     aggregateRuns.map(({ run }) => run.trim()),
-    ['test "${WORKSPACE_RESULT}" = success\n' + 'test "${STORAGE_COMPAT_RESULT}" = success'],
+    [
+      'test "${WORKSPACE_RESULT}" = success\n' +
+        'test "${STORAGE_COMPAT_RESULT}" = success\n' +
+        'test "${JAZZ_FFI_BINDINGS_RESULT}" = success\n' +
+        'test "${CRATES_PACKAGE_RESULT}" = success\n' +
+        'test "${KOTLIN_RESULT}" = success\n' +
+        'test "${KOTLIN_ANDROID_RESULT}" = success',
+    ],
     "the Rust aggregate may check partition statuses, but must not add a correctness command",
   );
 
@@ -172,15 +179,17 @@ test("crate publication selector tests are a reachable lint partition contract",
   const selectorTest = lint.find(({ label }) => label === "crate publication selector contract");
   assert.deepEqual(selectorTest, {
     label: "crate publication selector contract",
-    executable: "bash",
-    args: ["dev/scripts/publish-crates-alpha.test.sh"],
+    executable: "node",
+    args: ["--test", "dev/scripts/check-lockstep-versions.test.mjs"],
   });
 
   const withoutSelectorTest = lint.filter(
     ({ label }) => label !== "crate publication selector contract",
   );
   assert.equal(
-    withoutSelectorTest.some(({ args }) => args.includes("publish-crates-alpha.test.sh")),
+    withoutSelectorTest.some(({ args }) =>
+      args.includes("dev/scripts/check-lockstep-versions.test.mjs"),
+    ),
     false,
     "a removed selector test would leave the lint CI partition without its publish admission receipt",
   );

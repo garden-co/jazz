@@ -9,8 +9,8 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useSession } from "jazz-tools/react-native";
-import { app, type Todo } from "../schema";
+import { useAll, useJazzSession } from "jazz-tools/react-native";
+import { app, type Todo } from "../jazz.generated";
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value : "";
@@ -42,8 +42,8 @@ export function TodoList() {
   }
 
   const { data: todos = [], db } = useAll(todosQuery);
-  const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const session = useJazzSession();
+  const sessionUserId = session.user?.accountId ?? null;
 
   const addTodo = () => {
     const trimmed = normalizeText(title).trim();
