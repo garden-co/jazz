@@ -158,7 +158,7 @@ async fn a_session_follows_the_user_the_bearer_names() {
         Err(Error::Replaced)
     ));
     let json = serde_json::to_value(session.snapshot()).unwrap();
-    assert_eq!(json["status"], "signedOut");
+    assert_eq!(json["status"], "signed-out");
     assert!(json["clientEpoch"].is_u64());
 
     session.close().await.unwrap();
@@ -330,4 +330,110 @@ fn _assert_send_sync()
 where
     JazzSession: Send + Sync + Clone,
 {
+}
+
+/// TS's "keeps a local-first guest when the backend says no one is signed
+/// in" (`backend-watch.test.ts`), then its guest link on sign-up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {
+    let app = App::start().await;
+    let token = bearer(None);
+    let session = JazzSession::open(client_files(), app.session(&token).initial(Initial::Device))
+        .await
+        .unwrap();
+    let guest = session.snapshot();
+    assert_eq!(guest.user.as_ref().unwrap().kind, UserKind::Device);
+    let jazz = session.jazz().unwrap();
+    let written = jazz
+        .insert(NewTodo::new("As a guest", false))
+        .await
+        .unwrap();
+
+    // The backend names no one: the guest stays, with its client.
+    session.refresh().await.unwrap();
+    let kept = session.snapshot();
+    assert_eq!(kept.status, SessionStatus::Ready);
+    assert_eq!(kept.user, guest.user);
+    assert_eq!(kept.client_epoch, guest.client_epoch);
+
+    // Gil signs up (no account yet): the guest is linked to him, and goes
+    // on as him with its data and client.
+    *token.lock().unwrap() = Some("token-gil".to_owned());
+    session.refresh().await.unwrap();
+    let gil = session.snapshot();
+    let user = gil.user.unwrap();
+    assert_eq!(
+        (user.kind, user.subject.as_str()),
+        (UserKind::Backend, "gil")
+    );
+    assert_eq!(user.account, guest.user.unwrap().account);
+    assert_eq!(gil.client_epoch, guest.client_epoch);
+    assert!(jazz.all(todos::query()).await.unwrap().contains(&written));
+
+    // Following again keeps him as he is.
+    session.refresh().await.unwrap();
+    assert_eq!(session.snapshot().client_epoch, guest.client_epoch);
+    session.close().await.unwrap();
+
+    // With guest linking off, a new user gets an account of their own.
+    let token = bearer(None);
+    let unlinked = JazzSession::open(
+        client_files(),
+        app.session(&token)
+            .initial(Initial::Device)
+            .link_guest(false),
+    )
+    .await
+    .unwrap();
+    let guest = unlinked.snapshot().user.unwrap();
+    *token.lock().unwrap() = Some("token-hal".to_owned());
+    unlinked.refresh().await.unwrap();
+    let hal = unlinked.snapshot().user.unwrap();
+    assert_eq!(hal.subject, "hal");
+    assert_ne!(hal.account, guest.account);
+    unlinked.close().await.unwrap();
+    app.stop().await;
+}
+
+/// Each account keeps its own store: one user's local data is not in the
+/// next one's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_account_keeps_a_store_of_its_own() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(Some("token-ida"));
+    let session = JazzSession::open(
+        client_files(),
+        app.session(&token).storage(Storage::Dir(dir.path().into())),
+    )
+    .await
+    .unwrap();
+    let ida = session.snapshot().user.unwrap();
+    session.jazz().unwrap().disconnect().await.unwrap();
+    session
+        .jazz()
+        .unwrap()
+        .insert(NewTodo::new("Ida's, never synced", false))
+        .await
+        .unwrap();
+
+    *token.lock().unwrap() = Some("token-jon".to_owned());
+    session.refresh().await.unwrap();
+    let jon = session.snapshot().user.unwrap();
+    assert_ne!(jon.account, ida.account);
+    assert_eq!(
+        session
+            .jazz()
+            .unwrap()
+            .all_with(todos::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap(),
+        vec![]
+    );
+    for user in [&ida, &jon] {
+        let store = dir.path().join(user.account.0.to_string());
+        assert!(store.join("jazz.sqlite").exists(), "{store:?}");
+    }
+    session.close().await.unwrap();
+    app.stop().await;
 }

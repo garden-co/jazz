@@ -242,6 +242,24 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
                 None => ("409 Conflict", "link_refused".to_owned()),
             },
         }
+    } else if path.ends_with("/accounts/backend-user") {
+        // Who is signed in, assigning nothing: `account` null while they
+        // have none yet.
+        match user {
+            None => ("200 OK", json!({ "user": null }).to_string()),
+            Some(user) => match existing_account_of(&backend, &user).await {
+                Ok(account) => (
+                    "200 OK",
+                    json!({
+                        "account": account,
+                        "identity": { "issuer": BACKEND_ISSUER, "subject": user },
+                        "claims": {},
+                    })
+                    .to_string(),
+                ),
+                Err(_) => ("502 Bad Gateway", String::new()),
+            },
+        }
     } else if path.ends_with("/accounts/backend-sign-in") {
         match user {
             None => ("401 Unauthorized", "signed_out".to_owned()),
