@@ -498,7 +498,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "geo"],
-      "description": "Points on the Earth, e.g. { \"name\": \"place\", \"geo\": { \"lat\": \"lat\", \"lng\": \"lng\" } }",
+      "description": "Points on the Earth, e.g. { \"name\": \"place\", \"geo\": \"location\" }",
       "properties": {
         "$comment": {
           "type": "string"
@@ -510,19 +510,8 @@
           "description": "Unique among the table's text, vector and geo indexes."
         },
         "geo": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["lat", "lng"],
-          "properties": {
-            "lat": {
-              "type": "string",
-              "description": "An f64 column, degrees."
-            },
-            "lng": {
-              "type": "string",
-              "description": "An f64 column, degrees."
-            }
-          }
+          "type": "string",
+          "description": "A point column."
         },
         "serverOnly": {
           "type": "boolean",

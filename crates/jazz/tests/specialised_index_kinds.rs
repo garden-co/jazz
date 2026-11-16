@@ -16,8 +16,8 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder, TextField, Vect
 
 use crate::common::{allow_all_policies, compile_schema};
 
-/// `places(name, about?, lat, lng, embedding)` with `search` over name
-/// (weight 4) and about (1), `near` over lat/lng and `similar` over the
+/// `places(name, about?, location, embedding)` with `search` over name
+/// (weight 4) and about (1), `near` over the location point and `similar` over the
 /// embedding (cosine).
 fn schema_with(name_weight: u8) -> JazzSchema {
     schema_with_fields(TextField::weight(name_weight), TextField::weight(1))
@@ -31,8 +31,7 @@ fn schema_with_fields(name: TextField, about: TextField) -> JazzSchema {
                 TableSchemaBuilder::new("places")
                     .column("name", ColumnType::Text)
                     .nullable_column("about", ColumnType::Text)
-                    .column("lat", ColumnType::Double)
-                    .column("lng", ColumnType::Double)
+                    .column("location", ColumnType::Point)
                     .column("embedding", ColumnType::Vector { dimensions: 3 })
                     .policies(allow_all_policies())
                     .text_index(
@@ -41,7 +40,7 @@ fn schema_with_fields(name: TextField, about: TextField) -> JazzSchema {
                         "jazz-text/1:en",
                         true,
                     )
-                    .geo_index("near", "lat", "lng")
+                    .geo_index("near", "location")
                     .vector_index("similar", "embedding", VectorMetric::Cosine),
             )
             .build(),
@@ -80,23 +79,31 @@ fn place(
     lng: f64,
     embedding: [f32; 3],
 ) {
-    block_on(db.insert(
-        "places",
-        BTreeMap::from([
-            ("name".to_owned(), Value::String(name.to_owned())),
-            (
-                "about".to_owned(),
-                Value::Nullable(about.map(|a| Box::new(Value::String(a.to_owned())))),
-            ),
-            ("lat".to_owned(), Value::F64(lat)),
-            ("lng".to_owned(), Value::F64(lng)),
-            ("embedding".to_owned(), Value::Bytes(f32le(embedding))),
-        ]),
-        InsertOptions {
-            row_id: Some(row(id)),
-            ..Default::default()
-        },
-    ))
+    block_on(
+        db.insert(
+            "places",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(name.to_owned())),
+                (
+                    "about".to_owned(),
+                    Value::Nullable(about.map(|a| Box::new(Value::String(a.to_owned())))),
+                ),
+                (
+                    "location".to_owned(),
+                    Value::Bytes(
+                        jazz::records::encode_point_f64le(lng, lat)
+                            .unwrap()
+                            .to_vec(),
+                    ),
+                ),
+                ("embedding".to_owned(), Value::Bytes(f32le(embedding))),
+            ]),
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        ),
+    )
     .unwrap();
 }
 

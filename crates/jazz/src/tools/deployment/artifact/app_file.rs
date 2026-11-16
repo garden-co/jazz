@@ -94,7 +94,6 @@ pub const VECTOR_INDEX_KEYS: &[&str] = &["name", "vector", "metric", "ann", "ser
 /// A text index field's object form: `{ "weight": 4, "length": 256 }`.
 pub const TEXT_FIELD_KEYS: &[&str] = &["weight", "length"];
 pub const GEO_INDEX_KEYS: &[&str] = &["name", "geo", "serverOnly"];
-pub const GEO_POINT_KEYS: &[&str] = &["lat", "lng"];
 
 /// Keys of `object` that aren't `allowed` (nor `$comment`) are refused.
 fn only_keys(object: &[(String, Json)], allowed: &[&str], path: &str) -> Result<(), Refusal> {
@@ -461,15 +460,11 @@ fn read_tables(
                     format!("two specialised indexes are named `{}`", index.name),
                 ));
             }
-            let option_of = |i: usize| match &index.kind {
-                SpecialisedIndexKind::Text { .. } => "text".to_string(),
-                SpecialisedIndexKind::Vector { .. } => "vector".to_string(),
-                SpecialisedIndexKind::Geo { .. } => ["geo.lat", "geo.lng"][i].to_string(),
-            };
-            for (i, column) in index.kind.columns().into_iter().enumerate() {
+            for column in index.kind.columns() {
                 let option = match &index.kind {
                     SpecialisedIndexKind::Text { .. } => format!("text.{column}"),
-                    _ => option_of(i),
+                    SpecialisedIndexKind::Vector { .. } => "vector".to_string(),
+                    SpecialisedIndexKind::Geo { .. } => "geo".to_string(),
                 };
                 check_index(column, format!("{item_path}.{option}"), false)?;
             }
@@ -770,23 +765,16 @@ fn read_specialised_index(item: &Json, path: &str) -> Result<SpecialisedIndex, R
                 ann,
             }
         }
-        _ => {
-            let point = object(value, &kind_path)?;
-            only_keys(point, GEO_POINT_KEYS, &kind_path)?;
-            let coordinate = |key: &str| -> Result<String, Refusal> {
-                let column = value.get(key).ok_or_else(|| {
-                    refuse(
-                        &kind_path,
-                        "a geo index is { \"lat\": <f64 column>, \"lng\": <f64 column> }",
+        _ => SpecialisedIndexKind::Geo {
+            column: string(value, &kind_path)
+                .map_err(|(path, message)| {
+                    (
+                        path,
+                        format!("{message}; a geo index names a point column, e.g. \"geo\": \"location\""),
                     )
-                })?;
-                string(column, &format!("{kind_path}.{key}")).map(str::to_string)
-            };
-            SpecialisedIndexKind::Geo {
-                lat: coordinate("lat")?,
-                lng: coordinate("lng")?,
-            }
-        }
+                })?
+                .to_string(),
+        },
     };
     Ok(SpecialisedIndex {
         name: name.to_string(),
@@ -852,11 +840,8 @@ fn write_specialised_index(index: &SpecialisedIndex) -> Json {
                 VectorAnn::Exact => {}
             }
         }
-        SpecialisedIndexKind::Geo { lat, lng } => {
-            fields.push((
-                "geo",
-                Json::object(vec![("lat", Json::string(lat)), ("lng", Json::string(lng))]),
-            ));
+        SpecialisedIndexKind::Geo { column } => {
+            fields.push(("geo", Json::string(column)));
         }
     }
     if index.server_only {

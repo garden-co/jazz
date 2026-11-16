@@ -8,8 +8,7 @@ export type Doc = {
   embedding: Float32Array;
   draftEmbedding: Float32Array | null;
   seed: Float32Array;
-  lat: number;
-  lng: number;
+  location: readonly [lng: number, lat: number];
 };
 
 export type DocInsert = {
@@ -17,8 +16,7 @@ export type DocInsert = {
   embedding: Float32Array;
   draftEmbedding?: Float32Array | null;
   seed?: Float32Array;
-  lat: number;
-  lng: number;
+  location: readonly [lng: number, lat: number];
 };
 
 interface Types extends AppTypes {
@@ -30,8 +28,7 @@ interface Types extends AppTypes {
       embedding: { kind: "vector"; nullable: false; value: Float32Array };
       draftEmbedding: { kind: "vector"; nullable: true; value: Float32Array };
       seed: { kind: "vector"; nullable: false; value: Float32Array };
-      lat: { kind: "float"; nullable: false; value: number };
-      lng: { kind: "float"; nullable: false; value: number };
+      location: { kind: "point"; nullable: false; value: readonly [lng: number, lat: number] };
     };
     relations: {};
   };
@@ -41,12 +38,12 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:ee3d8a7a8b4eb56096ec2e0e9c548336b83baeec02f60a17bbe9ebc46c98c774",
+  "source": "sha256:2128c3ead5e740a6d6d1b666b5d4b003ced8db3913095d22314f27de9fa9ec0c",
   "schema": {
-    "current": "29859e00ecde59703bf20a35c66f14bc487c2453fe5ef8e804743c21c77f07fe",
+    "current": "55b77389ffee0abda9f1eb4e4940ab9c220cda1d01fe8c1114a16051376b4b6b",
     "schemas": [
       {
-        "hash": "29859e00ecde59703bf20a35c66f14bc487c2453fe5ef8e804743c21c77f07fe",
+        "hash": "55b77389ffee0abda9f1eb4e4940ab9c220cda1d01fe8c1114a16051376b4b6b",
         "schema": {
           "tables": {
             "docs": {
@@ -68,16 +65,15 @@ export const app = bindApp<Types>({
                   "name": "seed",
                   "nullable": false,
                 },
-                { "column_type": { "type": "Double" }, "name": "lat", "nullable": false },
-                { "column_type": { "type": "Double" }, "name": "lng", "nullable": false },
+                { "column_type": { "type": "Point" }, "name": "location", "nullable": false },
               ],
               "specialised_indexes": [
-                { "kind": { "geo": { "lat": "lat", "lng": "lng" } }, "name": "place" },
+                { "kind": { "geo": { "column": "location" } }, "name": "place" },
                 {
                   "kind": {
                     "text": {
                       "analyzer": "jazz-text/1:en",
-                      "fields": { "title": 1 },
+                      "fields": { "title": { "length": 32, "weight": 1 } },
                       "prefix": true,
                     },
                   },

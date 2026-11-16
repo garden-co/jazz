@@ -849,7 +849,7 @@ Neither file carries a schema hash or bundle id: loaders compute them.
     a field being its weight (1–15) or `{"weight", "length"?}` with its
     reference length in terms (1–4096, default 32);
   - `{"name", "vector": <column>, "metric", "ann"?, "serverOnly"?}`;
-  - `{"name", "geo": {"lat": <column>, "lng": <column>}, "serverOnly"?}`.
+  - `{"name", "geo": <point column>, "serverOnly"?}`.
     The writer puts them after the B-tree indexes, in name order, and leaves
     out defaults (`prefix: false`, `ann: "exact"`, `serverOnly: false`, a
     field's default length, which it writes as the bare weight).

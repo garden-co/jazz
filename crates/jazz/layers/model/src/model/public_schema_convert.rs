@@ -1281,20 +1281,12 @@ fn validate_specialised_indexes(
                     ));
                 }
             }
-            SpecialisedIndexKind::Geo { lat, lng } => {
-                for (option, coordinate) in [("geo.lat", lat), ("geo.lng", lng)] {
-                    let descriptor = column(coordinate, option)?;
-                    if descriptor.column_type != ColumnType::Double {
-                        return Err(err(
-                            format!("{path}.{option}"),
-                            "a geo index coordinate must be an f64 column",
-                        ));
-                    }
-                }
-                if lat == lng {
+            SpecialisedIndexKind::Geo { column: point } => {
+                let descriptor = column(point, "geo")?;
+                if descriptor.column_type != ColumnType::Point {
                     return Err(err(
                         format!("{path}.geo"),
-                        "a geo index needs two different columns",
+                        "a geo index needs a point column",
                     ));
                 }
             }
@@ -6762,6 +6754,7 @@ mod specialised_index_tests {
             .column("embedding", ColumnType::Vector { dimensions: 3 })
             .column("lat", ColumnType::Double)
             .column("lng", ColumnType::Double)
+            .column("location", ColumnType::Point)
             .column("stars", ColumnType::Integer);
         SchemaBuilder::new().table(with(table)).build()
     }
@@ -6775,7 +6768,7 @@ mod specialised_index_tests {
                 true,
             )
             .vector_index("similar", "embedding", VectorMetric::Cosine)
-            .geo_index("place", "lat", "lng")
+            .geo_index("place", "location")
     }
 
     fn refusal(with: impl FnOnce(TableSchemaBuilder) -> TableSchemaBuilder) -> String {
@@ -6839,7 +6832,7 @@ mod specialised_index_tests {
         // Declaration order does not matter: indexes are kept by name.
         let reordered = notes(|table| {
             table
-                .geo_index("place", "lat", "lng")
+                .geo_index("place", "location")
                 .vector_index("similar", "embedding", VectorMetric::Cosine)
                 .text_index(
                     "search",
@@ -6931,7 +6924,7 @@ mod specialised_index_tests {
         );
         assert_eq!(
             hex("place"),
-            "000000000000000e6a617a7a2d69782d6465636c2f310000000000000005706c6163650200000000000000036c617400000000000000036c6e6700"
+            "000000000000000e6a617a7a2d69782d6465636c2f310000000000000005706c6163650200000000000000086c6f636174696f6e00"
         );
     }
 
@@ -6954,7 +6947,7 @@ mod specialised_index_tests {
         assert_eq!(
             refusal(|t| t
                 .text_index("search", [("title", 1)], "jazz-text/1:en", false)
-                .geo_index("search", "lat", "lng")),
+                .geo_index("search", "location")),
             "$.notes.specialised_indexes.search: two specialised indexes with the same name"
         );
         assert_eq!(
@@ -6999,15 +6992,10 @@ mod specialised_index_tests {
             "$.notes.specialised_indexes.similar.vector: a vector index needs a vector column"
         );
         assert_eq!(
-            refusal(|t| t.geo_index("place", "lat", "stars")),
-            "$.notes.specialised_indexes.place.geo.lng: a geo index coordinate must be an f64 \
-             column"
+            refusal(|t| t.geo_index("place", "lat")),
+            "$.notes.specialised_indexes.place.geo: a geo index needs a point column"
         );
-        assert_eq!(
-            refusal(|t| t.geo_index("place", "lat", "lat")),
-            "$.notes.specialised_indexes.place.geo: a geo index needs two different columns"
-        );
-        let mut server_only = notes(|t| t.geo_index("place", "lat", "lng"));
+        let mut server_only = notes(|t| t.geo_index("place", "location"));
         server_only
             .get_mut(&TableName::new("notes"))
             .unwrap()

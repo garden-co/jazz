@@ -98,7 +98,10 @@ pub enum SpecialisedIndexKind {
         ann: VectorAnn,
     },
     /// Points on the Earth, from two `f64` columns in degrees (WGS84).
-    Geo { lat: String, lng: String },
+    Geo {
+        /// A `point` column.
+        column: String,
+    },
 }
 
 /// A vector index's distance (SPEC 20.10.2).
@@ -178,7 +181,7 @@ impl SpecialisedIndexKind {
         match self {
             Self::Text { fields, .. } => fields.keys().map(String::as_str).collect(),
             Self::Vector { column, .. } => vec![column.as_str()],
-            Self::Geo { lat, lng } => vec![lat.as_str(), lng.as_str()],
+            Self::Geo { column } => vec![column.as_str()],
         }
     }
 
@@ -207,9 +210,8 @@ impl SpecialisedIndexKind {
                 metric: *metric,
                 ann: *ann,
             },
-            Self::Geo { lat, lng } => Self::Geo {
-                lat: rename(lat),
-                lng: rename(lng),
+            Self::Geo { column } => Self::Geo {
+                column: rename(column),
             },
         }
     }
@@ -226,7 +228,7 @@ impl SpecialisedIndex {
     ///   analyzer; the prefix byte;
     /// - vector: the column; the metric byte (cosine 0, l2 1, dot 2); the
     ///   ann byte (exact 0);
-    /// - geo: the lat column, the lng column.
+    /// - geo: the point column.
     ///
     /// Pinned by fixtures: a change is a new encoding.
     pub fn canonical_bytes(&self) -> Vec<u8> {
@@ -265,10 +267,9 @@ impl SpecialisedIndex {
                     VectorAnn::Exact => 0,
                 });
             }
-            SpecialisedIndexKind::Geo { lat, lng } => {
+            SpecialisedIndexKind::Geo { column } => {
                 bytes.push(2);
-                put_str(&mut bytes, lat);
-                put_str(&mut bytes, lng);
+                put_str(&mut bytes, column);
             }
         }
         bytes.push(u8::from(self.server_only));

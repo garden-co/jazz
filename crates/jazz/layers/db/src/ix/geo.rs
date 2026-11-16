@@ -2,7 +2,7 @@
 //! unit vectors and covers are `jazz_index::geo`.
 //!
 //! `_geo(rid, cell, lat, lng, x, y, z)` holds one row per indexed point
-//! (a row with either coordinate null has none), indexed by `cell`. A
+//! (a row whose `point` cell is null has none), indexed by `cell`. A
 //! search reads the cells of its cover and decides exactly: a radius by
 //! the squared chord distance (also its score, smaller-better), a box by
 //! the stored degrees (score 0, so rows order by id).
@@ -47,12 +47,16 @@ impl Kind for Geo {
         conn.prepare_cached(&format!("DELETE FROM {table} WHERE rid = ?1"))
             .and_then(|mut s| s.execute([rid]))
             .map_err(storage)?;
-        let Some([Cell::Real(lat), Cell::Real(lng)]) = cells else {
+        let Some([Cell::Bytes(bytes)]) = cells else {
             return Ok(());
         };
-        // A point outside WGS84's ranges is not indexed: no search region
-        // contains it.
-        let Ok(point) = geo::point(*lat, *lng) else {
+        // A point that does not decode (wrong length, non-finite or out of
+        // range) leaves the row unindexed (`INV-IX-7`): admission refuses
+        // such values, so only a row written before could hold one.
+        let Ok([lng, lat]) = crate::records::decode_point_f64le(bytes) else {
+            return Ok(());
+        };
+        let Ok(point) = geo::point(lat, lng) else {
             return Ok(());
         };
         let [x, y, z] = point.unit;

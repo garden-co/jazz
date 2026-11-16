@@ -2332,11 +2332,6 @@ fn the_json_schemas_take_the_keys_the_readers_take() {
             ),
             keys(app_file::TEXT_FIELD_KEYS),
         ),
-        (
-            "a geo index's point",
-            properties(&defs["geoIndex"]["properties"]["geo"]),
-            keys(app_file::GEO_POINT_KEYS),
-        ),
     ] {
         assert_eq!(schema, reader, "{what}");
     }
@@ -2526,11 +2521,7 @@ fn indexed_todos() -> ArtifactInput {
     todos
         .columns
         .columns
-        .push(ColumnDescriptor::new("lat", ColumnType::Double));
-    todos
-        .columns
-        .columns
-        .push(ColumnDescriptor::new("lng", ColumnType::Double));
+        .push(ColumnDescriptor::new("location", ColumnType::Point));
     todos.specialised_indexes = vec![
         SpecialisedIndex {
             name: "search".into(),
@@ -2562,8 +2553,7 @@ fn indexed_todos() -> ArtifactInput {
         SpecialisedIndex {
             name: "place".into(),
             kind: SpecialisedIndexKind::Geo {
-                lat: "lat".into(),
-                lng: "lng".into(),
+                column: "location".into(),
             },
             server_only: false,
         },
@@ -2586,7 +2576,7 @@ fn specialised_indexes_round_trip_through_the_app_file() {
     assert_eq!(
         app["tables"]["todos"]["indexes"],
         serde_json::json!([
-            { "name": "place", "geo": { "lat": "lat", "lng": "lng" } },
+            { "name": "place", "geo": "location" },
             {
                 "name": "search",
                 "text": { "description": 1, "title": { "weight": 4, "length": 256 } },
@@ -2627,19 +2617,19 @@ fn malformed_specialised_indexes_are_refused_by_path() {
             "tables.todos.indexes[0]: an index object names its kind by key",
         ),
         (
-            serde_json::json!({ "name": "x", "geo": { "lat": "lat", "lng": "lng" }, "vector": "embedding" }),
+            serde_json::json!({ "name": "x", "geo": "location", "vector": "embedding" }),
             "an index object has exactly one kind key, not `vector` and `geo`",
         ),
         (
-            serde_json::json!({ "name": "x", "geo": { "lat": "lat", "lng": "lng" }, "metric": "l2" }),
+            serde_json::json!({ "name": "x", "geo": "location", "metric": "l2" }),
             "tables.todos.indexes[0]: unknown key `metric`",
         ),
         (
-            serde_json::json!({ "name": "X", "geo": { "lat": "lat", "lng": "lng" } }),
+            serde_json::json!({ "name": "X", "geo": "location" }),
             "tables.todos.indexes[0].name: `X` is not an index name",
         ),
         (
-            serde_json::json!({ "geo": { "lat": "lat", "lng": "lng" } }),
+            serde_json::json!({ "geo": "location" }),
             "an index object needs `name`",
         ),
         (
@@ -2687,20 +2677,20 @@ fn malformed_specialised_indexes_are_refused_by_path() {
             "a vector index needs `metric`",
         ),
         (
-            serde_json::json!({ "name": "g", "geo": { "lat": "lat", "lon": "lng" } }),
-            "tables.todos.indexes[0].geo: unknown key `lon`",
+            serde_json::json!({ "name": "g", "geo": { "column": "location" } }),
+            "tables.todos.indexes[0].geo: must be a string, not an object; a geo index names a point column",
         ),
         (
-            serde_json::json!({ "name": "g", "geo": { "lat": "lat", "lng": "lng" }, "serverOnly": "yes" }),
+            serde_json::json!({ "name": "g", "geo": "location", "serverOnly": "yes" }),
             "tables.todos.indexes[0].serverOnly: must be true or false",
         ),
         (
-            serde_json::json!({ "name": "g", "geo": { "lat": "lat", "lng": "lng" }, "serverOnly": true }),
+            serde_json::json!({ "name": "g", "geo": "location", "serverOnly": true }),
             "serverOnly indexes are not supported yet",
         ),
         (
-            serde_json::json!({ "name": "g", "geo": { "lat": "title", "lng": "lng" } }),
-            "a geo index coordinate must be an f64 column",
+            serde_json::json!({ "name": "g", "geo": "title" }),
+            "a geo index needs a point column",
         ),
         (
             serde_json::json!(7),
@@ -2714,7 +2704,7 @@ fn malformed_specialised_indexes_are_refused_by_path() {
     let written = write(indexed_todos()).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
     value["tables"]["todos"]["indexes"] = serde_json::json!([
-        { "name": "g", "geo": { "lat": "lat", "lng": "lng" } },
+        { "name": "g", "geo": "location" },
         { "name": "g", "vector": "embedding", "metric": "l2" }
     ]);
     let error = load(value.to_string().as_bytes(), written.permissions.as_bytes())

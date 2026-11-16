@@ -802,13 +802,12 @@ impl TableSchemaBuilder {
         })
     }
 
-    /// Add a geo index over two `f64` columns in degrees.
-    pub fn geo_index(self, name: &str, lat: &str, lng: &str) -> Self {
+    /// Add a geo index over a `point` column.
+    pub fn geo_index(self, name: &str, column: &str) -> Self {
         self.specialised_index(SpecialisedIndex {
             name: name.to_owned(),
             kind: SpecialisedIndexKind::Geo {
-                lat: lat.to_owned(),
-                lng: lng.to_owned(),
+                column: column.to_owned(),
             },
             server_only: false,
         })
