@@ -1129,11 +1129,54 @@ those bytes are refused with it at once until the fetch backoff ends.
   unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
-  is staged and answered `Staged`; a refusal while staging is kept and
-  reported by `Commit`, as the bindings report it. A `Query` naming it reads
-  the transaction's own staged writes. `Commit` answers `Written` with the
-  commit's seq; `Rollback` abandons it. A connection that closes abandons its
-  open transactions.
+  is staged and answered `Staged`; a refusal decided by the row's state, or a
+  serializable conflict, is kept and reported by `Commit`, as the bindings
+  report it. A `Query` naming it reads the transaction's own staged writes.
+  `Commit` answers `Written` with the commit's seq; `Rollback` abandons it. A
+  connection that closes abandons its open transactions.
+- The app's backend (`createJazz`, the Rust endpoint) serves a thin
+  connection's transaction requests itself, so the core never holds a
+  transaction open between calls: `Begin`, `Commit`, `Rollback`, every
+  request naming an open transaction, and the chunks, finish and abort of a
+  stream begun in one. It splits the connection's frames
+  (`jazz::thin_transactions::ThinRouter`) and passes the rest to the core
+  unchanged, keeping the client's order: a request for the backend waits
+  until the core answered every earlier one it answers (a live query and
+  its closing excepted), and frames for the core wait until the backend
+  answered every earlier request for it. The transaction requests are
+  served (`ThinTransactions`) by a client of the session's own, in memory,
+  started on its first transaction request and ended with the connection,
+  linked to the core with the admission the backend gave the connection
+  (the same vouched session, a device account's own token, or, for a
+  trusted backend client, the backend's link) and acting with its identity.
+  So the core reads and checks for it exactly as for the session, and only
+  accepts the finished transaction, as an upload (§8.2):
+  - A mergeable transaction's read fetches from the core first, then reads
+    in the transaction, so it sees the core's current rows with the
+    transaction's staged writes; a serializable one's read hydrates at the
+    transaction's snapshot, as on any replica.
+  - A write to an existing row loads the row from the core first. A staged
+    write the backend refuses outright (invalid values, a row that does not
+    exist) is answered with its refusal, and the transaction's commit fails
+    with it.
+  - The core checks the transaction as a whole when it is committed, in the
+    state it leaves behind (SPEC 7): the order of its writes does not
+    matter.
+  - `Commit` answers once the core accepted the upload, or with the core's
+    refusal; a serializable refusal is answered `transaction_conflict`. A
+    commit the core does not confirm within 30 s is answered
+    `commit_outcome_unknown`: it may have applied. Any other request waiting
+    on the core that long is answered `not_observed`.
+  - A connection whose requests wait 60 s past the last answer for one that
+    does not come is closed (1011), and the client reconnects.
+  - A backend serves at most so many sessions' transactions at once (256 by
+    default); past that, a session's transaction requests are refused with
+    `backpressure`. `createJazz` refuses them, as not supported yet, to a
+    connection bound to another version of the app's schema than its own.
+
+  The core still serves thin transactions itself for a backend from before
+  this, until such backends are gone.
+
 - `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
   of the authority's current frontier, for frozen branch bases.
 - `BeginStream` starts a large-value insert, update or upsert of one
