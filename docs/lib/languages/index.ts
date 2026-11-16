@@ -77,13 +77,14 @@ export const LANGUAGES: readonly Language[] = [
     bindings: {
       file: "examples/stage-plan/apps/kotlin-cli/src/main/kotlin/JazzApp.kt",
       lang: "kotlin",
-      symbols: ["TaskStatus", "Task", "NewTask"],
+      symbols: ["TaskStatus", "Task", "TaskInsert"],
     },
     enabled: false,
   },
   {
     label: "Go",
     backend: true,
+    setupPage: "setup/go",
     bindings: {
       file: "examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go",
       lang: "go",
