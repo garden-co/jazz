@@ -35,7 +35,11 @@ typedef struct JazzSubscription JazzSubscription;
 
 /*
  * Called on a thread of the subscription's own. kind is "delta" (json is
- * the delta JSON; the first has "reset": true and the full result) or
+ * the delta: {"added": [row], "updated": [row], "removed": [id],
+ * "removedKeys": [key], "reset", "coalesced"}; each row carries "$key",
+ * its result's opaque key, which a host holding history or union results
+ * (where one id is several results) applies updates and removals by;
+ * the first has "reset": true and the full result) or
  * "error" (json is the error JSON; no callback follows). Kind "closed"
  * means this subscription ended: its app closed, or its stream ended for
  * another reason (the client stopping, the server ending the query). Both strings are
