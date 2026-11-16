@@ -36,9 +36,10 @@ pub struct JazzHandle {
 
 #[uniffi::export]
 impl JazzHandle {
-    /// Opens an app from its config JSON: `{ "app", "permissions"?,
-    /// "appId"?, "serverUrl"?, "dataDir"?, "storage"?, "backendSecret"?,
-    /// "adminSecret"?, "session"? }`.
+    /// Opens an app from its config JSON: `{ "app", "appId"?, "serverUrl"?,
+    /// "auth"?, "dataDir"?, "storage"?, "contract"? }` (see the README): a
+    /// local client, or an end user with a device key. Bearer users and
+    /// backend clients open with [`Self::open_with_tokens`].
     #[uniffi::constructor]
     pub fn open(config_json: String) -> Result<Arc<Self>> {
         let contract = serde_json::from_str::<serde_json::Value>(&config_json)
@@ -73,7 +74,7 @@ impl JazzHandle {
 
     /// The end user's session as JSON: `{"status": "signedIn", "user":
     /// {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
-    /// `None` for a local app or a backend.
+    /// `None` for a local app.
     pub fn session_state(&self) -> Result<Option<String>> {
         self.core.surface(self.core.session_state())
     }
@@ -110,14 +111,14 @@ impl JazzHandle {
         self.watch("sync", listener)
     }
 
-    /// The permissions bundle a backend published and is pinned to;
-    /// `None` for a client.
+    /// Not part of the documented .65 surface; `None` for every client.
     pub fn bundle(&self) -> Result<Option<String>> {
         self.core.surface(self.core.bundle())
     }
 
-    /// The account id of the user a backend acts as (`session.user`);
-    /// `None` for a client.
+    /// The account id of the user this handle acts as (an end user, a
+    /// scoped backend client, a `for_user` handle); `None` for a local app
+    /// or a trusted backend client (the system).
     pub fn account(&self) -> Result<Option<String>> {
         self.core.surface(self.core.account())
     }
@@ -311,14 +312,43 @@ impl JazzHandle {
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
-        let tx = self
-            .core
-            .surface(self.core.tx_begin(true).and_then(|tx| core::parse_tx(&tx)))?;
-        Ok(Arc::new(Transaction {
-            handle: self,
-            tx,
-            open: std::sync::atomic::AtomicBool::new(true),
-        }))
+        self.begin_with(true)
+    }
+
+    /// Begins a mergeable transaction (TS's default `transaction`): its
+    /// reads see a snapshot and its own writes, its writes commit together
+    /// and merge with concurrent writes, so its commit is never refused as
+    /// a conflict.
+    pub fn begin_mergeable(self: Arc<Self>) -> Result<Arc<Transaction>> {
+        self.begin_with(false)
+    }
+
+    /// Leaves the server: local reads and writes go on, and sync resumes
+    /// with `reconnect` (TS's `disconnect`). Without a server it does
+    /// nothing.
+    pub fn disconnect(&self) -> Result<()> {
+        self.core.surface(self.core.disconnect())
+    }
+
+    /// Resumes sync after `disconnect` (TS's `reconnect`).
+    pub fn reconnect(&self) -> Result<()> {
+        self.core.surface(self.core.reconnect())
+    }
+
+    /// Closes the app and deletes its local store (TS's
+    /// `deleteClientStorage`): the next open starts empty and syncs again.
+    /// Writes the server hasn't accepted yet are lost. Refused while another
+    /// open app holds the same `dataDir`.
+    pub fn delete_client_storage(&self) -> Result<()> {
+        self.core.surface(self.core.delete_client_storage())
+    }
+
+    /// Calls `listener` with each write the server refused that no durable
+    /// wait (a `global` tier, `wait_for_sync`) reported, as TS's
+    /// `onMutationError`: `{"transaction", "message", "denied",
+    /// "serializable"}`. Refusals from before the first watch come first.
+    pub fn watch_mutation_errors(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
+        self.watch("mutationErrors", listener)
     }
 
     /// Subscribes to the query. The listener is called on a thread of the
@@ -347,9 +377,58 @@ impl JazzHandle {
     pub fn shutdown(&self) -> Result<()> {
         self.core.surface(self.core.close())
     }
+
+    /// [`Self::shutdown`], first waiting up to `timeout_ms` for the writes
+    /// the client holds to reach the server (TS's `close({ timeoutMs })`,
+    /// 10 000 by default there). With memory storage, writes still unsent
+    /// fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
+    /// the app is closed all the same. `0` closes at once.
+    pub fn shutdown_within(&self, timeout_ms: u64) -> Result<()> {
+        self.core.surface(
+            self.core
+                .close_within(Some(std::time::Duration::from_millis(timeout_ms))),
+        )
+    }
+
+    /// A backend client's kind (`"auth": { "credential": true }`), as the
+    /// main backend decided it: `"trusted"` or `"scoped"`; `None` for any
+    /// other app.
+    pub fn backend_client(&self) -> Result<Option<String>> {
+        self.core
+            .surface(self.core.backend_client())
+            .map(|kind| kind.map(str::to_owned))
+    }
+
+    /// On a trusted backend client, a handle acting as `user_id` (the id the
+    /// main backend's `authenticate` names them by), with `claims_json` (a
+    /// JSON object; empty for `{}`) as the claims its permissions see. It
+    /// never creates an account: `NoAccount` (contract 2) when the user has
+    /// none yet; `Permission` when the main backend refuses the identity;
+    /// `Refused` on a scoped client, a `for_user` handle or any other app.
+    /// Its `shutdown` leaves this handle open; after this handle closes, its
+    /// calls fail with `Closed`.
+    pub fn for_user(&self, user_id: String, claims_json: String) -> Result<Arc<Self>> {
+        let core = self
+            .core
+            .surface(self.core.for_user(&user_id, &claims_json))?;
+        Ok(Arc::new(Self { core }))
+    }
 }
 
 impl JazzHandle {
+    fn begin_with(self: Arc<Self>, serializable: bool) -> Result<Arc<Transaction>> {
+        let tx = self.core.surface(
+            self.core
+                .tx_begin(serializable)
+                .and_then(|tx| core::parse_tx(&tx)),
+        )?;
+        Ok(Arc::new(Transaction {
+            handle: self,
+            tx,
+            open: std::sync::atomic::AtomicBool::new(true),
+        }))
+    }
+
     fn watch(&self, what: &str, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
         let inner = self.core.surface(
             self.core

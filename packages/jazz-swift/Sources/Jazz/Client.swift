@@ -55,6 +55,11 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .Permission(let message): return JazzError.permissionDenied(message)
         case .NotSupported(let message): return JazzError.notSupported(message)
         case .Conflict(let message): return JazzError.conflict(message)
+        // A backend client's (jazz-ffi's for_user and close with a
+        // timeout); a Swift app never opens one, but the switch is
+        // exhaustive.
+        case .NoAccount(_, let message): return JazzError.refused(message)
+        case .Unsynced(_, let message): return JazzError.io(message)
         }
     }
 }
