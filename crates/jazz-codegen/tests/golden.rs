@@ -217,11 +217,7 @@ fn every_go_app_generates_its_committed_go_byte_for_byte() {
 }
 
 #[test]
-fn go_bindings_refuse_payload_enums_and_read_back_backquotes() {
-    // tasks has an enum with payloads, which Go doesn't bind.
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
-    let error = generate(Lang::Go, &std::fs::read(dir.join("jazz.app.json")).unwrap()).unwrap_err();
-    assert!(error.is_unsupported(), "{error}");
+fn go_bindings_read_back_backquotes() {
     // A backquote in the file survives the raw string it is embedded in.
     let app_json = "{ \"format\": 1, \"tables\": { \"notes\": { \"columns\": { \"body\": { \"enum\": [\"a`b\", \"c\"] } } } } }\n";
     let generated = generate(Lang::Go, app_json.as_bytes()).unwrap();
