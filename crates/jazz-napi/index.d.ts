@@ -233,6 +233,13 @@ export declare class NapiDb {
    * the SQLite file when their write call returns, so only `global` waits.
    */
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
+  /**
+   * TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+   * session's author bytes; none for this database's own) reached `tier`,
+   * failing with a rejection of theirs, including one that settled
+   * before and no wait reported.
+   */
+  waitForSync(tier: string, writer?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 
@@ -419,6 +426,38 @@ export interface DeleteOptions {
   updatedAtMs?: number
 }
 
+/** Options of [`generate_for_dir`] and [`migrations_create_for_dir`]. */
+export interface DirOptions {
+  /** Fail when the files or bindings are stale, and write nothing. */
+  check?: boolean
+  /**
+   * The bindings' languages (`"ts"`, `"rust"`, …); by default each the
+   * directory's files say the app is written in.
+   */
+  lang?: Array<string>
+  /**
+   * The language assumed when nothing in the directory names one and
+   * no other language's manifest is there (the npm CLI passes `"ts"`).
+   */
+  fallback?: string
+}
+
+/** What `generateForDir` / `migrationsCreateForDir` did in an app's directory. */
+export interface DirOutcome {
+  /** Lines to print. */
+  notes: Array<string>
+  /** Warnings to print. */
+  warnings: Array<string>
+  /** Bindings files written, relative to the directory. */
+  written: Array<string>
+  /** Bindings files already up to date, relative to the directory. */
+  current: Array<string>
+  /** `migrationsCreateForDir`: whether `jazz.app.json` changed. */
+  changed: boolean
+  /** `migrationsCreateForDir`: JSON paths of the TODOs left to resolve. */
+  todos: Array<string>
+}
+
 /** Authenticates before returning plaintext; rejects short or invalid ciphertext. */
 export declare function e2eeSodiumDecrypt(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, ciphertext: Uint8Array): Uint8Array
 
@@ -472,6 +511,13 @@ export interface ExplainedReadRow {
  * the whole `jazz.generated.ts`.
  */
 export declare function generate(lang: string, appJson: string): string
+
+/**
+ * `jazz-tools generate [--check]` in `dir`, the directory of the app's
+ * `jazz.app.json`: the same languages, checks and bytes as the
+ * `jazz-tools` binary, which runs the same code.
+ */
+export declare function generateForDir(dir: string, options?: DirOptions | undefined | null): DirOutcome
 
 export interface InsertOptions {
   rowId?: Uint8Array
@@ -528,6 +574,12 @@ export declare function loadBackendApp(schema: string, permissions: string): Jso
  * generated from to `appJson`'s edited `tables`, named `name`.
  */
 export declare function migrationsCreate(appJson: string, bindings: string | undefined | null, name: string): CreatedMigration
+
+/**
+ * `jazz-tools migrations create --name <name>` in `dir`, as the
+ * `jazz-tools` binary runs it.
+ */
+export declare function migrationsCreateForDir(dir: string, name: string, options?: DirOptions | undefined | null): DirOutcome
 
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 

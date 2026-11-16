@@ -182,9 +182,6 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
   } & Membership<Date | number>
 >;
 type UuidWhere<TOptional extends boolean> = WhereEqNe<string, TOptional, Membership<string>>;
-type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
-  ? { type: Case; where?: Partial<Omit<T, "type">> }
-  : never;
 type ArrayElement<T> = T extends readonly (infer E)[] ? E : never;
 
 type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
@@ -204,9 +201,7 @@ type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
               : C["kind"] extends "json"
                 ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
                 : C["kind"] extends "enum"
-                  ? [C["value"]] extends [string]
-                    ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
-                    : { match?: PayloadEnumMatch<C["value"]> }
+                  ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
                   : C["kind"] extends "array"
                     ? WhereEqNe<
                         C["value"],
