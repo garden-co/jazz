@@ -400,6 +400,7 @@ async fn missing_operation_policies_deny_reads_and_writes() {
                         // rejected with it (INV-HIST-20).
                         assert!(
                             error.contains("authorization_denied")
+                                || error.contains("(permission_denied)")
                                 || error.contains("read policy denied")
                                 || error.contains("not loaded locally")
                                 || operation == "DELETE"

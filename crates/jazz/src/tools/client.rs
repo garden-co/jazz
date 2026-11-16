@@ -2043,16 +2043,11 @@ impl JazzClient {
             .settle(db.wait_for_sync(CoreDurabilityTier::Global, writer))
             .await?
             .map_err(|error| {
-                if error.is_authorization_denied() {
-                    JazzError::Sync(format!(
-                        "a write was rejected before reaching the server: {}",
-                        crate::db::AUTHORIZATION_DENIED
-                    ))
-                } else {
+                JazzError::write_rejected(&error).unwrap_or_else(|| {
                     JazzError::Write(format!(
                         "a write was rejected before reaching the server: {error}"
                     ))
-                }
+                })
             })
     }
 
@@ -2090,20 +2085,14 @@ impl JazzClient {
             .await?
             .map(drop)
             .map_err(|error| {
-                // A policy rejection is reported by its reason, as the
-                // authority's verdict on the transaction.
-                if error.is_authorization_denied() {
-                    JazzError::Sync(format!(
-                        "{} {tier:?} durability: {}",
-                        super::REJECTED_BEFORE,
-                        crate::db::AUTHORIZATION_DENIED
-                    ))
-                } else {
+                // A rejection carries the authority's verdict as TS's code
+                // and reason.
+                JazzError::write_rejected(&error).unwrap_or_else(|| {
                     JazzError::Write(format!(
                         "{} {tier:?} durability: {error}",
                         super::REJECTED_BEFORE
                     ))
-                }
+                })
             })
     }
 
@@ -2508,12 +2497,20 @@ impl JazzClient {
                 continue;
             }
             let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            let (code, reason) =
+                super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
+                    // Any other refusal is a plain `write_rejected`, as TS
+                    // reports it, with the core's diagnostic.
+                    ("write_rejected".to_owned(), rejection.error.to_string())
+                });
             errors.push(MutationError {
                 transaction: TransactionId::from_committed_tx(TxId {
                     time: crate::time::TxTime(rejection.seq),
                     node,
                 }),
                 message: rejection.error.to_string(),
+                code,
+                reason,
                 denied: rejection.error.is_authorization_denied(),
                 serializable: rejection.serializable,
             });
@@ -2614,15 +2611,24 @@ pub struct StreamingUpload {
 /// A write of this client the server refused: see
 /// [`JazzClient::take_mutation_errors`].
 ///
-/// Serializes as `{"transaction": "<id>", "message", "denied",
-/// "serializable"}`, the transaction as its string id.
+/// Serializes as `{"transaction": "<id>", "message", "code", "reason",
+/// "denied", "serializable"}`, the transaction as its string id. More
+/// fields may come.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct MutationError {
     /// The refused commit, as its write returned it.
     #[serde(serialize_with = "serialize_display")]
     pub transaction: TransactionId,
+    /// The core's diagnostic.
     pub message: String,
+    /// TS's code (`MutationErrorEvent.code`): `permission_denied`,
+    /// `serialization_conflict`, `transaction_conflict`,
+    /// `client_clock_too_far_ahead` or `write_rejected`.
+    pub code: String,
+    /// TS's readable reason (`MutationErrorEvent.reason`).
+    pub reason: String,
     /// Refused by a permission.
     pub denied: bool,
     /// A serializable transaction's commit.
