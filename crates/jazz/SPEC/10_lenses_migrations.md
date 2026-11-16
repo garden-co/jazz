@@ -794,8 +794,9 @@ An app is described by two readable JSON files beside its `schema.ts`:
 - `jazz.permissions.json`: the current version's permissions. Only backends
   read it, so no client bundle carries the app's policies.
 
-The files are meant to be read by people and agents, and later written by
-them (see **Bindings** below for alpha.65, where they are the source). In
+The files are meant to be read by people and agents. From alpha.66 they are
+never authored: TypeScript is the only source, and they are generated from
+it (see **Generated files** below; in alpha.65 they were the source). In
 stage 1 (alpha.63) they are an IR: `jazz-tools generate` and
 `jazz-tools migrations create` compile the TS DSL (`schema.ts`,
 `permissions.ts`, `migrations/*.ts`) to them through the Rust writer
@@ -866,12 +867,19 @@ generate` writes both files from it, and marks each with a top-level
   files with the marker, `artifact::mark_generated(text, by)` marks one
   text, and `artifact::rewrite(app, permissions, by?)` checks two readable
   files as `load` does and re-renders them through the writer (keeping
-  migration `name`s; dropping `$comment`s), with the marker when asked. The
-  standalone `jazz-tools` binary can't read TypeScript: for an app with a
-  `schema.ts` in its directory, `src/` or `src/lib/`, its `generate` and
-  `migrations create` refuse, pointing to `npx jazz-tools generate`, while
-  `generate --check` (for CI gates) checks the committed files, their
-  `$generated` digests and the bindings, and notes that freshness from the
+  migration `name`s; dropping `$comment`s), with the marker when asked.
+- Only `npx jazz-tools generate` and `npx jazz-tools migrations create`
+  write an app's files, bindings and migrations, and only from `schema.ts`
+  (in the app's directory, `src/` or `src/lib/`). An app with
+  `jazz.app.json` but no `schema.ts` is refused by both, with a pointer to
+  `npx jazz-tools upgrade` (which writes `schema.ts` from the files,
+  keeping the schema hashes and bundle id): editing the JSON is not
+  a second authoring path. The standalone `jazz-tools` binary can't read
+  TypeScript, so it never writes: its `generate` and `migrations create`
+  refuse, pointing to `npx jazz-tools …` (or, without `schema.ts`, to
+  `upgrade` as above), while `generate --check` (for CI gates) checks the
+  committed files, their `$generated` digests (when present) and the
+  bindings, and, for an app with `schema.ts`, notes that freshness from the
   TypeScript is `npx jazz-tools generate --check`'s to check.
 
 #### `jazz.app.json`
@@ -1225,8 +1233,9 @@ don't reproduce the engine input exactly (schema hashes, lenses,
 permissions), it refuses with "not supported … yet" rather than write files
 that would publish something else.
 
-**Bindings.** From alpha.65 the files are the app's source in every
-language. `crates/jazz-codegen` generates typed bindings from
+**Bindings.** Every language opens the same files (alpha.65 made them the
+app's source in every language; from alpha.66 they are generated from
+`schema.ts`). `crates/jazz-codegen` generates typed bindings from
 `jazz.app.json` (`jazz.generated.ts` in TS), which apps commit. They embed
 the file's `source`, `sha256:` and the hex SHA-256 of its canonical text
 (the parsed file printed canonically, so reformatting the file leaves it
@@ -1240,9 +1249,9 @@ only the bindings loads its permissions against their compiled app
 (`artifact::load_backend`), with every check `load` runs.
 
 The bindings also record the version the app last generated against, which
-is how `jazz-tools generate` (and the `jazz-tools` binary's `validate`)
-tells edits apart: when the file's versions don't include the bindings'
-current schema, `tables` changed without a migration, and validate refuses
+is how `jazz-tools generate` tells edits apart: when the file's versions
+don't include the bindings' current schema, `tables` changed without a
+migration, and generate refuses
 ("the schema changed since the last version: run `jazz-tools migrations
 create --name <name>`") before it overwrites the only copy of that version.
 `migrations create` moves that version into `history` under its short hash

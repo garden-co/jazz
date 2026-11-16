@@ -153,6 +153,7 @@ wrong number of arguments, and a `schema.ts` or `migrations/` file that already 
 `--schema-dir` (the directory holding `jazz.app.json`) and `--dry-run` work as above.
 
 From then on, `schema.ts` is the source: change it and run `generate`, rather than editing the JSON.
+Until the app has a `schema.ts`, `generate` and `migrations create` refuse it and point you here.
 
 ### What it refuses
 

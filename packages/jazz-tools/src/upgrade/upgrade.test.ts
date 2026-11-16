@@ -248,6 +248,28 @@ describe("jazz-tools upgrade: conversions", () => {
     expect(files).toContain("src/jazz_app.rs");
   });
 
+  it("writes a JSON-only app with transforms and computed fields, keeping the hashes and bundle id", async () => {
+    const dir = fixture("json-only");
+    // crates/jazz-app's tasks app: a transformed column (`isoDate`), computed fields, no permissions.
+    const tasks = readFileSync(
+      join(FIXTURES, "../../../../../crates/jazz-app/tests/fixtures/tasks/jazz.app.json"),
+      "utf8",
+    );
+    writeFileSync(join(dir, "jazz.app.json"), tasks);
+    rmSync(join(dir, "jazz.permissions.json"));
+    const before = await artifactIdentity(
+      tasks,
+      '{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }\n',
+    );
+    await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(before);
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toContain('.transform("isoDate", s.string())');
+    const app = JSON.parse(readFileSync(join(dir, "jazz.app.json"), "utf8"));
+    expect(app.transforms).toEqual({ isoDate: { stored: "timestamp", view: "string" } });
+    expect(Object.keys(app.tables.tasks.computed)).toEqual(["urgent", "titleLen"]);
+  });
+
   it("reports the environment reads of the old permissions and marks them in the printed ones", async () => {
     const dir = fixture("env-permissions");
     // As set where the app last ran `validate`: the check runs it again.

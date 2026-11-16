@@ -673,6 +673,35 @@ const SNAPSHOT_FILE = /^(?:(\d{8,17}T\d{6})-)?([0-9a-f]{12})\.json$/i;
 const MIGRATION_FILE = /-([0-9a-f]{12})-([0-9a-f]{12})\.ts$/i;
 
 /**
+ * A version's tables without their columns' `transform`s: a snapshot holds
+ * what is stored, and the top-level `transforms` that name a column's view
+ * type aren't part of a version (nor of its schema hash).
+ */
+function withoutTransforms(tables: Record<string, ReadableTable>): Record<string, ReadableTable> {
+  return Object.fromEntries(
+    Object.entries(tables).map(([name, table]) => {
+      const columns = (table as { columns?: Record<string, unknown> }).columns;
+      if (!columns) return [name, table];
+      return [
+        name,
+        {
+          ...table,
+          columns: Object.fromEntries(
+            Object.entries(columns).map(([column, spec]) => {
+              if (spec && typeof spec === "object" && "transform" in spec) {
+                const { transform: _transform, ...stored } = spec as Record<string, unknown>;
+                return [column, stored];
+              }
+              return [column, spec];
+            }),
+          ),
+        } as ReadableTable,
+      ];
+    }),
+  );
+}
+
+/**
  * The engine schema (the snapshot's contents) and its full hash of a version
  * given in readable form, through the Rust compiler (napi `compileApp`).
  * Relations a table declares are kept on the snapshot, as .64 wrote them;
@@ -684,7 +713,7 @@ export async function snapshotFromVersion(
   const compiled = (await compileApp(
     JSON.stringify({
       $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
-      tables: versionTables,
+      tables: withoutTransforms(versionTables),
     }),
   )) as {
     schema: { current: string; schemas: Array<{ hash: string; schema: { tables: WasmSchema } }> };

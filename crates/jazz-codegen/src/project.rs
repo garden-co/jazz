@@ -275,7 +275,7 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
     }
     let Some((lang, text)) = committed else {
         outcome.notes.push(
-            "no committed bindings, so no earlier version to migrate from: run `jazz-tools generate`"
+            "no committed bindings, so no earlier version to migrate from: run `npx jazz-tools generate`"
                 .into(),
         );
         return Ok(outcome);
@@ -305,7 +305,7 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
         outcome.current = generated.current;
     } else {
         outcome.notes.push(format!(
-            "resolve {} TODO{} in {}, then run `jazz-tools generate`:",
+            "resolve {} TODO{} in {}, then run `npx jazz-tools generate`:",
             created.todos.len(),
             if created.todos.len() == 1 { "" } else { "s" },
             APP_FILE
@@ -442,7 +442,7 @@ mod tests {
         assert!(
             generate(&dir, &[ts.into()], true)
                 .unwrap_err()
-                .contains("run `jazz-tools generate`")
+                .contains("run `npx jazz-tools generate`")
         );
         generate(&dir, &[ts.into()], false).unwrap();
         generate(&dir, &[ts.into()], true).unwrap();
