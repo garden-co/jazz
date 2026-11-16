@@ -134,7 +134,7 @@ Each language implements the transforms itself; the stored values, migrations, p
 indexes see only the stored type. Permissions can't refer to a transformed column's app-facing
 value.
 
-A transform converts one value on its own: it can't read other columns of the row. (alpha.64's
+A transform converts one value on its own: it can't read other columns of the row. (alpha.65's
 `dependsOn` option is gone, and `jazz-tools upgrade` refuses an app that uses it.) To derive a
 read-only value from several columns, use a computed field.
 

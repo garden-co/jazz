@@ -574,3 +574,71 @@ async fn linking_survives_a_retired_guest_key() {
     session.close().await.unwrap();
     app.stop().await;
 }
+
+/// A refused link's fallback sign-in fails: the guest stays, and the next
+/// refresh signs the user in without linking again (TS's `refusedLink`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_link_is_not_tried_again_when_its_fallback_failed() {
+    let app = App::start().await;
+    {
+        let mut links = app.relay.links.lock().unwrap();
+        links.refused.insert("pat".to_owned());
+        links.fail_sign_in.insert("pat".to_owned());
+    }
+    let token = bearer(None);
+    let session = JazzSession::open(client_files(), app.session(&token).initial(Initial::Device))
+        .await
+        .unwrap();
+    let guest = session.snapshot().user.unwrap();
+    *token.lock().unwrap() = Some("token-pat".to_owned());
+    assert!(session.refresh().await.is_err());
+    // The guest's client is as it was.
+    let failed = session.snapshot();
+    assert_eq!(failed.user.unwrap(), guest);
+    assert_eq!(failed.status, SessionStatus::Ready);
+    assert_eq!(app.relay.links.lock().unwrap().attempts, 1);
+
+    session.refresh().await.unwrap();
+    let pat = session.snapshot().user.unwrap();
+    assert_eq!(pat.subject, "pat");
+    assert_ne!(pat.account, guest.account);
+    assert_eq!(app.relay.links.lock().unwrap().attempts, 1);
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// A manual link that went through, but whose reopen on the bearer failed,
+/// is retried by signing the linked user in, not by linking again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_after_a_link_whose_reopen_failed_signs_the_user_in() {
+    let app = App::start().await;
+    let token = bearer(None);
+    let session = JazzSession::open(
+        client_files(),
+        app.session(&token)
+            .initial(Initial::Device)
+            .link_guest(false),
+    )
+    .await
+    .unwrap();
+    let guest = session.snapshot().user.unwrap();
+    *token.lock().unwrap() = Some("token-quin".to_owned());
+    app.relay
+        .links
+        .lock()
+        .unwrap()
+        .fail_sign_in
+        .insert("quin".to_owned());
+    assert!(session.link_device_account().await.is_err());
+    assert_eq!(session.snapshot().status, SessionStatus::Error);
+
+    session.retry().await.unwrap();
+    let quin = session.snapshot().user.unwrap();
+    assert_eq!(
+        (quin.subject.as_str(), quin.account),
+        ("quin", guest.account)
+    );
+    assert_eq!(session.snapshot().status, SessionStatus::Ready);
+    session.close().await.unwrap();
+    app.stop().await;
+}
