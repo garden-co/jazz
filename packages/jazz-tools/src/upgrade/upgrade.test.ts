@@ -60,7 +60,13 @@ function expectGolden(
   report: UpgradeReport,
   options: { generated?: boolean } = {},
 ): void {
-  const files = projectFiles(dir);
+  // Snapshots `generate` writes are stamped with the time: compare them by hash.
+  const files = Object.fromEntries(
+    Object.entries(projectFiles(dir)).map(([path, text]) => [
+      path.replace(/(migrations\/snapshots\/)\d{8}T\d{6}-/, "$1<stamp>-"),
+      text,
+    ]),
+  );
   const generated = files["jazz.generated.ts"];
   delete files["jazz.generated.ts"];
   // Rust bindings are jazz-codegen's output too.

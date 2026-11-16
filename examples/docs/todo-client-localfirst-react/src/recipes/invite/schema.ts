@@ -1,6 +1,6 @@
+// #region schema
 import { schema as s } from "jazz-tools";
 
-// #region schema
 export const schema = s.defineSchema({
   chatInvites: s.table(
     { chatId: s.uuid(), code: s.string(), singleUse: s.boolean() },

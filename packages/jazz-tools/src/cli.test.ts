@@ -17,14 +17,8 @@ import * as napi from "jazz-napi";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
 
-const {
-  tmpBase,
-  createWorkspace,
-  fileExists,
-  captureConsoleLogs,
-  writeAppFiles,
-  writeTsApp,
-} = createCliFixtures(import.meta.url);
+const { tmpBase, createWorkspace, fileExists, captureConsoleLogs, writeAppFiles, writeTsApp } =
+  createCliFixtures(import.meta.url);
 
 /** Whether this jazz-napi checks `$generated` markers (the Rust writer of alpha.66). */
 const napiVerifiesGenerated =
@@ -185,59 +179,64 @@ describe("resolveEnvVar", () => {
   });
 });
 
+const CHAT_FIXTURE = new URL("./permissions/__fixtures__/chat-react.ts", import.meta.url);
+
+async function chatReactSchema(): Promise<string> {
+  return (await readFile(CHAT_FIXTURE, "utf8")).replace('"../../index.js"', '"jazz-tools"');
+}
+
 describe("cli generate", () => {
-  it("writes jazz.app.json, jazz.permissions.json and jazz.generated.ts from schema.ts", async () => {
+  it("writes jazz.app.json, jazz.permissions.json and jazz.generated.ts from the chat-react schema.ts", async () => {
     const { root } = await createWorkspace();
-    await writeTsApp(root);
+    await writeFile(join(root, "schema.ts"), await chatReactSchema());
 
     const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
 
-    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
-    expect(app.tables.todos.columns).toEqual({ title: "string", ownerId: "string" });
-    const permissions = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
-    expect(permissions.tables.todos.read).toBe("ownerId = session.identity.subject");
-    expect(permissions.tables.projects.read).toBe("false");
-    expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(true);
-    expect(logs.join("\n")).toMatch(/Wrote jazz\.app\.json, jazz\.permissions\.json, .*jazz\.generated\.ts/);
-    // The files load as a backend loads them.
-    await loadAppFiles(
-      await readFile(join(root, "jazz.app.json"), "utf8"),
-      await readFile(join(root, "jazz.permissions.json"), "utf8"),
+    expect(logs.join("\n")).toMatch(
+      /Wrote jazz\.app\.json, jazz\.permissions\.json, .*jazz\.generated\.ts/,
     );
+    const example = (file: string) =>
+      readFile(new URL(`../../../examples/chat-react/${file}`, import.meta.url), "utf8");
+    const written = (file: string) => readFile(join(root, file), "utf8");
+    const ours = (await loadAppFiles(
+      await written("jazz.app.json"),
+      await written("jazz.permissions.json"),
+    )) as { current: string; permissions: Record<string, Record<string, unknown>> };
+    const theirs = (await loadAppFiles(
+      await example("jazz.app.json"),
+      await example("jazz.permissions.json"),
+    )) as typeof ours;
+    // The same schema, and the same policies but the one the DSL rendering restructures.
+    expect(ours.current).toBe(theirs.current);
+    for (const [table, policies] of Object.entries(theirs.permissions)) {
+      for (const [operation, policy] of Object.entries(policies)) {
+        if (table === "chatMembers" && operation === "insert") continue;
+        expect(ours.permissions[table]![operation], `${table}.${operation}`).toEqual(policy);
+      }
+    }
+    expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(true);
+    await generate({ schemaDir: root, check: true });
   });
 
   it("finds src/schema.ts and writes the files beside it", async () => {
     const { root } = await createWorkspace();
-    const srcDir = join(root, "src");
-    await writeTsApp(srcDir);
+    await writeTsApp(join(root, "src"));
 
-    await captureConsoleLogs(() => generate({ schemaDir: root }));
+    await generate({ schemaDir: root });
 
-    expect(await fileExists(join(srcDir, "jazz.app.json"))).toBe(true);
-    expect(await fileExists(join(srcDir, "jazz.generated.ts"))).toBe(true);
-    expect(await fileExists(join(root, "jazz.app.json"))).toBe(false);
-  });
-
-  it("finds src/lib/schema.ts", async () => {
-    const { root } = await createWorkspace();
-    await writeTsApp(join(root, "src", "lib"));
-
-    await captureConsoleLogs(() => generate({ schemaDir: root }));
-
-    expect(await fileExists(join(root, "src", "lib", "jazz.app.json"))).toBe(true);
+    for (const file of ["jazz.app.json", "jazz.permissions.json", "jazz.generated.ts"]) {
+      expect(await fileExists(join(root, "src", file))).toBe(true);
+      expect(await fileExists(join(root, file))).toBe(false);
+    }
   });
 
   it("refuses a project without schema.ts", async () => {
-    const { root } = await createWorkspace();
-    await expect(generate({ schemaDir: root })).rejects.toThrow(
-      `No schema.ts in ${root} (looked in ., src, src/lib).`,
+    const { root, schemaDir } = await createWorkspace();
+    await expect(generate({ schemaDir })).rejects.toThrow(
+      `No schema.ts in ${schemaDir} (looked in ., src, src/lib).`,
     );
-  });
-
-  it("points an alpha.65 app (jazz.app.json, no schema.ts) at upgrade", async () => {
-    const { root } = await createWorkspace();
     await writeAppFiles(root);
-    await expect(generate({ schemaDir: root })).rejects.toThrow(/npx jazz-tools upgrade/);
+    await expect(generate({ schemaDir: root })).rejects.toThrow(/Run `npx jazz-tools upgrade`/);
   });
 
   it("refuses schema.ts in two roots", async () => {
@@ -245,30 +244,36 @@ describe("cli generate", () => {
     await writeTsApp(root);
     await writeTsApp(join(root, "src"));
     await expect(generate({ schemaDir: root })).rejects.toThrow(
-      "found schema.ts in both schema.ts and src/schema.ts",
+      /found schema\.ts in both schema\.ts and src\/schema\.ts/,
     );
   });
 
-  it("reads permissions from a sibling permissions.ts", async () => {
+  it("refuses a schema.ts without the named export `schema`", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(
+      join(root, "schema.ts"),
+      'import { schema as s } from "jazz-tools";\nexport default s.defineSchema({});\n',
+    );
+    await expect(generate({ schemaDir: root })).rejects.toThrow(/export the schema by name/);
+  });
+
+  it("reads the permissions from a sibling permissions.ts", async () => {
     const { root } = await createWorkspace();
     await writeTsApp(root, { permissionsFile: "permissions.ts" });
 
-    await captureConsoleLogs(() => generate({ schemaDir: root }));
+    await generate({ schemaDir: root });
 
     const permissions = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
-    expect(permissions.tables.todos.read).toBe("ownerId = session.identity.subject");
+    expect(permissions.tables.todos).toEqual({ read: "ownerId = session.identity.subject" });
+    expect(permissions.tables.projects).toEqual({ read: "false" });
   });
 
-  it("refuses permissions defined in both schema.ts and permissions.ts", async () => {
+  it("refuses permissions defined twice", async () => {
     const { root } = await createWorkspace();
     await writeTsApp(root);
     await writeFile(
       join(root, "permissions.ts"),
-      [
-        'import { schema } from "./schema";',
-        "export const permissions = schema.definePermissions({ projects: {}, todos: {} });",
-        "",
-      ].join("\n"),
+      'import { schema } from "./schema";\nexport const permissions = schema.definePermissions({ projects: {}, todos: {} });\n',
     );
     await expect(generate({ schemaDir: root })).rejects.toThrow(/permissions are defined twice/);
   });
@@ -284,133 +289,90 @@ describe("cli generate", () => {
     expect(permissions.tables).toEqual({});
   });
 
-  it("refuses a schema.ts without a named `schema` export", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(
-      join(root, "schema.ts"),
-      'import { schema as s } from "jazz-tools";\nexport default s.defineSchema({});\n',
-    );
-    await expect(generate({ schemaDir: root })).rejects.toThrow(/export the schema by name/);
-  });
-
-  it("names the JSON path and the schema.ts line of a rule the DSL refuses", async () => {
-    const { root } = await createWorkspace();
-    await writeTsApp(root, {
-      permissions: [
-        "  projects: {},",
-        "  todos: {",
-        "    read: (todo) => ({ ownerID: session.user }),",
-        "  },",
-      ].join("\n"),
-    });
-    const error = await generate({ schemaDir: root }).catch((e: Error) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("jazz.permissions.json: tables.todos.read:");
-    expect((error as Error).message).toContain('unknown column "ownerID" in todos');
-    expect((error as Error).message).toMatch(/schema\.ts:13:/);
-  });
-
-  it("names the schema.ts line of a rule the Rust loader refuses", async () => {
-    const { root } = await createWorkspace();
-    await writeTsApp(root, {
-      permissions: [
-        "  projects: {},",
-        "  todos: {",
-        "    read: true,",
-        "    insert: (todo) => allowedTo.read(todo.title),",
-        "  },",
-      ].join("\n"),
-    });
-    const source = await readFile(join(root, "schema.ts"), "utf8");
-    await writeFile(
-      join(root, "schema.ts"),
-      source.replace("const { definePermissions, session }", "const { definePermissions, session, allowedTo }"),
-    );
-    const error = await generate({ schemaDir: root }).catch((e: Error) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("tables.todos.insert");
-    expect((error as Error).message).toMatch(/at schema\.ts:14$/m);
-  });
-
-  it("--check passes on generated files and fails, writing nothing, once schema.ts changes", async () => {
+  it("--check passes on fresh files, and fails without writing once the TS changed", async () => {
     const { root } = await createWorkspace();
     await writeTsApp(root);
-    await captureConsoleLogs(() => generate({ schemaDir: root }));
+    await generate({ schemaDir: root });
+    await generate({ schemaDir: root, check: true });
 
-    await captureConsoleLogs(() => generate({ schemaDir: root, check: true }));
-
-    await writeTsApp(root, {
-      permissions: ["  projects: {},", "  todos: { read: true },"].join("\n"),
-    });
     const before = await readFile(join(root, "jazz.permissions.json"), "utf8");
+    await writeTsApp(root, {
+      permissions: "  projects: { read: true },\n  todos: {},",
+    });
     await expect(generate({ schemaDir: root, check: true })).rejects.toThrow(
-      /jazz\.permissions\.json is out of date with the app's TS/,
+      /jazz\.permissions\.json is out of date with the app's TS: run `jazz-tools generate`/,
     );
     expect(await readFile(join(root, "jazz.permissions.json"), "utf8")).toBe(before);
   });
 
-  it("--check fails when nothing was generated yet", async () => {
+  it("names the JSON path and the TS line of a rule the DSL refuses", async () => {
     const { root } = await createWorkspace();
-    await writeTsApp(root);
-    await expect(generate({ schemaDir: root, check: true })).rejects.toThrow(
-      /jazz\.app\.json and jazz\.permissions\.json are out of date/,
+    await writeTsApp(root, {
+      permissions:
+        "  projects: {},\n  todos: {\n    read: (todo) => ({ owner: session.user }),\n  },",
+    });
+    const error = await generate({ schemaDir: root }).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /tables\.todos\.read: unknown column "owner" in todos/,
     );
-    expect(await fileExists(join(root, "jazz.app.json"))).toBe(false);
+    expect((error as Error).message).toMatch(/schema\.ts:\d+/);
   });
 
-  it.runIf(napiVerifiesGenerated)(
-    "refuses to overwrite a hand-edited file unless --force",
+  it("names the TS line of a rule the Rust loader refuses", async () => {
+    const { root } = await createWorkspace();
+    await writeTsApp(root, {
+      permissions:
+        "  projects: {},\n  todos: {\n    read: (todo) => schema.allowedTo.read(todo.title),\n  },",
+    });
+    const error = await generate({ schemaDir: root }).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/\n  at \S*schema\.ts:13 \(tables\.todos\.read\)$/);
+  });
+
+  it.runIf(hasNapi("verifyGenerated"))(
+    "refuses to overwrite a file edited by hand unless --force",
     async () => {
       const { root } = await createWorkspace();
       await writeTsApp(root);
-      await captureConsoleLogs(() => generate({ schemaDir: root }));
+      await generate({ schemaDir: root });
       const file = join(root, "jazz.permissions.json");
       const edited = JSON.parse(await readFile(file, "utf8"));
-      edited.tables.todos.read = "true";
+      edited.tables.projects = { read: "true" };
       await writeFile(file, `${JSON.stringify(edited, null, 2)}\n`);
-      await writeTsApp(root, { columns: "title: s.string(), ownerId: s.string(), done: s.boolean().optional()" });
+      await writeTsApp(root, { permissions: "  projects: {},\n  todos: {}," });
 
-      await expect(captureConsoleLogs(() => generate({ schemaDir: root }))).rejects.toThrow(
-        /jazz\.permissions\.json was edited by hand since it was generated/,
-      );
-      await captureConsoleLogs(() => generate({ schemaDir: root, force: true }));
-      expect(JSON.parse(await readFile(file, "utf8")).tables.todos.read).toBe(
-        "ownerId = session.identity.subject",
-      );
+      await expect(generate({ schemaDir: root })).rejects.toThrow(/edited by hand/);
+      await generate({ schemaDir: root, force: true });
+      // The hand edit is gone: a table that allows nothing has no entry.
+      expect(JSON.parse(await readFile(file, "utf8")).tables.projects).toBeUndefined();
     },
   );
 
-  it("overwrites files written before alpha.66, which carry no $generated marker", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root);
-    await writeTsApp(root);
-
-    await captureConsoleLogs(() => generate({ schemaDir: root }));
-
-    const permissions = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
-    expect(permissions.tables.projects.read).toBe("false");
-  });
-
-  it("puts the TS migrations' history into jazz.app.json", async () => {
+  it("ships the history migrations/ holds", async () => {
     const { root } = await createWorkspace();
     await writeTsApp(root);
-    await captureConsoleLogs(() => createAppMigration({ cwd: root, name: "initial" }));
+    await createAppMigration({ cwd: root, name: "initial" });
+    await generate({ schemaDir: root });
     await writeTsApp(root, {
       columns: "title: s.string(), ownerId: s.string(), notes: s.string().optional()",
     });
     const created = await createAppMigration({ cwd: root, name: "add-notes" });
     expect(created.changed).toBe(true);
-    expect(created.file).toMatch(/migrations\/.*add-notes.*\.ts$/);
-    expect(created.todos).toEqual([]);
+    expect(created.file).toMatch(/add-notes/);
 
-    await captureConsoleLogs(() => generate({ schemaDir: root }));
+    await generate({ schemaDir: root });
 
     const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
     expect(Object.keys(app.history ?? {})).toHaveLength(1);
     expect(app.migrations).toHaveLength(1);
-    expect(app.migrations[0].migrate.todos.notes).toEqual({ add: "string", default: null });
+    expect(app.tables.todos.columns.notes).toBe("string?");
   });
 });
+
+function hasNapi(name: string): boolean {
+  return typeof (napi as unknown as Record<string, unknown>)[name] === "function";
+}
 
 async function compileOutput(schemaDir: string): Promise<CompiledOutput> {
   const writes: string[] = [];

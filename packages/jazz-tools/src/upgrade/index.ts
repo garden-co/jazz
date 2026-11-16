@@ -51,7 +51,7 @@ import {
   runningPackageRoot,
   type Project,
 } from "./project.js";
-import { refuseDroppedConditions, refuseEnvironmentReads } from "./permissions-check.js";
+import { environmentReads, refuseDroppedConditions } from "./permissions-check.js";
 import { refusePayloadEnums } from "./payload-enums.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
 import { codemodSchema, codemodSpreadModule } from "./schema-ts.js";
@@ -130,7 +130,13 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     notes.push(...checkLegacyFiles(project, legacy));
   }
   const scan = scanImports(project);
-  refuseEnvironmentReads(project, schemaSources(project, scan));
+  const envReads = environmentReads(project, schemaSources(project, scan));
+  if (envReads.length > 0) {
+    notes.push(
+      "The old schema or permissions read the environment. The printed permissions hold the values `validate` resolved them to, " +
+        `so the env-dependent logic needs a look by hand:\n${envReads.map((r) => `  ${r}`).join("\n")}`,
+    );
+  }
   refuseDroppedConditions(project);
   const appText = readFileSync(project.appFile, "utf8");
   const permissionsText = readFileSync(project.permissionsJsonFile, "utf8");
@@ -185,14 +191,25 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   const skipTables = new Set<string>();
   for (const spread of codemod.spreads) {
     const text = readFileSync(spread.file, "utf8");
-    const tables = spreadTables(ts, spread.file, text);
+    const tables = spreadTables(ts, spread.file, text, spread.exported);
     // Tables whose rules are all `true`/`false` keep living in the module.
     const plain = tables.every((t) => plainRules(permissions.tables[t]));
     const permissionsText = plain
       ? `export const permissions = ${plainPermissions(tables, permissions)};`
       : undefined;
-    const edited = codemodSpreadModule({ ts, file: spread.file, text, permissionsText });
-    if (plain && edited.hadPermissions) {
+    const edited = codemodSpreadModule({
+      ts,
+      file: spread.file,
+      text,
+      exported: spread.exported,
+      permissionsText,
+    });
+    for (const name of edited.dropped) {
+      notes.push(
+        `Dropped \`${name}\` from ${rel(spread.file)}: it used the module's own app, which alpha.66 doesn't have.`,
+      );
+    }
+    if (plain) {
       const local = `${spread.local.replace(/(Schema|Tables)$/, "")}Permissions`;
       spreadPermissions.push(local);
       spreadImports.push(
@@ -246,6 +263,24 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     for (const name of ["index.ts", "index.js"]) {
       const index = join(project.migrationsDir, name);
       if (existsSync(index)) deleted.add(index);
+    }
+    // A migration from a version nothing holds (no snapshot, not in jazz.app.json's history)
+    // never shipped: alpha.65's validate left it out, and `generate` can't build it.
+    const snapshotsDir = join(project.migrationsDir, "snapshots");
+    const known = new Set([
+      ...Object.keys(app.history ?? {}).map((v) => v.slice(0, 12)),
+      before.current.slice(0, 12),
+      ...(existsSync(snapshotsDir)
+        ? readdirSync(snapshotsDir).flatMap((f) => /([0-9a-f]{12})\.json$/i.exec(f)?.[1] ?? [])
+        : []),
+    ]);
+    for (const name of readdirSync(project.migrationsDir)) {
+      const from = /-([0-9a-f]{12})-[0-9a-f]{12}\.[cm]?[jt]s$/i.exec(name)?.[1];
+      if (!from || known.has(from)) continue;
+      deleted.add(join(project.migrationsDir, name));
+      notes.push(
+        `Deleted migrations/${name}: it migrates from ${from}, a version no snapshot and no jazz.app.json history holds, so it never shipped.`,
+      );
     }
   }
 
@@ -327,6 +362,8 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     if (!originals.has(path))
       originals.set(path, existsSync(path) ? readFileSync(path, "utf8") : null);
   }
+  // `generate` writes files too (a first snapshot, bindings): what wasn't there goes again.
+  const filesBefore = new Set(appFiles(project.schemaDir));
   const restore = () => {
     for (const [path, text] of originals) {
       if (text === null) rmSync(path, { force: true });
@@ -335,9 +372,16 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
         writeFileSync(path, text);
       }
     }
+    for (const path of appFiles(project.schemaDir)) if (!filesBefore.has(path)) rmSync(path, { force: true });
   };
   for (const [path, text] of writes) writeFileSync(path, text);
   for (const path of deleted) rmSync(path, { force: true });
+  // Versions of jazz.app.json's history without a snapshot get one: `generate` builds the history from them.
+  for (const [path, text] of await missingSnapshots(project, app)) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+    report.written.push(rel(path));
+  }
   removeEmptyDirs([...deleted].map(dirname), project.root);
 
   // 6. generate, and 7. the same deployment.
@@ -427,6 +471,48 @@ function projectTypeErrors(
   }
 }
 
+/** Every file under `dir`, but dependencies and VCS data. */
+function appFiles(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (current: string) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else out.push(path);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+/**
+ * Snapshots for the versions in jazz.app.json's `history` that
+ * migrations/snapshots/ lacks (alpha.65 apps kept some only in the JSON), as
+ * `migrations create` writes them.
+ */
+async function missingSnapshots(project: Project, app: AppJson): Promise<Array<[string, string]>> {
+  const versions = Object.entries(app.history ?? {});
+  if (versions.length === 0) return [];
+  const dir = join(project.migrationsDir ?? join(project.schemaDir, "migrations"), "snapshots");
+  const have = new Set(
+    existsSync(dir)
+      ? readdirSync(dir).flatMap((f) => /([0-9a-f]{12})\.json$/i.exec(f)?.[1] ?? [])
+      : [],
+  );
+  const { snapshotFromVersion } = await import("../dev/migrations.js");
+  const out: Array<[string, string]> = [];
+  for (const [name, version] of versions) {
+    if (have.has(name.slice(0, 12))) continue;
+    const snapshot = await snapshotFromVersion(version.tables as never);
+    const hash = snapshot.hash.slice(0, 12);
+    if (have.has(hash)) continue;
+    out.push([join(dir, `${hash}.json`), `${JSON.stringify(snapshot.schema, null, 2)}\n`]);
+    have.add(hash);
+  }
+  return out;
+}
+
 /** The bundle id and schema hashes `load` computes for the two files. */
 export async function artifactIdentity(
   app: string,
@@ -494,24 +580,19 @@ async function rustBindings(appJson: string): Promise<string | { reason: string 
   }
 }
 
-/** This jazz-tools' `generate`, in the app's directory. */
-function runGenerate(schemaDir: string): void {
-  const bin = join(runningPackageRoot(), "bin", "jazz-tools.js");
-  const result = spawnSync(process.execPath, [bin, "generate"], {
-    cwd: schemaDir,
-    encoding: "utf8",
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${result.stdout ?? ""}${result.stderr ?? ""}`.trim());
+/** This jazz-tools' `generate`, in the app's directory: the JSON files from the TS, then the bindings. */
+async function runGenerate(schemaDir: string): Promise<void> {
+  const { generateApp } = await import("../dev/project.js");
+  await generateApp({ cwd: schemaDir });
 }
 
 /** The table names a spread module's `export const schema = {…}` declares. */
-function spreadTables(ts: typeof TS, file: string, text: string): string[] {
+function spreadTables(ts: typeof TS, file: string, text: string, exported: string): string[] {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   for (const statement of source.statements) {
     if (!ts.isVariableStatement(statement)) continue;
     for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== "schema") continue;
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== exported) continue;
       let init = declaration.initializer;
       while (init && (ts.isAsExpression(init) || ts.isSatisfiesExpression(init)))
         init = init.expression;

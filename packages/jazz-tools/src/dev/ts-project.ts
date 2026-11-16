@@ -6,6 +6,9 @@
  * turns them into `jazz.app.json` and `jazz.permissions.json` (generated
  * artifacts, written by the Rust writer) and then the bindings. Node only.
  */
+import { PERMISSIONS_SCHEMA_URL } from "../permissions/types.js";
+/** `jazz.app.json`'s `$schema`, which names its format version. */
+export const APP_SCHEMA_URL = "https://jazz.tools/schemas/jazz.app.v1.json" as const;
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -47,7 +50,7 @@ export function findSchemaDir(cwd: string): string {
 
 /** A readable `jazz.app.json` input, before the Rust writer checks and prints it. */
 export interface ReadableAppFile {
-  format: 1;
+  $schema: typeof APP_SCHEMA_URL;
   tables: Record<string, unknown>;
   history?: Record<string, unknown>;
   migrations?: unknown[];
@@ -61,7 +64,7 @@ export interface TsApp {
   /** The file `permissions` came from (schema.ts or permissions.ts), or null when there are none. */
   permissionsFile: string | null;
   app: ReadableAppFile;
-  permissions: { format: 1; tables: Record<string, unknown> };
+  permissions: { $schema: typeof PERMISSIONS_SCHEMA_URL; tables: Record<string, unknown> };
   warnings: string[];
 }
 
@@ -123,16 +126,16 @@ export async function loadTsApp(
       throw new Error(
         `${shown(permissionsFile)}'s \`permissions\` must be what \`definePermissions({ … })\` returns (const { definePermissions } = schema).`,
       );
-    permissions = { format: 1, tables: tree.tables };
+    permissions = { $schema: PERMISSIONS_SCHEMA_URL, tables: tree.tables };
   } else {
     warnings.push(
       `No permissions: ${shown(schemaFile)} exports no \`permissions\` and there is no ${PERMISSIONS_TS_FILE}, so every table denies everything. ` +
         "Export `permissions = definePermissions({ … })` from schema.ts.",
     );
-    permissions = { format: 1, tables: {} };
+    permissions = { $schema: PERMISSIONS_SCHEMA_URL, tables: {} };
   }
 
-  const app: ReadableAppFile = { format: 1, tables: readable.tables };
+  const app: ReadableAppFile = { $schema: APP_SCHEMA_URL, tables: readable.tables };
   const migrationsDir = join(dir, MIGRATIONS_DIR);
   if (existsSync(migrationsDir)) {
     const tooling = await migrationsTooling();
@@ -161,7 +164,11 @@ export function locateRule(source: string, table: string, rule: string): number 
   if (!tableMatch) return undefined;
   const from = tableMatch.index + tableMatch[0].length;
   const keys =
-    rule === "update.old" ? ["updateIf", "update"] : rule === "update.new" ? ["updateTo", "update"] : [rule];
+    rule === "update.old"
+      ? ["updateIf", "update"]
+      : rule === "update.new"
+        ? ["updateTo", "update"]
+        : [rule];
   let index = from;
   for (const key of keys) {
     const match = new RegExp(`(^|[\\s{,])${escape(key)}\\s*:`, "m").exec(source.slice(from));
@@ -181,21 +188,45 @@ function lineOf(source: string, index: number): number {
   return source.slice(0, index).split("\n").length;
 }
 
+/**
+ * The table and rule a writer refusal names: as a readable path
+ * (`tables.chats.update.new…`) or an engine one
+ * (`$.chats.policies.update.with_check…`).
+ */
+export function ruleOfError(message: string): { table: string; rule: string } | undefined {
+  const readable =
+    /jazz\.permissions\.json:\s*tables\.([A-Za-z_][A-Za-z0-9_]*)\.(read|insert|delete|update)(\.(old|new))?/.exec(
+      message,
+    );
+  if (readable)
+    return { table: readable[1]!, rule: readable[3] ? `update${readable[3]}` : readable[2]! };
+  const engine =
+    /\$\.([A-Za-z_][A-Za-z0-9_]*)\.policies\.(select|insert|update|delete)(\.(using|with_check))?/.exec(
+      message,
+    );
+  if (!engine) return undefined;
+  const operation = engine[2] === "select" ? "read" : engine[2]!;
+  if (operation === "update" && engine[4])
+    return { table: engine[1]!, rule: engine[4] === "using" ? "update.old" : "update.new" };
+  return { table: engine[1]!, rule: operation };
+}
+
 /** A writer refusal, with the TS line of the rule it names when there is one. */
 export async function withTsLocation(error: unknown, app: TsApp): Promise<Error> {
   const err = error instanceof Error ? error : new Error(String(error));
-  const match = /jazz\.permissions\.json:\s*tables\.([A-Za-z_][A-Za-z0-9_]*)\.(read|insert|delete|update)(\.(old|new))?/.exec(
-    err.message,
-  );
-  if (!match || !app.permissionsFile) return err;
+  const rule = ruleOfError(err.message);
+  if (!rule || !app.permissionsFile) return err;
   const source = await readFile(app.permissionsFile, "utf8").catch(() => null);
   if (source === null) return err;
-  const rule = match[3] ? `update${match[3]}` : match[2]!;
-  const line = locateRule(source, match[1]!, rule);
+  const line = locateRule(source, rule.table, rule.rule);
   if (line === undefined) return err;
-  const located = new Error(`${err.message}\n  at ${shown(app.permissionsFile)}:${line}`, {
-    cause: err,
-  });
+  const path = `tables.${rule.table}.${rule.rule}`;
+  const located = new Error(
+    `${err.message}\n  at ${shown(app.permissionsFile)}:${line} (${path})`,
+    {
+      cause: err,
+    },
+  );
   Object.assign(located, { code: (err as { code?: unknown }).code });
   return located;
 }

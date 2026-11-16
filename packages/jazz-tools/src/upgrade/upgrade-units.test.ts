@@ -239,7 +239,7 @@ export const app = s.defineApp(schema);
       new Map([["app", { module: "generated", name: "app", typeOnly: false }]]),
     );
     expect(out.spreads).toEqual([
-      { file: "/app/auth.ts", specifier: "./auth", local: "authSchema" },
+      { file: "/app/auth.ts", specifier: "./auth", local: "authSchema", exported: "schema" },
     ]);
     expect(out.text).toContain(`import { tables as authSchema } from "./auth";`);
   });
@@ -248,6 +248,7 @@ export const app = s.defineApp(schema);
     const out = codemodSpreadModule({
       ts,
       file: "/app/auth.ts",
+      exported: "schema",
       text: `import { schema as s } from "jazz-tools";
 
 export const schema = { users: s.table({ name: s.string() }) };
@@ -266,6 +267,84 @@ export const permissions = s.definePermissions(authApp, ({ policy }) => {
 export const tables = { users: s.table({ name: s.string() }) };
 
 export const permissions = { users: { read: false } };
+`);
+  });
+});
+
+describe("spread tables modules", () => {
+  it("are found by what the schema spreads, whatever they call their tables and permissions", () => {
+    const out = codemodSpreadModule({
+      ts,
+      file: "/app/auth-schema.ts",
+      exported: "betterAuthSchema",
+      text: `import { schema as s } from "jazz-tools";
+
+export const betterAuthSchema = { users: s.table({ name: s.string() }) };
+
+type BetterAuthSchema = s.Schema<typeof betterAuthSchema>;
+const betterAuthApp: s.App<BetterAuthSchema> = s.defineApp(betterAuthSchema, { migrations: "none" });
+export const wasmSchema = betterAuthApp.wasmSchema;
+
+export const betterAuthPermissions = s.definePermissions(betterAuthApp, ({ policy }) => {
+  policy.users.allowRead.never();
+});
+`,
+      permissionsText: "export const permissions = { users: { read: false } };",
+    });
+    expect(out.dropped).toEqual(["wasmSchema"]);
+    expect(out.text).toBe(`import { schema as s } from "jazz-tools";
+
+export const tables = { users: s.table({ name: s.string() }) };
+
+export const permissions = { users: { read: false } };
+`);
+  });
+
+  it("import as `tables` from the schema", () => {
+    const out = codemodSchema({
+      ts,
+      file: "/app/schema.ts",
+      text: `import { schema as s } from "jazz-tools";
+import { betterAuthSchema } from "./auth-schema";
+
+const schema = { ...betterAuthSchema, todos: s.table({ title: s.string() }) };
+export const app = s.defineApp(schema);
+`,
+      exports: new Map([["app", { module: "generated", name: "app", typeOnly: false }]]),
+      extrasSpecifier: "./app-extras",
+      resolve: (specifier) => `/app/${specifier.slice(2)}.ts`,
+      root: "/app",
+    });
+    expect(out.spreads[0]!.exported).toBe("betterAuthSchema");
+    expect(out.text).toContain('import { tables as betterAuthSchema } from "./auth-schema";');
+  });
+});
+
+describe("what used the app", () => {
+  it("leaves schema.ts with it (a query moved to app-extras.ts with its row type)", () => {
+    const out = codemodSchema({
+      ts,
+      file: "/app/schema.ts",
+      text: `import { schema as s } from "jazz-tools";
+
+const schema = { stops: s.table({ venueId: s.uuid() }) };
+export const app = s.defineApp(schema);
+
+const stopWithVenueQuery = app.stops.include({ venue: true });
+
+export type StopWithVenue = s.RowOf<typeof stopWithVenueQuery>;
+`,
+      exports: new Map([
+        ["app", { module: "generated", name: "app", typeOnly: false }],
+        ["StopWithVenue", { module: "extras", name: "StopWithVenue", typeOnly: true }],
+      ]),
+      extrasSpecifier: "./app-extras",
+      resolve: (specifier) => `/app/${specifier.slice(2)}.ts`,
+      root: "/app",
+    });
+    expect(out.text).toBe(`import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({ stops: s.table({ venueId: s.uuid() }) });
 `);
   });
 });

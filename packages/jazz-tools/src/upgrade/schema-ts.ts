@@ -29,6 +29,8 @@ export interface SpreadModule {
   specifier: string;
   /** The local name schema.ts spreads. */
   local: string;
+  /** The name the module exports its tables under (`schema`, `betterAuthSchema`, …). */
+  exported: string;
 }
 
 export interface SchemaCodemodInput {
@@ -270,6 +272,26 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
       removed.add(statement);
     }
   }
+  const movedToExtrasOrUnused = (name: string) => !input.exports.has(name) || movedToExtras.has(name);
+  // Whatever still uses the app (a query for a row type, say) went to
+  // app-extras.ts with the exports that need it, or is dead: alpha.66's
+  // schema.ts has no app.
+  const appName = appStatement.declarationList.declarations[0]!.name;
+  if (ts.isIdentifier(appName)) {
+    const usesApp = (node: TS.Node): boolean =>
+      (ts.isIdentifier(node) && node.text === appName.text) || (ts.forEachChild(node, usesApp) ?? false);
+    for (const statement of source.statements) {
+      if (statement === tablesStatement || statement === appStatement || removed.has(statement)) continue;
+      if (ts.isImportDeclaration(statement) || !usesApp(statement)) continue;
+      removeStatement(statement);
+      const names = declaredNamesOf(ts, statement);
+      const moved = names.length > 0 && names.every((n) => input.exports.has(n));
+      if (!moved && names.some((n) => movedToExtrasOrUnused(n))) {
+        changes.push(`${where(statement)}: dropped \`${names.join(", ")}\`: it used the app, which schema.ts no longer defines`);
+      }
+    }
+  }
+
   // Names that moved to app-extras.ts but the schema still uses.
   const visitUses = (node: TS.Node) => {
     if (removed.has(node)) return;
@@ -301,7 +323,8 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
     }
     const target = input.resolve(found.declaration.moduleSpecifier.getText(source).slice(1, -1));
     if (!target) throw notSupportedYet(`spreading tables from a package`, where(property));
-    if ((found.element.propertyName ?? found.element.name).text === "schema") {
+    const exported = (found.element.propertyName ?? found.element.name).text;
+    if (exported !== "tables") {
       edits.push({
         start: found.element.getStart(source),
         end: found.element.getEnd(),
@@ -315,6 +338,7 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
       file: target,
       specifier: (found.declaration.moduleSpecifier as TS.StringLiteral).text,
       local,
+      exported,
     });
   }
 
@@ -345,49 +369,97 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
 }
 
 /**
- * A spread tables module (Better Auth's): `export const schema = {…}` →
- * `export const tables = {…}`; its own app goes; its callback permissions are
+ * A spread tables module (Better Auth's), found by what the schema spreads
+ * from it, whatever it calls its tables: the tables export becomes `tables`;
+ * its own app, the `s.Schema` / `s.App` aliases and whatever used the app
+ * go; its callback permissions (`s.definePermissions(…)`, under any name) are
  * replaced by `permissionsText` (or dropped, when the app prints them).
  */
 export function codemodSpreadModule(input: {
   ts: Ts;
   file: string;
   text: string;
+  /** The name the module exports its tables under. */
+  exported: string;
   /** `export const permissions = …;` to put in place of the old one, or undefined to drop it. */
   permissionsText: string | undefined;
-}): { text: string; hadPermissions: boolean } {
+}): { text: string; hadPermissions: boolean; dropped: string[] } {
   const { ts, file, text } = input;
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const edits: TextEdit[] = [];
+  const dropped: string[] = [];
   let hadPermissions = false;
+  const remove = (statement: TS.Statement) => {
+    // The statement, its line break and its own comments, not the blank line before them.
+    const start = statement.getFullStart();
+    const leading = text.slice(start, statement.getStart(source));
+    let end = statement.getEnd();
+    while (text[end] === " " || text[end] === "\t") end++;
+    if (text[end] === "\n") end++;
+    edits.push({ start: start + leading.length - leading.replace(/^\s*\n/, "").length, end, text: "" });
+  };
+  const call = (statement: TS.VariableStatement, name: string) => {
+    let init = statement.declarationList.declarations[0]?.initializer;
+    while (init && (ts.isAsExpression(init) || ts.isSatisfiesExpression(init))) init = init.expression;
+    return (
+      init !== undefined &&
+      ts.isCallExpression(init) &&
+      ts.isPropertyAccessExpression(init.expression) &&
+      init.expression.name.text === name
+    );
+  };
+  // The module's own apps, and everything that uses them.
+  const apps = new Set<string>();
   for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement) || !call(statement, "defineApp")) continue;
+    const name = statement.declarationList.declarations[0]!.name;
+    if (ts.isIdentifier(name)) apps.add(name.text);
+  }
+  const usesApp = (node: TS.Node): boolean =>
+    (ts.isIdentifier(node) && apps.has(node.text)) || (ts.forEachChild(node, usesApp) ?? false);
+  let permissionsDone = false;
+  for (const statement of source.statements) {
+    if (ts.isTypeAliasDeclaration(statement)) {
+      const type = statement.type;
+      if (
+        ts.isTypeReferenceNode(type) &&
+        ts.isQualifiedName(type.typeName) &&
+        ["Schema", "App", "SliceableApp"].includes(type.typeName.right.text)
+      ) {
+        remove(statement);
+      }
+      continue;
+    }
     if (!ts.isVariableStatement(statement)) continue;
     const declaration = statement.declarationList.declarations[0]!;
     if (!ts.isIdentifier(declaration.name)) continue;
     const name = declaration.name.text;
-    const init = declaration.initializer?.getText(source) ?? "";
-    if (name === "schema" && isExportedNode(ts, statement)) {
-      edits.push({
-        start: declaration.name.getStart(source),
-        end: declaration.name.getEnd(),
-        text: "tables",
-      });
-    } else if (/\.defineApp\(/.test(init)) {
-      edits.push({ start: statement.getFullStart(), end: statement.getEnd(), text: "" });
-    } else if (name === "permissions" && isExportedNode(ts, statement)) {
+    if (name === input.exported && isExportedNode(ts, statement)) {
+      if (name !== "tables") {
+        edits.push({ start: declaration.name.getStart(source), end: declaration.name.getEnd(), text: "tables" });
+      }
+    } else if (call(statement, "definePermissions")) {
       hadPermissions = true;
-      edits.push({
-        start: statement.getStart(source),
-        end: statement.getEnd(),
-        text: input.permissionsText ?? "",
-      });
+      if (input.permissionsText && !permissionsDone) {
+        edits.push({ start: statement.getStart(source), end: statement.getEnd(), text: input.permissionsText });
+        permissionsDone = true;
+      } else {
+        remove(statement);
+      }
+    } else if (apps.has(name)) {
+      remove(statement);
+    } else if (usesApp(statement)) {
+      remove(statement);
+      if (isExportedNode(ts, statement)) dropped.push(name);
     }
   }
+  // A module without permissions gets them, so the app spreads them like Better Auth's own.
+  if (!permissionsDone && input.permissionsText) {
+    edits.push({ start: text.length, end: text.length, text: `${text.endsWith("\n") ? "" : "\n"}\n${input.permissionsText}\n` });
+  }
   const out = applyEdits(text, edits);
-  return {
-    text: renameIdentifier(ts, file, out, "schema", "tables", true).replace(/\n{3,}/g, "\n\n"),
-    hadPermissions,
-  };
+  const renamed = input.exported === "tables" ? out : renameIdentifier(ts, file, out, input.exported, "tables", true);
+  return { text: renamed.replace(/\n{3,}/g, "\n\n"), hadPermissions, dropped };
 }
 
 function findImport(
