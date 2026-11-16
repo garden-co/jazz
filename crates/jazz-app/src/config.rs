@@ -44,6 +44,10 @@ pub struct Config {
     pub backend: Option<Backend>,
     /// Open as an end user of the app, signed in with this.
     pub user: Option<Auth>,
+    /// Lets an end user's credentials travel over plain `http://` to a
+    /// host other than this machine (a dev server on the LAN). Off: they
+    /// go over `https://`, or to `localhost`.
+    pub allow_insecure_http: bool,
 }
 
 impl Config {
@@ -55,6 +59,7 @@ impl Config {
             storage: Storage::Memory,
             backend: None,
             user: None,
+            allow_insecure_http: false,
         }
     }
 
@@ -76,6 +81,31 @@ impl Config {
     pub fn user(mut self, auth: Auth) -> Self {
         self.user = Some(auth);
         self
+    }
+
+    /// See [`Config::allow_insecure_http`].
+    pub fn allow_insecure_http(mut self) -> Self {
+        self.allow_insecure_http = true;
+        self
+    }
+
+    /// Whether an end user's credentials would cross the network in plain
+    /// text: `http://` or `ws://` to a host other than this machine.
+    pub(crate) fn sends_credentials_in_plain_text(&self) -> bool {
+        let Some(url) = self.server_url.as_deref() else {
+            return false;
+        };
+        let Ok(url) = reqwest::Url::parse(url) else {
+            return false;
+        };
+        let host = url.host_str().unwrap_or_default();
+        let loopback = host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        matches!(url.scheme(), "http" | "ws") && !loopback
     }
 }
 
@@ -135,5 +165,36 @@ impl std::fmt::Debug for Backend {
             .field("user_id", &self.user_id)
             .field("allow_dropping_history", &self.allow_dropping_history)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_cross_the_network_in_plain_text_only_off_this_machine() {
+        let plain = |url: &str| {
+            Config::new(AppId::random())
+                .server(url)
+                .sends_credentials_in_plain_text()
+        };
+        for url in [
+            "http://app.example/jazz",
+            "ws://app.example/jazz",
+            "ws://10.0.0.2:4000/jazz",
+        ] {
+            assert!(plain(url), "{url}");
+        }
+        for url in [
+            "https://app.example/jazz",
+            "wss://app.example/jazz",
+            "http://localhost:3000/jazz",
+            "ws://localhost:3000/jazz",
+            "http://127.0.0.1:3000/jazz",
+            "ws://[::1]:3000/jazz",
+        ] {
+            assert!(!plain(url), "{url}");
+        }
     }
 }

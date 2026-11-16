@@ -1,7 +1,9 @@
 use jazz::tools::JazzError;
 
-/// Errors from opening or using a Jazz app.
+/// Errors from opening or using a Jazz app. More may come: match it with a
+/// wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The app's files (`jazz.app.json`, `jazz.permissions.json`) or the
     /// bindings generated from them are missing, stale or invalid.
@@ -36,13 +38,27 @@ pub enum Error {
     #[error("signed out")]
     SignedOut,
 
+    /// The user has no Jazz account yet: they get one when they sign in
+    /// from a client, or with [`crate::Endpoint::create_account_for`].
+    #[error("user {0:?} has no Jazz account yet")]
+    NoAccount(String),
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
 
+    /// A streamed value's source failed; the upload was abandoned.
+    #[error("upload: {0}")]
+    Upload(String),
+
     /// The call panicked on the client's thread. The client runs on.
     #[error("the call panicked: {0}")]
     Panicked(String),
+
+    /// The local store is in use by another open app (in this process or
+    /// another), so it can't be deleted (TS's `StoreHeldByAnotherTabError`).
+    #[error("the local store is held: {0}")]
+    StoreHeld(String),
 
     /// The client's worker thread stopped.
     #[error("the Jazz client stopped")]

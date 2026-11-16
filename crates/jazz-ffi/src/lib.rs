@@ -8,7 +8,7 @@
 //! Rows, queries and deltas are plain JSON typed by the app's schema; see
 //! the crate's README for the shapes. Not supported yet (refused with
 //! `JazzError::Refused`): includes, connecting to a sync server as an end
-//! user with a JWT, writing enums with payloads, reads inside transactions
+//! user with a JWT, reads inside transactions
 //! (and transactions altogether), computed columns and transforms (the
 //! language's bindings implement them over the stored values).
 
@@ -16,6 +16,7 @@ pub mod c_abi;
 mod convert;
 mod core;
 mod error;
+mod gate;
 
 use std::sync::Arc;
 
@@ -60,7 +61,9 @@ impl JazzHandle {
             .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
             .unwrap_or(1);
         let host = core::HostTokens(Arc::new(move |reason: &str| {
-            tokens.token(reason.to_owned())
+            tokens
+                .token(reason.to_owned())
+                .map_err(|error| error.to_string())
         }));
         let core = core::Core::open_with_tokens(&config_json, Some(Arc::new(host)))
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
@@ -260,8 +263,9 @@ impl JazzHandle {
         })())
     }
 
-    /// Writes the row with this id: inserts it, or replaces its columns.
-    /// `row_json` is a whole row, as for an insert. Returns the row.
+    /// Writes the row with this id: a new id inserts (`row_json` then holds
+    /// every required column), an existing one sets the columns `row_json`
+    /// names. Returns the row.
     pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
         self.core.surface(
             self.core
@@ -533,10 +537,12 @@ impl std::fmt::Debug for JazzHandle {
 /// Where an end user's bearer tokens come from (the host's own sign-in).
 /// Called on a thread of its own, so it may block; `reason` is `connect`,
 /// `renew`, `expired` or `refresh` (the last two want a fresh token, not a
-/// cached one). `None` means no one is signed in.
+/// cached one). `None` means no one is signed in (the app stops); an error
+/// means the fetch failed (a network blip): the session stays signed in and
+/// asks again.
 #[uniffi::export(with_foreign)]
 pub trait TokenProvider: Send + Sync {
-    fn token(&self, reason: String) -> Option<String>;
+    fn token(&self, reason: String) -> Result<Option<String>>;
 }
 
 /// What a session or sync watch calls with each state (JSON).

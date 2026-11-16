@@ -34,6 +34,8 @@ pub(crate) struct Core {
     /// The contract version the host speaks (`"contract"` in the config):
     /// 1 unless it says 2.
     pub(crate) contract: u64,
+    /// Run first when the app closes: a C host's callbacks stop here.
+    close_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// How a call runs: inside a transaction, and/or at a durability or read
@@ -206,6 +208,7 @@ impl Core {
             next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
             has_server,
             contract,
+            close_hook: Mutex::new(None),
         })
     }
 
@@ -327,9 +330,9 @@ impl Core {
         Ok(row.to_string())
     }
 
-    /// Writes the row with this id: inserts it if there is none, otherwise
-    /// replaces its columns. `row_json` is a whole row, as for an insert
-    /// (TS's `upsert`). Returns the row as stored.
+    /// Writes the row with this id: inserts it if there is none (then
+    /// `row_json` is a whole row, as for an insert), otherwise sets the
+    /// columns `row_json` names (a partial row updates). Returns the row.
     pub fn upsert(
         &self,
         table_name: &str,
@@ -370,7 +373,13 @@ impl Core {
         let id = convert::parse_id(id, "the id")?;
         let table = self.table(table_name)?.clone();
         let cells = match patch_json {
-            Some(patch) => Some(convert::cells(&table, table_name, patch, "the patch")?.1),
+            Some(patch) => {
+                let (named, cells) = convert::cells(&table, table_name, patch, "the patch")?;
+                if named.is_some_and(|named| named != id) {
+                    return Err(refused("a restore's patch cannot name another row's id"));
+                }
+                Some(cells)
+            }
             None => None,
         };
         let name = table_name.to_owned();
@@ -437,7 +446,18 @@ impl Core {
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let edits = whole_pages(&client, &name, id, edits).await?;
-            let committed = client.update_with_edits(&name, id, cells, edits)?;
+            let committed = client
+                .update_with_edits(&name, id, cells, edits)
+                .map_err(|error| match error {
+                    // As jazz-app reports an edit of a row this client
+                    // cannot see.
+                    jazz_app::jazz::tools::JazzError::Write(message)
+                        if message.contains("NotObserved") =>
+                    {
+                        jazz_app::Error::Config(format!("no {name} row {id}"))
+                    }
+                    other => other.into(),
+                })?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
@@ -570,6 +590,8 @@ impl Core {
     /// The server's advice on whether this user may do `op` (`read`,
     /// `insert`, `update`, `delete`) without doing it: `Some(true)`,
     /// `Some(false)`, or `None` when no server can say (TS's `canRead` …).
+    /// Advisory: `true` doesn't promise the write will succeed (the data or
+    /// the permissions may change before it runs). Not in a transaction.
     /// `insert` takes `row_json`; `read` and `delete` take `id`; `update`
     /// takes `id` and an optional `row_json` patch.
     pub fn can(
@@ -589,7 +611,15 @@ impl Core {
         };
         let cells = |what: &str| -> Result<Vec<(String, Value)>> {
             match row_json {
-                Some(row) => Ok(convert::cells(table, table_name, row, what)?.1),
+                Some(row) => {
+                    let (given, cells) = convert::cells(table, table_name, row, what)?;
+                    if given.is_some() {
+                        return Err(refused(format!(
+                            "can {op}: {what} takes no \"id\" (advice is about the row's columns)"
+                        )));
+                    }
+                    Ok(cells)
+                }
                 None => Ok(Vec::new()),
             }
         };
@@ -748,7 +778,12 @@ impl Core {
             .cloned()
             .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
         let bearer = bearer.to_owned();
-        let user = block_on(async move { session.link(&bearer).await })?;
+        // On the client's runtime: linking talks to the app's endpoint
+        // (tokio I/O), and the caller's thread may have no runtime at all.
+        let user = block_on(
+            self.open_jazz()?
+                .with_client(move |_| async move { session.link(&bearer).await }),
+        )?;
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
@@ -760,6 +795,8 @@ impl Core {
         }
         block_on(jazz.sign_out())?;
         self.closed.store(true, Ordering::Release);
+        // Signed out, the app has ended: no token callback after this.
+        self.run_close_hook();
         Ok(())
     }
 
@@ -816,7 +853,27 @@ impl Core {
 
     /// Closes the app: the calls already made finish, subscriptions end,
     /// and every later call fails with `Closed`. Closing again does nothing.
+    /// Runs `hook` first when the app closes (once).
+    pub(crate) fn on_close(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.close_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// Runs the close hook if it hasn't run (whichever way the app ends).
+    fn run_close_hook(&self) {
+        let hook = self
+            .close_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     pub fn close(&self) -> Result<()> {
+        // Even when signing out already ended the app: the host's callbacks
+        // stop here.
+        self.run_close_hook();
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -1097,8 +1154,10 @@ impl jazz_app::TokenProvider for Tokens {
 /// or `refresh`.
 pub(crate) struct HostTokens(pub Arc<HostTokenFn>);
 
-/// A host's token callback: the reason in, the token (or none) out.
-pub(crate) type HostTokenFn = dyn Fn(&str) -> Option<String> + Send + Sync;
+/// A host's token callback: the reason in, the token (or none: signed out)
+/// out, or an error (the fetch failed: the session stays, and asks again).
+pub(crate) type HostTokenFn =
+    dyn Fn(&str) -> std::result::Result<Option<String>, String> + Send + Sync;
 
 impl jazz_app::TokenProvider for HostTokens {
     fn token(&self, reason: jazz_app::TokenReason) -> jazz_app::TokenFuture {
@@ -1111,16 +1170,22 @@ impl jazz_app::TokenProvider for HostTokens {
         let spawned = std::thread::Builder::new()
             .name("jazz-token".into())
             .spawn(move || {
+                // A panicking callback is a failed fetch, not a sign-out.
                 let token =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&reason)))
-                        .unwrap_or(None);
+                        .unwrap_or_else(|_| Err("the token provider panicked".into()));
                 let _ = sender.send(token);
             });
         Box::pin(async move {
             spawned.map_err(|error| {
                 jazz_app::Error::Config(format!("cannot ask for a token: {error}"))
             })?;
-            receiver.await.map_err(|_| jazz_app::Error::Stopped)
+            receiver
+                .await
+                .map_err(|_| jazz_app::Error::Stopped)?
+                .map_err(|reason| {
+                    jazz_app::Error::Server(format!("the token provider failed: {reason}"))
+                })
         })
     }
 }
@@ -1148,6 +1213,7 @@ fn config(
     let mut admin_secret = None;
     let mut session = None;
     let mut auth = None;
+    let mut insecure = false;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -1169,6 +1235,13 @@ fn config(
             "adminSecret" => admin_secret = Some(text()?),
             "session" => session = Some(value.clone()),
             "auth" => auth = Some(value.clone()),
+            // An end user over plain http:// to a host other than
+            // localhost, for development only.
+            "allowInsecureHttp" => {
+                insecure = value
+                    .as_bool()
+                    .ok_or_else(|| refused("config.allowInsecureHttp must be true or false"))?;
+            }
             // Read by `Core::open`; checked here.
             "contract" => match value.as_u64() {
                 Some(1 | 2) => {}
@@ -1279,6 +1352,9 @@ fn config(
             }
         };
         result = result.user(auth);
+        if insecure {
+            result = result.allow_insecure_http();
+        }
     } else if result.server_url.is_some() {
         return Err(refused(
             "a \"serverUrl\" needs \"permissions\" (a backend) or \"auth\" (an end user)",

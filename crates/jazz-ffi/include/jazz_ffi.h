@@ -68,7 +68,10 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              (edits: text / splice / jsonSet, see the README)
  *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
  *               "id"?, "row"?}                               -> true|false|null
- *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
+ *              (advisory: true does not promise the write succeeds; null =
+ *              unknown, e.g. no server; not available inside a transaction)
+ *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names)
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
  *                     | null (a local app or a backend)
@@ -120,16 +123,21 @@ void jazz_close(JazzHandle *handle);
 
 /*
  * An end user's token callback: called on a thread of its own (it may
- * block) with reason "connect" | "renew" | "expired" | "refresh"; returns
- * the token as a malloc'ed string (Go: C.CString), which jazz frees, or
- * NULL when no one is signed in.
+ * block) with reason "connect" | "renew" | "expired" | "refresh". Return 0
+ * with *token set to the token as a malloc'ed string (Go: C.CString), which
+ * jazz frees, or to NULL when no one is signed in (the app stops). Return
+ * non-zero when the fetch failed (e.g. a network blip): the session stays
+ * signed in and asks again; *token may hold the failure's message.
  */
-typedef char *(*JazzTokenCallback)(void *ctx, const char *reason);
+typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 
 /*
  * Opens an app as an end user signing in with the app's bearer
  * ("auth": {"bearer": true}); cb and ctx stay valid, from any thread, until
- * jazz_close returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
+ * jazz_close (or a "signOut" call) returns: that waits for a fetch in
+ * progress, and then the callback is never called again. Called from inside
+ * the callback, jazz_close returns at once and the callback stops once that
+ * call returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
  */
 JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
                            char **err);

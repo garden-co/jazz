@@ -86,13 +86,6 @@ pub(crate) fn to_value(
             }
             Value::Text(text.to_owned())
         }
-        // The engine's client can't write them yet (its public values have
-        // no payload enum).
-        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
-            return Err(unsupported(format!(
-                "writing an enum with payloads ({path})"
-            )));
-        }
         ColumnType::Integer => {
             let int = json.as_i64().ok_or_else(|| wrong("an integer"))?;
             Value::Integer(i32::try_from(int).map_err(|_| wrong("a 32-bit integer"))?)
@@ -143,7 +136,7 @@ pub(crate) fn parse_id(text: &str, path: &str) -> Result<ObjectId> {
 }
 
 /// An engine value as plain JSON; `column_type` says how to read text
-/// (json columns hold JSON text) and payload enums.
+/// (json columns hold JSON text) and array elements.
 pub(crate) fn to_json(value: Value, column_type: Option<&ColumnType>) -> Json {
     match value {
         Value::Null => Json::Null,
@@ -171,26 +164,6 @@ pub(crate) fn to_json(value: Value, column_type: Option<&ColumnType>) -> Json {
                     .map(|value| to_json(value, element))
                     .collect(),
             )
-        }
-        // A payload enum reads as `{ "case": …, "fields": { … } }`.
-        Value::Enum { case, values } => {
-            let fields = match column_type {
-                Some(
-                    ColumnType::EnumPayload { cases }
-                    | ColumnType::CatalogueEnumPayload { cases, .. },
-                ) => cases
-                    .iter()
-                    .find(|c| c.name == case)
-                    .map(|c| c.fields.as_slice()),
-                _ => None,
-            };
-            let mut object = Map::new();
-            for (at, value) in values.into_iter().enumerate() {
-                let field = fields.and_then(|fields| fields.get(at));
-                let name = field.map_or_else(|| at.to_string(), |f| f.name.as_str().to_owned());
-                object.insert(name, to_json(value, field.map(|f| &f.column_type)));
-            }
-            json!({ "case": case, "fields": object })
         }
         Value::Row { values, .. } => Json::Array(
             values
@@ -722,15 +695,6 @@ fn predicate(
         .and_then(Json::as_str)
         .ok_or_else(|| refused(format!("{path} needs an \"op\"")))?;
     let column = column(table, table_name, name)?;
-    if matches!(
-        column.column_type.as_ref(),
-        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. }
-    ) && !matches!(op, "isNull" | "isNotNull")
-    {
-        return Err(unsupported(format!(
-            "comparing {name}, an enum with payloads ({path})"
-        )));
-    }
     let value = condition.get("value");
     let path = format!("{path}.value");
     let literal = || -> Result<q::Operand> {
@@ -919,7 +883,12 @@ pub(crate) fn edits(
                         Some("utf8" | "utf16") => false,
                         _ => {
                             return Err(refused(format!(
-                                "{path}.within.units must be \"utf8\", \"utf16\" or \"bytes\""
+                                "{path}.{}units must be \"utf8\", \"utf16\" or \"bytes\"",
+                                if edit.get("within").is_some() {
+                                    "within."
+                                } else {
+                                    ""
+                                }
                             )));
                         }
                     };
@@ -953,7 +922,10 @@ pub(crate) fn edits(
                             };
                             Ok(LargeValueUpdateSplice {
                                 at: number(splice.get("at"), &format!("splices[{i}].at"))?,
-                                delete: splice.get("delete").and_then(Json::as_u64).unwrap_or(0),
+                                delete: match splice.get("delete") {
+                                    None | Some(Json::Null) => 0,
+                                    delete => number(delete, &format!("splices[{i}].delete"))?,
+                                },
                                 insert,
                             })
                         })
