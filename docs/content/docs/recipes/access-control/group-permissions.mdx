@@ -25,7 +25,9 @@ Three tables: the workspace itself, a members join table that records each user'
   "format": 1,
   "tables": {
     "workspaces": {
-      "columns": { "name": "string" },
+      "columns": {
+        "name": "string"
+      },
       "relations": {
         "members": { "reverse": "workspaceMembers", "relation": "workspace" },
         "documents": { "reverse": "documents", "relation": "workspace" }
@@ -37,11 +39,19 @@ Three tables: the workspace itself, a members join table that records each user'
         "user_id": "uuid",
         "role": { "enum": ["reader", "writer", "contributor", "admin"] }
       },
-      "relations": { "workspace": { "rel": "workspaces", "column": "workspaceId" } }
+      "relations": {
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      }
     },
     "documents": {
-      "columns": { "title": "string", "content": "string", "workspaceId": "uuid" },
-      "relations": { "workspace": { "rel": "workspaces", "column": "workspaceId" } }
+      "columns": {
+        "title": "string",
+        "content": "string",
+        "workspaceId": "uuid"
+      },
+      "relations": {
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      }
     }
   }
 }
