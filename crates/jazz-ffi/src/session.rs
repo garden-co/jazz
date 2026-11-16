@@ -45,7 +45,7 @@ impl SessionCore {
         Ok(Self {
             session,
             schema: OnceLock::new(),
-            relations: convert::Relations::read(&app_text),
+            relations: convert::Relations::read(&app_text)?,
             contract,
             closed: Arc::new(AtomicBool::new(false)),
             next_tx: Arc::new(AtomicU64::new(

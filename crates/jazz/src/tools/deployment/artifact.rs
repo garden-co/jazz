@@ -19,6 +19,7 @@ mod app_file;
 pub mod expr;
 pub mod json;
 mod permissions_file;
+pub mod relations;
 
 use std::collections::BTreeMap;
 
@@ -513,6 +514,7 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
 /// code generators and `jazz validate` read.
 #[derive(Debug, Clone)]
 pub struct AppDefinition {
+    relations: relations::Relations,
     history: History,
     codegen: Codegen,
     warnings: Vec<String>,
@@ -540,6 +542,11 @@ impl AppDefinition {
 
     pub fn codegen(&self) -> &Codegen {
         &self.codegen
+    }
+
+    /// Every table's relations, resolved ([`relations::resolve_relations`]).
+    pub fn relations(&self) -> &relations::Relations {
+        &self.relations
     }
 
     /// What loaded but is ignored, as `jazz.app.json: <path>: <why>` lines.
@@ -576,12 +583,13 @@ pub fn load_app(json: &[u8]) -> Result<AppDefinition, ArtifactError> {
     let history = check_history(&app_file)?;
     check_decoded_client_migrations(history.bundle(), history.current)
         .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
-    check_codegen(&app_file.codegen, history.current_schema())?;
+    let relations = check_codegen(&app_file.codegen, history.current_schema())?;
     // Lowering for a client must succeed too.
     lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
     let stranded = history.stranded.clone();
     Ok(AppDefinition {
+        relations,
         history,
         codegen: app_file.codegen,
         warnings: app_file
@@ -1317,7 +1325,12 @@ fn compute_bundle(
     .map_err(|error| refuse(format!("permissions: {error}")))
 }
 
-fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactError> {
+fn check_codegen(
+    codegen: &Codegen,
+    current: &Schema,
+) -> Result<relations::Relations, ArtifactError> {
+    let resolved = relations::resolve_relations(codegen, current)
+        .map_err(|(path, message)| ArtifactError::new(format!("{path}: {message}")))?;
     let table = |path: &str, name: &str| {
         current.get(&TableName::from(name)).ok_or_else(|| {
             ArtifactError::new(format!(
@@ -1337,54 +1350,6 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
     let has_column = |schema: &TableSchema, column: &str| column_of(schema, column).is_some();
     for (name, entry) in &codegen.tables {
         let schema = table(&format!("tables.{name}"), name)?;
-        for (relation, target) in &entry.relations {
-            let path = format!("tables.{name}.relations.{relation}");
-            match target {
-                CodegenRelation::Forward {
-                    table: other,
-                    column,
-                } => {
-                    table(&path, other)?;
-                    let Some(stored) = column_of(schema, column) else {
-                        return Err(ArtifactError::new(format!(
-                            "{path}: table {name} has no column {column}"
-                        )));
-                    };
-                    if let Some(target) = stored.references.filter(|t| t.as_str() != other) {
-                        return Err(ArtifactError::new(format!(
-                            "{path}: column {column} references {target}, so a relation over it \
-                             leads to {target}, not {other}"
-                        )));
-                    }
-                }
-                CodegenRelation::Reverse {
-                    table: other,
-                    relation: forward,
-                } => {
-                    table(&path, other)?;
-                    let points_back = codegen
-                        .tables
-                        .get(other)
-                        .and_then(|other| other.relations.get(forward))
-                        .is_some_and(|forward| {
-                            matches!(forward, CodegenRelation::Forward { table, .. } if table == name)
-                        });
-                    if !points_back {
-                        return Err(ArtifactError::new(format!(
-                            "{path}: {other} has no forward relation {forward} to {name}"
-                        )));
-                    }
-                }
-            }
-        }
-        for relation in entry.relations.keys() {
-            if relation == "id" || has_column(schema, relation) {
-                return Err(ArtifactError::new(format!(
-                    "tables.{name}.relations.{relation}: table {name} already has a column \
-                     {relation}; a relation needs its own name, e.g. `{relation}Row`"
-                )));
-            }
-        }
         let columns = || schema.columns.columns.iter().map(|c| c.name_str());
         for (index, field) in entry.computed.iter().enumerate() {
             let path = format!("tables.{name}.computed.{}", field.name);
@@ -1447,7 +1412,7 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
             }
         }
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// A schema in the readable form of a `history` version's `tables` (no

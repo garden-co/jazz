@@ -1,0 +1,167 @@
+[
+  {
+    "description": "a forward relation and its reverse",
+    "tables": {
+      "users": {
+        "columns": { "name": "string" },
+        "relations": { "todos": { "reverse": "todos", "relation": "owner" } }
+      },
+      "todos": {
+        "columns": { "title": "string", "ownerId": "uuid" },
+        "relations": { "owner": { "rel": "users", "column": "ownerId" } }
+      }
+    },
+    "relations": {
+      "users": [
+        {
+          "name": "todos",
+          "type": "reverse",
+          "fromTable": "users",
+          "toTable": "todos",
+          "fromColumn": "id",
+          "toColumn": "ownerId",
+          "isArray": true,
+          "nullable": false
+        }
+      ],
+      "todos": [
+        {
+          "name": "owner",
+          "type": "forward",
+          "fromTable": "todos",
+          "toTable": "users",
+          "fromColumn": "ownerId",
+          "toColumn": "id",
+          "isArray": false,
+          "nullable": false
+        }
+      ]
+    }
+  },
+  {
+    "description": "a forward relation over a nullable column is nullable",
+    "tables": {
+      "users": { "columns": { "name": "string" } },
+      "todos": {
+        "columns": { "assigneeId": "uuid?" },
+        "relations": { "assignee": { "rel": "users", "column": "assigneeId" } }
+      }
+    },
+    "relations": {
+      "users": [],
+      "todos": [
+        {
+          "name": "assignee",
+          "type": "forward",
+          "fromTable": "todos",
+          "toTable": "users",
+          "fromColumn": "assigneeId",
+          "toColumn": "id",
+          "isArray": false,
+          "nullable": true
+        }
+      ]
+    }
+  },
+  {
+    "description": "a forward relation over a uuid array leads to many rows",
+    "tables": {
+      "users": {
+        "columns": { "name": "string" },
+        "relations": { "teams": { "reverse": "teams", "relation": "members" } }
+      },
+      "teams": {
+        "columns": { "memberIds": { "array": "uuid" } },
+        "relations": { "members": { "rel": "users", "column": "memberIds" } }
+      }
+    },
+    "relations": {
+      "users": [
+        {
+          "name": "teams",
+          "type": "reverse",
+          "fromTable": "users",
+          "toTable": "teams",
+          "fromColumn": "id",
+          "toColumn": "memberIds",
+          "isArray": true,
+          "nullable": false
+        }
+      ],
+      "teams": [
+        {
+          "name": "members",
+          "type": "forward",
+          "fromTable": "teams",
+          "toTable": "users",
+          "fromColumn": "memberIds",
+          "toColumn": "id",
+          "isArray": true,
+          "nullable": false
+        }
+      ]
+    }
+  },
+  {
+    "description": "a reverse relation needs a forward relation of that name",
+    "tables": {
+      "users": {
+        "columns": { "name": "string" },
+        "relations": { "todos": { "reverse": "todos", "relation": "ownr" } }
+      },
+      "todos": {
+        "columns": { "ownerId": "uuid" },
+        "relations": { "owner": { "rel": "users", "column": "ownerId" } }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a reverse relation's forward relation must lead back to its table",
+    "tables": {
+      "users": { "columns": { "name": "string" } },
+      "projects": {
+        "columns": { "name": "string" },
+        "relations": { "todos": { "reverse": "todos", "relation": "owner" } }
+      },
+      "todos": {
+        "columns": { "ownerId": "uuid" },
+        "relations": { "owner": { "rel": "users", "column": "ownerId" } }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a relation's column must be a uuid or uuid array",
+    "tables": {
+      "users": { "columns": { "name": "string" } },
+      "todos": {
+        "columns": { "ownerName": "string" },
+        "relations": { "owner": { "rel": "users", "column": "ownerName" } }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a relation can't share a column's name",
+    "tables": {
+      "users": { "columns": { "name": "string" } },
+      "todos": {
+        "columns": { "owner": "uuid" },
+        "relations": { "owner": { "rel": "users", "column": "owner" } }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a relation can't take a JavaScript object internal's name",
+    "tables": {
+      "users": { "columns": { "name": "string" } },
+      "todos": {
+        "columns": { "ownerId": "uuid" },
+        "relations": { "constructor": { "rel": "users", "column": "ownerId" } }
+      }
+    },
+    "refused": true
+  }
+]

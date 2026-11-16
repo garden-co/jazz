@@ -243,7 +243,7 @@ impl Core {
         Ok(Self::with(
             jazz,
             Arc::new(schema),
-            convert::Relations::read(&app_text),
+            convert::Relations::read(&app_text)?,
             has_server,
             contract,
             None,
