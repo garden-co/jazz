@@ -21,6 +21,7 @@ import { formatTs, layout, loadPrettier } from "../printer/format.js";
 import { printSchemaTs, type Unsupported } from "../printer/index.js";
 import { printMigrations } from "../printer/migrations.js";
 import { UpgradeRefusal } from "./errors.js";
+import { appOutputs, snapshot } from "./snapshot.js";
 import { APP_FILE, PERMISSIONS_FILE } from "./project.js";
 
 export interface JsonOnlyOptions {
@@ -107,8 +108,13 @@ export async function upgradeJsonOnly(
   if (options.dryRun) return report;
 
   // Write; `generate`; the same deployment, or everything back.
-  const kept = new Map(
-    [appFile, permissionsFile].map((p) => [p, existsSync(p) ? readFileSync(p) : null] as const),
+  // Byte-exact undo: the app files, the bindings, migrations/ (removed if upgrade made it);
+  // anything else `generate` adds goes too.
+  const undo = snapshot(
+    appOutputs(
+      dir,
+      writes.map(([p]) => p),
+    ),
   );
   const filesBefore = new Set(listFiles(dir));
   for (const [path, text] of writes) {
@@ -130,7 +136,7 @@ export async function upgradeJsonOnly(
     }
   } catch (error) {
     for (const path of listFiles(dir)) if (!filesBefore.has(path)) rmSync(path, { force: true });
-    for (const [path, bytes] of kept) if (bytes) writeFileSync(path, bytes);
+    undo.restore();
     if (error instanceof UpgradeRefusal) throw error;
     throw new UpgradeRefusal(
       `\`generate\` failed on the printed TS, so upgrade put every file back:\n  ${(error instanceof Error ? error.message : String(error)).replace(/\n/g, "\n  ")}`,

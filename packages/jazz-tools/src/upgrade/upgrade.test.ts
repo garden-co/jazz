@@ -9,7 +9,16 @@ import { execFileSync } from "node:child_process";
  * is jazz-codegen's output and has its own tests there, so only its
  * presence is checked. Regenerate the goldens with UPDATE_GOLDEN=1.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -244,12 +253,52 @@ describe("jazz-tools upgrade: conversions", () => {
     } finally {
       delete process.env.UPGRADE_FIXTURE_ROOM;
     }
-    expect(report.notes.join("\n")).toMatch(
-      /read the environment[\s\S]*permissions\.ts:\d+: reads `process\.env\.UPGRADE_FIXTURE_ROOM`/,
+    // Manual work, not a note.
+    expect(report!.manual.join("\n")).toMatch(
+      /permissions\.ts:\d+: reads `process\.env\.UPGRADE_FIXTURE_ROOM`: the printed permissions hold the value it had/,
     );
     expect(readFileSync(join(dir, "schema.ts"), "utf8")).toMatch(
       /\/\/ TODO: permissions\.ts:\d+ read `process\.env\.UPGRADE_FIXTURE_ROOM`/,
     );
+  });
+
+  it("puts a JSON-only app back byte for byte: its bindings, and no migrations/ it made", async () => {
+    const dir = fixture("json-only");
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "jazz_app.rs"), "// the bindings the app had\n");
+    const before = projectFiles(dir);
+    await expect(
+      upgrade(dir, {
+        generate: async (schemaDir) => {
+          await testGenerate(schemaDir);
+          throw new Error("planted failure after generate wrote everything");
+        },
+      }),
+    ).rejects.toThrow(/`generate` failed on the printed TS, so upgrade put every file back/);
+    expect(projectFiles(dir)).toEqual(before);
+    expect(existsSync(join(dir, "migrations"))).toBe(false);
+  });
+
+  it("checks a TS app's defs without touching the rest of the app", async () => {
+    const dir = fixture("chat");
+    const file = join(dir, "jazz.permissions.json");
+    const withDefs = JSON.parse(
+      readFileSync(file, "utf8").replaceAll(
+        "exists chatMembers(chatId = this.chatId, userId = session.user)",
+        "member(this.chatId)",
+      ),
+    );
+    withDefs.defs = {
+      "member($chat)": "exists chatMembers(chatId = $chat, userId = session.user)",
+    };
+    writeFileSync(file, `${JSON.stringify(withDefs, null, 2)}\n`);
+    mkdirSync(join(dir, "dist"));
+    const built = join(dir, "dist", "app.js");
+    writeFileSync(built, "// built\n");
+    const old = new Date("2026-01-01T00:00:00Z");
+    utimesSync(built, old, old);
+    await upgrade(dir, { dryRun: true });
+    expect(statSync(built).mtime).toEqual(old);
   });
 
   it("runs the app's own validate on its own binaries, whatever this process's Jazz overrides say", async () => {
@@ -360,6 +409,34 @@ describe("jazz-tools upgrade: refusals", () => {
     );
     validateWithOwnJazzTools(dir);
     await refused(dir, /`true` inside anyOf\/allOf at tables\.messages\.read\.anyOf\[0\]/);
+  });
+
+  it("refuses a bare `true` when the old permissions read the environment: it may be an unset value", async () => {
+    const dir = fixture("env-permissions");
+    const permissions = join(dir, "permissions.ts");
+    writeFileSync(
+      permissions,
+      readFileSync(permissions, "utf8").replace(
+        "policy.messages.allowRead.where(anyOf([{ room: ROOM }, { $createdBy: session.user }]))",
+        "policy.messages.allowRead.where({ $createdBy: session.user })",
+      ),
+    );
+    // Validated with the variable unset: `allowInsert.where({ room: ROOM })` became `"insert": "true"`.
+    execFileSync(
+      process.execPath,
+      [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
+      {
+        cwd: dir,
+        stdio: "pipe",
+      },
+    );
+    expect(
+      JSON.parse(readFileSync(join(dir, "jazz.permissions.json"), "utf8")).tables.messages.insert,
+    ).toBe("true");
+    await refused(
+      dir,
+      /allows `messages\.insert` unconditionally[\s\S]*permissions\.ts:\d+: reads `process\.env\.UPGRADE_FIXTURE_ROOM`[\s\S]*Set those environment variables/,
+    );
   });
 
   it("refuses enum columns with cases, which alpha.65 removed, naming each", async () => {

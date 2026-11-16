@@ -6,15 +6,8 @@
  * stale one would lose whatever it doesn't say.
  */
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { appOutputs, snapshot } from "./snapshot.js";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { UpgradeRefusal } from "./errors.js";
@@ -116,7 +109,11 @@ export async function checkLegacyFilesWithDefs(
   expanded: string,
   identity: Identity,
 ): Promise<string[]> {
-  const files = snapshot(project.root);
+  // Only what `validate` writes: the two files, the bindings, migrations/.
+  const undo = snapshot(
+    appOutputs(project.schemaDir).filter((p) => !/[\\/](schema|permissions)\.ts$/.test(p)),
+  );
+  const committedApp = readFileSync(project.appFile, "utf8");
   const bin = join(legacy.dir, "bin", "jazz-tools.js");
   let result;
   let written: { app: string; permissions: string };
@@ -131,7 +128,7 @@ export async function checkLegacyFilesWithDefs(
       permissions: readFileSync(project.permissionsJsonFile, "utf8"),
     };
   } finally {
-    restore(project.root, files);
+    undo.restore();
   }
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   if (result.error) throw new UpgradeRefusal(`couldn't run ${bin}: ${result.error.message}`);
@@ -140,7 +137,7 @@ export async function checkLegacyFilesWithDefs(
       `jazz-tools ${legacy.version} \`validate\` refused the app:\n${indent(output)}\nFix what it says, then upgrade again.`,
     );
   }
-  const committed = await identity(files.get(project.appFile)!.toString("utf8"), expanded);
+  const committed = await identity(committedApp, expanded);
   if (
     JSON.stringify(await identity(written.app, written.permissions)) !== JSON.stringify(committed)
   ) {
@@ -156,29 +153,6 @@ export async function checkLegacyFilesWithDefs(
     );
   }
   return [];
-}
-
-/** Every file under `dir` but dependencies and VCS data, by path. */
-function snapshot(dir: string): Map<string, Buffer> {
-  const out = new Map<string, Buffer>();
-  const walk = (current: string) => {
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === ".git") continue;
-      const path = join(current, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else out.set(path, readFileSync(path));
-    }
-  };
-  walk(dir);
-  return out;
-}
-
-function restore(dir: string, files: Map<string, Buffer>): void {
-  for (const path of snapshot(dir).keys()) if (!files.has(path)) rmSync(path, { force: true });
-  for (const [path, bytes] of files) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, bytes);
-  }
 }
 
 /** Run the old `validate --check`, refusing what it refuses. */
