@@ -127,8 +127,8 @@ in those views.
 
 Leave out `client` for a thin client. The provider creates its session when it mounts and closes it
 when it unmounts; use a `key` to replace it with a new config. To show a session you opened yourself
-with `createJazzClient`, pass `session={session}` instead of `config`; the provider then leaves
-closing it to you.
+with `createJazzClient` (or `startJazzClient`, which returns it while it starts), pass
+`session={session}` instead of `config`; the provider then leaves closing it to you.
 
 ## Query subscriptions
 

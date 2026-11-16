@@ -327,8 +327,12 @@ async fn disconnect_stops_sync_until_reconnect() {
         .insert(NewNote::new(me, "written offline"))
         .await
         .unwrap();
+    // Disconnected, it reads its own write locally (a backend's default
+    // read would wait for the server it was told not to use).
     assert_eq!(
-        jazz.all(notes::query()).await.unwrap(),
+        jazz.all_with(notes::query(), jazz_app::ReadTier::LocalFirst)
+            .await
+            .unwrap(),
         vec![offline.clone()]
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -411,7 +415,11 @@ async fn delete_client_storage_removes_every_file() {
         .await
         .unwrap();
     assert!(
-        reopened.all(notes::query()).await.unwrap().is_empty(),
+        reopened
+            .all_with(notes::query(), jazz_app::ReadTier::LocalOnly)
+            .await
+            .unwrap()
+            .is_empty(),
         "the local store starts empty"
     );
     reopened.shutdown().await.unwrap();
