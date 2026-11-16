@@ -595,6 +595,78 @@ export function jazzSessionActions<Client>(
 }
 
 /**
+ * @internal The user a client opened outside a session (`<JazzClientProvider
+ * client>`) reads as, from its permission session (`client.session`). Null
+ * for an anonymous or internal reader.
+ */
+export function userOfPublicSession(
+  session: PublicSessionLike | null | undefined,
+): JazzUser | null {
+  if (!session?.user || session.authMode === "anonymous") return null;
+  const issuer = session.identity?.issuer;
+  if (!issuer || issuer === SYSTEM_ISSUER) return null;
+  return Object.freeze({
+    accountId: session.user,
+    kind: issuer === DEVICE_ISSUER ? "device" : "backend",
+    identity: Object.freeze({ issuer, subject: session.identity.subject }),
+    claims: Object.freeze({ ...session.claims }),
+  });
+}
+
+type PublicSessionLike = {
+  user: string | null;
+  identity: { issuer: string; subject: string };
+  claims?: Readonly<Record<string, unknown>>;
+  authMode?: string;
+};
+
+const CLIENT_ONLY_SESSION =
+  "This client was opened outside a Jazz session (<JazzClientProvider client>), " +
+  "so it has no session operations: use <JazzProvider config> (or session) to sign users in and out";
+
+/** @internal The snapshot `useJazzSession()` reads under `<JazzClientProvider client>`. */
+export function clientOnlySnapshot<Client>(
+  client: Client,
+  session: PublicSessionLike | null | undefined = (
+    client as { session?: PublicSessionLike | null } | undefined
+  )?.session,
+): JazzSessionSnapshot<Client> {
+  return Object.freeze({
+    status: "ready",
+    user: userOfPublicSession(session),
+    client,
+    localFirst: clientIsLocalFirst(client),
+  });
+}
+
+/**
+ * @internal The operations `useJazzSession()` has under `<JazzClientProvider
+ * client>`: there is no session to sign in or out, so each one refuses,
+ * naming why.
+ */
+export function clientOnlySessionActions<Client>(): Omit<
+  JazzSession<Client>,
+  "getSnapshot" | "subscribe" | "db"
+> {
+  const refuse = async (): Promise<never> => {
+    throw new Error(CLIENT_ONLY_SESSION);
+  };
+  return Object.freeze({
+    createDeviceAccount: refuse,
+    restoreDeviceAccount: refuse,
+    reopenDeviceAccount: refuse,
+    linkDeviceAccount: refuse,
+    refresh: refuse,
+    exportDeviceKey: () => {
+      throw new Error(CLIENT_ONLY_SESSION);
+    },
+    signOut: refuse,
+    retry: refuse,
+    close: refuse,
+  });
+}
+
+/**
  * @internal Session options that alpha.60 took and the session no longer
  * does. Refused by name: left in, they would reach the client config and be
  * ignored, quietly changing what the app asked for (an app that turned guest

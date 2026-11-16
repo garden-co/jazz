@@ -11,6 +11,8 @@ import {
 } from "react";
 import {
   attachJazzSessionConsumer,
+  clientOnlySessionActions,
+  clientOnlySnapshot,
   jazzSessionActions,
   ownJazzSession,
   startJazzSession,
@@ -18,7 +20,11 @@ import {
   type JazzSessionSnapshot,
 } from "../session/jazz-session.js";
 import type { SessionCore } from "../session/state.js";
-import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
+import {
+  JazzClientProvider,
+  useOptionalJazzClientContext,
+  type CoreJazzClient,
+} from "./provider.js";
 
 /** `useJazzSession()`: the session's state, and its operations. */
 export type UseJazzSessionResult<Client = CoreJazzClient> = JazzSessionSnapshot<Client> &
@@ -30,11 +36,31 @@ const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
  * (`createDeviceAccount`, `refresh`, `signOut`, ...). Available everywhere
  * under `<JazzProvider>`, including its `signedOut`, `loading`, `error` and
  * `closed` views. Operations reject on failure; the failure also shows in `error`.
+ *
+ * `user` is who your permissions see as `session`: `user.accountId` is
+ * `session.user`, with `user.identity` and `user.claims`.
+ *
+ * Under `<JazzClientProvider client>` (a client you opened yourself) it is
+ * `ready` with that client's user, and its operations reject: that client has
+ * no session to sign in or out.
  */
 export function useJazzSession<Client = CoreJazzClient>(): UseJazzSessionResult<Client> {
   const value = useContext(SessionContext);
-  if (!value) throw new Error("useJazzSession must be used within <JazzProvider>");
-  return value;
+  // A client opened outside a session (`<JazzClientProvider client>`): its
+  // user, always ready, with operations that reject naming why. Its context
+  // value changes when the client's auth does.
+  const clientContext = useOptionalJazzClientContext();
+  const clientOnly = useMemo(
+    () =>
+      value || !clientContext
+        ? undefined
+        : { ...clientOnlySnapshot(clientContext.client), ...clientOnlySessionActions() },
+    [value, clientContext],
+  );
+  const state = value ?? clientOnly;
+  if (!state)
+    throw new Error("useJazzSession must be used within <JazzProvider> or <JazzClientProvider>");
+  return state as UseJazzSessionResult<Client>;
 }
 
 /** What `<JazzProvider>` shows for each session status. */

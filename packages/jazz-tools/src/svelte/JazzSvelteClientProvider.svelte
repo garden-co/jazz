@@ -23,6 +23,7 @@ The caller remains responsible for shutting the client down.
 	function clearContext(): void {
 		ctx.db = null;
 		ctx.session = null;
+		ctx.client = null;
 		ctx.subscriptionStore = null;
 	}
 
@@ -42,6 +43,7 @@ The caller remains responsible for shutting the client down.
 
 				ctx.db = resolvedClient.db;
 				ctx.session = resolvedClient.session ?? null;
+				ctx.client = resolvedClient;
 				ctx.subscriptionStore = getSubscriptionStore(resolvedClient);
 				stopSessionSync = resolvedClient.db.onAuthChanged(({ session }) => {
 					if (!cancelled) {

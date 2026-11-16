@@ -1,3 +1,4 @@
+import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 import {
   computed,
   defineComponent,
@@ -258,6 +259,11 @@ export function useJazzClient(): JazzClientContextValue {
   return ctx.value;
 }
 
+/** @internal The nearest client's ref (triggered when its auth changes), or null. */
+export function injectOptionalJazzClient(): ShallowRef<JazzClientContextValue | null> | null {
+  return inject(JazzContextKey, null);
+}
+
 /**
  * Get a Jazz {@link Db} instance that can be used to read and write data.
  */
@@ -269,8 +275,12 @@ export function useDb(): Db {
  * Subscribe to the current Jazz {@link PublicSession}.
  * Returns a {@link ComputedRef} whose `.value` updates automatically as the user
  * logs in or out — use it in templates or computed properties.
+ *
+ * @deprecated Use `useJazzSession().snapshot.value.user`: the same user, with
+ * `user` as `accountId`. Warns once in development; removed in a later alpha.
  */
 export function useSession(): ComputedRef<PublicSession | null> {
+  warnSessionHookDeprecated("useSession()", "useJazzSession().snapshot.value.user");
   const ctx = inject(JazzContextKey, null);
   if (!ctx) {
     throw new Error(
