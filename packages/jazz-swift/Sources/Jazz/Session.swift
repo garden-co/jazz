@@ -121,6 +121,17 @@ public struct SyncError: Decodable, Hashable, Sendable {
     public var at: Date
 }
 
+/// A write the server refused (`Client.mutationErrors`).
+public struct MutationError: Decodable, Hashable, Sendable {
+    /// The refused transaction's id.
+    public var transaction: String
+    public var message: String
+    /// Refused by the app's permissions (rather than, say, a conflict).
+    public var denied: Bool
+    /// From a serializable transaction.
+    public var serializable: Bool
+}
+
 final class Tokens: TokenProvider, @unchecked Sendable {
     let provide: @Sendable (TokenReason) async throws -> String?
     /// How long a fetch may take before it counts as failed (not signed out).
@@ -215,6 +226,37 @@ extension Client {
         try await Self.typed {
             let json = try await Self.run { try self.handle.link(bearer: bearer) }
             return try Coding.decode(User.self, json)
+        }
+    }
+
+    /// Leaves the server (TS's `disconnect`): local reads and writes go
+    /// on, and sync resumes with `reconnect`. Without a server it does
+    /// nothing.
+    public func disconnect() async throws {
+        try await Self.typed { try await Self.run { try self.handle.disconnect() } }
+    }
+
+    /// Resumes sync after `disconnect` (TS's `reconnect`).
+    public func reconnect() async throws {
+        try await Self.typed { try await Self.run { try self.handle.reconnect() } }
+    }
+
+    /// Rolls back open transactions, closes the app and deletes its local
+    /// store (TS's `deleteClientStorage`): the next open starts empty and
+    /// syncs again. Writes the server hasn't accepted yet are lost. Throws
+    /// `JazzError.refused`, leaving the app open (open transactions are
+    /// still rolled back), while another open app holds the same `dataDir`.
+    public func deleteClientStorage() async throws {
+        try await Self.typed { try await Self.run { try self.handle.deleteClientStorage() } }
+    }
+
+    /// Each write the server refused that no durable wait (a `.global`
+    /// tier, `waitForSync`) reported (TS's `onMutationError`). Refusals
+    /// from before the first iteration come first. It fails with
+    /// `JazzError.closed` once the app closes.
+    public var mutationErrors: AsyncThrowingStream<MutationError, any Error> {
+        watch { listener in try self.handle.watchMutationErrors(listener: listener) } decode: {
+            try Coding.decode(MutationError.self, $0)
         }
     }
 
