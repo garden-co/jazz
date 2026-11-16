@@ -12,15 +12,18 @@ Schema changes that involve encrypted data are specified in [E2EE migrations](E2
 
 **The model in one paragraph.** A **space** is one application row (for
 example a `projects` row) together with the encrypted rows that name it (its
-`tasks`). Whoever Jazz lets read the space row may decrypt everything in the
-space; nothing else decides. Each space has a chain of key versions, each
-linking back to the previous one, so the newest key opens the whole history.
-A client that lacks a key writes a key request, and any reader holding the key
-answers it by sealing the key to the requester's account. Only sessions that
-may both read and update the space row create the space or rotate its key.
-Encryption keeps
-content unreadable outside Jazz's permissions; it adds no access rule of its
-own (§8).
+`tasks`). Jazz provides one **members table**: a row `(account, space)` makes
+that account a **member** of the space. The space row's read rule must come
+from it, so the members of a space are exactly the accounts entitled to its
+keys, and members can see who the other members are. Each space has a chain
+of key versions, each linking back to the previous one, so the newest key
+opens the whole history. Members' clients derive all key work from tables
+they can read: a key holder delivers the newest key to every member that
+lacks it, sealed to that member's account, and a key held by an account that
+is no longer a member marks the space as needing a new key. Only sessions
+that may update the space row change its members, create the space or rotate
+its key. Encryption keeps content unreadable outside Jazz's permissions; it
+adds no access rule of its own (§8).
 
 The account and device lifecycle was derived from an earlier TypeScript
 implementation and its tests, then amended by design decisions; where the two
@@ -159,7 +162,7 @@ protocol:
   second root; each account publishes its sealing key of the new mechanism;
   the next rotation of each space wraps its new key with it. Until an
   account has a sealing key of the selected mechanism, sealing to it fails
-  with "recipient unsupported" and its key requests wait. Old records are
+  with "recipient unsupported" and deliveries to it wait. Old records are
   not rewritten, and the old mechanism stays on the allow-list (above).
 
 ### Identifiers
@@ -184,10 +187,11 @@ bytes with `b[6] = (b[6] & 0x0f) | 0x80` and `b[8] = (b[8] & 0x3f) | 0x80`.
 The server cannot recompute them; it checks only R9 and that the ID is not
 already used. Only the account itself may register a root (R9), so a wrong
 ID can only break that account's own recovery, which the client detects by
-deriving again. No other ID is derived: reset identities and key requests
-have random IDs, so nobody can predict, and occupy in advance, the ID of
-another account's row. (An earlier draft derived both from public inputs;
-the reset-identity fixture `["jazz.e2ee.account-reset.v1","alice","1"]` →
+deriving again. No other ID is derived: reset identities, member rows and
+deliveries have random IDs, so nobody can predict, and occupy in advance, the
+ID of another account's row. (An earlier draft derived reset identity IDs
+from public inputs; the reset-identity fixture
+`["jazz.e2ee.account-reset.v1","alice","1"]` →
 `0499408f-e71b-82e6-b00e-5cd5a54871e4` in
 `crates/jazz-e2ee/tests/protocol_vectors.rs` is retired with it.)
 
@@ -262,9 +266,10 @@ be built is stated in the [core hooks note](E2EE_CORE_HOOKS.md) (§4 there):
    transaction read at its cut has changed by its commit: a row it read was
    superseded in a way the read would have returned, or a row matching one of
    its reads was accepted after the cut. The protocol relies on this for one
-   accepted bootstrap or reset per account and generation (§2.3, §2.11) and
-   one accepted successor per predecessor (§2.4, §3.5) among honest online
-   writers; replay decides when more than one is accepted anyway. Space
+   accepted bootstrap or reset per account and generation (§2.3, §2.11), one
+   accepted successor per predecessor (§2.4, §3.5) among honest online
+   writers, and deliveries sealed to the recipient's current account epoch
+   (§3.4); replay decides when more than one is accepted anyway. Space
    roots are not unique (§3.2).
 6. **Provisional reads** (offline). A snapshot `{owner, acceptedThrough, own}`
    whose rows carry either an accepted position or an own pending transaction
@@ -311,30 +316,33 @@ replay. "Before `p`" always means strictly earlier position.
   `scopeId` is Jazz's stable catalogue identity of the space row's table (the
   **space table**), `identifier` is the space row's ID. Every encrypted row
   of a space is encrypted under the space's keys.
-- **Reader, updater.** A reader is a session that Jazz lets read the space
-  row (read(row), §1.4); an updater is a reader that Jazz also lets update
-  it (update(row), §1.4). Readers may obtain the space's keys; updaters may
-  also create the space and rotate its key. Jazz permissions alone decide
-  both. A session that may update but not read the space row is not an
-  updater and never holds the space's keys.
+- **Member, updater.** A member of a space is an account with a row for the
+  space in the members table (§1.3); members may obtain the space's keys. An
+  updater is a session that Jazz lets read and update the space row
+  (read(row) and update(row), §1.4); updaters change the space's members,
+  create the space and rotate its key. The space row's read rule comes from
+  the members table (R13), so every updater is a member. Jazz permissions
+  alone decide both.
 - **Key version.** A space's key history is a chain: the root version, then
   one per **rotation** (a successor). Each version has an epoch ID and a
   random 32-byte key, and wraps the previous version's key, so the newest key
   opens every earlier one. The one exception is a recovery rotation (§3.5),
   which wraps the newest version its author holds and so skips the versions
   after it.
-- **Key request and delivery.** A key request asks for one key version for
-  one account; a delivery answers it with that version sealed to the
-  account's sealing key.
+- **Delivery.** One key version sealed to one member's account sealing key
+  (§2.12), written by a member that holds it (§3.4).
+- **Key holder.** An account that holds a version: it wrote the root or
+  successor of that version (its `accountEnvelope`), or a delivery of it to
+  the account was accepted.
 - **Held key.** A space key this device has authenticated and stores in its
   private store (§6). A held key is sufficient to read and write.
 
 ### 1.2 Account and device tables
 
 All E2EE tables (this section and §1.3) are internal Jazz tables, like Jazz's
-own account tables: they never appear in the application's `jazz.app.json` or
-`jazz.permissions.json`, and the application cannot define or override their
-policies. The tables in this section have fixed policies (§1.4). "Public" means readable by any session in `local-first` or
+own account tables: they never appear as entries of the application's
+`jazz.app.json` or `jazz.permissions.json`, and the application cannot define
+or override their policies. The tables in this section have fixed policies (§1.4). "Public" means readable by any session in `local-first` or
 `external` auth mode; "private" means readable only by the row's
 `$createdBy.account`. Every row is immutable.
 
@@ -396,16 +404,28 @@ application's encryption declarations (§1.4); the application writes no
 policy for them. Every row carries the space's address, `scopeId` and
 `identifier`, through which its policies reach the space row.
 
-| Table                     | Columns                                                                                                                                                                              | Row ID           | Meaning and writer                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `__e2ee_spaces`           | `scopeId`, `identifier`, `creatorAccountId`, `deviceId`, `accountEpochId`, `epochId`, `mechanism`, `version`, `verification`, `accountEnvelope`, `signature`                         | random           | A space root candidate: the first key version. Written by an updater (§3.2).                                                     |
-| `__e2ee_space_successors` | `scopeId`, `identifier`, `predecessor`, `historyEpochId`, `epochId`, `authorAccountId`, `authorDeviceId`, `authorEpochId`, `verification`, `history`, `accountEnvelope`, `signature` | random           | A rotation: the next key version, linked to the previous one. Written by an updater (§3.5).                                      |
-| `__e2ee_key_requests`     | `scopeId`, `identifier`, `keyEpochId?`, `accountId`                                                                                                                                  | random           | An account's request for a key version, or (no `keyEpochId`) for the space to be created. Written by a reader for itself (§3.4). |
-| `__e2ee_space_deliveries` | `scopeId`, `identifier`, `keyEpochId`, `senderAccountId`, `recipientAccountId`, `recipientAccountEpochId`, `envelope`                                                                | its request's ID | The answer to one request: the key version sealed to the requester's account (§3.4).                                             |
+| Table                     | Columns                                                                                                                                                                              | Row ID | Meaning and writer                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | -------------------------------------------------------------------------------------------------- |
+| `__e2ee_members`          | `scopeId`, `identifier`, `accountId`                                                                                                                                                 | random | `accountId` is a member of the space. Inserted and deleted by an updater (R12).                    |
+| `__e2ee_spaces`           | `scopeId`, `identifier`, `creatorAccountId`, `deviceId`, `accountEpochId`, `epochId`, `mechanism`, `version`, `verification`, `accountEnvelope`, `signature`                         | random | A space root candidate: the first key version. Written by an updater (§3.2).                       |
+| `__e2ee_space_successors` | `scopeId`, `identifier`, `predecessor`, `historyEpochId`, `epochId`, `authorAccountId`, `authorDeviceId`, `authorEpochId`, `verification`, `history`, `accountEnvelope`, `signature` | random | A rotation: the next key version, linked to the previous one. Written by an updater (§3.5).        |
+| `__e2ee_space_deliveries` | `scopeId`, `identifier`, `keyEpochId`, `senderAccountId`, `recipientAccountId`, `recipientAccountEpochId`, `envelope`                                                                | random | A key version sealed to a member's account. Written by a member that holds it, to a member (§3.4). |
+
+**The members table** is the one internal table the application uses
+directly. It appears in generated client code; the application reads it (for
+example to list a project's members) and inserts and deletes its rows
+through the ordinary API, under the derived policies of R12. Its rows are
+never updated. Membership is per account: there are no groups (groups of
+accounts are possible later work). One row makes the account a member; the
+row ID carries no meaning, and a second row for the same account and space
+changes nothing, so removing a member deletes every row of that account for
+the space. A trusted backend writes it like any application table, without
+policies.
 
 The system tables define indexes on the columns their policies and the
 runtime's queries look up: `(scopeId, identifier)` on every space table,
-`(scopeId, identifier, keyEpochId)` on requests and deliveries, and
+`(scopeId, identifier, accountId)` and `accountId` on members (the first
+also serves lookups by space), `(scopeId, identifier, keyEpochId)` and
 `recipientAccountId` on deliveries; on the account tables, `accountId` and
 `deviceId` where present.
 
@@ -429,9 +449,9 @@ the internal tables.
 
 All E2EE tables:
 
-- R1. No update and no delete, by any writer. Policies alone cannot say
-  "ever": system and trusted-backend writes bypass policies, so core refuses
-  updates and deletes of the internal tables for every writer, as a
+- R1. No update by any writer, and no delete except of member rows (R12).
+  Policies alone cannot say "ever": system and trusted-backend writes bypass
+  policies, so core refuses these updates and deletes for every writer, as a
   system-table rule outside the policies ([core hooks](E2EE_CORE_HOOKS.md)
   H7).
 - R2. Every row's author, sender or creator column (`accountId`,
@@ -512,51 +532,60 @@ passes nothing. Below:
   transaction's own writes, so a space row inserted or updated in the same
   transaction as the root is checked as written. A policy that requires an
   actual change of a column (an old-to-new transition) therefore admits no
-  creation or rotation; the deploy warns when it can see one.
+  member change, creation or rotation; the deploy warns when it can see one.
 
 Both are evaluated by the authority at the operation's commit, against its
-state then.
+state then. **member(a)** means: the members table has a row with the
+checked row's `scopeId` and `identifier` and `accountId = a` (an `Exists`
+over the members table, correlated with the checked row).
 
-- R12. **Reads.** The roots, successors, key requests and deliveries of a
-  space are readable by sessions that pass read(row). A delivery's envelope
-  is sealed to its recipient account, so other readers learn only that it
-  was answered, by whom and for which version.
-- R13. **Create.** Insert into `__e2ee_spaces` iff read(row) and
+- R12. **Members.** A member row is readable iff its `accountId` is the
+  session account or member(session account): members see the space's
+  other members. Insert and delete iff read(row) and update(row). A delete
+  is checked against the state before the transaction's own writes, as
+  every delete is, so an updater may remove itself.
+- R13. **Space row read rule.** Every space table that any encrypted table
+  with at least one encrypted column names as its `scope` has a read
+  (`select`) policy that is `M(T)` or a conjunction that has `M(T)` as one of its conjuncts, where
+  `T` is that table and `M(T)` is exactly
+  `exists __e2ee_members(scopeId = table_id('T'), identifier = this.id,
+accountId = session.user)` (`table_id` is T's catalogue identity, [core
+  hooks](E2EE_CORE_HOOKS.md) H7). The deploy refuses any other read rule for
+  a space table: a session that could read the space row without a member
+  row would never receive a key. (A declaration without encrypted columns
+  lets an existing app write member rows before it changes the read rule,
+  [migrations](E2EE_MIGRATIONS.md) §4.1.) Further conjuncts (claims, row columns)
+  narrow which members receive the rows, not the keys.
+- R14. **Reads.** The roots, successors and deliveries of a space are
+  readable iff member(session account). A delivery's envelope is sealed to
+  its recipient account, so other members learn only that it was
+  delivered, by whom, to whom and for which version.
+- R15. **Create.** Insert into `__e2ee_spaces` iff read(row) and
   update(row). The server does not limit the number of roots of an address:
   clients decide which is the space's root (§3.2).
-- R14. **Rotate.** Insert into `__e2ee_space_successors` iff read(row) and
+- R16. **Rotate.** Insert into `__e2ee_space_successors` iff read(row) and
   update(row).
-- R15. **Request.** Insert into `__e2ee_key_requests` iff read(row) and
-  `accountId` = session account.
-- R16. **Deliver.** Insert into `__e2ee_space_deliveries` iff read(row), its
-  `keyEpochId` is set, and the row's ID is the ID of an accepted key request
-  with the same `scopeId`, `identifier` and `keyEpochId` whose `accountId` is
-  `recipientAccountId`. Row IDs are unique, so a request has at most one
-  accepted answer. A request for the space itself (no `keyEpochId`) is
-  never answered by a delivery (§3.2).
-- R17. Application tables keep their own read and write policies. The space
+- R17. **Deliver.** Insert into `__e2ee_space_deliveries` iff
+  member(session account) and member(`recipientAccountId`).
+- R18. Application tables keep their own read and write policies. The space
   row's read rule is the confidentiality rule of everything in the space
   (§1.5, §8).
 
 Nothing else is checked by the server: not that a root is the first of its
-address, that a successor's author holds the key, that a request names a
+address, that a successor's author holds the key, that a delivery names a
 version of its space, or that an envelope opens. Clients verify those, and
-ignore a row that fails (§3.2–§3.4). A read rule that uses session claims
-works unchanged for requests: a request is checked against the requester's
-own session. A key delivered to an account is then usable by every session
-of that account, including sessions whose claims would not pass the rule;
-they still receive no rows from Jazz (§8). (The TypeScript implementation
-declared the space tables in the application schema with hand-written
-policies, and supported one space table per application.)
+ignore a row that fails (§3.2–§3.4). (The TypeScript implementation declared
+the space tables in the application schema with hand-written policies, and
+supported one space table per application.)
 
 ### 1.5 App-file declarations
 
 An encrypted table's `encryption` entry names its space: `space` is the
 column holding the space row's ID (`id` for a table whose rows are their own
-spaces), and `scope` is the space table. Nothing else is declared: who may
-read and update the space row, in the application's ordinary permissions,
-decides who may decrypt (readers), and create and rotate (sessions that may
-both read and update it).
+spaces), and `scope` is the space table. Nothing else is declared in
+`jazz.app.json`. In `jazz.permissions.json`, the space table's read rule
+comes from the members table (R13), and its update rule decides who changes
+members, creates and rotates:
 
 ```json
 "projects": { "columns": { … } },
@@ -570,6 +599,18 @@ both read and update it).
 }
 ```
 
+```json
+"projects": {
+  "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)",
+  "update": "ownerId = session.user"
+}
+```
+
+An application creating a project inserts the project row and its creator's
+member row in one transaction; R12 checks the member row against the
+transaction's end state, in which the creator may read and update the
+project.
+
 - **Column entries.** A `columns` value is either a type string (`"title":
 "string"`) or, during a schema conversion, an object with `type` and the
   conversion fields of [migrations](E2EE_MIGRATIONS.md) §3.2 (`from`, `to`,
@@ -577,22 +618,21 @@ both read and update it).
 - The deploy and code generation refuse a `scope` that is not a table with an
   `id`, and a `space` column that is not `id` (with `scope` the table itself)
   or a `uuid` column referencing `scope`.
-- **Entitlement is read access to the space row.** Finer rules inside a space
-  (a private task in a shared project) are not cryptographically separated:
-  every reader of the project can decrypt the private task. Content that
-  needs a narrower readership gets its own space: documentation recommends a
-  dedicated content row (for example a `privateNotes` row per owner) whose
-  read rule is exactly the intended readership. The deploy warns when it can
-  see that the space row is readable more broadly than the encrypted table
-  (for example, the table's read rule is the space row's rule plus further
-  conditions), and warns when a space table's read rule admits every
-  session. It also warns in the other direction, when it can see that the
-  encrypted table is readable more broadly than its space row (for example,
-  the table's read rule does not involve the space row at all): a session
-  that may read an encrypted row but not its space row receives the
-  ciphertext and can never obtain the key, so it reports the row
-  `key-unavailable` for good. It cannot decide either comparison in general
-  and does not claim to.
+- **Entitlement is membership.** The deploy refuses a space table whose read
+  rule does not come from the members table (R13). Finer rules inside a
+  space (a private task in a shared project) are not cryptographically
+  separated: every member of the project can decrypt the private task.
+  Content that needs a narrower readership gets its own space:
+  documentation recommends a dedicated content row (for example a
+  `privateNotes` row per owner) with its own members. The deploy warns when
+  it can see that the space row is readable more broadly than the encrypted
+  table (for example, the table's read rule is the space row's rule plus
+  further conditions), and when it can see that the encrypted table is
+  readable more broadly than its space row (for example, the table's read
+  rule does not involve the space row at all): a session that may read an
+  encrypted row but is not a member receives the ciphertext and never a
+  key, so it reports the row `key-unavailable`. It cannot decide either
+  comparison in general and does not claim to.
 
 Application-wide encryption settings live in an optional top-level
 `encryption` object of `jazz.app.json`, beside `tables`: `allowAccountReset`
@@ -999,16 +1039,19 @@ account rotation; while its sign-in to the application stays valid, Jazz
 keeps sending it the account's rows, and rows written under versions it holds
 stay readable to it. To cut a lost or stolen device off, the account must
 first **revoke the device's sign-in** with the application (so Jazz stops
-serving it) and then **rotate every space** whose keys it held (§3.5);
-developer documentation must say so, in that order. After a device removal,
-the SDK rotates each space this device holds keys for, as an ordinary
-rotation that the authority accepts only if the account may read and update
-the space row (R14), and then emits one `spaces-need-rotation` encryption
-event `{account, removedDeviceId, spaces}` listing the held spaces whose
-rotation was refused or could not be made (for example because no current
-key is held), so the application can ask someone who may update them. The
-SDK does not evaluate permissions locally (§3.2); it learns which spaces it
-may not rotate from the refusals.
+serving it); its spaces then need new keys. A device removal marks every
+space whose current version was sealed to an account epoch the removed
+device held as needing rotation (§3.5), and the next encrypted write by an
+updater rotates it. The SDK of the removing device does not wait: it
+rotates each space it holds keys for at once, as an ordinary rotation that
+the authority accepts only if the account may update the space row (R16),
+and then emits one `spaces-need-rotation` encryption event `{account,
+removedDeviceId, spaces}` listing the held spaces whose rotation was
+refused or could not be made (for example because no current key is held),
+so the application can ask an updater to rotate them. The SDK does not
+evaluate permissions locally (§3.2); it learns which spaces it may not
+rotate from the refusals. Developer documentation must say to revoke the
+sign-in first.
 
 **What removal achieves also depends on how the account signs in.** For an
 account authenticated by the application's own sign-in, a removed device can
@@ -1233,18 +1276,17 @@ inactive; a recovery root must be registered again: from the same recovery
 secret, the root derived for the new generation (§2.9). Records the account
 signed before the reset stay valid (state as of a position, §2.4).
 
-**A reset account requests keys like any reader.** Its new generation holds
+**A reset account gets keys again from members.** Its new generation holds
 no account key of the old one, so it opens nothing sealed to its old account
-(§2.12), and its runtime requests the space keys it needs (§3.4). There is no
-approval: Jazz's read permission on each space row decides, as for every
-reader (§8). Readers see the reset: a key request by an account whose
-generation, as of the request's position, is above 0 is that space's **reset
-notice**. Each reader's runtime verifies the generation from the account's
-public roots (R10) and emits an `account-reset` encryption event `{account,
-space, generation}` once per space, account and generation, next to the
-unreadable-row reports (§4.3), so the application can show "<account>'s
-encryption was reset". An account that reset before it ever read the space
-is shown the same way.
+(§2.12). Holders see a member with no envelope for its current generation
+and deliver to its new sealing key (§3.4). There is no approval: its member
+rows decide, as for every member (§8). Members see the reset: each member's
+runtime reads the public roots (R10) of the space's members and, for a
+member whose current generation is above 0, emits an `account-reset`
+encryption event `{account, space, generation}` once per space, account and
+generation, next to the unreadable-row reports (§4.3), so the application
+can show "<account>'s encryption was reset". An account that reset before
+it joined the space is shown the same way.
 
 ### 2.12 Account sealing keys
 
@@ -1333,12 +1375,11 @@ epoch (§2.12). `K'` is the new version's key, `Kₕ` the key of the
 successor's `historyEpochId` (its predecessor's key, except in a recovery
 rotation, §3.5), and in a delivery `K` is the key of `keyEpochId`.
 
-| Record      | Signed bytes                                                                                                                                                                            | Key material                                                                                                                                                                                                                                                                                                               |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Root        | `frame[X(json(["root", creatorAccountId, deviceId, accountEpochId]), "", epochId), env(mechanism, verification), accountEnvelope]`                                                      | `verification = wrap(K₀, X("verification", "", epochId), Z32)`; `accountEnvelope = seal(A(creatorAccountId, accountEpochId), X("account-envelope", json([creatorAccountId, accountEpochId]), epochId), K₀)`                                                                                                                |
-| Successor   | `X(json(["successor", id, "signature"]), json([authorAccountId, authorDeviceId, authorEpochId]), epochId) ‖ frame[predecessor, historyEpochId, verification, history, accountEnvelope]` | `verification = wrap(K', X("verification", "", epochId), Z32)`; `history = wrap(K', X(json(["successor", id, "history"]), historyEpochId, epochId), Kₕ)`; `accountEnvelope = seal(A(authorAccountId, authorEpochId), X(json(["successor", id, "account-envelope"]), json([authorAccountId, authorEpochId]), epochId), K')` |
-| Key request | Unsigned; random ID                                                                                                                                                                     | None                                                                                                                                                                                                                                                                                                                       |
-| Delivery    | Unsigned; its ID is its request's                                                                                                                                                       | `envelope = seal(A(recipientAccountId, recipientAccountEpochId), X(json(["delivery", id, senderAccountId]), json([recipientAccountId, recipientAccountEpochId]), keyEpochId), K)`                                                                                                                                          |
+| Record    | Signed bytes                                                                                                                                                                            | Key material                                                                                                                                                                                                                                                                                                               |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Root      | `frame[X(json(["root", creatorAccountId, deviceId, accountEpochId]), "", epochId), env(mechanism, verification), accountEnvelope]`                                                      | `verification = wrap(K₀, X("verification", "", epochId), Z32)`; `accountEnvelope = seal(A(creatorAccountId, accountEpochId), X("account-envelope", json([creatorAccountId, accountEpochId]), epochId), K₀)`                                                                                                                |
+| Successor | `X(json(["successor", id, "signature"]), json([authorAccountId, authorDeviceId, authorEpochId]), epochId) ‖ frame[predecessor, historyEpochId, verification, history, accountEnvelope]` | `verification = wrap(K', X("verification", "", epochId), Z32)`; `history = wrap(K', X(json(["successor", id, "history"]), historyEpochId, epochId), Kₕ)`; `accountEnvelope = seal(A(authorAccountId, authorEpochId), X(json(["successor", id, "account-envelope"]), json([authorAccountId, authorEpochId]), epochId), K')` |
+| Delivery  | Unsigned; random ID                                                                                                                                                                     | `envelope = seal(A(recipientAccountId, recipientAccountEpochId), X(json(["delivery", id, senderAccountId]), json([recipientAccountId, recipientAccountEpochId]), keyEpochId), K)`                                                                                                                                          |
 
 In the root, `env(mechanism, verification)` is applied literally: the root's
 `mechanism` and `version` columns name the key wrapping mechanism of the
@@ -1350,18 +1391,19 @@ The successor's `historyEpochId` is signed and bound into the `history`
 context (as its recipient field), so the version a `history` wrap opens
 cannot be substituted. These signed bytes add `historyEpochId` to the
 earlier draft's; the successor digest pinned in
-`crates/jazz-e2ee/tests/protocol_vectors.rs` is to be regenerated. Requests
-and deliveries are unsigned: the server authenticates their
-author (`$createdBy`, R2), and a delivered key is accepted only after it
+`crates/jazz-e2ee/tests/protocol_vectors.rs` is to be regenerated.
+Deliveries are unsigned: the server authenticates their
+sender (`$createdBy`, R2), and a delivered key is accepted only after it
 authenticates against its version's marker and the chain (§3.3), which the
 signed root and successors carry.
 
 ### 3.2 Creation
 
 A space exists once a valid root of its address is accepted. Only an
-updater creates one (R13: read and update permission on the space row). The
+updater creates one (R15: read and update permission on the space row). The
 creator generates the root epoch and `K₀`, and writes the root with
-`accountEnvelope`, its own account's copy; no delivery is written.
+`accountEnvelope`, its own account's copy. The other members receive `K₀`
+by delivery (§3.4).
 
 **When a space is created.** Inserting a space row creates nothing. A space
 is created only:
@@ -1375,41 +1417,33 @@ is created only:
   for a space that already has one;
 - **explicitly**, by `db.encryption.createSpace(row)`: one transaction
   holding only the root (stage `create`), which waits for Global acceptance;
+- **for members without one**: a member's runtime that sees member rows of
+  a space with no valid root (the account's own member rows are readable to
+  it, R12) creates the space after a random delay, as `createSpace`, so that
+  usually one updater does;
 - by a conversion sweep, in its first conversion transaction for the space
   ([migrations](E2EE_MIGRATIONS.md) §3.5).
 
 **Creation is optimistic.** A Jazz replica evaluates no write policy, and
 the runtime does not try to predict the authority's decision: it stages a
 root whenever it needs a space that has none, online or offline, and the
-authority decides (R13). A refusal fails only the transaction that carried
+authority decides (R15). A refusal fails only the transaction that carried
 the root, with the authority's refusal; when the refused row is the root,
 the SDK reports it as a publication error of stage `create` with code
-`space-create-refused`, naming the space. After a refusal the runtime stages
-no further root for that space in this session until the space row changes;
-later encrypted writes to the space fail with `space-pending`, and reads of
-it report the space `space-pending` (§4.3). Before a root is staged, the
-runtime prepares it: online it reads the address's roots, and it generates
-`K₀`, writes the root and stores `K₀` as an `unpublished` held key (§5.4).
-The write then stages the prepared root. Inside a transaction callback the
-staging call awaits this like an acquisition (§5.6). If a root was missed
-(offline, or not yet synced), the new one is a lost creation (below).
+`space-create-refused`, naming the space. A device tries at most once per
+space: after a refusal it never stages a root for that space again, and
+later encrypted writes to the space fail with `space-pending` and reads of
+it report the space `space-pending` (§4.3) until a valid root exists, which
+an updater's runtime creates when it sees the space's member rows. A member
+that may not update the space row therefore cannot create it. Before a root
+is staged, the runtime prepares it: online it reads the address's roots,
+and it generates `K₀`, writes the root and stores `K₀` as an `unpublished`
+held key (§5.4). The write then stages the prepared root. Inside a
+transaction callback the staging call awaits this like an acquisition
+(§5.6). If a root was missed (offline, or not yet synced), the new one is a
+lost creation (below).
 
-**Readers that cannot create.** A session whose creation was refused writes,
-unless one of its account is already open, a **space request**: a key
-request with no `keyEpochId` (§3.4; R15 accepts it from any reader). The
-runtime of every reader subscribes to the space requests it can read whose
-space has no valid root, and, after a random delay, creates the space
-(optimistically, as `createSpace`); a refusal ends its attempt for that
-request, and the first accepted valid root ends it for everyone. So an
-updater's client that sees the request creates the space. The cost is
-proportional to the open space requests a session can read, and to one
-refused attempt per such request by each reader that is not an updater. Once
-a valid root exists, the requester's runtime, which watches the address
-([core hooks](E2EE_CORE_HOOKS.md) H6), requests the root version like any
-reader (§3.4). A space request is answered by the root itself, never by a
-delivery (R16).
-
-**Several roots.** The server does not limit roots per address (R13).
+**Several roots.** The server does not limit roots per address (R15).
 Concurrent creators, offline creators, and a creator whose root clients
 reject (for example one written by a device that was removed before the
 root was accepted) can all produce roots. Replay accepts a root iff its
@@ -1426,19 +1460,17 @@ that is accepted but lost, leaves this device with a key no one else will
 use. The transaction that carried a refused root wrote nothing. Later
 transactions that encrypted under its key, which do not depend on the
 creation, may have been accepted by Jazz; their cells name an epoch that is
-not in the space's chain, so every other reader reports them
+not in the space's chain, so every other member reports them
 `invalid-ciphertext`. The device keeps the key, marked `refused` (§6.2),
 while it repairs its own rows:
 
-- if the session can read the space row, the runtime obtains the space's
-  real key (after a valid root exists, by request, §3.4; or by writing a
-  space request first), then re-encrypts, under that key, the rows it
-  wrote under the refused or lost key (it reads the space's rows and
-  selects cells naming that epoch, a cost proportional to the space), and
-  then discards the key (§5.4);
-- if it cannot read the space row (R15 refuses its request), those rows
-  stay unreadable to everyone else, and the key is discarded: Jazz no
-  longer serves the device the space's rows.
+- if its account is a member, the runtime obtains the space's real key
+  (by delivery, §3.4, once a valid root exists), then re-encrypts, under
+  that key, the rows it wrote under the refused or lost key (it reads the
+  space's rows and selects cells naming that epoch, a cost proportional to
+  the space), and then discards the key (§5.4);
+- if it is not a member, those rows stay unreadable to everyone else, and
+  the key is discarded: Jazz no longer serves the device the space's rows.
 
 Re-encryption is an ordinary update and needs Jazz update permission on the
 rows; rows the device may no longer update stay unreadable to others.
@@ -1453,10 +1485,10 @@ earlier version of the chain, whose author device was active with account
 epoch `authorEpochId` at its position (§2.4), and whose signature verifies.
 The last version reached is the **current version**. Whether the author
 could update the space row is Jazz's decision and is not re-checked. Every
-reader applies the same rule.
+member applies the same rule.
 
 **Acquiring.** The client reads, at one cut, the root, the successors, the
-deliveries addressed to its account (R12) and the public account histories
+deliveries addressed to its account (R14) and the public account histories
 of the authors involved. The candidates for a version `v` are the
 `accountEnvelope` of `v`'s root or successor when its own account wrote it,
 then deliveries of `v` to its account. Each names an epoch of its account;
@@ -1472,146 +1504,141 @@ successor were skipped by a recovery rotation (§3.5) and get no key from
 the chain: a device obtains them only from its own account envelope or a
 delivery of that version. A candidate that provably fails to open or
 authenticate is skipped; a crypto provider failure fails the operation
-(§0). The client tries the current version first and then earlier ones,
-keeps every key it accepts as a held key, and requests the current version
-when it does not obtain it (§3.4).
+(§0). The client tries the current version first and then earlier ones, and
+keeps every key it accepts as a held key. When it does not obtain the
+current version, it waits for a delivery (§3.4).
 
 **Unresolved history.** A record needing a capability this client lacks
 (unsupported signing mechanism or ledger version) leaves the chain
 unresolved from there (§7, unsupported capability); the client does not skip
 it.
 
-### 3.4 Key requests and deliveries
+### 3.4 Members and deliveries
 
-In the first release keys move **only** by request: nothing is delivered
-that was not asked for, and the server never decides whether an account
-other than the session's may read a row. Delivering proactively (to readers
-at rotation, or to new readers when they gain access) would need that check
-and is possible later work.
+Keys move by delivery only, and nobody asks for them: every member's
+runtime derives the work from tables it can read (R12, R14), automatically;
+applications and users never handle deliveries.
 
-- **Requesting.** When a device needs a version it cannot acquire (§3.3)
-  (a read or write needs it, or the chain shows a newer current version of
-  a space it holds keys for), its runtime asks for the current version,
-  automatically: applications and users never handle requests. It first
-  looks for a request of its own account for that space and version that it
-  can read (R12) and that is still open: no delivery answers it, or its
-  delivery has not yet been tried. If one exists, written by this or
-  another device of the account, it **joins** it: it waits for that
-  request's delivery, which every device of the account can open. Otherwise
-  it inserts a request `{scopeId, identifier, keyEpochId, accountId}` with
-  a random ID. Two devices that both find none may both write one; both are
-  answered, and that is harmless.
-- **Outcomes of a request insert.** An accepted request is open until a
-  delivery answers it; the device reports the space `key-pending` (§4.3). A
-  **refused** insert means that the authority did not accept the request
-  (R15); the client does not know why, and in particular does not conclude
-  that the account lost read access. It reports what it cannot decrypt
-  `key-unavailable` (this device lacks the key and its request was not
-  accepted) and asks again, with a new request, only when a later read or
-  write needs the key, after a backoff. An **unknown** outcome is kept: the
-  device treats the request as possibly open, reports `key-pending`,
-  reconciles it by its row ID and transaction identity (§5.6), and writes no
-  new request for that version until the outcome is known.
-- **Requests do not expire.** An open request stays open until answered.
-- **Space requests** (no `keyEpochId`, §3.2) follow the same joining and
-  outcome rules. One is open until a valid root of its address exists; it
-  is answered by that root, not by a delivery, and answerers of version
-  requests ignore it.
-- **Answering.** Every device holding keys of a space subscribes to the
-  space's **unanswered** requests: requests that no delivery with the same
-  ID answers (deliveries are readable by readers, R12). Before answering a
-  request for version `v` of address `(scopeId, identifier)`, the device
-  checks, from the chain it has authenticated for that address and its
-  space root (§3.3):
-  1. `v` is a version of **that** space's chain, and the key comes from that
-     space's held-key document (§6.2) only. A request naming an epoch of any
-     other space, or no epoch of the chain, is ignored;
-  2. `v` already existed when the request was accepted: the root or
-     successor that created `v` was accepted strictly before the request's
-     position. A request accepted at or before `v`'s creation is ignored,
-     even if `v` is now in the chain, so knowing a future epoch ID before
-     it exists gains nothing;
-  3. it holds `v`'s key.
+- **Who lacks a key.** A member **lacks** version `v` when no accepted
+  envelope of `v` (a delivery to it, or the `accountEnvelope` of `v`'s root
+  or successor that it wrote) names an account epoch of its current
+  generation. Versions concerned are the current version and, after a
+  recovery rotation (§3.5), the skipped versions. A device-removal account
+  rotation changes nothing here: the account's remaining devices open
+  envelopes sealed to earlier epochs of the generation through its history
+  (§2.12), and the space is marked as needing rotation instead (§3.5). A
+  reset starts a new generation, so a reset member lacks every version
+  until someone delivers again (§2.11).
+- **Delivering.** Every device holding keys of a space watches its member
+  rows and deliveries. For each member that lacks a version it holds, after
+  a random delay (so that usually one holder delivers), and only if no
+  delivery has appeared meanwhile, the device checks, from the chain it has
+  authenticated for that address and its space root (§3.3), that `v` is a
+  version of **that** space's chain, and takes the key from that space's
+  held-key document (§6.2) only. It then reads the member's public account
+  history (R10), finds its current account epoch and that epoch's valid
+  sealing key (§2.12) (without one it waits), and inserts the delivery
+  `{scopeId, identifier, keyEpochId, senderAccountId, recipientAccountId,
+recipientAccountEpochId, envelope}`, with a random ID, sealed to that
+  key, in a ledger transaction whose read set includes the member's public
+  account rows and member rows. Read-set validation (§0 item 5) refuses the
+  delivery if the member's account rotated or its member rows changed after
+  that cut, so a delivery is never sealed to an epoch that a since-removed
+  device still holds; the device then re-reads. The authority accepts it
+  only from a member to a member (R17). Two holders may both deliver; the
+  second delivery costs storage only.
+- **Receiving.** A member's devices watch deliveries addressed to their
+  account and acquire the key (§3.3). While its account lacks a version
+  that it needs, a member's device reports the space `key-pending` (§4.3).
+  A delivery that does not open or authenticate is skipped; because it
+  looks delivered to everyone else, the member stays `key-pending` until
+  another delivery or the next rotation (§3.5). Its sender is named by
+  `senderAccountId`, which every member can see (R14); a member is trusted
+  with the key anyway (it could disclose it), and the application's remedy
+  is to remove that member.
+- **Not a member.** A device whose account has no member row for the space
+  (its own member rows are readable to it, R12) reports what it cannot
+  decrypt `key-unavailable`: nobody will deliver to it.
 
-  It then reads the requester's public account history (R10), finds the
-  requester's current account epoch and its valid sealing key (§2.12)
-  (without one it waits), and, after a random delay (so that usually one
-  reader answers), inserts the delivery with the request's ID, sealed to
-  that key, in a ledger transaction whose read set includes the requester's
-  public account rows. Read-set validation (§0 item 5) refuses the answer if
-  the requester's account rotated after that cut, so an answer is never
-  sealed to an epoch that a since-removed device still holds; the answerer
-  then retries against the new epoch. The server accepts a delivery only
-  from a reader answering an accepted request (R16). At most one answer per
-  request is accepted; a device whose answer is refused stops.
-
-- **Receiving.** The requester's devices watch deliveries addressed to
-  their account and acquire the key (§3.3). An answer that does not open or
-  authenticate closes that request for the account; the device writes a new
-  request. A reader that answers with bad keys is named by
-  `senderAccountId`, which every reader of the space can see (R12). It is a
-  reader, so this costs it nothing it could not already do (it could
-  disclose the key); the application's remedy is to remove that reader's
-  access.
-- **After losing access.** A request accepted while its author could read
-  the space row may still be answered after that access ends. Check 2 above
-  limits the answer to a version that existed when the request was
-  accepted, which the author could then have requested and obtained anyway.
-
-Required behavioural tests: a request naming another space's epoch is not
-answered; a request naming a future epoch, accepted before that epoch is
-created, followed by the requester's removal and a rotation creating that
-epoch, is not answered; a request for a genuinely older version is
-answered; two devices of one account requesting at once are both answered,
-and a third joins a visible open request; a refused request insert reports
-`key-unavailable` and an unknown one `key-pending`; an answer whose
-requester's account rotates between the answerer's read and its commit is
-refused and retried.
+Required behavioural tests: a new member receives the current version from a
+holder; a delivery naming an epoch of another space is never written; a
+delivery to an account without a member row is refused (R17); a reset member
+receives the current version again; a delivery whose recipient's account
+rotates between the holder's read and its commit is refused and redone
+against the new epoch; a member that receives a delivery that fails to open
+stays `key-pending`.
 
 ### 3.5 Rotation and removal
 
-**Rotation** (`db.encryption.rotate(space)`) is by an updater (R14) whose
-device is active and holds the current version (it acquires or requests it
-first, §3.3–§3.4). It generates a new epoch and `K'`, and inserts one
-successor whose `predecessor` and `historyEpochId` are both the current
-version, in a ledger transaction that read the chain at its cut;
-read-set validation refuses a second successor of the same predecessor, and
-the loser re-reads. Nothing is delivered at rotation: the rotator's account
-holds `K'` through the successor's `accountEnvelope`, and every other reader
-requests `K'` when it needs it (§3.4). Right after a rotation the rotator's
-account is the only holder of the new version (§8).
+**Rotation** is by an updater (R16) whose device is active and holds the
+current version (it acquires it first, §3.3). It generates a new epoch and
+`K'`, and inserts, in one ledger transaction that read the chain, the
+space's member rows and those members' public account rows at its cut, one successor whose `predecessor` and
+`historyEpochId` are both the current version, and one delivery of `K'` to
+every current member other than itself that has a valid sealing key
+(§2.12, §3.4); members without one receive `K'` later from any holder.
+Read-set validation refuses a second successor of the same predecessor, and
+a rotation whose members changed meanwhile; the loser re-reads.
 
 Rotation does not re-encrypt existing content: old cells stay under their
 versions, which the newest key opens. Every rotation adds a version; reads
 use the held key of each cell's version and equality queries compute one
-token per held version (§4.5). Until a reader obtains the new version, it
+token per held version (§4.5). Until a member obtains the new version, it
 writes with the newest one it holds (§5.2).
 
-**Recovery rotation.** When no one who answers holds the current version
-(for example the only holder lost its device right after rotating), an
-updater may call `db.encryption.recoverRotation(space)`. It is never part
-of routine rotation, and the SDK never calls it on its own: the application
+**Needs rotation.** A space **needs rotation** when its current version is
+held (§1.1) by an account that is no longer a member, or was sealed to an
+account epoch that a later `remove-device` account successor (§2.8)
+superseded, so that a removed device can open it. The mark is derived from
+tables every member can read (members, roots, successors, deliveries and the
+public account successors, R10, R12, R14); nobody writes it, nobody can
+forget or forge it, and the next rotation clears it, since the new version is
+delivered to current members' current account epochs only. Each member's
+runtime evaluates it when the space's members, deliveries or chain change,
+at a cost proportional to the members and the current version's envelopes.
+
+**Rotation is lazy and coalesced; never per write.** A space that needs
+rotation is rotated:
+
+- before the next encrypted write to it by an updater: the runtime makes
+  the rotation in its own transaction and, online, the write waits for its
+  outcome within its own deadline and then uses `K'`. If the rotation is
+  refused (the writer is not an updater), offline, or not decided within
+  the deadline, the write uses the current version. A device that was
+  refused does not try again for that space until the space is marked again
+  by a further removal;
+- by `db.encryption.rotate(space)`, at once, when the application wants
+  the removal effective immediately;
+- after a device removal, by the removing device at once (§2.8).
+
+Several removals before the next rotation are covered by one rotation.
+Writes by members who are not updaters stay under the current version until
+an updater rotates.
+
+**Recovery rotation.** When no online member holds the current version (for
+example the only holder lost its device right after rotating), an updater
+may call `db.encryption.recoverRotation(space)`. It is never part of
+routine rotation, and the SDK never calls it on its own: the application
 calls it explicitly, typically after asking a person. It writes a successor
 whose `predecessor` is the current version (so it extends the chain) and
 whose `historyEpochId` is the newest version the rotator holds, whose key
-its `history` wraps. The versions after that one, up to and including the
-predecessor, are **skipped**: the chain gives no key for them (§3.3). A
-device that already holds a skipped version keeps it, and answers requests
-for it like any other version (§3.4), so content under it remains
-readable to holders and to whoever they answer. To everyone else, content
-written under skipped versions is lost: newcomers obtain the new version and
-every version its history reaches, and report cells of skipped versions
-`key-pending` (their request stays open) indefinitely. A recovery rotation
-needs at least one held version; with none, the remedy is a new space (§8).
+its `history` wraps, with deliveries to members as for any rotation. The
+versions after that one, up to and including the predecessor, are
+**skipped**: the chain gives no key for them (§3.3). A device that already
+holds a skipped version keeps it, and delivers it to members that lack it
+(§3.4), so content under it remains readable to holders and to the members
+they reach. Content written under skipped versions that no member holds is
+lost: members report its cells `key-pending` indefinitely. A recovery
+rotation needs at least one held version; with none, the remedy is a new
+space (§8).
 
-**Removal.** E2EE does not detect removals. To exclude someone, the
-application removes their read access to the space row and then calls
-`rotate(space)`; developer documentation must say so, and that the order
-matters (a rotation accepted before the access change excludes nobody).
-The removed account's request for the new version is refused (R15), and Jazz
-stops sending it the space's rows. It keeps every key it already held, which
-stay usable for content of their versions (§8). Removing a device of an
-account is handled the same way: revoke its sign-in, then rotate (§2.8).
+**Removal.** To remove a member, an updater deletes the member's rows
+(R12). Jazz then stops sending that account the space's rows (the space
+row's read rule comes from members, R13), no delivery to it is accepted
+(R17), and the space needs rotation, which happens lazily as above. The
+removed account keeps every key it already held, which stay usable for
+content of their versions (§8). Removing a device of an account is handled
+through the same mark: revoke its sign-in, then the space is rotated (§2.8).
 
 ### 3.6 New devices, recovery and account changes
 
@@ -1623,7 +1650,7 @@ no other account and no other device is involved. An account rotation changes
 the sealing key later envelopes use; the account's remaining devices still
 open earlier ones. A removed device opens only what was sealed to the
 account epochs it held, and keeps the space versions it held until spaces
-rotate (§2.8, §2.12). A reset account requests again (§2.11).
+rotate (§2.8, §2.12). Members deliver again to a reset account (§2.11, §3.4).
 
 ### 3.7 Offline
 
@@ -1631,9 +1658,10 @@ Provisional operations replay over a provisional snapshot (§0), keeping the
 author's account-history predicate (active device, not removed, keys and
 mechanisms matching). Space creation may be offline, staged in the same
 transaction as the encrypted write that needs it, exactly as online (§3.2,
-§5.4). A key request written offline is submitted on reconnection; answering
-and rotation are online only. On reconnection, Jazz permissions decide
-acceptance; a refused or lost creation is repaired as in §3.2.
+§5.4). Member rows written offline are ordinary writes, submitted on
+reconnection. Deliveries and rotation are online only. On reconnection,
+Jazz permissions decide acceptance; a refused or lost creation is repaired
+as in §3.2.
 
 ## 4. Reads
 
@@ -1698,24 +1726,23 @@ large-value format carries the stream mechanism's header once.
   chain, the device remembers that until the chain it knows advances, and
   reports cells of that epoch `invalid-ciphertext` without acquiring again;
   otherwise a live query pays the acquisition again on each refresh.
-- When the acquisition obtains no key for a needed version, the device's
-  request for the current version is open (§3.4): the read returns the rows
-  its held keys decrypt, leaves the space's other rows out and reports the
-  space once as `key-pending` (§4.3). It does not fail and reports no row
+- When the acquisition obtains no key for a needed version and the account
+  is a member (§3.4), the read returns the rows its held keys decrypt,
+  leaves the space's other rows out and reports the space once as
+  `key-pending` (§4.3). It does not fail and reports no row
   `key-unavailable`. When the delivery arrives, the device acquires the key,
   the report is withdrawn and live queries receive the rows as additions.
-- When the request insert is refused (§3.4; the client does not infer why),
-  the read returns what its held keys decrypt and reports the rest
-  `key-unavailable`. An unknown request outcome is treated as open. Any other acquisition failure (provider error,
-  cancellation) fails the read.
+- When the account is not a member, the read returns what its held keys
+  decrypt and reports the rest `key-unavailable`. Any other acquisition
+  failure (provider error, cancellation) fails the read.
 - A held-key record that fails its checks (§6.2) is skipped and reported; the
   read continues with the other held keys and acquires that version again if
   it can. (The TypeScript implementation failed every read of the space.)
 - Keys obtained by an acquisition, including earlier versions from the
   history chain, become held keys.
 - A device watches deliveries addressed to its account and the chain of each
-  held space; when a delivery or a new version syncs in, it acquires (and if
-  needed requests) without waiting for a read. A failed acquisition is
+  held space; when a delivery or a new version syncs in, it acquires
+  without waiting for a read. A failed acquisition is
   retried with backoff until the key is held, a later version supersedes it,
   or the session closes.
 
@@ -1729,9 +1756,9 @@ encrypted cell and returns the rest; no partial plaintext is returned. Report
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `invalid-ciphertext` | Authentication failed; the cell belongs to another row, table, column or space; malformed; no such epoch in the space's chain           |
 | `unsupported-format` | Unknown envelope mechanism or version                                                                                                   |
-| `key-unavailable`    | This device lacks that version's key and its request for it was not accepted (§3.4); no cause is inferred                               |
-| `key-pending`        | Per space, not per row: this account's key request is open or its outcome unknown (§3.4)                                                |
-| `space-pending`      | Per space, like `key-pending`: the space row has no valid root yet, and this session's creation was refused or not yet made (§3.2)      |
+| `key-unavailable`    | This device lacks that version's key and its account is not a member of the space (§3.4)                                                |
+| `key-pending`        | Per space, not per row: this account is a member and lacks a version it needs; a member's delivery is awaited (§3.4)                    |
+| `space-pending`      | Per space, like `key-pending`: the space row has no valid root yet, and this device's creation was refused or not yet made (§3.2)       |
 | `empty-cell`         | The stored cell is the empty byte string; the row is returned with the column's default (§4.1)                                          |
 | `superseded`         | The cell holds the cleared marker (§4.1) and this reader's declaration names no conversion for the column                               |
 | `stale-space`        | The cell was sealed under another space of the same row's history; it was read and needs repair ([migrations](E2EE_MIGRATIONS.md) §3.9) |
@@ -1779,8 +1806,8 @@ which this device holds no key cannot compute any token, and an empty
 `IN ()` would return a false empty result without ever revealing a missing
 version. Planning therefore reports the missing space key, and the runtime
 acquires it (§3.3) within the read's own budget before executing;
-acquisition outcomes are those of §4.2 (an open request gives `key-pending`
-and no rows). The query then runs against the version set it was planned
+acquisition outcomes are those of §4.2 (a member that lacks the key gets
+`key-pending` and no rows). The query then runs against the version set it was planned
 with.
 
 **Conversions.** On a column being converted ([migrations](E2EE_MIGRATIONS.md)
@@ -1793,20 +1820,20 @@ have a present source.
 **Completeness.** An equality query returns matching rows of the versions
 this device holds. When the device knows (from the chain it last read) that
 the space has versions it does not hold, the result may miss rows of those
-versions, and the query reports the space once as `key-pending` (request
-open or outcome unknown) or `key-unavailable` (request not accepted) so the
-result is not mistaken for complete.
+versions, and the query reports the space once as `key-pending` (a member)
+or `key-unavailable` (not a member) so the result is not mistaken for
+complete.
 
 ### 4.6 Subscriptions
 
-A subscription whose key request is open waits without emitting, in one
+A subscription whose space is `key-pending` waits without emitting, in one
 bounded episode (the operation timeout, 10 s by default). Delivery or
 authority changes trigger fresh reads; there is no polling and retries do not
 extend the deadline. On expiry it emits the rows its held keys decrypt,
 reports the space `key-pending`, and keeps watching; the rows arrive as
-additions once the key is obtained. The reader that can answer may be offline
-for much longer than one episode, so the wait is reported, not treated as an
-error. One-shot reads do not wait.
+additions once the key is obtained. The members who can deliver may be
+offline for much longer than one episode, so the wait is reported, not
+treated as an error. One-shot reads do not wait.
 
 While it waits, the subscription delivers nothing, but core keeps computing
 deltas against its own baseline. The subscription wrapper therefore keeps a
@@ -1827,8 +1854,9 @@ content-write path adds no check of access, device approval, version
 freshness or Global acceptance; only Jazz permissions accept or reject
 the write. Key binding, session lifetime and cancellation still apply. When no
 key is held, key acquisition (§3.3) happens before the write proceeds, and a
-write that needs a key whose request is open waits for it within its own
-deadline.
+write that needs a key its member account lacks waits for a delivery within
+its own deadline. A write to a space that needs rotation may first rotate
+it (§3.5).
 
 A device that has not yet obtained the newest version writes with the newest
 one it holds (§5.2).
@@ -1862,7 +1890,7 @@ creation keeps the author's device-active predicate (§3.7).
 
 An encrypted write to a space with no known valid root stages the root in
 the same transaction (§3.2), online or offline; the authority accepts it
-only from an updater (R13), and a refusal fails that transaction alone. The
+only from an updater (R15), and a refusal fails that transaction alone. The
 new key is stored as a held key before commit, with a persisted
 `unpublished` mark (§6.2) carrying the creation's durable transaction
 identity, and the mark is cleared once the creation is accepted as the
@@ -1920,7 +1948,8 @@ source.
   instead fails such a staging call with `key-pending` and aborts the
   transaction; the application acquires keys first with
   `db.encryption.acquire(space)` (which also prepares a missing space's
-  root, §3.2) and runs the transaction again.
+  root, §3.2, and makes a pending rotation, §3.5) and runs the transaction
+  again.
   (The TypeScript implementation had "content-key declarations"; they are
   dropped.)
 - Unknown outcomes are reconciled by the original transaction's identity, not
@@ -2045,7 +2074,7 @@ a **floor** for every account and space whose state it has verified:
 
 - an account: the cut, generation, canonical root of that generation, and
   current epoch with its position (§2.4, "Floors"); for the device's own
-  account and for every account it replays (authors, requesters);
+  account and for every account it replays (authors, delivery recipients);
 - a space: the cut, the root ID, and the current version with its chain
   depth.
 
@@ -2112,8 +2141,8 @@ names the table, column, space and pending count.
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Device approval pending     | `AccountKeyUnavailable` / readiness `not-verified`                                                                                                                                               | Show "waiting for approval or keys"; complete approval or recovery                                  | Re-approve, or treat the account as signed out                                                 |
 | Key pending                 | `SpaceKeyDeliveryPending`                                                                                                                                                                        | Report the space `key-pending`; subscriptions wait one bounded episode, then emit and keep watching | Poll, fail the read, or report each row `key-unavailable`                                      |
-| Key unavailable             | `E2eeDataError("key-unavailable")`, `SpaceKeyUnavailable`, `SpaceKeyNotMember`                                                                                                                   | Return what held keys decrypt; report the rest                                                      | Write plaintext, request again within the read, or claim the account lost access               |
-| Space pending               | None (new)                                                                                                                                                                                       | Refuse the write `space-pending`; report the read; write a space request; watch for the root        | Retry the refused creation in the same session, or write plaintext                             |
+| Key unavailable             | `E2eeDataError("key-unavailable")`, `SpaceKeyUnavailable`, `SpaceKeyNotMember`                                                                                                                   | Return what held keys decrypt; report the rest                                                      | Write plaintext, or wait for a delivery                                                        |
+| Space pending               | None (new)                                                                                                                                                                                       | Refuse the write `space-pending`; report the read; watch for the root                               | Retry the refused creation on this device, or write plaintext                                  |
 | Superseded / stale space    | None (new, schema conversions)                                                                                                                                                                   | Report; leave a `superseded` row out; return a `stale-space` row                                    | Report either as `invalid-ciphertext`                                                          |
 | Permission refusal          | Jazz rejection; `*PublicationError` outcome `refused`                                                                                                                                            | Report; reflect in local state                                                                      | Treat key possession as overriding it                                                          |
 | Authentication failure      | `E2eeDataError("invalid-ciphertext")`, `InvalidKeyEnvelopeError`                                                                                                                                 | Leave the row out (ordinary reads) or fail (strict reads)                                           | Return unverified plaintext                                                                    |
@@ -2130,12 +2159,12 @@ names the table, column, space and pending count.
 Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 `approval`, `account-rotation`, `account-key`, `recovery-root`,
 `recovery-delivery`, `account-reset`; space `create`, `rotate`,
-`key-request`, `delivery`, `write`.
+`delivery`, `write`.
 
 Serialization and transaction conflicts are retried internally only by
 operations that are safe to repeat because they re-read their evidence and
 stage fresh rows: the runtime's own publications (space creation outside an
-application transaction, rotation, key requests and answers), conversion
+application transaction, rotation and deliveries), conversion
 sweeps, and a staging call retried after "needs key" before submission
 (§5.6). A public mutation or transaction callback is never retried or
 replayed: its conflict is returned to the caller, and an unknown outcome is
@@ -2164,21 +2193,22 @@ get these codes:
 | `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                             |
 | `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                    |
 | `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                  |
-| `space-pending`                 | An encrypted write to a space that has no valid root, after this session's creation of it was refused (§3.2).                                     |
+| `space-pending`                 | An encrypted write to a space that has no valid root, after this device's creation of it was refused (§3.2).                                      |
 | `space-create-refused`          | The authority refused the root staged with a write or by `createSpace` (§3.2); only that transaction fails.                                       |
 | `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all. |
 | `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                      |
 
 ## 8. Security properties and limits
 
-**Trust boundary.** Jazz permissions alone decide who may read a space: the
-space row's read rule. E2EE protects content against ciphertext leaking
-outside Jazz: a leaked database or backup, a copied replica, or an operator
-who reads storage. It does not protect against a server, an operator or a
-permission bug that grants read access to someone (that session can request
-and receive the keys, §3.4), nor against a compromised login (whoever signs
-in as an account with an active device, or resets an app account, is that
-account).
+**Trust boundary.** Jazz permissions alone decide who may read a space: its
+member rows, from which the space row's read rule must come (R13), and the
+update rule that decides who changes them. E2EE protects content against
+ciphertext leaking outside Jazz: a leaked database or backup, a copied
+replica, or an operator who reads storage. It does not protect against a
+server, an operator or a permission bug that adds a member row (that
+account then receives the keys, §3.4), nor against a compromised login
+(whoever signs in as an account with an active device, or resets an app
+account, is that account).
 
 Properties:
 
@@ -2195,8 +2225,8 @@ Properties:
   their author device and replayed in accepted order; forged or reordered
   records are skipped, contradictions fail closed. The other records are
   not signed: `app` account roots (trusted on first use, below), account
-  identities, challenges and every envelope record (device, recovery and
-  successor deliveries, key requests and space deliveries) are authenticated
+  identities, challenges and every envelope record (device, recovery,
+  successor and space deliveries) are authenticated
   by Jazz authorship (`$createdBy`) and by the markers and chains their keys
   must verify against. A delivered key is used only after
   it authenticates against its version's marker and the signed chain (§3.3).
@@ -2207,47 +2237,48 @@ Properties:
 
 Limits:
 
-- **Removal depends on the application calling `rotate`.** E2EE detects no
-  access change (§3.5). Without a rotation after removing someone's read
-  access, content written later stays under a key they hold; Jazz stops
-  sending them rows, but a database leak would expose it to them.
+- **Removal is detected from member rows; rotation is lazy.** Deleting a
+  member's rows marks the space as needing rotation (§3.5); no `rotate`
+  call is needed. The new key is made before the next encrypted write by an
+  updater, or at once by an explicit `rotate`. Until then, content written
+  by members (and by updaters offline) stays under a key the removed account
+  holds; Jazz stops sending it rows, but a database leak would expose that
+  content to it.
 - **Removal cannot erase copies.** A delivered key is never revoked. Keys,
-  plaintext and ciphertext a former reader already obtained remain with them,
+  plaintext and ciphertext a former member already obtained remain with it,
   and old versions stay readable to whoever holds their keys.
-- **New readers get the full history.** The newest key opens every earlier
-  version, so anyone granted read access to the space row can decrypt
-  everything ever written in the space. Content that a later reader must not
-  see belongs in another space.
-- **The rotator is the only holder right after a rotation.** Readers obtain
-  the new version by request (§3.4); until a device of the rotating account
-  is online to answer, they keep reading old content and writing under the
-  version they hold, and cannot read content written under the new one.
+- **New members get the full history.** The newest key opens every earlier
+  version, so anyone added as a member can decrypt everything ever written
+  in the space. Content that a later member must not see belongs in another
+  space.
+- **Keys need a key holder's client online.** Nobody delivers keys but
+  members' clients (§3.4): a new member, a reset member, or a member who
+  missed a rotation's delivery waits, `key-pending`, until a device of a
+  member holding the key is online. A rotation delivers to every current
+  member at once (§3.5), so this wait is mostly for members added later.
 - **Losing the current key needs a recovery rotation, and loses content.** If
   every holder of the current version loses it before anyone else obtains it
-  (for example the rotator loses its only device without recovery), nobody
-  can answer requests for it or rotate routinely. An updater can then make a
-  recovery rotation (§3.5), linking the new version to the newest version it
-  holds: rotation and onboarding resume, but content written under the
-  skipped versions is lost to everyone who did not hold them, and stays
-  `key-pending` for newcomers. With no version held by any updater, the only
-  remedy is a new space, which means a new space row: a new row ID, every
-  encrypted row copied into it with new IDs, and every reference to the old
-  row and its rows rewritten by the application. The same holds after a
-  rotation by an updater whose history is wrong (a client defect or bad
-  faith; updaters are trusted to rotate).
-- **The space row's read rule is the content's confidentiality rule.** Finer
-  application rules inside a space are not cryptographically separated
-  (§1.5). Read rules that use session claims work: a request is checked
-  against the requester's own session. But keys are delivered per account
-  (§2.12), so once one session of an account passed the rule and obtained a
-  key, every session of that account holds it, including sessions whose
-  claims would not pass. Those sessions still receive no rows from Jazz;
-  they could decrypt only ciphertext obtained outside Jazz.
-- **Requests and answers reveal readers to readers.** Key requests and
-  deliveries are readable by every reader of the space (R12): readers learn
-  which accounts asked for which version and when, who answered, and so who
-  else reads the space. A request by an account of generation above 0 also
-  tells them that it reset (§2.11).
+  (for example the rotator loses its only device before any other member
+  had a sealing key), nobody can deliver it or rotate routinely. An updater
+  can then make a recovery rotation (§3.5), linking the new version to the
+  newest version it holds: rotation and delivery resume, but content written
+  under the skipped versions is lost to every member who did not hold them,
+  and stays `key-pending` for them. With no version held by any updater, the
+  only remedy is a new space, which means a new space row: a new row ID,
+  every encrypted row copied into it with new IDs, and every reference to
+  the old row and its rows rewritten by the application. The same holds
+  after a rotation by an updater whose history is wrong (a client defect or
+  bad faith; updaters are trusted to rotate).
+- **Membership is the content's confidentiality rule.** Finer application
+  rules inside a space are not cryptographically separated (§1.5). Further
+  conditions in the space row's read rule (session claims, row columns)
+  narrow which members receive rows from Jazz, not which receive keys: every
+  member holds them, and keys are delivered per account (§2.12), so every
+  session of a member account can decrypt ciphertext obtained outside Jazz.
+- **Members see each other.** Member rows and deliveries are readable by
+  every member (R12, R14): members learn who else is a member, who holds
+  which version, who delivered it and when, and from public account roots
+  whether a member reset (§2.11).
 - **Space keys are shared by an account's devices, and device removal
   withholds only future keys.** Deliveries are sealed per account (§2.12):
   every active device of the account opens them, and device approval is the
@@ -2255,21 +2286,14 @@ Limits:
   version it held, and while its sign-in stays valid Jazz keeps sending it
   rows written under those versions. Removal cuts it off only after its
   sign-in is revoked and the spaces are rotated (§2.8); spaces the account
-  may not rotate stay readable to it until someone who may does.
-- **No access check on answers.** The server does not re-check, when a
-  delivery is written, that the requester can still read the space row
-  (§3.4). Answerers deliver only a version that existed in the space's chain
-  when the request was accepted (§3.4, check 2), so a request accepted
-  before a removal yields at most a version its author could already have
-  obtained.
-- **Readers can answer badly.** A reader can answer requests with keys that
-  fail; the requester writes a new request. Answers name their sender to
-  every reader (R12); the application's remedy is removing that reader's
-  access. Request IDs are random, so no one can predict and occupy another
-  account's request, and two devices of one account requesting at once are
-  both answered (§3.4).
+  may not rotate are marked and stay readable to it until an updater writes
+  to them or rotates them.
+- **Members can deliver badly.** A member can deliver keys that fail; the
+  recipient stays `key-pending` until another delivery or the next rotation
+  (§3.4). Deliveries name their sender to every member (R14); the
+  application's remedy is removing that member and rotating.
 - **Any updater can add roots.** The server does not limit roots per space
-  (R13). Roots after the first valid one are ignored by every client (§3.2);
+  (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.
 - **Equality tokens are linkable.** Tags are per key version, and a query
   sends one token per held version (§4.5), so the server can link the tokens
@@ -2290,7 +2314,7 @@ Limits:
   against: whoever can write as the account, the server included, can write
   its first root and sealing keys, and a server can show a different root
   (another device and key) to clients that have not seen the account before.
-  Readers answering that account's requests then seal to that key. The
+  Members delivering to that account then seal to that key. The
   account's own devices raise `root-not-mine` when they see a root other
   than the one they verified (§2.4), but only from their first observation
   on; other accounts have no way to tell. The SDK should present
@@ -2305,8 +2329,8 @@ Limits:
   from the real one. Other devices' floors do not protect it.
 - **Account reset needs no approval.** For an application that enables
   `allowAccountReset`, whoever can sign in as an app-authenticated account
-  can reset it and then request every space key it may read, with the full
-  history (§2.11). Readers see a reset notice, after the fact. The account's
+  can reset it and then receive every space key it is a member of, with the
+  full history (§2.11). Members see a reset notice, after the fact. The account's
   own devices raise `device-no-longer-active` and must be approved again.
   Local-first accounts cannot reset: every generation's root must be signed
   by their identity (§2.4 step 1).
@@ -2338,18 +2362,18 @@ Limits:
   user verification.
 - **Metadata is visible to the server and to readers permitted by policy:**
   which rows, spaces and devices exist; row IDs, relationships, space
-  coordinates, authorship and timing; ciphertext sizes; key records and
-  requests. The public account tables (R10) are readable by every signed-in
+  coordinates, authorship and timing; ciphertext sizes; member rows and key
+  records. The public account tables (R10) are readable by every signed-in
   session: anyone can see how many devices an account has enrolled and
   removed, when, and whether recovery is set up. The server stores and
-  evaluates every E2EE row, so it sees who requests and answers which space
-  keys.
+  evaluates every E2EE row, so it sees who is a member of which space and
+  who delivers which keys to whom.
 - **No side-channel padding.** Ciphertext length reveals plaintext length.
 - Local private records are protected only by the platform store; scripts on
   the same origin can read them.
 - Integrity of encrypted cells is not checked by the server: Jazz stores any
   bytes a permitted writer submits; readers detect and leave out bad cells.
-- **Internal records are never deleted** (R1). Requests and deliveries grow
-  with readers and rotations, and a deleted space row or account leaves its
-  records. This is accepted for the first release; the cost is to be measured
+- **Internal records are never deleted** (R1), except member rows.
+  Deliveries grow with members and rotations, and a deleted space row or
+  account leaves its records. This is accepted for the first release; the cost is to be measured
   with key-version growth.
