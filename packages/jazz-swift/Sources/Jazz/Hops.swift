@@ -198,7 +198,7 @@ extension Query {
 
 extension Client {
     /// Every row `query` (a hop, gather or union) reads.
-    public func all<Q: ReadQuery>(_ query: Q, tier: ReadTier? = nil) async throws(JazzError) -> [Q.Row] {
+    public func all<Q: ReadQuery>(_ query: Q, tier: ReadTier? = nil) async throws -> [Q.Row] {
         try await Self.typed {
             let json = try Coding.json(JSONValue.object(try query.object()))
             let rows = try await Self.run {
@@ -209,7 +209,7 @@ extension Client {
     }
 
     /// The accepted versions `history` reads, from the server.
-    public func all<R>(_ history: History<R>, tier: ReadTier = .remote) async throws(JazzError) -> [Version<R>] {
+    public func all<R>(_ history: History<R>, tier: ReadTier = .remote) async throws -> [Version<R>] {
         try await Self.typed {
             let json = try history.json()
             let rows = try await Self.run { try self.handle.allAt(queryJson: json, tier: tier.rawValue) }
@@ -227,14 +227,14 @@ extension Client {
     /// Inserts `row` with `column` (bytes or text) streamed from `bytes`.
     public func upload<I: Insert, S: AsyncSequence & Sendable>(
         _ row: I, column: String, from bytes: S
-    ) async throws(JazzError) -> I.Row where S.Element == Data {
+    ) async throws -> I.Row where S.Element == Data {
         try await upload(I.Row.self, column: column, kind: "insert", id: nil, row: row, from: bytes)
     }
 
     /// Replaces `column` of row `id` with what `bytes` streams.
     public func upload<R: Row, S: AsyncSequence & Sendable>(
         _ type: R.Type, id: Jazz.ID, column: String, from bytes: S
-    ) async throws(JazzError) -> R where S.Element == Data {
+    ) async throws -> R where S.Element == Data {
         try await upload(R.self, column: column, kind: "update", id: id, row: Optional<NoRow>.none, from: bytes)
     }
 
@@ -243,7 +243,7 @@ extension Client {
 
     func upload<R: Row, E: Encodable, S: AsyncSequence & Sendable>(
         _ type: R.Type, column: String, kind: String, id: Jazz.ID?, row: E?, from bytes: S
-    ) async throws(JazzError) -> R where S.Element == Data {
+    ) async throws -> R where S.Element == Data {
         try await Self.typed {
             let rowJSON = try row.map { try Coding.json($0, userInfo) }
             let upload = try await Self.run {
