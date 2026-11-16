@@ -40,8 +40,8 @@ import { isRecord } from "./util.js";
  * grounds: `$dynamicRef`/`$dynamicAnchor`, draft 6/7 `contentMediaType`, and
  * the internationalized formats (`idn-email`, `idn-hostname`, `iri`,
  * `iri-reference`) in the drafts that assert formats, and the few regex
- * constructs `json-schema-regex.ts` lists. Deployments and `jazz-tools
- * validate` refuse the same features natively
+ * constructs `json-schema-regex.ts` lists. Deployments refuse the same
+ * features natively
  * (`crates/jazz/layers/model/src/model/json_schema_support.rs`), so no
  * runtime enforces a deployed schema differently: keep the two in step.
  */

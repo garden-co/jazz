@@ -41,7 +41,7 @@ fn check(schema: &Value, instance: &Value) -> Result<(), JsonSchemaError> {
 /// `json-schema-validator.test.ts` pins in the browser's validator. Schemas
 /// the fixture marks invalid are rejected before any value is checked, and
 /// the ones it marks `browserUnsupported` (valid natively, refused by the
-/// browser) are refused by deployments and `jazz-tools validate` everywhere,
+/// browser) are refused by deployments everywhere,
 /// so no deployed schema is enforced differently by the two.
 ///
 /// ```

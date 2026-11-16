@@ -66,9 +66,8 @@ pub fn json_schema_failure(error: JsonSchemaError, path: &str) -> String {
 }
 
 /// Refuse declared JSON Schemas using a feature not every Jazz runtime
-/// evaluates (see [`json_schema_support`]). Deployments and `jazz-tools
-/// validate` run it; admitting a schema does not, so a store whose schema
-/// already uses one still opens.
+/// evaluates (see [`json_schema_support`]). Deployments run it; admitting a
+/// schema does not, so a store whose schema already uses one still opens.
 pub fn check_supported_json_schemas(column_type: &ColumnType, path: &str) -> Result<(), String> {
     match column_type {
         ColumnType::Json {

@@ -5,7 +5,7 @@
 //! `packages/jazz-tools/src/runtime/json-schema-validator.ts`, which refuses
 //! the features it cannot evaluate as the crate does. A schema using one of
 //! them would be enforced on a server and refused in a browser, so
-//! deployments and `jazz-tools validate` refuse it everywhere with
+//! deployments refuse it everywhere with
 //! [`check_supported`]: the `$dynamicRef`/`$dynamicAnchor` keywords
 //! (2020-12), `contentMediaType` (drafts 6 and 7), the internationalized
 //! formats in the drafts that assert formats, and the regex constructs

@@ -2,8 +2,8 @@
 //! Jazz runtime evaluates. The browser validates JSON columns with a JS
 //! validator that cannot evaluate `$dynamicRef`, the internationalized
 //! formats, draft 6/7 `contentMediaType` and a few regex constructs, so a
-//! deployment or `jazz-tools validate` refuses a schema using one, naming
-//! the feature, the column and where in the schema it is. A store whose
+//! deployment refuses a schema using one, naming the feature, the column and
+//! where in the schema it is. A store whose
 //! schema already uses one still opens: the refusal never runs on opening.
 
 use crate::common;
@@ -61,7 +61,7 @@ fn deploy(schema: &PublicSchema) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
-/// What `jazz-tools validate` says about `schema`, if it refuses it.
+/// What the `validateSchema` binding says about `schema`, if it refuses it.
 fn validate(schema: &PublicSchema) -> Result<(), String> {
     validate_deployable_schema(&serde_json::to_vec(schema).unwrap())
         .map(|_| ())

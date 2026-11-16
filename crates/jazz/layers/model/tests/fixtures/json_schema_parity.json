@@ -493,6 +493,11 @@
     "invalid": [-0]
   },
   {
+    "description": "$dynamicRef without $dynamicAnchor is not supported by the browser runtime yet",
+    "schema": { "properties": { "next": { "$dynamicRef": "#" } } },
+    "browserUnsupported": true
+  },
+  {
     "description": "$dynamicAnchor in a subschema is not supported by the browser runtime yet",
     "schema": { "properties": { "tree": { "$dynamicAnchor": "node" } } },
     "browserUnsupported": true
