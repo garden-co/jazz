@@ -10,13 +10,16 @@ import jazzapp.Todo
 import jazzapp.Todos
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import tools.jazz.Jazz
 import tools.jazz.JazzColumns
 import tools.jazz.JazzException
 import tools.jazz.JazzRow
+import tools.jazz.Query
 import tools.jazz.ReadTier
 import tools.jazz.WriteTier
+import tools.jazz.gather
 import tools.jazz.include
 import tools.jazz.select
 
@@ -28,6 +31,12 @@ const val EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000"
 suspend fun readOpenTodos(jazz: Jazz): List<Todo> =
     jazz.all(Todos.where(Todos.done eq false))
 // #endregion reading-oneshot-kotlin
+
+// #region reading-one-kotlin
+// The first matching row, or null if no row matches or you can't read it.
+suspend fun readTodo(jazz: Jazz, id: String): Todo? =
+    jazz.one(Todos.where(Todos.id eq id))
+// #endregion reading-one-kotlin
 
 // #region reading-subscriptions-kotlin
 // Collecting the flow subscribes, and each change brings the whole result.
@@ -82,6 +91,12 @@ suspend fun readOpenTodosWithProjects(jazz: Jazz): List<JazzRow<Todo>> =
 suspend fun readProjectsWithOpenTodos(jazz: Jazz): List<JazzRow<Project>> =
     jazz.all(Projects.include(Projects.todos.where(Todos.done eq false)))
 // #endregion reading-reverse-relation-kotlin
+
+// #region reading-recursive-kotlin
+// From each open todo, its parent, the parent's parent and so on, up to 10 deep.
+fun buildTodoLineageQuery(): Query<Todo> =
+    Todos.where(Todos.done eq false).gather(Todos.parent, maxDepth = 10)
+// #endregion reading-recursive-kotlin
 
 // #region reading-select-kotlin
 // Only the columns you read; `id` comes along always.
@@ -174,8 +189,9 @@ suspend fun writeTodoWithDurabilityTiers(jazz: Jazz) {
 
 // #region writing-mutation-errors-kotlin
 // A write at WriteTier.Global returns once the server accepted it, and throws
-// if the server rejects it. The exception's type is the code (Permission when
-// permissions deny it, Refused when it's invalid) and its message the reason.
+// if the server rejects it. JazzException has no code field: its subtype says
+// what kind of rejection it is (Permission when permissions deny it, Refused
+// when it's invalid), and its message gives the reason.
 suspend fun insertTodoAndWait(jazz: Jazz): Todo? =
     try {
         jazz.insert(
@@ -209,9 +225,23 @@ suspend fun groupTodoWrites(jazz: Jazz, existingTodoId: String): String =
     }
 // #endregion writing-transaction-kotlin
 
+// #region writing-serializable-transaction-kotlin
+// The server accepts it only if what it read hasn't changed concurrently;
+// otherwise the commit throws JazzException.Conflict and nothing is applied.
+suspend fun finishTodoSerializably(jazz: Jazz, todoId: String): String =
+    jazz.transaction(tier = WriteTier.Global, serializable = true) { tx ->
+        val todo = tx.one(Todos.where(Todos.id eq todoId)) ?: error("Todo not found")
+
+        tx.update(Todos, todo.id) { done(true) }
+        todo.id
+    }
+// #endregion writing-serializable-transaction-kotlin
+
 // #region writing-transaction-errors-kotlin
 // At WriteTier.Global the commit waits for the server; if the server rejects
 // the transaction, nothing of it is applied and the commit throws.
+// JazzException has no code field: its subtype (Permission or Refused) says
+// what kind of rejection it is, and its message gives the reason.
 suspend fun completeTodoInTransaction(jazz: Jazz, todoId: String) {
     try {
         jazz.transaction(tier = WriteTier.Global) { tx ->
@@ -235,6 +265,8 @@ data class WhereOperatorExamples(
     val matches: List<Todo>,
     val unlinkedTodos: List<Todo>,
     val linkedTodos: List<Todo>,
+    val doneWithProject: List<Todo>,
+    val recentIncomplete: List<Todo>,
 )
 
 suspend fun whereOperatorExamples(jazz: Jazz, searchTerm: String, todoIdA: String, todoIdB: String): WhereOperatorExamples {
@@ -270,6 +302,22 @@ suspend fun whereOperatorExamples(jazz: Jazz, searchTerm: String, todoIdA: Strin
     val linkedTodos = jazz.all(Todos.where(Todos.parentId.isNotNull()))
     // #endregion where-null-kotlin
 
+    // #region where-and-kotlin
+    // done AND assigned to a project
+    val doneWithProject = jazz.all(
+        Todos.where(
+            Todos.done eq true,
+            Todos.projectId.isNotNull(),
+        ),
+    )
+    // #endregion where-and-kotlin
+
+    // #region where-order-limit-kotlin
+    val recentIncomplete = jazz.all(
+        Todos.where(Todos.done eq false).orderBy(JazzColumns.createdAt.asc()).limit(50),
+    )
+    // #endregion where-order-limit-kotlin
+
     return WhereOperatorExamples(
         incompleteTodos,
         nonDraftTodos,
@@ -280,5 +328,14 @@ suspend fun whereOperatorExamples(jazz: Jazz, searchTerm: String, todoIdA: Strin
         matches,
         unlinkedTodos,
         linkedTodos,
+        doneWithProject,
+        recentIncomplete,
     )
 }
+
+// #region where-subscription-kotlin
+// Collecting the flow subscribes; each value is the whole result, updated
+// whenever a todo enters or leaves the filter.
+fun watchOpenTodos(jazz: Jazz): Flow<List<Todo>> =
+    jazz.watch(Todos.where(Todos.done eq false))
+// #endregion where-subscription-kotlin
