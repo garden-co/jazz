@@ -2,8 +2,7 @@
 
 > **Status.** The normative reference implementation of this format is the
 > pure-Rust crate `crates/jazz-e2ee`, with the independent generator
-> `fixtures/e2ee-vectors.c`. The earlier TypeScript implementation
-> and the libsodium N-API primitives are historical and not normative.
+> `fixtures/e2ee-vectors.c`.
 
 This companion specifies the built-in large-value mechanism (the
 `StreamCipher` role), not a new storage or transport protocol. Version 1 is the STREAM construction of
@@ -12,8 +11,7 @@ Hoang, Reyhanitabar, Rogaway and Vizár
 over XChaCha20-Poly1305-IETF, in the big-endian 32-bit counter variant that
 RustCrypto's `aead-stream` crate implements as `StreamBE32`. The `jazz-e2ee`
 crate uses that crate's types; it contains no hand-written stream
-construction. It replaces the earlier libsodium secretstream mechanism
-`jazz.sodium.stream`, which was never released and is not read. A custom
+construction. A custom
 stream mechanism is registered like any other (crypto format, mechanism
 agility).
 
@@ -143,13 +141,11 @@ sealer or opener clears its derived key and owned state. Each replacement
 starts a fresh stream with a new nonce prefix and does not read, diff or
 merge the previous plaintext.
 
-## Qualification and integration boundary (historical)
+## Required tests and integration boundary
 
-The earlier TypeScript implementation's suites covered
-interoperability, multiple records, empty values, backpressure,
-cancellation, truncation, tampering, wrong keys or contexts and trailing
-bytes. The Rust implementation must carry the equivalent cases in
-`jazz-e2ee`'s tests and conformance kit.
+`jazz-e2ee`'s tests and conformance kit cover interoperability, multiple
+records, empty values, backpressure, cancellation, truncation, tampering,
+wrong keys or contexts and trailing bytes.
 
 The [fixture](#fixture) is generated directly with libsodium, without the
 `aead-stream` implementation or Jazz's framing helpers. This is independent
@@ -159,17 +155,3 @@ audit.
 Generic large-value staging, atomic owner-row publication, locator delivery
 and storage remain governed by [chapter 19](19_large_values.md); the
 encrypted streaming integration is specified in the core hooks note (H5).
-
-### Extraction qualification boundary (historical)
-
-The regression suites and independent byte corpus above are carried from the
-repaired source snapshot. No build, formatter, linter or test was run during
-this extraction. The integrating checkout must build its own native/WASM
-artifacts and run the Node, Chromium and package qualification commands; no
-artifact or qualification receipt from another checkout is inherited.
-
-This is the standalone cipher contract, not full landing or security approval.
-Generic large-value publication/transport integration remains separate; no
-claim of end-to-end encrypted file upload readiness is made here.
-Release-level qualification and the remaining generic large-value integration
-boundary are tracked in [#3125](https://github.com/garden-co/jazz2/issues/3125).

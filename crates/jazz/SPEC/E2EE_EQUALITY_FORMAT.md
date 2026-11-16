@@ -2,11 +2,7 @@
 
 > **Status.** The normative reference implementation of this format is the
 > pure-Rust crate `crates/jazz-e2ee`, with the independent generator
-> `fixtures/e2ee-vectors.c`. The earlier TypeScript implementation
-> and the libsodium N-API primitives are historical and not normative. The
-> format changes since then mean records written by that experimental
-> TypeScript layer do not decrypt or match with this one; nothing shipped
-> data on it.
+> `fixtures/e2ee-vectors.c`.
 
 This companion specifies the built-in equality mechanism, the equality
 context `C` and the value encoding `V`. Encrypted query integration is a

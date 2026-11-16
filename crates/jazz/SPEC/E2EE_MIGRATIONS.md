@@ -500,8 +500,7 @@ cache its position in memory; it is never authoritative.
 
 ## 7. Alternatives considered
 
-- **Copy into a new table** (the earlier TypeScript implementation's approach:
-  the app reads the old table and inserts into a new encrypted one in a
+- **Copy into a new table** (the app reads the old table and inserts into a new encrypted one in a
   serializable transaction that also declares the space). It needs no core
   support, but row IDs change, references and permissions must be redone,
   and there is no shared progress or mixed-version story. It is the

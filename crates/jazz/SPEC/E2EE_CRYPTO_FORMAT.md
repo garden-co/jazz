@@ -3,12 +3,7 @@
 > **Status.** The normative reference implementation of these formats is the
 > pure-Rust crate `crates/jazz-e2ee`, with the independent generator
 > `fixtures/e2ee-vectors.c`; the protocol on top is
-> [E2EE protocol](E2EE_PROTOCOL.md). The earlier TypeScript implementation
-> and the libsodium N-API primitives (`crates/jazz-napi/src/e2ee_crypto.rs`)
-> are historical and not normative. Sections marked _historical_ describe that
-> implementation and its qualification only. The formats have changed since
-> that experimental TypeScript layer, so records it wrote do not decrypt or
-> verify with this one; nothing shipped data on it.
+> [E2EE protocol](E2EE_PROTOCOL.md).
 
 This companion specifies the context and envelope codecs and the built-in
 mechanisms. Byte-level fixtures pin the encoding independently of the
@@ -119,10 +114,7 @@ vector tests.
 
 Mechanism `jazz.wrap.xchacha20poly1305`, version 1, wraps exactly one 32-byte key under a
 32-byte symmetric wrapping key. The first payload byte is the operation, 1;
-readers reject any other operation byte and any other length. (Operation 2,
-the earlier libsodium sealed box, is replaced by
-[HPKE key sealing](#built-in-key-sealing-hpke-version-1); it was never
-released and is not read.) The interface is independent of CellCipher; custom
+readers reject any other operation byte and any other length. The interface is independent of CellCipher; custom
 key envelopes do not change cell encryption or common context semantics.
 
 Associated data is the common envelope header, byte 1, then canonical context.
@@ -130,9 +122,7 @@ Derive a 32-byte key with keyed BLAKE2b using the wrapping key and input
 `UTF8("jazz.e2ee.wrap-key.v1") || 0x00 || associatedData`. The separator is
 one zero byte. The payload is byte 1, a fresh 24-byte nonce, and
 XChaCha20-Poly1305-IETF ciphertext with its appended 16-byte tag. Its length
-is exactly 73 bytes. This purpose label separates wrapping from cells. (The
-mechanism was earlier named `jazz.sodium.key`; that ID was never released and
-is not read.)
+is exactly 73 bytes. This purpose label separates wrapping from cells.
 
 Fixture (generator key `00`–`1f`, the context fixture, nonce `00`–`17`,
 wrapped key bytes `20`–`3f`): `wrapDerived` is
@@ -298,60 +288,3 @@ provider failure: a mechanism whose provider fails must surface
 `CryptoFailure` through the registry and the record helpers, never
 `InvalidCiphertext` or a false verification. The crate's
 `custom_mechanism` example registers, checks and selects a toy KEM.
-
-## Adapter selection (historical)
-
-The TypeScript implementation let applications override each adapter
-(`JazzCrypto` with `cellCipher`, `keyEnvelope`, `deviceSigner`,
-`equalityIndex`, `largeValueCipher`) through asynchronous JavaScript
-factories in `jazz-tools/e2ee`, `jazz-tools/e2ee/browser` and
-`jazz-tools/e2ee/native`. None of this applies to the Rust implementation:
-mechanisms are compiled in and selected by configuration (above), with no
-runtime callbacks from other languages.
-
-## Dependency qualification and limits (historical)
-
-This section records the qualification of the earlier libsodium-based
-implementation. The Rust implementation uses pure-Rust primitives, checked
-for libsodium byte compatibility by the vectors above; its own dependency
-qualification is not recorded here.
-
-The published [Cryptography Engineering assessment](https://www.privateinternetaccess.com/blog/wp-content/uploads/2017/08/libsodium.pdf)
-reviews libsodium 1.0.12 and 1.0.13, including XChaCha20-Poly1305 and sealed
-boxes. It is historical implementation audit evidence, not a review of the
-current release, JavaScript/Rust bindings or Jazz's protocol.
-
-Pinned matching pair: `libsodium-sys-stable` 1.24.0 and the official
-`libsodium` JavaScript package 0.8.3. Its upstream libsodium submodule is
-`77e1ce5d6dee871c49ef211222ba18ef0c486bda`. Inspection found all 316 C/header/
-assembly source files under `src/libsodium` identical to the Rust crate's bundled
-`LATEST.tar.gz` (SHA-256
-`b20a92e7ec25b285eafa349d721a5bb27e3a8ba94c0816630a127883f1d1b3ab`).
-The browser packages `libsodium` and `libsodium-wrappers` 0.8.3 are now exact
-development pins; the native dependency is pinned to exactly 1.24.0. Native cell
-interoperability with Node-hosted libsodium.js is tested in both directions.
-The installed Rust crate's bundled archive matches the SHA-256 above. The wrapper's
-upstream dependency range is not an exact pin, so the published browser implementation
-bundles the locked dependencies rather than letting consumers resolve that range.
-`bundle-e2ee-crypto.mjs` checks both versions and qualified JavaScript source hashes,
-then verifies that esbuild included those files. The distribution includes
-`SODIUM-SOURCES.json` and full licence notices. No runtime sodium npm dependency
-is left for consumers to resolve.
-
-The original source receipt covers Chromium and native Node on macOS arm64;
-this extraction has not rerun that qualification. Other native
-platform builds and alternative system-library/build overrides are not covered
-by this receipt and must qualify their actual libsodium source and configuration.
-This is interoperability and input-rejection evidence, not an independent binding
-or protocol security audit.
-
-JavaScript 0.8.4 instead points at
-`33cc75ab1565d9dcbe808354191bd572ad6b64d0`; comparison found a difference in
-`sodium/core.c`. The change fixes misuse-handler callback re-entry while a global
-lock is held. The pinned pair predates that fix; no Jazz custom misuse handler is
-installed. Updating either side requires requalifying the matching pair and vectors;
-matching version labels alone are insufficient.
-
-This layer pins the context, derivation and envelope formats with independent
-fixtures and rejection tests. Persistent application writes require separate
-key lifecycle and table integration; neither is supplied by these adapters.

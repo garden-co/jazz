@@ -25,12 +25,6 @@ that may update the space row change its members, create the space or rotate
 its key. Encryption keeps content unreadable outside Jazz's permissions; it
 adds no access rule of its own (§8).
 
-The account and device lifecycle was derived from an earlier TypeScript
-implementation and its tests, then amended by design decisions; where the two
-differ, this document notes it briefly. The space model replaces that
-implementation's space and membership design entirely. Points that remain
-undecided are marked **Open question**.
-
 **Precedence.** This document governs protocol behaviour (records, replay,
 permissions, reads, writes, local state and failure codes). The three format
 specs govern bytes and the mechanism interfaces of `crates/jazz-e2ee`, which is
@@ -220,8 +214,7 @@ The `application` field of every context is one of two domains:
 
 `appId` is the application's canonical lowercase UUID, taken from the
 application's configuration (its app files); `account` is the authenticated
-account. No URL or registry path is parsed. (The TypeScript implementation read
-the app ID from the account registry path `<server>/apps/<appId>/accounts`.)
+account. No URL or registry path is parsed.
 `env` is the configured environment label
 and defaults to `"dev"` (a client warns once when a production process leaves
 it unset). A configured empty label is refused, not read as unset. The server URL is not part of either domain, so data survives a move
@@ -391,9 +384,6 @@ The identity ID is the account ID for generation 0 (the first bootstrap). For
 a reset (§2.11) it is random (§0); clients find a generation's identity by
 its account, generation, device and epoch (§2.4, "Private verification").
 
-The TypeScript implementation also declared `__e2ee_recovery_protectors` and a
-32-byte request `challenge` column; neither was ever read, and both are dropped.
-
 ### 1.3 Space tables
 
 These tables are internal too. One set serves every space table of the
@@ -538,8 +528,8 @@ over the members table, correlated with the checked row).
 - R12. **Members.** A member row is readable iff its `accountId` is the
   session account or member(session account): members see the space's
   other members. Insert and delete iff read(row) and update(row). A delete
-  is checked against the state before the transaction's own writes, as
-  every delete is, so an updater may remove itself.
+  is checked against the state before the transaction's own writes (its
+  pre-state), so an updater may remove itself.
 - R13. **Space row read rule.** Every space table that any encrypted table
   with at least one encrypted column names as its `scope` has a read
   (`select`) policy that is `M(T)` or a conjunction that has `M(T)` as one of its conjuncts, where
@@ -570,9 +560,7 @@ accountId = session.user)` (`table_id` is T's catalogue identity, [core
 Nothing else is checked by the server: not that a root is the first of its
 address, that a successor's author holds the key, that a delivery names a
 version of its space, or that an envelope opens. Clients verify those, and
-ignore a row that fails (§3.2–§3.4). (The TypeScript implementation declared
-the space tables in the application schema with hand-written policies, and
-supported one space table per application.)
+ignore a row that fails (§3.2–§3.4).
 
 ### 1.5 App-file declarations
 
@@ -807,8 +795,8 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    is. Rows that fail any check, successors or recovery roots, never take
    part in this rule, so an invalid row cannot block a valid successor. The
    accepted successor advances the epoch.
-4. Unsupported signing mechanisms or versions raise
-   `UnsupportedE2EECapabilityError`; they are never treated as invalid. The
+4. Unsupported signing mechanisms or versions raise an
+   unsupported-capability error (§7); they are never treated as invalid. The
    same holds in private verification (below): a private record whose
    signer's request names an unsupported signing mechanism stops it with
    that error; it is not skipped.
@@ -943,9 +931,7 @@ verified approval delivery to this device for the current epoch. A candidate
 that provably fails to open (malformed, or failed authentication) is skipped
 and the next tried; a crypto provider failure fails the operation. A key is
 accepted only after it authenticates the chain (§2.7). Recovery-key
-acquisition (§2.9) and the possession check (§2.5) follow the same rule. (The
-TypeScript implementation treated every `open` failure, provider failures
-included, as an unusable candidate.)
+acquisition (§2.9) and the possession check (§2.5) follow the same rule.
 
 ### 2.7 Required and optional proofs
 
@@ -959,8 +945,8 @@ When authenticating account epoch key `K`:
   operation.
 - **Optional:** each private approval's `verification` marker and, where
   deliveries are required, each delivery-verification marker. An optional
-  proof is ignored **only** when provably invalid (an `InvalidKeyEnvelopeError`
-  or a marker not `Z32`). Ignoring it does not revoke the device or change
+  proof is ignored **only** when provably invalid (malformed or failed
+  authentication, or a marker not `Z32`). Ignoring it does not revoke the device or change
   public membership; it only removes that approval from the authenticated set.
   Provider errors, cancellation, uncertain results and unsupported mechanisms
   stop the operation.
@@ -1068,9 +1054,7 @@ local-first account. Removal still serves its other purposes there (retiring
 an unused install, rotating away a device whose secret was never stored, such
 as a device that only held a link).
 
-Both revisions therefore count only valid approvals. (The TypeScript
-implementation counted every raw public approval row of the epoch, valid or
-not, in the public revision.)
+Both revisions therefore count only valid approvals.
 
 ### 2.9 Recovery
 
@@ -1191,8 +1175,7 @@ signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
   signing key over the same bytes. Replay accepts it if the root is valid,
   strictly earlier, and not retired at or before the approval. Private key
   authentication applies the same retirement check before letting a recovery
-  approval found key lineage. (The TypeScript implementation checked
-  retirement only in public replay.)
+  approval found key lineage.
 - **List active.** Valid, unretired roots, ordered by position then ID, each
   with `registeredByDeviceId = signerId`. No registration time is recorded.
 - **Retire.** An account rotation with action `retire-recovery-root` (§2.8).
@@ -1546,12 +1529,16 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
 - **Receiving.** A member's devices watch deliveries addressed to their
   account and acquire the key (§3.3). While its account lacks a version
   that it needs, a member's device reports the space `key-pending` (§4.3).
-  A delivery that does not open or authenticate is skipped; because it
-  looks delivered to everyone else, the member stays `key-pending` until
-  another delivery or the next rotation (§3.5). Its sender is named by
-  `senderAccountId`, which every member can see (R14); a member is trusted
-  with the key anyway (it could disclose it), and the application's remedy
-  is to remove that member.
+  A delivery that does not open or authenticate is skipped. Because it
+  looks delivered to everyone else, nobody delivers again, so the device
+  emits an `invalid-delivery` encryption event `{space, sender, keyEpochId}`
+  once per delivery (the sender is `senderAccountId`, which every member
+  can see, R14), and its runtime rotates the space (§3.5), which gives
+  every member a fresh delivery; the authority accepts that rotation only
+  from an updater. Otherwise the member stays `key-pending` until an
+  updater rotates. A member is trusted with the key anyway (it could
+  disclose it); the application's remedy for a member that delivers badly
+  is to remove it.
 - **Not a member.** A device whose account has no member row for the space
   (its own member rows are readable to it, R12) reports what it cannot
   decrypt `key-unavailable`: nobody will deliver to it.
@@ -1561,20 +1548,26 @@ holder; a delivery naming an epoch of another space is never written; a
 delivery to an account without a member row is refused (R17); a reset member
 receives the current version again; a delivery whose recipient's account
 rotates between the holder's read and its commit is refused and redone
-against the new epoch; a member that receives a delivery that fails to open
-stays `key-pending`.
+against the new epoch; a member that receives a delivery that fails to open reports
+`invalid-delivery` and its runtime attempts a rotation.
 
 ### 3.5 Rotation and removal
 
 **Rotation** is by an updater (R16) whose device is active and holds the
 current version (it acquires it first, §3.3). It generates a new epoch and
 `K'`, and inserts, in one ledger transaction that read the chain, the
-space's member rows and those members' public account rows at its cut, one successor whose `predecessor` and
-`historyEpochId` are both the current version, and one delivery of `K'` to
-every current member other than itself that has a valid sealing key
-(§2.12, §3.4); members without one receive `K'` later from any holder.
-Read-set validation refuses a second successor of the same predecessor, and
-a rotation whose members changed meanwhile; the loser re-reads.
+space's member rows and the chosen members' public account rows at its
+cut, one successor whose `predecessor` and `historyEpochId` are both the
+current version, and one delivery of `K'` to each of at most 100 current
+members other than itself that have a valid sealing key (§2.12, §3.4). The
+100 are chosen first among members that held the previous version (they
+are reading the space now), then among the others, each group in random
+order. Right after the rotation is accepted, the rotator's runtime delivers
+`K'` to the remaining members in ordinary delivery transactions of up to
+100 deliveries; members it does not reach (without a sealing key, or the
+rotator went offline) receive `K'` later from any holder. Read-set
+validation refuses a second successor of the same predecessor, and a
+rotation whose members changed meanwhile; the loser re-reads.
 
 Rotation does not re-encrypt existing content: old cells stay under their
 versions, which the newest key opens. Every rotation adds a version; reads
@@ -1733,7 +1726,7 @@ large-value format carries the stream mechanism's header once.
   failure (provider error, cancellation) fails the read.
 - A held-key record that fails its checks (§6.2) is skipped and reported; the
   read continues with the other held keys and acquires that version again if
-  it can. (The TypeScript implementation failed every read of the space.)
+  it can.
 - Keys obtained by an acquisition, including earlier versions from the
   history chain, become held keys.
 - A device watches deliveries addressed to its account and the chain of each
@@ -1768,8 +1761,7 @@ reported against the space column as `invalid-ciphertext`. Any other error fails
 deduplicated per account by `(table, id, column, code)` in a bounded
 least-recently-used set of 10,000 entries; a listener registered later first
 receives the reports still in that set. A console warning names table, row and
-column, never content. (The TypeScript implementation cleared the whole set on
-reaching the bound.)
+column, never content.
 
 Unreadable rows are dropped after `limit` and `offset` have been applied, so a
 page may contain fewer rows than its limit. This is accepted behaviour: the
@@ -1917,8 +1909,7 @@ stored transaction identity: accepted clears the mark (or marks it
 `refused` when another root won), refused marks it `refused`, pending and
 unknown keep it; if the identity is unknown to the store and a valid root of
 the address is readable, the mark is cleared when it is this record's root
-and set to `refused` otherwise. (The TypeScript implementation kept the
-mark in memory only, and made later writes depend on the creation.)
+and set to `refused` otherwise.
 
 ### 5.5 Streaming large values
 
@@ -1946,8 +1937,6 @@ source.
   `db.encryption.acquire(space)` (which also prepares a missing space's
   root, §3.2, and makes a pending rotation, §3.5) and runs the transaction
   again.
-  (The TypeScript implementation had "content-key declarations"; they are
-  dropped.)
 - Unknown outcomes are reconciled by the original transaction's identity, not
   by resubmitting.
 
@@ -1982,10 +1971,6 @@ Device private keys are never stored in the clear:
   cannot export it.
 - **Apple platforms:** Keychain. **Android:** Android Keystore.
 - **Other platforms:** app-supplied secure storage.
-
-(The TypeScript implementation stored device private keys as plain JSON byte
-arrays in an application-supplied store; the device record also carried an
-unused 32-byte `challenge`, now dropped.)
 
 ### 6.2 Held-key records
 
@@ -2051,11 +2036,6 @@ rewriting the record. `refused` marks the key of a refused or lost creation
 the device's rows under it are repaired. The lineage records also give the runtime its
 epoch-to-space lookup ([migrations](E2EE_MIGRATIONS.md) §3.9).
 
-(The TypeScript implementation's `jazz-e2ee-held-key-v1` record bound a
-`schema` hash, which it signed but did not check, stored a position instead
-of the epoch and its lineage, had no persisted `unpublished` field, and
-failed the read on an invalid record.)
-
 ### 6.3 Binding
 
 All private records are bound to the application id, the environment and the
@@ -2115,7 +2095,8 @@ flattened into a bare `refused`. The data-error codes are exactly
 `key-unavailable`, `key-pending`, `space-pending`, `unsupported-format`,
 `invalid-ciphertext`, `empty-cell`, `superseded`, `stale-space` and
 `encryption-failed`. The encryption status events (not data errors) are
-`account-reset` (§2.11) and `spaces-need-rotation` (§2.8). Account roots that do not count are reported with
+`account-reset` (§2.11), `spaces-need-rotation` (§2.8) and
+`invalid-delivery` (§3.4). Account roots that do not count are reported with
 `root-malformed`, `root-foreign-account`, `root-key-mismatch`,
 `root-device-keys-missing`, `root-signature-invalid`, `root-kind-mismatch`
 or `root-unchained` (§2.4 step 1); they never fail replay.
@@ -2133,24 +2114,24 @@ space whose conversion or tag backfill is unfinished fails with the query
 error `conversion-pending` ([migrations](E2EE_MIGRATIONS.md) §3.3), which
 names the table, column, space and pending count.
 
-| Outcome                     | TypeScript form                                                                                                                                                                                  | Must                                                                                                | Must not                                                                                       |
+| Outcome                     | Codes                                                                                                                                                                                            | Must                                                                                                | Must not                                                                                       |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Device approval pending     | `AccountKeyUnavailable` / readiness `not-verified`                                                                                                                                               | Show "waiting for approval or keys"; complete approval or recovery                                  | Re-approve, or treat the account as signed out                                                 |
-| Key pending                 | `SpaceKeyDeliveryPending`                                                                                                                                                                        | Report the space `key-pending`; subscriptions wait one bounded episode, then emit and keep watching | Poll, fail the read, or report each row `key-unavailable`                                      |
-| Key unavailable             | `E2eeDataError("key-unavailable")`, `SpaceKeyUnavailable`, `SpaceKeyNotMember`                                                                                                                   | Return what held keys decrypt; report the rest                                                      | Write plaintext, or wait for a delivery                                                        |
-| Space pending               | None (new)                                                                                                                                                                                       | Refuse the write `space-pending`; report the read; watch for the root                               | Retry the refused creation on this device, or write plaintext                                  |
-| Superseded / stale space    | None (new, schema conversions)                                                                                                                                                                   | Report; leave a `superseded` row out; return a `stale-space` row                                    | Report either as `invalid-ciphertext`                                                          |
-| Permission refusal          | Jazz rejection; `*PublicationError` outcome `refused`                                                                                                                                            | Report; reflect in local state                                                                      | Treat key possession as overriding it                                                          |
-| Authentication failure      | `E2eeDataError("invalid-ciphertext")`, `InvalidKeyEnvelopeError`                                                                                                                                 | Leave the row out (ordinary reads) or fail (strict reads)                                           | Return unverified plaintext                                                                    |
-| Unsupported format          | `E2eeDataError("unsupported-format")`                                                                                                                                                            | Report                                                                                              | Treat as invalid ciphertext                                                                    |
-| Encryption failed           | `E2eeDataError("encryption-failed")`                                                                                                                                                             | Fail the write                                                                                      | Submit plaintext                                                                               |
+| Device approval pending     | None                                                                                                                                                                                             | Show "waiting for approval or keys"; complete approval or recovery                                  | Re-approve, or treat the account as signed out                                                 |
+| Key pending                 | `key-pending`                                                                                                                                                                                    | Report the space `key-pending`; subscriptions wait one bounded episode, then emit and keep watching | Poll, fail the read, or report each row `key-unavailable`                                      |
+| Key unavailable             | `key-unavailable`                                                                                                                                                                                | Return what held keys decrypt; report the rest                                                      | Write plaintext, or wait for a delivery                                                        |
+| Space pending               | `space-pending`                                                                                                                                                                                  | Refuse the write `space-pending`; report the read; watch for the root                               | Retry the refused creation on this device, or write plaintext                                  |
+| Superseded / stale space    | `superseded`, `stale-space`                                                                                                                                                                      | Report; leave a `superseded` row out; return a `stale-space` row                                    | Report either as `invalid-ciphertext`                                                          |
+| Permission refusal          | Publication outcome `refused`, with its specific code                                                                                                                                            | Report; reflect in local state                                                                      | Treat key possession as overriding it                                                          |
+| Authentication failure      | `invalid-ciphertext`                                                                                                                                                                             | Leave the row out (ordinary reads) or fail (strict reads)                                           | Return unverified plaintext                                                                    |
+| Unsupported format          | `unsupported-format`                                                                                                                                                                             | Report                                                                                              | Treat as invalid ciphertext                                                                    |
+| Encryption failed           | `encryption-failed`                                                                                                                                                                              | Fail the write                                                                                      | Submit plaintext                                                                               |
 | Provider failure            | The mechanism's `CryptoFailure` (distinct from `InvalidCiphertext`, `InvalidInput`, `NoKeyForMechanism` and a `false` verification), and a writer's failure to read back output it just produced | Fail the operation loudly; preserve the error                                                       | Report it as key unavailable, corrupted ciphertext or an invalid proof; try the next candidate |
-| Unsupported capability      | `UnsupportedE2EECapabilityError` (`ledger-version`, `signing-mechanism`, `signing-version`)                                                                                                      | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
-| Intrinsic contradiction     | `IntrinsicAccountHistoryError` (`conflicting-roots`, `conflicting-device-keys`, `conflicting-account-key`, `missing-root-key`, `missing-recipient-key`, `missing-signer-key`)                    | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
-| Unknown publication outcome | `AccountPublicationError` / `SpacePublicationError` outcome `unknown`                                                                                                                            | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
-| Recovery failures           | `E2eeRecoveryError`: `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                     | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
-| Unsupported shape           | Typed "Unsupported encrypted query…" errors                                                                                                                                                      | Name the operation                                                                                  | Fall back to a scan                                                                            |
-| Timeout / cancellation      | `TimeoutError`, `AbortError`                                                                                                                                                                     | Erase owned secrets; stop unsubmitted work                                                          | Claim a submitted operation failed                                                             |
+| Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`                                                                                                                                         | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
+| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `conflicting-account-key`, `missing-root-key`, `missing-recipient-key`, `missing-signer-key`                                                     | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
+| Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
+| Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
+| Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                  | Fall back to a scan                                                                            |
+| Timeout / cancellation      | Timeout, cancellation                                                                                                                                                                            | Erase owned secrets; stop unsubmitted work                                                          | Claim a submitted operation failed                                                             |
 
 Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 `approval`, `account-rotation`, `account-key`, `recovery-root`,
@@ -2166,13 +2147,7 @@ sweeps, and a staging call retried after "needs key" before submission
 replayed: its conflict is returned to the caller, and an unknown outcome is
 reconciled by its transaction identity.
 
-(The TypeScript implementation wrapped every failure inside a publication as
-a bare `refused` with the stage name, and defined two data-error codes,
-`key-not-shared` and `maintenance-required`, that nothing raised; both are
-dropped.)
-
-Refusals that had no code in the TypeScript implementation (only a message)
-get these codes:
+Refusal codes:
 
 | Code                            | Refusal                                                                                                                                           |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -2285,9 +2260,9 @@ Limits:
   may not rotate are marked and stay readable to it until an updater writes
   to them or rotates them.
 - **Members can deliver badly.** A member can deliver keys that fail; the
-  recipient stays `key-pending` until another delivery or the next rotation
-  (§3.4). Deliveries name their sender to every member (R14); the
-  application's remedy is removing that member and rotating.
+  recipient reports `invalid-delivery` naming the sender, and stays
+  `key-pending` until an updater rotates (§3.4). The application's remedy
+  is removing that member.
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.
