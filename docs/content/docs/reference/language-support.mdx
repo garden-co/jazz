@@ -12,10 +12,9 @@ lists what that language doesn't support yet, compared with TypeScript.
 <Tabs groupId="jazz-environment" items={["Rust", "Go"]} persist updateAnchor>
   <Tab value="Rust">
     Rust is a backend client: a service that reads and writes your app's data through your main
-    backend's `/jazz`. It doesn't run a main backend, serve your users, or run Jazz's core in its
-    own process. As a backend client, it doesn't support yet:
-
-    - partial reads of large values (use `jazz.with_client(…)` for the low-level client).
+    backend's `/jazz`, trusted or scoped, with `for_user` on a trusted client. It doesn't run your
+    app's main backend (serving its `/jazz` and publishing its permissions): use TypeScript's
+    `createJazz` for that, and connect Rust services to it as backend clients.
 
   </Tab>
   <Tab value="Go">
