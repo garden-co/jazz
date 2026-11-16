@@ -40,7 +40,14 @@
             let jazz = try await Client.open(app: notesApp, config: .local())
             let query = JazzQuery(jazz, Query<Note>())
             try await until("the first result") { !query.isLoading }
-            final class Flag: @unchecked Sendable { var set = false }
+            final class Flag: @unchecked Sendable {
+                private let lock = NSLock()
+                private var value = false
+                var set: Bool {
+                    get { lock.withLock { value } }
+                    set { lock.withLock { value = newValue } }
+                }
+            }
             let changed = Flag()
             // What SwiftUI does for a view reading `rows`.
             withObservationTracking {

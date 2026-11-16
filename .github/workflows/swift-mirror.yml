@@ -30,6 +30,8 @@ on:
       - "dev/scripts/build-swift-xcframework.sh"
       - "dev/scripts/assemble-swift-mirror.sh"
       - "examples/stage-plan/apps/swiftui/**"
+      - "examples/stage-plan/apps/swift-cli/**"
+      - "crates/jazz-codegen/src/swift.rs"
       - ".github/workflows/swift-mirror.yml"
   workflow_dispatch:
     inputs:
@@ -177,9 +179,14 @@ jobs:
           (cd "$verify" && swift test)
           # The newest available iPhone simulator.
           udid=$(xcrun simctl list devices available -j | python3 -c '
-          import json, sys
-          devices = [d for runtime, ds in json.load(sys.stdin)["devices"].items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")]
-          print(devices[-1]["udid"])')
+          import json, re, sys
+          def version(runtime):
+              return [int(n) for n in re.findall(r"\d+", runtime.split("iOS")[-1])]
+          runtimes = sorted((r for r in json.load(sys.stdin)["devices"].items() if "iOS" in r[0]), key=lambda r: version(r[0]))
+          phones = [d for _, ds in runtimes for d in ds if d["name"].startswith("iPhone")]
+          if not phones:
+              sys.exit("no available iPhone simulator")
+          print(phones[-1]["udid"])')
           echo "iOS simulator: $udid"
           echo "SIMULATOR=$udid" >> "$GITHUB_ENV"
           (cd "$verify" && xcodebuild test -scheme jazz-swift -destination "platform=iOS Simulator,id=$udid" -quiet)
@@ -190,7 +197,8 @@ jobs:
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
           example=examples/stage-plan/apps/swiftui
           perl -0pi -e "s|    url: https://github.com/garden-co/jazz-swift\n    exactVersion: [^\n]*|    path: $RUNNER_TEMP/verify|" "$example/project.yml"
-          grep -n -A1 "^  Jazz:" "$example/project.yml"
+          # Fail rather than test the published package if the swap didn't match.
+          grep -q "path: $RUNNER_TEMP/verify" "$example/project.yml" || { echo "::error::project.yml still names the published package"; exit 1; }
           (cd "$example" && xcodegen generate)
           (cd "$example" && xcodebuild build -scheme StagePlanUI -destination 'platform=macOS' -quiet CODE_SIGNING_ALLOWED=NO)
           (cd "$example" && xcodebuild test -scheme StagePlanUI -destination "platform=iOS Simulator,id=$SIMULATOR" -quiet CODE_SIGNING_ALLOWED=NO)
