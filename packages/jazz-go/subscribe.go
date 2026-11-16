@@ -1,19 +1,10 @@
 package jazz
 
-/*
-#include <stdint.h>
-#include <stdlib.h>
-#include "jazz_ffi.h"
-extern JazzSubscription* jazz_go_subscribe(JazzHandle* h, const char* q, uintptr_t ctx, char** err);
-*/
-import "C"
-
 import (
 	"context"
 	"encoding/json"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 )
 
 // Delta is a change of a subscribed query's result. The first is Reset,
@@ -51,15 +42,15 @@ var (
 	nextSubscriber atomic.Uint64
 )
 
-//export jazzGoSubscriptionCallback
-func jazzGoSubscriptionCallback(ctx C.uintptr_t, kind *C.char, text *C.char) {
+// onSubscription is jazz-ffi's subscription and watch callback.
+func onSubscription(ctx, kind, text uintptr) {
 	value, ok := subscribers.Load(uint64(ctx))
 	if !ok {
 		return
 	}
 	s := value.(*subscriber)
 	// The strings are borrowed for this call only: copy them.
-	e := event{C.GoString(kind), C.GoString(text)}
+	e := event{goString(kind), goString(text)}
 	s.mu.Lock()
 	if !s.closed {
 		s.queue = append(s.queue, e)
@@ -98,17 +89,15 @@ func subscribe[T any](ctx context.Context, db *DB, query any, decode func(event)
 		return nil, err
 	}
 	return stream(ctx, db, decode, func(id uint64) (func(), error) {
-		cquery := C.CString(string(queryJSON))
-		defer C.free(unsafe.Pointer(cquery))
-		var cerr *C.char
-		sub := C.jazz_go_subscribe(db.handle, cquery, C.uintptr_t(id), &cerr)
-		if err := takeError(cerr); err != nil || sub == nil {
+		var cerr uintptr
+		sub := ffi.subscribe(db.handle, cstr(string(queryJSON)), ffi.subscriptionCallback, uintptr(id), &cerr)
+		if err := takeError(cerr); err != nil || sub == 0 {
 			if err == nil {
 				err = &Error{Kind: KindRefused, Message: "subscribe failed"}
 			}
 			return nil, err
 		}
-		return func() { C.jazz_unsubscribe(sub) }, nil
+		return func() { ffi.unsubscribe(sub) }, nil
 	})
 }
 
@@ -122,7 +111,7 @@ func stream[T any](ctx context.Context, db *DB, decode func(event) (T, bool), st
 	subscribers.Store(id, s)
 	forget := func() { subscribers.Delete(id) }
 	db.mu.RLock()
-	if db.handle == nil {
+	if db.handle == 0 {
 		db.mu.RUnlock()
 		forget()
 		return nil, &Error{Kind: KindClosed, Message: "closed"}

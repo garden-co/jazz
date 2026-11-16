@@ -39,8 +39,12 @@ for dir in crates/jazz-codegen/tests/apps/*/jazzapp crates/jazz-codegen/tests/go
   mkdir "${module}/jazzapp"
   cp "${dir}/jazz_app.go" "${module}/jazzapp/"
   printf 'module example.com/golden\n\ngo 1.22\n\nrequire github.com/garden-co/jazz/packages/jazz-go/v2 v2.0.0\n\nreplace github.com/garden-co/jazz/packages/jazz-go/v2 => %s/packages/jazz-go\n' "${root}" > "${module}/go.mod"
-  (cd "${module}" && go vet ./... && test -z "$(gofmt -l .)") || { echo "${dir} fails go vet or gofmt"; exit 1; }
+  (cd "${module}" && GOFLAGS=-mod=mod go vet ./... && test -z "$(gofmt -l .)") || { echo "${dir} fails go vet or gofmt"; exit 1; }
 done
 
-(cd packages/jazz-go && go test -race ./...)
-(cd examples/stage-plan/apps/go-cli && go test -race -v ./...)
+# jazz-go needs no cgo: it loads target/debug's libjazz_ffi.so at run time.
+(cd packages/jazz-go && CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./...)
+(cd examples/stage-plan/apps/go-cli && CGO_ENABLED=0 go build ./...)
+# The race detector needs cgo; purego runs under it too.
+(cd packages/jazz-go && CGO_ENABLED=1 go test -race ./...)
+(cd examples/stage-plan/apps/go-cli && CGO_ENABLED=1 go test -race -v ./...)

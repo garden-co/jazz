@@ -1,14 +1,5 @@
 package jazz
 
-/*
-#include <stdint.h>
-#include <stdlib.h>
-#include "jazz_ffi.h"
-extern JazzEndpoint* jazz_go_endpoint_new(JazzHandle* h, uintptr_t ctx, const char* options, char** err);
-extern JazzSocket* jazz_go_endpoint_socket(JazzEndpoint* e, const char* upgrade, uintptr_t ctx, char** err);
-*/
-import "C"
-
 import (
 	"context"
 	"encoding/base64"
@@ -16,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,7 +49,7 @@ type EndpointOptions struct {
 // users' clients (TS, Swift, Kotlin, Go) sign in and sync through it.
 // Mount it on your server at BasePath; it is an http.Handler.
 type Endpoint struct {
-	ptr  *C.JazzEndpoint
+	ptr  uintptr
 	id   uint64
 	auth Authenticate
 	mu   sync.RWMutex
@@ -83,19 +75,17 @@ func NewEndpoint(db *DB, auth Authenticate, opts EndpointOptions) (*Endpoint, er
 		options["maxSockets"] = opts.MaxSockets
 	}
 	text, _ := json.Marshal(options)
-	coptions := C.CString(string(text))
-	defer C.free(unsafe.Pointer(coptions))
 	e := &Endpoint{id: nextEndpoint.Add(1), auth: auth}
 	endpoints.Store(e.id, e)
 	db.mu.RLock()
 	defer db.mu.RUnlock()
-	if db.handle == nil {
+	if db.handle == 0 {
 		endpoints.Delete(e.id)
 		return nil, &Error{Kind: KindClosed, Message: "closed"}
 	}
-	var cerr *C.char
-	e.ptr = C.jazz_go_endpoint_new(db.handle, C.uintptr_t(e.id), coptions, &cerr)
-	if err := takeError(cerr); err != nil || e.ptr == nil {
+	var cerr uintptr
+	e.ptr = ffi.endpointNew(db.handle, ffi.authCallback, uintptr(e.id), cstr(string(text)), &cerr)
+	if err := takeError(cerr); err != nil || e.ptr == 0 {
 		endpoints.Delete(e.id)
 		if err == nil {
 			err = &Error{Kind: KindRefused, Message: "endpoint failed"}
@@ -109,9 +99,9 @@ func NewEndpoint(db *DB, auth Authenticate, opts EndpointOptions) (*Endpoint, er
 func (e *Endpoint) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.ptr != nil {
-		C.jazz_endpoint_free(e.ptr)
-		e.ptr = nil
+	if e.ptr != 0 {
+		ffi.endpointFree(e.ptr)
+		e.ptr = 0
 		endpoints.Delete(e.id)
 	}
 }
@@ -155,15 +145,16 @@ func fromRequestJSON(text string) *http.Request {
 	return r.WithContext(context.Background())
 }
 
-//export jazzGoAuthCallback
-func jazzGoAuthCallback(ctx C.uintptr_t, request *C.char) *C.char {
+// onAuth is jazz-ffi's authenticate callback: a malloc'ed answer, or 0
+// for no one.
+func onAuth(ctx, request uintptr) uintptr {
 	value, ok := endpoints.Load(uint64(ctx))
 	if !ok {
-		return nil
+		return 0
 	}
-	user, err := value.(*Endpoint).auth(fromRequestJSON(C.GoString(request)))
+	user, err := value.(*Endpoint).auth(fromRequestJSON(goString(request)))
 	if err != nil || user == nil {
-		return nil
+		return 0
 	}
 	answer := map[string]any{"kind": "deviceAccount"}
 	if user.UserID != "" {
@@ -173,20 +164,18 @@ func jazzGoAuthCallback(ctx C.uintptr_t, request *C.char) *C.char {
 		}
 	}
 	b, _ := json.Marshal(answer)
-	return C.CString(string(b)) // jazz-ffi frees it
+	return mallocString(string(b)) // jazz-ffi frees it
 }
 
 // ServeHTTP answers a request to the endpoint, and serves its sync socket.
 func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	e.mu.RLock()
-	if e.ptr == nil {
+	if e.ptr == 0 {
 		e.mu.RUnlock()
 		http.Error(w, "the endpoint is closed", http.StatusServiceUnavailable)
 		return
 	}
-	path := C.CString(r.URL.Path)
-	socket := C.jazz_endpoint_is_socket(e.ptr, path) == 1
-	C.free(unsafe.Pointer(path))
+	socket := ffi.endpointIsSocket(e.ptr, cstr(r.URL.Path)) == 1
 	e.mu.RUnlock()
 	if socket && isUpgrade(r) {
 		if status, why := checkUpgrade(r); status != 0 {
@@ -204,13 +193,11 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	creq := C.CString(toRequestJSON(r, body))
-	defer C.free(unsafe.Pointer(creq))
-	var cerr *C.char
+	var cerr uintptr
 	e.mu.RLock()
-	cresp := C.jazz_endpoint_handle(e.ptr, creq, &cerr)
+	cresp := ffi.endpointHandle(e.ptr, cstr(toRequestJSON(r, body)), &cerr)
 	e.mu.RUnlock()
-	if err := takeError(cerr); err != nil || cresp == nil {
+	if err := takeError(cerr); err != nil || cresp == 0 {
 		http.Error(w, "jazz endpoint failed", http.StatusInternalServerError)
 		return
 	}
@@ -219,8 +206,7 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Headers [][2]string `json:"headers"`
 		Body    string      `json:"body"`
 	}
-	text := C.GoString(cresp)
-	C.jazz_string_free(cresp)
+	text, _ := takeString(cresp)
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
 		http.Error(w, "jazz endpoint: bad response", http.StatusInternalServerError)
 		return
@@ -243,19 +229,17 @@ func (e *Endpoint) serveSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	id := nextSocket.Add(1)
 	sockets.Store(id, conn)
-	cup := C.CString(upgradeJSON)
-	var cerr *C.char
+	var cerr uintptr
 	e.mu.RLock()
-	s := C.jazz_go_endpoint_socket(e.ptr, cup, C.uintptr_t(id), &cerr)
+	s := ffi.endpointSocket(e.ptr, cstr(upgradeJSON), ffi.socketMessage, ffi.socketClosed, uintptr(id), &cerr)
 	e.mu.RUnlock()
-	C.free(unsafe.Pointer(cup))
-	if err := takeError(cerr); err != nil || s == nil {
+	if err := takeError(cerr); err != nil || s == 0 {
 		sockets.Delete(id)
 		conn.close(wsInternalError, "jazz endpoint refused the socket")
 		return
 	}
 	defer func() {
-		C.jazz_socket_free(s) // waits for on_close
+		ffi.socketFree(s) // waits for on_close
 		sockets.Delete(id)
 	}()
 	for {
@@ -267,38 +251,37 @@ func (e *Endpoint) serveSocket(w http.ResponseWriter, r *http.Request) {
 		if len(message) == 0 {
 			continue
 		}
-		var cerr *C.char
-		pushed := C.jazz_socket_push(s, (*C.uchar)(unsafe.Pointer(&message[0])), C.size_t(len(message)), &cerr)
+		var cerr uintptr
+		pushed := ffi.socketPush(s, unsafe.Pointer(&message[0]), uintptr(len(message)), &cerr)
+		runtime.KeepAlive(message)
 		if takeError(cerr) != nil || pushed != 0 {
 			return
 		}
 	}
 }
 
-//export jazzGoSocketMessage
-func jazzGoSocketMessage(ctx C.uintptr_t, data *C.uchar, n C.size_t) {
+// onSocketMessage is jazz-ffi's on_message: a message for the client.
+func onSocketMessage(ctx, data, n uintptr) {
 	if value, ok := sockets.Load(uint64(ctx)); ok {
-		value.(*wsConn).write(opBinary, C.GoBytes(unsafe.Pointer(data), C.int(n)))
+		value.(*wsConn).write(opBinary, goBytes(data, n))
 	}
 }
 
-//export jazzGoSocketClosed
-func jazzGoSocketClosed(ctx C.uintptr_t, code C.ushort, reason *C.char) {
+// onSocketClosed is jazz-ffi's on_close: the code and reason to close with.
+func onSocketClosed(ctx, code, reason uintptr) {
 	if value, ok := sockets.Load(uint64(ctx)); ok {
-		value.(*wsConn).close(uint16(code), C.GoString(reason))
+		value.(*wsConn).close(uint16(code), goString(reason))
 	}
 }
 
 // ForUser is a handle acting as the request's user (TS forReqUser), for a
 // backend route to read and write as them. Close it when done.
 func (e *Endpoint) ForUser(r *http.Request) (*DB, error) {
-	creq := C.CString(toRequestJSON(r, nil))
-	defer C.free(unsafe.Pointer(creq))
-	var cerr *C.char
+	var cerr uintptr
 	e.mu.RLock()
-	h := C.jazz_endpoint_for_user(e.ptr, creq, &cerr)
+	h := ffi.endpointForUser(e.ptr, cstr(toRequestJSON(r, nil)), &cerr)
 	e.mu.RUnlock()
-	if err := takeError(cerr); err != nil || h == nil {
+	if err := takeError(cerr); err != nil || h == 0 {
 		if err == nil {
 			err = &Error{Kind: KindRefused, Message: "no user"}
 		}
