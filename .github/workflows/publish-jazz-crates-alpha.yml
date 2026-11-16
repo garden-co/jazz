@@ -98,8 +98,10 @@ jobs:
           # API error fails the run rather than skipping a release.
           CRATES=false
           if probe=$(gh api "repos/${REPO}/contents/dev/scripts/publish-crates.mjs?ref=${SHA}" --silent 2>&1); then
+            # awk reads to the end (no `exit`): closing the pipe early fails
+            # base64 with EPIPE under pipefail.
             CRATE_VERSION=$(gh api "repos/${REPO}/contents/Cargo.toml?ref=${SHA}" --jq .content | base64 -d \
-              | awk '/^\[workspace\.package\]/{p=1; next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; exit}')
+              | awk '/^\[workspace\.package\]/{p=1; next} /^\[/{p=0} p && !found && /^version *=/{gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; found=1}')
             if [ "${CRATE_VERSION}" != "${VERSION}" ]; then
               echo "::error::The crates at ${SHA} are '${CRATE_VERSION}', not jazz-tools' ${VERSION}. Run dev/scripts/sync-crate-versions.mjs on the release branch."
               exit 1
