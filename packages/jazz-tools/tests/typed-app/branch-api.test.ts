@@ -202,8 +202,13 @@ describe("branch API", () => {
       branch: "draft",
       title: "Draft",
     });
-    // Committing it is validated upstream through the view (see
-    // db.serializable-branch-read.test.ts); this Db has no server.
+    // This Db has no server: the commit applies locally after the local
+    // precheck through the view, and is validated upstream once a link that
+    // negotiated it comes up (db.serializable-branch-read.test.ts).
+    await tx.commit().wait({ tier: "local" });
+    expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      title: "Draft",
+    });
   });
 
   it("reports unavailable history when restoring onto an empty store", async () => {
