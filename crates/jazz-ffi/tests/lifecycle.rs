@@ -193,6 +193,16 @@ fn delete_client_storage_empties_the_store() {
         jazz.all(json!({ "table": "shows" }).to_string()),
         Err(JazzError::Closed)
     ));
+    // Nothing is left behind, not even the store's lock file (jazz#5856).
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(left.is_empty(), "left in the dataDir: {left:?}");
     let reopened = JazzHandle::open(config).unwrap();
     assert_eq!(
         parse(
