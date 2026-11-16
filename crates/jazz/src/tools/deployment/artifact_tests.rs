@@ -2002,10 +2002,10 @@ fn slices_and_ts_only_from_alpha63_load_with_a_warning() {
     assert!(
         app.warnings()
             .iter()
-            .any(|w| w.contains("slices: schema slicing is gone in alpha.65"))
+            .any(|w| w.contains("slices: schema slicing is gone in alpha.66"))
     );
     assert!(app.warnings().iter().any(|w| {
-        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.65) is ignored")
+        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.66) is ignored")
     }));
     assert!(edited_app_loads(|_| {}).warnings().is_empty());
 }
@@ -2156,7 +2156,7 @@ fn the_exact_login_is_session_identity() {
 
 #[test]
 fn a_version_no_migration_leads_from_loads_with_a_warning() {
-    // As `jazz-tools validate` wrote files before alpha.65 while a
+    // As `jazz-tools validate` wrote files before alpha.66 while a
     // migration was still to be written; `generate` refuses them.
     let written = write(shared_todos()).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
@@ -2707,7 +2707,7 @@ fn a_relation_policy_reading_a_computed_outer_field_is_told_it_is_computed() {
     );
 }
 
-/// An enum whose cases carry fields (accepted until 2.0.0-alpha.65) loads
+/// An enum whose cases carry fields (accepted until 2.0.0-alpha.66) loads
 /// in an earlier version of `history` and in a migration dropping it, so
 /// such an app can migrate away; the current tables may not declare one.
 #[test]
