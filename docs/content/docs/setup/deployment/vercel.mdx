@@ -1,7 +1,7 @@
 ---
 title: Vercel
 description: "Learn how to run Jazz inside your Next.js app on Vercel, with each environment's data in its own Sandbox."
-languageTabs: backend
+languageTabs: main-backend
 ---
 
 On Vercel, your Next.js app is the whole deployment. The `vercel()` store keeps each namespace's
@@ -13,12 +13,6 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 [backend clients](/docs/setup/backend-client).
 
 <include>../../../partials/install-alpha.mdx</include>
-
-This page is for a TypeScript backend. Rust and Go backends don't run on Vercel yet: on Vercel only
-a Node function can upgrade a sync socket, and their endpoints have no HTTP-stream fallback, so
-users' clients couldn't sync. They also keep a long-lived connection to the core, and have no
-counterpart to `vercel()`. Run them on
-[your own server](/docs/setup/deployment/own-server#create-jazz-once) or a container platform.
 
 ## Set it up
 

@@ -90,12 +90,12 @@ const config = {
       },
       {
         source: "/docs/setup/rust",
-        destination: "/docs/setup/deployment/own-server",
+        destination: "/docs/setup/backend-client",
         permanent: false,
       },
       {
         source: "/docs/setup/go",
-        destination: "/docs/setup/deployment/own-server",
+        destination: "/docs/setup/backend-client",
         permanent: false,
       },
       // Older create-jazz builds fetch the agent brief from its old URL.

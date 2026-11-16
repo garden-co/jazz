@@ -100,6 +100,18 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
 
   </Tab>
   <Tab value="Rust">
+    Depend on the `jazz-app` crate (not on crates.io yet, so from the Jazz repository), and let
+    `npx jazz-tools generate` write `src/jazz_app.rs` from your app's `jazz.app.json`:
+
+    ```toml title="Cargo.toml"
+    [dependencies]
+    jazz-app = { git = "https://github.com/garden-co/jazz" }
+    tokio = { version = "1", features = ["full"] }
+    ```
+
+    Commit `src/jazz_app.rs` and declare it with `mod jazz_app;`. The [Reading](/docs/reading/queries)
+    and [Writing](/docs/writing/writing-data) pages have a Rust tab for each example.
+
     A Rust process connects as a scoped machine, one your main backend trusts as a user
     (`trustWorkload({ …, as: (claims) => ({ userId }) })`): it signs in at your main backend's
     `/jazz` with the workload's token as a bearer credential, which it asks for again before each
@@ -109,7 +121,7 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
       ../examples/docs/endpoint-server-rs/src/lib.rs#backend-client-rust
     </include>
 
-    A trusted machine (`as: "backend"`) isn't supported in Rust yet. See
+    A trusted machine (`as: "backend"`) and `forUser(userId)` aren't supported in Rust yet. See
     [Language support](/docs/reference/language-support).
 
   </Tab>
