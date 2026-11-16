@@ -129,7 +129,7 @@ final class Tokens: TokenProvider, @unchecked Sendable {
 
     // Called by jazz-ffi on a thread of its own, which may block. Returning
     // nil signs the user out; throwing is a failed fetch: the session stays
-    // signed in and jazz-app retries on its own backoff.
+    // signed in and jazz-app-support retries on its own backoff.
     func token(reason: String) throws -> String? {
         let reason = TokenReason(rawValue: reason) ?? .connect
         let result = Box()
