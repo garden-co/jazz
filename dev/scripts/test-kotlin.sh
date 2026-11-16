@@ -16,7 +16,7 @@ done
 
 source dev/scripts/kotlin-toolchain.sh
 
-cargo build -p jazz-ffi -p jazz-cli --bin jazz-tools
+cargo build -p jazz-ffi -p jazz-tools --bin jazz-tools
 # The e2e tests' StagePlan backend, a test harness (Kotlin is a client): a
 # Jazz server and the test stand-in for its Jazz endpoint.
 cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
