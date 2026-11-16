@@ -58,6 +58,7 @@ public struct Query<R: Row>: Sendable {
     var limitCount: Int?
     var offsetCount: Int?
     var includes: [any IncludeSpec<R>] = []
+    var withDeleted = false
 
     public init() {}
 
@@ -72,7 +73,7 @@ public struct Query<R: Row>: Sendable {
     /// The values are as stored: a transformed column comes in its stored
     /// form, and computed fields aren't there.
     public func select(_ columns: any AnyColumn<R>...) -> Selection<R> {
-        Selection(query: self, columns: columns.map(\.name))
+        Selection(query: self, entries: columns.map { .string($0.name) })
     }
 
 
@@ -121,6 +122,7 @@ public struct Query<R: Row>: Sendable {
         if let limitCount { object["limit"] = .number(Double(limitCount)) }
         if let offsetCount { object["offset"] = .number(Double(offsetCount)) }
         if !includes.isEmpty { object["include"] = .array(try includes.map { try $0.includeJSON() }) }
+        if withDeleted { object["includeDeleted"] = .bool(true) }
         return object
     }
 

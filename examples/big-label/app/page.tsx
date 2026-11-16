@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { JazzProvider, useJazzSession, useSession } from "jazz-tools/react";
+import { JazzProvider, useJazzSession } from "jazz-tools/react";
 import {
   Banner,
   Button,
@@ -152,9 +152,9 @@ export default function Page() {
 }
 
 function AccountApp() {
-  const account = useSession()?.user;
+  const { user, refresh } = useJazzSession();
+  const account = user?.accountId;
   const email = authClient.useSession().data?.user.email ?? "";
-  const { refresh } = useJazzSession();
   const [bootstrapping, setBootstrapping] = React.useState(false);
   // A failed background bootstrap is shown as a banner over the working app,
   // not the full-screen failure: the account and its local data are fine.

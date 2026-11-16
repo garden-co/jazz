@@ -5,6 +5,7 @@
 //! `jazz-tools generate` generates from `jazz.app.json`; the service opens
 //! the app as its backend with them (see `main.rs`).
 
+pub mod credential;
 pub mod jazz_app;
 mod routes;
 
