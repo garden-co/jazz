@@ -150,7 +150,7 @@ them.
 ## Built-in key sealing (HPKE), version 1
 
 Mechanism `jazz.wrap.hpke-x25519`, version 1, seals exactly one 32-byte key
-to a recipient public key (a device, a group epoch or a recovery root) with
+to a recipient public key (a device, an account epoch or a recovery root) with
 HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180)) in base mode,
 single-shot, suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 /
 ChaCha20Poly1305 (KEM `0x0020`, KDF `0x0001`, AEAD `0x0003`). ChaCha20Poly1305
@@ -168,8 +168,9 @@ Jazz authorisation remains required. Sealing to a small-order recipient key
 fails with `InvalidInput`, not a provider failure.
 
 Recipient key pairs come from HPKE `DeriveKeyPair` (RFC 9180 §7.1.3): a new
-device uses 32 fresh random bytes as input keying material, and a group epoch
-derives its input keying material from the epoch key (see the protocol). The
+device uses 32 fresh random bytes as input keying material, and an account
+epoch derives its input keying material from the account epoch key (see the
+protocol's account sealing keys). The
 public key is the 32-byte X25519 public key; implementations may store the
 secret key clamped.
 
@@ -239,10 +240,11 @@ are the default implementations.
   once, with no grace path, so the developer rotates and re-encrypts onto
   the replacement before retiring (the protocol's mechanism agility rules).
 - **Advertisement.** Public keys carry their mechanism: the advertised form
-  is `env(mechanism, publicKey)`. Each identity (a device, a recovery root, a
-  group epoch) has exactly one sealing key and one signing key, fixed at
-  creation; a recipient that supports a new mechanism creates a new identity
-  for it (see the protocol's mechanism agility rules).
+  is `env(mechanism, publicKey)`. Each identity (a device, a recovery root)
+  has exactly one sealing key and one signing key, fixed at creation; a
+  recipient that supports a new mechanism creates a new identity for it, and
+  an account publishes a sealing key of the new mechanism for its current
+  epoch (see the protocol's mechanism agility rules).
 - **Selection.** The application configuration selects one mechanism per role
   for writing. A sender seals only to a recipient key of the selected
   mechanism and otherwise fails with "recipient unsupported"; there is no

@@ -38,8 +38,8 @@ changes that touch encrypted data when the app files (`jazz.app.json`,
   a conversion").
 - **Writes cannot move a row between spaces** (spec §5.1), and a write needs
   a held key for the row's space (spec §5.1); the `move` write of §4.4 is the
-  one exception, stated in the protocol too. Creating a space needs the
-  `manageKeys` right (spec §3.3).
+  one exception, stated in the protocol too. Creating a space needs Jazz
+  update permission on the space row (spec §3.2).
 
 ## 2. Which changes are lens-only
 
@@ -129,8 +129,7 @@ re-encrypt are per column; re-home is per entry:
     "count": { "type": "int", "from": "countV1", "convert": "countFromText" }
   },
   "equality": ["body"],
-  "backfill": [],
-  "manageKeys": { "allowedTo": "update" }
+  "backfill": []
 }
 ```
 
@@ -174,9 +173,9 @@ that grows with unrelated data):
   `WriteCells`, for every insert, update and upsert that supplies the column.
   An update that leaves the column out leaves both as they are.
 - A row in a space with no root yet: the first conversion or encrypted write
-  is the space creation (spec §3.3), in one mixed ledger transaction with the
-  row write (H8), and only a session with the `manageKeys` right can do it;
-  any other session's encrypted write is refused `space-pending`.
+  is the space creation (spec §3.2), in one mixed ledger transaction with the
+  row write (H8), and only a session that may update the space row can do
+  it; any other session's encrypted write is refused `space-pending`.
   This is the "atomic first write" of an existing space row: the row is never
   observable encrypted under a space that was not accepted.
 - A decrypt writes plaintext. It is refused unless the deploy confirmed the
@@ -184,21 +183,24 @@ that grows with unrelated data):
 
 ### 3.5 Who converts
 
-| Work                                   | Who                                                                                                 |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Create missing spaces                  | Sessions with the `manageKeys` right on the space row, through manager discovery (spec §3.3, H11)   |
-| Convert a row the client writes anyway | Any writer (it holds the key by spec §5.1)                                                          |
-| Background sweep of a space            | By default, the space's key managers that are online; the app may opt all recipients in (`"sweep"`) |
-| Report progress                        | The server, without keys (§3.6)                                                                     |
+| Work                                   | Who                                                                                                                       |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Create missing spaces                  | Sessions that may update the space row, as part of their sweep (spec §3.2)                                                |
+| Convert a row the client writes anyway | Any writer (it holds the key by spec §5.1)                                                                                |
+| Background sweep of a space            | By default, online sessions that may update the space row and hold its key; `"sweep": "readers"` opts in every key holder |
+| Report progress                        | The server, without keys (§3.6)                                                                                           |
 
-The sweep is a client-runtime task above `Db`, like the recipient sync (H11):
-for each space it manages and holds a key for, it subscribes to rows with a
+The sweep is a client-runtime task above `Db`, like key requests (H11): for
+each space it sweeps (it may update the space row, or every reader may) and
+holds a key for, it subscribes to rows with a
 present source, and converts them in serializable transactions of bounded
 size (default 100 rows). Each transaction re-reads the rows it converts, so a
 concurrent edit or a second sweeper makes it conflict and retry rather than
-overwrite. A sweeper starts at a random row of its space, so several managers
-rarely collide. Sweeping needs Jazz update permission on the rows; a manager
-without it skips them and they appear in progress.
+overwrite. A sweeper starts at a random row of its space, so several sweepers
+rarely collide. Sweeping needs Jazz update permission on the rows; a sweeper
+without it skips them and they appear in progress. A sweeper that may update
+a space row without a space creates the space in its first conversion
+transaction (§3.4).
 
 A sweep starts only when the authority's active schema is the converting
 version or later (§3.7). It pauses when the session goes offline; conversions
@@ -255,7 +257,7 @@ declared default (§4.5).
 
 | Situation                                            | Effect                                                                                 |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Encrypt; space has no root, no manager online        | Rows stay plaintext and readable; counted under "no root yet"                          |
+| Encrypt; space has no root, no updater online        | Rows stay plaintext and readable; counted under "no root yet"                          |
 | Encrypt; space exists, no key holder online          | Rows stay plaintext and readable; counted per space                                    |
 | Encrypt; space column null                           | Cannot be encrypted; counted as "no space"; the app must assign a space or delete them |
 | Decrypt / re-encrypt / re-home; no key holder online | Rows stay in the old form, readable to key holders only                                |
@@ -300,8 +302,8 @@ add `__e2ee_eq_body` likewise if it is tagged. The entry gets `"from":
 Making a plaintext table encrypted additionally chooses its space:
 
 - `"space": "id", "scope": "<this table>"`: every row is its own space; the
-  sweep creates one space per row, and only sessions with `manageKeys` on
-  that row can.
+  sweep creates one space per row, and only sessions that may update that
+  row can.
 - `"space": "<reference column>", "scope": "<referenced table>"`: rows share
   their parent's space. The column must be a reference to the scope table and
   must be immutable from now on (spec §5.1); `generate` warns when existing
@@ -355,7 +357,8 @@ hold the plaintext. Rows in spaces no key holder reaches stay encrypted (§3.8).
   a new space column and new encrypted columns, and each sweep transaction
   converts whole rows (all encrypted columns and the new space value at once).
   The sweeper needs keys of both the old and new space and the right to write
-  the row; target spaces that do not exist are created by their managers.
+  the row; target spaces that do not exist are created by sessions that may
+  update their space rows.
 - **Moving one row between spaces of the same scope** is a new write kind,
   `move`: it re-encrypts every encrypted column of the row under the target
   space and changes the space column in one serializable transaction. It
@@ -364,9 +367,9 @@ hold the plaintext. Rows in spaces no key holder reaches stay encrypted (§3.8).
 - **Splitting** a space is creating a new scope row and moving a subset of
   rows into it; **merging** is moving all rows of one space into another and
   then deleting the empty scope row.
-- A move is not revocation: recipients of the old space keep the old
-  ciphertext and its history. To exclude someone, remove them and rotate
-  (spec §3.4).
+- A move is not revocation: readers of the old space keep the old
+  ciphertext and its history. To exclude someone, remove their read access to
+  the space row and rotate (spec §3.5).
 
 ### 4.5 New encrypted tables and columns
 
@@ -387,7 +390,7 @@ default's cell and token.
 | 2. Ship     | Deploy (publishes, does not activate); release clients built from the new files     | `deploy --no-activate`; `validate` checks the transition                                                                                      |
 | 3. Activate | Activate when client adoption is sufficient                                         | `deploy --activate`; clients start writing the new form and sweeping                                                                          |
 | 4. Seal     | Apply the suggested permission edit                                                 | `generate` proposes the seal policy; `deploy` publishes the revision                                                                          |
-| 5. Watch    | Make sure managers open the app; fix spaces with no root, no space or no key holder | `migrations status`                                                                                                                           |
+| 5. Watch    | Make sure updaters open the app; fix spaces with no root, no space or no key holder | `migrations status`                                                                                                                           |
 | 6. Finalise | Optional: drop the source                                                           | `migrations create --finalise` refuses while rows are pending, or lists them with `--abandon`                                                 |
 
 Phases 3 and 4 may be one deploy when old clients' read-only degradation is
@@ -403,10 +406,10 @@ table (§5.1).
 
 1. Add the new table to `jazz.app.json` with its `encryption` entry, and
    `createTables` it in the migration; deploy and ship.
-2. In a client that holds the keys (a key manager), read the old rows of a
-   space and, in one serializable transaction, insert their copies into the
-   new table. When the space has no root yet, the same transaction creates it
-   (spec §3.3), so the first encrypted rows and the space are accepted
+2. In a client that may update the space row, read the old rows of a space
+   and, in one serializable transaction, insert their copies into the new
+   table. When the space has no root yet, the same transaction creates it
+   (spec §3.2), so the first encrypted rows and the space are accepted
    together.
 3. Point the app's code, relations and permissions at the new table; rows get
    new IDs, so references to them must be rewritten in the same transactions
@@ -424,7 +427,7 @@ table (§5.1).
 | Write target and clear source; tag-only writes; `move` write kind                                      | H2 (`WriteCells` gains the source cells; a `Move` kind with both spaces) |
 | Source-or-target selection; short values; `superseded` and `stale-space` reports; epoch → space lookup | H3, from held-key records (spec §4.1, §6.2)                              |
 | Tokens for both contexts; the `conversion-pending` check                                               | H4                                                                       |
-| Sweep task, activation gate, status API                                                                | Client runtime above `Db`, beside the recipient sync (H11)               |
+| Sweep task, activation gate, status API                                                                | Client runtime above `Db`, beside key requests (H11)                     |
 | The client can read the authority's active schema version                                              | Core catalogue API (new)                                                 |
 | Lens: rename plus optionality widening on one stored column, with a backward default for null          | Core lens (to confirm)                                                   |
 | Native encoding unchanged under each allowed widening                                                  | Core values (to confirm)                                                 |
@@ -451,11 +454,11 @@ cache its position in memory; it is never authoritative.
   scope until one authenticates). It needs no sweep, but every read pays for
   every past declaration forever, and a plaintext column could never be
   encrypted this way.
-- **A key-holding migration worker** (a service account added as a recipient
-  of every space, running sweeps server-side). It finishes promptly and
-  reaches cold spaces, but gives one server-run identity every key, which is
-  what E2EE excludes. Apps may still do this explicitly in manual recipient
-  mode.
+- **A key-holding migration worker** (a service account that may read every
+  space row, running sweeps server-side). It finishes promptly and reaches
+  cold spaces, but gives one server-run identity every key, which is what
+  E2EE excludes. Apps may still do this explicitly, by giving such an
+  account read access to the space rows.
 - **Lazy conversion only** (convert on write, no sweep). Cold rows stay in the
   old form indefinitely: plaintext stays on the server and finalising never
   becomes possible.
@@ -464,8 +467,8 @@ cache its position in memory; it is never authoritative.
 
 1. In-place conversion pairs with the "present source wins" rule and client
    sweeps (§3); copying into a new table is the recipe of §5.1.
-2. Online key managers sweep by default; `"sweep": "recipients"` opts all
-   recipients in.
+2. Online sessions that may update the space row sweep by default;
+   `"sweep": "readers"` opts in every reader holding the key.
 3. New-form writes and sweeps wait for the server to activate the converting
    schema, through a client-visible active-schema API.
 4. The seal is a permissions revision that tooling proposes and the developer
