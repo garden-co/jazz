@@ -361,6 +361,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-client-docs"
+version = "0.1.0"
+dependencies = [
+ "jazz-app",
+ "todo-server-docs",
+ "tokio",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2357,12 +2366,16 @@ name = "jazz-ffi"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "futures",
  "futures-executor",
+ "futures-util",
  "jazz-app",
  "jazz-server",
+ "reqwest",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "uniffi",
  "uuid",
 ]

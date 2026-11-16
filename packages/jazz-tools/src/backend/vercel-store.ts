@@ -262,30 +262,51 @@ async function healthy(base: string, timeoutMs: number, diag: Record<string, num
   return false;
 }
 
-/** Whether semver `a` is newer than `b` (prereleases sort before their release). */
+/**
+ * Whether version `a` is newer than `b`. A `-` starts a prerelease of what
+ * precedes it, at any depth, so `2.0.0-alpha.64-rc.1` is a candidate for
+ * `2.0.0-alpha.64` and sorts before it, as `2.0.0-alpha.64` does before
+ * `2.0.0`. Dot-separated parts compare numerically when both are numbers;
+ * a number sorts before a word. The start script's `newer` orders the same
+ * way (GNU `sort -V` with every `-` as `~`).
+ */
 export function newerVersion(a: string, b: string): boolean {
-  const split = (v: string) => {
-    const [main = "", pre] = v.split(/-(.*)/s, 2);
-    return { main: main.split(".").map(Number), pre: pre?.split(".") };
-  };
-  const x = split(a);
-  const y = split(b);
-  for (let i = 0; i < 3; i++) {
-    if ((x.main[i] ?? 0) !== (y.main[i] ?? 0)) return (x.main[i] ?? 0) > (y.main[i] ?? 0);
-  }
-  if (!x.pre || !y.pre) return !x.pre && !!y.pre;
-  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
-    const p = x.pre[i];
-    const q = y.pre[i];
+  return compareVersions(a, b) > 0;
+}
+
+const PRERELEASE = Symbol("prerelease");
+type VersionPart = number | string | typeof PRERELEASE;
+
+function versionParts(version: string): VersionPart[] {
+  const parts: VersionPart[] = [];
+  version.split("-").forEach((segment, i) => {
+    if (i > 0) parts.push(PRERELEASE);
+    for (const part of segment.split(".")) {
+      parts.push(/^\d+$/.test(part) ? Number(part) : part);
+    }
+  });
+  return parts;
+}
+
+function compareVersions(a: string, b: string): number {
+  const x = versionParts(a);
+  const y = versionParts(b);
+  for (let i = 0; ; i++) {
+    const p = x[i];
+    const q = y[i];
+    if (p === undefined && q === undefined) return 0;
+    // One ended: a prerelease marker on the other sorts before the end
+    // (`alpha.64-rc.1` < `alpha.64`); any other part sorts after it.
+    if (p === undefined) return q === PRERELEASE ? 1 : -1;
+    if (q === undefined) return p === PRERELEASE ? -1 : 1;
     if (p === q) continue;
-    if (p === undefined) return false;
-    if (q === undefined) return true;
-    const numeric = /^\d+$/;
-    if (numeric.test(p) && numeric.test(q)) return Number(p) > Number(q);
-    if (numeric.test(p) !== numeric.test(q)) return !numeric.test(p);
-    return p > q;
+    if (p === PRERELEASE) return -1;
+    if (q === PRERELEASE) return 1;
+    if (typeof p === "number" && typeof q === "number") return p > q ? 1 : -1;
+    if (typeof p === "number") return -1;
+    if (typeof q === "number") return 1;
+    return p > q ? 1 : -1;
   }
-  return false;
 }
 
 /**
@@ -350,9 +371,11 @@ run=${q(`${root}/tmp`)}
 # Starts are serialized; the server itself runs without the lock.
 exec 9>"$run/jazz.lock"
 flock 9
-# Semver order: GNU sort -V with "~" sorts a prerelease before its release.
+# Version order: GNU sort -V with every "-" as "~" sorts a prerelease
+# before what it is a prerelease of, at any depth (alpha.64-rc.1 before
+# alpha.64 before the release), as newerVersion does in TypeScript.
 newer() {
-  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
+  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1//-/\\~}" "\${2//-/\\~}" | sort -V | tail -1)" = "\${1//-/\\~}" ]
 }
 version=${q(version)}
 trust=${q(trustLine)}
