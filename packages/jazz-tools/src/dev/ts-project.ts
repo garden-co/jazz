@@ -26,6 +26,16 @@ export const SCHEMA_ROOTS = [".", "src", "src/lib"];
 
 export type LoadModule = (file: string) => Promise<Record<string, unknown>>;
 
+/**
+ * The refusal of an app with `jazz.app.json` but no `schema.ts`: TS is the
+ * only authoring source, so `generate` and `migrations create` write only
+ * from schema.ts. The `jazz-tools` binary says the same
+ * (crates/jazz-cli/src/bin/jazz-tools.rs).
+ */
+export const JSON_ONLY_APP =
+  "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. " +
+  "Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), then `npx jazz-tools generate`.";
+
 /** The directory holding `schema.ts` in the project at `cwd`; refuses none or several. */
 export function findSchemaDir(cwd: string): string {
   const found = SCHEMA_ROOTS.map((root) => join(cwd, root)).filter((dir) =>
@@ -42,8 +52,7 @@ export function findSchemaDir(cwd: string): string {
   const json = SCHEMA_ROOTS.map((root) => join(cwd, root, APP_FILE)).find(existsSync);
   throw new Error(
     json
-      ? `No ${SCHEMA_FILE} next to ${relative(cwd, json) || APP_FILE}: from alpha.66 the app's schema and permissions are written in TS, and ${APP_FILE} is generated from them. ` +
-          "Run `npx jazz-tools upgrade` to convert an alpha.65 app; apps in other languages run the `jazz-tools` binary instead."
+      ? JSON_ONLY_APP
       : `No ${SCHEMA_FILE} in ${cwd} (looked in ${SCHEMA_ROOTS.join(", ")}). See ${APP_FILES_DOCS}.`,
   );
 }

@@ -5,6 +5,7 @@ import {
   APP_ID_ENV_VARS,
   SERVER_URL_ENV_VARS,
   compileSchema,
+  createMigration,
   loadDotEnv,
   loadEnvFile,
   readEnvFiles,
@@ -13,6 +14,7 @@ import {
 } from "./cli.js";
 import { createAppMigration, generateApp } from "./dev/project.js";
 import { loadAppFiles } from "./dev/codegen-napi.js";
+import { JSON_ONLY_APP } from "./dev/ts-project.js";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
 
@@ -230,8 +232,12 @@ describe("cli generate", () => {
     await expect(generate({ schemaDir })).rejects.toThrow(
       `No schema.ts in ${schemaDir} (looked in ., src, src/lib).`,
     );
+    // A JSON-only app: TS is the only authoring source, so neither command
+    // writes from jazz.app.json.
     await writeAppFiles(root);
-    await expect(generate({ schemaDir: root })).rejects.toThrow(/Run `npx jazz-tools upgrade`/);
+    await expect(generate({ schemaDir: root })).rejects.toThrow(JSON_ONLY_APP);
+    await expect(createMigration({ schemaDir: root, name: "x" })).rejects.toThrow(JSON_ONLY_APP);
+    expect(await readdir(root)).not.toContain("migrations");
   });
 
   it("refuses schema.ts in two roots", async () => {

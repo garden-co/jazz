@@ -20,11 +20,17 @@ Pass `--schema-dir <path>` to point them elsewhere.
 
 Projects in other languages, such as a Rust backend client, generate their bindings with
 `npx jazz-tools generate` too, from a `schema.ts` beside their own manifest (`Cargo.toml`, `go.mod`,
-`Package.swift`, `build.gradle.kts`); no `package.json` is needed. In an app with a `schema.ts`, the
-standalone `jazz-tools` binary refuses `generate` and `migrations create`, and points to
-`npx jazz-tools …`. Its `generate --check` still works there: it checks the bindings, and the
-`$generated` checksum of the committed JSON files, against those files. Whether the JSON is up to
-date with `schema.ts` only `npx jazz-tools generate --check` can tell, since it runs the TypeScript.
+`Package.swift`, `build.gradle.kts`); no `package.json` is needed. `schema.ts` is the only source:
+`jazz.app.json` and `jazz.permissions.json` are generated, so don't edit them. In an app with
+`jazz.app.json` but no `schema.ts` (an alpha.65 Rust, Go, Swift or Kotlin app), `generate` and
+`migrations create` refuse and point you at `npx jazz-tools upgrade`, which writes `schema.ts` from
+the JSON files, keeping the schema hashes and bundle id; then run `npx jazz-tools generate`.
+
+The standalone `jazz-tools` binary can't read TypeScript, so it writes nothing: its `generate` and
+`migrations create` refuse and point to `npx jazz-tools …`. Its `generate --check` still works: it
+checks the bindings, and the `$generated` checksum of the committed JSON files, against those files.
+Whether the JSON is up to date with `schema.ts` only `npx jazz-tools generate --check` can tell,
+since it runs the TypeScript.
 
 `npx jazz-tools --help` and `npx jazz-tools inspect --help` list every option.
 
