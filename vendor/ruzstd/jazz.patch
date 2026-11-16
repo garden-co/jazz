@@ -18,7 +18,7 @@
  autolib = false
  autobins = false
  autoexamples = false
-@@ -29,42 +25,24 @@
+@@ -29,57 +25,25 @@
  description = "A decoder for the zstd compression format"
  homepage = "https://github.com/KillingSpark/zstd-rs"
  readme = "Readme.md"
@@ -51,7 +51,7 @@
 -    "dep:core",
 -    "dep:alloc",
 -]
-+rustc-dep-of-std = ["dep:compiler_builtins", "dep:core", "dep:alloc"]
++rustc-dep-of-std = []
  std = []
  
  [lib]
@@ -59,25 +59,40 @@
 +doctest = false
  name = "ruzstd"
  path = "src/lib.rs"
--
+ 
 -[[bench]]
 -name = "decode_all"
 -path = "benches/decode_all.rs"
 -harness = false
- 
- [dependencies.alloc]
- version = "1.0.0"
-@@ -90,12 +68,4 @@
+-
+-[dependencies.alloc]
+-version = "1.0.0"
+-optional = true
+-package = "rustc-std-workspace-alloc"
+-
+-[dependencies.compiler_builtins]
+-version = "0.1.2"
+-optional = true
+-
+-[dependencies.core]
+-version = "1.0.0"
+-optional = true
+-package = "rustc-std-workspace-core"
+-
+ [dependencies.fastrand]
+ version = "2.3.0"
+ optional = true
+@@ -90,12 +54,4 @@
  optional = true
  default-features = false
  
 -[dev-dependencies.criterion]
 -version = "0.5"
- 
+-
 -[dev-dependencies.rand]
 -version = "0.8.5"
 -features = ["small_rng"]
--
+ 
 -[dev-dependencies.zstd]
 -version = "0.13.2"
 --- a/Readme.md

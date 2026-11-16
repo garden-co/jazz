@@ -41,7 +41,7 @@ swift --version
 
 cd "$root"
 cargo test -q -p jazz-codegen --test golden -- swift
-cargo build -q -p jazz-cli --bin jazz-tools
+cargo build -q -p jazz-tools --bin jazz-tools
 "$root/target/debug/jazz-tools" generate --check --dir "$example"
 # The app endpoint the end-user tests sign in through.
 cargo build -q -p jazz-app --features test-relay --bin jazz-app-test-relay
