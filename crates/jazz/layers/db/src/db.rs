@@ -10,7 +10,7 @@ use std::task::{Poll, Waker};
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
     BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
-    SchemaVersion,
+    ReadViewSpec, SchemaVersion,
 };
 use crate::query::Query;
 use crate::records::{Value, ValueType};
@@ -10850,6 +10850,64 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_in(
+            prepared,
+            include_deleted,
+            identity,
+            tier,
+            &ReadViewSourceSpec::Current,
+        )
+        .await
+    }
+
+    /// As [`Self::all_prepared_at`], through `source`: a branch view (a head
+    /// over an optional live or frozen base) composes as it does outside a
+    /// transaction, over the transaction's staged writes.
+    ///
+    /// Only a mergeable transaction reads through a branch view so far: a
+    /// serializable one records its read set for the root view alone, so a
+    /// branch read there is refused rather than validated against the wrong
+    /// rows. A historic (snapshot) source is refused in either.
+    pub async fn all_prepared_in(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+        source: &ReadViewSourceSpec,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let view = match source {
+            ReadViewSourceSpec::Current => None,
+            ReadViewSourceSpec::Snapshot { .. } => {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "Reading a snapshot inside a transaction is not supported yet",
+                ));
+            }
+            ReadViewSourceSpec::BranchView { .. } => {
+                if matches!(
+                    self.db.inner.staging().batches.get(&self.id),
+                    Some(Batch {
+                        kind: BatchKind::Serializable { .. },
+                        ..
+                    })
+                ) {
+                    return Err(Error::new(
+                        ErrorCode::Query,
+                        "Reading through a branch view inside a serializable transaction is not \
+                         supported yet",
+                    ));
+                }
+                let opts = ReadOpts {
+                    read_view: ReadViewSpec {
+                        source: source.clone(),
+                        include_deleted,
+                    },
+                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
+                };
+                ReadSpec::of(&opts, &self.db.inner())?.view
+            }
+        };
         // Capture staging before queueing: later writes must not leak into
         // the prefix this read admitted, even when its predecessor is cancelled.
         let (prefix, state) = {
@@ -10869,7 +10927,7 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix);
+        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix, view);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -10906,6 +10964,7 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
         prefix: BatchPrefix,
+        view: Option<View>,
     ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
@@ -11016,6 +11075,7 @@ impl TxRef<'_> {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
+                        view: view.clone(),
                         ..ReadSpec::default()
                     };
                     let roots = inner.run(&prepared, identity, &read)?;

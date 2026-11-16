@@ -14,7 +14,6 @@ The documentation copy of [`examples/todo-server-rs`](../../todo-server-rs): the
 
 Most snippets use the typed API: `jazz.all`, `one`, `get`, `insert`, `update`, `delete`, `transaction` and `subscribe`, with `todos::query()`, `todos::done().eq(false)`, `todos::title().contains("milk")`, `order_by(jazz_app::created_at(), …)`, `projects::todos().of(id)`, `NewTodo::new(title, done)` and `TodoUpdate { parent: Some(None), .. }`. What `jazz-app` doesn't cover yet uses the low-level `JazzClient`, either directly or through `Jazz::with_client`:
 
-- per-request sessions (`for_session`): the typed handle acts as the backend's one user;
 - includes, `select`, recursive queries (`gather`);
 - files (large values);
 - serializable transactions that read.
@@ -80,4 +79,4 @@ On Ctrl-C or SIGTERM it stops accepting requests, ends the live streams, lets th
 cargo test -p todo-server-docs
 ```
 
-They drive the real router: CRUD, persistence across restarts, the SSE stream and its end on shutdown run on a local app; resync runs against an in-process Jazz server, with one backend writing as Alice and a second one, with an empty store, reading the write as Bob. `bindings_are_current` checks `src/jazz_app.rs` against `jazz.app.json`.
+They drive the real router: CRUD, persistence across restarts, the SSE stream and its end on shutdown run on a local app; resync runs against an in-process Jazz server, where two clients in main-backend mode stand in for the TypeScript main backend: one writes as Alice, and a second, with an empty store, reads the write as Bob. `bindings_are_current` checks `src/jazz_app.rs` against `jazz.app.json`.

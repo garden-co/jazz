@@ -31,6 +31,8 @@ members = [
   "examples/docs/todo-server-rs",
   # The docs' backend-client snippets.
   "examples/docs/backend-client-rs",
+  # Probes the backend-client contract against a TS main backend.
+  "examples/rust-backend-clients/probe",
   "examples/stage-plan/benchmarks",
   "examples/band-book/benchmarks",
   "examples/permissioned-resources/benchmarks",

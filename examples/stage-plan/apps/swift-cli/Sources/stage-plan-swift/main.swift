@@ -41,8 +41,8 @@ func printTasks(_ tasks: [JazzApp.Task]) {
     }
 }
 
-// In a function, not top-level code: Swift 6.1 (Xcode 16) crashes compiling
-// top-level async code that calls Jazz's typed-throws methods.
+// In a function, not top-level code: Swift 6.1 (Xcode 16) has crashed
+// compiling top-level async code that calls Jazz.
 @MainActor func run() async throws {
     let env = ProcessInfo.processInfo.environment
     guard let endpoint = env["JAZZ_ENDPOINT"], let appId = env["JAZZ_APP_ID"] else {

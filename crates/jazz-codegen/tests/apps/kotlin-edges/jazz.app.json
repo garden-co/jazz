@@ -17,7 +17,7 @@
       "columns": {
         "tableName": "string",
         "result": "uuid?",
-        "tags": { "type": { "array": "string" } }
+        "tags": { "array": "string" }
       }
     }
   }
