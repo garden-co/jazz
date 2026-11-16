@@ -2,8 +2,11 @@
 
 The Swift runtime of Jazz: `async`/`await` calls and `AsyncThrowingStream`
 subscriptions over `crates/jazz-ffi` (the Jazz core, built from Rust, through
-UniFFI). Apps call it through the typed bindings that `jazz-tools generate`
-writes as `JazzApp.swift`.
+UniFFI). Apps call it through typed bindings: author the app's `schema.ts`
+beside a `Package.swift` that depends on Jazz, and `npx jazz-tools generate`
+writes `jazz.app.json`, `jazz.permissions.json` and `JazzApp.swift` there
+(`--check` in CI fails when any of them is stale). See
+docs/content/docs/setup/swift.mdx.
 
 The package's manifest is the repository's root `Package.swift` (SwiftPM
 takes a package by URL only from a repository root); its sources are here.

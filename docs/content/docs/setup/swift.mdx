@@ -1,13 +1,13 @@
 ---
 title: Swift
-description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from jazz.app.json."
+description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from your app's schema."
 ---
 
 For apps: run your backend in TypeScript.
 
-A Swift app is an end-user client of your app. It opens the same `jazz.app.json` as every other
-language, with typed bindings generated from it, signs a user in, and syncs through your backend's
-Jazz endpoint. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
+A Swift app is an end-user client of your app. It uses the same schema as every other language,
+with typed bindings generated from your app's schema with `npx jazz-tools generate`, signs a user
+in, and syncs through your backend's Jazz endpoint. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
 `async`, and subscriptions are `AsyncSequence`s.
 
 CI builds and tests the Swift package on Linux only, with command-line tools and servers. It
@@ -55,13 +55,28 @@ follows the same steps but isn't tested yet, and there are no prebuilt binaries 
 
 ## Generate the bindings
 
-With a `Package.swift` that uses the `Jazz` product beside `jazz.app.json`, `jazz-tools generate`
-writes `JazzApp.swift` next to them:
+The bindings are generated from your app's schema with `npx jazz-tools generate`. Write the schema
+and permissions in a `schema.ts` (see [Defining Tables](/docs/schemas/defining-tables) and
+[Declarative Permissions](/docs/schemas/policies)) beside a `Package.swift` that uses the `Jazz`
+product (no `package.json` is needed) and run it there: it writes `jazz.app.json`,
+`jazz.permissions.json` and `JazzApp.swift` next to them.
 
 ```bash
-npx jazz-tools generate            # checks the files, writes JazzApp.swift
-npx jazz-tools generate --check    # in CI: fails if JazzApp.swift is stale
+npx jazz-tools generate            # writes the app files and JazzApp.swift
+npx jazz-tools generate --check    # in CI: fails if any of them is stale
 ```
+
+A Swift client of an app whose schema lives elsewhere (its TypeScript backend's, say) gets a
+two-line `schema.ts` that re-exports it, as StagePlan's Swift example does:
+
+```ts
+export { schema, permissions } from "../react-localfirst/schema";
+```
+
+Detection picks Swift from the `Package.swift`; `--lang swift` selects it explicitly. Edit only
+`schema.ts`: the JSON files and `JazzApp.swift` are generated, so commit them and regenerate after
+each schema change. Run `generate` with `npx`: the standalone `jazz-tools` binary refuses to write
+beside a `schema.ts`, though its `generate --check` still works.
 
 Commit `JazzApp.swift` and add it to your target's sources. Everything in it sits inside
 `public enum JazzApp`, so a table's names never hide Swift's own types: StagePlan's `tasks` table
@@ -127,7 +142,7 @@ no account yet takes over the device account signed in before; with `linkGuest: 
 
 ## Computed fields and transforms
 
-If `jazz.app.json` declares computed fields or transforms, the bindings declare a
+If your schema declares computed fields or transforms, the bindings declare a
 `JazzApp.Computed` protocol. It has one method per computed field (`tasksPriority(score:)`) and a
 `View`/`Stored` pair per transform (`isoDateView(_:)`, `isoDateStored(_:)`).
 `JazzApp.open(_:computed:)` takes your implementation, so a missing method is a compile error:
