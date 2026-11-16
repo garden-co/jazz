@@ -31,10 +31,9 @@
 //! part of a release yet: `Endpoint`, the app's `/jazz` handler served
 //! natively. Run an app's main backend with TS `createJazz`.
 //!
-//! Not supported yet: subscribing to history, and partial reads of large
-//! values. A bearer session is renewed by reconnecting with a fresh bearer,
-//! as TypeScript's bearer clients do (in-place renewal is for cookie
-//! sessions).
+//! Not supported yet: partial reads of large values. A bearer session is
+//! renewed by reconnecting with a fresh bearer, as TypeScript's bearer
+//! clients do (in-place renewal is for cookie sessions).
 
 mod advice;
 mod app;
@@ -69,14 +68,14 @@ pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason}
 pub use backend_client::{BackendClientKind, CLOSE_TIMEOUT};
 pub use branch::{Branch, BranchView, OnBranch, Snapshot};
 pub use config::{Backend, Config, Storage};
-pub use edit::TextColumn;
+pub use edit::{Edits, TextColumn};
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
-pub use handle::Jazz;
+pub use handle::{DEFAULT_FIRST_LOAD_REMOTE_WAIT, DefaultRead, Jazz};
 pub use history::Version;
 pub use include::{
-    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+    Include, IntoInclude, Nullability, OneInclude, Partial, Pick, RefsInclude, Row, Selection, With,
 };
 pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
@@ -96,7 +95,7 @@ pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, TransactionId};
+pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, ResultKey, TransactionId};
 
 /// Stateless anchors and ranges into text values (cursors, selections,
 /// comments), captured from one value and found again in later ones, as

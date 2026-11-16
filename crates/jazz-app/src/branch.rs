@@ -28,6 +28,7 @@ use crate::error::{Error, Result};
 use crate::handle::{Jazz, decode_result, insert, read_opts};
 use crate::include::Row;
 use crate::query::{Column, Query};
+use crate::read::ReadOptions;
 use crate::subscription::{self, Subscription};
 use crate::table::{Insert, Table, Update};
 use crate::transaction::Transaction;
@@ -310,9 +311,12 @@ impl OnBranch {
             .await
     }
 
-    /// Every row `query` matches in this view, reading local data first.
+    /// Every row `query` matches in this view, read as [`Jazz::all`] reads
+    /// (at the client's default tier).
     pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
-        self.all_with(query, ReadTier::LocalFirst).await
+        self.jazz
+            .all_with_options(query, ReadOptions::default().branch(self.view.clone()))
+            .await
     }
 
     /// Every row `query` matches in this view, read at `tier`.
@@ -341,7 +345,9 @@ impl OnBranch {
 
     /// Subscribes to `query` in this view, as [`Jazz::subscribe`].
     pub async fn subscribe<T: Row>(&self, query: Query<T>) -> Result<Subscription<T>> {
-        self.subscribe_with(query, ReadTier::LocalFirst).await
+        self.jazz
+            .subscribe_with_options(query, ReadOptions::default().branch(self.view.clone()))
+            .await
     }
 
     /// [`OnBranch::subscribe`] at `tier`.

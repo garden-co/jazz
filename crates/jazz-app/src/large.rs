@@ -3,8 +3,8 @@
 //! as its `insertStreaming` does. An edit adds to a chunked cell's bounded
 //! edit tail instead of rewriting it.
 //!
-//! Not supported yet: edits combined with whole-column replacements in one
-//! update.
+//! Edits combine with an update's whole-column sets in one row update: see
+//! [`Jazz::update_edited`].
 
 use futures_core::Stream;
 use futures_util::StreamExt as _;

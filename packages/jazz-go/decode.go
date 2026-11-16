@@ -50,7 +50,7 @@ func decodeRow[R any](table string, raw json.RawMessage, out *R) error {
 		}
 		for _, name := range names {
 			if value, ok := fields[name]; ok && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-				return &Error{Kind: "refused", Message: fmt.Sprintf(
+				return &Error{Kind: KindRefused, Table: table, Column: name, Message: fmt.Sprintf(
 					"%s.%s is null, which its Go field can't hold (a non-finite double reads as null)", table, name)}
 			}
 		}
