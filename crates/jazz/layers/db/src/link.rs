@@ -200,6 +200,7 @@ impl LinkFailure {
     /// | `auth_failed`, anything else            | AuthRejected     | AuthRejected |
     /// | `not_ready` + `later`                   | ServerNotReady   | Network     |
     /// | `backpressure` + `later`                | Refused          | Network     |
+    /// | `internal` + `later`                    | Refused          | Network     |
     /// | anything else                           | Fatal            | Fatal       |
     pub fn from_wire_error(error: &WireError, admitted: bool) -> Self {
         let message = error.message.clone();
@@ -214,7 +215,11 @@ impl LinkFailure {
                 message,
             };
         }
-        if error.asks_reconnect_later() {
+        // `internal` with `later` is a server that cannot serve this session
+        // right now (its runtime is shutting down in a rolling deploy): an
+        // availability failure like overload, never a reason to stop.
+        let unavailable = error.retry == WireRetry::Later && error.code == WireErrorCode::Internal;
+        if error.asks_reconnect_later() || unavailable {
             return match (admitted, error.code) {
                 (true, _) => Self::Network(message),
                 (false, WireErrorCode::NotReady) => Self::ServerNotReady(message),

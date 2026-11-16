@@ -1200,13 +1200,13 @@ where
     if jazz::wire::wire_hello_version_range(&encoded[0]).is_none() {
         let frame = match decode_frame(&encoded[0]) {
             Ok(frame) => frame,
-            // An error frame this client cannot read (a code it does not
-            // know) is still the server refusing it: retrying cannot help.
+            // An error frame this client cannot read (a code or retry from a
+            // newer server) is still the server refusing this attempt. Nothing
+            // negotiates versions before hello, so it is retried with backoff
+            // and reported at once, never taken as a reason to stop for good.
             Err(error) if jazz::wire::is_wire_error_frame(&encoded[0]) => {
-                return Err(WebSocketClientError::ServerWireError(WireError::new(
-                    jazz::wire::WireErrorCode::MalformedFrame,
-                    jazz::wire::WireRetry::Never,
-                    format!("server sent an error this client cannot decode: {error}"),
+                return Err(WebSocketClientError::ServerRejected(format!(
+                    "server sent an error this client cannot decode: {error}"
                 )));
             }
             Err(error) => return Err(WebSocketClientError::DecodeFrame(error)),
@@ -2331,9 +2331,9 @@ mod tests {
 
     /// A server's answer before hello reaches the shared link classification
     /// as a wire error (#5927 R10), so the native client treats it as the
-    /// web and Node clients do: `NotReady` is a server still starting, and
-    /// an error frame with a code this client does not know stops the link
-    /// instead of being retried as an outage.
+    /// web and Node clients do: `NotReady` is a server still starting. An
+    /// error frame with a code this client does not know (a newer server) is
+    /// a refusal the link retries, never a reason to stop for good.
     ///
     /// ```text
     /// client ─prelude, hello─► server ─Error frame─► client ─► LinkFailure
@@ -2352,7 +2352,7 @@ mod tests {
         .unwrap();
         // `WireFrame::Error` (tag 1), code 99, retry `never`, empty message.
         let unknown_code = vec![1, 99, 0, 0];
-        for (frame, expected) in [(not_ready, "serverNotReady"), (unknown_code, "fatal")] {
+        for (frame, expected) in [(not_ready, "serverNotReady"), (unknown_code, "refusal")] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
@@ -2367,7 +2367,7 @@ mod tests {
                     .await
                     .unwrap();
             });
-            let error = match NativeWebSocketConnector
+            let error = NativeWebSocketConnector
                 .connect(NativeTransportRequest {
                     requested_link: NativeTransportLink::OrdinarySession,
                     server_url: format!("http://{address}"),
@@ -2379,15 +2379,22 @@ mod tests {
                     wake: Arc::new(|| {}),
                 })
                 .await
-            {
-                Ok(_) => panic!("a server error must refuse the attempt"),
-                Err(NativeTransportError::Wire(error)) => error,
-                Err(other) => panic!("a server's answer stays a wire error, got {other:?}"),
-            };
-            let kind = match LinkFailure::from_wire_error(&error, false) {
-                LinkFailure::ServerNotReady(_) => "serverNotReady",
-                LinkFailure::Fatal(_) => "fatal",
-                other => panic!("unexpected classification {other:?}"),
+                .err()
+                .expect("a server error must refuse the attempt");
+            let kind = match error {
+                NativeTransportError::Wire(error) => {
+                    match LinkFailure::from_wire_error(&error, false) {
+                        LinkFailure::ServerNotReady(_) => "serverNotReady",
+                        other => panic!("unexpected classification {other:?}"),
+                    }
+                }
+                // A connector `Terminal` is a refusal the link retries
+                // (`LinkFailure::Refused`), not a stop.
+                NativeTransportError::Terminal(message) => {
+                    assert!(message.contains("cannot decode"), "{message}");
+                    "refusal"
+                }
+                other => panic!("unexpected error {other:?}"),
             };
             assert_eq!(kind, expected);
             server.await.unwrap();

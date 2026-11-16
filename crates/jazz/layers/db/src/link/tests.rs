@@ -767,10 +767,18 @@ fn a_server_wire_error_is_classified_by_code_and_admission() {
             kind(C::Backpressure, R::Later, "x", admitted),
             reconnect("refused")
         );
-        // `later` does not make a malformed frame or an internal error retryable.
+        // A runtime that cannot serve the session now (shutting down in a
+        // rolling deploy) is unavailable, not broken.
+        assert_eq!(
+            kind(C::Internal, R::Later, "x", admitted),
+            reconnect("refused")
+        );
+        for retry in [R::Never, R::AfterAuth, R::AfterResume] {
+            assert_eq!(kind(C::Internal, retry, "x", admitted), "fatal");
+        }
+        // `later` does not make a malformed frame retryable.
         for code in [
             C::MalformedFrame,
-            C::Internal,
             C::UnsupportedFeature,
             C::UnsupportedProtocolVersion,
         ] {
