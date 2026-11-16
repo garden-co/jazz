@@ -145,8 +145,12 @@ query: `JazzApp.shows.tasks.orderBy(JazzApp.tasks.rank).limit(3)`, plus a nested
 `.required()`. `query.select(columns…)` reads only some columns into a `Decodable` type of yours,
 with `jazz.all(selection, as: MyType.self)`.
 
-`jazz.transaction(commit:) { tx in … }` runs a serializable transaction. It commits when the
-closure returns, rolls back when the closure throws, and rethrows that error. Reads take a
+`jazz.transaction(commit:) { tx in … }` runs a mergeable transaction, as TypeScript's
+`db.transaction`: it commits when the closure returns, rolls back when the closure throws, and
+rethrows that error. Its writes merge with concurrent ones, so its commit is never a conflict.
+`jazz.serializableTransaction(commit:) { tx in … }` is TypeScript's `db.serializableTransaction`:
+the server accepts it only if nothing it read changed meanwhile, else it throws
+`JazzError.conflict`. Reads take a
 `tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
 `jazz.waitForSync(.global)` waits until everything written so far has reached the server.
 
@@ -208,4 +212,12 @@ Not supported yet:
 
 A write that the server's permissions refuse doesn't throw by default. Writes are local-first, so
 it stays in the local store and never syncs. Write with `tier: .global` (or call
-`waitForSync(.global)`) to get `JazzError.permissionDenied` instead.
+`waitForSync(.global)`) to get `JazzError.permissionDenied` instead, or follow
+`jazz.mutationErrors` (TypeScript's `onMutationError`), which reports each refused write nothing
+waited on.
+
+`jazz.disconnect()` leaves the server while local reads and writes go on, and `jazz.reconnect()`
+resumes sync. `jazz.deleteClientStorage()` rolls back open transactions, closes the app and deletes its local
+store (writes the server hasn't accepted are lost). While another open app holds the same `dataDir`,
+it throws `JazzError.refused` and the app stays open (its open transactions are still rolled back). The `session`, `syncChanges` and `mutationErrors` streams end with
+`JazzError.closed` when the app closes.
