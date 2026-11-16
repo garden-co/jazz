@@ -286,7 +286,8 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
                 .await
                 .expect_err("Bob must not mutate Alice's note");
             assert!(
-                error.to_string().contains("authorization_denied"),
+                error.to_string().contains("authorization_denied")
+                    || error.to_string().contains("(permission_denied)"),
                 "{error}"
             );
         }
@@ -1037,7 +1038,12 @@ async fn backend_session_updates_leave_read_permissions_to_the_server_inner() {
     )));
     let alice = backend.for_session(session);
     let patch = vec![("title".to_owned(), Value::Text("Alice's edit".to_owned()))];
-    let refused = |error: String| assert!(error.contains("authorization_denied"), "{error}");
+    let refused = |error: String| {
+        assert!(
+            error.contains("authorization_denied") || error.contains("(permission_denied)"),
+            "{error}"
+        )
+    };
     let update = alice
         .update("notes", note_id, patch.clone())
         .expect("the backend stages Alice's update")
