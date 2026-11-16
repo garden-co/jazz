@@ -52,9 +52,9 @@ or with your own sign-in's bearer token:
   ../examples/docs/backend-client-rs/src/client.rs#context-setup-rust-client
 </include>
 
-To follow who is signed in, as TypeScript's `createJazzClient` does, open a `JazzSession`. It starts
-with a device account (a guest), and a user your sign-in names takes the guest's account over if
-they have none yet:
+To follow who is signed in, as TypeScript's `createJazzClient` does, open a `JazzSession`. With
+`.initial(Initial::Device)` it starts with a device account (a guest); a user your sign-in names then
+takes the guest's account over if they have none yet (`link_guest`, on by default):
 
 <include cwd lang="rust" meta='title="src/main.rs"'>
   ../examples/docs/backend-client-rs/src/client.rs#context-setup-rust-session
