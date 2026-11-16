@@ -68,7 +68,7 @@ nothing and doesn't fail: `db.transaction(...)` resolves with the callback's val
 resolves at once, and its `txId` rejects, since there is no transaction to name (from alpha.65;
 earlier versions throw "empty mergeable transaction has no committed unit").
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
@@ -89,6 +89,12 @@ earlier versions throw "empty mergeable transaction has no committed unit").
     <include cwd lang="swift">
       ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-transaction-swift
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-transaction-kotlin
+    </include>
+
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
@@ -152,7 +158,7 @@ A transaction can fail at three points:
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
    with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
@@ -162,6 +168,12 @@ A transaction can fail at three points:
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-errors-effect
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-transaction-errors-kotlin
+    </include>
+
   </Tab>
 </Tabs>
 

@@ -2171,6 +2171,9 @@ pub struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    /// The optional features the host negotiated with the peer
+    /// ([`Link::set_features`]).
+    features: Rc<std::cell::Cell<crate::wire::WireFeatures>>,
 }
 
 struct QueueTransport {
@@ -2188,6 +2191,10 @@ impl WireTransport for QueueTransport {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         self.queues.inbound.borrow_mut().pop_front()
+    }
+
+    fn features(&self) -> crate::wire::WireFeatures {
+        self.queues.features.get()
     }
 }
 
@@ -2211,6 +2218,15 @@ impl Link {
     /// The binding this link belongs to.
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+
+    /// The optional wire features the host negotiated with the peer in
+    /// its `Hello`. An upstream link uses them to decide what it may send:
+    /// a serializable commit that read through a branch view goes only to
+    /// a peer with [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`].
+    pub fn set_features(&self, features: crate::wire::WireFeatures) {
+        self.queues.features.set(features);
+        self.binding.hooks.schedule_tick();
     }
 
     /// Frames received from the peer; applied on the next tick.

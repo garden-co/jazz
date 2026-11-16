@@ -2619,7 +2619,11 @@ impl NapiDb {
             ))
             .into());
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(self.transport(link))
     }
 
     /// The newest transaction time this database handed out under its node

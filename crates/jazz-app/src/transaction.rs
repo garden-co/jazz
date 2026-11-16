@@ -32,10 +32,10 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// `write`, which returns the row read back, needs a read through the
-    /// branch, which a serializable transaction can't do yet (jazz#5806):
-    /// refuse it before staging anything, so a caller that ignores the
-    /// error doesn't commit it.
+    /// `write`, which returns the row read back, is not supported yet
+    /// through a branch in a serializable transaction: refuse it before
+    /// staging anything, so a caller that ignores the error doesn't commit
+    /// it.
     fn refuse_read_back_on_branch(&self, write: &str) -> Result<()> {
         if self.client.is_on_branch() && !self.mergeable {
             return Err(crate::Error::Unsupported(format!(

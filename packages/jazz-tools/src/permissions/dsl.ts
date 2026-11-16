@@ -13,7 +13,6 @@ import {
   node,
   op,
   PermissionsDslError,
-  setRowFactory,
   tableMeta,
   unknownMember,
   type Ctx,
@@ -113,8 +112,6 @@ function rowHandle(meta: SchemaMeta, scope: Scope): unknown {
   });
 }
 
-setRowFactory(rowHandle);
-
 function oldRow(meta: SchemaMeta, table: string): unknown {
   const t = tableMeta(meta, table);
   return new Proxy(Object.create(null) as object, {
@@ -204,12 +201,12 @@ export interface EqHelper {
   (left: Value<any, any>, right: Comparable): Policy;
 }
 
-export const eq = comparison("eq") as EqHelper;
-export const ne = comparison("ne") as CompareHelper<"ne">;
-export const gt = comparison("gt") as CompareHelper<"gt">;
-export const gte = comparison("gte") as CompareHelper<"gte">;
-export const lt = comparison("lt") as CompareHelper<"lt">;
-export const lte = comparison("lte") as CompareHelper<"lte">;
+export const eq = /*#__PURE__*/ comparison("eq") as EqHelper;
+export const ne = /*#__PURE__*/ comparison("ne") as CompareHelper<"ne">;
+export const gt = /*#__PURE__*/ comparison("gt") as CompareHelper<"gt">;
+export const gte = /*#__PURE__*/ comparison("gte") as CompareHelper<"gte">;
+export const lt = /*#__PURE__*/ comparison("lt") as CompareHelper<"lt">;
+export const lte = /*#__PURE__*/ comparison("lte") as CompareHelper<"lte">;
 
 /** `{ tags: contains("x") }`: the column contains the value; `contains(a, b)` as a policy. */
 export function contains<const X>(operand: X): ContainsOp<X>;
@@ -258,18 +255,24 @@ const TYPED =
 
 /** Typed literals, exactly that value whatever they are compared with: `typed.int(5)`, `typed.text("5")`, … */
 export const typed = Object.freeze({
-  literal: TYPED("literal") as (value: string | number | boolean | null) => Value<any, any>,
-  int: TYPED("int") as (value: number | bigint) => Value<number, any>,
-  bigint: TYPED("bigint") as (value: number | bigint) => Value<bigint, any>,
-  timestamp: TYPED("timestamp") as (value: number) => Value<Date, any>,
-  double: TYPED("double") as (value: number | "NaN" | "inf" | "-inf") => Value<number, any>,
-  text: TYPED("text") as (value: string) => Value<string, any>,
-  uuid: TYPED("uuid") as (value: string) => Value<string, any>,
-  bytes: TYPED("bytes") as (hex: string | Uint8Array) => Value<Uint8Array, any>,
-  txid: TYPED("txid") as (value: string) => Value<string, any>,
-  bool: TYPED("bool") as (value: boolean) => Value<boolean, any>,
-  array: TYPED("array") as (...items: (Value<any, any> | null)[]) => Value<unknown[], any>,
-  row: TYPED("row") as (
+  literal: /*#__PURE__*/ TYPED("literal") as (
+    value: string | number | boolean | null,
+  ) => Value<any, any>,
+  int: /*#__PURE__*/ TYPED("int") as (value: number | bigint) => Value<number, any>,
+  bigint: /*#__PURE__*/ TYPED("bigint") as (value: number | bigint) => Value<bigint, any>,
+  timestamp: /*#__PURE__*/ TYPED("timestamp") as (value: number) => Value<Date, any>,
+  double: /*#__PURE__*/ TYPED("double") as (
+    value: number | "NaN" | "inf" | "-inf",
+  ) => Value<number, any>,
+  text: /*#__PURE__*/ TYPED("text") as (value: string) => Value<string, any>,
+  uuid: /*#__PURE__*/ TYPED("uuid") as (value: string) => Value<string, any>,
+  bytes: /*#__PURE__*/ TYPED("bytes") as (hex: string | Uint8Array) => Value<Uint8Array, any>,
+  txid: /*#__PURE__*/ TYPED("txid") as (value: string) => Value<string, any>,
+  bool: /*#__PURE__*/ TYPED("bool") as (value: boolean) => Value<boolean, any>,
+  array: /*#__PURE__*/ TYPED("array") as (
+    ...items: (Value<any, any> | null)[]
+  ) => Value<unknown[], any>,
+  row: /*#__PURE__*/ TYPED("row") as (
     id: Value<any, any> | null,
     ...fields: (Value<any, any> | null)[]
   ) => Value<unknown, any>,
@@ -409,7 +412,7 @@ function compileRule(
   updateTo: boolean,
 ): PolicyJson {
   const root = newScope(table);
-  const ctx: Ctx = { meta, table, scope: root, root, depth: 0, old: updateTo };
+  const ctx: Ctx = { meta, table, scope: root, root, depth: 0, old: updateTo, row: rowHandle };
   const input =
     typeof rule === "function"
       ? updateTo

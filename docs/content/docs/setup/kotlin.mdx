@@ -1,0 +1,192 @@
+---
+title: Kotlin
+description: "Build Jazz apps in Kotlin, for Android and the JVM, with the jazz-kotlin library and typed bindings generated from jazz.app.json."
+---
+
+Kotlin is for apps: Android apps and JVM desktop or command-line clients. Your app's main backend
+runs in TypeScript. A Kotlin app opens the same `jazz.app.json` as every other language,
+with typed bindings generated from it, and syncs as an end user through your backend's Jazz
+endpoint (`createJazz`'s handler), or runs locally.
+
+The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). Its calls are
+`suspend` functions, and subscriptions are `Flow`s. It runs on JDK 17 or later, and on Android
+(minSdk 24).
+
+## Install
+
+`jazz-kotlin` isn't on Maven Central yet. Each Jazz release has it as files on its
+[GitHub release](https://github.com/garden-co/jazz/releases), checked by the `SHA256SUMS` beside
+them:
+
+- `jazz-kotlin-<version>.jar`: the JVM library, with `libjazz_ffi` for Linux (x86-64, arm64),
+  macOS (arm64, x86-64) and Windows (x86-64) inside, which JNA loads from the jar;
+- `jazz-kotlin-android-<version>.aar`: the Android library, with `libjazz_ffi` for arm64-v8a,
+  armeabi-v7a and x86_64.
+
+Download the one you need into your project's `libs/`, and depend on it with the libraries it uses
+from Maven Central:
+
+```kotlin title="build.gradle.kts"
+plugins {
+    kotlin("jvm") version "2.2.21"
+    kotlin("plugin.serialization") version "2.2.21" // for the generated bindings
+    application
+}
+
+repositories { mavenCentral() }
+
+dependencies {
+    implementation(files("libs/jazz-kotlin-2.0.0-alpha.66.jar"))
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("net.java.dev.jna:jna:5.17.0")
+}
+```
+
+On Android, depend on `files("libs/jazz-kotlin-android-2.0.0-alpha.66.aar")` and
+`net.java.dev.jna:jna:5.17.0@aar` instead of the jar and `jna`. Keep `tools.jazz.**`,
+`uniffi.jazz_ffi.**` and `com.sun.jna.**` if you minify.
+
+To build from source: in a Jazz checkout,
+`cargo build -p jazz-ffi --release`, then either build the jar with Gradle in `packages/jazz-kotlin`
+(it bundles your platform's library) or set `-Djna.library.path` to `target/release`.
+
+## Generate the bindings
+
+With a `build.gradle.kts` that depends on `jazz-kotlin` beside `jazz.app.json`, `jazz-tools generate` writes
+`src/main/kotlin/JazzApp.kt`, in the package `jazzapp`:
+
+```bash
+jazz-tools generate            # checks the files, writes src/main/kotlin/JazzApp.kt
+jazz-tools generate --check    # in CI: fails if JazzApp.kt is stale
+```
+
+(`npx jazz-tools generate` works the same; a `build.gradle.kts` naming the jar file counts if it
+mentions `jazz-kotlin`, as `files("libs/jazz-kotlin-….jar")` does.)
+
+Commit `JazzApp.kt`. Per table it gives you:
+
+- a `@Serializable` row data class (`Task`), with the authored column names;
+- a new-row data class (`NewTask`), whose optional columns default to `null`;
+- a patch builder (`TaskPatch`), used as `jazz.update(Tasks, id) { status(TaskStatus.Done) }`;
+- a table object (`Tasks`) with typed columns, for queries:
+  `Tasks.where(Tasks.showId eq id).orderBy(Tasks.rank.asc())`;
+- an `enum class` per enum column (`TaskStatus`).
+
+Import the generated declarations by name (`import jazzapp.Tasks`, `import jazzapp.NewTask`), or
+write them qualified (`jazzapp.Result`), rather than `import jazzapp.*`: a star import outranks
+Kotlin's default imports, so a table such as `results` would hide `kotlin.Result` in your code.
+
+Names are the ones `jazz.app.json` uses: a `showId` column is `showId`, and a `due_at` column stays
+`due_at` (only names that aren't Kotlin identifiers are camel-cased). Values are plain Kotlin types:
+`uuid` is a `String`, `int` an `Int`, `bigint` a `Long`, `float` a `Double`, `timestamp` a `Long`
+(milliseconds since the epoch), `bytea` a `ByteArray`, `json` a `JsonElement`, an array a
+`List<T>`, an enum its generated `enum class`, and an optional column is nullable. The file names
+these fully qualified (`kotlin.String`), so a table may be called `Result` or `Unit`.
+
+## Open the app
+
+The app syncs through your backend's Jazz endpoint (`createJazz`'s handler, e.g.
+`https://app.example/jazz`), never with the sync server's secrets. It signs in with a local-first
+device account:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-client
+</include>
+
+or as a user your backend signs in, with their bearer token:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#auth-bearer-kotlin
+</include>
+
+`jazz.session` and `jazz.syncStatus` are `StateFlow`s of who is signed in and how the app syncs;
+`jazz.link(bearer)` joins a device account to your sign-in:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#auth-session-kotlin
+</include>
+
+`Jazz` is safe to use from any coroutine: its calls are main-safe `suspend` functions, and the
+native core syncs on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) when you're
+done; closing ends open `watch`es and subscriptions with `JazzException.Closed`.
+
+Writes are local-first: a write the server's permissions refuse doesn't fail the call, it rolls
+back once the server answers. Write at `WriteTier.Global` (or call `waitForSync`) to see the
+refusal as a `JazzException.Permission`.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Kotlin
+tab for each example. `examples/stage-plan/apps/kotlin-cli` in the repository is a complete
+end-user app: it signs in, creates a show, lists its tasks by rank, adds tasks and moves them
+between stages.
+
+## Edit text
+
+A `"merge": "text"` column (like StagePlan's `tasks.notes`) is written as an edit of what you
+read, so concurrent edits merge. `jazz.edit(table, id) { … }` also splices text and bytes and sets
+values inside JSON columns.
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-text-edit-kotlin
+</include>
+
+## Hops, unions and history
+
+Follow a relation from a query's rows (`hopTo`); `gather(relation, maxDepth)` follows a self-relation recursively:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-hop-to-kotlin
+</include>
+
+Combine queries of one table:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-union-kotlin
+</include>
+
+Read the versions the server accepted ([History](/docs/reading/history)), at `ReadTier.Remote`:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-history-kotlin
+</include>
+
+Include deleted rows:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-include-deleted-kotlin
+</include>
+
+## Large values
+
+Stream a large text or `bytea` value in, and read back only the part you need:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-streaming-upload-kotlin
+</include>
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-partial-value-kotlin
+</include>
+
+## Computed fields and transforms
+
+If `jazz.app.json` declares computed fields or transforms, the bindings declare an
+`interface JazzComputed` (e.g. `tasksPriority(score: Int): TaskPriority`,
+`isoDateView(stored: Long): String` and `isoDateStored(view: String): Long`), and
+`jazzapp.open(config, computed)` takes your implementation, so a missing one doesn't compile. Rows
+carry each computed field and each transformed column's view value; inserts and patches take the
+view value. Queries compare a transformed column as stored.
+
+## Not supported yet
+
+In Kotlin, Jazz doesn't support these yet:
+
+- reading part of a large value inside an include (root queries only);
+- subscribing to history queries;
+- guest (anonymous) users;
+- nested rows and catalogue enums in bindings;
+- Kotlin Multiplatform targets other than the JVM and Android;
+- Maven Central: install the jar or AAR from the GitHub release;
+- non-finite doubles (`NaN`, infinities): writing or comparing one throws, as JSON has none;
+- `limit` and `offset` with `watch`: they apply to the server's result before `watch` re-sorts it
+  locally, so a page can be off after changes. Use them with `all`.
