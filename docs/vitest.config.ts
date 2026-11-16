@@ -14,6 +14,8 @@ export default defineConfig({
       "lib/search-include-refs.test.ts",
       "lib/bundle-sizes/**/*.test.ts",
       "lib/jazz-version/**/*.test.ts",
+      "lib/languages/**/*.test.ts",
+      "lib/code-tokenizers.test.ts",
       "lib/llm-text.test.ts",
       "lib/quickstart-links.test.ts",
     ],

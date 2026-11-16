@@ -6,6 +6,7 @@ import { rehypeCodeMeta } from "./lib/rehype-code-meta";
 import { remarkPartialComponents } from "./lib/remark-partial-components";
 import { remarkBundleSizes } from "./lib/bundle-sizes/remark";
 import { remarkJazzVersion } from "./lib/jazz-version/remark";
+import { languageTabsPlugin } from "./lib/languages/plugin";
 
 type ParseMetaString = NonNullable<typeof rehypeCodeDefaultOptions.parseMetaString>;
 
@@ -53,6 +54,8 @@ export const docs = defineDocs({
   docs: {
     schema: pageSchema.extend({
       reviewedAt: z.string().optional(),
+      // "backend": only languages that can run a backend get tabs (docs/lib/languages).
+      languageTabs: z.enum(["backend"]).optional(),
     }),
     postprocess: {
       includeProcessedMarkdown: true,
@@ -82,6 +85,7 @@ export const presentationDecks = defineCollections({
 // Docs pages, blog posts and the `content/partials` they import render code with Astryx
 // CodeBlock (client-side highlighting from the raw source), so Shiki is off.
 export default defineConfig({
+  plugins: [languageTabsPlugin()],
   mdxOptions: {
     rehypeCodeOptions: false,
     remarkPlugins: (plugins) => [

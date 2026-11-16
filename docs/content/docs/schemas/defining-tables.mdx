@@ -134,9 +134,11 @@ See [Relationships](/docs/schemas/relationships) for more.
 
 ## Indexes
 
-By default every column gets a single-column index. List `indexes` to choose: a name is a
-single-column index, an array of names a composite index, which may end in `$createdAt` or
-`$updatedAt`. Once any single names are listed, only those columns get single-column indexes.
+A table has the indexes you list in its `indexes`, plus one on each relation column, which Jazz
+always indexes. A column name in the list declares a single-column index on that column, and an
+array of names a composite index, which may end in `$createdAt` or `$updatedAt`. Queries can filter
+and sort by any column; an index on the columns they use lets them read only the matching rows
+instead of the whole table.
 
 ```json title="jazz.app.json"
 {
@@ -213,8 +215,24 @@ guarantee its history is complete.
 
 ## The generated bindings
 
-`jazz-tools generate` writes `jazz.generated.ts` from `jazz.app.json`. It exports the typed `app`
-you pass to queries, mutations, and subscriptions throughout your application code:
+`jazz-tools generate` writes typed bindings from `jazz.app.json`, in your app's language: a row
+type and an insert type per table, and an enum type per enum column. For StagePlan's `tasks` table
+(the [StagePlan example](https://github.com/garden-co/jazz/tree/main/examples/stage-plan)):
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <BindingsExcerpt language="TypeScript" />
+  </Tab>
+  <Tab value="Rust">
+    <BindingsExcerpt language="Rust" />
+  </Tab>
+</Tabs>
+
+The rest of this section is about the TypeScript bindings; each language's setup page covers its
+own.
+
+In TypeScript, the bindings are `jazz.generated.ts`. It exports the typed `app` you pass to
+queries, mutations, and subscriptions throughout your application code:
 
 ```ts title="app.ts"
 import { app, type Todo } from "./jazz.generated";
@@ -255,9 +273,3 @@ import { app } from "./jazz.generated";
 
 type TodoFilter = WhereOf<typeof app.todos>;
 ```
-
-## Large schemas
-
-The generated module declares every table's types directly, so TypeScript doesn't infer them from
-the schema: an app with hundreds of tables typechecks one table handle at a time, and every part
-of the app uses the same `app`.

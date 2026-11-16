@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { testApp } from "../testing/index.js";
 import { boundApp } from "../typed-app.js";
 import { deployApp } from "./catalogue.js";
+import type { SchemaSourceInput } from "../schema-source.js";
 import { fetchMigrationGraph } from "./migration-graph.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import type { DeploymentBody } from "./catalogue-api.js";
@@ -35,7 +36,7 @@ it("validates all branches before writing, deploys the converged history, and se
   const add = (column: string) => ({ [column]: { add: "string", default: "" } });
   const toV1 = { from: "v0", to: "v1", migrate: { notes: add("a") } };
   const toV2 = { from: "v1", to: "v2", migrate: { notes: add("tmp") } };
-  const deploy = (app: ReturnType<typeof testApp>, permissions: object = { tables: {} }) =>
+  const deploy = (app: SchemaSourceInput, permissions: object = { tables: {} }) =>
     deployApp({ ...options, app, permissions: { format: 1, ...permissions } });
 
   expect((await deploy(testApp({ tables: tables(0) }))).changed).toBe(true);

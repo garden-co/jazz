@@ -1,0 +1,478 @@
+//! Transactions: writes that commit together, and reads that see the
+//! transaction's snapshot.
+
+use std::cell::Cell;
+use std::future::Future;
+use std::rc::Rc;
+
+use jazz::tools::{JazzClient, ObjectId, OpenTransactionId, ReadTier};
+
+use futures_util::FutureExt as _;
+
+use crate::error::Result;
+use crate::handle::{Jazz, decode_result, insert};
+use crate::query::Query;
+use crate::table::{Implementations, Insert, Table, Update};
+
+/// A transaction in progress, handed to [`Jazz::transaction`]'s closure.
+///
+/// Mergeable ([`Jazz::transaction`]) or serializable
+/// ([`Jazz::serializable_transaction`]). Staged writes are not visible to reads outside it until it
+/// commits. Clone it freely within the closure; it lives on the client's
+/// thread, so it is not `Send`.
+#[derive(Clone)]
+pub struct Transaction {
+    client: JazzClient,
+    id: OpenTransactionId,
+    wrote: Rc<Cell<bool>>,
+    implementations: Implementations,
+}
+
+impl Transaction {
+    pub(crate) fn client(&self) -> &JazzClient {
+        &self.client
+    }
+
+    /// Marks the transaction as having written, so it commits.
+    pub(crate) fn wrote(&self) {
+        self.wrote.set(true);
+    }
+
+    pub fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
+        let (row, _) = insert(&self.client, new, &self.implementations)?;
+        self.wrote.set(true);
+        Ok(row)
+    }
+
+    pub fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
+        let cells = update.into_cells(&self.implementations)?;
+        self.client.update(<U::Row as Table>::NAME, id, cells)?;
+        self.wrote.set(true);
+        Ok(())
+    }
+
+    /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
+    /// transaction now sees it.
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        let cells = new.into_cells(&self.implementations)?;
+        self.client
+            .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
+        self.wrote.set(true);
+        self.read_back(id).await
+    }
+
+    pub fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
+        self.client.delete(T::NAME, id)?;
+        self.wrote.set(true);
+        Ok(())
+    }
+
+    /// Brings back a deleted row, as [`Jazz::restore`].
+    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+        self.client.restore(T::NAME, id, None)?;
+        self.wrote.set(true);
+        self.read_back(id).await
+    }
+
+    /// Brings back a deleted row with `new`'s values, as
+    /// [`Jazz::restore_with`].
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        let cells = new.into_cells(&self.implementations)?;
+        self.client.restore(
+            <N::Row as Table>::NAME,
+            id,
+            Some(cells.into_iter().collect()),
+        )?;
+        self.wrote.set(true);
+        self.read_back(id).await
+    }
+
+    async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
+        self.get::<T>(id)
+            .await?
+            .ok_or_else(|| crate::Error::Decode {
+                table: T::NAME,
+                message: format!("row {} is not there after writing it", id.uuid()),
+            })
+    }
+
+    /// Every row `query` matches, as the transaction sees them.
+    pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
+        let rows = self
+            .client
+            .query(query.into_untyped(), ReadTier::LocalFirst)
+            .await?;
+        rows.into_iter()
+            .map(|row| decode_result(row, &self.implementations))
+            .collect()
+    }
+
+    pub async fn one<T: Table>(&self, query: Query<T>) -> Result<Option<T>> {
+        Ok(self.all(query.limit(1)).await?.into_iter().next())
+    }
+
+    pub async fn get<T: Table>(&self, id: ObjectId) -> Result<Option<T>> {
+        self.one(Query::<T>::all().id(id)).await
+    }
+}
+
+impl Jazz {
+    /// Runs `body` in a mergeable transaction, as TS's `transaction` does:
+    /// its writes commit together, each merging with concurrent writes as a
+    /// plain write does; its reads see local data with its own staged
+    /// writes. It is committed if `body` returns `Ok` (and wrote anything),
+    /// rolled back if it returns `Err`. On a [`Jazz::durable`] handle the
+    /// call returns once the commit reached that tier. A body that panics
+    /// rolls back and fails with [`crate::Error::Panicked`]. Dropping the
+    /// returned future doesn't cancel the transaction: it runs to its end on
+    /// the client's thread.
+    ///
+    /// ```ignore
+    /// let moved = jazz.transaction(move |tx| async move {
+    ///     let task = tx.get::<Task>(id).await?.ok_or(MyError::Gone)?;
+    ///     tx.update(id, TaskUpdate { status: Some(next), ..Default::default() })?;
+    ///     Ok(task)
+    /// }).await?;
+    /// ```
+    pub async fn transaction<F, Fut, R>(&self, body: F) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
+        self.run_transaction(true, body).await
+    }
+
+    /// Runs `body` in a serializable transaction, as TS's
+    /// `serializableTransaction` does: its reads see the data as of its
+    /// start, and the server applies its writes only if nothing it read or
+    /// wrote changed in the meantime, refusing the commit otherwise.
+    /// Otherwise as [`Jazz::transaction`].
+    pub async fn serializable_transaction<F, Fut, R>(&self, body: F) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
+        self.run_transaction(false, body).await
+    }
+
+    async fn run_transaction<F, Fut, R>(&self, mergeable: bool, body: F) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
+        let implementations = self.info.implementations.clone();
+        let settle = self.settler()?;
+        self.with_client(move |client| async move {
+            let open = if mergeable {
+                client.begin_mergeable_transaction()?
+            } else {
+                client.begin_transaction()?
+            };
+            let transaction = Transaction {
+                client: open.client().clone(),
+                id: open.transaction_id(),
+                wrote: Rc::new(Cell::new(false)),
+                implementations,
+            };
+            let wrote = transaction.wrote.clone();
+            let scoped = transaction.client.clone();
+            let id = transaction.id;
+            // The body runs inside the guard, so a panic rolls back too.
+            let outcome = std::panic::AssertUnwindSafe(async move { body(transaction).await })
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|panic| {
+                    Err(crate::Error::Panicked(crate::handle::panic_message(
+                        &*panic,
+                    )))
+                });
+            match outcome {
+                Ok(result) if wrote.get() => {
+                    let committed = scoped.commit_transaction(id)?;
+                    settle.settle(&client, Some(committed)).await?;
+                    Ok(result)
+                }
+                Ok(result) => {
+                    scoped.rollback_transaction(id)?;
+                    Ok(result)
+                }
+                Err(error) => {
+                    // The body's error is the one to report; a rollback
+                    // that fails too adds nothing the caller can act on.
+                    let _ = scoped.rollback_transaction(id);
+                    Err(error)
+                }
+            }
+        })
+        .await
+    }
+}
+
+// Transactions opened with `begin_transaction`, parked on the client's
+// thread between the calls made on them.
+thread_local! {
+    static OPEN: std::cell::RefCell<Parked> = Default::default();
+}
+
+/// The parked transactions, by key. The client's run loop rolls them back
+/// before it closes the client ([`roll_back_parked`]); any still here when
+/// the thread exits are forgotten, not dropped: the client they belong to
+/// is gone by then, and dropping one touches thread-locals already torn
+/// down, which aborts the process.
+#[derive(Default)]
+struct Parked(u64, std::collections::HashMap<u64, Transaction>);
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        for transaction in std::mem::take(&mut self.1).into_values() {
+            std::mem::forget(transaction);
+        }
+    }
+}
+
+/// Rolls back every parked transaction: run on the client's thread once no
+/// job is left, before the client closes.
+pub(crate) fn roll_back_parked() {
+    let parked = OPEN.with(|open| std::mem::take(&mut open.borrow_mut().1));
+    for (_, tx) in parked {
+        let _ = tx.client.rollback_transaction(tx.id);
+    }
+}
+
+/// A transaction opened with [`Jazz::begin_transaction`] (TS's
+/// `beginTransaction`): `Send`, so it can be held across a request's
+/// awaits, and driven call by call. Commit it with
+/// [`OpenTransaction::commit`]; dropping it uncommitted rolls it back.
+pub struct OpenTransaction {
+    jazz: Jazz,
+    key: u64,
+    settle: crate::writes::Settler,
+    finished: bool,
+}
+
+impl Jazz {
+    /// Opens a mergeable transaction to drive call by call, as TS's
+    /// `beginTransaction` does. [`Jazz::transaction`] is the closure form.
+    pub async fn begin_transaction(&self) -> Result<OpenTransaction> {
+        self.open_transaction(true).await
+    }
+
+    /// Opens a serializable transaction to drive call by call, as TS's
+    /// `beginSerializableTransaction` does.
+    pub async fn begin_serializable_transaction(&self) -> Result<OpenTransaction> {
+        self.open_transaction(false).await
+    }
+
+    async fn open_transaction(&self, mergeable: bool) -> Result<OpenTransaction> {
+        let settle = self.settler()?;
+        let implementations = self.info.implementations.clone();
+        let key = self
+            .with_client(move |client| async move {
+                let open = if mergeable {
+                    client.begin_mergeable_transaction()?
+                } else {
+                    client.begin_transaction()?
+                };
+                let transaction = Transaction {
+                    client: open.client().clone(),
+                    id: open.transaction_id(),
+                    wrote: Rc::new(Cell::new(false)),
+                    implementations,
+                };
+                Ok(OPEN.with(|open| {
+                    let mut open = open.borrow_mut();
+                    open.0 += 1;
+                    let key = open.0;
+                    open.1.insert(key, transaction);
+                    key
+                }))
+            })
+            .await?;
+        Ok(OpenTransaction {
+            jazz: self.clone(),
+            key,
+            settle,
+            finished: false,
+        })
+    }
+}
+
+impl Jazz {
+    /// Transactions opened with [`Jazz::begin_transaction`] and not yet
+    /// committed or rolled back (for tests).
+    #[doc(hidden)]
+    pub async fn open_transactions(&self) -> Result<usize> {
+        self.with_client(|_| async { Ok(OPEN.with(|open| open.borrow().1.len())) })
+            .await
+    }
+}
+
+fn parked(key: u64) -> Result<Transaction> {
+    OPEN.with(|open| open.borrow().1.get(&key).cloned())
+        .ok_or_else(|| {
+            crate::Error::Config("the transaction is already committed or rolled back".into())
+        })
+}
+
+impl OpenTransaction {
+    async fn on<F, Fut, R>(&self, call: F) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
+        let key = self.key;
+        self.jazz
+            .with_client(move |_| async move { call(parked(key)?).await })
+            .await
+    }
+
+    pub async fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
+        self.on(move |tx| async move { tx.insert(new) }).await
+    }
+
+    pub async fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
+        self.on(move |tx| async move { tx.update(id, update) })
+            .await
+    }
+
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        self.on(move |tx| async move { tx.upsert(id, new).await })
+            .await
+    }
+
+    pub async fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
+        self.on(move |tx| async move { tx.delete::<T>(id) }).await
+    }
+
+    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+        self.on(move |tx| async move { tx.restore::<T>(id).await })
+            .await
+    }
+
+    /// Brings back a deleted row with `new`'s values. A restore replaces
+    /// the whole row, so it takes the full insert, as TS's
+    /// `restore(table, id, data)` does.
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        self.on(move |tx| async move {
+            let cells = new.into_cells(&tx.implementations)?;
+            tx.client.restore(
+                <N::Row as Table>::NAME,
+                id,
+                Some(cells.into_iter().collect()),
+            )?;
+            tx.wrote.set(true);
+            tx.read_back(id).await
+        })
+        .await
+    }
+
+    /// [`Jazz::edit_text`] staged in the transaction.
+    pub async fn edit_text<T: Table, V: crate::TextColumn>(
+        &self,
+        id: ObjectId,
+        column: crate::Column<T, V>,
+        edited_from: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<()> {
+        let (edited_from, text) = (edited_from.into(), text.into());
+        self.on(move |tx| async move { tx.edit_text(id, column, edited_from, text) })
+            .await
+    }
+
+    /// [`Jazz::splice`] staged in the transaction.
+    pub async fn splice<T: Table, V: crate::LargeColumn>(
+        &self,
+        id: ObjectId,
+        column: crate::Column<T, V>,
+        within: crate::Page,
+        splices: Vec<crate::Splice>,
+    ) -> Result<()> {
+        self.on(move |tx| async move { tx.splice(id, column, within, splices) })
+            .await
+    }
+
+    /// [`Jazz::json_set`] staged in the transaction.
+    pub async fn json_set<T: Table, V: crate::JsonColumn>(
+        &self,
+        id: ObjectId,
+        column: crate::Column<T, V>,
+        edits: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) -> Result<()> {
+        let edits: Vec<_> = edits.into_iter().collect();
+        self.on(move |tx| async move { tx.json_set(id, column, edits) })
+            .await
+    }
+
+    pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
+        self.on(move |tx| async move { tx.all(query).await }).await
+    }
+
+    pub async fn one<T: Table>(&self, query: Query<T>) -> Result<Option<T>> {
+        self.on(move |tx| async move { tx.one(query).await }).await
+    }
+
+    pub async fn get<T: Table>(&self, id: ObjectId) -> Result<Option<T>> {
+        self.on(move |tx| async move { tx.get::<T>(id).await })
+            .await
+    }
+
+    /// Commits it (if it wrote anything; otherwise there is nothing to
+    /// commit). On a [`Jazz::durable`] handle, returns once the commit
+    /// reached that tier.
+    pub async fn commit(mut self) -> Result<()> {
+        self.finished = true;
+        let key = self.key;
+        let settle = std::mem::replace(&mut self.settle, crate::writes::Settler::local());
+        self.jazz
+            .with_client(move |client| async move {
+                let tx = OPEN
+                    .with(|open| open.borrow_mut().1.remove(&key))
+                    .ok_or_else(|| {
+                        crate::Error::Config(
+                            "the transaction is already committed or rolled back".into(),
+                        )
+                    })?;
+                if tx.wrote.get() {
+                    let committed = tx.client.commit_transaction(tx.id)?;
+                    settle.settle(&client, Some(committed)).await
+                } else {
+                    tx.client.rollback_transaction(tx.id)?;
+                    Ok(())
+                }
+            })
+            .await
+    }
+
+    /// Rolls it back: none of its writes apply.
+    pub async fn rollback(mut self) -> Result<()> {
+        self.finished = true;
+        let key = self.key;
+        self.jazz
+            .with_client(move |_| async move {
+                if let Some(tx) = OPEN.with(|open| open.borrow_mut().1.remove(&key)) {
+                    tx.client.rollback_transaction(tx.id)?;
+                }
+                Ok(())
+            })
+            .await
+    }
+}
+
+impl Drop for OpenTransaction {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let key = self.key;
+        // Uncommitted: roll back, on the client's thread.
+        self.jazz.fire(move |_| async move {
+            if let Some(tx) = OPEN.with(|open| open.borrow_mut().1.remove(&key)) {
+                let _ = tx.client.rollback_transaction(tx.id);
+            }
+        });
+    }
+}
