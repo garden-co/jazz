@@ -10013,7 +10013,9 @@ impl Db {
         // that view, and nothing is renamed across an upgrade.
         let view = inner.stored_view();
         let active_schema = view;
-        inner.replayed_commits += pending.len() as u64;
+        inner
+            .replayed_commits
+            .set(inner.replayed_commits.get() + pending.len() as u64);
         let replayed: Result<(), Error> = (async {
             for (order, tx, ops, rows) in pending.into_iter() {
                 ({
@@ -11141,7 +11143,7 @@ impl Db {
     /// opened (for tests and metrics): settling a commit replays the
     /// pending commits sharing its rows, not every one still pending.
     pub fn replayed_commits(&self) -> u64 {
-        self.inner.metadata().replayed_commits
+        self.inner.replayed_commits.get()
     }
 
     /// Echoes the serving passes examined to match the images they ship
@@ -11150,7 +11152,7 @@ impl Db {
     /// one tick applied for it.
     #[doc(hidden)]
     pub fn echo_probes(&self) -> u64 {
-        self.inner.metadata().echo_probes
+        self.inner.echo_probes.get()
     }
 
     /// Fates the upstream has given this replica's own commits (not ones
@@ -12561,7 +12563,7 @@ impl Db {
                 session.connection_settled = Some(through);
                 out.push(SyncMessage::ConnectionSettled { through });
             }
-            inner.echo_probes += echo_probes;
+            inner.echo_probes.set(inner.echo_probes.get() + echo_probes);
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
             // it wrote them: shipped at the relay's seqs, they would stand

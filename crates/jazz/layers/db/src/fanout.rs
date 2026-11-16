@@ -162,7 +162,7 @@ pub(super) struct Fanout {
     tables: HashMap<String, BTreeSet<u64>>,
     keys: HashMap<(String, String, String), BTreeSet<u64>>,
     key_columns: HashMap<String, BTreeSet<String>>,
-    stats: FanoutStats,
+    stats: Rc<RefCell<FanoutStats>>,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
 }
@@ -276,7 +276,7 @@ impl Fanout {
             .collect()
     }
 
-    pub(super) fn stats(&self) -> FanoutStats {
+    pub(super) fn stats(&self) -> Rc<RefCell<FanoutStats>> {
         self.stats.clone()
     }
 
@@ -369,7 +369,7 @@ impl Inner {
                 VecDeque::new()
             }));
             group.members.push(member(&queue));
-            self.fan.stats.shared_joins += 1;
+            self.fan.stats.borrow_mut().shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they
@@ -767,8 +767,8 @@ impl Inner {
                 }
             }
         }
-        self.fan.stats.woken += woken.len() as u64;
-        self.fan.stats.skipped += (self.fan.groups.len() - woken.len()) as u64;
+        self.fan.stats.borrow_mut().woken += woken.len() as u64;
+        self.fan.stats.borrow_mut().skipped += (self.fan.groups.len() - woken.len()) as u64;
         let groups: Vec<_> = woken
             .into_iter()
             .filter_map(|(gid, ids)| Some((gid, self.fan.groups.get(&gid).cloned()?, ids)))
@@ -778,9 +778,9 @@ impl Inner {
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
                 if self.refresh_group(&mut group, ids.as_ref()).await {
-                    self.fan.stats.reran += 1;
+                    self.fan.stats.borrow_mut().reran += 1;
                 } else {
-                    self.fan.stats.rechecked += 1;
+                    self.fan.stats.borrow_mut().rechecked += 1;
                 }
             }
             if let Some(changed) = targets.remove(&gid) {

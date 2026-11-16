@@ -701,10 +701,10 @@ struct Inner {
     /// may already have uploaded (see [`Inner::next_seq`]).
     pub(crate) reopenable: bool,
     /// Pending commits a rebase replayed (see `Db::rebase`).
-    pub(crate) replayed_commits: u64,
+    pub(crate) replayed_commits: Rc<Cell<u64>>,
     /// Echoes a serving pass examined to match its images (see
     /// `Db::echo_probes`).
-    pub(crate) echo_probes: u64,
+    pub(crate) echo_probes: Rc<Cell<u64>>,
     /// The global authority: what it settles is durable at `Global`.
     authority: Rc<Cell<bool>>,
     /// Every session but SYSTEM's must be pinned to a published bundle
@@ -1711,8 +1711,8 @@ impl Db {
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
-                replayed_commits: 0,
-                echo_probes: 0,
+                replayed_commits: Rc::default(),
+                echo_probes: Rc::default(),
                 authority: Rc::new(Cell::new(false)),
                 pins_required: Rc::new(Cell::new(false)),
                 refusals: sync::Refusals::default(),
@@ -3113,7 +3113,7 @@ impl Db {
     }
 
     pub fn fanout_stats(&self) -> fanout::FanoutStats {
-        self.inner.metadata().fan.stats()
+        self.inner.fanout_stats.borrow().clone()
     }
 
     /// Deliver the rows written since the last dispatch to the groups they
@@ -8969,6 +8969,9 @@ pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
 /// State-only borrows never run SQL. Storage borrows await rollback of a
 /// transaction handle's cached overlay; only staging may retain that overlay.
 struct Store {
+    replayed_commits: Rc<Cell<u64>>,
+    echo_probes: Rc<Cell<u64>>,
+    fanout_stats: Rc<RefCell<fanout::FanoutStats>>,
     // One shared value per runtime setting; reads never borrow execution state.
     authority: Rc<Cell<bool>>,
     pins_required: Rc<Cell<bool>>,
@@ -9017,6 +9020,9 @@ impl Store {
             authority: inner.authority.clone(),
             pins_required: inner.pins_required.clone(),
             staging_policy: inner.staging.clone(),
+            replayed_commits: inner.replayed_commits.clone(),
+            echo_probes: inner.echo_probes.clone(),
+            fanout_stats: inner.fan.stats(),
             identity: inner.identity.clone(),
             chunks: inner.chunks.clone(),
             ids: inner.ids.clone(),
