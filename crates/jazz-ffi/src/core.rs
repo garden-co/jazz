@@ -828,7 +828,7 @@ impl Core {
             let (id, committed) = client
                 .finish_streaming_upload(entry.upload, entry.kind, entry.id)
                 .await?;
-            settle(&client, Some(committed), tier).await?;
+            settle(&client, committed, tier).await?;
             read_back(&client, &entry.table, &entry.name, id).await
         }))?;
         Ok(row.to_string())

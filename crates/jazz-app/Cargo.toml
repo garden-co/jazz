@@ -2,8 +2,6 @@
 name = "jazz-app"
 version = "0.1.0"
 edition = "2024"
-# Not published: its test-relay bin serves tests/relay, a test stand-in.
-publish = false
 description = "Typed, Send + Clone Rust handle for a Jazz app opened from its jazz.app.json"
 
 [features]
@@ -17,10 +15,8 @@ axum = ["unstable-endpoint", "dep:axum"]
 # see src/bin/jazz-app-test-relay.rs.
 test-relay = [
   "dep:futures",
-  "dep:hmac",
-  "dep:sha2",
-  "dep:tokio-tungstenite",
   # The relay accepts sockets as well as connecting them.
+  "dep:tokio-tungstenite",
   "tokio-tungstenite/handshake",
   "tokio/net",
   "tokio/io-util",
