@@ -105,6 +105,36 @@ pub async fn start(
     }
 }
 
+/// `backendClients`: a machine credential trusted as the backend
+/// (`trustWorkload({ as: "backend" })`), `machine-trusted[.<n>]`.
+fn trusted_machine(authorization: Option<&str>) -> bool {
+    authorization
+        .and_then(|header| header.strip_prefix("Bearer machine-trusted"))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+}
+
+/// `existingAccountOf`: the account the core holds for `user`, if any.
+async fn existing_account_of(backend: &Backend, user: &str) -> Result<Option<String>, u16> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/apps/{}/admin/accounts/resolve",
+            backend.core, backend.app
+        ))
+        .header("X-Jazz-Backend-Secret", &backend.backend_secret)
+        .json(&json!({ "identity": { "issuer": BACKEND_ISSUER, "subject": user } }))
+        .send()
+        .await
+        .map_err(|_| 502u16)?;
+    match response.status().as_u16() {
+        404 => Ok(None),
+        200 => {
+            let body: Value = response.json().await.map_err(|_| 502u16)?;
+            Ok(body["account"].as_str().map(str::to_owned))
+        }
+        status => Err(status),
+    }
+}
+
 /// `authenticate`: the user a bearer names (`token-<user>[.<n>]`).
 fn authenticate(authorization: Option<&str>) -> Option<String> {
     let token = authorization?.strip_prefix("Bearer token-")?;
@@ -155,7 +185,43 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
     let mut body = vec![0; length];
     stream.read_exact(&mut body).await.unwrap();
     let user = authenticate(header("authorization").as_deref());
-    let (status, body) = if path.ends_with("/accounts/backend-link/challenge") {
+    let authorization = header("authorization");
+    let (status, body) = if path.ends_with("/backend/admit") {
+        if trusted_machine(authorization.as_deref()) {
+            ("204 No Content", String::new())
+        } else {
+            (
+                "401 Unauthorized",
+                "not a trusted backend client".to_owned(),
+            )
+        }
+    } else if path.ends_with("/backend/user-session") {
+        let user_id = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|body| body["userId"].as_str().map(str::to_owned));
+        match (trusted_machine(authorization.as_deref()), user_id) {
+            (false, _) => (
+                "401 Unauthorized",
+                "not a trusted backend client".to_owned(),
+            ),
+            (true, None) => (
+                "400 Bad Request",
+                "userId must be a non-empty string".to_owned(),
+            ),
+            (true, Some(user_id)) => match existing_account_of(&backend, &user_id).await {
+                Ok(Some(account)) => (
+                    "200 OK",
+                    json!({ "account": account, "issuer": BACKEND_ISSUER }).to_string(),
+                ),
+                Ok(None) => ("404 Not Found", json!({ "code": "no_account" }).to_string()),
+                Err(403) => (
+                    "403 Forbidden",
+                    json!({ "code": "identity_not_authorized" }).to_string(),
+                ),
+                Err(_) => ("502 Bad Gateway", String::new()),
+            },
+        }
+    } else if path.ends_with("/accounts/backend-link/challenge") {
         match user {
             None => ("401 Unauthorized", "signed_out".to_owned()),
             Some(user) => {
@@ -372,6 +438,22 @@ async fn admit(
 ) -> Option<(Vec<u8>, String)> {
     let mut prelude: Value = serde_json::from_slice(prelude).ok()?;
     let auth = prelude.get_mut("auth")?.as_object_mut()?;
+    if trusted_machine(authorization) {
+        // A trusted backend client states a stand-in secret (and maybe a
+        // user's session), never a token or the admin secret of its own.
+        for credential in ["jwt_token", "admin_secret"] {
+            if !auth.get(credential).unwrap_or(&Value::Null).is_null() {
+                return None;
+            }
+        }
+        auth.get("backend_secret")?.as_str()?;
+        auth.insert(
+            "backend_secret".into(),
+            backend.backend_secret.clone().into(),
+        );
+        prelude["bundle"] = backend.bundle.clone().into();
+        return Some((serde_json::to_vec(&prelude).ok()?, "trusted".to_owned()));
+    }
     for credential in ["backend_secret", "admin_secret"] {
         if !auth.get(credential).unwrap_or(&Value::Null).is_null() {
             return None;

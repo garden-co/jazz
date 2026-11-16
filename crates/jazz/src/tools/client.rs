@@ -791,7 +791,8 @@ impl JazzClient {
     }
 
     /// Connect as a user of an app whose backend (`createJazz`) signs its
-    /// users in with the app's own bearer token: the token travels as
+    /// users in with the app's own bearer token (or as a trusted backend
+    /// client of it, stating a stand-in `backend_secret` and no session): the token travels as
     /// `Authorization: Bearer` on the upgrade, and `context.backend_session`
     /// states the user it names (with the account the backend's sign-in
     /// returned). The backend checks the one against the other and vouches
@@ -801,9 +802,14 @@ impl JazzClient {
         connector: Arc<dyn NativeTransportConnector>,
         bearer: String,
     ) -> Result<Self> {
-        if context.backend_session.is_none() {
+        // A trusted backend client states a stand-in secret its credential
+        // on the upgrade vouches for, and the backend replaces with its own.
+        let trusted = context.backend_secret.is_some() && context.backend_session.is_none();
+        if context.backend_session.is_none() && !trusted {
             return Err(JazzError::Connection(
-                "a bearer connection states the user's session (backend_session)".to_owned(),
+                "a bearer connection states the user's session (backend_session), or, for a \
+                 trusted backend client, a stand-in backend_secret"
+                    .to_owned(),
             ));
         }
         Self::connect_inner(context, Some(connector), Some(format!("Bearer {bearer}"))).await
@@ -1861,6 +1867,11 @@ impl JazzClient {
             .closed_transactions
             .insert(transaction_id, ClosedTransaction::RolledBack);
         Ok(true)
+    }
+
+    /// How many of this client's commits await the server's verdict.
+    pub fn pending_uploads(&self) -> usize {
+        self.shared.db.pending_upload_count()
     }
 
     /// Wait until every write committed so far reached the server, failing
