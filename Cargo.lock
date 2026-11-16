@@ -364,7 +364,7 @@ dependencies = [
 name = "backend-client-docs"
 version = "0.1.0"
 dependencies = [
- "jazz-app",
+ "jazz-app-support",
  "serde_json",
  "todo-server-docs",
  "tokio",
@@ -2054,7 +2054,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jazz-alpha59-alpha60-dump"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "blake3",
  "ciborium",
@@ -2064,8 +2064,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-app"
-version = "2.0.0-alpha.64"
+name = "jazz-app-support"
+version = "2.0.0-alpha.65"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-codegen"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "jazz-core",
  "serde",
@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-compression"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "jazz-ruzstd",
  "lz4_flex",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-core"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-db"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "bytes",
  "futures",
@@ -2327,13 +2327,13 @@ dependencies = [
 
 [[package]]
 name = "jazz-ffi"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "base64 0.22.1",
  "futures",
  "futures-executor",
  "futures-util",
- "jazz-app",
+ "jazz-app-support",
  "jazz-server",
  "reqwest",
  "serde_json",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-model"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-native-transport"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "axum 0.8.9",
  "bytes",
@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-otel"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "jazz-core",
  "jazz-server",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-protocol"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "hex",
  "jazz-compression",
@@ -2482,7 +2482,7 @@ version = "0.8.3"
 
 [[package]]
 name = "jazz-server"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-text"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "serde",
  "serde_json",
@@ -2560,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-tools"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-types"
-version = "2.0.0-alpha.64"
+version = "2.0.0-alpha.65"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4231,7 +4231,7 @@ dependencies = [
 name = "rust-backend-client-probe"
 version = "0.1.0"
 dependencies = [
- "jazz-app",
+ "jazz-app-support",
  "serde_json",
  "tokio",
 ]
@@ -4719,7 +4719,7 @@ dependencies = [
 name = "stage-plan-rust-cli"
 version = "0.1.0"
 dependencies = [
- "jazz-app",
+ "jazz-app-support",
  "jazz-server",
  "serde_json",
  "tempfile",
@@ -5002,7 +5002,7 @@ dependencies = [
  "axum 0.7.9",
  "futures-util",
  "http-body-util",
- "jazz-app",
+ "jazz-app-support",
  "jazz-server",
  "mimalloc",
  "reqwest",
@@ -5025,7 +5025,7 @@ dependencies = [
  "axum 0.7.9",
  "futures-util",
  "http-body-util",
- "jazz-app",
+ "jazz-app-support",
  "jazz-server",
  "reqwest",
  "reqwest-eventsource",

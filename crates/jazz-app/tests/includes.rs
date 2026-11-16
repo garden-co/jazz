@@ -10,7 +10,7 @@ mod task_bindings;
 
 use bindings::{NewProject, NewTodo, Project, Todo, TodoUpdate, projects, todos};
 use futures::StreamExt;
-use jazz_app::{AppId, Backend, Config, Jazz, Order, Partial, Rows};
+use jazz_app_support::{AppId, Backend, Config, Jazz, Order, Partial, Rows};
 use jazz_server::JazzServer;
 
 struct Fixture {
@@ -58,7 +58,7 @@ async fn fixture(jazz: &Jazz) -> Fixture {
     }
 }
 
-fn by_title() -> jazz_app::Query<Todo> {
+fn by_title() -> jazz_app_support::Query<Todo> {
     todos::query().order_by(todos::title(), Order::Asc)
 }
 
@@ -343,11 +343,11 @@ async fn included_rows_decode_every_column_type() {
         fn tasks_title_len(&self, title: String) -> i32 {
             title.chars().count() as i32
         }
-        fn iso_date_view(&self, stored: jazz_app::Timestamp) -> String {
+        fn iso_date_view(&self, stored: jazz_app_support::Timestamp) -> String {
             format!("ms-{}", stored.0)
         }
-        fn iso_date_stored(&self, view: String) -> jazz_app::Timestamp {
-            jazz_app::Timestamp(view.trim_start_matches("ms-").parse().unwrap())
+        fn iso_date_stored(&self, view: String) -> jazz_app_support::Timestamp {
+            jazz_app_support::Timestamp(view.trim_start_matches("ms-").parse().unwrap())
         }
     }
 
@@ -358,7 +358,9 @@ async fn included_rows_decode_every_column_type() {
         .insert(NewTask {
             priority: Some(TaskPriority::High),
             due_at: Some("ms-86400000".into()),
-            meta: Some(jazz_app::Json(serde_json::json!({ "owner": "ops" }))),
+            meta: Some(jazz_app_support::Json(
+                serde_json::json!({ "owner": "ops" }),
+            )),
             ..NewTask::new("Ship", 9, vec!["a".to_owned(), "b".to_owned()])
         })
         .await
@@ -399,7 +401,7 @@ async fn requiring_a_not_null_relation_is_an_inner_join() {
     let dangling = jazz
         .insert(NewStep::new(
             "dangling",
-            jazz_app::ObjectId::new(),
+            jazz_app_support::ObjectId::new(),
             Vec::new(),
         ))
         .await
@@ -448,7 +450,7 @@ async fn array_relations_include_vecs() {
         .insert(NewStep::new(
             "dangling",
             a.id,
-            vec![b.id, jazz_app::ObjectId::new()],
+            vec![b.id, jazz_app_support::ObjectId::new()],
         ))
         .await
         .unwrap();
@@ -516,11 +518,11 @@ impl task_bindings::Computed for NoComputed {
     fn tasks_title_len(&self, title: String) -> i32 {
         title.chars().count() as i32
     }
-    fn iso_date_view(&self, stored: jazz_app::Timestamp) -> String {
+    fn iso_date_view(&self, stored: jazz_app_support::Timestamp) -> String {
         stored.0.to_string()
     }
-    fn iso_date_stored(&self, view: String) -> jazz_app::Timestamp {
-        jazz_app::Timestamp(view.parse().unwrap())
+    fn iso_date_stored(&self, view: String) -> jazz_app_support::Timestamp {
+        jazz_app_support::Timestamp(view.parse().unwrap())
     }
 }
 
@@ -554,7 +556,7 @@ async fn includes_through_a_server() {
     let rows = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let rows = reader
-                .all_with(query.clone(), jazz_app::ReadTier::Remote)
+                .all_with(query.clone(), jazz_app_support::ReadTier::Remote)
                 .await
                 .unwrap();
             if rows.first().is_some_and(|(_, todos)| todos.len() == 3) {

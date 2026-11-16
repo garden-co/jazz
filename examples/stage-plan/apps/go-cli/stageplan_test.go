@@ -37,7 +37,7 @@ func TestAppFilesAreStagePlans(t *testing.T) {
 }
 
 // testServer is a Jazz core (`jazz-tools server`, JAZZ_TOOLS) on a memory
-// store, and in front of it jazz-app's test relay (JAZZ_TEST_RELAY), the
+// store, and in front of it jazz-app-support's test relay (JAZZ_TEST_RELAY), the
 // stand-in for a TS main backend's /jazz: it publishes StagePlan's files and
 // signs "Bearer token-<user>" in as <user>. With JAZZ_MAIN_BACKEND=ts it
 // is a real TS main backend instead (tsMainBackend).
@@ -88,7 +88,7 @@ func testServer(t *testing.T) server {
 		t.Fatal(err)
 	}
 	if err := r.Start(); err != nil {
-		t.Fatalf("starting %s (cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay): %v", relay, err)
+		t.Fatalf("starting %s (cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay): %v", relay, err)
 	}
 	t.Cleanup(func() { r.Process.Signal(os.Interrupt); r.Wait() })
 	line, err := bufio.NewReader(out).ReadString('\n')

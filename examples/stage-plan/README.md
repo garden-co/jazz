@@ -21,7 +21,7 @@ StagePlan is the Jazz example for two things:
 | [`apps/react-localfirst`](apps/react-localfirst)         | React, Vite, device accounts, Astryx with the Jazz theme                   |
 | [`apps/sveltekit-hybrid`](apps/sveltekit-hybrid)         | SvelteKit, Jazz in the app, device-account guest then Better Auth          |
 | [`apps/ts-effect-betterauth`](apps/ts-effect-betterauth) | TypeScript and Effect, no UI framework, Jazz in a Hono server, Better Auth |
-| [`apps/rust-cli`](apps/rust-cli)                         | Rust, a CLI on `jazz-app` as the app's backend, acting as one user         |
+| [`apps/rust-cli`](apps/rust-cli)                         | Rust, a CLI on `jazz-app-support` as the app's backend, acting as one user |
 
 ## Run it
 

@@ -1,5 +1,5 @@
 //! Queries that read other rows than their table's own, lowered through
-//! jazz-app's untyped builder (`jazz_app::untyped`), the one the typed Rust
+//! jazz-app-support's untyped builder (`jazz_app_support::untyped`), the one the typed Rust
 //! API wraps: `hopTo` (with `after`), `gather`, `union`, `history` and
 //! `includeDeleted`.
 //!
@@ -18,9 +18,9 @@
 //!   carry no deleted marker yet, and in a subscription a row's deletion
 //!   arrives as an `updated` row.
 
-use jazz_app::jazz::query::{self as q, OrderDirection};
-use jazz_app::jazz::tools::{QueryResult, Schema, TableSchema};
-use jazz_app::untyped::{self, GatherStep, Hop};
+use jazz_app_support::jazz::query::{self as q, OrderDirection};
+use jazz_app_support::jazz::tools::{QueryResult, Schema, TableSchema};
+use jazz_app_support::untyped::{self, GatherStep, Hop};
 use serde_json::{Map, Value as Json, json};
 
 use crate::convert::{self, Relations, Shape};
@@ -383,7 +383,7 @@ pub(crate) fn lower(schema: &Schema, relations: &Relations, json: &Json) -> Resu
                 && convert::column(&from_table, &at_table, &relation.column).is_ok_and(|c| {
                     matches!(
                         c.column_type.as_ref(),
-                        jazz_app::jazz::tools::ColumnType::Array { .. }
+                        jazz_app_support::jazz::tools::ColumnType::Array { .. }
                     )
                 });
             query = query.hop_to(if many {
@@ -465,8 +465,8 @@ pub(crate) fn row(lowered: &Lowered, result: QueryResult) -> Result<Json> {
 pub(crate) fn row_of(
     shape: &convert::Shape,
     history_read: bool,
-    id: jazz_app::ObjectId,
-    result_fields: Vec<jazz_app::jazz::tools::QueryResultField>,
+    id: jazz_app_support::ObjectId,
+    result_fields: Vec<jazz_app_support::jazz::tools::QueryResultField>,
 ) -> Json {
     if !history_read {
         return convert::row_json(shape, id, result_fields);
