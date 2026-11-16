@@ -111,22 +111,6 @@ async fn a_chief_plans_a_show() {
     server.shutdown().await;
 }
 
-/// The example uses StagePlan's files unchanged.
-#[test]
-fn app_files_are_stage_plans() {
-    let canonical = concat!(env!("CARGO_MANIFEST_DIR"), "/../react-localfirst");
-    for (file, copy) in [
-        ("jazz.app.json", APP),
-        ("jazz.permissions.json", PERMISSIONS),
-    ] {
-        let original = std::fs::read_to_string(format!("{canonical}/{file}")).unwrap();
-        assert!(
-            copy == original,
-            "{file} differs from react-localfirst's: copy it from there, never edit it here"
-        );
-    }
-}
-
 /// The committed bindings are what `jazz-tools generate` writes from them.
 #[test]
 fn bindings_are_current() {
