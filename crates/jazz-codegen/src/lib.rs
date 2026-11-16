@@ -93,23 +93,23 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
-            // The back end is here, but the runtime package isn't released
-            // yet: `swift` is switched on with it (add it to `ALL` too).
-            "swift" => Err(CodegenError::unsupported(
-                "generating Swift bindings is not available yet; supported: ts, rust, kotlin, go",
-            )),
+            "swift" => Ok(Lang::Swift),
             "kotlin" | "kt" => Ok(Lang::Kotlin),
             "go" | "golang" => Ok(Lang::Go),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust, kotlin, go"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift, kotlin, go"
             ))),
         }
     }
 
-    /// Every language `jazz-tools generate` handles, in that order. (Swift is
-    /// not available yet: [`Lang::Swift`] is generated only by direct calls,
-    /// so no `Package.swift` selects it.)
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Kotlin, Lang::Go];
+    /// Every language `jazz-tools generate` handles, in that order.
+    pub const ALL: &'static [Lang] = &[
+        Lang::TypeScript,
+        Lang::Rust,
+        Lang::Swift,
+        Lang::Kotlin,
+        Lang::Go,
+    ];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -219,10 +219,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn swift_is_not_available_from_the_cli_yet() {
-        let error = Lang::parse("swift").unwrap_err();
-        assert!(error.is_unsupported());
-        assert!(error.message().contains("not available yet"), "{error}");
-        assert!(!Lang::ALL.contains(&Lang::Swift));
+    fn swift_is_available_from_the_cli() {
+        assert_eq!(Lang::parse("swift").unwrap(), Lang::Swift);
+        assert!(Lang::ALL.contains(&Lang::Swift));
     }
 }
