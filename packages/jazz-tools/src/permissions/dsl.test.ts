@@ -44,7 +44,10 @@ describe("acceptance: the reference renderings", () => {
             "exists chats(id = this.chatId, isPublic = true)",
             "exists chats(id = this.chatId, $createdBy.account = session.user)",
             {
-              allOf: ["joinCode != null", "exists chats(id = this.chatId, joinCode = this.joinCode)"],
+              allOf: [
+                "joinCode != null",
+                "exists chats(id = this.chatId, joinCode = this.joinCode)",
+              ],
             },
           ],
         },
@@ -122,5 +125,41 @@ describe("acceptance: the reference renderings", () => {
       },
     });
     expect(readablePermissions(bigLabel.permissions)!.tables).toMatchSnapshot();
+  });
+
+  it("compiles one object's `old` comparisons to one self-lookup, beside its other keys", async () => {
+    const { schema } = chatReact;
+    const permissions = {
+      ...Object.fromEntries(Object.keys(schema.tables).map((t) => [t, {}])),
+      chats: {
+        updateIf: true,
+        updateTo: (chat: any, old: any) =>
+          schema.allOf(schema.exists.chatMembers({ chatId: chat.id }), {
+            isPublic: old.isPublic,
+            name: schema.ne(null),
+            joinCode: old.joinCode,
+          }),
+      },
+    } as never;
+    const tree = readablePermissions(schema.definePermissions(permissions))!;
+    expect(tree.tables.chats!.update).toEqual({
+      old: "true",
+      new: {
+        allOf: [
+          "exists chatMembers(chatId = this.id)",
+          {
+            allOf: [
+              "exists chats(id = this.id, isPublic = this.isPublic, joinCode = this.joinCode)",
+              "name != null",
+            ],
+          },
+        ],
+      },
+    });
+    const app = JSON.stringify({
+      $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+      ...readableSchema(schema)!,
+    });
+    await expect(load(app, JSON.stringify(tree))).resolves.toBeTruthy();
   });
 });

@@ -36,8 +36,11 @@ export interface ValueHandle<V = unknown, K = string> {
 }
 
 /** A column of a row (`row.chatId`), or of a table (`schema.tables.t.col`, for `allowedTo` `via`). */
-export interface ColumnHandle<V = unknown, K = string, T extends string = string>
-  extends ValueHandle<V, K> {
+export interface ColumnHandle<
+  V = unknown,
+  K = string,
+  T extends string = string,
+> extends ValueHandle<V, K> {
   readonly [columnBrand]: T;
 }
 
@@ -85,7 +88,9 @@ type LiteralOfKind<K> = K extends "string" | "uuid" | "enum"
  * Any value of kind `K` (`"uuid"`, `"string"`, …), for helper parameters: a
  * literal, a row's column of that kind, a session value or a claim.
  */
-export type Value<K extends ValueKind = ValueKind> = LiteralOfKind<K> | ValueHandle<any, CompatibleKind<K>>;
+export type Value<K extends ValueKind = ValueKind> =
+  | LiteralOfKind<K>
+  | ValueHandle<any, CompatibleKind<K>>;
 
 /** Any uuid-typed value: a literal, a uuid column of a row, `session.user`, a claim. */
 export type Uuid = Value<"uuid">;
@@ -154,18 +159,18 @@ export type KindOf<Sql> = Sql extends "TEXT"
         : Sql extends "REAL"
           ? "float"
           : Sql extends "BIGINT"
-          ? "bigint"
-          : Sql extends "TIMESTAMP"
-            ? "timestamp"
-            : Sql extends "BYTEA"
-              ? "bytes"
-              : Sql extends { kind: "ENUM" }
-                ? "enum"
-                : Sql extends { kind: "JSON" }
-                  ? "json"
-                  : Sql extends { kind: "ARRAY" }
-                    ? "array"
-                    : string;
+            ? "bigint"
+            : Sql extends "TIMESTAMP"
+              ? "timestamp"
+              : Sql extends "BYTEA"
+                ? "bytes"
+                : Sql extends { kind: "ENUM" }
+                  ? "enum"
+                  : Sql extends { kind: "JSON" }
+                    ? "json"
+                    : Sql extends { kind: "ARRAY" }
+                      ? "array"
+                      : string;
 
 /** A literal for a column of value type `V` and kind `K`. */
 export type LiteralFor<V, K> = K extends "timestamp"
@@ -227,7 +232,9 @@ export type Conditions<S, T extends keyof S, WithOld extends boolean = false> = 
     ColumnInfo<S, T>[C]["value"],
     ColumnInfo<S, T>[C]["kind"],
     ColumnInfo<S, T>[C]["nullable"],
-    WithOld extends true ? OldValue<ColumnInfo<S, T>[C]["value"], ColumnInfo<S, T>[C]["kind"]> : never
+    WithOld extends true
+      ? OldValue<ColumnInfo<S, T>[C]["value"], ColumnInfo<S, T>[C]["kind"]>
+      : never
   >;
 };
 
@@ -382,7 +389,8 @@ export type PermissionsInput<S, R> = {
 export type AllTables<S> = { [T in keyof S]: unknown };
 
 /** `jazz.permissions.json`'s `$schema`, which names its format version. */
-export const PERMISSIONS_SCHEMA_URL = "https://jazz.tools/schemas/jazz.permissions.v1.json" as const;
+export const PERMISSIONS_SCHEMA_URL =
+  "https://jazz.tools/schemas/jazz.permissions.v1.json" as const;
 
 /** The readable `jazz.permissions.json` tree `definePermissions` returns, under {@link READABLE_PERMISSIONS}. */
 export interface ReadablePermissionsFile {

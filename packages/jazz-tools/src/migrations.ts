@@ -45,8 +45,7 @@ type ColumnsWithReferences<C, R> = {
       : Omit<C[K], "__jazzReferences"> & { readonly __jazzReferences: ExplicitColumnTarget<R, K> }
     : C[K];
 };
-type NormalizeTable<T> =
-  T extends DefinedTable<infer C, infer R> ? ColumnsWithReferences<C, R> : T;
+type NormalizeTable<T> = T extends DefinedTable<infer C, infer R> ? ColumnsWithReferences<C, R> : T;
 
 type StoredSchema<S> = {
   [T in keyof S]: {
@@ -696,8 +695,10 @@ function buildSteps(config: {
 }): ReadableMigrationSteps {
   const from = config.from as Record<string, TableSource>;
   const to = config.to as Record<string, TableSource>;
-  if (!from || typeof from !== "object") throw new Error("defineMigration: `from` must be an object of tables.");
-  if (!to || typeof to !== "object") throw new Error("defineMigration: `to` must be an object of tables.");
+  if (!from || typeof from !== "object")
+    throw new Error("defineMigration: `from` must be an object of tables.");
+  if (!to || typeof to !== "object")
+    throw new Error("defineMigration: `to` must be an object of tables.");
 
   const renames = new Map<string, string>();
   const usedSources = new Set<string>();
@@ -740,7 +741,9 @@ function buildSteps(config: {
     const steps: Record<string, ReadableColumnStep> = {};
     const renamedSources = new Set<string>();
     const droppedColumns = new Set<string>();
-    for (const [column, op] of Object.entries(rawOps as Record<string, AddOp | DropOp | RenameOp>)) {
+    for (const [column, op] of Object.entries(
+      rawOps as Record<string, AddOp | DropOp | RenameOp>,
+    )) {
       switch (op?._type) {
         case "rename": {
           assertUserTableColumnNameAllowed(column);
