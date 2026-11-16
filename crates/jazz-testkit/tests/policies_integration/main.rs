@@ -105,12 +105,15 @@ fn authorship_permissions_schema() -> Schema {
 }
 
 fn assert_transaction_policy_denied(err: crate::JazzError) {
-    let crate::JazzError::Sync(message) = err else {
+    let crate::JazzError::WriteRejected { code, reason, .. } = &err else {
         panic!("expected authority policy rejection, got {err:?}");
     };
     assert_eq!(
-        message,
-        "transaction was rejected before reaching GlobalServer durability: authorization_denied",
+        (code.as_str(), reason.as_str()),
+        (
+            "permission_denied",
+            "Write rejected by server authorization"
+        ),
         "expected authority policy rejection",
     );
 }
