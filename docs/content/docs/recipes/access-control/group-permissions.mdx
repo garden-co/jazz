@@ -19,120 +19,26 @@ This recipe shows how to build a workspace where users have different levels of 
 
 Three tables: the workspace itself, a members join table that records each user's role, and the documents that belong to the workspace.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-  "tables": {
-    "workspaces": {
-      "columns": {
-        "name": "string"
-      },
-      "relations": {
-        "members": { "reverse": "workspaceMembers", "relation": "workspace" },
-        "documents": { "reverse": "documents", "relation": "workspace" }
-      }
-    },
-    "workspaceMembers": {
-      "columns": {
-        "workspaceId": "uuid",
-        "user_id": "uuid",
-        "role": { "enum": ["reader", "writer", "contributor", "admin"] }
-      },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspaceId" }
-      }
-    },
-    "documents": {
-      "columns": {
-        "title": "string",
-        "content": "string",
-        "workspaceId": "uuid"
-      },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspaceId" }
-      }
-    }
-  }
-}
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/group-permissions/schema.ts#schema
+</include>
 
 ## Permissions
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
-  "defs": {
-    "isMember($workspace)": "exists workspaceMembers(workspaceId = $workspace, user_id = session.user)",
-    "hasRole($workspace, $role)": "exists workspaceMembers(workspaceId = $workspace, user_id = session.user, role = $role)",
-    "isAdmin($workspace)": "hasRole($workspace, 'admin')"
-  },
-  "tables": {
-    "documents": {
-      "read": "isMember(this.workspaceId)",
-      "insert": {
-        "anyOf": [
-          "hasRole(this.workspaceId, 'writer')",
-          "hasRole(this.workspaceId, 'contributor')",
-          "hasRole(this.workspaceId, 'admin')"
-        ]
-      },
-      "update": {
-        "$comment": "Writers and admins can edit any document; contributors only their own.",
-        "where": {
-          "anyOf": [
-            "hasRole(this.workspaceId, 'writer')",
-            "hasRole(this.workspaceId, 'admin')",
-            "$createdBy.account = session.user and hasRole(this.workspaceId, 'contributor')"
-          ]
-        }
-      },
-      "delete": {
-        "$comment": "Writers and admins can delete any document; contributors only their own.",
-        "where": {
-          "anyOf": [
-            "hasRole(this.workspaceId, 'writer')",
-            "isAdmin(this.workspaceId)",
-            "$createdBy.account = session.user and hasRole(this.workspaceId, 'contributor')"
-          ]
-        }
-      }
-    },
-    "workspaces": {
-      "read": "isMember(this.id)",
-      "insert": "true",
-      "update": "isAdmin(this.id)",
-      "delete": "isAdmin(this.id)"
-    },
-    "workspaceMembers": {
-      "read": "isMember(this.workspaceId)",
-      "insert": {
-        "$comment": "Admins add members; a workspace's creator can add themselves as its first admin.",
-        "where": {
-          "anyOf": [
-            "isAdmin(this.workspaceId)",
-            "user_id = session.user and role = 'admin' and exists workspaces(id = this.workspaceId, $createdBy.account = session.user)"
-          ]
-        }
-      },
-      "update": "isAdmin(this.workspaceId)",
-      "delete": {
-        "$comment": "Admins can remove any member; members can leave on their own.",
-        "where": { "anyOf": ["isAdmin(this.workspaceId)", "user_id = session.user"] }
-      }
-    }
-  }
-}
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/group-permissions/schema.ts#permissions
+</include>
 
-The `defs` are reusable helpers: `isMember`, `hasRole` and `isAdmin` take the workspace id to check
-(`this.workspaceId` on a document or membership, `this.id` on a workspace). See
-[expressions](/docs/reference/app-files#expressions) for the grammar.
+`isMember`, `hasRole` and `isAdmin` are plain TypeScript helpers: they take the workspace id to check
+(`document.workspaceId` on a document, `workspaceMember.workspaceId` on a membership, `workspace.id`
+on a workspace). `createdByMe` and `mine` are plain conditions. `npx jazz-tools generate` inlines
+them all into `jazz.permissions.json`.
 
-- **Contributor** edit access requires both `$createdBy.account = session.user` (the row belongs to this author) and a matching contributor membership. Writers and admins bypass the creator check entirely.
-- **Bootstrap insert**: the second branch of the `workspaceMembers` insert policy lets the workspace creator add themselves as the first admin&hairsp;—&hairsp;otherwise `isAdmin` would block everyone, since there are no members yet.
-- **Leave on your own**: members can delete their own membership row regardless of role. Admins can remove anyone.
+- **Contributor** edit and delete access requires both `createdByMe` (`{ $createdBy: session.user }`: the row belongs to this author) and a matching contributor membership. Writers and admins can edit and delete any document.
+- **Bootstrap insert**: the second branch of the `workspaceMembers` insert policy lets the workspace creator add themselves as the first admin (`workspaceMember.workspace.where(createdByMe)` checks the workspace the new row points to)&hairsp;—&hairsp;otherwise `isAdmin` would block everyone, since there are no members yet.
+- **Leave on your own**: members can delete their own membership row (`mine`) regardless of role. Admins can remove anyone.
 
-See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `anyOf`, `allOf`, and `$createdBy`.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `anyOf`, `allOf`, relation `.where`, and `$createdBy`.
 
 ## Creating a workspace
 
