@@ -71,7 +71,7 @@ Every framework provides a hook to access the database handle, and query hooks r
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
@@ -81,6 +81,12 @@ Mutations are methods on the database handle. All three take a table as their fi
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-crud-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -110,6 +116,15 @@ Trying to insert, update or delete an already deleted row will fail. Use `restor
 Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
 row before restoring it.
 
+`restore` is only for a deleted row: on a live one it fails with `row not deleted`. When you don't
+know which it is, check `$deletedAt`, which a query with `includeDeleted()` can select:
+
+```ts
+const existing = await db.one(app.todos.where({ id }).includeDeleted().select("$deletedAt"));
+if (existing?.$deletedAt) db.restore(app.todos, id, values);
+else db.update(app.todos, id, values);
+```
+
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
@@ -130,7 +145,7 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
@@ -140,6 +155,12 @@ Required fields cannot be set to `null`.
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-nullable-update-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -230,16 +251,21 @@ into a long value stays cheap however long it grows.
 
 Store a file in a `bytes` column next to its metadata:
 
-```ts title="schema.ts"
-files: s.table(
-  {
-    name: s.string(),
-    type: s.string(),
-    size: s.int(),
-    content: s.bytes(),
-  },
-  {},
-),
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "files": {
+      "columns": {
+        "name": "string",
+        "type": "string",
+        "size": "int",
+        "content": "bytes"
+      }
+    }
+  }
+}
 ```
 
 Upload from the browser with `insertStreaming`, which streams the bytes into the row instead of
@@ -316,7 +342,7 @@ try {
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
@@ -326,6 +352,12 @@ try {
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-durability-tier-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
+    </include>
+
   </Tab>
 </Tabs>
 

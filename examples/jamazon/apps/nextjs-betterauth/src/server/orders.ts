@@ -1,5 +1,5 @@
 import { PersistedWriteRejectedError, type Db } from "jazz-tools";
-import { app, type Order, type OrderStatus, type Payment } from "@/schema";
+import { app, type Order, type OrderStatus, type Payment } from "@/jazz.generated";
 import { ids, orderCode } from "@/src/lib/ids";
 import { shippingCents } from "@/src/store/pricing";
 import type { PaymentProvider, PaymentResolution, SandboxOutcome } from "./payments";

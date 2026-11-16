@@ -4,13 +4,12 @@
 // once every connection has ended.
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { schema as s } from "../../index.js";
+import { testApp } from "../../testing/test-app.js";
 import { createJazz, memory } from "../index.js";
 
-const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.todos.allowRead.never();
-});
+const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
+// Nobody reads a todo.
+const permissions = { format: 1, tables: { todos: {} } };
 const jazz = createJazz({ app, permissions, store: memory(), authenticate: () => null });
 const server = createServer((req, res) => jazz.nodeHandler(req, res));
 await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

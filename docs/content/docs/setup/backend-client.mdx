@@ -1,6 +1,7 @@
 ---
 title: Backend Client
 description: "Learn how to connect other trusted machines to Jazz through your main backend, for machine-to-machine access."
+languageTabs: backend
 ---
 
 Your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) is the one that runs `createJazz`: browsers and apps sync
@@ -26,8 +27,8 @@ audience and the claims only that machine has:
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite, trustWorkload } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -62,6 +63,14 @@ export const jazz = createJazz({
 
 A token from a listed issuer that fails any check is refused. It never reaches `authenticate`.
 
+<Callout type="warn" title="Keep workload and user tokens apart">
+  Your users' bearer tokens must not come from an issuer listed in `backendClients`: such a token is
+  checked only as a workload's, and if it doesn't match it's refused and never reaches
+  `authenticate`, so the user just appears signed out (`{ "user": null }`), with no error. Cookie
+  sessions aren't affected. Give each workload claims no user token can carry, or a user token that
+  matches would be admitted as that workload.
+</Callout>
+
 ## Connect from the machine
 
 On the machine, open a Jazz session against your main backend and pass a function that returns a
@@ -69,8 +78,8 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
 
 ```ts title="import-job.ts"
 import { createJazzClient } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 const session = await createJazzClient({
   app,

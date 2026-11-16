@@ -15,7 +15,7 @@ import {
 import { useAll } from "jazz-tools/react";
 import { ImagePlus } from "lucide-react";
 import { useState } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { nextZIndex } from "@/src/lib/poster";
 import { useAssetUrl } from "@/src/lib/use-asset-url";
 

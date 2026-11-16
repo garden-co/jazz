@@ -1,0 +1,7 @@
+{
+  "format": 1,
+  "$comment": "Standalone Inspector admin reads must use SYSTEM authority rather than succeeding only because the application happens to allow public reads.",
+  "tables": {
+    "todos": { "update": "true" }
+  }
+}

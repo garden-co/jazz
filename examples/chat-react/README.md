@@ -13,14 +13,14 @@ pnpm dev        # starts the Jazz server, pushes the schema, and opens Vite
 
 ```bash
 pnpm test               # Vitest browser tests
-pnpm build              # Optional schema validation + production build
+pnpm build              # Regenerate jazz.generated.ts + production build
 ```
 
 ## How it works
 
 **State sync** is entirely handled by Jazz. Every message, reaction, stroke, and membership change is a synchronous local write (`db.insert`, `db.delete`). Jazz replicates the change to all connected peers in the background. The UI is driven by `useAll` reactive queries — no polling, no manual state management.
 
-**Row-level security** is a schema concern, not an application concern. Policies live in `permissions.ts` in a typed DSL. They compile into a policy AST enforced server-side on every sync request. Components contain no auth logic.
+**Row-level security** is a schema concern, not an application concern. Policies live in `jazz.permissions.json` as expression strings. They compile into a policy AST enforced server-side on every sync request. Components contain no auth logic.
 
 **Public chats** are visible to all connected clients. **Private chats** are restricted to members. A trusted provider's `join_code` claim may grant an initial read, but the local-first invite flow does not mint or override provider claims.
 
@@ -30,7 +30,7 @@ pnpm build              # Optional schema validation + production build
 
 ## Schema
 
-Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` validates `schema.ts` before the production build; the app imports the typed `app` export directly from that file.
+Defined in `jazz.app.json`. Running `pnpm build` runs `jazz-tools generate` to regenerate `jazz.generated.ts` from it before the production build; the app imports the typed `app` export from `jazz.generated.ts`.
 
 - **profiles** — userId, name, avatar
 - **chats** — isPublic, joinCode (nullable — set for private chats); authorship comes from `$createdBy`

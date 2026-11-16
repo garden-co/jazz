@@ -1,15 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { commands } from "vitest/browser";
-import { schema } from "../../src/index.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserTestDb } from "./account-fixtures.js";
-
-const app = schema.defineApp(
-  {
-    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+import { app } from "./apps/todos-title-done/jazz.generated.js";
 
 describe("exact local transaction write merging", () => {
   it("keeps large content through a transactional update and a caught staging failure", async () => {

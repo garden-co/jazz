@@ -6,15 +6,18 @@ import { createJazzContext, type JazzContext } from "../backend/create-jazz-cont
 import {
   startLocalJazzServer,
   deploy as deployFixture,
+  testPermissions,
   type LocalJazzServerHandle,
 } from "../testing/index.js";
 import {
   app as fixtureApp,
+  appFile as fixtureAppFile,
   permissions as fixturePermissions,
-  schema as fixtureSchema,
+  permissionsFile as fixturePermissionsFile,
   wasmSchema as wasmSchemaExample,
-} from "./fixtures/schema.js";
+} from "./fixtures/app.js";
 import { jazzAdapter } from "./index.js";
+import { betterAuthAppFileNotes } from "./schema.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
@@ -75,9 +78,11 @@ async function appUserSession(
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
     it("denies client CRUD for every generated Better Auth table", () => {
-      expect(Object.keys(fixturePermissions).sort()).toEqual(Object.keys(fixtureSchema).sort());
+      expect(Object.keys(fixturePermissions).sort()).toEqual(
+        Object.keys(fixtureAppFile.tables).sort(),
+      );
 
-      for (const tableName of Object.keys(fixtureSchema)) {
+      for (const tableName of Object.keys(fixtureAppFile.tables)) {
         const tablePermissions = fixturePermissions[tableName]!;
 
         expect(tablePermissions.select?.using).toEqual({ type: "False" });
@@ -96,8 +101,8 @@ describe("jazzAdapter", () => {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schema: fixtureApp,
-      permissions: fixturePermissions,
+      app: fixtureApp,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -154,8 +159,8 @@ describe("jazzAdapter", () => {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schema: fixtureApp,
-      permissions: fixturePermissions,
+      app: fixtureApp,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -281,6 +286,137 @@ describe("jazzAdapter", () => {
     }
   }, 30_000);
 
+  /** A row for each Better Auth table, as its adapter would write it. */
+  const betterAuthRows = (userId: string): Record<string, Record<string, unknown>> => ({
+    better_auth_user: {
+      name: "Denied",
+      email: `denied-${crypto.randomUUID()}@example.com`,
+      emailVerified: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    better_auth_session: {
+      expiresAt: new Date(Date.now() + 60_000),
+      token: `denied-${crypto.randomUUID()}`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      userId,
+    },
+    better_auth_account: {
+      accountId: "denied-account",
+      providerId: "test",
+      userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    better_auth_verification: {
+      identifier: "denied-verification",
+      value: "backend-only",
+      expiresAt: new Date(Date.now() + 60_000),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    better_auth_jwks: {
+      publicKey: "denied-public-key",
+      privateKey: "denied-private-key",
+      createdAt: new Date(),
+    },
+  });
+
+  // The adapter writes no policies for its tables. Deny-all must hold for a
+  // client both as the adapter leaves the app (the tables absent from
+  // jazz.permissions.json) and once the entries it prints are pasted in.
+  it.each([
+    ["absent from jazz.permissions.json", {}],
+    [
+      "given the entries the adapter prints",
+      JSON.parse(
+        `{${betterAuthAppFileNotes(Object.keys(fixtureAppFile.tables)).split("jazz.permissions.json:\n")[1]}}`,
+      ),
+    ],
+  ])(
+    "denies a verified client session every operation on Better Auth tables %s",
+    async (label, betterAuthTables: Record<string, unknown>) => {
+      const permissionsFile = { ...fixturePermissionsFile, tables: betterAuthTables };
+      const tableNames = Object.keys(fixtureAppFile.tables);
+      expect(tableNames.sort()).toEqual(Object.keys(betterAuthRows("")).sort());
+      const server = await startLocalJazzServer();
+      const { bundle } = await deployFixture({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        app: fixtureApp,
+        permissions: permissionsFile,
+      });
+      const context = createJazzContext({
+        appId: server.appId,
+        app: fixtureApp,
+        permissions: testPermissions(fixtureApp, permissionsFile),
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
+        bundle,
+      });
+      const table = (name: string) => (fixtureApp as Record<string, any>)[name];
+
+      try {
+        const backend = context.asBackend(fixtureApp);
+        const user = (await backend
+          .insert(table("better_auth_user"), betterAuthRows("").better_auth_user)
+          .wait({ tier: "global" })) as { id: string };
+        const ids: Record<string, string> = { better_auth_user: user.id };
+        for (const name of tableNames.filter((name) => name !== "better_auth_user")) {
+          const row = (await backend
+            .insert(table(name), betterAuthRows(user.id)[name])
+            .wait({ tier: "global" })) as { id: string };
+          ids[name] = row.id;
+        }
+
+        const sessionDb = context.forSession(
+          await appUserSession(server, `deny-${label.split(" ")[0]}`),
+        );
+        const denied =
+          /AuthorizationDenied|Write rejected by server authorization|read policy denied/;
+        const attempt = (write: () => { wait(options: { tier: "global" }): Promise<unknown> }) =>
+          Promise.resolve().then(() => write().wait({ tier: "global" }));
+        for (const name of tableNames) {
+          await expect(
+            sessionDb.all(table(name), { tier: "remote" }),
+            `${name} read`,
+          ).resolves.toEqual([]);
+          await expect(
+            attempt(() => sessionDb.insert(table(name), betterAuthRows(user.id)[name])),
+            `${name} insert`,
+          ).rejects.toThrow(denied);
+          await expect(
+            attempt(() => sessionDb.update(table(name), ids[name]!, { createdAt: new Date(0) })),
+            `${name} update`,
+          ).rejects.toThrow(denied);
+          await expect(
+            attempt(() => sessionDb.delete(table(name), ids[name]!)),
+            `${name} delete`,
+          ).rejects.toThrow(denied);
+        }
+        // The rows are there, unchanged: the client saw none because it was denied.
+        for (const name of tableNames) {
+          const rows = (await backend.all(table(name), { tier: "remote" })) as {
+            id: string;
+            createdAt: Date;
+          }[];
+          expect(
+            rows.map((row) => row.id),
+            `${name} rows`,
+          ).toEqual([ids[name]]);
+          expect(rows[0]!.createdAt.getTime(), `${name} updated`).not.toBe(0);
+        }
+      } finally {
+        await context.shutdown();
+        await server.stop();
+      }
+    },
+    60_000,
+  );
+
   describe("adapter methods", () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
@@ -295,8 +431,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1085,7 +1221,7 @@ describe("jazzAdapter", () => {
       expect(changed).toBe(1);
     });
 
-    it("accepts app-like schema sources from root schema.ts modules", async () => {
+    it("accepts app-like schema sources", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
         db: () => context.asBackend(authSchema),
@@ -1114,7 +1250,8 @@ describe("jazzAdapter", () => {
       });
     });
 
-    it("creates root schema.ts output for Better Auth CLI generation", async () => {
+    it("creates jazz.app.json output for Better Auth CLI generation", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
       const generated = await (adapter as any).createSchema({
         tables: {
           user: {
@@ -1128,22 +1265,24 @@ describe("jazzAdapter", () => {
           },
         },
       });
+      const notes = String(log.mock.calls[0]?.[0]);
+      log.mockRestore();
 
       expect(generated).toMatchObject({
-        path: "./schema-better-auth/schema.ts",
+        path: "./jazz.app.json",
         overwrite: true,
       });
-      expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
-      expect(generated.code).toContain(
-        'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
+      const file = JSON.parse(generated.code);
+      expect(file).toMatchObject({
+        $schema: "https://jazz.tools/schemas/jazz.app.schema.json",
+        format: 1,
+        tables: { better_auth_user: { columns: { name: "string" } } },
+      });
+      expect(Object.keys(file.tables).every((name) => name.startsWith("better_auth_"))).toBe(true);
+      // No policies: every client read and write of the table is denied.
+      expect(notes).toContain(
+        '"better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" }',
       );
-      expect(generated.code).toContain(
-        "export const permissions = s.definePermissions(app, ({ policy }) => {",
-      );
-      expect(generated.code).toContain("policy.better_auth_user.allowRead.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowInsert.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowUpdate.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowDelete.never();");
     });
   });
 
@@ -1164,8 +1303,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1534,8 +1673,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1670,8 +1809,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1737,8 +1876,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       const ctx1 = createJazzContext({
@@ -1814,8 +1953,8 @@ describe("jazzAdapter", () => {
           serverUrl: server.url,
           appId: server.appId,
           adminSecret: server.adminSecret,
-          schema: fixtureApp,
-          permissions: fixturePermissions,
+          app: fixtureApp,
+          permissions: fixturePermissionsFile,
         });
         const ctx1 = createJazzContext({
           appId: server.appId,

@@ -1,19 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { generateAuthSecret, schema, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { generateAuthSecret, type Db } from "../../src/index.js";
+import { app } from "./apps/fresh-subscriber-first-sync/jazz.generated.js";
+import permissions from "./apps/fresh-subscriber-first-sync/jazz.permissions.json";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
-const app = schema.defineApp(
-  {
-    docs: schema.table({ label: schema.string(), body: schema.string() }, {}),
-  },
-  { migrations: "none" },
-);
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.docs.allowRead.always(),
-  policy.docs.allowInsert.always(),
-]);
+// The app (apps/fresh-subscriber-first-sync): docs every user may read and insert.
 
 const ctx = new TestCleanup();
 afterEach(async () => {
@@ -29,10 +21,16 @@ describe("fresh subscriber first sync", () => {
       serverUrl: coreUrl,
       adminSecret,
     } = await getJazzServerInfo(uniqueDbName("fresh-subscriber-first-sync"));
-    await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+    await deploy({
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+      app,
+      permissions: permissions,
+    });
     const { serverUrl } = await startJazzApp(
       { appId, serverUrl: coreUrl, adminSecret },
-      { schema: app.wasmSchema, permissions },
+      { schema: app, permissions },
     );
     const secret = generateAuthSecret();
     const open = async (label: string): Promise<Db> =>

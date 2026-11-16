@@ -62,7 +62,12 @@ already apply locally first and sync in the background.
 The callback form commits automatically when the callback finishes. Jazz rolls the transaction back
 if the callback throws or returns a rejected promise.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+A mergeable callback that writes nothing, such as a cleanup that finds nothing to delete, commits
+nothing and doesn't fail: `db.transaction(...)` resolves with the callback's value, its `wait()`
+resolves at once, and its `txId` rejects, since there is no transaction to name (from alpha.65;
+earlier versions throw "empty mergeable transaction has no committed unit").
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
@@ -72,6 +77,12 @@ if the callback throws or returns a rejected promise.
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-rust
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -196,7 +207,8 @@ For a serializable transaction, use `beginSerializableTransaction()` instead. Ca
 commit result to wait for the authority to accept or reject the transaction. You do not choose a
 durability tier, it is always settled by the authority.
 
-If a mergeable transaction has no writes, `commit()` throws. Call `rollback()` instead.
+If a mergeable transaction you manage yourself has no writes, `commit()` throws. Call `rollback()`
+instead. (The callback form handles that case for you, as above.)
 
 Await every read you start through a transaction before you commit it. Committing while one of
 its reads is still pending throws a `not_observed` error, and the transaction ends without

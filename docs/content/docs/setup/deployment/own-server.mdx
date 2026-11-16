@@ -1,6 +1,7 @@
 ---
 title: Your Own Server
 description: "Learn how to run Jazz in your own Node server, VM or container, with the data in SQLite on its disk."
+languageTabs: main-backend
 ---
 
 On your own machine, Jazz is part of your backend's process, with the data in a directory on its
@@ -16,8 +17,8 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -31,12 +32,13 @@ export const jazz = createJazz({
 <include>../../../partials/main-backend-config.mdx</include>
 
 The examples on this page are ES modules and use top-level `await`, so the backend package needs
-`"type": "module"` (or `.mts` files). `schema.ts` and `permissions.ts` must be ES modules too. In a
-CommonJS package, such as an Expo app's, importing them gives `{ default }`, and `createJazz` fails
-with "permissions.ts defines permissions for unknown table(s): default". A backend in its own ESM
-package isn't enough while those two files stay in the CommonJS package: put them in a folder (for
-example `jazz/`) with a `package.json` of `{ "type": "module" }`, and import them from there in both
-the app and the backend.
+`"type": "module"` (or `.mts` files). `jazz.generated.ts` must be an ES module too. In a CommonJS
+package, such as an Expo app's, importing it gives `{ default }`, and `createJazz` fails with
+`jazz.generated.ts arrived as { default: … }`. A backend in its own ESM package isn't enough while
+the app files stay in the CommonJS package: put `jazz.app.json`, `jazz.permissions.json` and
+`jazz.generated.ts` in a folder (for example `jazz/`) with a `package.json` of
+`{ "type": "module" }`, run `npx jazz-tools generate` there, and import them from there in both the
+app and the backend.
 
 ### Large values
 
@@ -122,7 +124,7 @@ one proxy that passes WebSocket upgrades through).
 ## Deploy it
 
 Deploy your backend as usual. Jazz serves sync requests through your HTTP server at `/jazz`. On
-startup, Jazz applies the schema, migrations and permissions defined in your code. If it can't apply
+startup, Jazz applies the schema, migrations and permissions from your app files. If it can't apply
 them, for example because a migration is missing, it won't start.
 
 Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
@@ -174,14 +176,13 @@ origin can't sign in with your app's cookie yet, even with `allowedOrigins`; ser
 
 ## Data on another machine
 
-When the data should live apart from your app servers (several app instances sharing one database,
-serverless functions, an existing Jazz Cloud app), keep it in [Jazz Cloud](/docs/setup/deployment/jazz-cloud)
-and point `createJazz` at it with `remote()`:
+An existing app on [Jazz Cloud (deprecated)](/docs/setup/deployment/jazz-cloud) keeps its data
+there: point `createJazz` at it with `remote()`:
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,

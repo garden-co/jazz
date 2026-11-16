@@ -11,7 +11,7 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { app, type Profile } from "../../schema";
+import { app, type Profile } from "../../jazz.generated";
 
 export function NewRoomDialog({
   isOpen,

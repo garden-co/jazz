@@ -7,8 +7,7 @@ import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import {
   createJazz,
   createJazzClient,
@@ -23,15 +22,16 @@ import {
   encodeWireClientHello,
 } from "../runtime/native-runtime/websocket.js";
 
-const app = await defineShippedApp({
-  todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-});
+// Updates and deletes are denied.
+const permissionsFile = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
+/** The engine's permissions, for the backend clients. */
+const permissions = testPermissions(app, permissionsFile);
 
 const AUDIENCE = "https://app.example.test";
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -112,7 +112,7 @@ async function serve(jazz: Jazz): Promise<string> {
 async function appWith(backendClients: Parameters<typeof createJazz>[0]["backendClients"]) {
   const jazz = await createJazz({
     app,
-    permissions,
+    permissions: permissionsFile,
     store: memory(),
     authenticate,
     backendClients,
@@ -503,7 +503,7 @@ describe("trusted backend clients", () => {
     cleanups.push(() => core.stop());
     const jazz = await createJazz({
       app,
-      permissions,
+      permissions: permissionsFile,
       store: remote({ url: core.url, appId, secret: core.adminSecret }),
       authenticate,
       backendClients: [

@@ -1,13 +1,7 @@
 import { Effect } from "effect";
 import type { JazzDb } from "jazz-tools/effect";
-import {
-  app,
-  type ActivityKind,
-  type Crew,
-  type Show,
-  type Task,
-  type TaskStatus,
-} from "../schema";
+import { app, type ActivityKind, type Crew, type Show, type Task } from "../jazz.generated";
+import { type TaskStatus } from "../app-extras";
 
 /**
  * StagePlan's writes as Effects over the Jazz service. The browser runs them

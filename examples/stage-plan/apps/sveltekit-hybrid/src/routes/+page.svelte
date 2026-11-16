@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getSession, QuerySubscription } from "jazz-tools/svelte";
-  import { app } from "../../schema";
+  import { app } from "../../jazz.generated";
   import Account from "$lib/components/Account.svelte";
   import Board from "$lib/components/Board.svelte";
   import { createShow, type Me } from "$lib/model/actions";

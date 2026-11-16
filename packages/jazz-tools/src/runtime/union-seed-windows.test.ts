@@ -1,6 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import type { WasmRow } from "../drivers/types.js";
 import type { Runtime } from "./client.js";
 import { translateQuery } from "./query-adapter.js";
@@ -11,10 +11,7 @@ import {
 } from "./testing/napi-runtime-test-utils.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp(
-  { rooms: s.table({ title: s.string(), code: s.string() }, {}) },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { rooms: { columns: { title: "string", code: "string" } } } });
 
 it("pins windowed UNION labels while retaining the legacy unmodified label", () => {
   const seeds = [

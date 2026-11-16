@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 
 let testApp: PolicyTestApp;
 const issuer = "https://poster-shop.test";

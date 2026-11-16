@@ -12,7 +12,7 @@ function shippedSources(dir = srcRoot): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      return /^(fixtures|__fixtures__|testing|client-tests)$/.test(entry.name)
+      return /^(fixtures|__fixtures__|__typecheck__|testing|client-tests)$/.test(entry.name)
         ? []
         : shippedSources(path);
     }
@@ -89,21 +89,25 @@ const PURE_CALLS = new Set([
  * Keyed `<file>: <callee>`. A new entry needs the same review.
  */
 const REVIEWED_CALLS = new Set([
+  // Generated bindings bind their app, a value the module exports.
   "backend/vercel-store.ts: <value>.repeat",
   "classic-api.ts: classicFunction",
   "classic-api.ts: classicNamespace",
   "dev/app-files.ts: join",
+  "upgrade/index.ts: join",
+  "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
-  "dsl.ts: AddBuilder",
-  "dsl.ts: DropBuilder",
   "inspect/mcp.ts: WHERE_OPERATORS.join",
   "local-first-auth/identity.ts: utf8",
-  "permissions/index.ts: kindGuard",
+  "permissions/index.ts: removedSchemaApi",
   "prosemirror/overlays.ts: PluginKey",
   "prosemirror/sync.ts: PluginKey",
   "react-core/provider.tsx: createContext",
   "react-core/session.tsx: createContext",
   "removed-api.ts: removed",
+  // Each builds a throwing stub (or a frozen object of them) for the module to export.
+  "removed-schema-api.ts: removedNamespace",
+  "removed-schema-api.ts: removedSchemaApi",
   "runtime/author-id.ts: Utf8Decoder",
   "runtime/native-runtime/native-codec.ts: Utf8Decoder",
   "runtime/native-runtime/native-row-codec.ts: Utf8Decoder",
@@ -117,8 +121,6 @@ const REVIEWED_CALLS = new Set([
   "runtime/json-schema-validator.ts: base32Pattern",
   // Adds the session object it returns to a module-local WeakSet.
   "runtime/system-identity.ts: markTrustedReservedSession",
-  "schema-loader.ts: fileURLToPath",
-  "schema-loader.ts: existsSync",
   "subscriptions-orchestrator.ts: makeDeferred",
   "thin/self-signed-token.ts: parseUuidText",
   "vue/provider.ts: defineComponent",
@@ -222,7 +224,7 @@ describe("package.json sideEffects", () => {
     ]) {
       expect(topLevelEffects(`${srcRoot}/${path}`), path).not.toEqual([]);
     }
-    expect(initializerCalls(`${srcRoot}/dsl.ts`)).toContain("AddBuilder");
+    expect(initializerCalls(`${srcRoot}/removed-schema-api.ts`)).toContain("removedNamespace");
     expect(initializerCalls(`${srcRoot}/vue/session.ts`)).toContain("defineComponent");
   });
 });
