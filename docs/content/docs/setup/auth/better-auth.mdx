@@ -147,8 +147,9 @@ handlers, client, plugins), see the [Better Auth documentation](https://www.bett
 
 ### Generate the tables
 
-The Better Auth CLI writes Better Auth's tables into your app's `jazz.app.json`, next to your own
-tables, so a single backend context handles both.
+The Better Auth CLI writes Better Auth's tables, and policies for them, into a generated
+`schema-better-auth/schema.ts` module. Your `schema.ts` spreads them next to your own tables, so a
+single backend context handles both.
 
 Start with shared Better Auth options.
 
@@ -183,20 +184,17 @@ export const auth = betterAuth({
 Generate with the [Better Auth CLI](https://www.better-auth.com/docs/concepts/cli):
 
 ```bash
-npx @better-auth/cli generate --config ./auth-generate.ts --yes
+npx @better-auth/cli generate --config ./auth-generate.ts --output ./schema-better-auth/schema.ts --yes
 ```
 
-It writes to `./jazz.app.json`; pass `--output <path>` for an app file elsewhere, relative to
-the directory you run it in. Don't combine it with `--cwd` or an absolute path: the adapter reads
-the file relative to the current directory, the CLI writes it relative to `--cwd`. Each Better
-Auth table is replaced as a whole, and every other table keeps its exact text, as do `history`
-and `migrations`. Relations you added to a Better Auth table stay as long as their column does,
-and a Better Auth table the CLI no longer generates (say, from a removed plugin) is kept.
-Without `--yes`, the CLI asks before overwriting the file, after the adapter's notes on what to do
-next. Review the diff when you regenerate.
+Pass `--output` relative to the directory you run it in. Don't combine it with `--cwd` or an
+absolute path: the adapter resolves the path relative to the current directory, the CLI writes it
+relative to `--cwd`. The CLI rewrites the whole module each time, so don't edit it: keep your own
+tables, relations and policies in `schema.ts`. Without `--yes`, the CLI asks before overwriting
+the file, after the adapter's notes on what to do next. Review the diff when you regenerate.
 
 A new reference column gets a forward relation named `<column>Relation` (`userIdRelation`).
-Reverse relations aren't generated: add the ones your app reads. Table and column names must be
+Reverse relations aren't generated. Table and column names must be
 identifiers (`[A-Za-z_][A-Za-z0-9_]*`), so a `modelName` or `fieldName` with a hyphen is refused,
 with a message saying to rename it.
 
@@ -204,154 +202,48 @@ The generation config passes `schema: {}` because it only generates tables. The 
 running app takes the generated `app` (see [Use Jazz as the database](#use-jazz-as-the-database)):
 with `{}` there, it would find no tables.
 
-The result is one app file with both sets of tables. For a chat app, your own `messages` table sits
-next to the `better_auth_*` tables the Better Auth CLI wrote:
+The module exports `tables` (`better_auth_account`, `better_auth_jwks`, `better_auth_session`,
+`better_auth_user` and `better_auth_verification`, plus any your plugins add) and `permissions`.
+Spread both into `schema.ts`. For a chat app, your own `messages` table sits next to the
+`better_auth_*` tables:
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "better_auth_account": {
-      "columns": {
-        "accountId": "string",
-        "providerId": "string",
-        "userId": "uuid",
-        "accessToken": "string?",
-        "refreshToken": "string?",
-        "idToken": "string?",
-        "accessTokenExpiresAt": "timestamp?",
-        "refreshTokenExpiresAt": "timestamp?",
-        "scope": "string?",
-        "password": "string?",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp"
-      },
-      "relations": {
-        "user": { "rel": "better_auth_user", "column": "userId" }
-      }
-    },
-    "better_auth_jwks": {
-      "columns": {
-        "publicKey": "string",
-        "privateKey": "string",
-        "createdAt": "timestamp",
-        "expiresAt": "timestamp?",
-        "alg": "string?",
-        "crv": "string?"
-      }
-    },
-    "better_auth_session": {
-      "columns": {
-        "expiresAt": "timestamp",
-        "token": "string",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp",
-        "ipAddress": "string?",
-        "userAgent": "string?",
-        "userId": "uuid",
-        "impersonatedBy": "string?"
-      },
-      "relations": {
-        "user": { "rel": "better_auth_user", "column": "userId" }
-      }
-    },
-    "better_auth_user": {
-      "columns": {
-        "name": "string",
-        "email": "string",
-        "emailVerified": "boolean",
-        "image": "string?",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp",
-        "role": "string?",
-        "banned": "boolean?",
-        "banReason": "string?",
-        "banExpires": "timestamp?"
-      },
-      "relations": {
-        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
-        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
-      }
-    },
-    "better_auth_verification": {
-      "columns": {
-        "identifier": "string",
-        "value": "string",
-        "expiresAt": "timestamp",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp"
-      }
-    },
-    "messages": {
-      "columns": {
-        "author_name": "string",
-        "chat_id": "string",
-        "text": "string",
-        "sent_at": "timestamp"
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+import { tables as authTables, permissions as authPermissions } from "./schema-better-auth/schema";
+
+export const schema = s.defineSchema({
+  ...authTables,
+  messages: s.table({
+    author_name: s.string(),
+    chat_id: s.string(),
+    text: s.string(),
+    sent_at: s.timestamp(),
+  }),
+});
+
+const { definePermissions } = schema;
+
+export const permissions = definePermissions({
+  // Denies every operation on the better_auth_* tables
+  ...authPermissions,
+  messages: { read: true },
+});
 ```
 
-The Better Auth CLI writes nothing to `jazz.permissions.json`. A table or operation without a policy is
-denied, so regular client sessions can't read or write Better Auth rows; the adapter itself uses
-`jazz.db`, which has backend authority. To silence the "no policies" warning `createJazz` logs for
-those tables, deny everything on each of them explicitly, next to your own policies. The
-adapter prints one line per table to paste under `"tables"`. Never add allow rules for these
-tables: client sessions have no business reading them.
+The generated `permissions` deny every operation on the Better Auth tables, so regular client
+sessions can't read or write Better Auth rows; the adapter itself uses `jazz.db`, which has backend
+authority. `definePermissions` needs every table listed, so spread `authPermissions` in next to
+your own policies rather than leaving the tables out. Never add allow rules for these tables:
+client sessions have no business reading them.
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "better_auth_account": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_jwks": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_session": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_user": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_verification": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "messages": {
-      "read": "true"
-    }
-  }
-}
-```
-
-Then check both files and write the bindings:
+Then write the app files and bindings:
 
 ```bash
 npx jazz-tools generate
 ```
 
 If the Better Auth CLI changed tables a version you already shipped has, `jazz-tools generate` asks for a migration
-first: run `npx jazz-tools migrations create --name <name>`, fill in any `"TODO: …"` it leaves, and
+first: run `npx jazz-tools migrations create --name <name>`, fill in any `TODO` it leaves, and
 run `npx jazz-tools generate` again. See [Migrations](/docs/schemas/migrations).
 
 ### Use Jazz as the database
@@ -409,8 +301,8 @@ The adapter is currently aligned with Better Auth `1.7.22`, and accepts later 1.
 Upgrading from Better Auth 1.7.0–1.7.2 changes the auth schema. Before the new version serves traffic:
 
 1. Duplicate `better_auth_account` rows that share a `(providerId, accountId)` pair can only exist in rare setups, where one OIDC `providerId` was used with several issuers under Better Auth 1.7.0–1.7.2. The adapter keeps account identity unique on that pair, so writes to such accounts would fail with `Unique constraint violated`. If you see that error after upgrading, reach out to us rather than deleting rows yourself.
-2. Regenerate the tables in `jazz.app.json` as shown in [Generate the tables](#generate-the-tables). The account table no longer has a required `issuer` column.
-3. Run `npx jazz-tools migrations create --name remove-better-auth-issuer`. Check that the migration it writes in `jazz.app.json` drops the column, `"better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }`, replace any `"TODO: …"` left in it, and run `npx jazz-tools generate`.
+2. Regenerate `schema-better-auth/schema.ts` as shown in [Generate the tables](#generate-the-tables). The account table no longer has a required `issuer` column.
+3. Run `npx jazz-tools migrations create --name remove-better-auth-issuer`. Check that the migration it writes under `migrations/` drops the column, `better_auth_account: { issuer: m.drop.string({ backwardsDefault: "" }) }`, replace any `TODO` left in it, and run `npx jazz-tools generate`.
 4. Deploy the backend with that migration in the same release as the Better Auth upgrade. Against the old schema, sign-ups and account links fail because `issuer` is still required.
 
 The adapter catches the most common mistakes: it throws when it starts if your schema still requires `issuer`, and on the first account write it logs any `(providerId, accountId)` pairs shared by more than one row.

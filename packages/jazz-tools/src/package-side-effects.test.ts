@@ -94,6 +94,14 @@ const REVIEWED_CALLS = new Set([
   "classic-api.ts: classicFunction",
   "classic-api.ts: classicNamespace",
   "dev/app-files.ts: join",
+  // The authoring DSL builds its helpers (comparison helpers, typed
+  // literals, migration builders) as values it exports.
+  "dsl.ts: AddBuilder",
+  "dsl.ts: DropBuilder",
+  "permissions/dsl.ts: comparison",
+  "permissions/dsl.ts: TYPED",
+  // The alpha.64 names in the `schema` namespace, as throwing stubs.
+  "schema-builders.ts: removedSchemaApi",
   "upgrade/index.ts: join",
   "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",

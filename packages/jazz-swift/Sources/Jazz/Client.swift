@@ -20,6 +20,11 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     case conflict(String)
     /// The calling task was cancelled.
     case cancelled
+    /// A `JazzSession`'s client kept past a change of user (or a sign-out):
+    /// get the current one with `session.client()`.
+    case replaced(String)
+    /// A `JazzSession` with no one signed in has no client.
+    case noUser(String)
 
     public var description: String {
         switch self {
@@ -31,6 +36,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .notSupported(let message): return "not supported yet: \(message)"
         case .conflict(let message): return "conflict: \(message)"
         case .cancelled: return "cancelled"
+        case .replaced(let message): return "replaced: \(message)"
+        case .noUser(let message): return "no user: \(message)"
         }
     }
 
@@ -60,6 +67,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         // exhaustive.
         case .NoAccount(_, let message): return JazzError.refused(message)
         case .Unsynced(_, let message): return JazzError.io(message)
+        case .Replaced(let message): return JazzError.replaced(message)
+        case .NoUser(_, let message): return JazzError.noUser(message)
         // A trusted backend client's: a Swift app never opens one.
         case .BundleMismatch(_, _, let message): return JazzError.refused(message)
         }
@@ -481,6 +490,8 @@ final class Listener: SubscriptionListener, @unchecked Sendable {
         case "permission": return .permissionDenied(message)
         case "notSupported": return .notSupported(message)
         case "conflict": return .conflict(message)
+        case "replaced": return .replaced(message)
+        case "noUser": return .noUser(message)
         default: return .io(message)
         }
     }

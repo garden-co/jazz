@@ -1,6 +1,6 @@
 ---
 title: Column Types
-description: "Look up every column type of jazz.app.json and what it maps to in TypeScript and SQL."
+description: "Look up every column type of the schema.ts builders and what it maps to in TypeScript and SQL."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -12,21 +12,17 @@ By default, a string column keeps one value: when two people edit it at the same
 starting point, [one edit wins the whole field](/docs/recipes/local-first/local-first-data-model#concurrent-edits).
 For prose that several people edit at once, opt the column into a text merge strategy instead:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "docs": {
-      "$comment": "title keeps one value: a concurrent edit replaces it whole",
-      "columns": {
-        "title": "string",
-        "body": { "type": "string", "merge": "text" },
-        "notes": { "type": "string", "merge": "markdown" },
-        "page": { "type": "string", "merge": "html" }
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  docs: s.table({
+    title: s.string(), // one value: a concurrent edit replaces it whole
+    body: s.string().merge("text"),
+    notes: s.string().merge("markdown"),
+    page: s.string().merge("html"),
+  }),
+});
 ```
 
 The column still stores and syncs a plain string, so you read and write it like any other string,
@@ -36,11 +32,11 @@ the bottom keeps both changes.
 
 The three formats differ in the pieces the merge works on. When both people replace the same piece, one replacement wins it whole rather than mixing the two:
 
-| Strategy              | Kept whole                                                                                                                                                                                                               |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `"merge": "text"`     | Words, single spaces and punctuation marks. In scripts written without spaces (Chinese, Japanese, Thai and the like) and for emoji, each character. Accents, emoji modifiers and joined emoji stay with their character. |
-| `"merge": "markdown"` | Everything `text` keeps, plus runs of markup characters such as `**` or `##`, list markers like `1.`, and link targets like `](https://example.com)`.                                                                    |
-| `"merge": "html"`     | Everything `text` keeps, plus whole tags (`<p class="intro">`) and entities (`&amp;`).                                                                                                                                   |
+| Strategy            | Kept whole                                                                                                                                                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `merge("text")`     | Words, single spaces and punctuation marks. In scripts written without spaces (Chinese, Japanese, Thai and the like) and for emoji, each character. Accents, emoji modifiers and joined emoji stay with their character. |
+| `merge("markdown")` | Everything `text` keeps, plus runs of markup characters such as `**` or `##`, list markers like `1.`, and link targets like `](https://example.com)`.                                                                    |
+| `merge("html")`     | Everything `text` keeps, plus whole tags (`<p class="intro">`) and entities (`&amp;`).                                                                                                                                   |
 
 There is one finer case. When both people type into the same word at once, each only adding or deleting letters at one spot, that word merges by character and both keep what they typed. If one person changes "color" to "colour" while another changes it to "colors", the result is "colours". This applies to words written only in scripts whose letters stand alone (Latin, Greek, Cyrillic, Chinese, Japanese kana, Hangul and the like). A word in other scripts, or one holding an emoji or a curly apostrophe (`don’t`), is merged whole.
 
@@ -49,7 +45,7 @@ that the merged Markdown or HTML is well formed. See
 [Collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing) for how to use
 one with an editor.
 
-A text merge column can be optional (`{ "type": "string", "merge": "text", "optional": true }`). `null` means no text
+A text merge column can be optional (`s.string().optional().merge("text")`). `null` means no text
 yet, and an empty string is ordinary text:
 
 - Two people adding text to a `null` column at the same time both keep their text, the earlier write
@@ -58,36 +54,28 @@ yet, and an empty string is ordinary text:
   the server later wins the whole value.
 
 <Callout type="warn">
-  `"text"`, `"markdown"` and `"html"` merges are only valid on **string columns**: `jazz-tools
-  generate` refuses them on any other type. (`"counter"` merges an `int`, and `"g-set"` an array.)
+  `merge("text")`, `merge("markdown")` and `merge("html")` are only valid on **string columns**:
+  `jazz-tools generate` refuses them on any other type. (`merge("counter")` merges an `s.int()`, and
+  `merge("g-set")` an `s.array(...)`.)
 </Callout>
 
 ## Transformed Columns
 
 > **Experimental:** Transformed columns are an early API and may change before the stable release.
 
-A transformed column is stored as one type while your app reads and writes it as another. Name a
-transform on the column, declare the transform's two types under the top-level `transforms`, and
-implement it in `jazz.computed.ts`:
+A transformed column is stored as one type while your app reads and writes it as another. Call
+`.transform(name, viewType)` on the column: the column's own type is the stored type, `viewType` is
+the type your app sees. Then implement the transform under that name in `jazz.computed.ts`:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "tasks": {
-      "columns": {
-        "title": "string",
-        "priority": { "type": "int", "transform": "priorityLevel" }
-      }
-    }
-  },
-  "transforms": {
-    "priorityLevel": {
-      "stored": "int",
-      "view": { "enum": ["low", "medium", "high"] }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  tasks: s.table({
+    title: s.string(),
+    priority: s.int().transform("priorityLevel", s.enum("low", "medium", "high")),
+  }),
+});
 ```
 
 ```ts title="jazz.computed.ts"
@@ -102,8 +90,8 @@ export const transforms = {
 ```
 
 `from` converts a stored value into the value your app reads; `to` converts it back before inserts
-and updates. A transform's types carry no `?`: the column says whether it is optional, and `null`
-is passed through. The generated bindings import `jazz.computed.ts`, so a transform the file
+and updates. The view type carries no `.optional()`: the column says whether it is optional, and
+`null` is passed through. The generated bindings import `jazz.computed.ts`, so a transform the file
 declares but doesn't implement (or the other way round) fails to typecheck, and `bindApp` refuses
 it at runtime.
 
@@ -141,28 +129,12 @@ read-only value from several columns, use a computed field.
 ## Computed Columns
 
 A computed field is derived from other columns when a row is read. It has no stored column and is
-read-only. Declare it under the table's `computed`, with its `type` and the columns it is computed
-`from`, and implement it in `jazz.computed.ts`:
+read-only. Declare it among the table's columns with `s.computed(type, from)`, where `from` lists
+the columns it is computed from, and implement it in `jazz.computed.ts`:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "tasks": {
-      "columns": {
-        "title": "string",
-        "score": "int"
-      },
-      "computed": {
-        "priority": {
-          "type": { "enum": ["low", "medium", "high"] },
-          "from": ["score"]
-        }
-      }
-    }
-  }
-}
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/recipes/computed-columns/schema.ts#schema
+</include>
 
 ```ts title="jazz.computed.ts"
 import type { AppComputed } from "./jazz.generated";

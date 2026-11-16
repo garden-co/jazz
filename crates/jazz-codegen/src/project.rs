@@ -138,7 +138,7 @@ pub fn languages_or(
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, the Cargo.toml of a crate depending on jazz-app-support, a Package.swift depending on Jazz (jazz-swift), or a go.mod requiring jazz-go); pass --lang",
+             (a package.json, the Cargo.toml of a crate depending on jazz-app-support, a Package.swift depending on Jazz (jazz-swift), a build.gradle.kts or build.gradle depending on jazz-kotlin, or a go.mod requiring jazz-go); pass --lang",
             shown(&dir),
         ));
     }
@@ -484,6 +484,31 @@ mod tests {
         generate(&dir, &languages(&dir, &[]).unwrap(), false).unwrap();
         generate(&dir, &languages(&dir, &[]).unwrap(), true).unwrap();
         assert!(!dir.join(Lang::Rust.file()).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_kotlin_app_is_found_by_either_build_script() {
+        let dir = dir();
+        let kotlin =
+            || languages(&dir, &[]).map(|l| l.iter().any(|s| s.lang == Lang::Kotlin && s.detected));
+        // Groovy, as an Android app's on Maven Central.
+        std::fs::write(
+            dir.join("build.gradle"),
+            "dependencies {\n    implementation 'tools.jazz:jazz-kotlin-android:2.0.0-alpha.66'\n}\n",
+        )
+        .unwrap();
+        assert_eq!(kotlin(), Ok(true));
+        // A Kotlin DSL script beside it that doesn't depend on jazz-kotlin
+        // doesn't hide it.
+        std::fs::write(
+            dir.join("build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") }\n",
+        )
+        .unwrap();
+        assert_eq!(kotlin(), Ok(true));
+        std::fs::write(dir.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        assert!(kotlin().is_err_and(|e| e.contains("build.gradle.kts or build.gradle")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

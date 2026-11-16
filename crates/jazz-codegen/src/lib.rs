@@ -15,6 +15,7 @@
 pub mod bindings;
 pub mod go;
 mod json_schema;
+pub mod kotlin;
 pub mod migrations;
 pub mod model;
 pub mod names;
@@ -83,6 +84,7 @@ pub enum Lang {
     Rust,
     Swift,
     Go,
+    Kotlin,
 }
 
 impl Lang {
@@ -92,15 +94,22 @@ impl Lang {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
             "swift" => Ok(Lang::Swift),
+            "kotlin" | "kt" => Ok(Lang::Kotlin),
             "go" | "golang" => Ok(Lang::Go),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift, go"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift, kotlin, go"
             ))),
         }
     }
 
     /// Every language `jazz-tools generate` handles, in that order.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Swift, Lang::Go];
+    pub const ALL: &'static [Lang] = &[
+        Lang::TypeScript,
+        Lang::Rust,
+        Lang::Swift,
+        Lang::Kotlin,
+        Lang::Go,
+    ];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -110,6 +119,7 @@ impl Lang {
             Lang::Rust => "Cargo.toml",
             Lang::Swift => "Package.swift",
             Lang::Go => "go.mod",
+            Lang::Kotlin => kotlin::MARKER,
         }
     }
 
@@ -134,6 +144,12 @@ impl Lang {
                             .and_then(|p| p.parent())
                             .is_some_and(|p| p.join(self.marker()).exists()))
             }
+            // Either build script, Kotlin DSL or Groovy.
+            Lang::Kotlin => [marker, dir.join(kotlin::GROOVY_MARKER)]
+                .iter()
+                .any(|script| {
+                    std::fs::read_to_string(script).is_ok_and(|build| kotlin::is_app_build(&build))
+                }),
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
             Lang::Swift => std::fs::read_to_string(marker)
@@ -151,6 +167,7 @@ impl Lang {
             Lang::Rust => rust::FORMAT,
             Lang::Swift => swift::FORMAT,
             Lang::Go => go::FORMAT,
+            Lang::Kotlin => kotlin::FORMAT,
         }
     }
 
@@ -161,6 +178,7 @@ impl Lang {
             Lang::Rust => rust::FILE,
             Lang::Swift => swift::FILE,
             Lang::Go => go::FILE,
+            Lang::Kotlin => kotlin::FILE,
         }
     }
 }
@@ -179,6 +197,7 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
         Lang::Rust => rust::generate(app),
         Lang::Swift => swift::generate(app),
         Lang::Go => go::generate(app),
+        Lang::Kotlin => kotlin::generate(app),
     }
 }
 
