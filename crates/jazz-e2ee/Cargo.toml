@@ -44,7 +44,9 @@ getrandom = { version = "0.3", optional = true, features = ["wasm_js"] }
 [dev-dependencies]
 # Builds this crate's own tests and examples with the conformance kit.
 jazz-e2ee = { path = ".", features = ["conformance"] }
-# Cross-checks only: the library itself never links libsodium.
+# Cross-checks only: the library itself never links libsodium. This version
+# bundles libsodium 1.0.22, the one `crates/jazz/SPEC/fixtures/e2ee-vectors.c`
+# is built against and checks for.
 libsodium-sys-stable = "=1.24.0"
 # Build records outside the writer's rules, to test the reader.
 aead-stream = { version = "0.6.0", default-features = false, features = ["alloc"] }

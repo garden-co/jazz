@@ -9,8 +9,8 @@
 //!
 //! With `H` this mechanism's header and `C` the context, let
 //! `A = len(H) || H || len(C) || C` (u32be lengths). The stream key is
-//! `BLAKE2b-256(key = epoch key, A)` and every record uses `A` as associated
-//! data. The encoding is `H || 19-byte random nonce prefix`, then data
+//! `BLAKE2b-256(key = epoch key, "jazz.e2ee.stream-key.v1" || 00 || A)` and
+//! every record uses `A` as associated data. The encoding is `H || 19-byte random nonce prefix`, then data
 //! records (`u32be length || ciphertext`, 1–65,536 plaintext bytes, flag 0),
 //! then exactly one empty last record (length 16, flag 1). A length of 16
 //! marks the last record; data records are never empty, so they are longer.
@@ -43,6 +43,7 @@ pub const TAG_BYTES: usize = 16;
 /// The last record's length: an empty plaintext and its tag.
 const LAST_RECORD: usize = TAG_BYTES;
 const MAX_CIPHERTEXT: usize = RECORD_BYTES + TAG_BYTES;
+const KEY_LABEL: &[u8] = b"jazz.e2ee.stream-key.v1\0";
 
 /// What both directions derive from the key and context.
 struct Prepared {
@@ -51,10 +52,10 @@ struct Prepared {
     header: Vec<u8>,
 }
 
-fn prepare(key: &[u8; 32], context: &[u8]) -> Result<Prepared> {
-    let header = MECHANISM.header()?;
+fn prepare(mechanism: Mechanism<'_>, key: &[u8; 32], context: &[u8]) -> Result<Prepared> {
+    let header = mechanism.header()?;
     let aad = frame_record(&[&header, context])?;
-    let key = hash::keyed_hash(key, &aad);
+    let key = hash::keyed_hash_parts(key, &[KEY_LABEL, &aad]);
     Ok(Prepared { aad, key, header })
 }
 
@@ -78,11 +79,20 @@ impl StreamEncryptor {
         context: &[u8],
         rng: &mut (impl RandomSource + ?Sized),
     ) -> Result<(Self, Vec<u8>)> {
+        Self::new_as(MECHANISM, key, context, rng)
+    }
+
+    fn new_as(
+        mechanism: Mechanism<'_>,
+        key: &[u8; 32],
+        context: &[u8],
+        rng: &mut (impl RandomSource + ?Sized),
+    ) -> Result<(Self, Vec<u8>)> {
         let Prepared {
             aad,
             key,
             header: mut prefix,
-        } = prepare(key, context)?;
+        } = prepare(mechanism, key, context)?;
         let nonce = random_array::<NONCE_PREFIX_BYTES>(rng)?;
         prefix.extend_from_slice(&nonce);
         let encryptor = Self {
@@ -151,7 +161,11 @@ pub struct StreamDecryptor {
 
 impl StreamDecryptor {
     pub fn new(key: &[u8; 32], context: &[u8]) -> Result<Self> {
-        let Prepared { aad, key, header } = prepare(key, context)?;
+        Self::new_as(MECHANISM, key, context)
+    }
+
+    fn new_as(mechanism: Mechanism<'_>, key: &[u8; 32], context: &[u8]) -> Result<Self> {
+        let Prepared { aad, key, header } = prepare(mechanism, key, context)?;
         Ok(Self {
             key,
             aad,
@@ -317,6 +331,40 @@ impl StreamCipher for Builtin {
 
     fn decryptor(&self, key: &[u8; 32], context: &[u8]) -> Result<Box<dyn StreamReader>> {
         Ok(Box::new(StreamDecryptor::new(key, context)?))
+    }
+
+    fn max_buffered(&self) -> usize {
+        4 + MAX_CIPHERTEXT
+    }
+}
+
+/// This stream cipher's algorithm under another ID or version, for the
+/// conformance kit's header-binding check.
+#[cfg(feature = "conformance")]
+#[derive(Debug, Clone, Copy)]
+pub struct Sibling(pub Mechanism<'static>);
+
+#[cfg(feature = "conformance")]
+impl MechanismImpl for Sibling {
+    fn mechanism(&self) -> Mechanism<'static> {
+        self.0
+    }
+}
+
+#[cfg(feature = "conformance")]
+impl StreamCipher for Sibling {
+    fn encryptor(
+        &self,
+        key: &[u8; 32],
+        context: &[u8],
+        rng: &mut dyn RandomSource,
+    ) -> Result<(Box<dyn StreamWriter>, Vec<u8>)> {
+        let (encryptor, prefix) = StreamEncryptor::new_as(self.0, key, context, rng)?;
+        Ok((Box::new(encryptor), prefix))
+    }
+
+    fn decryptor(&self, key: &[u8; 32], context: &[u8]) -> Result<Box<dyn StreamReader>> {
+        Ok(Box::new(StreamDecryptor::new_as(self.0, key, context)?))
     }
 
     fn max_buffered(&self) -> usize {

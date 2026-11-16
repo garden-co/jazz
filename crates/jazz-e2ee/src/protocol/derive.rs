@@ -11,14 +11,16 @@ use super::domain::AccountDomain;
 use super::error::{ProtocolError, ProtocolResult};
 use super::ids;
 
-const RECOVERY_SEED_LABEL: &[u8] = b"jazz.e2ee.recovery-seed.v1";
-const RECOVERY_GENERATION_SEED_LABEL: &[u8] = b"jazz.e2ee.recovery-generation-seed.v1";
-const RECOVERY_KEM_LABEL: &[u8] = b"jazz.e2ee.recovery-kem-key.v1";
-const RECOVERY_SIGN_LABEL: &[u8] = b"jazz.e2ee.recovery-sign-key.v1";
-const RECOVERY_ROOT_ID_LABEL: &[u8] = b"jazz.e2ee.recovery-root-id.v1";
-const GROUP_KEM_LABEL: &[u8] = b"jazz.e2ee.group-kem-key.v1";
-const GROUP_SIGN_LABEL: &[u8] = b"jazz.e2ee.group-sign-key.v1";
-const COMMITMENT_LABEL: &[u8] = b"jazz.e2ee.recipient-commitment.v1";
+// Every keyed derivation hashes `UTF8(label) ‖ 0x00 ‖ input` (the input may
+// be empty), the same style as the mechanisms' key labels.
+const RECOVERY_SEED_LABEL: &[u8] = b"jazz.e2ee.recovery-seed.v1\0";
+const RECOVERY_GENERATION_SEED_LABEL: &[u8] = b"jazz.e2ee.recovery-generation-seed.v1\0";
+const RECOVERY_KEM_LABEL: &[u8] = b"jazz.e2ee.recovery-kem-key.v1\0";
+const RECOVERY_SIGN_LABEL: &[u8] = b"jazz.e2ee.recovery-sign-key.v1\0";
+const RECOVERY_ROOT_ID_LABEL: &[u8] = b"jazz.e2ee.recovery-root-id.v1\0";
+const GROUP_KEM_LABEL: &[u8] = b"jazz.e2ee.group-kem-key.v1\0";
+const GROUP_SIGN_LABEL: &[u8] = b"jazz.e2ee.group-sign-key.v1\0";
+const COMMITMENT_LABEL: &[u8] = b"jazz.e2ee.recipient-commitment.v1\0";
 const LOCAL_DEVICE_CHECK_LABEL: &str = "jazz.e2ee.local-device-check.v1\0";
 const RECOVERY_MATERIAL_CHECK_LABEL: &str = "jazz.e2ee.recovery-material-check.v1\0";
 
@@ -125,10 +127,10 @@ impl RecoveryKeys {
     /// UTF8(decimal generation))` above it, so a reset account can register
     /// a fresh root from the same secret. From the seed, the sealing pair is
     /// HPKE `DeriveKeyPair` of `BLAKE2b-256(key = seed,
-    /// "jazz.e2ee.recovery-kem-key.v1")`, the signing seed
-    /// `BLAKE2b-256(key = seed, "jazz.e2ee.recovery-sign-key.v1")`, and the
+    /// "jazz.e2ee.recovery-kem-key.v1" ‖ 00)`, the signing seed
+    /// `BLAKE2b-256(key = seed, "jazz.e2ee.recovery-sign-key.v1" ‖ 00)`, and the
     /// root ID the first 16 bytes of `BLAKE2b-256(key = seed,
-    /// "jazz.e2ee.recovery-root-id.v1")` as a version 8 UUID.
+    /// "jazz.e2ee.recovery-root-id.v1" ‖ 00)` as a version 8 UUID.
     pub fn derive(
         secret: &RecoverySecret,
         account_domain: &AccountDomain,
@@ -136,13 +138,12 @@ impl RecoveryKeys {
     ) -> ProtocolResult<Self> {
         let domain = account_domain.as_str().as_bytes();
         let seed = if generation == 0 {
-            hash::keyed_hash_parts(secret.as_bytes(), &[RECOVERY_SEED_LABEL, &[0], domain])
+            hash::keyed_hash_parts(secret.as_bytes(), &[RECOVERY_SEED_LABEL, domain])
         } else {
             hash::keyed_hash_parts(
                 secret.as_bytes(),
                 &[
                     RECOVERY_GENERATION_SEED_LABEL,
-                    &[0],
                     domain,
                     &[0],
                     generation.to_string().as_bytes(),
@@ -163,14 +164,23 @@ impl RecoveryKeys {
 }
 
 /// A group epoch's key pairs (§3.1), derived from its epoch key with the
-/// mechanisms the group's public-key record names.
+/// mechanisms the group's public-key record names. Each derivation binds its
+/// mechanism's header `H`: `BLAKE2b-256(key = epoch key,
+/// "jazz.e2ee.group-kem-key.v1" ‖ 00 ‖ H(sealer))` and
+/// `BLAKE2b-256(key = epoch key, "jazz.e2ee.group-sign-key.v1" ‖ 00 ‖
+/// H(signer))`, so one epoch key never yields the same input for two
+/// mechanisms.
 pub fn group_epoch_key_pairs(
     sealer: &dyn KeySealer,
     signer: &dyn Signer,
     epoch_key: &[u8; 32],
 ) -> ProtocolResult<(KeyPair, KeyPair)> {
-    let kem_ikm = hash::keyed_hash(epoch_key, GROUP_KEM_LABEL);
-    let sign_seed = hash::keyed_hash(epoch_key, GROUP_SIGN_LABEL);
+    let kem_ikm =
+        hash::keyed_hash_parts(epoch_key, &[GROUP_KEM_LABEL, &sealer.mechanism().header()?]);
+    let sign_seed = hash::keyed_hash_parts(
+        epoch_key,
+        &[GROUP_SIGN_LABEL, &signer.mechanism().header()?],
+    );
     Ok((
         sealer.derive_key_pair(&kem_ikm[..])?,
         signer.derive_key_pair(&sign_seed[..])?,
@@ -186,10 +196,7 @@ pub fn recipient_commitment(
     revision: &[u8],
 ) -> ProtocolResult<[u8; 32]> {
     let framed = frame_record(&[membership, revision])?;
-    Ok(*hash::keyed_hash_parts(
-        salt,
-        &[COMMITMENT_LABEL, &[0], &framed],
-    ))
+    Ok(*hash::keyed_hash_parts(salt, &[COMMITMENT_LABEL, &framed]))
 }
 
 /// The bytes a new local device seals and signs to check its key pairs

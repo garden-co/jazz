@@ -1219,26 +1219,29 @@ UTF8("jazz.e2ee.recovery-generation-seed.v1") ‖ 0x00 ‖ UTF8(Dₐ) ‖ 0x00 �
 UTF8(decimal g))` (`Dₐ` is canonical JSON and contains no `0x00`). So the
   same secret gives a fresh, registrable root after each reset, while the
   roots of earlier generations stay invalid (§2.11). Then the sealing key pair is HPKE `DeriveKeyPair` of
-  `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-kem-key.v1"))`,
-  the signing key pair's Ed25519 seed is
-  `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-sign-key.v1"))`,
-  and the root ID is the first 16 bytes of
-  `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-root-id.v1"))`
+  `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-kem-key.v1") ‖
+0x00)`, the signing key pair's Ed25519 seed is
+  `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-sign-key.v1") ‖
+0x00)`, and the root ID is the first 16 bytes of
+  `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-root-id.v1") ‖
+0x00)`
   with the version and variant bits set as for space IDs (§3.2). The labels
   are bound to the current mechanisms (`jazz.wrap.hpke-x25519` v1 and
   `jazz.sodium.sign` v1); a later mechanism defines its own labels and gives a
-  second root, registered alongside. The `0x00` separates the label from the
+  second root, registered alongside. Every keyed derivation of this
+  protocol and of the built-in mechanisms hashes `UTF8(label) ‖ 0x00 ‖ input`,
+  the input possibly empty; the `0x00` separates the label from the
   domain, and including `Dₐ` gives different roots per application and
   environment from one secret. The derivation is pure: the same `s` and
   account always give the same root. Fixture: `s` = bytes `00`–`1f` and
   `Dₐ = ["0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f","prod","alice"]` give root ID
-  `032f45bb-7f73-8d44-8896-7742cf0aafa6`, sealing public key
-  `9519969c333c52d91aee8627c00a9cb2b1e879b985a451cdcfc57c93dfbf2c06` and
+  `a4c5c670-5336-81dc-a21b-a455befbf096`, sealing public key
+  `4cb2da93696a09b991912b3c49e0a1fdd7278948be5c6d6cbff34239236bde78` and
   signing public key
-  `a90b937a1cae643ec7a3d1c7b96264f6ff761bed0d44fdef086be8a350211cf7`; as
+  `16e6857ea0aa9e666c087026136fa793458b465150e5ba75213017edbd07466e`; as
   text, `s` is `jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8`.
-  The same `s` and `Dₐ` give root ID `6eee5902-eeee-87d2-befc-f93f8ef1d5bc`
-  at generation 1 and `675d3f81-0e2f-87aa-b146-cb2e632bff7f` at
+  The same `s` and `Dₐ` give root ID `243d5113-0e7a-8965-b199-9c3e5db34384`
+  at generation 1 and `0a84cdb6-4329-8e28-a6a5-e21185b04763` at
   generation 2.
 - **Register.** After bootstrap (§2.3), and whenever the recovery secret is
   first available on an active device, the SDK registers the root derived
@@ -1535,10 +1538,13 @@ had no governing row at all.)
 
 **Epoch key pairs.** For group epoch key `K`, the sealing key pair is HPKE
 `DeriveKeyPair` of the input keying material
-`BLAKE2b-256(key = K, input = UTF8("jazz.e2ee.group-kem-key.v1"))`; the
-signing key pair's seed is
-`BLAKE2b-256(key = K, input = UTF8("jazz.e2ee.group-sign-key.v1"))` as an
-Ed25519 seed. Every holder of `K` can derive both. With each new epoch (root
+`BLAKE2b-256(key = K, input = UTF8("jazz.e2ee.group-kem-key.v1") ‖ 0x00 ‖
+H(sealing mechanism))`; the signing key pair's seed is
+`BLAKE2b-256(key = K, input = UTF8("jazz.e2ee.group-sign-key.v1") ‖ 0x00 ‖
+H(signing mechanism))` as an Ed25519 seed, where `H(m)` is the common
+envelope header of mechanism `m` (its ID and version, no payload). Binding
+the mechanism means one epoch key never gives two mechanisms the same input
+keying material. Every holder of `K` can derive both. With each new epoch (root
 or successor) the author publishes one `__e2ee_group_public_keys` row, in the
 same transaction (R16), carrying one sealing and one signing key of the
 mechanisms the configuration selects at that rotation (§0). The public-key
@@ -3073,7 +3079,9 @@ Non-goals and explicit limits:
 - **Metadata is visible to the server and to readers permitted by policy:**
   which rows, spaces, groups and devices exist; row IDs, relationships, space
   coordinates, authorship and timing; ciphertext sizes; key and membership
-  records; equality-token repetition within one epoch's domain. Group
+  records; equality tokens, which show the server how many rows of a column
+  share each value within one space epoch, and which values queries look
+  for (but not the values). Group
   public-key records are readable by every signed-in session: they reveal
   that a random group ID exists, when it rotates and which account (a manager)
   published each epoch, but not which application row it belongs to or its

@@ -224,8 +224,8 @@ pub trait KeySealer: MechanismImpl {
 
 /// Signatures over canonical record bytes.
 pub trait Signer: MechanismImpl {
-    /// Deterministically derives a key pair from a seed of at least 32
-    /// bytes.
+    /// Deterministically derives a key pair from a seed of exactly 32 bytes;
+    /// any other length is [`Error::InvalidInput`].
     fn derive_key_pair(&self, seed: &[u8]) -> Result<KeyPair>;
 
     /// A fresh key pair from a 32-byte random seed.

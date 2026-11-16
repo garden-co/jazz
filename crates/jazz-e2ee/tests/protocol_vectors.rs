@@ -250,15 +250,14 @@ fn recovery_derivation() {
     let seed = sodium_keyed(
         &secret_bytes,
         &[
-            b"jazz.e2ee.recovery-seed.v1".as_slice(),
-            &[0],
+            b"jazz.e2ee.recovery-seed.v1\0".as_slice(),
             account_domain.as_str().as_bytes(),
         ]
         .concat(),
     );
-    let kem_ikm = sodium_keyed(&seed, b"jazz.e2ee.recovery-kem-key.v1");
-    let sign_seed = sodium_keyed(&seed, b"jazz.e2ee.recovery-sign-key.v1");
-    let root_id = sodium_keyed(&seed, b"jazz.e2ee.recovery-root-id.v1");
+    let kem_ikm = sodium_keyed(&seed, b"jazz.e2ee.recovery-kem-key.v1\0");
+    let sign_seed = sodium_keyed(&seed, b"jazz.e2ee.recovery-sign-key.v1\0");
+    let root_id = sodium_keyed(&seed, b"jazz.e2ee.recovery-root-id.v1\0");
     assert_eq!(keys.root_id, v8(&root_id));
     assert_eq!(keys.signing.public.bytes, sodium_sign_public(&sign_seed));
     assert_eq!(
@@ -268,14 +267,14 @@ fn recovery_derivation() {
     assert_eq!(keys.sealing.public.mechanism, key_seal::MECHANISM);
     assert_eq!(keys.signing.public.mechanism, signature::MECHANISM);
 
-    assert_eq!(keys.root_id, "032f45bb-7f73-8d44-8896-7742cf0aafa6");
+    assert_eq!(keys.root_id, "a4c5c670-5336-81dc-a21b-a455befbf096");
     assert_eq!(
         to_hex(&keys.sealing.public.bytes),
-        "9519969c333c52d91aee8627c00a9cb2b1e879b985a451cdcfc57c93dfbf2c06"
+        "4cb2da93696a09b991912b3c49e0a1fdd7278948be5c6d6cbff34239236bde78"
     );
     assert_eq!(
         to_hex(&keys.signing.public.bytes),
-        "a90b937a1cae643ec7a3d1c7b96264f6ff761bed0d44fdef086be8a350211cf7"
+        "16e6857ea0aa9e666c087026136fa793458b465150e5ba75213017edbd07466e"
     );
 
     // Another account or environment gives another root from one secret.
@@ -314,8 +313,22 @@ fn group_keys_and_commitment() {
     let epoch_key: [u8; 32] = core::array::from_fn(|i| 0x20 + i as u8);
     let (sealing, signing) =
         derive::group_epoch_key_pairs(&key_seal::Builtin, &signature::Builtin, &epoch_key).unwrap();
-    let kem_ikm = sodium_keyed(&epoch_key, b"jazz.e2ee.group-kem-key.v1");
-    let sign_seed = sodium_keyed(&epoch_key, b"jazz.e2ee.group-sign-key.v1");
+    let kem_ikm = sodium_keyed(
+        &epoch_key,
+        &[
+            b"jazz.e2ee.group-kem-key.v1\0".as_slice(),
+            &env("jazz.wrap.hpke-x25519", &[]),
+        ]
+        .concat(),
+    );
+    let sign_seed = sodium_keyed(
+        &epoch_key,
+        &[
+            b"jazz.e2ee.group-sign-key.v1\0".as_slice(),
+            &env("jazz.sodium.sign", &[]),
+        ]
+        .concat(),
+    );
     assert_eq!(
         sealing.public,
         key_seal::Builtin.derive_key_pair(&kem_ikm).unwrap().public
@@ -323,11 +336,11 @@ fn group_keys_and_commitment() {
     assert_eq!(signing.public.bytes, sodium_sign_public(&sign_seed));
     assert_eq!(
         to_hex(&sealing.public.bytes),
-        "9e720c5213ceee89f6b305578881ed458b4289dbf98a7b6343701188abcb2766"
+        "9101836ab4383917d38ffc10bbdd92fdce579c2aa058e1027b7b5a093421bd57"
     );
     assert_eq!(
         to_hex(&signing.public.bytes),
-        "922841a38106f07dd94a9dd3b060fd7891b185f835432971e1bee07c2a96c04c"
+        "9d89b966d907e4bb3c54c2baa2b8aa9c4979a5d056440e3aad2cdc48bf62310c"
     );
 
     let salt: [u8; 32] = core::array::from_fn(|i| i as u8);
@@ -339,12 +352,7 @@ fn group_keys_and_commitment() {
         commitment,
         sodium_keyed(
             &salt,
-            &[
-                b"jazz.e2ee.recipient-commitment.v1".as_slice(),
-                &[0],
-                &framed
-            ]
-            .concat()
+            &[b"jazz.e2ee.recipient-commitment.v1\0".as_slice(), &framed].concat()
         )
     );
     assert_eq!(
@@ -1840,15 +1848,14 @@ fn recovery_derivation_after_reset() {
     let gen0 = RecoveryKeys::derive(&secret, &account_domain, 0).unwrap();
     let mut seen = vec![gen0.root_id.clone()];
     for (generation, pinned) in [
-        (1u64, "6eee5902-eeee-87d2-befc-f93f8ef1d5bc"),
-        (2u64, "675d3f81-0e2f-87aa-b146-cb2e632bff7f"),
+        (1u64, "243d5113-0e7a-8965-b199-9c3e5db34384"),
+        (2u64, "0a84cdb6-4329-8e28-a6a5-e21185b04763"),
     ] {
         let keys = RecoveryKeys::derive(&secret, &account_domain, generation).unwrap();
         let seed = sodium_keyed(
             &secret_bytes,
             &[
-                b"jazz.e2ee.recovery-generation-seed.v1".as_slice(),
-                &[0],
+                b"jazz.e2ee.recovery-generation-seed.v1\0".as_slice(),
                 account_domain.as_str().as_bytes(),
                 &[0],
                 generation.to_string().as_bytes(),
@@ -1857,16 +1864,16 @@ fn recovery_derivation_after_reset() {
         );
         assert_eq!(
             keys.root_id,
-            v8(&sodium_keyed(&seed, b"jazz.e2ee.recovery-root-id.v1"))
+            v8(&sodium_keyed(&seed, b"jazz.e2ee.recovery-root-id.v1\0"))
         );
         assert_eq!(
             keys.signing.public.bytes,
-            sodium_sign_public(&sodium_keyed(&seed, b"jazz.e2ee.recovery-sign-key.v1"))
+            sodium_sign_public(&sodium_keyed(&seed, b"jazz.e2ee.recovery-sign-key.v1\0"))
         );
         assert_eq!(
             keys.sealing.public,
             key_seal::Builtin
-                .derive_key_pair(&sodium_keyed(&seed, b"jazz.e2ee.recovery-kem-key.v1"))
+                .derive_key_pair(&sodium_keyed(&seed, b"jazz.e2ee.recovery-kem-key.v1\0"))
                 .unwrap()
                 .public
         );

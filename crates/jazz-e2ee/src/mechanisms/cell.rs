@@ -29,21 +29,40 @@ pub fn encrypt(
     plaintext: &[u8],
     rng: &mut (impl RandomSource + ?Sized),
 ) -> Result<Vec<u8>> {
-    let aad = concat(&[&MECHANISM.header()?, context]);
+    encrypt_as(MECHANISM, key, context, plaintext, rng)
+}
+
+fn encrypt_as(
+    mechanism: Mechanism<'_>,
+    key: &[u8; 32],
+    context: &[u8],
+    plaintext: &[u8],
+    rng: &mut (impl RandomSource + ?Sized),
+) -> Result<Vec<u8>> {
+    let aad = concat(&[&mechanism.header()?, context]);
     let derived = derive(key, &aad);
     let nonce = random_array::<{ aead::NONCE_BYTES }>(rng)?;
     let ciphertext = aead::encrypt(&derived, &nonce, &aad, plaintext)?;
-    envelope::encode(MECHANISM, &concat(&[&nonce, &ciphertext]))
+    envelope::encode(mechanism, &concat(&[&nonce, &ciphertext]))
 }
 
 /// Authenticates the envelope against `key` and `context`, then returns its
 /// plaintext.
 pub fn decrypt(key: &[u8; 32], context: &[u8], envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    let payload = envelope::decode(MECHANISM, envelope)?;
+    decrypt_as(MECHANISM, key, context, envelope)
+}
+
+fn decrypt_as(
+    mechanism: Mechanism<'_>,
+    key: &[u8; 32],
+    context: &[u8],
+    envelope: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    let payload = envelope::decode(mechanism, envelope)?;
     if payload.len() < MIN_PAYLOAD {
         return Err(Error::InvalidCiphertext);
     }
-    let aad = concat(&[&MECHANISM.header()?, context]);
+    let aad = concat(&[&mechanism.header()?, context]);
     let derived = derive(key, &aad);
     let (nonce, ciphertext) = payload.split_at(aead::NONCE_BYTES);
     aead::decrypt(
@@ -82,5 +101,40 @@ impl CellCipher for Builtin {
         envelope: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>> {
         decrypt(key, context, envelope)
+    }
+}
+
+/// This cell cipher's algorithm under another ID or version, for the
+/// conformance kit's header-binding check.
+#[cfg(feature = "conformance")]
+#[derive(Debug, Clone, Copy)]
+pub struct Sibling(pub Mechanism<'static>);
+
+#[cfg(feature = "conformance")]
+impl MechanismImpl for Sibling {
+    fn mechanism(&self) -> Mechanism<'static> {
+        self.0
+    }
+}
+
+#[cfg(feature = "conformance")]
+impl CellCipher for Sibling {
+    fn encrypt(
+        &self,
+        key: &[u8; 32],
+        context: &[u8],
+        plaintext: &[u8],
+        rng: &mut dyn RandomSource,
+    ) -> Result<Vec<u8>> {
+        encrypt_as(self.0, key, context, plaintext, rng)
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8; 32],
+        context: &[u8],
+        envelope: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        decrypt_as(self.0, key, context, envelope)
     }
 }

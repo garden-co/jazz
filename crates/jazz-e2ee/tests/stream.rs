@@ -35,7 +35,7 @@ fn decrypt_in_chunks(encoded: &[u8], chunk: usize) -> Result<Vec<u8>, Error> {
 fn custom(records: &[(&[u8], u32, bool)]) -> Vec<u8> {
     let header = stream::MECHANISM.header().unwrap();
     let aad = frame_record(&[&header, CONTEXT]).unwrap();
-    let derived = hash::keyed_hash(&KEY, &aad);
+    let derived = hash::keyed_hash_parts(&KEY, &[b"jazz.e2ee.stream-key.v1\0", &aad]);
     let prefix = [5u8; NONCE_PREFIX_BYTES];
     let stream = StreamBE32::<XChaCha20Poly1305>::new((&*derived).into(), (&prefix).into());
     let mut out = [header.as_slice(), &prefix].concat();

@@ -20,7 +20,7 @@ use jazz_e2ee::records::{self, CellIdentity};
 use jazz_e2ee::registry::Registry;
 use jazz_e2ee::{Error, RandomSource, Result, Zeroizing};
 
-const STREAM_HELLO: &str = "4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015f379dad1393c199f0448eb4c646e414886a6bfdae500000010a3a6e6facd9827eb4d173bb309517cb0";
+const STREAM_HELLO: &str = "4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015af44ecab95efa19a05ffd9d05ad84a354cffbed12a00000010bb21e362d42391ffb6905ea1550acd09";
 
 #[test]
 fn builtins_conform_with_the_spec_vectors() {
@@ -333,6 +333,124 @@ fn readers_route_by_envelope_and_writers_by_config() {
         Registry::builtin()
             .select(&MechanismConfig::default())
             .is_ok()
+    );
+}
+
+/// Every built-in mechanism authenticates its own header: its output
+/// relabelled to the same algorithm under a sibling version or ID decodes
+/// but fails authentication.
+#[test]
+fn builtins_authenticate_their_headers() {
+    let sibling = cell::Sibling(Mechanism::new(
+        cell::MECHANISM.id,
+        cell::MECHANISM.version + 1,
+    ));
+    conformance::check_cell_header_binding(&cell::Builtin, &sibling).unwrap();
+    conformance::check_cell_header_binding(
+        &cell::Builtin,
+        &cell::Sibling(Mechanism::new("jazz.sodium.cell-sibling", 1)),
+    )
+    .unwrap();
+    conformance::check_key_wrapper_header_binding(
+        &key_envelope::Builtin,
+        &key_envelope::Sibling(Mechanism::new(key_envelope::MECHANISM.id, 2)),
+    )
+    .unwrap();
+    conformance::check_key_sealer_header_binding(
+        &key_seal::Builtin,
+        &key_seal::Sibling(Mechanism::new("jazz.wrap.hpke-x25519-sibling", 1)),
+    )
+    .unwrap();
+    conformance::check_signer_header_binding(
+        &signature::Builtin,
+        &signature::Sibling(Mechanism::new(signature::MECHANISM.id, 2)),
+    )
+    .unwrap();
+    conformance::check_equality_tagger_header_binding(
+        &equality::Builtin,
+        &equality::Sibling(Mechanism::new(equality::MECHANISM.id, 2)),
+    )
+    .unwrap();
+    conformance::check_stream_cipher_header_binding(
+        &stream::Builtin,
+        &stream::Sibling(Mechanism::new(stream::MECHANISM.id, 2)),
+    )
+    .unwrap();
+    // A mechanism that ignores its header fails the check.
+    assert!(
+        conformance::check_cell_header_binding(
+            &cell::Builtin,
+            &RoutedOnly(Mechanism::new(cell::MECHANISM.id, 2)),
+        )
+        .is_err()
+    );
+}
+
+/// The built-in cell algorithm that checks its header for routing only and
+/// authenticates the built-in's header instead of its own.
+struct RoutedOnly(Mechanism<'static>);
+
+impl MechanismImpl for RoutedOnly {
+    fn mechanism(&self) -> Mechanism<'static> {
+        self.0
+    }
+}
+
+impl CellCipher for RoutedOnly {
+    fn encrypt(
+        &self,
+        key: &[u8; 32],
+        context: &[u8],
+        plaintext: &[u8],
+        rng: &mut dyn RandomSource,
+    ) -> Result<Vec<u8>> {
+        let sealed = cell::encrypt(key, context, plaintext, rng)?;
+        let header = cell::MECHANISM.header()?.len();
+        jazz_e2ee::envelope::encode(self.0, &sealed[header..])
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8; 32],
+        context: &[u8],
+        envelope: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let payload = jazz_e2ee::envelope::decode(self.0, envelope)?;
+        cell::decrypt(
+            key,
+            context,
+            &jazz_e2ee::envelope::encode(cell::MECHANISM, payload)?,
+        )
+    }
+}
+
+/// A header whose ID no mechanism can have is malformed, not another
+/// mechanism's.
+#[test]
+fn malformed_header_ids_are_invalid() {
+    let registry = Registry::builtin();
+    let mut bad = cell::MECHANISM.header().unwrap();
+    bad[6] = b'J';
+    bad.extend_from_slice(&[0; 40]);
+    assert_eq!(
+        registry.cell_cipher_for(&bad).err(),
+        Some(Error::InvalidCiphertext)
+    );
+    let mut zero = cell::MECHANISM.header().unwrap();
+    let at = zero.len() - 4;
+    zero[at..].copy_from_slice(&[0; 4]);
+    zero.extend_from_slice(&[0; 40]);
+    assert_eq!(
+        registry.cell_cipher_for(&zero).err(),
+        Some(Error::InvalidCiphertext)
+    );
+    let mut other = cell::MECHANISM.header().unwrap();
+    let at = other.len() - 1;
+    other[at] = 9;
+    other.extend_from_slice(&[0; 40]);
+    assert_eq!(
+        registry.cell_cipher_for(&other).err(),
+        Some(Error::UnsupportedFormat)
     );
 }
 

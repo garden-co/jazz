@@ -74,6 +74,8 @@ pub fn decode<'b>(mechanism: Mechanism<'_>, envelope: &'b [u8]) -> Result<&'b [u
 }
 
 /// Splits any well-formed envelope into its ID bytes, version and payload.
+/// A header that is malformed, including an ID outside `[a-z0-9.-]` or
+/// version 0, is [`Error::InvalidCiphertext`].
 pub(crate) fn parse(envelope: &[u8]) -> Result<(&[u8], u32, &[u8])> {
     if envelope.len() < 11 || envelope[..4] != MAGIC || envelope[4] != FORMAT {
         return Err(Error::InvalidCiphertext);
@@ -88,5 +90,14 @@ pub(crate) fn parse(envelope: &[u8]) -> Result<(&[u8], u32, &[u8])> {
             .try_into()
             .expect("four version bytes"),
     );
+    // A header whose ID or version no mechanism can have is malformed, not
+    // another mechanism's.
+    let valid = id
+        .iter()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
+        && version != 0;
+    if !valid {
+        return Err(Error::InvalidCiphertext);
+    }
     Ok((id, version, &envelope[10 + id_len..]))
 }

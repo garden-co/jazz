@@ -302,7 +302,10 @@ fn equality_vector() {
     let input = frame_record(&[&header, &context()]).unwrap();
     assert_eq!(to_hex(&input), v::EQUALITY_CONTEXT);
     assert_eq!(
-        to_hex(&*hash::keyed_hash(&root(), &input)),
+        to_hex(&*hash::keyed_hash_parts(
+            &root(),
+            &[b"jazz.e2ee.equality-key.v1\0", &input]
+        )),
         v::EQUALITY_DERIVED
     );
     let token = equality::token(&root(), &context(), &hex(v::PLAINTEXT)).unwrap();
@@ -334,14 +337,20 @@ fn equality_vector() {
 fn stream_vector() {
     let header = stream::MECHANISM.header().unwrap();
     let aad = frame_record(&[&header, &context()]).unwrap();
-    assert_eq!(to_hex(&*hash::keyed_hash(&root(), &aad)), v::STREAM_DERIVED);
+    assert_eq!(
+        to_hex(&*hash::keyed_hash_parts(
+            &root(),
+            &[b"jazz.e2ee.stream-key.v1\0", &aad]
+        )),
+        v::STREAM_DERIVED
+    );
     let encoded = hex(v::STREAM);
     let decrypted = stream::decrypt(&root(), &context(), &encoded).unwrap();
     assert_eq!(*decrypted, b"hellohello");
     // The fixture's records, rebuilt with RustCrypto's STREAM directly.
     let prefix: [u8; 19] = encoded[header.len()..header.len() + 19].try_into().unwrap();
     assert_eq!(prefix, hex(v::NONCE)[..19]);
-    let derived = hash::keyed_hash(&root(), &aad);
+    let derived = hash::keyed_hash_parts(&root(), &[b"jazz.e2ee.stream-key.v1\0", &aad]);
     let mut rebuilt = encoded[..header.len() + 19].to_vec();
     let mut writer = aead_stream::EncryptorBE32::<chacha20poly1305::XChaCha20Poly1305>::new(
         (&*derived).into(),
@@ -383,7 +392,7 @@ fn stream_vector() {
 }
 
 /// The crate's writer output for `hello`, pinned in `E2EE_LARGE_VALUE_FORMAT.md`.
-const STREAM_HELLO: &str = "4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015f379dad1393c199f0448eb4c646e414886a6bfdae500000010a3a6e6facd9827eb4d173bb309517cb0";
+const STREAM_HELLO: &str = "4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015af44ecab95efa19a05ffd9d05ad84a354cffbed12a00000010bb21e362d42391ffb6905ea1550acd09";
 
 #[test]
 fn every_byte_of_each_vector_is_authenticated() {
@@ -490,9 +499,9 @@ const IDENTITY: CellIdentity<'static> = CellIdentity {
     scope_id: "00000000-0000-0000-0000-000000000001",
     identifier: "00000000-0000-0000-0000-000000000002",
     table_id: "00000000-0000-0000-0000-000000000003",
-    row_id: "00000000-0000-0000-0000-000000000004",
+    row_id: "00000000-0000-7000-8000-000000000004",
     column_id: "00000000-0000-0000-0000-000000000005",
-    epoch_id: "00000000-0000-0000-0000-000000000006",
+    epoch_id: "00000000-0000-4000-8000-000000000006",
 };
 const TEXT_TYPE: &[u8] = br#"{"column_type":{"type":"Text"},"nullable":false}"#;
 const BYTES_TYPE: &[u8] = br#"{"column_type":{"type":"Bytea"},"nullable":false}"#;
@@ -571,13 +580,11 @@ fn record_contexts() {
         ]
     );
     assert_eq!(parts[1], TEXT_TYPE);
-    let corpus = Mechanism::new("test.corpus", 1);
-    let stream_context = records::stream_context(&IDENTITY, BYTES_TYPE, corpus).unwrap();
+    let stream_context = records::stream_context(&IDENTITY, BYTES_TYPE).unwrap();
     let parts = frames(&stream_context);
-    assert_eq!(parts[1], corpus.header().unwrap());
-    let inner = frames(&parts[0]);
-    assert_eq!(context_fields(&inner[0])[1], "jazz.e2ee.stream-record.v1");
-    assert_eq!(inner[1], BYTES_TYPE);
+    assert_eq!(parts.len(), 2);
+    assert_eq!(context_fields(&parts[0])[1], "jazz.e2ee.stream-record.v1");
+    assert_eq!(parts[1], BYTES_TYPE);
     let equality = records::EqualityIdentity {
         application: IDENTITY.application,
         scope_id: IDENTITY.scope_id,
@@ -645,7 +652,7 @@ fn stored_values_round_trip() {
         Err(Error::InvalidCiphertext)
     );
     let other_row = CellIdentity {
-        row_id: "00000000-0000-0000-0000-000000000009",
+        row_id: "00000000-0000-7000-8000-000000000009",
         ..IDENTITY
     };
     assert_eq!(
@@ -653,7 +660,7 @@ fn stored_values_round_trip() {
         Err(Error::InvalidCiphertext)
     );
     let other_epoch = CellIdentity {
-        epoch_id: "00000000-0000-0000-0000-000000000009",
+        epoch_id: "00000000-0000-4000-8000-000000000009",
         ..IDENTITY
     };
     assert_eq!(
@@ -692,7 +699,7 @@ fn stored_values_round_trip() {
     assert_eq!(
         *stream::decrypt(
             &key,
-            &records::stream_context(&IDENTITY, BYTES_TYPE, stream::MECHANISM).unwrap(),
+            &records::stream_context(&IDENTITY, BYTES_TYPE).unwrap(),
             encoding
         )
         .unwrap(),
@@ -752,4 +759,73 @@ fn spec_wrapper_examples() {
     let record = records::read_stored_record(&cell).unwrap();
     assert_eq!(record.kind, records::RecordKind::Cell);
     assert_eq!(record.ciphertext, test_envelope);
+}
+
+/// The equality value encoding `V` and its tokens: tokens match Jazz's
+/// plaintext equality (every NaN alike, `-0.0` equal to `0.0`, text by exact
+/// bytes with no Unicode normalisation), and null differs from every value.
+#[test]
+fn equality_values() {
+    use records::{EqualityValue as E, equality_value};
+    let cases: [(E<'_>, &str); 12] = [
+        (E::Null, "00"),
+        (E::Bool(false), "0100"),
+        (E::Bool(true), "0101"),
+        (E::Int(-2), "01fffffffffffffffe"),
+        (E::Timestamp(1_800_000_000_000), "01000001a3185c5000"),
+        (E::Float(1.5), "013ff8000000000000"),
+        (E::Float(0.0), "010000000000000000"),
+        (E::Float(-0.0), "010000000000000000"),
+        (E::Float(f64::NAN), "017ff8000000000000"),
+        (
+            E::Float(f64::from_bits(0xfff0_0000_0000_0001)),
+            "017ff8000000000000",
+        ),
+        (E::Text(""), "01"),
+        (E::Text("é"), "01c3a9"),
+    ];
+    for (value, encoded) in cases {
+        assert_eq!(to_hex(&equality_value(&value)), encoded, "{value:?}");
+    }
+    assert_eq!(to_hex(&equality_value(&E::Text("e\u{301}"))), "0165cc81");
+    assert_eq!(to_hex(&equality_value(&E::Bytes(&[0, 1]))), "010001");
+    assert_eq!(
+        to_hex(&equality_value(&E::Uuid([0xab; 16]))),
+        "01abababababababababababababababab"
+    );
+
+    let identity = records::EqualityIdentity {
+        application: IDENTITY.application,
+        scope_id: IDENTITY.scope_id,
+        identifier: IDENTITY.identifier,
+        table_id: IDENTITY.table_id,
+        column_id: IDENTITY.column_id,
+        epoch_id: IDENTITY.epoch_id,
+    };
+    let float_type = br#"{"column_type":{"type":"Double"},"nullable":true}"#;
+    let token = |value: E<'_>| {
+        to_hex(
+            &records::equality_token_of(&equality::Builtin, &root(), &identity, float_type, &value)
+                .unwrap(),
+        )
+    };
+    assert_eq!(token(E::Float(0.0)), token(E::Float(-0.0)));
+    assert_eq!(token(E::Float(f64::NAN)), token(E::Float(-f64::NAN)));
+    assert_ne!(token(E::Float(0.0)), token(E::Null));
+    assert_ne!(token(E::Text("é")), token(E::Text("e\u{301}")));
+    assert_eq!(
+        token(E::Float(-0.0)),
+        "4a45324501146a617a7a2e736f6469756d2e657175616c69747900000001cd771c3a1e2f0e55f0cfe1cfc6f1ff86eb4ae15f9b5c9270e769602f74f956f6"
+    );
+    // An equality identity is checked like a cell identity.
+    assert_eq!(
+        records::equality_context(
+            &records::EqualityIdentity {
+                epoch_id: "epoch",
+                ..identity
+            },
+            TEXT_TYPE
+        ),
+        Err(Error::InvalidInput)
+    );
 }

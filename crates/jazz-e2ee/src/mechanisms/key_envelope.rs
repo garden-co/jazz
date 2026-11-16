@@ -20,8 +20,8 @@ const WRAP: u8 = 1;
 const KEY_LABEL: &[u8] = b"jazz.e2ee.wrap-key.v1\0";
 const WRAP_PAYLOAD: usize = 1 + aead::NONCE_BYTES + 32 + aead::TAG_BYTES;
 
-fn wrap_aad(context: &[u8]) -> Result<Vec<u8>> {
-    Ok(concat(&[&MECHANISM.header()?, &[WRAP], context]))
+fn wrap_aad(mechanism: Mechanism<'_>, context: &[u8]) -> Result<Vec<u8>> {
+    Ok(concat(&[&mechanism.header()?, &[WRAP], context]))
 }
 
 /// Wraps `key` under `wrapping_key` for `context`.
@@ -31,11 +31,21 @@ pub fn wrap(
     key: &[u8; 32],
     rng: &mut (impl RandomSource + ?Sized),
 ) -> Result<Vec<u8>> {
-    let aad = wrap_aad(context)?;
+    wrap_as(MECHANISM, wrapping_key, context, key, rng)
+}
+
+fn wrap_as(
+    mechanism: Mechanism<'_>,
+    wrapping_key: &[u8; 32],
+    context: &[u8],
+    key: &[u8; 32],
+    rng: &mut (impl RandomSource + ?Sized),
+) -> Result<Vec<u8>> {
+    let aad = wrap_aad(mechanism, context)?;
     let derived = hash::keyed_hash_parts(wrapping_key, &[KEY_LABEL, &aad]);
     let nonce = random_array::<{ aead::NONCE_BYTES }>(rng)?;
     let ciphertext = aead::encrypt(&derived, &nonce, &aad, key)?;
-    envelope::encode(MECHANISM, &concat(&[&[WRAP], &nonce, &ciphertext]))
+    envelope::encode(mechanism, &concat(&[&[WRAP], &nonce, &ciphertext]))
 }
 
 /// Returns the wrapped key after authenticating it for `context`.
@@ -44,11 +54,20 @@ pub fn unwrap(
     context: &[u8],
     envelope: &[u8],
 ) -> Result<Zeroizing<[u8; 32]>> {
-    let payload = envelope::decode(MECHANISM, envelope)?;
+    unwrap_as(MECHANISM, wrapping_key, context, envelope)
+}
+
+fn unwrap_as(
+    mechanism: Mechanism<'_>,
+    wrapping_key: &[u8; 32],
+    context: &[u8],
+    envelope: &[u8],
+) -> Result<Zeroizing<[u8; 32]>> {
+    let payload = envelope::decode(mechanism, envelope)?;
     if payload.len() != WRAP_PAYLOAD || payload[0] != WRAP {
         return Err(Error::InvalidCiphertext);
     }
-    let aad = wrap_aad(context)?;
+    let aad = wrap_aad(mechanism, context)?;
     let derived = hash::keyed_hash_parts(wrapping_key, &[KEY_LABEL, &aad]);
     let nonce = payload[1..1 + aead::NONCE_BYTES]
         .try_into()
@@ -88,5 +107,40 @@ impl KeyWrapper for Builtin {
         envelope: &[u8],
     ) -> Result<Zeroizing<[u8; 32]>> {
         unwrap(wrapping_key, context, envelope)
+    }
+}
+
+/// This key wrapper's algorithm under another ID or version, for the
+/// conformance kit's header-binding check.
+#[cfg(feature = "conformance")]
+#[derive(Debug, Clone, Copy)]
+pub struct Sibling(pub Mechanism<'static>);
+
+#[cfg(feature = "conformance")]
+impl MechanismImpl for Sibling {
+    fn mechanism(&self) -> Mechanism<'static> {
+        self.0
+    }
+}
+
+#[cfg(feature = "conformance")]
+impl KeyWrapper for Sibling {
+    fn wrap(
+        &self,
+        wrapping_key: &[u8; 32],
+        context: &[u8],
+        key: &[u8; 32],
+        rng: &mut dyn RandomSource,
+    ) -> Result<Vec<u8>> {
+        wrap_as(self.0, wrapping_key, context, key, rng)
+    }
+
+    fn unwrap(
+        &self,
+        wrapping_key: &[u8; 32],
+        context: &[u8],
+        envelope: &[u8],
+    ) -> Result<Zeroizing<[u8; 32]>> {
+        unwrap_as(self.0, wrapping_key, context, envelope)
     }
 }

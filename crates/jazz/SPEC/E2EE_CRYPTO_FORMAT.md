@@ -27,10 +27,14 @@ All multi-byte integers are unsigned, big-endian. There is no padding.
 | Mechanism version   | Four bytes, non-zero                                     |
 | Mechanism payload   | Remaining bytes; interpretation belongs to the mechanism |
 
-The reader requires the installed adapter's exact ID and version. Unknown
-formats, mismatched mechanisms, invalid IDs and truncated headers fail closed.
-This header is routing metadata, not an authentication claim. Mechanism
-implementations must authenticate their ID/version with the operation context.
+The reader requires the installed mechanism's exact ID and version. A header
+that is malformed (truncated, another magic or format byte, an ID length
+outside 1–64, an ID byte outside `[a-z0-9.-]`, or version 0) is
+`invalid-ciphertext`; a well-formed header of a mechanism that is not
+registered or not allowed is `unsupported-format`. Both fail closed. This
+header is routing metadata, not an authentication claim. Mechanism
+implementations must authenticate their ID/version with the operation
+context; the conformance kit checks it (below).
 Payload validation and authentication happen before plaintext is returned.
 
 Example fixture: mechanism `test`, version 1, payload `aa`:
@@ -43,10 +47,9 @@ order: application, policy, scope, identifier, table, row, column, epoch, recipi
 Each field is a four-byte unsigned big-endian byte length followed by its UTF-8
 bytes. Application, policy, scope, identifier and epoch must be non-empty.
 Unused table/row/column/recipient fields have zero length; omitted and empty
-optional fields mean the same thing. Unknown own fields are rejected, including
-non-enumerable properties and symbol keys. Each field is limited to 65,535 UTF-8
-bytes. Unpaired UTF-16 surrogates are rejected rather than replaced; no Unicode,
-case or identifier normalisation takes place.
+optional fields mean the same thing. Each field is a Rust `&str`, so it is
+valid UTF-8 by construction, and is limited to 65,535 bytes; no Unicode, case
+or identifier normalisation takes place.
 
 The common E2EE layer supplies all IDs applicable to the operation; cell contexts
 include table, row and column. Key contexts identify their owner scope and epoch
@@ -77,11 +80,11 @@ A stored encrypted cell wraps the cell cipher's output in a routing record
 that names its space epoch. The record mechanism is `jazz.e2ee.cell-record`,
 version 1, in the common envelope:
 
-| Field         | Encoding                                                                 |
-| ------------- | ------------------------------------------------------------------------ |
-| Header        | Common envelope header, mechanism `jazz.e2ee.cell-record`, version 1     |
-| Epoch         | Exactly 36 ASCII bytes: the space epoch's lowercase UUID                 |
-| Cipher output | Remaining bytes: the cell cipher's own common envelope (header, payload) |
+| Field         | Encoding                                                                  |
+| ------------- | ------------------------------------------------------------------------- |
+| Header        | Common envelope header, mechanism `jazz.e2ee.cell-record`, version 1      |
+| Epoch         | Exactly 36 ASCII bytes: the space epoch's lowercase UUID (version 4 or 7) |
+| Cipher output | Remaining bytes: the cell cipher's own common envelope (header, payload)  |
 
 The payload (epoch plus cipher output) is at least 47 bytes. The epoch is
 routing metadata in clear; it is also authenticated, because the cell
@@ -98,7 +101,7 @@ plaintext is Jazz's native row encoding of the single value.
 Readers reject a record whose mechanism is another (reported as
 `unsupported-format`, which lets a reader try the
 [stream record](E2EE_LARGE_VALUE_FORMAT.md#stream-record-version-1)), a payload
-under 47 bytes, an epoch that is not a lowercase UUID, an epoch other than the
+under 47 bytes, an epoch that is not a lowercase version 4 or 7 UUID, an epoch other than the
 key's, and cipher output that is not an envelope of the installed cell
 mechanism (`invalid-ciphertext`, or `unsupported-format` for an unknown
 mechanism).
@@ -171,7 +174,10 @@ secret key clamped.
 ## Fixtures
 
 `fixtures/e2ee-vectors.c` independently constructs the framing and derivation
-inputs against libsodium 1.0.22, including HPKE assembled from libsodium's
+inputs against libsodium 1.0.22, exactly as the crate's dev-dependency
+`libsodium-sys-stable` =1.24.0 bundles and builds it (the generator's header
+gives the build command and its `main` checks the version), including HPKE
+assembled from libsodium's
 X25519, HKDF-SHA256 and ChaCha20-Poly1305. It first reproduces RFC 9180
 appendix A.2.1 (sequence 0), then seals the generator's key (bytes `20`–`3f`)
 for the context fixture to the recipient derived from input keying material
@@ -267,7 +273,10 @@ A mechanism is accepted once it passes the conformance kit
 (`jazz_e2ee::conformance`, feature `conformance`): round trips, key and
 context binding, rejection of tampered, truncated and extended input
 (streams also of reordered, duplicated and dropped segments), routing by its
-own header, exact reproduction of the vectors it declares, and, per role,
+own header, authentication of its header (output relabelled to the same
+algorithm under a sibling ID or version must decode and then fail
+authentication, `check_*_header_binding`), exact reproduction of the vectors
+it declares, and, per role,
 provider failure: a mechanism whose provider fails must surface
 `CryptoFailure` through the registry and the record helpers, never
 `InvalidCiphertext` or a false verification. The crate's

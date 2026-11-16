@@ -17,6 +17,7 @@ use crate::agility::{CellCipher, EqualityTagger, StreamCipher, StreamWriter};
 use crate::context::{CryptoContext, frame_record};
 use crate::envelope::{self, Mechanism};
 use crate::error::{Error, Result};
+use crate::protocol::ids::{self, IdForm};
 use crate::random::RandomSource;
 use crate::registry::Registry;
 
@@ -72,19 +73,23 @@ pub struct StoredRecord<'a> {
     pub ciphertext: &'a [u8],
 }
 
-/// A lowercase hyphenated UUID, `8-4-4-4-12`.
+/// A lowercase hyphenated UUID with the RFC variant, of any version: the
+/// form of application row IDs (`E2EE_PROTOCOL.md` §0, "Identifiers").
 pub fn is_uuid(value: &[u8]) -> bool {
+    core::str::from_utf8(value).is_ok_and(|value| ids::is_id(value, IdForm::Any))
+}
+
+/// A space epoch ID: a lowercase UUID of version 4 or 7, as the protocol
+/// generates them (§0).
+pub fn is_epoch_id(value: &[u8]) -> bool {
     value.len() == EPOCH_BYTES
-        && value.iter().enumerate().all(|(index, byte)| match index {
-            8 | 13 | 18 | 23 => *byte == b'-',
-            _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
-        })
+        && core::str::from_utf8(value).is_ok_and(|value| ids::is_id(value, IdForm::Random))
 }
 
 impl CellIdentity<'_> {
     fn check(&self) -> Result<()> {
         if is_uuid(self.row_id.as_bytes())
-            && is_uuid(self.epoch_id.as_bytes())
+            && is_epoch_id(self.epoch_id.as_bytes())
             && !self.table_id.is_empty()
             && !self.column_id.is_empty()
         {
@@ -116,20 +121,30 @@ pub fn cell_context(identity: &CellIdentity<'_>, cell_type: &[u8]) -> Result<Vec
     frame_record(&[&identity.context(CELL_POLICY)?, cell_type])
 }
 
-/// The stream-record v1 context:
-/// `frame(frame(canonical context, cell type), mechanism header)`.
-pub fn stream_context(
-    identity: &CellIdentity<'_>,
-    cell_type: &[u8],
-    mechanism: Mechanism<'_>,
-) -> Result<Vec<u8>> {
+/// The stream-record v1 context: `frame(canonical context, cell type)`, as
+/// for a cell but with the stream policy. The stream mechanism binds its own
+/// header, once, as the cell mechanism does.
+pub fn stream_context(identity: &CellIdentity<'_>, cell_type: &[u8]) -> Result<Vec<u8>> {
     identity.check()?;
-    let inner = frame_record(&[&identity.context(STREAM_POLICY)?, cell_type])?;
-    frame_record(&[&inner, &mechanism.header()?])
+    frame_record(&[&identity.context(STREAM_POLICY)?, cell_type])
+}
+
+impl EqualityIdentity<'_> {
+    fn check(&self) -> Result<()> {
+        if is_epoch_id(self.epoch_id.as_bytes())
+            && !self.table_id.is_empty()
+            && !self.column_id.is_empty()
+        {
+            Ok(())
+        } else {
+            Err(Error::InvalidInput)
+        }
+    }
 }
 
 /// The equality v1 context: `frame(canonical context without row, cell type)`.
 pub fn equality_context(identity: &EqualityIdentity<'_>, cell_type: &[u8]) -> Result<Vec<u8>> {
+    identity.check()?;
     let context = CryptoContext {
         application: identity.application,
         policy: EQUALITY_POLICY,
@@ -145,7 +160,7 @@ pub fn equality_context(identity: &EqualityIdentity<'_>, cell_type: &[u8]) -> Re
 }
 
 fn routed(record: Mechanism<'_>, epoch_id: &str, inner: &[u8]) -> Result<Vec<u8>> {
-    if !is_uuid(epoch_id.as_bytes()) {
+    if !is_epoch_id(epoch_id.as_bytes()) {
         return Err(Error::InvalidInput);
     }
     let mut payload = Vec::with_capacity(EPOCH_BYTES + inner.len());
@@ -156,7 +171,7 @@ fn routed(record: Mechanism<'_>, epoch_id: &str, inner: &[u8]) -> Result<Vec<u8>
 
 fn read_routed<'b>(record: Mechanism<'_>, value: &'b [u8]) -> Result<(&'b str, &'b [u8])> {
     let payload = envelope::decode(record, value)?;
-    if payload.len() < MIN_RECORD_PAYLOAD || !is_uuid(&payload[..EPOCH_BYTES]) {
+    if payload.len() < MIN_RECORD_PAYLOAD || !is_epoch_id(&payload[..EPOCH_BYTES]) {
         return Err(Error::InvalidCiphertext);
     }
     let epoch_id = core::str::from_utf8(&payload[..EPOCH_BYTES]).expect("checked ASCII");
@@ -243,7 +258,7 @@ pub fn begin_stream_value(
     cell_type: &[u8],
     rng: &mut dyn RandomSource,
 ) -> Result<(Box<dyn StreamWriter>, Vec<u8>)> {
-    let context = stream_context(identity, cell_type, cipher.mechanism())?;
+    let context = stream_context(identity, cell_type)?;
     let mut prefix = stream_record_prefix(identity.epoch_id)?;
     let (writer, header) = cipher.encryptor(key, &context, rng)?;
     prefix.extend_from_slice(&header);
@@ -282,7 +297,7 @@ pub fn decrypt_stream_value(
         return Err(Error::InvalidCiphertext);
     }
     let cipher = registry.stream_cipher_for(routed)?;
-    let context = stream_context(identity, cell_type, cipher.mechanism())?;
+    let context = stream_context(identity, cell_type)?;
     let mut reader = cipher.decryptor(key, &context)?;
     let mut out = Zeroizing::new(Vec::with_capacity(routed.len()));
     reader
@@ -290,6 +305,69 @@ pub fn decrypt_stream_value(
         .and_then(|()| reader.finish())
         .map_err(Error::after_routing)?;
     Ok(out)
+}
+
+/// A logical value as an equality index encodes it (`E2EE_EQUALITY_FORMAT.md`,
+/// "Value encoding"). The column's type is bound by the context, so values
+/// of different types are never compared.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EqualityValue<'a> {
+    Null,
+    Bool(bool),
+    /// 32- and 64-bit integers.
+    Int(i64),
+    Timestamp(u64),
+    Float(f64),
+    /// Compared by exact UTF-8 bytes, with no Unicode normalisation.
+    Text(&'a str),
+    Bytes(&'a [u8]),
+    Uuid([u8; 16]),
+}
+
+/// The canonical bit pattern of an equality-indexed float: every NaN is
+/// `0x7ff8000000000000` and `-0.0` is `0.0`, so tokens match Jazz's
+/// plaintext equality, where `-0.0 == 0.0`.
+const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
+
+/// `V`, the encoded value an equality token hashes: `00` for null;
+/// otherwise `01` followed by the value: one byte `00`/`01` for a boolean,
+/// eight big-endian bytes for an integer (two's complement), a timestamp or
+/// a float (its canonical bit pattern), the exact UTF-8 bytes of a text,
+/// the bytes of a byte string, the 16 bytes of a UUID.
+pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
+    let mut out = vec![1u8];
+    match *value {
+        EqualityValue::Null => return vec![0],
+        EqualityValue::Bool(value) => out.push(u8::from(value)),
+        EqualityValue::Int(value) => out.extend_from_slice(&value.to_be_bytes()),
+        EqualityValue::Timestamp(value) => out.extend_from_slice(&value.to_be_bytes()),
+        EqualityValue::Float(value) => {
+            let bits = if value.is_nan() {
+                CANONICAL_NAN
+            } else if value == 0.0 {
+                0
+            } else {
+                value.to_bits()
+            };
+            out.extend_from_slice(&bits.to_be_bytes());
+        }
+        EqualityValue::Text(value) => out.extend_from_slice(value.as_bytes()),
+        EqualityValue::Bytes(value) => out.extend_from_slice(value),
+        EqualityValue::Uuid(value) => out.extend_from_slice(&value),
+    }
+    out
+}
+
+/// The equality token of a logical value: [`equality_token`] of
+/// [`equality_value`].
+pub fn equality_token_of(
+    tagger: &dyn EqualityTagger,
+    key: &[u8; 32],
+    identity: &EqualityIdentity<'_>,
+    cell_type: &[u8],
+    value: &EqualityValue<'_>,
+) -> Result<Vec<u8>> {
+    equality_token(tagger, key, identity, cell_type, &equality_value(value))
 }
 
 /// The equality token for an encoded value, with `tagger`.

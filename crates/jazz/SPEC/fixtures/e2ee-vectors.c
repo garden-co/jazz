@@ -1,7 +1,12 @@
-/* Independent protocol fixture generator; no Jazz TypeScript helpers.
- * Link against the pinned libsodium archive. Every field is deterministic: the
- * HPKE seal uses fixed input keying material and the stream a fixed nonce
- * prefix. Test keys only, never production keys.
+/* Independent protocol fixture generator; it shares no code with jazz-e2ee.
+ * Build it against libsodium 1.0.22 exactly as the crate's dev-dependency
+ * `libsodium-sys-stable = "=1.24.0"` bundles and builds it (main() checks the
+ * version), for example from that crate's build output:
+ *   OUT=target/debug/build/libsodium-sys-stable-<hash>/out/installed
+ *   cc -std=c99 -O1 -I"$OUT/include" e2ee-vectors.c "$OUT/lib/libsodium.a" -o e2ee-vectors
+ * Every field is deterministic: the HPKE seal uses fixed input keying
+ * material and the stream a fixed nonce prefix. Test keys only, never
+ * production keys.
  */
 #ifdef NDEBUG
 #error "This fixture generator requires assertions enabled"
@@ -117,6 +122,9 @@ int main(void) {
     const unsigned char plaintext[] = "hello";
     const char cell_label[] = "jazz.e2ee.cell-key.v1";
     const char wrap_label[] = "jazz.e2ee.wrap-key.v1";
+    const char equality_label[] = "jazz.e2ee.equality-key.v1";
+    const char stream_label[] = "jazz.e2ee.stream-key.v1";
+    unsigned char labelled[300];
     printf("{");
     field("root", root, 32); field("key", key, 32); field("nonce", nonce, 24);
     field("context", context, sizeof context); field("plaintext", plaintext, 5);
@@ -156,7 +164,11 @@ int main(void) {
     memset(input + 4 + h, 0, 4); input[7 + h] = sizeof context;
     memcpy(input + 8 + h, context, sizeof context);
     field("equalityContext", input, 8 + h + sizeof context);
-    assert(crypto_generichash(derived, 32, input, 8 + h + sizeof context, root, 32) == 0);
+    /* The label, its terminating 00 (sizeof includes it), then the framed input. */
+    memcpy(labelled, equality_label, sizeof equality_label);
+    memcpy(labelled + sizeof equality_label, input, 8 + h + sizeof context);
+    assert(crypto_generichash(derived, 32, labelled, sizeof equality_label + 8 + h + sizeof context,
+        root, 32) == 0);
     field("equalityDerived", derived, 32);
     assert(crypto_generichash(equality + h, 32, plaintext, 5, derived, 32) == 0);
     field("equality", equality, h + 32);
@@ -167,7 +179,9 @@ int main(void) {
     memset(input + 4 + h, 0, 4); input[7 + h] = sizeof context;
     memcpy(input + 8 + h, context, sizeof context);
     a = 8 + h + sizeof context;
-    assert(crypto_generichash(derived, 32, input, a, root, 32) == 0);
+    memcpy(labelled, stream_label, sizeof stream_label);
+    memcpy(labelled + sizeof stream_label, input, a);
+    assert(crypto_generichash(derived, 32, labelled, sizeof stream_label + a, root, 32) == 0);
     field("streamDerived", derived, 32);
     /* STREAM (BE32): a 19-byte nonce prefix, then per record a u32be index
      * and a last-record flag byte form the 24-byte XChaCha20-Poly1305 nonce. */
@@ -189,6 +203,20 @@ int main(void) {
         position += 4 + cipher_size;
     }
     field("stream", stream, position);
+    /* What a writer given the single input `hello` produces: data record 0,
+     * then the empty last record as record 1. */
+    {
+        unsigned char record_nonce[24];
+        size_t first = h + 19 + 4 + 5 + crypto_aead_xchacha20poly1305_ietf_ABYTES;
+        size_t cipher_size = crypto_aead_xchacha20poly1305_ietf_ABYTES;
+        memcpy(record_nonce, nonce, 19);
+        memset(record_nonce + 19, 0, 3); record_nonce[22] = 1; record_nonce[23] = 1;
+        memset(stream + first, 0, 4); stream[first + 3] = (unsigned char)cipher_size;
+        assert(crypto_aead_xchacha20poly1305_ietf_encrypt(stream + first + 4, &written,
+            plaintext, 0, input, a, NULL, record_nonce, derived) == 0);
+        assert(written == cipher_size);
+        field("streamHello", stream, first + 4 + cipher_size);
+    }
     sodium_memzero(derived, sizeof derived);
     puts("}");
     return 0;

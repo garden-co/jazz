@@ -265,7 +265,10 @@ fn ed25519_edge_cases_match() {
 fn sodium_stream(key: &[u8; 32], context: &[u8], prefix: &[u8; 19], plaintext: &[u8]) -> Vec<u8> {
     let header = stream::MECHANISM.header().unwrap();
     let aad = frame_record(&[&header, context]).unwrap();
-    let derived = sodium_hash(key, &aad);
+    let derived = sodium_hash(
+        key,
+        &[b"jazz.e2ee.stream-key.v1\0", aad.as_slice()].concat(),
+    );
     let mut out = [header.as_slice(), prefix].concat();
     let mut chunks: Vec<&[u8]> = plaintext.chunks(stream::RECORD_BYTES).collect();
     chunks.push(&[]);

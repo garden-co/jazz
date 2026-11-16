@@ -25,8 +25,10 @@ no payload, and `C` the caller-supplied authenticated context bytes.
 All lengths below are unsigned four-byte big-endian integers.
 
 Define `A = length(H) || H || length(C) || C`. Derive the 32-byte stream key
-`K` with keyed BLAKE2b, using the supplied 32-byte epoch key as key and `A` as
-input. Every record also uses `A` as associated data. The mechanism
+`K = BLAKE2b-256(key = epoch key, input = UTF8("jazz.e2ee.stream-key.v1") ||
+00 || A)`. Every record also uses `A` as associated data: the derived key
+separates keys per header and context, and the associated data lets each
+record's tag authenticate them on its own, as the cell mechanism does. The mechanism
 ID/version therefore separates this derivation from other purposes. The common
 E2EE layer, not the cipher adapter, resolves the context's identities.
 
@@ -67,12 +69,13 @@ XChaCha20-Poly1305 and explicitly constructed nonces, independently of the
 context fixture and nonce prefix `00`–`12`, it encrypts `hello` as record 0,
 `hello` as record 1 and the empty last record 2. Its key derivation output
 (`streamDerived`) is
-`fb300f65cfa0e0dbc3a0c675375df7d2bcc2fbfa79dd09796509df7b6d3c8130` and the
+`fc30552ded0a4c91d766f076d771dcac6e1dac0c95800f3ae58751d6e63e4f74` and the
 stream is
-`4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015f379dad1393c199f0448eb4c646e414886a6bfdae500000015cc8de564b4a5ae9a96cebee6da64c20875e9ac682b00000010361c27bcd9b94847dd16094baaa17860`.
-The `jazz-e2ee` writer, given the same inputs and the single input `hello`,
-produces
-`4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015f379dad1393c199f0448eb4c646e414886a6bfdae500000010a3a6e6facd9827eb4d173bb309517cb0`.
+`4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015af44ecab95efa19a05ffd9d05ad84a354cffbed12a00000015730afa441c238e42872c29c08d3e7f758e7ac96bcf0000001054a6f488bbf996f472a2052e4b254e9a`.
+The generator also emits (`streamHello`) what a writer given the same
+inputs and the single input `hello` produces, and the `jazz-e2ee` writer
+reproduces it:
+`4a453245011d6a617a7a2e73747265616d2e786368616368613230706f6c793133303500000001000102030405060708090a0b0c0d0e0f10111200000015af44ecab95efa19a05ffd9d05ad84a354cffbed12a00000010bb21e362d42391ffb6905ea1550acd09`.
 Both are asserted by the crate's vector tests, which also rebuild the stream
 from libsodium on random inputs.
 
@@ -98,15 +101,16 @@ the epoch followed by the cell cipher's own envelope. The payload is at least
 47 bytes.
 
 The cipher's context `C` is
-`frame[frame[ctx, T], H]`: `ctx` is the canonical context of a
+`frame[ctx, T]`: `ctx` is the canonical context of a
 [cell record](E2EE_CRYPTO_FORMAT.md#cell-record-version-1) with policy
 `jazz.e2ee.stream-record.v1` instead, `T` the same logical type bytes, and
-`frame` u32be-length-prefixed concatenation. The distinct policy separates a
+`frame` u32be-length-prefixed concatenation. As for cells, the context does
+not repeat `H`: the stream mechanism binds its own header (above). The distinct policy separates a
 stream from a cell of the same coordinates. Only non-indexed `bytes` columns
 may use stream records; any other column reports `unsupported-format`.
 
 A reader first tries the cell record; on `unsupported-format` it tries the
-stream record. Wrong mechanism, a payload under 47 bytes, or a non-UUID epoch
+stream record. Wrong mechanism, a payload under 47 bytes, or an epoch that is not a lowercase version 4 or 7 UUID
 fail as for cells.
 
 Framing example, epoch `00000000-0000-4000-8000-000000000000`: the record
