@@ -1,8 +1,8 @@
 import { schema as s } from "jazz-tools";
-import { betterAuthSchema } from "./auth-schema";
+import { tables as betterAuthTables, permissions as betterAuthPermissions } from "./auth-schema";
 
 export const schema = s.defineSchema({
-  ...betterAuthSchema,
+  ...betterAuthTables,
   albums: s
     .table(
       {
@@ -84,39 +84,10 @@ const isInvitation = (playlist_id: s.Uuid) =>
   exists.invitations({ playlist_id, subject: session.user, role: "editor", status: "accepted" });
 
 export const permissions = definePermissions({
+  ...betterAuthPermissions,
   albums: {
     read: true,
     insert: createdByMe,
-  },
-  better_auth_account: {
-    read: false,
-    insert: false,
-    update: false,
-    delete: false,
-  },
-  better_auth_jwks: {
-    read: false,
-    insert: false,
-    update: false,
-    delete: false,
-  },
-  better_auth_session: {
-    read: false,
-    insert: false,
-    update: false,
-    delete: false,
-  },
-  better_auth_user: {
-    read: false,
-    insert: false,
-    update: false,
-    delete: false,
-  },
-  better_auth_verification: {
-    read: false,
-    insert: false,
-    update: false,
-    delete: false,
   },
   invitations: {
     read: (invitation) => anyOf({ subject: session.user }, invitation.playlist.where(createdByMe)),

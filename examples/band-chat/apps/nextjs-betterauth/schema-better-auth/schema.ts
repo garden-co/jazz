@@ -63,8 +63,6 @@ export const tables = {
   ),
 };
 
-type BetterAuthSchema = s.Schema<typeof tables>;
-
 export const permissions = {
   better_auth_user: { read: false, insert: false, update: false, delete: false },
   better_auth_session: { read: false, insert: false, update: false, delete: false },

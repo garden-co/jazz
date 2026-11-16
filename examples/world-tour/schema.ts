@@ -80,8 +80,6 @@ export const schema = s.defineSchema({
   ),
 });
 
-const stopWithVenueQuery = app.stops.include({ venue: true });
-
 const { definePermissions, exists, session, anyOf, allOf } = schema;
 
 const ownerIsMe = { ownerId: session.user };

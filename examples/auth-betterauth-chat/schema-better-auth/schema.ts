@@ -76,9 +76,6 @@ export const tables = {
   ),
 };
 
-type AppSchema = s.Schema<typeof tables>;
-export const wasmSchema = app.wasmSchema;
-
 export const permissions = {
   better_auth_user: { read: false, insert: false, update: false, delete: false },
   better_auth_session: { read: false, insert: false, update: false, delete: false },
