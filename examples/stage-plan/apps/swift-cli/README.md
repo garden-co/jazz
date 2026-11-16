@@ -1,5 +1,10 @@
 # StagePlan from Swift
 
+> **Experimental: client only, backends are TypeScript.** Jazz for Swift is
+> an end-user client; StagePlan's backend runs in TypeScript. See
+> `packages/jazz-swift/README.md` for what Swift supports and doesn't yet, and
+> [Language Support](https://jazz.tools/docs/reference/language-support).
+
 A command-line tool over StagePlan's app, written in Swift. Its `schema.ts`
 re-exports `../react-localfirst`'s, `npx jazz-tools generate` writes
 `jazz.app.json` and `jazz.permissions.json` from it, and `JazzApp.swift` is
