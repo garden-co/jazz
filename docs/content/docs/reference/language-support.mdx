@@ -53,8 +53,7 @@ Swift and Kotlin are for apps.
     - subscription deltas carry no positions: `q.Live(ctx, db)` keeps a query's rows in order for you;
     - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
       reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
-      column. In a subscription, such a row ends it with an error delta;
-    - Windows builds, and macOS in CI.
+      column. In a subscription, such a row ends it with an error delta.
 
     A Go program can also be a client of your app, syncing as one of its users through your backend's
     Jazz endpoint (the `/jazz` route `createJazz` serves), as a browser does:
