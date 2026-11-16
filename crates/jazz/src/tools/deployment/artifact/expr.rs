@@ -3295,6 +3295,11 @@ impl Printer<'_, '_> {
             RelationPredicate::Contains { left, right } => {
                 format!("{} contains {}", column(left)?, value(right)?)
             }
+            // The policy language has no prefix/suffix test, so no policy
+            // holds one; there is no text to give back.
+            RelationPredicate::StartsWith { .. } | RelationPredicate::EndsWith { .. } => {
+                return None;
+            }
             RelationPredicate::Removed(removed) => match *removed {},
         })
     }
@@ -3512,6 +3517,13 @@ fn predicate_text(p: &RelationPredicate, precedence: u8) -> String {
         ),
         RelationPredicate::Contains { left, right } => {
             format!("{} contains {}", colref_text(left), value_ref_text(right))
+        }
+        // Not policy syntax (policies cannot hold these); a readable form for diagnostics.
+        RelationPredicate::StartsWith { left, right } => {
+            format!("{} startsWith {}", colref_text(left), value_ref_text(right))
+        }
+        RelationPredicate::EndsWith { left, right } => {
+            format!("{} endsWith {}", colref_text(left), value_ref_text(right))
         }
         RelationPredicate::Removed(removed) => match *removed {},
     }

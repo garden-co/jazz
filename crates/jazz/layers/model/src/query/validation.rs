@@ -1626,7 +1626,9 @@ fn rewrite_flat_join_predicate_columns(
         | Predicate::Gte(left, right)
         | Predicate::Lt(left, right)
         | Predicate::Lte(left, right)
-        | Predicate::Contains(left, right) => {
+        | Predicate::Contains(left, right)
+        | Predicate::StartsWith(left, right)
+        | Predicate::EndsWith(left, right) => {
             rewrite_operand(left)?;
             rewrite_operand(right)
         }
@@ -2510,6 +2512,19 @@ fn validate_predicate(
                 Some(_) => Ok(()),
                 None => check_inferred_param(right, expected, params),
             }
+        }
+        // Text against text only: a prefix or suffix of an array, JSON or
+        // bytes value is not defined.
+        Predicate::StartsWith(left, right) | Predicate::EndsWith(left, right) => {
+            for operand in [&mut *left, &mut *right] {
+                match operand_type(table, operand, params)? {
+                    Some(column_type)
+                        if matches!(non_null_column_type(&column_type), ColumnType::String) => {}
+                    Some(_) => return Err(QueryError::OperandTypeMismatch),
+                    None => check_inferred_param(operand, ColumnType::String, params)?,
+                }
+            }
+            Ok(())
         }
         // Claims are dynamically typed and become literals when binding the session.
         // Either can be checked for nullness without a statically nullable column.

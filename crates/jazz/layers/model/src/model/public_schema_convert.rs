@@ -522,7 +522,9 @@ fn coerce_predicate_typed_literals(
                 !coerce_operand_pair_typed_literal(table, left, value, column_types)
             });
         }
-        Predicate::Contains(left, right) => {
+        Predicate::Contains(left, right)
+        | Predicate::StartsWith(left, right)
+        | Predicate::EndsWith(left, right) => {
             if coerce_operand_pair_typed_literal(table, left, right, column_types)
                 || coerce_operand_pair_typed_literal(table, right, left, column_types)
             {
@@ -2340,6 +2342,8 @@ fn collect_rel_predicate_columns<'a>(
         RelationPredicate::Not(child) => collect_rel_predicate_columns(child, columns),
         RelationPredicate::Cmp { left, .. }
         | RelationPredicate::Contains { left, .. }
+        | RelationPredicate::StartsWith { left, .. }
+        | RelationPredicate::EndsWith { left, .. }
         | RelationPredicate::In { left, .. } => columns.push(left),
         RelationPredicate::IsNull { column } | RelationPredicate::IsNotNull { column } => {
             columns.push(column)

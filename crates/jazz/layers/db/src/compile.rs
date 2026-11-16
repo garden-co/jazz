@@ -2072,6 +2072,15 @@ impl<'a> Ctx<'a> {
                     self.contains(l, r)
                 }
             }
+            Predicate::StartsWith(l, r) | Predicate::EndsWith(l, r) => {
+                if let Operand::Column(column) = l {
+                    check_affix_text(table, column)?;
+                }
+                let end = matches!(predicate, Predicate::EndsWith(..));
+                let l = self.operand(l, table, alias)?;
+                let r = self.operand(r, table, alias)?;
+                self.affix(l, r, end)
+            }
             Predicate::IsNull(operand) => match self.operand(operand, table, alias)? {
                 Term::Missing => "1".to_owned(),
                 Term::NaN => "0".to_owned(),
@@ -2952,6 +2961,23 @@ impl<'a> Ctx<'a> {
                 let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 self.contains(left, right)
             }
+            RelationPredicate::StartsWith { left, right }
+            | RelationPredicate::EndsWith { left, right } => {
+                let end = matches!(predicate, RelationPredicate::EndsWith { .. });
+                match self.rel_column_type(rel, left) {
+                    Some(ValueType::String) | None => {}
+                    Some(other) => {
+                        return Err(query_error(format!(
+                            "operand type mismatch: {} on {}, which has type {other:?}",
+                            if end { "ends with" } else { "starts with" },
+                            left.column
+                        )));
+                    }
+                }
+                let left = self.resolve_term(rel, left)?;
+                let right = self.rel_value_as(right, Some(&ValueType::String), rel, scope)?;
+                self.affix(left, right, end)
+            }
             RelationPredicate::Removed(removed) => match *removed {},
         })
     }
@@ -3014,9 +3040,10 @@ fn outer_key_only(rel: &RelationExpr) -> bool {
     }
     fn predicate_refs(predicate: &RelationPredicate) -> usize {
         match predicate {
-            RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
-                refs(right)
-            }
+            RelationPredicate::Cmp { right, .. }
+            | RelationPredicate::Contains { right, .. }
+            | RelationPredicate::StartsWith { right, .. }
+            | RelationPredicate::EndsWith { right, .. } => refs(right),
             RelationPredicate::In { values, .. } => values.iter().map(refs).sum(),
             RelationPredicate::Not(payload) => predicate_refs(payload),
             RelationPredicate::Removed(removed) => match *removed {},
@@ -3257,6 +3284,20 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
 }
 
 /// `contains` searches text, bytes or an array.
+/// A prefix or suffix test reads a text column only.
+fn check_affix_text(table: &Table, column: &str) -> Result<(), Error> {
+    let Some(declared) = table.column(column) else {
+        return Ok(());
+    };
+    match type_kind(&declared.ty) {
+        Kind::Text => Ok(()),
+        _ => Err(query_error(format!(
+            "operand type mismatch: starts/ends with on {column}, which has type {:?}",
+            declared.ty
+        ))),
+    }
+}
+
 fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     let Some(declared) = table.column(column) else {
         return Ok(());
@@ -4039,6 +4080,44 @@ impl Ctx<'_> {
         self.params[slot] = crate::values::array_needle(needle);
         let needle = placeholder;
         format!("EXISTS (SELECT 1 FROM json_each({array}) WHERE value = {needle})")
+    }
+
+    /// Text `left` starting (`end` false) or ending (`end` true) with text
+    /// `right`, bytewise on UTF-8. NULL on either side is false. Like
+    /// [`Self::contains`], a chunked cell is an INTEGER, not its value, and
+    /// matches nothing (SPEC 19.5).
+    fn affix(&mut self, left: Term, right: Term, end: bool) -> String {
+        let chunked = |term: &Term, sql: &str| {
+            matches!(term, Term::Large(_))
+                .then(|| format!("NOT {}", crate::large::chunked_sql(sql)))
+        };
+        let (Some(l), Some(r)) = (left.sql(), right.sql()) else {
+            return "0".to_owned();
+        };
+        let (lb, rb) = (format!("CAST({l} AS BLOB)"), format!("CAST({r} AS BLOB)"));
+        // `substr` and `length` count bytes on a BLOB. `substr` of an empty
+        // BLOB is NULL, so the empty needle is matched by length; NULL on
+        // either side leaves the test NULL, read as false.
+        let test = if end {
+            format!(
+                "({lb} IS NOT NULL AND (length({rb}) = 0 OR (length({lb}) >= length({rb}) \
+                 AND substr({lb}, length({lb}) - length({rb}) + 1) = {rb})))"
+            )
+        } else {
+            format!(
+                "({lb} IS NOT NULL AND (length({rb}) = 0 \
+                 OR substr({lb}, 1, length({rb})) = {rb}))"
+            )
+        };
+        let mut parts: Vec<String> = [chunked(&left, l), chunked(&right, r)]
+            .into_iter()
+            .flatten()
+            .collect();
+        parts.push(format!("COALESCE({test}, 0)"));
+        if parts.len() == 1 {
+            return parts.pop().expect("one part");
+        }
+        format!("({})", parts.join(" AND "))
     }
 
     fn contains(&mut self, left: Term, right: Term) -> String {

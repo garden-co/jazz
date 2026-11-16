@@ -1251,6 +1251,13 @@ impl WireKind {
         matches!(self, WireKind::Serializable { reads, .. }
             if reads.iter().any(|read| read.view != ReadViewSourceSpec::Current))
     }
+
+    /// It holds a read with a text prefix/suffix predicate, so it needs a
+    /// link that negotiated [`crate::wire::FEATURE_TEXT_AFFIX_PREDICATES`].
+    pub fn reads_text_affix(&self) -> bool {
+        matches!(self, WireKind::Serializable { reads, .. }
+            if reads.iter().any(|read| read.query.uses_text_affix()))
+    }
 }
 
 /// [`WireKind`]'s encoding. Variants are only ever appended.
@@ -10315,7 +10322,7 @@ impl Db {
             .iter()
             .position(|m| matches!(m, SyncMessage::Read { .. }))
             .unwrap_or(out.len());
-        let reads = out.split_off(first_read);
+        let mut reads = out.split_off(first_read);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -10420,6 +10427,45 @@ impl Db {
                                     message: "a serializable transaction that read through a \
                                               branch view: not supported yet by this server"
                                         .to_owned(),
+                                },
+                            },
+                            global: false,
+                        });
+                    }
+                    _ => kept.push((commit, push)),
+                }
+            }
+            (commits, pushes) = kept.into_iter().unzip();
+        }
+        // A read or commit with a text prefix/suffix predicate is sent
+        // only to an upstream that negotiated it: an older server cannot
+        // decode it and would drop the whole link. Otherwise it is refused
+        // here, for good, as one read's error or a rejected fate.
+        if features & crate::wire::FEATURE_TEXT_AFFIX_PREDICATES == 0 {
+            const UNSUPPORTED: &str =
+                "a starts/ends-with predicate: not supported yet by this server";
+            reads.retain(|message| match message {
+                SyncMessage::Read { id, query, .. } if query.uses_text_affix() => {
+                    client.refused.push(SyncMessage::Refused {
+                        id: *id,
+                        code: ErrorCode::Query,
+                        message: UNSUPPORTED.to_owned(),
+                    });
+                    false
+                }
+                _ => true,
+            });
+            let mut kept = Vec::with_capacity(commits.len());
+            for (commit, push) in commits.into_iter().zip(pushes) {
+                match &commit {
+                    SyncMessage::Commit { id, kind, .. } if kind.reads_text_affix() => {
+                        client.refused.push(SyncMessage::Fate {
+                            id: *id,
+                            outcome: Outcome::Refused {
+                                through: client.known,
+                                error: WireError::Rejected {
+                                    reason: None,
+                                    message: UNSUPPORTED.to_owned(),
                                 },
                             },
                             global: false,
