@@ -145,7 +145,6 @@ impl Group {
 /// Counters for the fan-out bench and tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FanoutStats {
-    pub groups: usize,
     pub shared_joins: u64,
     pub woken: u64,
     pub skipped: u64,
@@ -278,10 +277,7 @@ impl Fanout {
     }
 
     pub(super) fn stats(&self) -> FanoutStats {
-        FanoutStats {
-            groups: self.groups.len(),
-            ..self.stats.clone()
-        }
+        self.stats.clone()
     }
 
     /// Tell members whose remote answered, or settled them at a higher

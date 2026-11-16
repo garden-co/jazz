@@ -700,10 +700,6 @@ struct Inner {
     /// clock too, so a reopened file never hands out a transaction id it
     /// may already have uploaded (see [`Inner::next_seq`]).
     pub(crate) reopenable: bool,
-    /// Rows the authority named as written for this replica's own commits
-    /// whose version was not this replica's image of them (see
-    /// `Inner::as_written_images`), asked for whole instead.
-    pub(crate) as_written_mismatches: u64,
     /// Pending commits a rebase replayed (see `Db::rebase`).
     pub(crate) replayed_commits: u64,
     /// Echoes a serving pass examined to match its images (see
@@ -1715,7 +1711,6 @@ impl Db {
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
-                as_written_mismatches: 0,
                 replayed_commits: 0,
                 echo_probes: 0,
                 authority: Rc::new(Cell::new(false)),

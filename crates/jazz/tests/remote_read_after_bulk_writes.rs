@@ -67,10 +67,14 @@ struct End {
     inbox: Queue,
     allowance: Option<Rc<Cell<usize>>>,
     drop_reads: Option<Rc<Cell<bool>>>,
+    sent: Option<Rc<RefCell<Vec<SyncMessage>>>>,
 }
 
 impl Transport for End {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if let Some(sent) = &self.sent {
+            sent.borrow_mut().push(message.clone());
+        }
         self.out.borrow_mut().push_back(message);
         Ok(())
     }
@@ -94,6 +98,7 @@ impl Transport for End {
 }
 
 struct Link {
+    sent: Rc<RefCell<Vec<SyncMessage>>>,
     _upstream: Upstream,
     /// Messages the server takes in per turn.
     allowance: Rc<Cell<usize>>,
@@ -106,11 +111,13 @@ fn connect(server: &Db, client: &Db) -> Link {
     let down: Queue = Rc::default();
     let allowance = Rc::new(Cell::new(usize::MAX));
     let drop_reads = Rc::new(Cell::new(false));
+    let sent: Rc<RefCell<Vec<SyncMessage>>> = Rc::default();
     let upstream = block_on(client.connect_upstream(Box::new(End {
         out: up.clone(),
         inbox: down.clone(),
         allowance: None,
         drop_reads: None,
+        sent: Some(sent.clone()),
     })));
     block_on(server.accept_subscriber(
         Box::new(End {
@@ -118,11 +125,13 @@ fn connect(server: &Db, client: &Db) -> Link {
             inbox: up,
             allowance: Some(allowance.clone()),
             drop_reads: Some(drop_reads.clone()),
+            sent: None,
         }),
         alice_id(),
     ))
     .unwrap();
     let link = Link {
+        sent,
         _upstream: upstream,
         allowance,
         drop_reads,
@@ -238,7 +247,7 @@ fn a_tick_applying_a_burst_of_commits_matches_their_rows_once_each() {
     const WRITES: usize = 300;
     let server = open(0, AuthorSubject::SYSTEM);
     let alice = open(1, alice_id());
-    let _link = connect(&server, &alice);
+    let link = connect(&server, &alice);
     let before = server.echo_probes();
     for n in 0..WRITES {
         insert(&alice, n);
@@ -250,7 +259,13 @@ fn a_tick_applying_a_burst_of_commits_matches_their_rows_once_each() {
         "{probes} echo probes for {WRITES} commits"
     );
     // Each row still settles as alice wrote it, with no round trip.
-    assert_eq!(alice.as_written_mismatches(), 0);
+    assert!(
+        link.sent
+            .borrow()
+            .iter()
+            .all(|message| !matches!(message, SyncMessage::ResendWhole { .. })),
+        "honest writes need no whole-row fetch"
+    );
     assert_eq!(count(&alice, "docs"), WRITES);
     assert_eq!(count(&server, "docs"), WRITES);
 }
