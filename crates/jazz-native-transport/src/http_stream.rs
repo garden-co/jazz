@@ -195,10 +195,15 @@ impl HttpStreamError {
             Self::Refused {
                 status: 401 | 403, ..
             } => NativeTransportError::AuthRejected(message),
+            // No stream here after all, or something else answering: fail
+            // loudly rather than retry against it.
+            Self::Refused { status: 404, .. } | Self::Malformed(_) => {
+                NativeTransportError::Terminal(message)
+            }
             // Any other refusal switched the endpoint back to sockets (see
             // `connect_stream`): the next session tries a socket, which
             // fails as a socket does if the backend has neither.
-            Self::Refused { .. } | Self::Malformed(_) => NativeTransportError::Retryable(message),
+            Self::Refused { .. } => NativeTransportError::Retryable(message),
         }
     }
 }
@@ -589,7 +594,8 @@ pub enum HttpStreamTransportKind {
 ///
 /// The connector remembers the switch for as long as it lives (a client's
 /// reconnects share it). A stream refused before it opens switches back,
-/// so the next session tries a socket again.
+/// so the next session tries a socket again; a 404 or a response that is
+/// no session fails for good (`Terminal`), loudly.
 #[derive(Clone)]
 pub struct HttpStreamFallbackConnector {
     http: reqwest::Client,
@@ -731,12 +737,14 @@ impl HttpStreamFallbackConnector {
             NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout)
         );
         // A name that doesn't resolve has no backend to ask, and an upgrade
-        // refused for its credential was answered by the backend itself.
+        // refused for its credential (401) was answered by the backend
+        // itself. A 403 may be a WAF or CDN refusing upgrades: probe it, as
+        // TS does.
         let probe = match &failure {
             NativeConnectFailure::Resolution(_) => false,
             NativeConnectFailure::WebSocket(WebSocketClientError::Connect(
                 tokio_tungstenite::tungstenite::Error::Http(response),
-            )) => !matches!(response.status().as_u16(), 401 | 403),
+            )) => response.status().as_u16() != 401,
             _ => true,
         };
         if probe
@@ -843,6 +851,26 @@ mod tests {
             socket_gave_up |= socket.check().is_some();
         }
         assert!(socket_gave_up, "a socket that silent is given up");
+    }
+
+    #[test]
+    fn stream_open_refusals_map_like_a_socket_upgrade() {
+        let refused = |status| HttpStreamError::Refused {
+            status,
+            body: String::new(),
+        };
+        let kind = |error: HttpStreamError| match error.into_transport_error() {
+            NativeTransportError::Retryable(_) => "retryable",
+            NativeTransportError::Terminal(_) => "terminal",
+            NativeTransportError::AuthRejected(_) => "auth",
+        };
+        assert_eq!(kind(refused(401)), "auth");
+        assert_eq!(kind(refused(403)), "auth");
+        assert_eq!(kind(refused(404)), "terminal");
+        assert_eq!(kind(HttpStreamError::Malformed("x".into())), "terminal");
+        assert_eq!(kind(refused(503)), "retryable");
+        assert_eq!(kind(refused(410)), "retryable");
+        assert_eq!(kind(HttpStreamError::Timeout), "retryable");
     }
 
     #[test]
