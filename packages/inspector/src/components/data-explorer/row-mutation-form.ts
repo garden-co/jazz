@@ -97,6 +97,22 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
     case "Bytea":
     case "Vector":
       throw new Error("Binary fields are read-only in the inspector.");
+    case "Point": {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed) as unknown;
+      } catch {
+        throw new Error("A point is a JSON array [lng, lat].");
+      }
+      if (
+        !Array.isArray(parsed) ||
+        parsed.length !== 2 ||
+        !parsed.every((coordinate) => typeof coordinate === "number")
+      ) {
+        throw new Error("A point is a JSON array [lng, lat].");
+      }
+      return parsed;
+    }
     case "Array": {
       let parsed: unknown;
       try {

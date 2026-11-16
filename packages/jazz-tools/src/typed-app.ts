@@ -10,6 +10,7 @@ import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
 import { vectorLiteralJson } from "./runtime/vector.js";
+import { pointLiteralJson } from "./runtime/point.js";
 
 // ============================================================================
 // The generated type map
@@ -1226,14 +1227,23 @@ export class TypedTableQueryBuilder<
           (columnType?.type === "Row" &&
             columnType.columns.some((column) => Object.hasOwn(value, column.name))));
 
+      // A point literal travels as the hex of its bytes, so a filter keeps
+      // every bit (JSON numbers lose -0); `[lng, lat]` is checked here.
+      const literal = (op: string, opValue: unknown): unknown => {
+        if (columnType?.type !== "Point" || opValue === null) return opValue;
+        if ((op === "in" || op === "notIn") && Array.isArray(opValue)) {
+          return opValue.map((point) => pointLiteralJson(point, key));
+        }
+        return op === "eq" || op === "ne" ? pointLiteralJson(opValue, key) : opValue;
+      };
       if (isObjectValue && !isDirectObjectValue) {
         for (const [op, opValue] of Object.entries(value)) {
           if (opValue !== undefined) {
-            built.push({ column: key, op, value: opValue });
+            built.push({ column: key, op, value: literal(op, opValue) });
           }
         }
       } else {
-        built.push({ column: key, op: "eq", value });
+        built.push({ column: key, op: "eq", value: literal("eq", value) });
       }
     }
     return built;

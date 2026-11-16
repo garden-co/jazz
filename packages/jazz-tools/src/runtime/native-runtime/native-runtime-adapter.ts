@@ -141,6 +141,7 @@ import {
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 import { assertVectorBytes } from "../vector.js";
+import { assertPointBytes } from "../point.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -7244,6 +7245,10 @@ function decodeBytes(
     case "Vector":
       // The payload is the `f32le/1` bytes themselves, carried as Bytea.
       assertVectorBytes(bytes, type.dimensions, fieldName);
+      return { type: "Bytea", value: bytes.slice() };
+    case "Point":
+      // The payload is the 16 `point-f64le/1` bytes, carried as Bytea.
+      assertPointBytes(bytes, fieldName);
       return { type: "Bytea", value: bytes.slice() };
     case "Array":
       return {

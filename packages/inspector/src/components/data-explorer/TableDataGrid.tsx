@@ -526,6 +526,11 @@ function unwrapDefaultValue(defaultValue: Value, columnType: ColumnType): unknow
         ? JSON.parse(String(defaultValue.value))
         : defaultValue.value;
     case "Bytea":
+      if (columnType.type === "Point") {
+        // `point-f64le/1`: `[lng, lat]`.
+        const view = new DataView(new Uint8Array(defaultValue.value).buffer);
+        return [view.getFloat64(0, true), view.getFloat64(8, true)];
+      }
       if (columnType.type === "Vector") {
         const bytes = new Uint8Array(defaultValue.value);
         const view = new DataView(bytes.buffer);

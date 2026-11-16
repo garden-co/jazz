@@ -898,6 +898,7 @@ fn scalar(name: &str) -> Option<ColumnType> {
         "timestamp" => ColumnType::Timestamp,
         "uuid" => ColumnType::Uuid,
         "bytes" => ColumnType::Bytea,
+        "point" => ColumnType::Point,
         _ => return None,
     })
 }
@@ -911,6 +912,7 @@ const SCALARS: &[&str] = &[
     "timestamp",
     "uuid",
     "bytes",
+    "point",
 ];
 
 /// A column type, nullability and options from its spec.
@@ -1048,6 +1050,9 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                         if matches!(element, ColumnType::Vector { .. }) {
                             return Err(refuse(sub, "an array of vectors is not supported"));
                         }
+                        if matches!(element, ColumnType::Point) {
+                            return Err(refuse(sub, "an array of points is not supported"));
+                        }
                         ColumnType::Array {
                             element: Box::new(element),
                         }
@@ -1113,6 +1118,27 @@ fn read_value(value: &Json, ty: &ColumnType, path: &str) -> Result<Value, Refusa
                 bytes.extend_from_slice(&x.to_le_bytes());
             }
             Value::Bytea(bytes)
+        }
+        // `[lng, lat]`, GeoJSON order.
+        (ColumnType::Point, Json::Array(items)) => {
+            let coordinate = |i: usize| match items.get(i) {
+                Some(Json::Number(n)) => n.parse::<f64>().ok(),
+                _ => None,
+            };
+            let point = match (items.len(), coordinate(0), coordinate(1)) {
+                (2, Some(lng), Some(lat)) => jazz_types::records::encode_point_f64le(lng, lat).ok(),
+                _ => None,
+            };
+            Value::Bytea(
+                point
+                    .ok_or_else(|| {
+                        refuse(
+                            path,
+                            "a point is [lng, lat]: longitude in [-180, 180], then latitude in [-90, 90]",
+                        )
+                    })?
+                    .to_vec(),
+            )
         }
         (ColumnType::Bytea, Json::String(s)) => Value::Bytea(
             base64::engine::general_purpose::STANDARD
@@ -1605,6 +1631,7 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
         ColumnType::Vector { dimensions } => {
             Json::object(vec![("vector", Json::Number(dimensions.to_string()))])
         }
+        ColumnType::Point => Json::string("point"),
     })
 }
 
@@ -1695,6 +1722,13 @@ fn write_value(value: &Value, ty: &ColumnType) -> Result<Json, String> {
                 .map(|c| Json::Number(f32::from_le_bytes([c[0], c[1], c[2], c[3]]).to_string()))
                 .collect(),
         ),
+        (Value::Bytea(bytes), ColumnType::Point) => {
+            let [lng, lat] = jazz_types::records::decode_point_f64le(bytes)
+                .map_err(|_| super::expr::unsupported("a point default that isn't a point"))?;
+            let number =
+                |x: f64| Json::Number(serde_json::Number::from_f64(x).expect("finite").to_string());
+            Json::Array(vec![number(lng), number(lat)])
+        }
         (Value::Bytea(bytes), _) => {
             Json::String(base64::engine::general_purpose::STANDARD.encode(bytes))
         }

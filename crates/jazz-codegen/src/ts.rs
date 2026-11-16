@@ -565,6 +565,7 @@ fn kind(ty: &ColumnType) -> &'static str {
         | ColumnType::CatalogueEnumPayload { .. } => "enum",
         ColumnType::Array { .. } => "array",
         ColumnType::Vector { .. } => "vector",
+        ColumnType::Point => "point",
         // The loader refuses these in a file.
         ColumnType::TransactionId | ColumnType::Row { .. } => "json",
     }
@@ -585,6 +586,8 @@ pub(crate) fn ts_type(ty: &ColumnType, init: bool) -> String {
         ColumnType::Timestamp => "Date".into(),
         ColumnType::Bytea => "Uint8Array".into(),
         ColumnType::Vector { .. } => "Float32Array".into(),
+        // GeoJSON order (SPEC 10.10): longitude first.
+        ColumnType::Point => "readonly [lng: number, lat: number]".into(),
         ColumnType::Json { schema: None } => "JsonValue".into(),
         ColumnType::Json {
             schema: Some(schema),

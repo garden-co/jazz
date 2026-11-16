@@ -533,6 +533,33 @@ mod tests {
         assert!(decode_named_cells(b"\x01\x01\x01v\x13\x81\x20\x00").is_err());
     }
 
+    // A `point` cell (SPEC 20.1) crosses the host boundary as type tag 20,
+    // and its payload is the 16 `point-f64le/1` bytes (lng, then lat), so the
+    // TypeScript codec writes it without consulting Rust's serde.
+    #[test]
+    fn named_cell_input_carries_points_as_f64le_and_refuses_bad_ones() {
+        let fixture = b"\x01\x01\x01p\x14\x10\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\x00\xc0";
+        let cells = decode_named_cells(fixture).unwrap();
+        let bytes = [1.0f64, -2.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        assert_eq!(cells.get("p"), Some(&Value::Bytes(bytes)));
+        let descriptor = RecordDescriptor::new([("p", ValueType::Point)]);
+        assert_eq!(
+            encode_named_cell_descriptor(&descriptor).unwrap(),
+            &fixture[..5]
+        );
+        // Wrong length, and a latitude out of range.
+        assert!(
+            decode_named_cells(b"\x01\x01\x01p\x14\x08\x00\x00\x00\x00\x00\x00\xf0\x3f").is_err()
+        );
+        assert!(
+            decode_named_cells(b"\x01\x01\x01p\x14\x10\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\x60\x40")
+                .is_err()
+        );
+    }
+
     #[test]
     fn named_cell_input_rejects_ambiguous_and_unbounded_descriptors_and_decodes_payload_enums() {
         for descriptor in [

@@ -4,6 +4,7 @@ import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers
 import { exactSignedI64 } from "./exact-integer.js";
 import { concatBytes, isValidUtf8 } from "../util.js";
 import { VECTOR_MAX_DIMENSIONS, assertVectorBytes } from "../vector.js";
+import { assertPointBytes } from "../point.js";
 
 const textDecoder = new Utf8Decoder({ fatal: true });
 
@@ -686,6 +687,8 @@ function valueTypeName(tag: number): string {
       return "U48";
     case 19:
       return "Vector";
+    case 20:
+      return "Point";
     default:
       return `unknown(${tag})`;
   }
@@ -809,6 +812,11 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       // The payload is the `f32le/1` bytes themselves: no stored-scalar arm.
       if (value.type !== "Bytea") throw new Error("expected Vector value as f32le bytes");
       assertVectorBytes(value.value, type.dimensions);
+      return value.value;
+    case "Point":
+      // The payload is the 16 `point-f64le/1` bytes: no stored-scalar arm.
+      if (value.type !== "Bytea") throw new Error("expected Point value as point-f64le bytes");
+      assertPointBytes(value.value);
       return value.value;
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
@@ -936,6 +944,9 @@ export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"
       return { tag: 9 };
     case "Vector":
       return { tag: 19, dimensions: type.dimensions };
+    case "Point":
+      // `ValueType::Point`, a unit variant.
+      return { tag: 20 };
     case "Uuid":
       return { tag: 11 };
     case "Array":
@@ -983,6 +994,9 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
       return { type: "Bytea", value: decodeInlineScalar(bytes).slice() };
     case "Vector":
       assertVectorBytes(bytes, type.dimensions);
+      return { type: "Bytea", value: bytes.slice() };
+    case "Point":
+      assertPointBytes(bytes);
       return { type: "Bytea", value: bytes.slice() };
     case "Array":
       return { type: "Array", value: decodeArray(type.element, bytes) };

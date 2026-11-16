@@ -404,6 +404,9 @@ export function fromJsonForColumn(type: ColumnType | undefined, value: unknown):
       return typeof value === "string" && /^-?\d+$/.test(value) ? BigInt(value) : value;
     case "Vector":
       return Array.isArray(value) ? Float32Array.from(value as number[]) : value;
+    case "Point":
+      // `[lng, lat]`, already plain JSON numbers.
+      return value;
     case "Array":
       return Array.isArray(value)
         ? value.map((entry) => fromJsonForColumn(type.element, entry))

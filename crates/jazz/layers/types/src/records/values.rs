@@ -481,6 +481,14 @@ pub enum ValueType {
     /// wrong length or a NaN/infinite element. Not orderable, not a key.
     /// Appended last so existing serde variant indices are unchanged.
     Vector(u32),
+    /// A WGS84 point (SPEC 20.1), carried as [`Value::Bytes`] of exactly 16
+    /// bytes in encoding `point-f64le/1`: longitude then latitude, each an
+    /// IEEE-754 binary64 little-endian (GeoJSON order). Encoded like `Bytes`
+    /// everywhere (record payload, SQLite BLOB cell, wire); encoders refuse
+    /// a wrong length, a non-finite coordinate, a longitude outside
+    /// `[-180, 180]` or a latitude outside `[-90, 90]`. Not orderable, not a
+    /// key. Appended last so existing serde variant indices are unchanged.
+    Point,
 }
 
 /// Opaque marker for physical-only value encodings beneath the public
@@ -549,6 +557,39 @@ const DESCRIPTOR_NODE_U48: u8 = 25;
 const DESCRIPTOR_NODE_INTERNED: u8 = 26;
 /// A `vector(n)` column (SPEC 20.1): one `dimensions: u32` field.
 const DESCRIPTOR_NODE_VECTOR: u8 = 27;
+/// A `point` column (SPEC 20.1): no payload.
+const DESCRIPTOR_NODE_POINT: u8 = 28;
+
+/// Bytes of a [`ValueType::Point`] value in encoding `point-f64le/1`.
+pub const POINT_BYTES: usize = 16;
+
+/// Decodes a `point` payload in encoding `point-f64le/1` into
+/// `[lng, lat]` (GeoJSON order), refusing a wrong length, a non-finite
+/// coordinate or one out of range.
+pub fn decode_point_f64le(bytes: &[u8]) -> Result<[f64; 2], Error> {
+    let bytes: &[u8; POINT_BYTES] = bytes
+        .try_into()
+        .map_err(|_| Error::PointLength { bytes: bytes.len() })?;
+    let lng = f64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
+    let lat = f64::from_le_bytes(bytes[8..].try_into().expect("8 bytes"));
+    if !(-180.0..=180.0).contains(&lng) || !(-90.0..=90.0).contains(&lat) {
+        return Err(Error::PointOutOfRange {
+            lng_bits: lng.to_bits(),
+            lat_bits: lat.to_bits(),
+        });
+    }
+    Ok([lng, lat])
+}
+
+/// Encodes `[lng, lat]` in encoding `point-f64le/1`, refusing a non-finite
+/// coordinate or one out of range.
+pub fn encode_point_f64le(lng: f64, lat: f64) -> Result<[u8; POINT_BYTES], Error> {
+    let mut bytes = [0; POINT_BYTES];
+    bytes[..8].copy_from_slice(&lng.to_le_bytes());
+    bytes[8..].copy_from_slice(&lat.to_le_bytes());
+    decode_point_f64le(&bytes)?;
+    Ok(bytes)
+}
 
 /// Largest dimension of a [`ValueType::Vector`] (SPEC 20.1).
 pub const VECTOR_MAX_DIMENSIONS: u32 = 4096;
@@ -810,6 +851,7 @@ fn descriptor_codec_push_value_type(
                 ..scalar(DESCRIPTOR_NODE_VECTOR)
             },
         ),
+        ValueType::Point => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_POINT)),
         ValueType::I32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I32)),
         ValueType::I64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I64)),
         ValueType::F64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_F64)),
@@ -1074,6 +1116,7 @@ fn descriptor_codec_decode_value_type(
             })?;
             Ok(ValueType::Vector(checked_vector_dimensions(dimensions)?))
         }
+        DESCRIPTOR_NODE_POINT => scalar(DESCRIPTOR_NODE_POINT, ValueType::Point),
         DESCRIPTOR_NODE_I32 => scalar(DESCRIPTOR_NODE_I32, ValueType::I32),
         DESCRIPTOR_NODE_I64 => scalar(DESCRIPTOR_NODE_I64, ValueType::I64),
         DESCRIPTOR_NODE_F64 => scalar(DESCRIPTOR_NODE_F64, ValueType::F64),
@@ -1288,6 +1331,7 @@ fn persisted_descriptor_node_schema() -> &'static EnumSchema {
             (DESCRIPTOR_NODE_U48, "U48"),
             (DESCRIPTOR_NODE_INTERNED, "Interned"),
             (DESCRIPTOR_NODE_VECTOR, "Vector"),
+            (DESCRIPTOR_NODE_POINT, "Point"),
         ];
         let cases = kinds.into_iter().enumerate().map(|(index, (tag, name))| {
             assert_eq!(index, usize::from(tag));
@@ -1437,7 +1481,10 @@ fn persisted_descriptor_node_from_value(value: &Value) -> Result<DescriptorCodec
         (DESCRIPTOR_NODE_VECTOR, [Value::U32(dimensions)]) => {
             node.registry_id = u64::from(*dimensions);
         }
-        (DESCRIPTOR_NODE_U8..=DESCRIPTOR_NODE_UUID | DESCRIPTOR_NODE_U48, []) => {}
+        (
+            DESCRIPTOR_NODE_U8..=DESCRIPTOR_NODE_UUID | DESCRIPTOR_NODE_U48 | DESCRIPTOR_NODE_POINT,
+            [],
+        ) => {}
         _ => return Err(Error::NonCanonicalRecord),
     }
     Ok(node)
@@ -1820,6 +1867,7 @@ impl ValueType {
             Self::String
             | Self::Bytes
             | Self::Vector(_)
+            | Self::Point
             | Self::Internal(_)
             | Self::Array(_)
             | Self::Record(_)
@@ -1868,6 +1916,10 @@ pub(super) fn encode_value_into(
         ) => bytes.extend_from_slice(value),
         (Value::Bytes(value), ValueType::Vector(dimensions)) => {
             validate_vector_f32le(value, *dimensions)?;
+            bytes.extend_from_slice(value)
+        }
+        (Value::Bytes(value), ValueType::Point) => {
+            decode_point_f64le(value)?;
             bytes.extend_from_slice(value)
         }
         (
@@ -2072,6 +2124,10 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             validate_vector_f32le(bytes, *dimensions)?;
             Ok(Value::Bytes(bytes.to_vec()))
         }
+        ValueType::Point => {
+            decode_point_f64le(bytes)?;
+            Ok(Value::Bytes(bytes.to_vec()))
+        }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
             Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?)))
         }
@@ -2182,6 +2238,7 @@ fn validate_value_inner(
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => Ok(()),
         ValueType::Vector(dimensions) => validate_vector_f32le(bytes, *dimensions),
+        ValueType::Point => decode_point_f64le(bytes).map(|_| ()),
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
             read_exact::<4>(bytes).map(|_| ())
         }
@@ -2330,6 +2387,7 @@ fn validate_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<(), Err
         ValueType::String
         | ValueType::Bytes
         | ValueType::Vector(_)
+        | ValueType::Point
         | ValueType::Internal(_)
         | ValueType::Array(_)
         | ValueType::Record(_)
@@ -2476,6 +2534,7 @@ pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
         (Value::Bytes(value), ValueType::Vector(dimensions)) => {
             validate_vector_f32le(value, *dimensions)
         }
+        (Value::Bytes(value), ValueType::Point) => decode_point_f64le(value).map(|_| ()),
         (Value::U8(_), ValueType::U8)
         | (Value::U16(_), ValueType::U16)
         | (Value::U32(_), ValueType::U32)
@@ -2622,6 +2681,7 @@ pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), E
             Ok(())
         }
         ValueType::Vector(dimensions) => checked_vector_dimensions(*dimensions).map(|_| ()),
+        ValueType::Point => Ok(()),
         ValueType::EnumTag(schema) => schema.validate(),
         ValueType::Enum(schema) => {
             schema.validate()?;
@@ -2756,6 +2816,7 @@ pub(super) fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Resul
         ValueType::String
         | ValueType::Bytes
         | ValueType::Vector(_)
+        | ValueType::Point
         | ValueType::Internal(_)
         | ValueType::Array(_)
         | ValueType::Record(_)

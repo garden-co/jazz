@@ -2835,6 +2835,102 @@ fn malformed_vector_columns_are_refused_by_name() {
     );
 }
 
+fn point_bytes(lng: f64, lat: f64) -> Vec<u8> {
+    jazz_types::records::encode_point_f64le(lng, lat)
+        .unwrap()
+        .to_vec()
+}
+
+/// A point column is written `"point"` (`"point?"` when optional), its
+/// default as `[lng, lat]` in GeoJSON order, and the file reads back to the
+/// same schema (SPEC 20.1, 10.10).
+#[test]
+fn point_columns_round_trip_through_the_file() {
+    let mut input = todo_server();
+    let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+    todos
+        .columns
+        .columns
+        .push(ColumnDescriptor::new("location", ColumnType::Point));
+    todos
+        .columns
+        .columns
+        .push(nullable("pickup", ColumnType::Point));
+    let mut home = ColumnDescriptor::new("home", ColumnType::Point);
+    home.default = Some(Value::Bytea(point_bytes(-122.419416, 37.774929)));
+    todos.columns.columns.push(home);
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+
+    let expected = structural(input.schemas[0].clone());
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let columns = &app["tables"]["todos"]["columns"];
+    assert_eq!(
+        columns["location"],
+        serde_json::json!("point"),
+        "{}",
+        written.app
+    );
+    assert_eq!(columns["pickup"], serde_json::json!("point?"));
+    assert_eq!(
+        columns["home"],
+        serde_json::json!({ "type": "point", "default": [-122.419416, 37.774929] })
+    );
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(
+        loaded.current_hash(),
+        SchemaHash::compute(&expected),
+        "the file reads back to the schema it was written from"
+    );
+}
+
+/// `point` is its own type: a schema with a point column differs from one
+/// with a bytes column.
+#[test]
+fn point_is_schema_identity() {
+    let hash = |ty: ColumnType| {
+        let mut input = todo_server();
+        input.schemas[0]
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .columns
+            .columns
+            .push(ColumnDescriptor::new("location", ty));
+        SchemaHash::compute(&structural(input.schemas[0].clone()))
+    };
+    assert_ne!(hash(ColumnType::Point), hash(ColumnType::Bytea));
+    assert_eq!(hash(ColumnType::Point), hash(ColumnType::Point));
+}
+
+#[test]
+fn malformed_point_columns_are_refused_by_name() {
+    let column = |spec: serde_json::Value| {
+        edited_app(move |v| v["tables"]["todos"]["columns"]["location"] = spec)
+    };
+    let error = column(serde_json::json!("pointt"));
+    assert!(error.contains("did you mean `point`"), "{error}");
+    let error = column(serde_json::json!({ "array": "point" }));
+    assert!(
+        error.contains("an array of points is not supported"),
+        "{error}"
+    );
+    for default in [
+        serde_json::json!([37.77, -122.42]),
+        serde_json::json!([181, 0]),
+        serde_json::json!([0]),
+        serde_json::json!([0, 0, 0]),
+        serde_json::json!(["0", 0]),
+        serde_json::json!({ "lng": 0, "lat": 0 }),
+    ] {
+        let error = column(serde_json::json!({ "type": "point", "default": default }));
+        assert!(
+            error.contains("a point is [lng, lat]")
+                || error.contains("doesn't fit this column's type"),
+            "{default}: {error}"
+        );
+    }
+}
+
 /// What the TS permissions compiler (and the engine behind it) refused, the
 /// loader refuses too, naming the spot.
 #[test]

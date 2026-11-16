@@ -125,7 +125,12 @@ export type ColumnType =
    * `dimensions` binary32 values (SPEC 20.1), carried in `Value` as `Bytea`
    * holding their `f32le/1` bytes; `Float32Array` at the JS edge.
    */
-  | { type: "Vector"; dimensions: number };
+  | { type: "Vector"; dimensions: number }
+  /**
+   * A WGS84 point (SPEC 20.1), carried in `Value` as `Bytea` holding its 16
+   * `point-f64le/1` bytes; `[lng, lat]` (GeoJSON order) at the JS edge.
+   */
+  | { type: "Point" };
 
 export type ColumnMergeStrategy = "Counter" | "GSet" | "Text" | "Markdown" | "Html";
 
