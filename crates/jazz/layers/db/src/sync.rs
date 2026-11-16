@@ -12450,12 +12450,17 @@ impl Db {
             // replica with no server accepted. (Where a latest-only table
             // pruned an earlier of several own versions of the row in one
             // tick, that version counts as unreadable.)
-            let covered: BTreeSet<String> = inner.sessions[index]
-                .subs
-                .values()
-                .filter_map(|(_, group, ..)| group.upgrade())
-                .flat_map(|group| group.borrow().tables().clone())
-                .collect();
+            // The tables the session's live reads read, built only once a
+            // written row asks: most sessions get no accepted write in a tick.
+            let covered_now = |inner: &Inner| -> BTreeSet<String> {
+                inner.sessions[index]
+                    .subs
+                    .values()
+                    .filter_map(|(_, group, ..)| group.upgrade())
+                    .flat_map(|group| group.borrow().tables().clone())
+                    .collect()
+            };
+            let mut covered: Option<BTreeSet<String>> = None;
             let mut write_only: HashSet<(String, RowUuid, Vec<u8>)> = HashSet::new();
             {
                 let mut written: BTreeMap<(String, RowUuid, Vec<u8>), Vec<Pos>> = BTreeMap::new();
@@ -12471,7 +12476,10 @@ impl Db {
                     // A live read of the table reconciles the row: checked
                     // first, so a burst into a read table costs no extra
                     // store lookup per row (R62).
-                    if covered.contains(&table) {
+                    if covered
+                        .get_or_insert_with(|| covered_now(&inner))
+                        .contains(&table)
+                    {
                         continue;
                     }
                     let Some(current) = inner.current_image(&table, row, &key)? else {
