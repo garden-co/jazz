@@ -294,7 +294,7 @@ export function layout(source: string): string {
   let blank = false;
   const flush = (end: string) => {
     const nodes = trimNewlines(parse(statement, { i: 0 })[0]!);
-    if (nodes.length) out.push(print(nodes, 0, 0) + end);
+    if (nodes.length) out.push(print(nodes, 0, 0, end.length) + end);
     statement = [];
   };
   for (let i = 0; i < toks.length; i++) {

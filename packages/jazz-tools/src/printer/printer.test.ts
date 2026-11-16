@@ -114,12 +114,31 @@ describe("the permissions printer", () => {
       cues: { read: crewOrChief("chief") },
     });
     expect(out.unsupported).toEqual([]);
-    // One helper for the whole check; the role that differs between uses is a parameter.
+    // One helper for the whole check, taking values (so every table can use it); the
+    // role that differs between uses is a parameter. Its structural name would be
+    // too long to read, so it gets a short one for the author to rename.
     expect(out.code).toContain(
-      'const isCrewOrChiefWithRole = (showId: s.Uuid, role: s.Value<"string">) => anyOf(exists.crew({ showId, userId: session.user }), exists.crew({ showId, userId: session.user, role }));',
+      'const rule1 = (showId: s.Uuid, role: s.Value<"string">) => anyOf(exists.crew({ showId, userId: session.user }), exists.crew({ showId, userId: session.user, role }));',
     );
-    expect(out.code).toContain('read: (cue) => isCrewOrChiefWithRole(cue.showId, "chief"),');
-    expect(out.code).toContain('delete: (note) => isCrewOrChiefWithRole(note.showId, "lead"),');
+    expect(out.code).toContain('read: (cue) => rule1(cue.showId, "chief"),');
+    expect(out.code).toContain('delete: (note) => rule1(note.showId, "lead"),');
+  });
+
+  it("names parameters after the column they fill and types enum literals as their union", () => {
+    const bands = app({
+      members: { columns: { bandId: "uuid", userId: "uuid", role: { enum: ["admin", "player"] } } },
+      gigs: { columns: { bandId: "uuid" } },
+      songs: { columns: { bandId: "uuid" } },
+    });
+    const member = (role: string) =>
+      `exists members(bandId = this.bandId, userId = session.user, role = '${role}')`;
+    const out = print(bands, {
+      gigs: { read: member("admin") },
+      songs: { read: member("player") },
+    });
+    expect(out.code).toContain(
+      'const isMemberWithRole = (bandId: s.Uuid, role: "admin" | "player") => exists.members({ bandId, userId: session.user, role });',
+    );
   });
 
   it("prints named values by name", () => {
