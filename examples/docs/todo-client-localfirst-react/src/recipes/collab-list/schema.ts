@@ -1,6 +1,6 @@
+// #region schema
 import { schema as s } from "jazz-tools";
 
-// #region schema
 export const schema = s.defineSchema({
   projectMembers: s.table(
     { projectId: s.uuid(), user_id: s.uuid() },

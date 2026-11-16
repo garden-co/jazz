@@ -1,6 +1,6 @@
+// #region schema
 import { schema as s } from "jazz-tools";
 
-// #region schema
 export const schema = s.defineSchema({
   documents: s.table(
     { title: s.string(), content: s.string(), workspaceId: s.uuid() },

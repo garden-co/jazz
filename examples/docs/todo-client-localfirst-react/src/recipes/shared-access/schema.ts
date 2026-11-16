@@ -1,6 +1,6 @@
+// #region schema
 import { schema as s } from "jazz-tools";
 
-// #region schema
 export const schema = s.defineSchema({
   todoShares: s.table(
     { todoId: s.uuid(), user_id: s.uuid(), can_edit: s.boolean() },
