@@ -516,6 +516,38 @@ async fn the_backend_acts_as_a_request_user() {
     app.stop().await;
 }
 
+/// A user's handle shares the backend's trusted client: it can't
+/// disconnect it for every user, see every user's refusals, or delete
+/// the backend's store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_handle_refuses_the_clients_lifecycle() {
+    let app = App::start().await;
+    app.endpoint.create_account_for("bob").await.unwrap();
+    let as_bob = Request::new("POST", "/").header("authorization", "Bearer token-bob");
+    let bob = app.endpoint.for_user(&as_bob).await.unwrap();
+
+    #[track_caller]
+    fn unsupported(result: Result<(), Error>) {
+        assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
+    }
+    unsupported(bob.disconnect().await);
+    unsupported(bob.reconnect().await);
+    unsupported(bob.mutation_errors().await.map(drop));
+    unsupported(bob.delete_client_storage().await);
+
+    // The shared client is still connected, and still runs.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        bob.durable(DurabilityTier::GlobalServer)
+            .insert(NewTodo::new("still synced", false)),
+    )
+    .await
+    .expect("the shared client is still connected")
+    .unwrap();
+    assert!(app.backend.all(todos::query()).await.is_ok());
+    app.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_endpoint_refuses_what_it_should() {
     let app = App::start().await;
@@ -548,10 +580,25 @@ async fn the_endpoint_refuses_what_it_should() {
         json!({ "issuer": "jazz:backend", "subject": "carol" })
     );
     assert_eq!(signed_in["claims"], json!({ "role": "member" }));
+    // Another app id in the path (a TS client derives one from its
+    // endpoint URL) is served as this endpoint's own app, as by createJazz.
     let other = format!("/jazz/apps/{}/accounts/backend-sign-in", AppId::random());
+    let served = app
+        .endpoint
+        .handle(Request::new("POST", &other).header("authorization", "Bearer token-carol"))
+        .await;
+    assert_eq!(served.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&served.body).unwrap()["identity"]["subject"],
+        json!("carol")
+    );
+    assert!(
+        app.endpoint
+            .is_socket(&format!("/jazz/apps/{}/ws", AppId::random()))
+    );
     assert_eq!(
         app.endpoint
-            .handle(Request::new("POST", other))
+            .handle(Request::new("POST", "/jazz/apps//accounts/backend-sign-in"))
             .await
             .status,
         404
@@ -1262,5 +1309,39 @@ async fn the_axum_router_admits_a_ts_clients_text_prelude() {
     let served = tokio::spawn(async move { axum::serve(listener, router).await });
     a_ts_shaped_socket_is_admitted(&app, &ws).await;
     served.abort();
+    app.stop().await;
+}
+
+/// A client that names another app id (a TS client derives its own from
+/// the endpoint URL) signs in and syncs: the endpoint serves its own app.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_naming_another_app_id_syncs_with_the_endpoints_app() {
+    let app = App::start().await;
+    let derived = AppId::random();
+    assert_ne!(derived, app.app_id);
+    let uma = Jazz::open(
+        client_files(),
+        Config::new(derived)
+            .server(&app.url)
+            .user(bearer("token-uma")),
+    )
+    .await
+    .expect("sign in through the endpoint under another app id");
+    let todo = uma
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo::new("Under a derived id", false))
+        .await
+        .unwrap();
+    let seen = eventually(async || {
+        let rows = app
+            .backend
+            .all_with(todos::query(), ReadTier::Remote)
+            .await
+            .unwrap();
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert_eq!(seen, vec![todo]);
+    uma.shutdown().await.unwrap();
     app.stop().await;
 }
