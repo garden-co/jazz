@@ -23,7 +23,10 @@ survive; where two people replaced the same words, the later edit wins that part
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  notes: s.table({ title: s.string(), body: s.string().default("").merge("markdown") }),
+  notes: s.table({
+    title: s.string(),
+    body: s.string().default("").merge("markdown"),
+  }),
 });
 ```
 

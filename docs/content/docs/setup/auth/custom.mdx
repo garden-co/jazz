@@ -251,7 +251,10 @@ For an app with this `todos` table:
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  todos: s.table({ title: s.string(), owner_id: s.uuid() }),
+  todos: s.table({
+    title: s.string(),
+    owner_id: s.uuid(),
+  }),
 });
 ```
 
