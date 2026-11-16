@@ -86,7 +86,8 @@ func OpenSession(ctx context.Context, cfg Config, opts SessionOptions) (*Session
 	if err := loadFFI(); err != nil {
 		return nil, err
 	}
-	if ffi.sessionOpen == nil {
+	if ffi.sessionOpen == nil || ffi.sessionCall == nil || ffi.sessionJazz == nil ||
+		ffi.sessionWatch == nil || ffi.sessionClose == nil {
 		return nil, &Error{Kind: KindNotSupported, Message: "sessions are not supported yet by this libjazz_ffi"}
 	}
 	var provider TokenProvider
