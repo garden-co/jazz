@@ -44,6 +44,10 @@ pub(crate) enum Command {
 /// cancels them.
 const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long shutdown waits for the backend to answer the requests that end
+/// the client's HTTP stream sessions (see `HttpStreamFallbackConnector::settle`).
+const STREAM_SESSION_END: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The issuer `createJazz` names the users a backend acts as by.
 const BACKEND_ISSUER: &str = "jazz:backend";
 
@@ -620,7 +624,20 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     let stopped = local.block_on(&runtime, async move {
-        let (client, opened) = match connect(files, config, link, stopper).await {
+        // Clients of a main backend may sync over its HTTP stream, whose
+        // sessions end with a request on this runtime: shutdown waits for
+        // it (`settle`), before the runtime goes.
+        let endpoint_connector =
+            Arc::new(jazz_native_transport::HttpStreamFallbackConnector::new());
+        let (client, opened) = match connect(
+            files,
+            config,
+            link,
+            stopper,
+            Arc::clone(&endpoint_connector),
+        )
+        .await
+        {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
@@ -629,6 +646,7 @@ fn run(
         };
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
+            endpoint_connector.settle(STREAM_SESSION_END).await;
             return None;
         }
         // Refused writes no durable wait claimed go to `mutation_errors`.
@@ -688,6 +706,7 @@ fn run(
         // client runs, so none is dropped with the thread's locals.
         crate::transaction::roll_back_parked();
         let result = client.shutdown().await;
+        endpoint_connector.settle(STREAM_SESSION_END).await;
         Some((result, stopped))
     });
     // The store's connections close with the last clone of the client, and
@@ -737,6 +756,9 @@ async fn connect(
     config: Config,
     link_kind: Link,
     stopper: mpsc::WeakUnboundedSender<Command>,
+    // A main backend (TS `createJazz`) may not upgrade sockets where it is
+    // hosted: its clients fall back to its HTTP stream, as TS clients do.
+    endpoint_connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
 ) -> Result<(JazzClient, Opened)> {
     let mut loaded = files.load()?;
     // The endpoint's client evaluates the sessions it acts for locally too:
@@ -800,9 +822,6 @@ async fn connect(
         });
     }
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
-    // A main backend (TS `createJazz`) may not upgrade sockets where it is
-    // hosted: its clients fall back to its HTTP stream, as TS clients do.
-    let endpoint_connector = Arc::new(jazz_native_transport::HttpStreamFallbackConnector::new());
     let memory = context.storage == ClientStorage::Memory;
     let mut backend_client = None;
     let (client, user) = match (config.user, &config.server_url) {

@@ -43,6 +43,8 @@ pub struct Links {
     pub revoke: bool,
     /// Links attempted so far.
     pub attempts: usize,
+    /// Users whose next `backend-sign-in` fails (`503`), once each.
+    pub fail_sign_in: std::collections::HashSet<String>,
 }
 
 pub struct Relay {
@@ -58,6 +60,9 @@ pub struct Relay {
     /// How `backend-link` behaves.
     #[allow(dead_code)]
     pub links: Arc<Mutex<Links>>,
+    /// While set, connections are dropped as they arrive: the backend is
+    /// unreachable.
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -66,6 +71,16 @@ impl Relay {
     pub fn kick(&self) {
         for connection in self.connections.lock().unwrap().drain(..) {
             connection.abort();
+        }
+    }
+
+    /// Makes the backend unreachable (`true`: open connections drop, new
+    /// ones are closed at once) or reachable again.
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.unreachable
+            .store(unreachable, std::sync::atomic::Ordering::SeqCst);
+        if unreachable {
+            self.kick();
         }
     }
 
@@ -105,12 +120,18 @@ pub async fn start(
     let admitted = Arc::new(Mutex::new(Vec::new()));
     let refusing = Arc::new(Mutex::new(HashMap::new()));
     let connections = Arc::new(Mutex::new(Vec::new()));
+    let unreachable = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (log, refused, open) = (admitted.clone(), refusing.clone(), connections.clone());
+    let down = unreachable.clone();
     let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            if down.load(std::sync::atomic::Ordering::SeqCst) {
+                drop(stream);
+                continue;
+            }
             let connection =
                 tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
             open.lock().unwrap().push(connection.abort_handle());
@@ -122,6 +143,7 @@ pub async fn start(
         refusing,
         connections,
         links,
+        unreachable,
         task,
     }
 }
@@ -282,8 +304,15 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
             },
         }
     } else if path.ends_with("/accounts/backend-sign-in") {
+        let failing = user
+            .as_ref()
+            .is_some_and(|user| backend.links.lock().unwrap().fail_sign_in.remove(user));
         match user {
             None => ("401 Unauthorized", "signed_out".to_owned()),
+            Some(_) if failing => (
+                "503 Service Unavailable",
+                "account_request_failed".to_owned(),
+            ),
             Some(user) => {
                 let account = account_of(&backend, &user).await;
                 let body = json!({

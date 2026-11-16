@@ -3,7 +3,7 @@ title: Swift
 description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from jazz.app.json."
 ---
 
-For apps: run your backend in TypeScript, Rust or Go.
+For apps: run your backend in TypeScript.
 
 A Swift app is an end-user client of your app. It opens the same `jazz.app.json` as every other
 language, with typed bindings generated from it, signs a user in, and syncs through your backend's
@@ -22,7 +22,7 @@ it once from a checkout at the same release tag (this needs Rust and Swift 6.0 o
 pkg-config at it:
 
 ```bash
-git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
+git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
 jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only   # builds libjazz_ffi.a and jazz_ffi.pc
 export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
 ```
@@ -32,7 +32,7 @@ checkout), and build with `PKG_CONFIG_PATH` set:
 
 ```swift title="Package.swift"
 dependencies: [
-    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65")
+    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.66")
 ],
 targets: [
     .target(
@@ -145,8 +145,12 @@ query: `JazzApp.shows.tasks.orderBy(JazzApp.tasks.rank).limit(3)`, plus a nested
 `.required()`. `query.select(columns…)` reads only some columns into a `Decodable` type of yours,
 with `jazz.all(selection, as: MyType.self)`.
 
-`jazz.transaction(commit:) { tx in … }` runs a serializable transaction. It commits when the
-closure returns, rolls back when the closure throws, and rethrows that error. Reads take a
+`jazz.transaction(commit:) { tx in … }` runs a mergeable transaction, as TypeScript's
+`db.transaction`: it commits when the closure returns, rolls back when the closure throws, and
+rethrows that error. Its writes merge with concurrent ones, so its commit is never a conflict.
+`jazz.serializableTransaction(commit:) { tx in … }` is TypeScript's `db.serializableTransaction`:
+the server accepts it only if nothing it read changed meanwhile, else it throws
+`JazzError.conflict`. Reads take a
 `tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
 `jazz.waitForSync(.global)` waits until everything written so far has reached the server.
 
@@ -190,7 +194,7 @@ Not supported yet:
 - Prebuilt `libjazz_ffi` and XCFrameworks: build the library from the release's source, as above.
 - A SwiftUI `Binding` for `JazzText`.
 - Running a backend in Swift (publishing permissions, acting for users) or serving the app's Jazz
-  endpoint: run your backend in TypeScript, Rust or Go.
+  endpoint: run your backend in TypeScript.
 - Keychain (or file) storage for device keys: keep the key from `Jazz.generateDeviceKey()` with
   your own code.
 - An `@Observable` session model for SwiftUI: follow `jazz.session`. (`JazzQuery` exists for Apple
@@ -208,4 +212,12 @@ Not supported yet:
 
 A write that the server's permissions refuse doesn't throw by default. Writes are local-first, so
 it stays in the local store and never syncs. Write with `tier: .global` (or call
-`waitForSync(.global)`) to get `JazzError.permissionDenied` instead.
+`waitForSync(.global)`) to get `JazzError.permissionDenied` instead, or follow
+`jazz.mutationErrors` (TypeScript's `onMutationError`), which reports each refused write nothing
+waited on.
+
+`jazz.disconnect()` leaves the server while local reads and writes go on, and `jazz.reconnect()`
+resumes sync. `jazz.deleteClientStorage()` rolls back open transactions, closes the app and deletes its local
+store (writes the server hasn't accepted are lost). While another open app holds the same `dataDir`,
+it throws `JazzError.refused` and the app stays open (its open transactions are still rolled back). The `session`, `syncChanges` and `mutationErrors` streams end with
+`JazzError.closed` when the app closes.

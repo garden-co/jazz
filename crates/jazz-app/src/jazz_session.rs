@@ -540,6 +540,13 @@ impl JazzSession {
                     });
                 }
                 Err(error) => {
+                    // A link that went through but whose reopen failed is
+                    // retried by following the backend (the device account
+                    // is the user's now), not by linking again.
+                    let op = match op {
+                        Op::LinkDevice if this.lock().device.is_none() => Op::Follow,
+                        op => op,
+                    };
                     this.lock().last_failed = Some(op);
                     let usable = this.lock().jazz.is_some();
                     let error = SessionError::from(error);
