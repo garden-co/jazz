@@ -1,0 +1,146 @@
+// JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
+// Bindings format 2. Regenerate it after changing jazz.app.json.
+@file:kotlin.Suppress("unused", "RedundantVisibilityModifier")
+
+package jazzapp
+
+/** `sha256:…` of the `jazz.app.json` these bindings were generated from. */
+public const val SOURCE: kotlin.String = "sha256:320aeff40326a9b6076a5196c5e24d44d5eaec47c105abdecae9c0b5d77a49ae";
+
+/** The app's `jazz.app.json`: its schema, every earlier version and the migrations between them. */
+public val APP: kotlin.String = kotlin.arrayOf(
+    "{\n",
+    "  \"\$schema\": \"https://jazz.tools/schemas/jazz.app.schema.json\",\n",
+    "  \"format\": 1,\n",
+    "  \"tables\": {\n",
+    "    \"notes\": {\n",
+    "      \"columns\": {\n",
+    "        \"body\": \"string\",\n",
+    "        \"pinned\": { \"type\": \"boolean\", \"default\": false },\n",
+    "        \"folderId\": \"uuid?\"\n",
+    "      },\n",
+    "      \"relations\": { \"folder\": { \"rel\": \"folders\", \"column\": \"folderId\" } }\n",
+    "    },\n",
+    "    \"folders\": {\n",
+    "      \"columns\": { \"name\": \"string\" },\n",
+    "      \"relations\": { \"notesViaFolder\": { \"reverse\": \"notes\", \"relation\": \"folder\" } }\n",
+    "    }\n",
+    "  },\n",
+    "  \"history\": {\n",
+    "    \"v1\": {\n",
+    "      \"tables\": {\n",
+    "        \"notes\": { \"columns\": { \"text\": \"string\" } }\n",
+    "      }\n",
+    "    }\n",
+    "  },\n",
+    "  \"migrations\": [\n",
+    "    {\n",
+    "      \"name\": \"folders\",\n",
+    "      \"from\": \"v1\",\n",
+    "      \"createTables\": [\"folders\"],\n",
+    "      \"migrate\": {\n",
+    "        \"notes\": {\n",
+    "          \"body\": { \"renameFrom\": \"text\" },\n",
+    "          \"pinned\": { \"add\": \"boolean\", \"default\": false },\n",
+    "          \"folderId\": { \"add\": \"uuid\", \"default\": null }\n",
+    "        }\n",
+    "      }\n",
+    "    }\n",
+    "  ]\n",
+    "}\n",
+).joinToString("")
+
+/**
+ * Opens the app: locally, or as an end user of your backend's Jazz
+ * endpoint (`JazzConfig.serverUrl` and `JazzConfig.auth`).
+ */
+public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =
+    tools.jazz.Jazz.open(APP, config)
+
+/** A row of `folders`. */
+@kotlinx.serialization.Serializable
+public data class Folder(
+    val id: kotlin.String,
+    val name: kotlin.String,
+)
+
+/** A new row of `folders`: leave out a column to store its default (or `null`). */
+@kotlinx.serialization.Serializable
+public data class NewFolder(
+    val name: kotlin.String,
+)
+
+/** Changes to a row of `folders`: columns not set are left as they are. */
+public class FolderPatch : tools.jazz.Patch() {
+    /** Sets `name`. */
+    public fun name(value: kotlin.String): FolderPatch = apply { set("name", value, kotlinx.serialization.serializer<kotlin.String>()) }
+}
+
+/** Table `folders`: its columns, and queries with `query()`. */
+public object Folders : tools.jazz.Table<Folder, NewFolder, FolderPatch>(
+    "folders",
+    Folder.serializer(),
+    NewFolder.serializer(),
+    ::FolderPatch,
+) {
+    /** The row's id. */
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
+    /** Column `name`. */
+    public val name: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("name", kotlinx.serialization.serializer<kotlin.String>())
+    /** Relation `notesViaFolder`: the `notes` rows whose `folder` is this row. */
+    public val notesViaFolder: tools.jazz.Many<Folder, Note> =
+        tools.jazz.Many("notesViaFolder") { Notes }
+}
+
+/** A row of `notes`. */
+@kotlinx.serialization.Serializable
+public data class Note(
+    val id: kotlin.String,
+    val body: kotlin.String,
+    val pinned: kotlin.Boolean,
+    val folderId: kotlin.String? = null,
+)
+
+/** A new row of `notes`: leave out a column to store its default (or `null`). */
+@kotlinx.serialization.Serializable
+public data class NewNote(
+    val body: kotlin.String,
+    val pinned: kotlin.Boolean? = null,
+    val folderId: kotlin.String? = null,
+)
+
+/** Changes to a row of `notes`: columns not set are left as they are. */
+public class NotePatch : tools.jazz.Patch() {
+    /** Sets `body`. */
+    public fun body(value: kotlin.String): NotePatch = apply { set("body", value, kotlinx.serialization.serializer<kotlin.String>()) }
+    /** Sets `pinned`. */
+    public fun pinned(value: kotlin.Boolean): NotePatch = apply { set("pinned", value, kotlinx.serialization.serializer<kotlin.Boolean>()) }
+    /** Sets `folderId`. */
+    public fun folderId(value: kotlin.String?): NotePatch = apply { set("folderId", value, tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>())) }
+}
+
+/** Table `notes`: its columns, and queries with `query()`. */
+public object Notes : tools.jazz.Table<Note, NewNote, NotePatch>(
+    "notes",
+    Note.serializer(),
+    NewNote.serializer(),
+    ::NotePatch,
+) {
+    /** The row's id. */
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
+    /** Column `body`. */
+    public val body: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("body", kotlinx.serialization.serializer<kotlin.String>())
+    /** Column `pinned`. */
+    public val pinned: tools.jazz.Column<kotlin.Boolean> =
+        tools.jazz.Column("pinned", kotlinx.serialization.serializer<kotlin.Boolean>())
+    /** Column `folderId`. */
+    public val folderId: tools.jazz.Column<kotlin.String?> =
+        tools.jazz.Column("folderId", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
+    /** Relation `folder`: the `folders` row `folderId` references. */
+    public val folder: tools.jazz.One<Note, Folder> =
+        tools.jazz.One("folder") { Folders }
+}
