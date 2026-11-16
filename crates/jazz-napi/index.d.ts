@@ -233,6 +233,13 @@ export declare class NapiDb {
    * the SQLite file when their write call returns, so only `global` waits.
    */
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
+  /**
+   * TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+   * session's author bytes; none for this database's own) reached `tier`,
+   * failing with a rejection of theirs, including one that settled
+   * before and no wait reported.
+   */
+  waitForSync(tier: string, writer?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 

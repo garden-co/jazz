@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
@@ -41,6 +41,7 @@ pub struct DocumentUpdate {
 
 impl ::jazz_app::Table for Document {
     const NAME: &'static str = "documents";
+    const COLUMNS: &'static [&'static str] = &["branch", "title"];
     type New = NewDocument;
     type Update = DocumentUpdate;
 
@@ -103,6 +104,11 @@ pub mod documents {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `documents`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Document>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<Document, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -158,6 +164,7 @@ pub struct DraftUpdate {
 
 impl ::jazz_app::Table for Draft {
     const NAME: &'static str = "drafts";
+    const COLUMNS: &'static [&'static str] = &["name", "base", "base_snapshot_ref"];
     type New = NewDraft;
     type Update = DraftUpdate;
 
@@ -225,6 +232,11 @@ pub mod drafts {
     /// Every row of `drafts`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Draft> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `drafts`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Draft>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)

@@ -129,7 +129,7 @@ struct Shared {
     /// keeps nor re-opens a link until it turns false.
     upstream_paused: watch::Sender<bool>,
     /// The credential the next connection attempt presents.
-    credentials: watch::Sender<AuthConfig>,
+    credentials: watch::Sender<Credentials>,
     /// No server is configured, so nothing can confirm a write past Local.
     serverless: bool,
     /// The upstream link is a trusted backend or admin link, which may
@@ -144,6 +144,8 @@ struct State {
     upstream: Option<Upstream>,
     /// Open transactions and whether they staged a write.
     transactions: HashMap<OpenTransactionId, bool>,
+    /// Open transactions begun mergeable; the others are serializable.
+    mergeable_transactions: std::collections::HashSet<OpenTransactionId>,
     closed_transactions: HashMap<OpenTransactionId, ClosedTransaction>,
     /// Engine seqs of this client's commits, by public transaction id.
     writes: HashMap<TransactionId, u64>,
@@ -159,6 +161,9 @@ struct State {
     /// The last upstream connect attempt that failed, and its error.
     connect_failed: Option<(u64, String)>,
     /// The upstream link's last published status; `None` without a server.
+    /// How many times the server refused the credential: each refusal,
+    /// even one that leaves the status as it was.
+    auth_refusals: u64,
     link_status: Option<LinkStatus>,
     /// Consecutive recoverable tick failures.
     tick_failures: u32,
@@ -541,6 +546,15 @@ async fn drive(shared: Weak<Shared>, work: Arc<Notify>) {
     }
 }
 
+/// What a connection attempt presents: its prelude's credentials, and the
+/// `Authorization` header of its upgrade (an app's own bearer, which the
+/// app's backend checks before it states the session to the core).
+#[derive(Clone, Default)]
+struct Credentials {
+    auth: AuthConfig,
+    authorization: Option<String>,
+}
+
 /// Drives the shared upstream link machine ([`UpstreamLink`]): this task owns
 /// the socket and the timer, the machine decides when to connect, back off,
 /// wait for a new credential or stop.
@@ -553,7 +567,7 @@ async fn keep_upstream(
     mut request: NativeTransportRequest,
     mut keeper: LinkKeeper,
     mut paused: watch::Receiver<bool>,
-    mut credentials: watch::Receiver<AuthConfig>,
+    mut credentials: watch::Receiver<Credentials>,
 ) {
     let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
     let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
@@ -651,7 +665,9 @@ async fn keep_upstream(
                 if changed.is_err() {
                     return;
                 }
-                request.auth = credentials.borrow_and_update().clone();
+                let next = credentials.borrow_and_update().clone();
+                request.auth = next.auth;
+                request.authorization = next.authorization;
                 LinkInput::CredentialUpdated
             }
         };
@@ -702,10 +718,23 @@ impl LinkKeeper {
     /// Hand the machine's view to the read gate and the status accessor.
     fn publish(&mut self, shared: &Shared) {
         shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        let mut changed = false;
         for event in self.link.drain_events() {
-            if let LinkEvent::Status(status) = event {
-                shared.state().link_status = Some(status);
+            match event {
+                LinkEvent::Status(status) => {
+                    shared.state().link_status = Some(status);
+                    changed = true;
+                }
+                LinkEvent::AuthFailed { .. } => {
+                    shared.state().auth_refusals += 1;
+                    changed = true;
+                }
+                LinkEvent::AuthRestored => {}
             }
+        }
+        // Status readers (`JazzClient::status_changes`) re-read it.
+        if changed {
+            shared.progress.send_modify(|generation| *generation += 1);
         }
     }
 }
@@ -762,7 +791,7 @@ impl JazzClient {
     /// use [`Self::connect_with_native_transport`] from their process or
     /// binding composition crate.
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_inner(context, None).await
+        Self::connect_inner(context, None, None).await
     }
 
     /// Connect using a transport selected at a native composition point.
@@ -770,12 +799,32 @@ impl JazzClient {
         context: AppContext,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self> {
-        Self::connect_inner(context, Some(connector)).await
+        Self::connect_inner(context, Some(connector), None).await
+    }
+
+    /// Connect as a user of an app whose backend (`createJazz`) signs its
+    /// users in with the app's own bearer token: the token travels as
+    /// `Authorization: Bearer` on the upgrade, and `context.backend_session`
+    /// states the user it names (with the account the backend's sign-in
+    /// returned). The backend checks the one against the other and vouches
+    /// for the session to the core; the client holds no backend secret.
+    pub async fn connect_with_native_transport_bearer(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+        bearer: String,
+    ) -> Result<Self> {
+        if context.backend_session.is_none() {
+            return Err(JazzError::Connection(
+                "a bearer connection states the user's session (backend_session)".to_owned(),
+            ));
+        }
+        Self::connect_inner(context, Some(connector), Some(format!("Bearer {bearer}"))).await
     }
 
     async fn connect_inner(
         context: AppContext,
         connector: Option<Arc<dyn NativeTransportConnector>>,
+        authorization: Option<String>,
     ) -> Result<Self> {
         let has_server = !context.server_url.is_empty();
         let connector = match (has_server, connector) {
@@ -791,7 +840,11 @@ impl JazzClient {
         };
         // A core governs a stated session only by the bundle it is pinned
         // to, and refuses one without: say so here, not as a refusal later.
-        if has_server && context.backend_session.is_some() && context.bundle.is_none() {
+        if has_server
+            && context.backend_session.is_some()
+            && authorization.is_none()
+            && context.bundle.is_none()
+        {
             return Err(JazzError::Connection(
                 "a backend_session needs `bundle`: the published permissions bundle \
                  (as deploying the app returns it) its user is checked by"
@@ -834,17 +887,20 @@ impl JazzClient {
             work: work.clone(),
             progress,
             upstream_paused: watch::channel(false).0,
-            credentials: watch::channel(AuthConfig {
-                // With the backend secret, a client's own proof is the
-                // backend relaying that client (a local-first guest).
-                jwt_token: if context.backend_session.is_some() {
-                    None
-                } else {
-                    context.jwt_token.clone()
+            credentials: watch::channel(Credentials {
+                auth: AuthConfig {
+                    // With the backend secret, a client's own proof is the
+                    // backend relaying that client (a local-first guest).
+                    jwt_token: if context.backend_session.is_some() {
+                        None
+                    } else {
+                        context.jwt_token.clone()
+                    },
+                    backend_secret: context.backend_secret.clone(),
+                    admin_secret: context.admin_secret.clone(),
+                    backend_session: stated_session(&context, authorization.is_some())?,
                 },
-                backend_secret: context.backend_secret.clone(),
-                admin_secret: context.admin_secret.clone(),
-                backend_session: stated_session(&context)?,
+                authorization: authorization.clone(),
             })
             .0,
             serverless: connector.is_none(),
@@ -864,13 +920,14 @@ impl JazzClient {
             let wake = work.clone();
             let paused = shared.upstream_paused.subscribe();
             let mut credentials = shared.credentials.subscribe();
+            let initial = credentials.borrow_and_update().clone();
             let request = NativeTransportRequest {
                 requested_link: NativeTransportLink::OrdinarySession,
                 server_url: context.server_url.clone(),
                 app_id: context.app_id,
                 peer_identity: identity.author,
-                auth: credentials.borrow_and_update().clone(),
-                authorization: None,
+                auth: initial.auth,
+                authorization: initial.authorization,
                 bundle: context.bundle.clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
@@ -1345,6 +1402,87 @@ impl JazzClient {
         ))
     }
 
+    /// Begin a resumable upload of `column`'s value for a row with
+    /// `values`' other cells: feed it with
+    /// [`JazzClient::push_streaming_upload`] piece by piece (as an async
+    /// stream yields them), then [`JazzClient::finish_streaming_upload`].
+    /// Nothing commits until the finish; the value is never held whole.
+    pub fn begin_streaming_upload(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        column: &str,
+    ) -> Result<StreamingUpload> {
+        self.reject_updated_at_override("streaming uploads")?;
+        if self.transaction_id().is_some() {
+            return Err(JazzError::Write(
+                "streaming uploads in a transaction are not supported".into(),
+            ));
+        }
+        let cells = self.core_cells(table, values)?;
+        let upload = self
+            .db()?
+            .begin_streaming_value_upload(table, &cells, column)
+            .map_err(write_error)?;
+        Ok(StreamingUpload {
+            upload,
+            table: table.to_owned(),
+            column: column.to_owned(),
+            cells,
+        })
+    }
+
+    /// Feed the next piece of `upload`.
+    pub async fn push_streaming_upload(
+        &self,
+        upload: &mut StreamingUpload,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.db()?
+            .push_streaming_value_upload(&mut upload.upload, bytes)
+            .await
+            .map_err(write_error)
+    }
+
+    /// Abandon `upload`, releasing what it stored.
+    pub async fn abort_streaming_upload(&self, upload: StreamingUpload) -> Result<()> {
+        self.db()?
+            .abort_streaming_value_upload(upload.upload)
+            .await
+            .map_err(write_error)
+    }
+
+    /// Finish `upload` as `kind` of row `object_id` (a new row's id when
+    /// `None`), committing the row with its streamed value.
+    pub async fn finish_streaming_upload(
+        &self,
+        upload: StreamingUpload,
+        kind: crate::db::StreamingMutationKind,
+        object_id: Option<ObjectId>,
+    ) -> Result<(ObjectId, TransactionId)> {
+        let db = self.db()?;
+        let row = object_id.map_or_else(|| db.next_row_id(), |id| RowUuid(*id.uuid()));
+        let write = db
+            .finish_streaming_value_upload(
+                upload.upload,
+                kind,
+                &upload.table,
+                row,
+                upload.cells,
+                &upload.column,
+                self.write_identity()?,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(write_error)?;
+        Ok((
+            ObjectId::from_uuid(write.row_uuid().0),
+            self.committed(write.mergeable_tx_id()),
+        ))
+    }
+
     /// Create a new row in a table.
     pub fn insert(
         &self,
@@ -1485,6 +1623,89 @@ impl JazzClient {
         Ok(Some(self.committed(write.mergeable_tx_id())))
     }
 
+    /// The authority's advice on whether this client may do `action` (read,
+    /// insert, update or delete a row), without doing it. Without a server
+    /// nothing can advise: the answer is
+    /// [`PermissionAdvice::Unknown`](crate::protocol::PermissionAdvice).
+    pub async fn permission_advice(
+        &self,
+        action: PermissionAdviceRequest,
+    ) -> Result<crate::protocol::PermissionAdvice> {
+        if self.session_identity()?.is_some() || self.transaction_id().is_some() {
+            return Err(JazzError::Query(
+                "permission advice for an explicit session or in a transaction is not supported"
+                    .into(),
+            ));
+        }
+        let action = match action {
+            PermissionAdviceRequest::Read { table, row } => {
+                crate::protocol::PermissionAdviceAction::Read {
+                    table,
+                    row: RowUuid(*row.uuid()),
+                }
+            }
+            PermissionAdviceRequest::Insert { table, values } => {
+                let cells = self.core_cells(&table, values)?;
+                crate::protocol::PermissionAdviceAction::Insert { table, cells }
+            }
+            PermissionAdviceRequest::Update { table, row, values } => {
+                let patch = self.core_cells(&table, values.into_iter().collect())?;
+                crate::protocol::PermissionAdviceAction::Update {
+                    table,
+                    row: RowUuid(*row.uuid()),
+                    patch,
+                }
+            }
+            PermissionAdviceRequest::Delete { table, row } => {
+                crate::protocol::PermissionAdviceAction::Delete {
+                    table,
+                    row: RowUuid(*row.uuid()),
+                }
+            }
+        };
+        let db = self.db()?;
+        let id = db.request_permission_advice(action, None);
+        self.shared.tick_soon();
+        self.shared.settle(db.permission_advice(id)).await
+    }
+
+    /// [`JazzClient::update`] with edits of large-capable columns: a text
+    /// column's [`LargeValueUpdate::TextEdit`] (merged over what this
+    /// store has, as the authority merges), splices within a page, JSON
+    /// replacements by pointer. The patch and the edits apply as one row
+    /// update; a failing edit leaves the row unchanged.
+    pub fn update_with_edits(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        edits: Vec<crate::db::LargeValueUpdate>,
+    ) -> Result<Option<TransactionId>> {
+        let cells = self.core_cells(table, updates.into_iter().collect())?;
+        let updated_at_ms = self.write_updated_at()?;
+        let row = RowUuid(*object_id.uuid());
+        let db = self.db()?;
+        let options = UpdateOptions {
+            identity: self.write_identity()?,
+            updated_at_ms,
+            ..Default::default()
+        };
+        if let Some(transaction_id) = self.open_transaction()? {
+            crate::db::block_on(
+                db.tx_ref(transaction_id)
+                    .update_with_large_value_mutations(table, row, cells, edits, options),
+            )
+            .map_err(write_error)?;
+            self.staged(transaction_id);
+            return Ok(None);
+        }
+        let write = crate::db::block_on(
+            db.update_with_large_value_mutations(table, row, cells, edits, options),
+        )
+        .map_err(write_error)?;
+        Ok(Some(self.committed(write.mergeable_tx_id())))
+    }
+
     /// Delete a row in the named table.
     ///
     /// The row need not have appeared in a previous query result. The table and
@@ -1574,6 +1795,17 @@ impl JazzClient {
     /// if every read and written row is unchanged since then. Staged writes
     /// are not visible to ordinary reads until the transaction commits.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
+        self.begin(false)
+    }
+
+    /// Begin a mergeable transaction: its writes commit together, each
+    /// merging with concurrent ones as a plain write does (TS's default
+    /// `transaction`). Its reads see local data with its own staged writes.
+    pub fn begin_mergeable_transaction(&self) -> Result<JazzTransaction> {
+        self.begin(true)
+    }
+
+    fn begin(&self, mergeable: bool) -> Result<JazzTransaction> {
         // Each staged write carries this handle's identity (checked when
         // staged, and named on the commit for the authority).
         self.write_identity()?;
@@ -1587,11 +1819,18 @@ impl JazzClient {
                 transaction_id = OpenTransactionId::new();
             }
         }
-        crate::db::block_on(db.begin_serializable(transaction_id)).map_err(write_error)?;
-        self.shared
-            .state()
-            .transactions
-            .insert(transaction_id, false);
+        if mergeable {
+            crate::db::block_on(db.begin_mergeable(transaction_id)).map_err(write_error)?;
+        } else {
+            crate::db::block_on(db.begin_serializable(transaction_id)).map_err(write_error)?;
+        }
+        {
+            let mut state = self.shared.state();
+            state.transactions.insert(transaction_id, false);
+            if mergeable {
+                state.mergeable_transactions.insert(transaction_id);
+            }
+        }
         let write_context = self
             .write_context
             .clone()
@@ -1611,10 +1850,22 @@ impl JazzClient {
                 "transaction cannot commit without writes".to_string(),
             ));
         }
-        let receipt = crate::db::block_on(self.db()?.commit_serializable_handle(transaction_id));
+        let mergeable = self
+            .shared
+            .state
+            .borrow()
+            .mergeable_transactions
+            .contains(&transaction_id);
+        let db = self.db()?;
+        let receipt = if mergeable {
+            crate::db::block_on(db.commit_mergeable_handle(transaction_id))
+        } else {
+            crate::db::block_on(db.commit_serializable_handle(transaction_id))
+        };
         {
             let mut state = self.shared.state();
             state.transactions.remove(&transaction_id);
+            state.mergeable_transactions.remove(&transaction_id);
             state
                 .closed_transactions
                 .insert(transaction_id, ClosedTransaction::Committed);
@@ -1632,6 +1883,7 @@ impl JazzClient {
             .map_err(write_error)?;
         let mut state = self.shared.state();
         state.transactions.remove(&transaction_id);
+        state.mergeable_transactions.remove(&transaction_id);
         state
             .closed_transactions
             .insert(transaction_id, ClosedTransaction::RolledBack);
@@ -1646,8 +1898,14 @@ impl JazzClient {
             return Ok(());
         }
         let db = self.db()?;
+        // This handle's writes only: its session's, or the database's own.
+        // A refusal that settled before the call counts (jazz#5728).
+        let writer = match self.write_identity()? {
+            WriteIdentity::Session(author) => Some(author),
+            _ => None,
+        };
         self.shared
-            .settle(db.wait_for_pending_writes(CoreDurabilityTier::Global))
+            .settle(db.wait_for_sync(CoreDurabilityTier::Global, writer))
             .await?
             .map_err(|error| {
                 if error.is_authorization_denied() {
@@ -1701,12 +1959,14 @@ impl JazzClient {
                 // authority's verdict on the transaction.
                 if error.is_authorization_denied() {
                     JazzError::Sync(format!(
-                        "transaction was rejected before reaching {tier:?} durability: {}",
+                        "{} {tier:?} durability: {}",
+                        super::REJECTED_BEFORE,
                         crate::db::AUTHORIZATION_DENIED
                     ))
                 } else {
                     JazzError::Write(format!(
-                        "transaction was rejected before reaching {tier:?} durability: {error}"
+                        "{} {tier:?} durability: {error}",
+                        super::REJECTED_BEFORE
                     ))
                 }
             })
@@ -1731,9 +1991,30 @@ impl JazzClient {
                 "only a client with a bearer-authenticated server can update its token".to_owned(),
             ));
         }
+        if self.shared.credentials.borrow().authorization.is_some() {
+            return Err(JazzError::Connection(
+                "a bearer-connected client updates its bearer (update_bearer)".to_owned(),
+            ));
+        }
         self.shared
             .credentials
-            .send_modify(|auth| auth.jwt_token = Some(jwt_token));
+            .send_modify(|credentials| credentials.auth.jwt_token = Some(jwt_token));
+        Ok(())
+    }
+
+    /// Present a new app bearer upstream, on a client connected with
+    /// [`Self::connect_with_native_transport_bearer`]. A live link reconnects
+    /// with it; a link whose bearer the backend refused connects again.
+    pub fn update_bearer(&self, bearer: String) -> Result<()> {
+        self.shared.ensure_open()?;
+        if self.shared.credentials.borrow().authorization.is_none() {
+            return Err(JazzError::Connection(
+                "only a client connected with a bearer can update it".to_owned(),
+            ));
+        }
+        self.shared.credentials.send_modify(|credentials| {
+            credentials.authorization = Some(format!("Bearer {bearer}"));
+        });
         Ok(())
     }
 
@@ -1748,6 +2029,27 @@ impl JazzClient {
     /// off). Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
     pub fn set_slow_query_threshold(&self, threshold: Option<Duration>) {
         self.shared.db.set_slow_query_threshold(threshold);
+    }
+
+    /// Changes when [`Self::upstream_status`] or [`Self::upload_status`] may
+    /// have: after each tick of the client and each change of the link's
+    /// status. A counter, for readers to re-read the status on, instead of
+    /// polling it. It closes when the client shuts down.
+    pub fn status_changes(&self) -> watch::Receiver<u64> {
+        self.shared.progress.subscribe()
+    }
+
+    /// This client's uploads: commits awaiting the server's verdict (since
+    /// when), and those it refused since the client opened.
+    pub fn upload_status(&self) -> crate::db::UploadStatus {
+        self.shared.db.upload_status()
+    }
+
+    /// How many times the server has refused this client's credential. A
+    /// refusal of a renewed credential leaves [`Self::upstream_status`] as
+    /// it was; this tells the two apart.
+    pub fn auth_refusals(&self) -> u64 {
+        self.shared.state.borrow().auth_refusals
     }
 
     /// Check if connected to server.
@@ -1968,6 +2270,100 @@ impl JazzClient {
     }
 }
 
+impl JazzClient {
+    /// Leave the server, keeping local reads and writes working (TS's
+    /// `db.disconnect()`); [`JazzClient::reconnect`] resumes sync with the
+    /// same client. Returns whether a link was attached: without a server
+    /// there is none, and nothing changes.
+    pub fn disconnect(&self) -> bool {
+        if self.shared.serverless {
+            return false;
+        }
+        self.shared.upstream_paused.send_replace(true);
+        let detached = detach(&self.shared);
+        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        detached
+    }
+
+    /// Resume sync after [`JazzClient::disconnect`] (TS's
+    /// `db.reconnect()`), waiting until the link is attached. Returns
+    /// whether there was anything to reattach: without a server there is
+    /// nothing, and it returns `false` at once.
+    pub async fn reconnect(&self) -> Result<bool> {
+        if self.shared.serverless {
+            return Ok(false);
+        }
+        // An attempt the keeper started before this call (a retry during an
+        // outage) may still fail after it: only attempts started from here
+        // on answer it.
+        let (started, attached) = {
+            let state = self.shared.state.borrow();
+            (state.connect_started, state.upstream.is_some())
+        };
+        // Neither detached nor reconnecting: nothing to reattach.
+        let resumed = self
+            .shared
+            .upstream_paused
+            .send_if_modified(|paused| std::mem::replace(paused, false));
+        if !resumed && attached {
+            return Ok(false);
+        }
+        // The first attempt either attaches or fails; the keeper retries
+        // after a failure on its own.
+        self.shared
+            .until(|| {
+                let state = self.shared.state.borrow();
+                if state.upstream.is_some() {
+                    return Some(Ok(true));
+                }
+                match &state.connect_failed {
+                    Some((attempt, error)) if *attempt > started => {
+                        Some(Err(JazzError::Connection(error.clone())))
+                    }
+                    _ => None,
+                }
+            })
+            .await?
+    }
+
+    /// Keep the writes the server refuses, for
+    /// [`JazzClient::take_mutation_errors`] (TS's `onMutationError`).
+    /// Owned by `jazz-app`, like that: not public API.
+    #[doc(hidden)]
+    pub fn track_mutation_errors(&self) {
+        self.shared.db.track_upstream_rejections();
+    }
+
+    /// This client's writes the server refused since the last call (with
+    /// [`JazzClient::track_mutation_errors`] on), oldest first. Each is
+    /// reported once; their payloads are released.
+    ///
+    /// Destructive, and owned by `jazz-app`: its reporter takes these for
+    /// `Jazz::mutation_errors`, so another caller (say through
+    /// `Jazz::with_client`) would steal refusals from it. Not public API.
+    #[doc(hidden)]
+    pub fn take_mutation_errors(&self) -> Vec<MutationError> {
+        let node = self.shared.identity.node;
+        let mut errors = Vec::new();
+        for rejection in self.shared.db.take_upstream_rejections() {
+            if rejection.writer != *node.as_bytes() {
+                continue;
+            }
+            let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            errors.push(MutationError {
+                transaction: TransactionId::from_committed_tx(TxId {
+                    time: crate::time::TxTime(rejection.seq),
+                    node,
+                }),
+                message: rejection.error.to_string(),
+                denied: rejection.error.is_authorization_denied(),
+                serializable: rejection.serializable,
+            });
+        }
+        errors
+    }
+}
+
 #[cfg(feature = "testing")]
 impl JazzClient {
     pub fn client_id(&self) -> Option<crate::tools::ClientId> {
@@ -2001,10 +2397,7 @@ impl JazzClient {
     }
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
-        self.shared.upstream_paused.send_replace(true);
-        let detached = detach(&self.shared);
-        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-        detached
+        self.disconnect()
     }
 
     /// Wait for a durability tier using an exact timeout rather than the
@@ -2023,38 +2416,64 @@ impl JazzClient {
     /// Let the keeper open a fresh link for the preserved client state and
     /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        // An attempt the keeper started before this call (a retry during an
-        // outage) may still fail after it: only attempts started from here
-        // on answer it.
-        let (started, attached) = {
-            let state = self.shared.state.borrow();
-            (state.connect_started, state.upstream.is_some())
-        };
-        // Neither detached nor reconnecting: nothing to reattach.
-        let resumed = self
-            .shared
-            .upstream_paused
-            .send_if_modified(|paused| std::mem::replace(paused, false));
-        if !resumed && attached {
-            return Ok(false);
-        }
-        // The first attempt either attaches or fails; the keeper retries
-        // after a failure on its own.
-        self.shared
-            .until(|| {
-                let state = self.shared.state.borrow();
-                if state.upstream.is_some() {
-                    return Some(Ok(true));
-                }
-                match &state.connect_failed {
-                    Some((attempt, error)) if *attempt > started => {
-                        Some(Err(JazzError::Connection(error.clone())))
-                    }
-                    _ => None,
-                }
-            })
-            .await?
+        self.reconnect().await
     }
+}
+
+/// What [`JazzClient::permission_advice`] asks about.
+#[derive(Debug, Clone)]
+pub enum PermissionAdviceRequest {
+    Read {
+        table: String,
+        row: ObjectId,
+    },
+    Insert {
+        table: String,
+        values: HashMap<String, Value>,
+    },
+    Update {
+        table: String,
+        row: ObjectId,
+        values: Vec<(String, Value)>,
+    },
+    Delete {
+        table: String,
+        row: ObjectId,
+    },
+}
+
+/// A large value being uploaded piece by piece: see
+/// [`JazzClient::begin_streaming_upload`]. It lives on the client's thread.
+pub struct StreamingUpload {
+    upload: crate::db::StreamingValueUpload,
+    table: String,
+    column: String,
+    cells: BTreeMap<String, CoreValue>,
+}
+
+/// A write of this client the server refused: see
+/// [`JazzClient::take_mutation_errors`].
+///
+/// Serializes as `{"transaction": "<id>", "message", "denied",
+/// "serializable"}`, the transaction as its string id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationError {
+    /// The refused commit, as its write returned it.
+    #[serde(serialize_with = "serialize_display")]
+    pub transaction: TransactionId,
+    pub message: String,
+    /// Refused by a permission.
+    pub denied: bool,
+    /// A serializable transaction's commit.
+    pub serializable: bool,
+}
+
+fn serialize_display<T: std::fmt::Display, S: serde::Serializer>(
+    value: &T,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
 }
 
 /// A transaction-scoped client handle.
@@ -2198,12 +2617,20 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     })
 }
 
-/// The session a backend client states for its user, as the core reads it.
-fn stated_session(context: &AppContext) -> Result<Option<serde_json::Value>> {
+/// The session the prelude states for the client's user, as the core reads
+/// it: on the backend secret, or (`bearer`) on the word of the app's bearer,
+/// which the app's backend checks it against.
+fn stated_session(context: &AppContext, bearer: bool) -> Result<Option<serde_json::Value>> {
     let Some(session) = context.backend_session.as_ref() else {
         return Ok(None);
     };
-    if context.backend_secret.is_none() || context.admin_secret.is_some() {
+    if bearer {
+        if context.backend_secret.is_some() || context.admin_secret.is_some() {
+            return Err(JazzError::Connection(
+                "a session stated on a bearer carries no backend or admin secret".to_owned(),
+            ));
+        }
+    } else if context.backend_secret.is_none() || context.admin_secret.is_some() {
         return Err(JazzError::Connection(
             "a backend_session is stated with the backend secret alone".to_owned(),
         ));

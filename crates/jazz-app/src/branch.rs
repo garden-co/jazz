@@ -25,7 +25,8 @@ use jazz::tools::{DurabilityTier, JazzClient, JazzError, ObjectId, ReadTier, Val
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
-use crate::handle::{Jazz, decode_result, insert};
+use crate::handle::{Jazz, decode_result, insert, read_opts};
+use crate::include::Row;
 use crate::query::{Column, Query};
 use crate::subscription::{self, Subscription};
 use crate::table::{Insert, Table, Update};
@@ -302,16 +303,17 @@ impl OnBranch {
     }
 
     /// Every row `query` matches in this view, reading local data first.
-    pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
+    pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
         self.all_with(query, ReadTier::LocalFirst).await
     }
 
     /// Every row `query` matches in this view, read at `tier`.
-    pub async fn all_with<T: Table>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
-        let query = query.into_untyped();
+    pub async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
         let implementations = self.jazz.info.implementations.clone();
         self.with_branch(move |client| async move {
-            let rows = client.query(query, tier).await?;
+            let rows = client.query_with_opts(query, opts).await?;
             rows.into_iter()
                 .map(|row| decode_result::<T>(row, &implementations))
                 .collect()
@@ -320,7 +322,7 @@ impl OnBranch {
     }
 
     /// The first row `query` matches in this view.
-    pub async fn one<T: Table>(&self, query: Query<T>) -> Result<Option<T>> {
+    pub async fn one<T: Row>(&self, query: Query<T>) -> Result<Option<T>> {
         Ok(self.all(query.limit(1)).await?.into_iter().next())
     }
 
@@ -330,21 +332,27 @@ impl OnBranch {
     }
 
     /// Subscribes to `query` in this view, as [`Jazz::subscribe`].
-    pub async fn subscribe<T: Table>(&self, query: Query<T>) -> Result<Subscription<T>> {
+    pub async fn subscribe<T: Row>(&self, query: Query<T>) -> Result<Subscription<T>> {
         self.subscribe_with(query, ReadTier::LocalFirst).await
     }
 
     /// [`OnBranch::subscribe`] at `tier`.
-    pub async fn subscribe_with<T: Table>(
+    pub async fn subscribe_with<T: Row>(
         &self,
         query: Query<T>,
         tier: ReadTier,
     ) -> Result<Subscription<T>> {
-        let query = query.into_untyped();
+        let opts = read_opts(&query, tier);
+        let query = query.into_untyped()?;
+        if jazz::schema::history::is_history_table(&query.table) {
+            return Err(Error::Unsupported(
+                "subscribing to history; read it with OnBranch::all".into(),
+            ));
+        }
         let (sender, receiver) = mpsc::unbounded_channel();
         let implementations = self.jazz.info.implementations.clone();
         self.with_branch(move |client| async move {
-            let stream = client.subscribe_with_read_tier(query, tier).await?;
+            let stream = client.subscribe_with_opts(query, opts).await?;
             tokio::task::spawn_local(subscription::forward::<T>(stream, sender, implementations));
             Ok(())
         })
@@ -408,11 +416,12 @@ impl OnBranch {
         self.restore_cells::<T>(id, None).await
     }
 
-    /// Brings back the row the head branch deleted, with `update`'s columns
-    /// replaced.
-    pub async fn restore_with<U: Update>(&self, id: ObjectId, update: U) -> Result<U::Row> {
-        let cells = update.into_cells(&self.jazz.info.implementations)?;
-        self.restore_cells::<U::Row>(id, Some(cells)).await
+    /// Brings back the row the head branch deleted, with `new`'s values, as
+    /// [`Jazz::restore_with`].
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+        let cells = new.into_cells(&self.jazz.info.implementations)?;
+        self.restore_cells::<N::Row>(id, Some(cells.into_iter().collect()))
+            .await
     }
 
     async fn restore_cells<T: Table>(

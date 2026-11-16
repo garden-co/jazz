@@ -1,6 +1,7 @@
 ---
 title: Your Own Server
 description: "Learn how to run Jazz in your own Node server, VM or container, with the data in SQLite on its disk."
+languageTabs: backend
 ---
 
 On your own machine, Jazz is part of your backend's process, with the data in a directory on its
@@ -175,9 +176,8 @@ origin can't sign in with your app's cookie yet, even with `allowedOrigins`; ser
 
 ## Data on another machine
 
-When the data should live apart from your app servers (several app instances sharing one database,
-serverless functions, an existing Jazz Cloud app), keep it in [Jazz Cloud](/docs/setup/deployment/jazz-cloud)
-and point `createJazz` at it with `remote()`:
+An existing app on [Jazz Cloud (deprecated)](/docs/setup/deployment/jazz-cloud) keeps its data
+there: point `createJazz` at it with `remote()`:
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";

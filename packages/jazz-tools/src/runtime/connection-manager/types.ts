@@ -352,6 +352,7 @@ export abstract class ConnectionManager {
     await runtime.waitForPendingWrites("global", {
       throughOutage: true,
       signal,
+      sync: {},
     });
   }
 

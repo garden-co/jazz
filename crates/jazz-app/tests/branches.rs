@@ -310,6 +310,63 @@ async fn transactions_and_selectors() {
     jazz.shutdown().await.unwrap();
 }
 
+/// A serializable transaction reads shared rows at its start and writes
+/// into a branch; the branch writes commit with it, and an ignored refusal
+/// of a read-back write commits nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_serializable_transaction_writes_into_a_branch() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let intro = jazz
+        .on_branch("main")
+        .insert(NewDocument::new("main", "Intro"))
+        .await
+        .unwrap();
+    let row = jazz.insert(NewDraft::new("review")).await.unwrap();
+
+    let renamed = jazz
+        .serializable_transaction(move |tx| async move {
+            // A read of an unbranched table, outside the branch.
+            let draft_row = tx
+                .get::<bindings::Draft>(row.id)
+                .await?
+                .expect("the draft row");
+            let draft = tx.on_branch(Branch::from("draft").over("main"))?;
+            draft.update(
+                intro.id,
+                DocumentUpdate {
+                    title: Some(format!("Intro, for {}", draft_row.name)),
+                    ..Default::default()
+                },
+            )?;
+            draft.insert(NewDocument::new("draft", "Notes"))?;
+            let _ignored = draft
+                .upsert(
+                    jazz_app::ObjectId::new(),
+                    NewDocument::new("draft", "Never"),
+                )
+                .await;
+            Ok(draft_row.name)
+        })
+        .await
+        .unwrap();
+    assert_eq!(renamed, "review");
+    assert_eq!(
+        titles(
+            &jazz
+                .on_branch(Branch::from("draft").over("main"))
+                .all(by_title())
+                .await
+                .unwrap()
+        ),
+        [("draft", "Intro, for review"), ("draft", "Notes")]
+    );
+    assert_eq!(
+        titles(&jazz.on_branch("main").all(by_title()).await.unwrap()),
+        [("main", "Intro")]
+    );
+    jazz.shutdown().await.unwrap();
+}
+
 /// A draft written by one backend is read through its base by another,
 /// through the server; the base stays as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
