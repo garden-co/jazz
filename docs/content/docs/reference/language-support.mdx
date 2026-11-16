@@ -3,8 +3,8 @@ title: Language Support
 description: "What each language does in a Jazz app, and what it doesn't support yet, compared with TypeScript."
 ---
 
-Every language opens the same `jazz.app.json` and `jazz.permissions.json`, with bindings generated
-from them. Your app's main backend runs in TypeScript ([Vercel](/docs/setup/deployment/vercel) or
+Every language works from your app's TypeScript schema and permissions: `npx jazz-tools generate`
+writes each language's typed bindings from them. Your app's main backend runs in TypeScript ([Vercel](/docs/setup/deployment/vercel) or
 [your own server](/docs/setup/deployment/own-server)). Rust and Go run as
 [backend clients](/docs/setup/backend-client) of it, and Swift, Kotlin and Go are for apps. Each tab
 lists what that language doesn't support yet, compared with TypeScript.

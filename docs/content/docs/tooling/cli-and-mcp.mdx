@@ -18,8 +18,9 @@ description: "Learn what the jazz-tools command line does, and how agents use yo
 The commands look for `jazz.app.json` in the current directory, then in `./src` and `./src/lib`.
 Pass `--schema-dir <path>` to point them elsewhere.
 
-Projects without Node, such as a Rust backend client, use the standalone `jazz-tools` binary, which runs
-the same `generate [--check]` and `migrations create --name <name>` commands.
+Projects in other languages, such as a Rust backend client, generate their bindings with
+`npx jazz-tools generate` too, from the app's `schema.ts`. The standalone `jazz-tools` binary refuses
+`generate` and `migrations create` in an app with a `schema.ts`, and points you to `npx`.
 
 `npx jazz-tools --help` and `npx jazz-tools inspect --help` list every option.
 
