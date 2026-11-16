@@ -81,7 +81,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     job.insert(NewTodo::new("after idle", false, ObjectId::new()))
         .await?;
     println!("INSERTED after idle");
-    match job.close(CLOSE_TIMEOUT).await {
+    // CLOSE_TIMEOUT_MS: close with this timeout instead (0: at once).
+    let close_timeout = std::env::var("CLOSE_TIMEOUT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(CLOSE_TIMEOUT);
+    let closing = std::time::Instant::now();
+    let closed = job.close(close_timeout).await;
+    println!("CLOSE_TOOK_MS {}", closing.elapsed().as_millis());
+    match closed {
         Ok(()) => println!("CLOSED ok"),
         Err(other) => println!("CLOSED err {other}"),
     }

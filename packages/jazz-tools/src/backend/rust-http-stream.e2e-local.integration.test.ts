@@ -56,7 +56,7 @@ afterAll(
 );
 
 /** A createJazz main backend that can't upgrade sockets, counting requests. */
-async function startBackend() {
+async function startBackend(options: { deleteDelayMs?: number } = {}) {
   const app = testApp(readFileSync(process.env.RUST_APP_JSON!, "utf8"));
   const jazz = await createJazz({
     app,
@@ -83,8 +83,15 @@ async function startBackend() {
       res.on("finish", () => {
         if (res.statusCode >= 400) requests.refusedSends += 1;
       });
-    } else if (/\/stream\/[^/]+$/.test(path) && req.method === "DELETE") requests.deletes += 1;
-    else if (path.endsWith("/ws")) requests.socket += 1;
+    } else if (/\/stream\/[^/]+$/.test(path) && req.method === "DELETE") {
+      requests.deletes += 1;
+      // A backend slow to answer: the session ends, the answer comes late.
+      if (options.deleteDelayMs) {
+        const answer = jazz.nodeHandler.bind(jazz);
+        setTimeout(() => void answer(req, res), options.deleteDelayMs);
+        return;
+      }
+    } else if (path.endsWith("/ws")) requests.socket += 1;
     return jazz.nodeHandler(req, res);
   });
   const counts = { upgraded: 0 };
@@ -206,6 +213,34 @@ it.skipIf(!CLIENT)(
       expect(rows.map((row) => row.title as string).sort()).toEqual(["after idle", "before idle"]);
     } finally {
       clearInterval(timer);
+      await backend.close();
+    }
+  },
+);
+
+it.skipIf(!CLIENT)(
+  "close(ZERO) doesn't wait for the stream session's DELETE",
+  { timeout: 90_000 },
+  async () => {
+    const backend = await startBackend({ deleteDelayMs: 5_000 });
+    const { jazz } = backend;
+    try {
+      const { stdout, stderr } = await runClient(
+        {
+          SERVER_URL: backend.serverUrl,
+          APP_ID: jazz.appId,
+          TOKEN: await sign({ sub: "ci" }),
+          IDLE_SECS: "0",
+          CLOSE_TIMEOUT_MS: "0",
+        },
+        60_000,
+      );
+      console.log(stdout, stderr);
+      expect(stdout).toContain("CLOSED");
+      const took = Number(/CLOSE_TOOK_MS (\d+)/.exec(stdout)?.[1]);
+      // Not the 2 s a plain shutdown gives the DELETE, let alone its 5 s.
+      expect(took).toBeLessThan(1_000);
+    } finally {
       await backend.close();
     }
   },
