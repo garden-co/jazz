@@ -6,7 +6,7 @@ and `jazz.permissions.json` are byte-identical copies of
 `JazzApp.swift` is what `jazz-tools generate` writes from them.
 
 An end-user client of StagePlan (Swift apps are clients; StagePlan's backend
-runs in TypeScript, Rust or Go). It signs in to the app's Jazz endpoint
+runs in TypeScript). It signs in to the app's Jazz endpoint
 (`JAZZ_ENDPOINT`, the backend's `createJazz` handler, e.g.
 `http://127.0.0.1:8780/jazz`; `JAZZ_APP_ID`) with a device account, whose
 key it keeps in `--key-file` (made on first use, mode 0600), or with a bearer

@@ -75,8 +75,8 @@ public struct Config: Sendable {
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?
 
-    /// Swift apps are clients (`.client`, `.local`); backends run in TS,
-    /// Rust or Go.
+    /// Swift apps are clients (`.client`, `.local`); the app's backend runs
+    /// in TypeScript (`createJazz`).
     init(storage: Storage, appId: String? = nil, serverUrl: String? = nil, dataDir: String? = nil) {
         self.storage = storage
         self.appId = appId
