@@ -111,6 +111,8 @@ pub enum UserKind {
     Device,
     /// A user the app's backend signed in ([`crate::Auth::Bearer`]).
     Backend,
+    /// The system: a trusted backend client ([`crate::Config::credential`]).
+    System,
 }
 
 /// How the client syncs, as TypeScript's `SyncStatus` (serialized the same
@@ -385,6 +387,9 @@ struct Linking {
     endpoint: String,
     app: AppId,
     key: DeviceKey,
+    /// The client's runtime: the link's requests run there, whatever the
+    /// caller's executor.
+    runtime: tokio::runtime::Handle,
 }
 
 /// An end user's session with the app: `Send + Clone`, from
@@ -448,8 +453,17 @@ impl Session {
             Error::Config("only a device account's session links (Auth::Device)".into())
         })?;
         let device = linking.key.account(linking.app);
-        let linked =
-            crate::backend::link(&linking.endpoint, linking.app, bearer, &linking.key).await?;
+        let request = {
+            let (linking, bearer) = (linking.clone(), bearer.to_owned());
+            async move {
+                crate::backend::link(&linking.endpoint, linking.app, &bearer, &linking.key).await
+            }
+        };
+        let linked = linking
+            .runtime
+            .spawn(request)
+            .await
+            .map_err(|_| Error::Stopped)??;
         if linked.account != device {
             // The backend has linked the user by now: say so, as the
             // session stays the device's.
@@ -518,6 +532,7 @@ pub(crate) fn start(
             endpoint: endpoint.to_owned(),
             app: *app,
             key: key.clone(),
+            runtime: tokio::runtime::Handle::current(),
         })),
         Credential::Bearer { .. } => None,
     };

@@ -2,9 +2,27 @@
 name = "jazz-app"
 version = "0.1.0"
 edition = "2024"
-# Not published: its test-relay bin serves tests/relay, a test stand-in.
-publish = false
 description = "Typed, Send + Clone Rust handle for a Jazz app opened from its jazz.app.json"
+
+[features]
+# Unstable, not part of a release yet: the app's Jazz endpoint (`endpoint`),
+# a native main server for an app's users. Run main backends with TS
+# `createJazz`.
+unstable-endpoint = ["dep:hmac", "dep:sha2", "dep:tokio-tungstenite"]
+# `Endpoint::router`: the endpoint as an Axum router.
+axum = ["unstable-endpoint", "dep:axum"]
+# A stand-in for an app's Jazz endpoint, for testing bindings' end users:
+# see src/bin/jazz-app-test-relay.rs.
+test-relay = [
+  "dep:futures",
+  # The relay accepts sockets as well as connecting them.
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/handshake",
+  "tokio/net",
+  "tokio/io-util",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+]
 
 [dependencies]
 axum = { version = "0.8.9", optional = true, default-features = false, features = [
@@ -27,31 +45,12 @@ sha2 = { version = "0.10", optional = true }
 thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
-# Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
-futures = { version = "0.3", optional = true }
 tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = [
   "connect",
-  "handshake",
   "rustls-tls-native-roots",
 ] }
-
-[features]
-# Unstable, not part of a release yet: the app's Jazz endpoint (`endpoint`),
-# a native main server for an app's users. Run main backends with TS
-# `createJazz`.
-unstable-endpoint = ["dep:hmac", "dep:sha2", "dep:tokio-tungstenite"]
-# `Endpoint::router`: the endpoint as an Axum router.
-axum = ["unstable-endpoint", "dep:axum"]
-# A stand-in for an app's Jazz endpoint, for testing bindings' end users:
-# see src/bin/jazz-app-test-relay.rs.
-test-relay = [
-  "dep:futures",
-  "dep:tokio-tungstenite",
-  "tokio/net",
-  "tokio/io-util",
-  "tokio/rt-multi-thread",
-  "tokio/signal",
-]
+# Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
+futures = { version = "0.3", optional = true }
 
 [[bin]]
 name = "jazz-app-test-relay"

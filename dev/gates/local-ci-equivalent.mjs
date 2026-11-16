@@ -28,7 +28,7 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
   "--benches",
 ]);
 export const RUST_CI_FEATURES =
-  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/test-relay,jazz-app/axum";
+  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/axum,jazz-app/test-relay";
 
 // CI setup supplies this one coordination input. Every other JAZZ_* variable
 // is a test, fixture, benchmark, timeout, or assertion control and would make
@@ -47,10 +47,10 @@ export const ciPartitionJobs = Object.freeze({
   "next-trace-decide": "test-next-trace",
   "next-trace": "test-next-trace",
   "react-native": "test-react-native",
-  kotlin: "test-kotlin",
-  "kotlin-android": "test-kotlin-android",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
   go: "test-go",
+  kotlin: "test-kotlin",
+  "kotlin-android": "test-kotlin-android",
 });
 
 const command = (label, executable, args, options = {}) =>

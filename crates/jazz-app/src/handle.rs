@@ -84,6 +84,10 @@ pub(crate) struct Info {
     /// How this backend was opened, for the trusted client its endpoint
     /// acts for its users with.
     pub(crate) opened_with: Option<(AppFiles, Config)>,
+    /// A backend client's way back to its main backend.
+    pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
+    /// The store keeps nothing past the process.
+    pub(crate) memory: bool,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -164,6 +168,14 @@ impl Jazz {
                 "a backend needs the sync server's URL (Config::server)".into(),
             ));
         }
+        if matches!(config.user, Some(Auth::Credential(_))) && !files.has_permissions() {
+            return Err(Error::App(
+                "a backend client needs the app's jazz.permissions.json (AppFiles::read, or \
+                 AppFiles::with_permissions), as createJazzClient takes its permissions: it \
+                 checks the users it acts for by them"
+                    .into(),
+            ));
+        }
         if config.backend.is_some() && !files.has_permissions() {
             return Err(Error::App(
                 "a backend needs the app's jazz.permissions.json".into(),
@@ -230,6 +242,8 @@ impl Jazz {
             session,
             sync,
             backend,
+            backend_client,
+            memory,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
@@ -243,6 +257,8 @@ impl Jazz {
                 sync,
                 backend,
                 opened_with,
+                backend_client,
+                memory,
             }),
             scope: None,
             for_user: false,
@@ -632,6 +648,8 @@ struct Opened {
     session: Option<UserSession>,
     sync: watch::Receiver<SyncStatus>,
     backend: Option<BackendLink>,
+    backend_client: Option<crate::backend_client::BackendClientLink>,
+    memory: bool,
 }
 
 async fn connect(
@@ -645,7 +663,12 @@ async fn connect(
     // its schema carries the permissions the backend publishes, as
     // `createJazz`'s backend session compiles them. Policies are not part
     // of the schema's hash.
-    if let (Link::TrustedForUsers, Some(app)) = (link_kind, &loaded.backend) {
+    // So does a backend client, for the users it acts for (`for_user`), and
+    // a scoped one for its own user: TS `createJazzClient` takes the app's
+    // permissions for the same reason.
+    let backend_client = matches!(config.user, Some(Auth::Credential(_)));
+    let folds_permissions = link_kind == Link::TrustedForUsers || backend_client;
+    if let (true, Some(app)) = (folds_permissions, &loaded.backend) {
         for (table, policies) in app.permissions().iter() {
             if let Some(schema) = loaded.schema.get_mut(table) {
                 schema.policies = policies.clone();
@@ -697,7 +720,18 @@ async fn connect(
         });
     }
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
+    let memory = context.storage == ClientStorage::Memory;
+    let mut backend_client = None;
     let (client, user) = match (config.user, &config.server_url) {
+        (Some(Auth::Credential(credential)), Some(endpoint)) => {
+            let (client, user, credential, link) =
+                crate::backend_client::connect(context, connector, credential, endpoint).await?;
+            if !user.account.is_system() {
+                admitted = Some(user.account);
+            }
+            backend_client = Some(link);
+            (client, Some((user, credential)))
+        }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
                 connect_user(context, connector, auth, endpoint).await?;
@@ -735,6 +769,8 @@ async fn connect(
             session,
             sync,
             backend: link,
+            backend_client,
+            memory,
         },
     ))
 }
@@ -765,6 +801,7 @@ async fn connect_user(
             };
             Ok((client, user, Credential::Device { key, app }))
         }
+        Auth::Credential(_) => unreachable!("a backend client connects through backend_client"),
         Auth::Bearer(provider) => {
             let token = provider
                 .token(TokenReason::Connect)
