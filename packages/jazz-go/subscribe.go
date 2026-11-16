@@ -114,34 +114,45 @@ func stream[T any](ctx context.Context, db *DB, decode func(event) (v T, last, s
 	id := nextSubscriber.Add(1)
 	subscribers.Store(id, s)
 	forget := func() { subscribers.Delete(id) }
-	db.mu.RLock()
-	if db.handle == 0 {
-		db.mu.RUnlock()
-		forget()
-		return nil, &Error{Kind: KindClosed, Message: "closed"}
-	}
-	end, err := start(id)
-	db.mu.RUnlock()
-	if err != nil {
-		forget()
-		return nil, err
-	}
 	// stop ends jazz-ffi's side, once: no callback runs after it returns.
+	var (
+		endMu   sync.Mutex
+		end     func()
+		stopped bool
+	)
 	var stopOnce sync.Once
 	stop := func() {
 		stopOnce.Do(func() {
 			s.mu.Lock()
 			s.closed = true
 			s.mu.Unlock()
-			end()
+			endMu.Lock()
+			stopped = true
+			e := end
+			endMu.Unlock()
+			if e != nil {
+				e()
+			}
 			forget()
 		})
 	}
 	// Close ends the stream too: it stops jazz-ffi's side at once (before
 	// the handle closes), and the stream then sends what was already
-	// queued and closes its channel.
+	// queued and closes its channel. It is registered before it starts, so
+	// a Close meanwhile ends it.
 	closing := make(chan struct{})
 	var closeOnce sync.Once
+	unregister := func() {
+		db.streamsMu.Lock()
+		delete(db.streams, id)
+		db.streamsMu.Unlock()
+	}
+	db.mu.RLock()
+	if db.handle == 0 {
+		db.mu.RUnlock()
+		forget()
+		return nil, &Error{Kind: KindClosed, Message: "closed"}
+	}
 	db.streamsMu.Lock()
 	if db.streams == nil {
 		db.streams = map[uint64]func(){}
@@ -151,14 +162,28 @@ func stream[T any](ctx context.Context, db *DB, decode func(event) (v T, last, s
 		closeOnce.Do(func() { close(closing) })
 	}
 	db.streamsMu.Unlock()
+	started, err := start(id)
+	db.mu.RUnlock()
+	if err != nil {
+		unregister()
+		forget()
+		return nil, err
+	}
+	endMu.Lock()
+	if stopped {
+		// Closed while starting: end what just started.
+		endMu.Unlock()
+		started()
+		return nil, &Error{Kind: KindClosed, Message: "closed"}
+	}
+	end = started
+	endMu.Unlock()
 	out := make(chan T)
 	go func() {
 		defer close(out)
 		defer func() {
 			stop()
-			db.streamsMu.Lock()
-			delete(db.streams, id)
-			db.streamsMu.Unlock()
+			unregister()
 		}()
 		draining := false
 		for {

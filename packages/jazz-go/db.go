@@ -102,7 +102,8 @@ type DB struct {
 	provider uint64 // the TokenProvider's id, if any
 
 	// streams are the DB's open subscriptions and watches, by id: each
-	// ends its stream and waits until it has.
+	// stops its jazz-ffi side at once; its channel closes once what was
+	// queued is sent.
 	streamsMu sync.Mutex
 	streams   map[uint64]func()
 }
