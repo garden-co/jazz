@@ -1715,7 +1715,7 @@ impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
-        Self::open_on(config, conn, None)
+        Self::open_on(config, conn.into(), None)
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
@@ -1745,7 +1745,7 @@ impl Db {
     /// overlay (see [`crate::host`]).
     pub(crate) fn with_host_connection<T>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, Error>,
+        f: impl FnOnce(&crate::storage::Storage) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let inner = self.inner.borrow_mut();
         f(&inner.conn)
@@ -1753,7 +1753,7 @@ impl Db {
 
     fn open_on(
         mut config: DbConfig,
-        conn: Connection,
+        conn: crate::storage::Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement is prepared: the flag is read at
@@ -1825,7 +1825,7 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: Connection,
+        conn: crate::storage::Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
@@ -1960,7 +1960,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn: conn.into(),
+                conn,
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]

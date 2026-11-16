@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_offload_delete (hash BLOB PRIMARY KEY) WITHO
 /// Prepare a store for its chunk store, or refuse to open a store that
 /// has one without it. The first open with a chunk store queues every leaf
 /// the file already holds.
-pub(crate) fn open_offload(conn: &Connection, chunks: &Chunks) -> Result<(), Error> {
+pub(crate) fn open_offload(conn: &crate::storage::Storage, chunks: &Chunks) -> Result<(), Error> {
     let exists: bool = conn
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' \
@@ -165,7 +165,7 @@ pub(crate) fn open_offload(conn: &Connection, chunks: &Chunks) -> Result<(), Err
     match (exists, chunks.offload_store().is_some()) {
         (true, false) => Err(unconfigured()),
         (false, false) | (true, true) => Ok(()),
-        (false, true) => crate::values::in_savepoint(conn, "jazz_lv_offload", || {
+        (false, true) => conn.scope("jazz_lv_offload", |conn| {
             crate::db::execute_script(conn, OFFLOAD_DDL)?;
             conn.execute(
                 "INSERT INTO _jazz_lv_offload (hash, state) SELECT n.hash, 0 \
@@ -183,10 +183,10 @@ pub(crate) fn open_offload(conn: &Connection, chunks: &Chunks) -> Result<(), Err
 /// receipt or upload lease holds them), marked as being put. Their bytes
 /// must reach the chunk store before [`offloaded`] drops them here.
 pub(crate) fn begin_offload(
-    conn: &Connection,
+    conn: &crate::storage::Storage,
     limit: usize,
 ) -> Result<Vec<(NodeKey, Vec<u8>)>, Error> {
-    crate::values::in_savepoint(conn, "jazz_lv_offload", || {
+    conn.scope("jazz_lv_offload", |conn| {
         let picked: Vec<(Vec<u8>, Vec<u8>)> = conn
             .prepare_cached(
                 "SELECT o.hash, n.bytes FROM _jazz_lv_offload o \
@@ -1503,14 +1503,14 @@ pub(crate) fn touch_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result
 /// from the file, so they are not cached; an in-memory store (whose cache
 /// is its only readable copy) or an open transaction caches them pinned.
 pub(crate) fn stage_upload(
-    conn: &Connection,
+    conn: &crate::storage::Storage,
     chunks: &Chunks,
     id: &[u8; 32],
     staged: &[lv::StagedChunk],
     replica: bool,
 ) -> Result<(), Error> {
     let cache = !conn.is_autocommit() || chunks.in_memory();
-    crate::values::in_savepoint(conn, "jazz_lv_upload", || {
+    conn.scope("jazz_lv_upload", |conn| {
         staged.iter().try_for_each(|chunk| {
             store_chunk(conn, chunks, cache, chunk)?;
             if replica {
@@ -2398,8 +2398,8 @@ mod tests {
             .collect()
     }
 
-    fn chunks() -> (Connection, Arc<Chunks>) {
-        let conn = Connection::open_in_memory().unwrap();
+    fn chunks() -> (crate::storage::Storage, Arc<Chunks>) {
+        let conn = crate::storage::Storage::native(Connection::open_in_memory().unwrap());
         let chunks = Chunks::install(None, None, false).unwrap();
         conn.execute_batch(DDL).unwrap();
         (conn, chunks)
@@ -2923,7 +2923,7 @@ mod tests {
     struct Offloading {
         dir: std::path::PathBuf,
         path: std::path::PathBuf,
-        conn: Connection,
+        conn: crate::storage::Storage,
         chunks: Arc<Chunks>,
         store: Arc<dyn ChunkStore>,
     }
@@ -2940,7 +2940,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("store.sqlite");
-        let conn = Connection::open(&path).unwrap();
+        let conn = crate::storage::Storage::native(Connection::open(&path).unwrap());
         let store: Arc<dyn ChunkStore> =
             Arc::new(crate::chunk_store::FileChunkStore::new(dir.join("chunks")).unwrap());
         let chunks = Chunks::install(Some((&path, None)), Some(store.clone()), false).unwrap();

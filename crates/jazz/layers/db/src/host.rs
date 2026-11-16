@@ -28,7 +28,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::catalogue::{CataloguePut, CatalogueRows};
 use crate::db::{Db, FileOptions, Journal};
 use crate::options::{Error, ErrorCode};
-use crate::values::{in_savepoint, storage};
+use crate::storage::Storage;
+use crate::values::storage;
 
 /// One host table: `_jazz_host_<name>`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -114,7 +115,7 @@ pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
-    pub(crate) conn: Connection,
+    pub(crate) conn: Storage,
     pub(crate) path: Option<(PathBuf, Option<&'static str>)>,
 }
 
@@ -175,7 +176,7 @@ impl StoreFile {
         ))
         .map_err(storage)?;
         Ok(Self {
-            conn,
+            conn: conn.into(),
             path: Some((path.to_path_buf(), options.vfs)),
         })
     }
@@ -184,7 +185,10 @@ impl StoreFile {
     pub fn memory() -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
-        Ok(Self { conn, path: None })
+        Ok(Self {
+            conn: conn.into(),
+            path: None,
+        })
     }
 
     /// An in-memory store this process shares by `name`: it lives while any
@@ -194,7 +198,10 @@ impl StoreFile {
         let conn =
             Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
         crate::format::admit(&conn)?;
-        Ok(Self { conn, path: None })
+        Ok(Self {
+            conn: conn.into(),
+            path: None,
+        })
     }
 }
 
@@ -320,13 +327,12 @@ impl HostTables for StoreFile {
     }
 
     fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
-        in_savepoint(&self.conn, "host_write", || {
-            crate::catalogue::put(&self.conn, put)
-        })
+        self.conn
+            .scope("host_write", |conn| crate::catalogue::put(conn, put))
     }
 
     fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
-        in_savepoint(&self.conn, "host_write", || f(&self.conn))
+        self.conn.scope("host_write", |conn| f(conn))
     }
 }
 
@@ -357,17 +363,17 @@ impl HostTables for Db {
     }
 
     fn catalogue(&self) -> Result<CatalogueRows, Error> {
-        self.with_host_connection(crate::catalogue::read)
+        self.with_host_connection(|conn| crate::catalogue::read(conn))
     }
 
     fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
         self.with_host_connection(|conn| {
-            in_savepoint(conn, "host_write", || crate::catalogue::put(conn, put))
+            conn.scope("host_write", |conn| crate::catalogue::put(conn, put))
         })
     }
 
     fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
-        self.with_host_connection(|conn| in_savepoint(conn, "host_write", || f(conn)))
+        self.with_host_connection(|conn| conn.scope("host_write", |conn| f(conn)))
     }
 }
 
@@ -446,11 +452,11 @@ fn prefix_scan(conn: &Connection, table: HostTable, prefix: &[u8]) -> Result<Vec
     Ok(out)
 }
 
-fn put_many(conn: &Connection, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
     if pairs.is_empty() {
         return Ok(());
     }
-    in_savepoint(conn, "host_write", || {
+    conn.scope("host_write", |conn| {
         create(conn, table)?;
         let mut statement = conn
             .prepare_cached(&format!(
@@ -466,12 +472,12 @@ fn put_many(conn: &Connection, table: HostTable, pairs: &[HostPair]) -> Result<(
 }
 
 fn put_if_absent(
-    conn: &Connection,
+    conn: &Storage,
     table: HostTable,
     key: &[u8],
     value: &[u8],
 ) -> Result<Option<Vec<u8>>, Error> {
-    in_savepoint(conn, "host_write", || {
+    conn.scope("host_write", |conn| {
         create(conn, table)?;
         let existing: Option<Vec<u8>> = conn
             .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))
