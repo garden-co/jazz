@@ -202,10 +202,11 @@ async fn a_trusted_client_with_other_permissions_acts_for_no_user() {
     .await
     .expect("it opens: only acting for users is refused");
     let refused = job.for_user("a", serde_json::Value::Null).await;
-    let Err(Error::App(message)) = &refused else {
+    let Err(Error::BundleMismatch { own, served }) = &refused else {
         panic!("for_user is refused: {refused:?}");
     };
-    assert!(message.contains(backend.bundle().unwrap()), "{message}");
+    assert_eq!(served, backend.bundle().unwrap());
+    assert_ne!(own, served);
 
     job.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
     a.shutdown().await.unwrap();

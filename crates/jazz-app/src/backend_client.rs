@@ -248,7 +248,7 @@ impl Jazz {
     /// the app's published `jazz.permissions.json`. A main backend that
     /// names the bundle it serves (`X-Jazz-Bundle` on `backend/admit`) is
     /// checked: with other permissions, `for_user` fails with
-    /// [`Error::App`] naming both bundles (jazz#5808).
+    /// [`Error::BundleMismatch`] naming both bundles (jazz#5808).
     ///
     /// Never creates an account: a user who has none yet fails with
     /// [`Error::NoAccount`]; one the main backend refuses (revoked) with
@@ -278,11 +278,10 @@ impl Jazz {
         if let Some((served, own)) = &link.bundle_mismatch {
             // A user's reads are evaluated here, by this client's own
             // permissions: refuse rather than read by stale ones.
-            return Err(Error::App(format!(
-                "for_user: this client's permissions (bundle {own}) differ from the ones the \
-                 main backend serves (bundle {served}); open it with the app's published \
-                 jazz.permissions.json"
-            )));
+            return Err(Error::BundleMismatch {
+                own: own.clone(),
+                served: served.clone(),
+            });
         }
         // On the client's runtime, whatever the caller's executor.
         let (link, user) = (link.clone(), user_id.to_owned());
