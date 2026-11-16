@@ -13,3 +13,10 @@ It sets up `trustWorkload({ …, claims: { sub: "ci" }, as: "backend" })` and
 Env switches: `SKIP_ALICE`, `SKIP_FOREIGN`, and `WAIT_FIRST` (sleep 3 s before `close`).
 Without `WAIT_FIRST`, `close(CLOSE_TIMEOUT)` returns within about 1 ms with `Unsynced { pending: 1 }`
 after a `for_user` write, so the test's `CLOSED ok` assertion fails. With `WAIT_FIRST=1` it passes.
+
+Update (main 1748d9329): a backend client now needs the app's permissions, so the clients open with
+`AppFiles::new(jazz_app::APP, None).with_permissions(include_bytes!("../jazz.permissions.json"))`.
+`NO_ATTACH=1` skips `jazz.attach(server)`, so the backend can't upgrade sockets and the client falls
+back to the HTTP stream. `LOG_URLS=1` logs the backend's requests. `dev/e2e/rust-scoped-credential-client`
+is the scoped client opened with `Config::credential`; run it with the scoped test and `EXPECT_CLOSED=1`.
+The `WAIT_FIRST` workaround is no longer needed.

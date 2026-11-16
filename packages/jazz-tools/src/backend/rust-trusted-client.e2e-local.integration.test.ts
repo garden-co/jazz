@@ -58,8 +58,8 @@ it("a Rust client syncs as a trusted backend client", { timeout: 90_000 }, async
       trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ci" }, as: "backend" }),
     ],
   }).ready();
-  const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
-  await jazz.attach(server);
+  const server: Server = createServer((req, res) => { if (process.env.LOG_URLS) console.log("REQ", req.method, req.url?.replace(/\/apps\/[^/]+/, "/apps/<id>").replace(/stream\/[^/?]+/, "stream/<sid>")); jazz.nodeHandler(req, res); });
+  if (!process.env.NO_ATTACH) await jazz.attach(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {

@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Some(token))
             }
         });
-    let job = jazz_app::open(config).await?;
+    let job = ::jazz_app::Jazz::open(::jazz_app::AppFiles::new(jazz_app::APP, None).with_permissions(include_bytes!("../jazz.permissions.json").as_slice()), config).await?;
     println!("KIND {:?}", job.backend_client());
     if job.backend_client() != Some(BackendClientKind::Trusted) {
         return Err("not trusted".into());

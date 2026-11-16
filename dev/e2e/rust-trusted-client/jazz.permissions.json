@@ -1,0 +1,1 @@
+{ "format": 1, "tables": { "todos": { "read": "owner = session.user", "insert": "owner = session.user" } } }

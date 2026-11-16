@@ -63,8 +63,8 @@ it("a Rust client syncs as a scoped backend client", { timeout: 60_000 }, async 
       }),
     ],
   }).ready();
-  const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
-  await jazz.attach(server);
+  const server: Server = createServer((req, res) => { if (process.env.LOG_URLS) console.log("REQ", req.method, req.url?.replace(/\/apps\/[^/]+/, "/apps/<id>").replace(/stream\/[^/?]+/, "stream/<sid>")); jazz.nodeHandler(req, res); });
+  if (!process.env.NO_ATTACH) await jazz.attach(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
@@ -82,6 +82,7 @@ it("a Rust client syncs as a scoped backend client", { timeout: 60_000 }, async 
     });
     console.log(stdout, stderr);
     expect(stdout).toContain("SIGNED_IN subject=machine:worker");
+    if (process.env.EXPECT_CLOSED) expect(stdout).toContain("CLOSED ok");
     expect(stdout).toContain("REMOTE_ROWS 1");
     const account = /account=(\S+)/.exec(stdout)![1];
     const rows = await jazz.db.all(app.todos);
