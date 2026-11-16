@@ -63,43 +63,20 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
 public struct Config: Sendable {
     public enum Storage: String, Sendable { case memory, persistent }
 
-    /// The session a backend acts in: `subject` is the user's id.
-    @_spi(Backend) public struct Session: Sendable {
-        public var issuer: String
-        public var subject: String
-        public init(issuer: String = "jazz:backend", subject: String) {
-            self.issuer = issuer
-            self.subject = subject
-        }
-    }
-
     public var storage: Storage
     public var appId: String?
     public var serverUrl: String?
     public var dataDir: String?
-    /// The text of `jazz.permissions.json`: set, the app opens as a backend.
-    @_spi(Backend) public var permissions: String?
-    @_spi(Backend) public var backendSecret: String?
-    @_spi(Backend) public var adminSecret: String?
-    @_spi(Backend) public var session: Session?
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?
 
-    /// Every field at once, backend ones included: Swift opens apps as
-    /// clients (`.client`, `.local`), and backends run in TS, Rust or Go.
-    @_spi(Backend) public init(
-        storage: Storage = .memory, appId: String? = nil, serverUrl: String? = nil,
-        dataDir: String? = nil, permissions: String? = nil, backendSecret: String? = nil,
-        adminSecret: String? = nil, session: Session? = nil
-    ) {
+    /// Swift apps are clients (`.client`, `.local`); backends run in TS,
+    /// Rust or Go.
+    init(storage: Storage, appId: String? = nil, serverUrl: String? = nil, dataDir: String? = nil) {
         self.storage = storage
         self.appId = appId
         self.serverUrl = serverUrl
         self.dataDir = dataDir
-        self.permissions = permissions
-        self.backendSecret = backendSecret
-        self.adminSecret = adminSecret
-        self.session = session
     }
 
     /// An end user's client: it syncs through the app's Jazz endpoint
@@ -118,20 +95,6 @@ public struct Config: Sendable {
         -> Config
     {
         Config(storage: storage, appId: appId, dataDir: dataDir)
-    }
-
-    /// A backend with its `jazz.permissions.json`, acting for `user`. Not
-    /// public API: Swift is a client; run your backend in TS, Rust or Go.
-    /// (Jazz's own tests use it.)
-    @_spi(Backend) public static func backend(
-        appId: String, permissions: String, serverUrl: String? = nil,
-        backendSecret: String? = nil, adminSecret: String? = nil, user: String? = nil,
-        storage: Storage = .memory, dataDir: String? = nil
-    ) -> Config {
-        Config(
-            storage: storage, appId: appId, serverUrl: serverUrl, dataDir: dataDir,
-            permissions: permissions, backendSecret: backendSecret, adminSecret: adminSecret,
-            session: user.map { Session(subject: $0) })
     }
 
     /// Where a persistent store goes without a `dataDir`: Application
@@ -159,7 +122,6 @@ public struct Config: Sendable {
             // Contract 2: permission, not-supported and conflict errors apart.
             "contract": .number(2),
         ]
-        object["permissions"] = permissions.map(JSONValue.string)
         object["appId"] = appId.map(JSONValue.string)
         object["serverUrl"] = serverUrl.map(JSONValue.string)
         if storage == .persistent {
@@ -167,17 +129,10 @@ public struct Config: Sendable {
         } else {
             object["dataDir"] = dataDir.map(JSONValue.string)
         }
-        object["backendSecret"] = backendSecret.map(JSONValue.string)
-        object["adminSecret"] = adminSecret.map(JSONValue.string)
         switch auth {
         case .deviceKey(let key)?: object["auth"] = .object(["deviceKey": .string(key)])
         case .bearer?: object["auth"] = .object(["bearer": .bool(true)])
         case nil: break
-        }
-        if let session {
-            object["session"] = .object([
-                "issuer": .string(session.issuer), "subject": .string(session.subject),
-            ])
         }
         return try Coding.json(JSONValue.object(object))
     }
@@ -236,12 +191,11 @@ public final class Client: Sendable {
         return Client(handle: handle, implementations: implementations)
     }
 
-    /// The account id of the user a backend acts for (`session.user` in
-    /// permissions). A client has none: this throws `refused`.
+    /// The signed-in user's account id (`session.user` in permissions).
     public func account() async throws(JazzError) -> Jazz.ID {
         try await Self.typed {
             guard let account = try await Self.run({ try self.handle.account() }) else {
-                throw JazzError.refused("account() needs a backend acting for a user (`Config.backend(…, user:)`)")
+                throw JazzError.refused("no one is signed in")
             }
             return account
         }
@@ -536,9 +490,6 @@ extension Config: CustomStringConvertible, CustomDebugStringConvertible {
         if let serverUrl { parts.append("serverUrl: \(serverUrl)") }
         if let dataDir { parts.append("dataDir: \(dataDir)") }
         if let auth { parts.append("auth: \(auth)") }
-        if permissions != nil { parts.append("permissions: <set>") }
-        if backendSecret != nil { parts.append("backendSecret: <redacted>") }
-        if adminSecret != nil { parts.append("adminSecret: <redacted>") }
         return "Config(\(parts.joined(separator: ", ")))"
     }
     public var debugDescription: String { description }

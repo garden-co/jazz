@@ -1,14 +1,12 @@
 import Foundation
 import XCTest
 
-@_spi(Backend) @testable import Jazz
+@testable import Jazz
 
 final class ConfigTests: XCTestCase {
     func testPrintingAConfigRedactsSecrets() {
         let client = Config.client(appId: "a", serverUrl: "https://app", auth: .deviceKey("jazz-auth-v1:SECRET"))
-        let backend = Config.backend(
-            appId: "a", permissions: "{}", backendSecret: "BS-SECRET", adminSecret: "AS-SECRET", user: "u")
-        for text in ["\(client)", String(reflecting: client), "\(backend)", String(reflecting: backend)] {
+        for text in ["\(client)", String(reflecting: client)] {
             XCTAssertFalse(text.contains("SECRET"), text)
         }
         XCTAssertTrue("\(client)".contains("<redacted>"))
@@ -24,5 +22,15 @@ final class ConfigTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: home.appendingPathComponent("jazz/app-1").path))
         #endif
         XCTAssertTrue(json.contains(#""storage":"persistent""#))
+    }
+}
+
+extension ConfigTests {
+    func testAClientSendsNoBackendKeys() throws {
+        let json = try Config.client(appId: "a", serverUrl: "https://app", auth: .deviceKey("k"), storage: .memory)
+            .json(app: "{}")
+        for key in ["permissions", "backendSecret", "adminSecret", "session"] {
+            XCTAssertFalse(json.contains("\"\(key)\""), json)
+        }
     }
 }

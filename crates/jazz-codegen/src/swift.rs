@@ -807,7 +807,7 @@ impl<'a> Writer<'a> {
         );
         let _ = write!(out, "{APP_PREFIX}{hashes}\"\"\"\n{file}\"\"\"{hashes}\n\n");
         out.push_str(
-            "    /// Opens the app. A backend (`config.permissions` set to its\n    /// `jazz.permissions.json`) first publishes the app's permissions bundle\n    /// and pins the session it acts in to it.\n",
+            "    /// Opens the app as an end-user client (`.client(…)`, signed in through\n    /// the app's Jazz endpoint) or a local one (`.local()`).\n",
         );
         if self.has_computed {
             let _ = writeln!(
