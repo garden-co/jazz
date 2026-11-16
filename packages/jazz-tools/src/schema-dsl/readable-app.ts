@@ -115,12 +115,13 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
         const builder = definition._computed.type as unknown as BuilderInternals;
         const column = builder._build(name);
         const type = readableType(column.sqlType);
-        if (typeof type !== "string")
-          throw new Error(
-            `${tableName}.${name}: a computed field's type is a scalar column type (string, int, …).`,
-          );
         computed[name] = {
-          type: column.nullable ? `${type}?` : type,
+          type:
+            typeof type === "string"
+              ? column.nullable
+                ? `${type}?`
+                : type
+              : { ...(type as { [key: string]: ReadableJson }), ...(column.nullable ? { optional: true } : {}) },
           from: [...definition._computed.from],
         };
         continue;
