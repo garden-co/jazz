@@ -13,6 +13,12 @@ type Delta[R any] struct {
 	Added   []R      `json:"added"`
 	Updated []R      `json:"updated"`
 	Removed []string `json:"removed"`
+	// AddedKeys, UpdatedKeys and RemovedKeys are the results' keys,
+	// parallel to Added, Updated and Removed. One row can be several
+	// results (each version in a History query, each arm of a Union that
+	// matches it): apply updates and removals by key. Elsewhere a key is
+	// as good as the row's id.
+	AddedKeys, UpdatedKeys, RemovedKeys []string `json:"-"`
 	// Reset says the result is Added alone: start over from it.
 	Reset bool `json:"reset"`
 	// Coalesced says several changes were folded into this one.

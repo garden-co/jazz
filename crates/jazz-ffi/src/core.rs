@@ -681,17 +681,19 @@ impl Core {
         }
         let tier = opts.read_tier.unwrap_or(ReadTier::LocalFirst);
         let parsed = convert::parse(query_json, "the query")?;
-        let (query, table, reads_deleted) = if crate::relational::is_relational(&parsed) {
+        let (query, table, reads_deleted, history) = if crate::relational::is_relational(&parsed) {
+            // A history subscription's versions share their row's id: a
+            // host applies them by `$key`.
             let lowered = crate::relational::lower(&self.schema, &self.relations, &parsed)?;
-            if lowered.history {
-                return Err(unsupported(
-                    "subscribing to history: all versions of a row share its id",
-                ));
-            }
-            (lowered.query, lowered.shape, lowered.reads_deleted)
+            (
+                lowered.query,
+                lowered.shape,
+                lowered.reads_deleted,
+                lowered.history,
+            )
         } else {
             let (_, query, shape) = convert::query(&self.schema, &self.relations, &parsed)?;
-            (query, shape, false)
+            (query, shape, false, false)
         };
         let (events, received) = mpsc::channel::<Option<Event>>();
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
@@ -722,7 +724,7 @@ impl Core {
                         // so no host waits for a delta that never comes.
                         None => Event::Error(JazzError::Closed),
                         Some(SubscriptionStreamItem::Delta(delta)) => {
-                            match convert::delta_json(&table, delta, first) {
+                            match convert::delta_json(&table, history, delta, first) {
                                 Ok(json) => Event::Delta(json),
                                 Err(error) => Event::Error(JazzError::from(error)),
                             }
