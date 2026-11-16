@@ -71,15 +71,15 @@ named error.
   { "name": "search", "text": { "title": 4, "body": 1 },
     "analyzer": "jazz-text/1:en", "prefix": true },
   { "name": "similar", "vector": "embedding", "metric": "cosine" },
-  { "name": "place", "geo": { "lat": "lat", "lng": "lng" } }
+  { "name": "place", "geo": "location" }
 ]
 ```
 
-| kind key | value                                                           | other keys                                                                                                    |
-| -------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `text`   | string column → integer weight 1–15                             | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`                                      |
-| `vector` | a `vector` column                                               | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
-| `geo`    | `{ "lat": <f64 column>, "lng": <f64 column> }` (degrees, WGS84) | `serverOnly`                                                                                                  |
+| kind key | value                               | other keys                                                                                                    |
+| -------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `text`   | string column → integer weight 1–15 | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`                                      |
+| `vector` | a `vector` column                   | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
+| `geo`    | a `point` column                    | `serverOnly`                                                                                                  |
 
 The artifact is the only place indexes are declared; generated bindings
 for each language read them from it. The JSON Schema in
@@ -118,6 +118,26 @@ not a tuple member, an array element, a payload-enum field or a B-tree index
 column. As a filter operand it compares as a whole value, bit for bit (6.1.1);
 nearness is only a search (20.4). The dimensions are part of the type, so
 changing them is a type change, refused like any other to or from `vector`.
+
+A new scalar column type, written `"point"` (`"point?"` when optional; the
+object form `{ "type": "point", … }` only when it has options such as
+`default`), holds a WGS84 position in degrees. Its value is `[lng, lat]`,
+**GeoJSON order: longitude first** (10.10). Generated bindings map it to
+`readonly [lng: number, lat: number]` in TypeScript and
+`jazz_app::Point { lng, lat }` in Rust. It is a `ValueType` appended after
+`Vector`, stored in its cell as a BLOB of 16 bytes in encoding
+`point-f64le/1` (the longitude, then the latitude, each IEEE-754 binary64
+little-endian) and carried on the wire as the same bytes. A write with a
+wrong length, a non-finite coordinate, a longitude outside `[-180, 180]` or
+a latitude outside `[-90, 90]` is refused at admission. As for `vector`, the
+value is a byte value of exactly 16 bytes; a record field of type `point` is
+variable-width with no stored-scalar header; the persisted record descriptor
+names it with node 28 (`Point`, no fields) and the binding descriptor with
+type tag 20. A point is not a tuple member, an array element, a payload-enum
+field, a B-tree index column or an ordering key. As a filter operand it
+compares as a whole value, bit for bit (6.1.1: `Eq` and `in` only, `-0.0` ≠
+`0.0`); nearness and containment are only a search (20.4). The migration
+diff refuses changes to or from `point`.
 
 Specialised indexes are part of a table's version id (a new schema-id
 domain, `SchemaHash` only; the ids of schemas without specialised indexes are
@@ -480,8 +500,12 @@ candidates but never change scores.
 
 ### 20.10.3 Geo
 
-A point is `(lat, lng)` from the declared columns, in degrees; a row with
-either null, non-finite or out of range is not indexed and never matches. `x, y, z` is the point on the unit sphere.
+A point is the declared `point` column's `[lng, lat]`, in degrees; a row
+whose point is null is not indexed and never matches (admission has already
+refused non-finite and out-of-range points; a stored value that fails to
+decode is likewise left unindexed, `INV-IX-7`). `lat` and `lng` in `__geo`
+are its two coordinates as stored. `x, y, z` is the point on the unit
+sphere.
 Trigonometry is fdlibm's `sin`/`cos` kernels written out in basic IEEE-754
 binary64 operations, with exact argument reduction in degrees, never the
 platform's `sin`/`cos` (which may differ in the last bit between targets).
@@ -563,6 +587,4 @@ except `index_building`, which is `backpressure` (retry later).
 - Hybrid search (several clauses fused by reciprocal rank), typo tolerance,
   trigram substring search (answering 19.5's large-value `contains`), and
   returning scores or highlights.
-- A typed `point` column (asked for in issue 3991) instead of two `f64`
-  columns for geo indexes.
 - Searching E2EE columns, which would need client-side encrypted indexes.
