@@ -678,6 +678,35 @@ async fn streaming_in_a_transaction() {
     );
     assert_eq!(jazz.all(tasks::query()).await.unwrap().len(), before);
 
+    // Serializable transactions stream too, closure and open forms.
+    let serial = jazz
+        .serializable_transaction(move |tx| async move {
+            tx.insert_streaming(
+                NewTask::new("Serializable", 0, Vec::new()),
+                tasks::attachment(),
+                chunked(&[6; 70_000], 30_000),
+            )
+            .await
+        })
+        .await
+        .unwrap();
+    let stored = jazz.get::<Task>(serial.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment, Some(vec![6; 70_000]));
+    let open = jazz.begin_serializable_transaction().await.unwrap();
+    let updated = open
+        .update_streaming(
+            serial.id,
+            TaskUpdate::default(),
+            tasks::attachment(),
+            chunked(&[8; 4], 2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.attachment, Some(vec![8; 4]));
+    open.commit().await.unwrap();
+    let stored = jazz.get::<Task>(serial.id).await.unwrap().unwrap();
+    assert_eq!(stored.attachment, Some(vec![8; 4]));
+
     // Open form: commits with the transaction...
     let open = jazz.begin_transaction().await.unwrap();
     let streamed = open
