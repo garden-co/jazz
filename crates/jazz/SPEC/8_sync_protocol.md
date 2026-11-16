@@ -1171,11 +1171,16 @@ those bytes are refused with it at once until the fetch backoff ends.
     does not come is closed (1011), and the client reconnects.
   - A backend serves at most so many sessions' transactions at once (256 by
     default); past that, a session's transaction requests are refused with
-    `backpressure`. `createJazz` refuses them, as not supported yet, to a
-    connection bound to another version of the app's schema than its own.
+    `backpressure`.
+  - The session's client opens on the schema version the connection bound
+    (`ThinOp::Schema`), which the core serves pinned to it, as for an older
+    replica (§8.9): a client built against an earlier version of the app
+    is served as before.
 
-  The core still serves thin transactions itself for a backend from before
-  this, until such backends are gone.
+  This holds for a thin connection through the app's backend. The core
+  still serves thin transactions itself for one that reaches it otherwise
+  (or through a backend from before this), staging each write in order,
+  until such connections are gone.
 
 - `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
   of the authority's current frontier, for frozen branch bases.
