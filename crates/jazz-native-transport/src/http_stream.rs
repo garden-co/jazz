@@ -58,6 +58,11 @@ const MAX_RECORD_BYTES: usize = jazz::protocol_limits::MAX_WIRE_FRAME_BYTES + 64
 /// answers a send once the core has taken its records; one that answers
 /// nothing for this long is gone.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// TCP keepalive on the stream's connections: first probe after this idle time,
+/// then every interval, giving up after the retries (about 60 s in all).
+const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const TCP_KEEPALIVE_RETRIES: u32 = 3;
 /// How long the probe of a socket path may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Received messages buffered ahead of the pump; the response body is not
@@ -185,12 +190,15 @@ impl HttpStreamError {
         let message = self.to_string();
         match self {
             Self::Request(_) | Self::Timeout => NativeTransportError::Retryable(message),
-            Self::Refused { status: 401, .. } => NativeTransportError::AuthRejected(message),
+            // A refused credential stays refused until the caller brings a
+            // new one, as on a socket's upgrade.
             Self::Refused {
-                status: 408 | 425 | 429 | 500 | 502 | 503 | 504,
-                ..
-            } => NativeTransportError::Retryable(message),
-            Self::Refused { .. } | Self::Malformed(_) => NativeTransportError::Terminal(message),
+                status: 401 | 403, ..
+            } => NativeTransportError::AuthRejected(message),
+            // Any other refusal switched the endpoint back to sockets (see
+            // `connect_stream`): the next session tries a socket, which
+            // fails as a socket does if the backend has neither.
+            Self::Refused { .. } | Self::Malformed(_) => NativeTransportError::Retryable(message),
         }
     }
 }
@@ -610,6 +618,12 @@ impl HttpStreamFallbackConnector {
             // never redirects its sync routes.
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                // An idle stream session has no silence deadline (see
+                // `HTTP_STREAM_LIVENESS`): TCP keepalive finds a dead one,
+                // within about a minute, rather than the OS default's hours.
+                .tcp_keepalive(TCP_KEEPALIVE_IDLE)
+                .tcp_keepalive_interval(TCP_KEEPALIVE_INTERVAL)
+                .tcp_keepalive_retries(TCP_KEEPALIVE_RETRIES)
                 .build()
                 .expect("an HTTP client with no redirects builds"),
             endpoints: Arc::default(),
@@ -716,8 +730,15 @@ impl HttpStreamFallbackConnector {
             failure,
             NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout)
         );
-        // A name that doesn't resolve has no backend to ask.
-        let probe = !matches!(failure, NativeConnectFailure::Resolution(_));
+        // A name that doesn't resolve has no backend to ask, and an upgrade
+        // refused for its credential was answered by the backend itself.
+        let probe = match &failure {
+            NativeConnectFailure::Resolution(_) => false,
+            NativeConnectFailure::WebSocket(WebSocketClientError::Connect(
+                tokio_tungstenite::tungstenite::Error::Http(response),
+            )) => !matches!(response.status().as_u16(), 401 | 403),
+            _ => true,
+        };
         if probe
             && self
                 .serves_stream_instead(&url, hung, request.authorization.as_deref())

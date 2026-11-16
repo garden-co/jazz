@@ -48,10 +48,13 @@ enum Upgrades {
     NoStream,
 }
 
+/// A stream session: its key, and the core socket it relays to.
+type Session = (String, Arc<tokio::sync::Mutex<CoreSink>>);
+
 struct Backend {
     core: String,
     upgrades: Upgrades,
-    sessions: Mutex<HashMap<String, (String, Arc<tokio::sync::Mutex<CoreSink>>)>>,
+    sessions: Mutex<HashMap<String, Session>>,
     opened: AtomicUsize,
     sends: AtomicUsize,
     deleted: AtomicUsize,
@@ -76,10 +79,11 @@ async fn refused_upgrade(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    if method == Method::GET && headers.contains_key("upgrade") {
-        if let Upgrades::BrokenInBetween = backend.upgrades {
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
+    if method == Method::GET
+        && headers.contains_key("upgrade")
+        && matches!(backend.upgrades, Upgrades::BrokenInBetween)
+    {
+        return StatusCode::BAD_GATEWAY.into_response();
     }
     socket_path(State(backend)).await
 }
