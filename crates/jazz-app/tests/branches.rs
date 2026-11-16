@@ -645,3 +645,58 @@ async fn next(
         .expect("an open stream")
         .expect("a typed delta")
 }
+
+/// A serializable transaction that read through the draft and wrote back
+/// through it (an upsert, a restore) conflicts at commit when main changed
+/// a row the draft inherits meanwhile; none of its writes land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_serializable_branch_write_conflicts_when_its_base_changed() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let main = jazz.on_branch("main");
+    let intro = main
+        .insert(NewDocument::new("main", "Intro"))
+        .await
+        .unwrap();
+    let outro = main
+        .insert(NewDocument::new("main", "Outro"))
+        .await
+        .unwrap();
+    let draft = jazz.on_branch(Branch::from("draft").over("main"));
+    draft.delete::<Document>(outro.id).await.unwrap();
+
+    let concurrent = main.clone();
+    let result = jazz
+        .serializable_transaction(move |tx| async move {
+            let draft = tx.on_branch(Branch::from("draft").over("main"))?;
+            assert!(draft.get::<Document>(intro.id).await?.is_some());
+            draft
+                .upsert(
+                    jazz_app_support::ObjectId::new(),
+                    NewDocument::new("draft", "Upserted"),
+                )
+                .await?;
+            draft.restore::<Document>(outro.id).await?;
+            // Meanwhile, main changes the row the draft read and inherits.
+            concurrent
+                .update(
+                    intro.id,
+                    DocumentUpdate {
+                        title: Some("Intro, changed on main".into()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            Ok(())
+        })
+        .await;
+    let error = result.unwrap_err();
+    assert!(
+        error.to_string().contains("changed since its snapshot"),
+        "{error}"
+    );
+    assert_eq!(
+        titles(&draft.all(by_title()).await.unwrap()),
+        [("draft", "Intro, changed on main")]
+    );
+    jazz.shutdown().await.unwrap();
+}
