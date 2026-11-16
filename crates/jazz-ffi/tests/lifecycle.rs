@@ -193,6 +193,27 @@ fn delete_client_storage_empties_the_store() {
         jazz.all(json!({ "table": "shows" }).to_string()),
         Err(JazzError::Closed)
     ));
+    // Nothing is left behind, not even the store's lock file on unix
+    // (jazz#5856).
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .collect()
+        })
+        .unwrap_or_default();
+    // Windows keeps the lock file: deleting it there could orphan another
+    // app's live lock (jazz#5856).
+    let expected: Vec<std::ffi::OsString> = if cfg!(unix) {
+        Vec::new()
+    } else {
+        vec!["jazz.lock".into()]
+    };
+    assert!(
+        left.iter().all(|name| expected.contains(name)),
+        "left in the dataDir: {left:?}"
+    );
     let reopened = JazzHandle::open(config).unwrap();
     assert_eq!(
         parse(
