@@ -1,7 +1,9 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { entriesOf, parseAppJson } from "./app-json.js";
-import { identityDifferences, renameValidate } from "./index.js";
+import { identityDifferences, isRustApp, renameValidate } from "./index.js";
 import { dslAlpha } from "./fresh.js";
 import { codemodSchema, codemodSpreadModule } from "./schema-ts.js";
 import { loadTypeScript } from "./project.js";
@@ -257,5 +259,32 @@ describe("the deployment check", () => {
       "schema versions [h1, h2] → [h1, h3]",
       "bundle id b1 → b2",
     ]);
+  });
+});
+
+describe("Rust apps", () => {
+  it("are crates that depend on jazz-app-support or commit src/jazz_app.rs, as `jazz-tools generate` tells", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jazz-upgrade-rust-"));
+    try {
+      expect(isRustApp(dir)).toBe(false);
+      writeFileSync(join(dir, "Cargo.toml"), '[workspace]\nmembers = ["a"]\n');
+      expect(isRustApp(dir), "a workspace root").toBe(false);
+      writeFileSync(
+        join(dir, "Cargo.toml"),
+        '[package]\nname = "x"\n\n[dependencies]\nserde = "1"\n',
+      );
+      expect(isRustApp(dir), "an unrelated crate").toBe(false);
+      writeFileSync(
+        join(dir, "Cargo.toml"),
+        '[package]\nname = "x"\n\n[dependencies]\njazz-app-support = { path = "../jazz-app-support" }\n',
+      );
+      expect(isRustApp(dir)).toBe(true);
+      writeFileSync(join(dir, "Cargo.toml"), '[package]\nname = "x"\n');
+      mkdirSync(join(dir, "src"));
+      writeFileSync(join(dir, "src", "jazz_app.rs"), "// generated\n");
+      expect(isRustApp(dir), "committed bindings").toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

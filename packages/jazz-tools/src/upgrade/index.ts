@@ -361,12 +361,32 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
       `\`generate\` failed on the converted app, so upgrade put every file back:\n  ${(error instanceof Error ? error.message : String(error)).replace(/\n/g, "\n  ")}`,
     );
   }
-  report.written.push(rel(project.appFile), rel(project.permissionsJsonFile), rel(generatedFile));
   report.notes.push(
     `The schema hashes and the bundle id (${before.bundle.slice(0, 12)}) are unchanged.`,
   );
+  // A Rust app (a crate on `jazz-app-support`) gets Rust bindings instead, as `generate` writes them.
+  const rustApp = isRustApp(project.schemaDir);
+  report.written.push(rel(project.appFile), rel(project.permissionsJsonFile));
+  if (rustApp) {
+    const rustFile = join(project.schemaDir, RUST_BINDINGS_FILE);
+    const rust = await rustBindings(readFileSync(project.appFile, "utf8"));
+    if (typeof rust === "string") {
+      mkdirSync(dirname(rustFile), { recursive: true });
+      writeFileSync(rustFile, rust);
+      report.written.push(rel(rustFile));
+    } else {
+      report.notes.push(
+        `${RUST_BINDINGS_FILE} was not written (${rust.reason}); run \`npx jazz-tools generate\` once this jazz-tools generates Rust bindings.`,
+      );
+    }
+    report.notes.push(
+      "This is a Rust app: run `cargo check` to typecheck it against the new bindings.",
+    );
+  } else {
+    report.written.push(rel(generatedFile));
+  }
 
-  if (!options.skipTypecheck) {
+  if (!options.skipTypecheck && !rustApp) {
     const split = splitTypeErrors(beforeErrors, projectTypeErrors(project, writes, deleted));
     report.typeErrors = split.added;
     report.preexistingTypeErrors = split.preexisting;
@@ -439,6 +459,39 @@ export function identityDifferences(before: ArtifactIdentity, after: ArtifactIde
   if (a !== b) out.push(`schema versions [${a}] → [${b}]`);
   if (before.bundle !== after.bundle) out.push(`bundle id ${before.bundle} → ${after.bundle}`);
   return out;
+}
+
+const RUST_BINDINGS_FILE = join("src", "jazz_app.rs");
+
+/**
+ * Whether `dir` is a Rust app, as `jazz-tools generate` tells: a crate (a
+ * `Cargo.toml` with `[package]`) that depends on `jazz-app-support`, or one with
+ * committed `src/jazz_app.rs`. A workspace root or an unrelated crate isn't.
+ */
+export function isRustApp(dir: string): boolean {
+  const manifest = join(dir, "Cargo.toml");
+  if (!existsSync(manifest)) return false;
+  const text = readFileSync(manifest, "utf8");
+  if (!/^\s*\[package\]/m.test(text)) return false;
+  if (existsSync(join(dir, RUST_BINDINGS_FILE))) return true;
+  return /^\s*jazz-app-support\s*=|^\s*\[(?:dev-|build-)?dependencies\.jazz-app-support\]/m.test(
+    text,
+  );
+}
+
+/** The `jazz-app-support` crate's bindings, or why this jazz-napi can't generate them. */
+async function rustBindings(appJson: string): Promise<string | { reason: string }> {
+  try {
+    const napi = (await import("jazz-napi")) as unknown as {
+      generate?: (lang: string, app: string) => string;
+    };
+    if (typeof napi.generate !== "function") return { reason: "this jazz-napi has no `generate`" };
+    return napi.generate("rust", appJson);
+  } catch (error) {
+    return {
+      reason: (error instanceof Error ? error.message : String(error)).replace(/[.\s]*$/, ""),
+    };
+  }
 }
 
 /** This jazz-tools' `generate`, in the app's directory. */
