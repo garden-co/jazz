@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bindings::{NewProject, NewTodo, Todo, TodoUpdate, projects, todos};
 use futures::StreamExt;
-use jazz_app::{AppFiles, AppId, Backend, Config, Error, Jazz, Order, ReadTier, Rows};
+use jazz_app::{AppFiles, AppId, Backend, Config, Error, Jazz, Order, ReadTier, Rows, Storage};
 use jazz_server::JazzServer;
 
 fn files() -> AppFiles {
@@ -318,8 +318,8 @@ async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
 #[tokio::test]
 async fn refuses_what_it_cannot_do() {
     let app_id = AppId::random();
-    let as_user = Jazz::open(files(), Config::new(app_id).server("http://localhost:1")).await;
-    assert!(matches!(as_user, Err(Error::Unsupported(_))), "{as_user:?}");
+    let as_nobody = Jazz::open(files(), Config::new(app_id).server("http://localhost:1")).await;
+    assert!(matches!(as_nobody, Err(Error::Config(_))), "{as_nobody:?}");
 
     let backend = Backend::new("b", "a", "u");
     let serverless = Jazz::open(files(), Config::new(app_id).backend(backend.clone())).await;
@@ -530,4 +530,100 @@ async fn mergeable_and_serializable_transactions() {
             );
         }
     }
+}
+
+/// A transaction driven call by call (TS's `beginTransaction`): a `Send`
+/// handle that commits, rolls back, or rolls back when dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_transactions() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+
+    let tx = jazz.begin_transaction().await.unwrap();
+    let a = tx.insert(new_todo("a")).await.unwrap();
+    // Held across an await in another task: the handle is Send.
+    let tx = tokio::spawn(async move {
+        tx.update(
+            a.id,
+            TodoUpdate {
+                done: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        tx
+    })
+    .await
+    .unwrap();
+    assert!(tx.get::<Todo>(a.id).await.unwrap().unwrap().done);
+    tx.commit().await.unwrap();
+    assert!(jazz.get::<Todo>(a.id).await.unwrap().unwrap().done);
+
+    let tx = jazz.begin_serializable_transaction().await.unwrap();
+    tx.insert(new_todo("rolled back")).await.unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(jazz.open_transactions().await.unwrap(), 0);
+
+    let tx = jazz.begin_transaction().await.unwrap();
+    tx.insert(new_todo("dropped")).await.unwrap();
+    assert_eq!(jazz.open_transactions().await.unwrap(), 1);
+    drop(tx);
+    // Dropping it rolls it back on the client's thread, without waiting.
+    let mut open = 1;
+    for _ in 0..100 {
+        open = jazz.open_transactions().await.unwrap();
+        if open == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open, 0, "dropping an open transaction rolls it back");
+
+    let titles: Vec<_> = jazz
+        .all(todos::query())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|todo| todo.title)
+        .collect();
+    assert_eq!(titles, ["a"]);
+}
+
+/// Shutting down with a transaction still open rolls it back first: the
+/// client thread must not drop it with its thread-locals (that aborted the
+/// process).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_with_open_serializable_transaction() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let tx = jazz.begin_serializable_transaction().await.unwrap();
+    tx.insert(new_todo("never committed")).await.unwrap();
+    jazz.shutdown().await.unwrap();
+    assert!(matches!(tx.commit().await, Err(Error::Stopped)));
+}
+
+/// The same with a mergeable transaction, on a persistent store: its
+/// writes are not there when the app is opened again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_with_open_mergeable_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_id = AppId::random();
+    let config = || Config::new(app_id).storage(Storage::Dir(dir.path().to_owned()));
+    let jazz = bindings::open(config()).await.unwrap();
+    jazz.insert(new_todo("kept")).await.unwrap();
+    let tx = jazz.begin_transaction().await.unwrap();
+    tx.insert(new_todo("never committed")).await.unwrap();
+    jazz.shutdown().await.unwrap();
+    drop(tx);
+
+    let jazz = bindings::open(config()).await.unwrap();
+    let titles: Vec<_> = jazz
+        .all(todos::query())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|todo| todo.title)
+        .collect();
+    assert_eq!(titles, ["kept"]);
+    jazz.shutdown().await.unwrap();
 }

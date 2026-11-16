@@ -62,7 +62,9 @@ It writes the `better_auth_*` tables and leaves `messages` alone:
         "createdAt": "timestamp",
         "updatedAt": "timestamp"
       },
-      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+      "relations": {
+        "user": { "rel": "better_auth_user", "column": "userId" }
+      }
     },
     "better_auth_jwks": {
       "columns": {
@@ -85,7 +87,9 @@ It writes the `better_auth_*` tables and leaves `messages` alone:
         "userId": "uuid",
         "impersonatedBy": "string?"
       },
-      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+      "relations": {
+        "user": { "rel": "better_auth_user", "column": "userId" }
+      }
     },
     "better_auth_user": {
       "columns": {

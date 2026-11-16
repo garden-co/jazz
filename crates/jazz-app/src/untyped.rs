@@ -802,9 +802,7 @@ fn predicate(predicate: &Predicate, scope: &str) -> std::result::Result<Relation
         Predicate::IsNull(operand) => RelationPredicate::IsNull {
             column: column(operand)?,
         },
-        Predicate::EnumMatch { .. } => {
-            return Err("enum match conditions cannot follow a relation yet".to_owned());
-        }
+        Predicate::Removed(removed) => match *removed {},
     })
 }
 
