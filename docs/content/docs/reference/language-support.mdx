@@ -15,8 +15,6 @@ lists what that language doesn't support yet, compared with TypeScript.
     backend's `/jazz`. It doesn't run a main backend, serve your users, or run Jazz's core in its
     own process. As a backend client, it doesn't support yet:
 
-    - connecting as a trusted machine (`as: "backend"`), and `forUser(userId)` on such a client:
-      Rust connects as a scoped one, a machine your main backend trusts as a user;
     - includes, `select` and recursive queries (use `jazz.with_client(…)` for the low-level client);
     - payload enums;
     - `linkIdentity`.
