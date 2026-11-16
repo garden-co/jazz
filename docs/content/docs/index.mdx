@@ -17,21 +17,21 @@ export const schema = s.defineSchema({
 const { definePermissions, session } = schema;
 
 // Each user sees and edits only the todos they created
-const isCreator = () => ({ $createdBy: session.user });
+const createdByMe = { $createdBy: session.user };
 
 export const permissions = definePermissions({
   todos: {
-    read: isCreator(),
-    insert: isCreator(),
-    update: isCreator(),
-    delete: isCreator(),
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
   },
 });
 ```
 
 Run `npx jazz-tools generate` after writing it, and again after each change. It checks the schema
 and permissions and writes `jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts`, the
-typed `app` your code imports. Commit all of them. See [App files](/docs/reference/app-files).
+typed `app` your code imports. Commit all of them. See [Defining Tables](/docs/schemas/defining-tables).
 
 Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your backend imports are the ones it enforces.
 
