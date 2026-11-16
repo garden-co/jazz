@@ -421,7 +421,11 @@ pub async fn insert_todo_and_wait(jazz: &Jazz) -> jazz_app::Result<Option<Todo>>
 // #endregion writing-mutation-errors-rust
 
 // #region writing-transaction-errors-rust
-pub async fn complete_todo_in_transaction(jazz: &Jazz, todo_id: ObjectId) -> jazz_app::Result<()> {
+/// Whether the server accepted the commit.
+pub async fn complete_todo_in_transaction(
+    jazz: &Jazz,
+    todo_id: ObjectId,
+) -> jazz_app::Result<bool> {
     let committed = jazz
         .durable(DurabilityTier::GlobalServer)
         .transaction(move |tx| async move {
@@ -436,10 +440,10 @@ pub async fn complete_todo_in_transaction(jazz: &Jazz, todo_id: ObjectId) -> jaz
         .await;
 
     match committed {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         Err(jazz_app::Error::WriteRejected { code, reason, .. }) => {
             eprintln!("{code}: {reason}");
-            Ok(())
+            Ok(false)
         }
         Err(error) => Err(error),
     }

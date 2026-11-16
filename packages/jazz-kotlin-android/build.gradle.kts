@@ -16,10 +16,15 @@ plugins {
     id("com.android.library") version "8.13.0"
     kotlin("android") version "2.2.21"
     kotlin("plugin.serialization") version "2.2.21"
+    // 0.35.0: the last release for Gradle 8 (0.36 needs Gradle 9).
+    id("com.vanniktech.maven.publish") version "0.35.0"
 }
 
+val repo = rootDir.resolve("../..").canonicalFile
+
 group = "tools.jazz"
-version = "2.0.0-alpha.66"
+// Lockstep with every Jazz package: jazz-tools' version.
+version = (groovy.json.JsonSlurper().parse(repo.resolve("packages/jazz-tools/package.json")) as Map<*, *>)["version"] as String
 
 val ndkVersionPinned = "27.1.12297006"
 val minSdkVersion = 24
@@ -54,7 +59,6 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.17.0@aar")
 }
 
-val repo = rootDir.resolve("../..").canonicalFile
 val jvmLibrary = repo.resolve("packages/jazz-kotlin")
 val cargoProfile = (findProperty("cargoProfile") as String?) ?: "release-mobile"
 val abis = ((findProperty("androidAbis") as String?) ?: "arm64-v8a,armeabi-v7a,x86_64").split(",").map { it.trim() }
@@ -100,3 +104,45 @@ android.sourceSets.getByName("main") {
     jniLibs.srcDir(jniLibsOut)
 }
 tasks.named("preBuild") { dependsOn(generateUniffi) }
+// The sources jar (Maven Central) packs the generated bindings too.
+tasks.withType<Jar>().configureEach { dependsOn(generateUniffi) }
+
+// Maven Central (dev/scripts/publish-kotlin.sh): the release AAR, sources, an
+// empty javadoc jar, signed; see packages/jazz-kotlin for the properties.
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
+    configure(
+        com.vanniktech.maven.publish.AndroidSingleVariantLibrary(
+            variant = "release",
+            sourcesJar = true,
+            publishJavadocJar = true,
+        ),
+    )
+    coordinates("tools.jazz", "jazz-kotlin-android", version.toString())
+    pom {
+        name.set("jazz-kotlin-android")
+        description.set("Jazz for Kotlin on Android: an end-user client of a Jazz app whose backend runs in TypeScript (experimental).")
+        url.set("https://jazz.tools")
+        inceptionYear.set("2026")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://github.com/garden-co/jazz/blob/main/LICENSE")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("garden-co")
+                name.set("Garden Computing, Inc.")
+                url.set("https://github.com/garden-co")
+            }
+        }
+        scm {
+            url.set("https://github.com/garden-co/jazz")
+            connection.set("scm:git:https://github.com/garden-co/jazz.git")
+            developerConnection.set("scm:git:ssh://git@github.com/garden-co/jazz.git")
+        }
+    }
+}

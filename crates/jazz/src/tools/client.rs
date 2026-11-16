@@ -786,15 +786,23 @@ fn link_failure(error: NativeTransportError) -> LinkFailure {
         },
         NativeTransportError::Terminal(message) => LinkFailure::Refused(message),
         NativeTransportError::Retryable(message) => LinkFailure::Network(message),
+        NativeTransportError::Wire(error) => LinkFailure::from_wire_error(&error, false),
     }
 }
 
 /// How an established link ended. Losing an admitted link is an outage,
-/// whatever the transport calls it, unless the server refused the credential.
+/// whatever the transport calls it, unless the server refused the credential
+/// or ended it with a wire error, which the link classifies.
 fn terminal_failure(stopped: NativeTransportTerminal) -> LinkFailure {
     match stopped {
         NativeTransportTerminal::Failed(error @ NativeTransportError::AuthRejected(_)) => {
             link_failure(error)
+        }
+        // Not reached: the native transport reports a server's wire error
+        // only before hello, as a failed connect. Were an admitted link to
+        // end with one, the link would classify it as admitted.
+        NativeTransportTerminal::Failed(NativeTransportError::Wire(error)) => {
+            LinkFailure::from_wire_error(&error, true)
         }
         NativeTransportTerminal::Failed(
             NativeTransportError::Terminal(message) | NativeTransportError::Retryable(message),
@@ -984,13 +992,10 @@ impl JazzClient {
                     keeper.live = Some((attempt, link.terminal));
                     keeper.handle(LinkInput::Admitted(attempt));
                 }
-                Err(
-                    NativeTransportError::Terminal(error)
-                    | NativeTransportError::AuthRejected(error),
-                ) => {
-                    return Err(JazzError::Connection(error));
+                Err(error) if !error.is_retryable() => {
+                    return Err(JazzError::Connection(error.to_string()));
                 }
-                Err(error @ NativeTransportError::Retryable(_)) => {
+                Err(error) => {
                     tracing::debug!(%error, "jazz client starts offline");
                     keeper.handle(LinkInput::Ended(attempt, link_failure(error)));
                 }
@@ -2494,10 +2499,9 @@ impl JazzClient {
             let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
             let (code, reason) =
                 super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
-                    (
-                        rejection.error.code.as_str().to_owned(),
-                        rejection.error.message.clone(),
-                    )
+                    // Any other refusal is a plain `write_rejected`, as TS
+                    // reports it, with the core's diagnostic.
+                    ("write_rejected".to_owned(), rejection.error.to_string())
                 });
             errors.push(MutationError {
                 transaction: TransactionId::from_committed_tx(TxId {

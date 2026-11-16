@@ -5,7 +5,10 @@ import jazzapp.NewTodo
 import jazzapp.Projects
 import jazzapp.Todo
 import jazzapp.Todos
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import tools.jazz.Jazz
@@ -85,6 +88,8 @@ class DocsSnippetsTest {
             val open = listOf("Cut release", "Proofread docs", "Write docs")
 
             assertEquals(open, readOpenTodos(jazz).map { it.title }.sorted())
+            assertEquals("Write docs", readTodo(jazz, write.id)?.title)
+            assertNull(readTodo(jazz, java.util.UUID.randomUUID().toString()))
             assertEquals(listOf("Proofread docs", "Write docs"), readOpenDocsTodos(jazz).map { it.title }.sorted())
             assertEquals(open, readOpenTodosByTitle(jazz).map { it.title })
             assertEquals(open, readTodoPage(jazz, page = 1).map { it.title })
@@ -150,22 +155,57 @@ class DocsSnippetsTest {
     }
 
     @Test
+    fun where_subscription_snippet() = runBlocking {
+        open().use { jazz ->
+            jazz.todo("First")
+            withTimeout(30_000) {
+                val results = watchOpenTodos(jazz).map { todos -> todos.map { it.title }.sorted() }
+                val seen = async { results.first { it == listOf("First", "Second") } }
+                kotlinx.coroutines.delay(300)
+                jazz.todo("Second")
+                assertEquals(listOf("First", "Second"), seen.await())
+            }
+        }
+    }
+
+    @Test
+    fun recursive_snippet() = runBlocking {
+        open().use { jazz ->
+            val root = jazz.todo("Root", done = true)
+            val middle = jazz.todo("Middle", done = true, parentId = root.id)
+            jazz.todo("Leaf", parentId = middle.id)
+            jazz.todo("Alone")
+            assertEquals(
+                listOf("Alone", "Leaf", "Middle", "Root"),
+                jazz.all(buildTodoLineageQuery()).map { it.title }.sorted(),
+            )
+        }
+    }
+
+    @Test
     fun where_operator_snippets() = runBlocking {
         open().use { jazz ->
             val a = jazz.todo("Buy milk", priority = 5)
+            kotlinx.coroutines.delay(5) // distinct $createdAt, for the order-limit query
             val b = jazz.todo("Draft", done = true, priority = 12)
+            kotlinx.coroutines.delay(5)
             jazz.todo("Oat milk", priority = 1, parentId = a.id)
+            kotlinx.coroutines.delay(5)
             jazz.todo("No priority")
+            jazz.todo("Shipped", done = true, projectId = java.util.UUID.randomUUID().toString())
             val r = whereOperatorExamples(jazz, "milk", a.id, b.id)
             assertEquals(listOf("Buy milk", "No priority", "Oat milk"), r.incompleteTodos.map { it.title }.sorted())
-            assertEquals(listOf("Buy milk", "No priority", "Oat milk"), r.nonDraftTodos.map { it.title }.sorted())
+            assertEquals(listOf("Buy milk", "No priority", "Oat milk", "Shipped"), r.nonDraftTodos.map { it.title }.sorted())
             assertEquals(setOf(a.id, b.id), r.selectedTodos.map { it.id }.toSet())
-            assertEquals(4, r.recentTodos.size)
+            assertEquals(5, r.recentTodos.size)
             assertEquals(listOf("Buy milk", "Draft"), r.highPriority.map { it.title }.sorted())
             assertEquals(listOf("Buy milk", "Oat milk"), r.lowPriority.map { it.title }.sorted())
             assertEquals(listOf("Buy milk", "Oat milk"), r.matches.map { it.title }.sorted())
-            assertEquals(listOf("Buy milk", "Draft", "No priority"), r.unlinkedTodos.map { it.title }.sorted())
+            assertEquals(listOf("Buy milk", "Draft", "No priority", "Shipped"), r.unlinkedTodos.map { it.title }.sorted())
             assertEquals(listOf("Oat milk"), r.linkedTodos.map { it.title })
+            assertEquals(listOf("Shipped"), r.doneWithProject.map { it.title })
+            // Open todos, oldest first.
+            assertEquals(listOf("Buy milk", "Oat milk", "No priority"), r.recentIncomplete.map { it.title })
         }
     }
 
@@ -218,6 +258,14 @@ class DocsSnippetsTest {
             val other = jazz.todo("Finish in a transaction")
             completeTodoInTransaction(jazz, other.id)
             assertEquals(true, jazz.one(Todos.where(Todos.id eq other.id), ReadTier.Remote)?.done)
+
+            // A serializable transaction: the todo's id, and the todo done.
+            val serial = jazz.todo("Finish serializably")
+            assertEquals(serial.id, finishTodoSerializably(jazz, serial.id))
+            assertEquals(true, jazz.one(Todos.where(Todos.id eq serial.id), ReadTier.Remote)?.done)
+            // A missing todo fails the block, and nothing is written.
+            val missing = kotlin.runCatching { finishTodoSerializably(jazz, java.util.UUID.randomUUID().toString()) }
+            assertEquals("Todo not found", missing.exceptionOrNull()?.message)
         }
     }
 }

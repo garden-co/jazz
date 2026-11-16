@@ -578,6 +578,16 @@ export declare function loadAppArtifact(app: string, permissions: string): JsonV
 export declare function loadBackendApp(schema: string, permissions: string): JsonValue
 
 /**
+ * What the migration between two schemas in the engine's JSON form
+ * (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+ * `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+ * [{ table, steps, addedVariants, unchangedRows }] }`, each step
+ * `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+ * Throws, with the reason, for a change no migration step does.
+ */
+export declare function migrationDiff(fromJson: string, toJson: string): string
+
+/**
  * Write the migration from the version the committed bindings
  * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
  * generated from to `appJson`'s edited `tables`, named `name`.
@@ -614,6 +624,15 @@ export interface RestoreOptions {
  * [`schema_source_hash`], which hashes the `jazz.app.json` file.
  */
 export declare function schemaHash(engineSchemaJson: string): string
+
+/**
+ * Whether rows pass unchanged between two schemas in the engine's JSON form
+ * (`{ "tables": … }`), so a deployment connects them without a migration:
+ * the rule `migrations create` follows to decide whether to write one.
+ * Indexes, history retention, merge strategies, column order and defaults
+ * of columns outside `branchBy` don't count; everything else does.
+ */
+export declare function schemasAreCompatible(leftJson: string, rightJson: string): boolean
 
 /**
  * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
@@ -740,6 +759,13 @@ export interface VerifyTokenResult {
   id: string
   error?: string
 }
+
+/**
+ * A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+ * `tables` of a `jazz.app.json` `history` version (no relations, computed
+ * fields or transforms), as JSON text.
+ */
+export declare function versionTables(engineSchemaJson: string): string
 
 /**
  * Build the `jazz.app.json` and `jazz.permissions.json` texts from what

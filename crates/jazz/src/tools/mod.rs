@@ -132,9 +132,11 @@ pub enum ClientStorage {
     Memory,
 }
 
-/// Errors from Jazz client operations.
+/// Errors from Jazz client operations. More may come: match it with a
+/// wildcard arm.
 #[cfg(feature = "runtime")]
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum JazzError {
     #[error("Identity error: {0}")]
     Identity(#[from] crate::ids::AuthorSubjectError),
@@ -211,6 +213,10 @@ impl JazzError {
 pub(crate) fn rejection_code_and_reason(error: &crate::db::Error) -> Option<(String, String)> {
     use crate::db::{ErrorCode, Reason};
     match error.code {
+        // TS keeps the whole diagnostic when the message is empty.
+        ErrorCode::TransactionConflict if error.message.is_empty() => {
+            Some(("transaction_conflict".to_owned(), error.to_string()))
+        }
         ErrorCode::TransactionConflict => {
             Some(("transaction_conflict".to_owned(), error.message.clone()))
         }

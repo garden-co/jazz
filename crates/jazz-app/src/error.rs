@@ -14,6 +14,12 @@ pub enum Error {
     #[error("configuration: {0}")]
     Config(String),
 
+    /// A text splice offset is not on a char boundary of the value: Rust
+    /// text offsets are UTF-8 bytes (`str` indices), and one inside a code
+    /// point is refused rather than rounded.
+    #[error("text offset: {0}")]
+    TextOffset(String),
+
     /// The sync server refused or failed a request made while opening.
     #[error("server: {0}")]
     Server(String),

@@ -64,7 +64,9 @@ public class Column<T>(override val name: String, public val serializer: KSerial
 
     /**
      * Only part of this text or `bytea` column's value: `[from, to)` in
-     * [units] (`row[column]` then reads that part). Root queries only.
+     * [units] (`row[column]` then reads that part). Root queries only. Text
+     * positions are UTF-16 code units by default, `String` indices; pass
+     * [SpliceUnits.Bytes] for a `bytea` column.
      */
     public fun range(from: Long, to: Long, units: SpliceUnits = SpliceUnits.Utf16): Selection = PartSelection(
         name,

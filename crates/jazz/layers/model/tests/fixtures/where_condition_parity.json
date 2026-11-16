@@ -1,0 +1,142 @@
+[
+  {
+    "description": "eq compares",
+    "condition": { "column": "title", "op": "eq", "value": "a" },
+    "means": { "compare": "eq" }
+  },
+  {
+    "description": "ne compares",
+    "condition": { "column": "title", "op": "ne", "value": "a" },
+    "means": { "compare": "ne" }
+  },
+  {
+    "description": "lt compares",
+    "condition": { "column": "priority", "op": "lt", "value": 1 },
+    "means": { "compare": "lt" }
+  },
+  {
+    "description": "lte compares",
+    "condition": { "column": "priority", "op": "lte", "value": 1 },
+    "means": { "compare": "lte" }
+  },
+  {
+    "description": "gt compares",
+    "condition": { "column": "priority", "op": "gt", "value": 1 },
+    "means": { "compare": "gt" }
+  },
+  {
+    "description": "gte compares",
+    "condition": { "column": "priority", "op": "gte", "value": 1 },
+    "means": { "compare": "gte" }
+  },
+  {
+    "description": "eq null is a null test",
+    "condition": { "column": "doneAt", "op": "eq", "value": null },
+    "means": { "isNull": true }
+  },
+  {
+    "description": "ne null is a not-null test",
+    "condition": { "column": "doneAt", "op": "ne", "value": null },
+    "means": { "isNull": false }
+  },
+  {
+    "description": "isNull true is a null test",
+    "condition": { "column": "doneAt", "op": "isNull", "value": true },
+    "means": { "isNull": true }
+  },
+  {
+    "description": "isNull false is a not-null test (jazz#5929)",
+    "condition": { "column": "doneAt", "op": "isNull", "value": false },
+    "means": { "isNull": false }
+  },
+  {
+    "description": "isNull without a value is a null test",
+    "condition": { "column": "doneAt", "op": "isNull" },
+    "means": { "isNull": true }
+  },
+  {
+    "description": "isNull with a non-boolean is refused",
+    "condition": { "column": "doneAt", "op": "isNull", "value": "yes" },
+    "means": "refused"
+  },
+  {
+    "description": "isNotNull without a value is a not-null test",
+    "condition": { "column": "doneAt", "op": "isNotNull" },
+    "means": { "isNull": false },
+    "tsToday": "refused"
+  },
+  {
+    "description": "isNotNull true is a not-null test",
+    "condition": { "column": "doneAt", "op": "isNotNull", "value": true },
+    "means": { "isNull": false },
+    "tsToday": "refused"
+  },
+  {
+    "description": "isNotNull false is refused",
+    "condition": { "column": "doneAt", "op": "isNotNull", "value": false },
+    "means": "refused"
+  },
+  {
+    "description": "in tests membership",
+    "condition": { "column": "title", "op": "in", "value": ["a", "b"] },
+    "means": { "in": 2, "negated": false }
+  },
+  {
+    "description": "notIn tests non-membership",
+    "condition": { "column": "title", "op": "notIn", "value": ["a", "b"] },
+    "means": { "in": 2, "negated": true }
+  },
+  {
+    "description": "in with no candidates",
+    "condition": { "column": "title", "op": "in", "value": [] },
+    "means": { "in": 0, "negated": false }
+  },
+  {
+    "description": "in without an array is refused",
+    "condition": { "column": "title", "op": "in", "value": "a" },
+    "means": "refused"
+  },
+  {
+    "description": "in with a null member is refused",
+    "condition": { "column": "title", "op": "in", "value": ["a", null] },
+    "means": "refused"
+  },
+  {
+    "description": "notIn with a null member is refused",
+    "condition": { "column": "title", "op": "notIn", "value": [null] },
+    "means": "refused"
+  },
+  {
+    "description": "contains on text",
+    "condition": { "column": "title", "op": "contains", "value": "a" },
+    "means": { "contains": true }
+  },
+  {
+    "description": "contains on an array",
+    "condition": { "column": "tags", "op": "contains", "value": "a" },
+    "means": { "contains": true }
+  },
+  {
+    "description": "gt null is refused",
+    "condition": { "column": "priority", "op": "gt", "value": null },
+    "means": "refused",
+    "tsToday": { "compare": "gt" }
+  },
+  {
+    "description": "contains null is refused",
+    "condition": { "column": "title", "op": "contains", "value": null },
+    "means": "refused",
+    "tsToday": { "contains": true }
+  },
+  {
+    "description": "eq without a value is refused",
+    "condition": { "column": "title", "op": "eq" },
+    "means": "refused",
+    "tsToday": { "compare": "eq" }
+  },
+  {
+    "description": "an unknown op is refused",
+    "condition": { "column": "title", "op": "like", "value": "a" },
+    "means": "refused"
+  }
+]

@@ -243,7 +243,7 @@ A serializable transaction reads from a stable transaction snapshot. The authori
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-serializable-transaction-ts
@@ -263,6 +263,12 @@ write is valid only if the data you just read has not changed in a conflicting t
   <Tab value="Swift">
     <include cwd lang="swift">
       ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-serializable-transaction-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-serializable-transaction-kotlin
     </include>
 
   </Tab>

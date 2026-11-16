@@ -7,13 +7,13 @@ in the list, or whose `items` don't match the tabs.
 
 ## Adding a language
 
-1. Give your example `// #region <topic>-<lang>` snippets: `reading-oneshot-go`,
-   `writing-crud-go`, and so on. Use the same topics as Rust's in
-   `examples/docs/todo-server-rs/src/docs_snippets.rs`.
+1. Write your example's snippets to [SNIPPETS.md](SNIPPETS.md): the same app,
+   shape and scenarios as the TypeScript ones, in `// #region <topic>-<lang>`
+   regions (`reading-oneshot-go`, `writing-crud-go`, and so on).
 2. Add a `<Tab value="Go">` with an `<include>` of your snippet to each
-   `jazz-environment` block that has one, and add `"Go"` to that block's `items`.
-   Where your language can't do what a block shows, add a tab with one line
-   instead: `Not in Go yet: see [Language support](/docs/reference/language-support#go).` (Swift and Kotlin link to their setup page's `#not-supported-yet`)
+   `jazz-environment` block whose topic you have, and add `"Go"` to that block's
+   `items`. Where your language can't do a topic, leave its tab out: the
+   language's "Not supported yet" list on Language Support says so.
 3. Write `content/docs/setup/<lang>.mdx`, ending with a `## Not supported yet`
    list. It's already in `content/docs/meta.json`.
 4. Set `bindings` in `LANGUAGES`: your committed generated file for StagePlan
