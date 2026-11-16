@@ -12,10 +12,15 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-/** A Swift package of the Jazz Swift runtime: its bindings are JazzApp.swift. */
+/** A Swift package of the Jazz Swift runtime (it uses the `Jazz` product): its bindings are JazzApp.swift. */
 function isSwiftApp(dir) {
   const manifest = join(root, dir, "Package.swift");
-  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
+  return existsSync(manifest) && usesJazzSwift(readFileSync(manifest, "utf8"));
+}
+
+/** As jazz-codegen's `swift::is_app_manifest`: the `Jazz` product, or the jazz-swift package. */
+function usesJazzSwift(manifest) {
+  return /\.product\(\s*name:\s*"Jazz"/.test(manifest) || /["/]jazz-swift(\.git)?"/.test(manifest);
 }
 
 /**
@@ -104,8 +109,19 @@ function jazzPackages() {
     .map(dirname);
 }
 
+/**
+ * Packages that depend on jazz-tools but are not apps, each with why. Keep
+ * this short: an example is an app and commits its jazz.app.json.
+ */
+const NOT_APPS = new Map([
+  [
+    "examples/rust-backend-clients",
+    "a test harness: it serves the Rust examples' own app files from a TS main backend",
+  ],
+]);
+
 test("every example package that depends on jazz-tools commits a jazz.app.json", () => {
-  const packages = jazzPackages();
+  const packages = jazzPackages().filter((dir) => !NOT_APPS.has(dir));
   assert.ok(packages.length > 30, `found only ${packages.length} jazz-tools packages`);
   const apps = tracked("examples/**/jazz.app.json", "dev/stress-tests/**/jazz.app.json");
   const without = packages.filter((dir) => !apps.some((file) => file.startsWith(`${dir}/`)));

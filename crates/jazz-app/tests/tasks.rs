@@ -207,6 +207,255 @@ async fn text_edits_merge() {
     assert_eq!(notes().await, "well, bye now, friend");
 }
 
+/// A text edit together with other column sets, in one update: TS's
+/// `update(table, id, data, { editedFrom })`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_edit_with_other_columns() {
+    use jazz_app::Edits;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            notes: Some("hello world".into()),
+            ..NewTask::new("Notes", 1, Vec::new())
+        })
+        .await
+        .unwrap();
+    // Someone else changes the notes while an editor still shows
+    // "hello world".
+    jazz.update(
+        task.id,
+        TaskUpdate {
+            notes: Some(Some("hello brave world".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    jazz.update_edited(
+        task.id,
+        TaskUpdate {
+            notes: Some(Some("hello world!".into())),
+            title: Some("Renamed".into()),
+            score: Some(7),
+            ..Default::default()
+        },
+        Edits::new().edited_from(tasks::notes(), "hello world"),
+    )
+    .await
+    .unwrap();
+    let task = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(task.notes.as_deref(), Some("hello brave world!"));
+    assert_eq!((task.title.as_str(), task.score), ("Renamed", 7));
+
+    // In a transaction, closure and open forms.
+    let id = task.id;
+    jazz.transaction(move |tx| async move {
+        tx.update_edited(
+            id,
+            TaskUpdate {
+                notes: Some(Some("bye".into())),
+                score: Some(8),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::notes(), "hello brave world!"),
+        )
+    })
+    .await
+    .unwrap();
+    let open = jazz.begin_transaction().await.unwrap();
+    open.update_edited(
+        id,
+        TaskUpdate {
+            notes: Some(Some("bye now".into())),
+            title: Some("Done".into()),
+            ..Default::default()
+        },
+        Edits::new().edited_from(tasks::notes(), "bye"),
+    )
+    .await
+    .unwrap();
+    open.commit().await.unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!(
+        (task.notes.as_deref(), task.title.as_str(), task.score),
+        (Some("bye now"), "Done", 8)
+    );
+
+    // The edited column must be set to a string by the update.
+    let unset = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                score: Some(1),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::notes(), "bye now"),
+        )
+        .await;
+    assert!(matches!(unset, Err(Error::Config(_))), "{unset:?}");
+    // A failing edit (a column without "merge": "text") writes nothing:
+    // not even the update's other sets.
+    let plain = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                title: Some("Other".into()),
+                score: Some(2),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::title(), "Done"),
+        )
+        .await;
+    assert!(plain.is_err(), "{plain:?}");
+    let missing = jazz
+        .update_edited(
+            jazz_app::ObjectId::new(),
+            TaskUpdate {
+                notes: Some(Some("x".into())),
+                ..Default::default()
+            },
+            Edits::new().edited_from(tasks::notes(), ""),
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(Error::NotFound { .. })),
+        "{missing:?}"
+    );
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Done", 8));
+}
+
+/// Splices and json sets together with other column sets and a text edit,
+/// in one update: TS's `update(table, id, data, { applyDiffs, editedFrom })`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diffs_with_other_columns() {
+    use jazz_app::{Edits, Page, Splice};
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            notes: Some("hello".into()),
+            attachment: Some(vec![0; 8]),
+            meta: Some(Json(serde_json::json!({ "owner": "ops", "n": 1 }))),
+            ..NewTask::new("Diffs", 1, Vec::new())
+        })
+        .await
+        .unwrap();
+    let id = task.id;
+    jazz.update_edited(
+        id,
+        TaskUpdate {
+            title: Some("Diffed".into()),
+            score: Some(5),
+            notes: Some(Some("hello!".into())),
+            ..Default::default()
+        },
+        Edits::new()
+            .edited_from(tasks::notes(), "hello")
+            .splice(
+                tasks::attachment(),
+                Page::Bytes { from: 0, to: 8 },
+                vec![Splice {
+                    at: 0,
+                    delete: 1,
+                    insert: vec![9, 9],
+                }],
+            )
+            .json_set(
+                tasks::meta(),
+                [("/owner".to_owned(), serde_json::json!("dev"))],
+            ),
+    )
+    .await
+    .unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Diffed", 5));
+    assert_eq!(task.notes.as_deref(), Some("hello!"));
+    assert_eq!(
+        task.attachment.as_deref().map(|a| &a[..3]),
+        Some(&[9, 9, 0][..])
+    );
+    assert_eq!(
+        task.meta.unwrap().0,
+        serde_json::json!({ "owner": "dev", "n": 1 })
+    );
+
+    // In a transaction, closure and open forms.
+    jazz.transaction(move |tx| async move {
+        tx.update_edited(
+            id,
+            TaskUpdate {
+                score: Some(6),
+                ..Default::default()
+            },
+            Edits::new().json_set(tasks::meta(), [("/n".to_owned(), serde_json::json!(2))]),
+        )
+    })
+    .await
+    .unwrap();
+    let open = jazz.begin_transaction().await.unwrap();
+    open.update_edited(
+        id,
+        TaskUpdate {
+            title: Some("Open".into()),
+            ..Default::default()
+        },
+        Edits::new().splice(
+            tasks::attachment(),
+            Page::Bytes { from: 0, to: 2 },
+            vec![Splice {
+                at: 0,
+                delete: 2,
+                insert: vec![1],
+            }],
+        ),
+    )
+    .await
+    .unwrap();
+    open.commit().await.unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Open", 6));
+    assert_eq!(
+        task.attachment.as_deref().map(|a| &a[..2]),
+        Some(&[1, 0][..])
+    );
+    assert_eq!(task.meta.unwrap().0["n"], serde_json::json!(2));
+
+    // A column both set and diffed is refused, as TS refuses it.
+    let both = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                meta: Some(Some(Json(serde_json::json!({})))),
+                ..Default::default()
+            },
+            Edits::new().json_set(tasks::meta(), [("/n".to_owned(), serde_json::json!(3))]),
+        )
+        .await;
+    assert!(matches!(both, Err(Error::Config(_))), "{both:?}");
+    // A failing diff writes none of the update's sets.
+    let failing = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                title: Some("Not written".into()),
+                ..Default::default()
+            },
+            Edits::new().json_set(
+                tasks::meta(),
+                [("/missing/deep".to_owned(), serde_json::json!(1))],
+            ),
+        )
+        .await;
+    assert!(failing.is_err(), "{failing:?}");
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!(task.title, "Open");
+    assert_eq!(task.meta.unwrap().0["n"], serde_json::json!(2));
+}
+
 /// Large values: a bytes cell inserted from a stream, spliced in place, and a json cell edited by pointer.
 #[tokio::test]
 async fn large_values() {
@@ -911,4 +1160,68 @@ async fn partial_reads() {
         owner.values.unwrap().0,
         serde_json::json!({ "name": "ops" })
     );
+}
+
+/// Selecting a transformed column reads its view value, through the app's
+/// transform, as a full row does; filtering on it compares the stored value.
+#[tokio::test]
+async fn select_reads_transformed_columns_as_viewed() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            due_at: Some("day-20000".into()),
+            ..NewTask::new("Ship it", 3, Vec::new())
+        })
+        .await
+        .unwrap();
+    jazz.insert(NewTask::new("Someday", 1, Vec::new()))
+        .await
+        .unwrap();
+
+    let rows = jazz
+        .all(
+            tasks::query()
+                .filter(tasks::due_at().eq(Timestamp(20_000 * DAY_MS)))
+                .select((tasks::title(), tasks::due_at())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, task.id);
+    let (title, due_at): &(String, Option<String>) = &rows[0].values;
+    assert_eq!(title, "Ship it");
+    assert_eq!(due_at.as_deref(), Some("day-20000"));
+
+    // One column alone.
+    let due: Vec<Option<String>> = jazz
+        .all(
+            tasks::query()
+                .order_by(tasks::title(), jazz_app::Order::Asc)
+                .select(tasks::due_at()),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect();
+    assert_eq!(due, [Some("day-20000".to_owned()), None]);
+
+    // Inside an included row's selection.
+    jazz.insert(bindings::NewBox {
+        task: Some(task.id),
+        ..bindings::NewBox::new("crate")
+    })
+    .await
+    .unwrap();
+    let boxed =
+        jazz.all(bindings::boxes::query().include(
+            bindings::boxes::task_relation().with(tasks::query().select(tasks::due_at())),
+        ))
+        .await
+        .unwrap();
+    let included = boxed[0].1.as_ref().expect("the box's task");
+    assert_eq!(included.id, task.id);
+    assert_eq!(included.values.as_deref(), Some("day-20000"));
 }

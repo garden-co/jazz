@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "tables": {
+    "todos": { "read": "true", "insert": "true" }
+  }
+}

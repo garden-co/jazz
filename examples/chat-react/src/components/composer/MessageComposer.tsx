@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { SendIcon } from "lucide-react";
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb, useJazzSession } from "jazz-tools/react";
 import { ActionMenu } from "@/components/composer/ActionMenu";
 import { Editor, type EditorHandle } from "@/components/editor/Editor";
 import { Button } from "@/components/ui/button";
@@ -18,8 +18,8 @@ interface MessageComposerProps {
 export function MessageComposer({ chatId, disabled = false }: MessageComposerProps) {
   const editorRef = useRef<EditorHandle>(null);
   const db = useDb();
-  const session = useSession();
-  const userId = session?.user ?? null;
+  const session = useJazzSession();
+  const userId = session.user?.accountId ?? null;
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
     () => ({
       tier: db.getConfig().serverUrl ? "global" : "local",

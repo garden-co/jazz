@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { useAll, useSession } from "jazz-tools/react-native";
+import { useAll, useJazzSession } from "jazz-tools/react-native";
 import { app } from "../jazz.generated";
 
 const BATCH_SIZE = 500;
@@ -116,8 +116,8 @@ type LogEntry = {
 };
 
 export function StressTest() {
-  const session = useSession();
-  const sessionUserId = session?.user_id ?? null;
+  const session = useJazzSession();
+  const sessionUserId = session.user?.accountId ?? null;
   const [subscribed, setSubscribed] = useState(false);
   const { data: todos = [], db } = useAll(subscribed ? app.todos : undefined);
 

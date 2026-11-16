@@ -1,4 +1,4 @@
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useDb } from "jazz-tools/react";
 import { app } from "./recipes/user-owned/jazz.generated.js";
 
 // #region owned-query

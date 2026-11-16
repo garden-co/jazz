@@ -92,20 +92,15 @@ impl Lang {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
             "swift" => Ok(Lang::Swift),
-            // Switched off until the Go runtime and docs ship with it.
-            "go" | "golang" => Err(CodegenError::unsupported(
-                "generating bindings in Go is not available yet; supported: ts, rust, swift",
-            )),
+            "go" | "golang" => Ok(Lang::Go),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift, go"
             ))),
         }
     }
 
-    /// Every language `jazz-tools generate` handles, in that order. (Go is not
-    /// available yet: [`Lang::Go`] is generated only by direct calls, so no
-    /// `go.mod` selects it.)
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Swift];
+    /// Every language `jazz-tools generate` handles, in that order.
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Swift, Lang::Go];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.

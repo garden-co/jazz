@@ -103,7 +103,8 @@ impl<'a> Fields<'a> {
 
     /// Takes the next column's value: partial rows hold their values in the
     /// order they were selected.
-    pub(crate) fn take_next<T: ColumnValue>(&mut self) -> Result<T> {
+    #[doc(hidden)]
+    pub fn take_next<T: ColumnValue>(&mut self) -> Result<T> {
         let Some(field) = self.fields.get_mut(self.next) else {
             return Err(self.error(format!("no column at {}", self.next)));
         };

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { SmilePlus } from "lucide-react";
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb, useJazzSession } from "jazz-tools/react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenuLabel,
@@ -21,17 +21,17 @@ interface ReactionPickerProps {
 export const ReactionPicker = ({ onPick, messageId }: ReactionPickerProps) => {
   const [customEmoji, setCustomEmoji] = useState("🍉");
   const db = useDb();
-  const session = useSession();
+  const session = useJazzSession();
   const presets = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
   const emojiRegex =
     /^(\p{Extended_Pictographic}|\p{Emoji_Component}|\p{Emoji_Presentation}|\s)+$/u;
 
   const addReaction = (emoji: string) => {
-    if (!session?.user) return;
+    if (!session.user?.accountId) return;
     fireAndReport(
       db.insert(app.reactions, {
         messageId,
-        userId: session.user,
+        userId: session.user.accountId,
         emoji,
       }),
       "failed to add reaction",

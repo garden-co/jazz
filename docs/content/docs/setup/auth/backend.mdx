@@ -311,17 +311,20 @@ author into a string.
 
 ### Observe the current session
 
-| Binding              | Read the current session                                            |
-| -------------------- | ------------------------------------------------------------------- |
-| React / React Native | `const session = useSession()`                                      |
-| Vue                  | `const session = useSession()`; read `session.value`                |
-| Solid                | `const session = useSession()`; read `session()`                    |
-| Svelte               | `const session = getSession()`; read `session.current`              |
-| TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
+The Jazz session's `user` is who is signed in, and it is what your policies see:
+`user.accountId` is `session.user`, and `user.identity` and `user.claims` are `session.identity` and
+`session.claims`. It is `null` while no one is signed in.
 
-Who is signed in on the device (rather than what a policy sees) comes from the Jazz session:
-`useJazzSession().user` in React, `getJazzSession()` in Svelte, `session.getSnapshot().user`
-without a framework.
+| Binding              | Read the signed-in user                                               |
+| -------------------- | --------------------------------------------------------------------- |
+| React / React Native | `const { user } = useJazzSession()`                                   |
+| Vue                  | `const { snapshot } = useJazzSession()`; read `snapshot.value.user`   |
+| Solid                | `const { snapshot } = useJazzSession()`; read `snapshot().user`       |
+| Svelte               | `const session = getJazzSession()`; read `$session.user`              |
+| TypeScript           | `session.getSnapshot().user`; subscribe with `session.subscribe(...)` |
+
+`user.kind` tells a device account (`"device"`, a guest) from a user your backend signed in
+(`"backend"`).
 
 Framework hooks must run inside the Jazz provider. Signed-out readers have no session account, so
 ownership checks against them fail closed; write an explicit anonymous-access policy when you want
