@@ -136,14 +136,23 @@ describe("loadMigrationHistory", () => {
     it(`gives main's history and migrations (${withFromSnapshot ? "from a snapshot" : "derived from the witness"})`, async () => {
       const { tables, text } = await fixtureApp();
       const migrationsDir = await fixtureMigrations(withFromSnapshot);
-      const loaded = await loadMigrationHistory({ migrationsDir, currentTables: tables, loadModule });
+      const loaded = await loadMigrationHistory({
+        migrationsDir,
+        currentTables: tables,
+        loadModule,
+      });
       const main = JSON.parse(text);
       expect(loaded.migrations).toEqual(main.migrations);
       expect(Object.keys(loaded.history)).toEqual(Object.keys(main.history));
       // The same version: Rust loads the app and finds the same hashes.
       const app = JSON.stringify({ format: 1, tables, ...loaded });
       const files = (await loadAppFiles(
-        JSON.stringify({ format: 1, tables, history: loaded.history, migrations: loaded.migrations }),
+        JSON.stringify({
+          format: 1,
+          tables,
+          history: loaded.history,
+          migrations: loaded.migrations,
+        }),
         '{"format":1,"tables":{}}',
       )) as { current: string };
       expect(files.current).toBe(loaded.current);
@@ -152,7 +161,12 @@ describe("loadMigrationHistory", () => {
         bundle: string;
       };
       const ours = (await loadAppFiles(
-        JSON.stringify({ format: 1, tables, history: loaded.history, migrations: loaded.migrations }),
+        JSON.stringify({
+          format: 1,
+          tables,
+          history: loaded.history,
+          migrations: loaded.migrations,
+        }),
         '{"format":1,"tables":{}}',
       )) as { bundle: string };
       expect(ours.bundle).toBe(mainLoaded.bundle);

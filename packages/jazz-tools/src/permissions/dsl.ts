@@ -22,7 +22,17 @@ import {
   type SchemaMeta,
   type Scope,
 } from "./compile.js";
-import { makeFrom, union, recursive, outer, frontier, param, rowId, jsonValue, type From } from "./relation.js";
+import {
+  makeFrom,
+  union,
+  recursive,
+  outer,
+  frontier,
+  param,
+  rowId,
+  jsonValue,
+  type From,
+} from "./relation.js";
 import {
   READABLE_PERMISSIONS,
   PERMISSIONS_SCHEMA_URL,
@@ -84,14 +94,21 @@ function rowHandle(meta: SchemaMeta, scope: Scope): unknown {
       return made;
     },
     has(_target, prop) {
-      return typeof prop === "string" && (table.columns.has(prop) || Object.hasOwn(table.relations, prop));
+      return (
+        typeof prop === "string" &&
+        (table.columns.has(prop) || Object.hasOwn(table.relations, prop))
+      );
     },
     ownKeys() {
       return ["id", ...table.columns.keys(), ...Object.keys(table.relations)];
     },
     getOwnPropertyDescriptor(target, prop) {
       if (typeof prop !== "string") return undefined;
-      return { enumerable: true, configurable: true, value: (this as ProxyHandler<object>).get!(target, prop, undefined) };
+      return {
+        enumerable: true,
+        configurable: true,
+        value: (this as ProxyHandler<object>).get!(target, prop, undefined),
+      };
     },
   });
 }
@@ -215,24 +232,29 @@ export function is(caseName: string, predicate: PolicyInput) {
   return op({ op: "is", name: caseName, operand: predicate }) as unknown as CompareOp<never>;
 }
 
-const TYPED = (kind: string) => (...args: unknown[]) => {
-  const parts = args.map((arg) => {
-    if (arg === null) return "null";
-    const h = handleOf(arg);
-    if (h?.k === "text") return h.text;
-    if (typeof arg === "string") return `'${arg.replaceAll("'", "''")}'`;
-    if (typeof arg === "number" || typeof arg === "bigint" || typeof arg === "boolean")
-      return String(arg);
-    if (arg instanceof Uint8Array)
-      return `'${Array.from(arg, (b) => b.toString(16).padStart(2, "0")).join("")}'`;
-    throw new PermissionsDslError(`typed.${kind}(…) can't hold ${String(arg)}`);
-  });
-  if (kind === "double" && typeof args[0] === "number" && Number.isInteger(args[0]))
-    parts[0] = `${args[0]}.0`;
-  // `row(id, …)`: the id is a uuid string (written `uuid('…')`) or null.
-  if (kind === "row" && typeof args[0] === "string") parts[0] = `uuid(${parts[0]})`;
-  return handle({ k: "text", text: `${kind}(${parts.join(", ")})` }) as unknown as Value<any, any>;
-};
+const TYPED =
+  (kind: string) =>
+  (...args: unknown[]) => {
+    const parts = args.map((arg) => {
+      if (arg === null) return "null";
+      const h = handleOf(arg);
+      if (h?.k === "text") return h.text;
+      if (typeof arg === "string") return `'${arg.replaceAll("'", "''")}'`;
+      if (typeof arg === "number" || typeof arg === "bigint" || typeof arg === "boolean")
+        return String(arg);
+      if (arg instanceof Uint8Array)
+        return `'${Array.from(arg, (b) => b.toString(16).padStart(2, "0")).join("")}'`;
+      throw new PermissionsDslError(`typed.${kind}(…) can't hold ${String(arg)}`);
+    });
+    if (kind === "double" && typeof args[0] === "number" && Number.isInteger(args[0]))
+      parts[0] = `${args[0]}.0`;
+    // `row(id, …)`: the id is a uuid string (written `uuid('…')`) or null.
+    if (kind === "row" && typeof args[0] === "string") parts[0] = `uuid(${parts[0]})`;
+    return handle({ k: "text", text: `${kind}(${parts.join(", ")})` }) as unknown as Value<
+      any,
+      any
+    >;
+  };
 
 /** Typed literals, exactly that value whatever they are compared with: `typed.int(5)`, `typed.text("5")`, … */
 export const typed = Object.freeze({
@@ -247,7 +269,10 @@ export const typed = Object.freeze({
   txid: TYPED("txid") as (value: string) => Value<string, any>,
   bool: TYPED("bool") as (value: boolean) => Value<boolean, any>,
   array: TYPED("array") as (...items: (Value<any, any> | null)[]) => Value<unknown[], any>,
-  row: TYPED("row") as (id: Value<any, any> | null, ...fields: (Value<any, any> | null)[]) => Value<unknown, any>,
+  row: TYPED("row") as (
+    id: Value<any, any> | null,
+    ...fields: (Value<any, any> | null)[]
+  ) => Value<unknown, any>,
 });
 
 // ============================================================================
@@ -296,7 +321,9 @@ function existsPolicy(
 function makeExists<S>(tables: readonly string[]): Exists<S> {
   const exists = (query: { render(ctx: Ctx): string }) => {
     if (!query || typeof query.render !== "function")
-      throw new PermissionsDslError("exists(…) takes a query (from.<table>…); use exists.<table>({…}) for a table");
+      throw new PermissionsDslError(
+        "exists(…) takes a query (from.<table>…); use exists.<table>({…}) for a table",
+      );
     return node({ k: "existsQuery", query });
   };
   for (const table of tables) {
@@ -371,9 +398,7 @@ export class PermissionsError extends Error {
     readonly reason: string,
     readonly location?: string,
   ) {
-    super(
-      `jazz.permissions.json: ${path}: ${reason}${location ? `\n  at ${location}` : ""}`,
-    );
+    super(`jazz.permissions.json: ${path}: ${reason}${location ? `\n  at ${location}` : ""}`);
   }
 }
 
@@ -388,7 +413,10 @@ function compileRule(
   const input =
     typeof rule === "function"
       ? updateTo
-        ? (rule as (row: unknown, old: unknown) => unknown)(rowHandle(meta, root), oldRow(meta, table))
+        ? (rule as (row: unknown, old: unknown) => unknown)(
+            rowHandle(meta, root),
+            oldRow(meta, table),
+          )
         : (rule as (row: unknown) => unknown)(rowHandle(meta, root))
       : rule;
   if (input === undefined) throw new PermissionsDslError("the rule returned undefined");
@@ -408,7 +436,10 @@ export function compilePermissions(
     throw new PermissionsError(path, reason, userFrame(error) ?? callSite);
   };
   if (!rules || typeof rules !== "object" || Array.isArray(rules))
-    fault("tables", new Error("definePermissions({ <table>: { read, insert, … } }) takes an object"));
+    fault(
+      "tables",
+      new Error("definePermissions({ <table>: { read, insert, … } }) takes an object"),
+    );
   for (const table of Object.keys(rules)) {
     if (!meta.has(table)) fault(`tables.${table}`, new Error(`unknown table "${table}"`));
   }
@@ -423,7 +454,9 @@ export function compilePermissions(
       if (!(RULE_KEYS as readonly string[]).includes(key))
         fault(
           `${path}.${key}`,
-          new Error(`unknown rule key "${key}": use read, insert, update, updateIf, updateTo or delete`),
+          new Error(
+            `unknown rule key "${key}": use read, insert, update, updateIf, updateTo or delete`,
+          ),
         );
     }
     const has = (key: string) => tableRules[key] !== undefined;
@@ -432,7 +465,9 @@ export function compilePermissions(
     if (has("updateIf") !== has("updateTo"))
       fault(
         `${path}.${has("updateIf") ? "updateIf" : "updateTo"}`,
-        new Error("`updateIf` and `updateTo` come together: which rows may be updated, and to what"),
+        new Error(
+          "`updateIf` and `updateTo` come together: which rows may be updated, and to what",
+        ),
       );
     const out: Record<string, unknown> = {};
     for (const key of ["read", "insert", "update", "delete"] as const) {

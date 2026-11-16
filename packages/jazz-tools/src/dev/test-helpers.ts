@@ -45,7 +45,10 @@ export async function getAvailablePort(): Promise<number> {
 /** A todos app's `jazz.app.json`: `todos { title: string, done: boolean }`. */
 export function todoSchema(): string {
   return `${JSON.stringify(
-    { $schema: "https://jazz.tools/schemas/jazz.app.v1.json", tables: { todos: { columns: { title: "string", done: "boolean" } } } },
+    {
+      $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+      tables: { todos: { columns: { title: "string", done: "boolean" } } },
+    },
     null,
     2,
   )}\n`;
@@ -54,7 +57,10 @@ export function todoSchema(): string {
 /** Its `jazz.permissions.json`: anyone may read and insert todos. */
 export function todoPermissions(): string {
   return `${JSON.stringify(
-    { $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json", tables: { todos: { read: "true", insert: "true" } } },
+    {
+      $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
+      tables: { todos: { read: "true", insert: "true" } },
+    },
     null,
     2,
   )}\n`;

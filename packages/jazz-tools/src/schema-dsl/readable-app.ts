@@ -89,8 +89,7 @@ export function readableColumn(
 ): ReadableJson {
   const type = readableType(column.sqlType);
   const options: { [key: string]: ReadableJson } = {};
-  if (column.default !== undefined)
-    options.default = readableValue(column.default, column.sqlType);
+  if (column.default !== undefined) options.default = readableValue(column.default, column.sqlType);
   if (column.mergeStrategy) options.merge = column.mergeStrategy;
   if (column.references && !forwardReference) options.references = column.references;
   if (transform) options.transform = transform;
@@ -121,7 +120,10 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
               ? column.nullable
                 ? `${type}?`
                 : type
-              : { ...(type as { [key: string]: ReadableJson }), ...(column.nullable ? { optional: true } : {}) },
+              : {
+                  ...(type as { [key: string]: ReadableJson }),
+                  ...(column.nullable ? { optional: true } : {}),
+                },
           from: [...definition._computed.from],
         };
         continue;

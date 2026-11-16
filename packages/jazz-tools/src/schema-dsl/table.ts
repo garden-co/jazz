@@ -166,7 +166,14 @@ type ConflictingTargets<R extends Relationships, C extends string, T extends str
 }[keyof R];
 /** A relation may not take a column's name, and a forward one needs a uuid column. */
 type ValidateRelations<C, R extends Relationships> = {
-  [K in keyof R]: K extends keyof C | "id" | "__proto__" | "constructor" | "prototype" | "" | `$${string}`
+  [K in keyof R]: K extends
+    | keyof C
+    | "id"
+    | "__proto__"
+    | "constructor"
+    | "prototype"
+    | ""
+    | `$${string}`
     ? never
     : R[K] extends ForwardRelationship<infer Target, infer Col>
       ? Col extends RelationColumns<C>
