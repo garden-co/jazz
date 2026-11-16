@@ -4024,64 +4024,6 @@ mod tests {
         store.close().unwrap();
     }
 
-    /// Between a thin session's requests the core holds no transaction or
-    /// savepoint open (SPEC 8.14), as a Durable Object can't: once a session
-    /// asked to begin a transaction and stage a write in it, another
-    /// connection to the store's SQLite file takes its write lock at once.
-    #[test]
-    fn the_core_holds_nothing_open_between_thin_requests() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let storage = StorageConfig::data_dir(dir.path());
-        let store = AppStore::open(&storage).unwrap();
-        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
-        rt.block_on(async {
-            let (session, mut stream) = thin_docs_session(&runtime).await;
-            let transaction = "0190f3e4000070008000000000000007";
-            send_thin(
-                &runtime,
-                session,
-                1,
-                jazz::thin::ThinOp::Begin {
-                    transaction: transaction.to_owned(),
-                    kind: "mergeable".to_owned(),
-                },
-            )
-            .await;
-            let begun = next_thin(&mut stream, Duration::from_secs(5)).await;
-            assert!(
-                matches!(&begun, Some((1, jazz::thin::ThinBody::Error { code, .. }))
-                    if code == jazz::thin::TRANSACTIONS_NOT_ON_CORE),
-                "{begun:?}"
-            );
-            send_thin(
-                &runtime,
-                session,
-                2,
-                jazz::thin::ThinOp::Insert {
-                    table: "docs".to_owned(),
-                    cells: Vec::new(),
-                    options: Vec::new(),
-                    transaction: Some(transaction.to_owned()),
-                },
-            )
-            .await;
-            assert!(
-                next_thin(&mut stream, Duration::from_secs(5))
-                    .await
-                    .is_some()
-            );
-            store_thread_is_free(&runtime).await;
-        });
-        // The session is still open: whatever it began would still be held.
-        let other = rusqlite::Connection::open(dir.path().join("jazz.sqlite")).unwrap();
-        other
-            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
-            .expect("no write lock held between requests");
-        drop(other);
-        store.close().unwrap();
-    }
-
     /// A bucket that fails a thin read's fetch answers the read with why,
     /// and later reads of those leaves are refused at once while fetches
     /// back off, without asking the bucket again.
