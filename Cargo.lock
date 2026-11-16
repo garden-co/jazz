@@ -365,6 +365,7 @@ name = "backend-client-docs"
 version = "0.1.0"
 dependencies = [
  "jazz-app",
+ "serde_json",
  "todo-server-docs",
  "tokio",
 ]
@@ -2329,12 +2330,16 @@ name = "jazz-ffi"
 version = "2.0.0-alpha.64"
 dependencies = [
  "base64 0.22.1",
+ "futures",
  "futures-executor",
+ "futures-util",
  "jazz-app",
  "jazz-server",
+ "reqwest",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "uniffi",
  "uuid",
 ]
@@ -4706,6 +4711,7 @@ version = "0.1.0"
 dependencies = [
  "jazz-app",
  "jazz-server",
+ "serde_json",
  "tempfile",
  "tokio",
  "uuid",

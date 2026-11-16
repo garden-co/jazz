@@ -2065,6 +2065,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-react-native",
     "test-jazz-ffi-bindings",
     "test-crates-package",
+    "test-go",
   ])
     assert.equal(
       suite.jobs[name].if,
@@ -2081,6 +2082,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     [
       "lint",
       "test-crates-package",
+      "test-go",
       "test-jazz-ffi-bindings",
       "test-next-trace",
       "test-react-native",

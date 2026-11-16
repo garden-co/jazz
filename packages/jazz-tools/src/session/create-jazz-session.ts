@@ -28,7 +28,12 @@ import {
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
-import { coreInitial, createStartedJazzSession, type JazzSession } from "./jazz-session.js";
+import {
+  coreInitial,
+  createStartedJazzSession,
+  ownJazzSession,
+  type JazzSession,
+} from "./jazz-session.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
@@ -207,7 +212,21 @@ export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<
   return createStartedJazzSession(config, openBrowserSessionCore);
 }
 
-/** @internal The session core `createJazzClient` and `<JazzProvider>` own. */
+/**
+ * Open a Jazz session in this browser and return it at once, while it starts
+ * (`status: "starting"`), for apps that render without a framework provider:
+ * show a loading screen from `getSnapshot()` and `subscribe()`, then the app
+ * once it is `ready` (or `signed-out`). A startup that fails leaves the session
+ * in `error` with the cause in `snapshot.error`; `retry()` starts it again.
+ * Unlike `createJazzClient`, a failed start doesn't close the session: call
+ * `close()` when the app is done with it. Pass it to `<JazzProvider session>`
+ * to render it in a framework.
+ */
+export function startJazzClient(config: JazzClientConfig): JazzSession<JazzClient> {
+  return ownJazzSession(config, openBrowserSessionCore);
+}
+
+/** @internal The session core `createJazzClient`, `startJazzClient` and `<JazzProvider>` own. */
 export async function openBrowserSessionCore(
   config: JazzClientConfig,
 ): Promise<BrowserJazzSession> {

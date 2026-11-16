@@ -23,6 +23,14 @@ pub enum JazzError {
     /// retrying it may succeed.
     #[error("{reason}")]
     Conflict { reason: String },
+    /// Contract 2: a trusted backend client acted for a user who has no
+    /// account yet (TS's `NoJazzAccountError`, `code: "no_account"`).
+    #[error("{reason}")]
+    NoAccount { user_id: String, reason: String },
+    /// Contract 2: closing with a timeout left `pending` writes unsent
+    /// (memory storage, where they are lost).
+    #[error("{reason}")]
+    Unsynced { pending: u64, reason: String },
 }
 
 impl JazzError {
@@ -35,7 +43,9 @@ impl JazzError {
         match self {
             Self::Permission { reason }
             | Self::NotSupported { reason }
-            | Self::Conflict { reason } => Self::Refused { reason },
+            | Self::Conflict { reason }
+            | Self::NoAccount { reason, .. } => Self::Refused { reason },
+            Self::Unsynced { reason, .. } => Self::Io { reason },
             other => other,
         }
     }
@@ -49,6 +59,17 @@ impl JazzError {
             Self::Permission { .. } => "permission",
             Self::NotSupported { .. } => "notSupported",
             Self::Conflict { .. } => "conflict",
+            Self::NoAccount { .. } => "noAccount",
+            Self::Unsynced { .. } => "unsynced",
+        }
+    }
+}
+
+/// A foreign callback that failed in a way its signature doesn't name.
+impl From<uniffi::UnexpectedUniFFICallbackError> for JazzError {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::Io {
+            reason: error.reason,
         }
     }
 }
@@ -64,6 +85,8 @@ pub(crate) enum JazzErrorKind {
     Permission(String),
     NotSupported(String),
     Conflict(String),
+    NoAccount { user_id: String, reason: String },
+    Unsynced { pending: u64, reason: String },
 }
 
 impl From<JazzErrorKind> for JazzError {
@@ -75,6 +98,8 @@ impl From<JazzErrorKind> for JazzError {
             JazzErrorKind::Permission(reason) => Self::Permission { reason },
             JazzErrorKind::NotSupported(reason) => Self::NotSupported { reason },
             JazzErrorKind::Conflict(reason) => Self::Conflict { reason },
+            JazzErrorKind::NoAccount { user_id, reason } => Self::NoAccount { user_id, reason },
+            JazzErrorKind::Unsynced { pending, reason } => Self::Unsynced { pending, reason },
         }
     }
 }
@@ -127,13 +152,26 @@ impl From<jazz_app::Error> for JazzErrorKind {
         let message = error.to_string();
         // Only what contract 1 reports as `Refused` is told apart, so a
         // contract 1 host sees exactly what it did before.
-        #[allow(unreachable_patterns)]
         match error {
             E::Rejected(reason) => rejection(&reason, message),
             E::Unsupported(what) => unsupported(what),
+            // E::Refused: the backend refused who the client is (a credential
+            // trusted neither way, a refused link); `for_user` reports its
+            // 403 as `Permission` itself.
             E::App(_) | E::Config(_) | E::Decode { .. } | E::Refused(_) => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
+            E::NoAccount(user_id) => Self::NoAccount {
+                user_id,
+                reason: message,
+            },
+            E::Unsynced { pending } => Self::Unsynced {
+                pending: pending as u64,
+                reason: message,
+            },
+            // A bearer the backend names no one by (e.g. a rejected link):
+            // a refusal, not a network blip to retry.
+            E::SignedOut => Self::Refused(message),
             E::Jazz(J::ChannelClosed) => Self::Closed,
             // The authority rejected a write that was waiting for a tier:
             // a refusal, not a transport failure.

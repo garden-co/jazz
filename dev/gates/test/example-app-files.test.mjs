@@ -21,9 +21,10 @@ function isSwiftApp(dir) {
 /**
  * TS apps: every app with a jazz.app.json, except Rust crates (a Cargo.toml
  * beside it), whose bindings are `src/jazz_app.rs` and which the `jazz-app`
- * crate's checks cover, and Swift packages (a Package.swift naming
- * jazz-swift), whose bindings are `JazzApp.swift` and which
- * dev/gates/jazz-swift.sh covers.
+ * crate's checks cover, Swift packages (a Package.swift naming jazz-swift),
+ * whose bindings are `JazzApp.swift` and which dev/gates/jazz-swift.sh
+ * covers, and Go modules (a go.mod beside it), whose bindings are
+ * `jazzapp/jazz_app.go` and which jazz-codegen's golden tests cover.
  */
 function projects() {
   return execFileSync(
@@ -34,7 +35,8 @@ function projects() {
     .split("\n")
     .filter(Boolean)
     .map(dirname)
-    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")) && !isSwiftApp(dir));
+    .filter((dir) => !existsSync(join(root, dir, "Cargo.toml")) && !isSwiftApp(dir))
+    .filter((dir) => !existsSync(join(root, dir, "go.mod")));
 }
 
 test("every example app commits its files and its bindings", () => {
@@ -102,8 +104,19 @@ function jazzPackages() {
     .map(dirname);
 }
 
+/**
+ * Packages that depend on jazz-tools but are not apps, each with why. Keep
+ * this short: an example is an app and commits its jazz.app.json.
+ */
+const NOT_APPS = new Map([
+  [
+    "examples/rust-backend-clients",
+    "a test harness: it serves the Rust examples' own app files from a TS main backend",
+  ],
+]);
+
 test("every example package that depends on jazz-tools commits a jazz.app.json", () => {
-  const packages = jazzPackages();
+  const packages = jazzPackages().filter((dir) => !NOT_APPS.has(dir));
   assert.ok(packages.length > 30, `found only ${packages.length} jazz-tools packages`);
   const apps = tracked("examples/**/jazz.app.json", "dev/stress-tests/**/jazz.app.json");
   const without = packages.filter((dir) => !apps.some((file) => file.startsWith(`${dir}/`)));

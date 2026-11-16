@@ -3,6 +3,6 @@
   "private": true,
   "scripts": {
     "build:crates": "cargo build -p jazz-tools --bin jazz-tools",
-    "test": "cargo test --workspace --lib --bins --tests --features jazz-core/testing,jazz-core/transport-compression-zstd,jazz-server/test,jazz-tools/test"
+    "test": "cargo test --workspace --lib --bins --tests --features jazz-core/testing,jazz-core/transport-compression-zstd,jazz-server/test,jazz-tools/test,jazz-app/test-relay"
   }
 }
