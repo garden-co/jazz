@@ -257,21 +257,23 @@ async fn transactions_and_selectors() {
         )?;
         draft.insert(NewDocument::new("draft", "Added"))?;
         tx.insert(NewDraft::new("draft"))?;
-        // Reads through a branch inside a transaction are not supported yet,
-        // and the writes that read back are refused before staging: this
-        // ignored upsert commits nothing.
-        assert!(draft.get::<Document>(intro.id).await.is_err());
-        let refused = draft
+        // A mergeable transaction reads through the branch, staged writes
+        // included, and so can write what it reads back.
+        let seen = draft
+            .get::<Document>(intro.id)
+            .await?
+            .expect("the draft's row");
+        assert_eq!(
+            (seen.branch.as_str(), seen.title.as_str()),
+            ("draft", "Intro, in a transaction")
+        );
+        let upserted = draft
             .upsert(
                 jazz_app::ObjectId::new(),
                 NewDocument::new("draft", "Upserted"),
             )
-            .await;
-        assert!(matches!(refused, Err(Error::Unsupported(_))), "{refused:?}");
-        assert!(matches!(
-            draft.restore::<Document>(intro.id).await,
-            Err(Error::Unsupported(_))
-        ));
+            .await?;
+        assert_eq!(upserted.branch, "draft");
         Ok(())
     })
     .await
@@ -284,7 +286,11 @@ async fn transactions_and_selectors() {
                 .await
                 .unwrap()
         ),
-        [("draft", "Added"), ("draft", "Intro, in a transaction")]
+        [
+            ("draft", "Added"),
+            ("draft", "Intro, in a transaction"),
+            ("draft", "Upserted")
+        ]
     );
     assert_eq!(jazz.all(drafts::query()).await.unwrap().len(), 1);
 
@@ -295,7 +301,7 @@ async fn transactions_and_selectors() {
         typed.all(by_title()).await.unwrap(),
         named.all(by_title()).await.unwrap()
     );
-    assert_eq!(typed.all(by_title()).await.unwrap().len(), 2);
+    assert_eq!(typed.all(by_title()).await.unwrap().len(), 3);
 
     for wrong in [
         Branch::named("title", "draft".to_owned()),
@@ -340,6 +346,10 @@ async fn a_serializable_transaction_writes_into_a_branch() {
                 },
             )?;
             draft.insert(NewDocument::new("draft", "Notes"))?;
+            // A serializable transaction can't read through a branch yet
+            // (jazz#5806), so writes that read back are refused before
+            // staging: this ignored upsert commits nothing.
+            assert!(draft.get::<Document>(intro.id).await.is_err());
             let _ignored = draft
                 .upsert(
                     jazz_app::ObjectId::new(),
