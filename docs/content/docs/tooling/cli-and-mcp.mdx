@@ -19,8 +19,9 @@ The commands look for `jazz.app.json` in the current directory, then in `./src` 
 Pass `--schema-dir <path>` to point them elsewhere.
 
 Projects in other languages, such as a Rust backend client, generate their bindings with
-`npx jazz-tools generate` too, from the app's `schema.ts`. The standalone `jazz-tools` binary refuses
-`generate` and `migrations create` in an app with a `schema.ts`, and points you to `npx`.
+`npx jazz-tools generate` too, from a `schema.ts` beside their own manifest (`Cargo.toml`, `go.mod`,
+`Package.swift`, `build.gradle.kts`); no `package.json` is needed. The standalone `jazz-tools`
+binary can still check them (`generate --check`), but writing them needs `npx`.
 
 `npx jazz-tools --help` and `npx jazz-tools inspect --help` list every option.
 
