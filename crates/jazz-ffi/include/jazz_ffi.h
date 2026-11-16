@@ -70,6 +70,9 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *               "id"?, "row"?}                               -> true|false|null
  *              (advisory: true does not promise the write succeeds; null =
  *              unknown, e.g. no server; not available inside a transaction)
+ *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names)
+ *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
  *                     | null (a local app or a backend)
  *   "syncStatus" {} -> {"link": ...}

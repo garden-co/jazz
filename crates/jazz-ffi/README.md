@@ -166,6 +166,15 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   server, or no decision) means unknown. It is advice: `true` doesn't promise
   the write will succeed, as the data or permissions may change first. Not
   inside a transaction.
+- **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
+  `upsert {table, id, row}` write the row with this id: for a new id an
+  insert (`row` then needs every required column, else `missing required
+field`), for an existing row the columns `row` names (a partial row
+  updates).
+  `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
+  deleted row as it was, or with `patch` (a whole row) as its content; a
+  patch naming another row's `id` is refused. Both
+  return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`
