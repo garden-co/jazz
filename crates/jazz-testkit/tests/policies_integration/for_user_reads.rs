@@ -126,6 +126,72 @@ async fn for_user_claims_do_not_bleed_between_handles_of_one_user() {
         .await;
 }
 
+/// Handles acting for the same user keep their own claims on writes: a
+/// transaction is checked with the claims its writes were staged with,
+/// even when another handle for that user wrote with other claims before
+/// it committed.
+#[tokio::test]
+async fn for_user_transaction_writes_keep_their_handles_claims() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("docs")
+                        .column("org", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_read().always();
+                            p.allow_insert()
+                                .where_(pe::eq("org", pe::session(vec!["claims", "org"])));
+                        })),
+                )
+                .table(probe_table())
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
+            let backend = fresh_backend(&server, &schema, "backend").await;
+            let in_o1 = backend.for_session(bob().with_claims(serde_json::json!({ "org": "o1" })));
+            let in_o2 = backend.for_session(bob().with_claims(serde_json::json!({ "org": "o2" })));
+
+            // Control: o1's handle may not write an o2 doc on its own.
+            let alone = in_o1
+                .insert("docs", row_input!("org" => "o2"))
+                .unwrap()
+                .2
+                .unwrap();
+            assert!(
+                backend
+                    .wait_for_transaction(alone, DurabilityTier::GlobalServer)
+                    .await
+                    .is_err(),
+                "o1's claims forbid an o2 doc"
+            );
+
+            let tx = in_o1.begin_mergeable_transaction().unwrap();
+            tx.client()
+                .insert("docs", row_input!("org" => "o2"))
+                .unwrap();
+            // Another request for Bob, in o2, writes meanwhile.
+            let other = in_o2
+                .insert("docs", row_input!("org" => "o2"))
+                .unwrap()
+                .2
+                .unwrap();
+            backend
+                .wait_for_transaction(other, DurabilityTier::GlobalServer)
+                .await
+                .unwrap();
+            let committed = tx.commit().unwrap();
+            let outcome = backend
+                .wait_for_transaction(committed, DurabilityTier::GlobalServer)
+                .await;
+            assert!(
+                outcome.is_err(),
+                "the transaction is checked with the claims of the handle that staged it"
+            );
+            server.shutdown().await;
+        })
+        .await;
+}
+
 /// A schema of projects (readable by everyone) and their docs (readable in
 /// the session's `org`), with one project and a doc in each of two orgs.
 async fn projects_with_docs(

@@ -264,6 +264,41 @@ pub fn schema_hash(engine_schema_json: String) -> js::Result<String> {
         .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
 }
 
+/// Whether rows pass unchanged between two schemas in the engine's JSON form
+/// (`{ "tables": … }`), so a deployment connects them without a migration:
+/// the rule `migrations create` follows to decide whether to write one.
+/// Indexes, history retention, merge strategies, column order and defaults
+/// of columns outside `branchBy` don't count; everything else does.
+#[napi(js_name = "schemasAreCompatible")]
+pub fn schemas_are_compatible(left_json: String, right_json: String) -> js::Result<bool> {
+    jazz::tools::deployment::artifact::schemas_are_compatible(
+        left_json.as_bytes(),
+        right_json.as_bytes(),
+    )
+    .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
+/// What the migration between two schemas in the engine's JSON form
+/// (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+/// `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+/// [{ table, steps, addedVariants, unchangedRows }] }`, each step
+/// `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+/// Throws, with the reason, for a change no migration step does.
+#[napi(js_name = "migrationDiff")]
+pub fn migration_diff(from_json: String, to_json: String) -> js::Result<String> {
+    jazz_codegen::migrations::diff_steps_json(from_json.as_bytes(), to_json.as_bytes())
+        .map_err(codegen_error)
+}
+
+/// A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+/// `tables` of a `jazz.app.json` `history` version (no relations, computed
+/// fields or transforms), as JSON text.
+#[napi(js_name = "versionTables")]
+pub fn version_tables(engine_schema_json: String) -> js::Result<String> {
+    jazz::tools::deployment::artifact::version_tables_json(engine_schema_json.as_bytes())
+        .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
 /// What `migrationsCreate` wrote.
 #[napi(object)]
 pub struct CreatedMigration {
