@@ -318,8 +318,8 @@ async fn transactions_and_selectors() {
 }
 
 /// A serializable transaction reads shared rows at its start and writes
-/// into a branch; the branch writes commit with it, and an ignored refusal
-/// of a read-back write commits nothing.
+/// into a branch, reading back what it wrote (an upsert, a restore of a row
+/// the draft deleted); the branch writes commit with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_serializable_transaction_writes_into_a_branch() {
     let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
@@ -329,6 +329,16 @@ async fn a_serializable_transaction_writes_into_a_branch() {
         .await
         .unwrap();
     let row = jazz.insert(NewDraft::new("review")).await.unwrap();
+    // The draft deleted an inherited row; the transaction brings it back.
+    let outro = jazz
+        .on_branch("main")
+        .insert(NewDocument::new("main", "Outro"))
+        .await
+        .unwrap();
+    jazz.on_branch(Branch::from("draft").over("main"))
+        .delete::<Document>(outro.id)
+        .await
+        .unwrap();
 
     let renamed = jazz
         .serializable_transaction(move |tx| async move {
@@ -356,14 +366,22 @@ async fn a_serializable_transaction_writes_into_a_branch() {
                 (seen.branch.as_str(), seen.title.as_str()),
                 ("draft", "Intro, for review")
             );
-            // Writes that read back are still refused before staging in a
-            // serializable transaction: this ignored upsert commits nothing.
-            let _ignored = draft
+            // Writes that read the row back work through the branch too.
+            let upserted = draft
                 .upsert(
                     jazz_app_support::ObjectId::new(),
-                    NewDocument::new("draft", "Never"),
+                    NewDocument::new("draft", "Upserted"),
                 )
-                .await;
+                .await?;
+            assert_eq!(
+                (upserted.branch.as_str(), upserted.title.as_str()),
+                ("draft", "Upserted")
+            );
+            let restored = draft.restore::<Document>(outro.id).await?;
+            assert_eq!(
+                (restored.branch.as_str(), restored.title.as_str()),
+                ("draft", "Outro")
+            );
             Ok(draft_row.name)
         })
         .await
@@ -377,11 +395,53 @@ async fn a_serializable_transaction_writes_into_a_branch() {
                 .await
                 .unwrap()
         ),
-        [("draft", "Intro, for review"), ("draft", "Notes")]
+        [
+            ("draft", "Intro, for review"),
+            ("draft", "Notes"),
+            ("draft", "Outro"),
+            ("draft", "Upserted")
+        ]
     );
     assert_eq!(
         titles(&jazz.on_branch("main").all(by_title()).await.unwrap()),
-        [("main", "Intro")]
+        [("main", "Intro"), ("main", "Outro")]
+    );
+    jazz.shutdown().await.unwrap();
+}
+
+/// A mergeable transaction restores a row the draft deleted, reading it
+/// back through the branch; main never lost it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mergeable_transaction_restores_a_branch_row() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let outro = jazz
+        .on_branch("main")
+        .insert(NewDocument::new("main", "Outro"))
+        .await
+        .unwrap();
+    let draft = jazz.on_branch(Branch::from("draft").over("main"));
+    draft.delete::<Document>(outro.id).await.unwrap();
+    assert!(draft.all(by_title()).await.unwrap().is_empty());
+
+    let restored = jazz
+        .transaction(move |tx| async move {
+            tx.on_branch(Branch::from("draft").over("main"))?
+                .restore::<Document>(outro.id)
+                .await
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (restored.branch.as_str(), restored.title.as_str()),
+        ("draft", "Outro")
+    );
+    assert_eq!(
+        titles(&draft.all(by_title()).await.unwrap()),
+        [("draft", "Outro")]
+    );
+    assert_eq!(
+        titles(&jazz.on_branch("main").all(by_title()).await.unwrap()),
+        [("main", "Outro")]
     );
     jazz.shutdown().await.unwrap();
 }
