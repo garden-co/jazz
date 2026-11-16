@@ -10,13 +10,9 @@ This recipe covers building an app where users own their own data and no-one els
 
 There's no need to add an explicit owner column&hairsp;—&hairsp;Jazz tracks who created each row automatically via `$createdBy`.
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-export const schema = s.defineSchema({
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/user-owned/schema.ts#schema
+</include>
 
 See [Defining tables](/docs/schemas/defining-tables) for everything a table can declare.
 
@@ -24,20 +20,9 @@ See [Defining tables](/docs/schemas/defining-tables) for everything a table can 
 
 Match `$createdBy` to `session.user` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can allow every insert with `true`.
 
-```ts title="schema.ts"
-const { definePermissions, session } = schema;
-
-const createdByMe = { $createdBy: session.user };
-
-export const permissions = definePermissions({
-  todos: {
-    read: createdByMe,
-    insert: true,
-    update: createdByMe,
-    delete: createdByMe,
-  },
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/user-owned/schema.ts#permissions
+</include>
 
 These rules are enforced on the server. See [Declarative Permissions](/docs/schemas/policies) for combinators, `allowedTo`, and more complex options.
 

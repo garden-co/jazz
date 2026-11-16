@@ -132,17 +132,9 @@ A computed field is derived from other columns when a row is read. It has no sto
 read-only. Declare it among the table's columns with `s.computed(type, from)`, where `from` lists
 the columns it is computed from, and implement it in `jazz.computed.ts`:
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-export const schema = s.defineSchema({
-  tasks: s.table({
-    title: s.string(),
-    score: s.int(),
-    priority: s.computed(s.enum("low", "medium", "high"), ["score"]),
-  }),
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/recipes/computed-columns/schema.ts#schema
+</include>
 
 ```ts title="jazz.computed.ts"
 import type { AppComputed } from "./jazz.generated";

@@ -10,63 +10,21 @@ Every client subscribes to the same data and sees changes as they happen. This r
 
 A shared project with collaboratively-edited tasks.
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-export const schema = s.defineSchema({
-  projects: s.table(
-    { name: s.string() },
-    {
-      tasks: s.reverse("tasks", "project"),
-      members: s.reverse("projectMembers", "project"),
-    },
-  ),
-  tasks: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      assignee_id: s.uuid().optional(),
-      projectId: s.uuid(),
-    },
-    { project: s.rel("projects", "projectId") },
-  ),
-  projectMembers: s.table(
-    { projectId: s.uuid(), user_id: s.uuid() },
-    { project: s.rel("projects", "projectId") },
-  ),
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/collab-list/schema.ts#schema
+</include>
 
 ## Permissions
 
-Project members can read and write tasks. The creator can manage membership. Tasks inherit access from their project via `allowedTo`.
+Project members can read, add and edit tasks. The creator can manage membership. Tasks inherit access from their project via `allowedTo`.
 
-```ts title="schema.ts"
-const { definePermissions, exists, allowedTo, session, anyOf } = schema;
+The creator and members can read a project; only the creator can update it. Only the creator can
+add members. A membership row is readable by the project's creator and by the member it names.
+There are no `delete` rules, so projects, tasks and memberships can't be deleted.
 
-const createdByMe = { $createdBy: session.user };
-
-export const permissions = definePermissions({
-  // The creator and members.
-  projects: {
-    read: (project) =>
-      anyOf(createdByMe, exists.projectMembers({ projectId: project.id, user_id: session.user })),
-    insert: true,
-    update: createdByMe,
-  },
-  // Inherit from the project.
-  tasks: {
-    read: (task) => allowedTo.read(task.project),
-    insert: (task) => allowedTo.read(task.project),
-    update: (task) => allowedTo.read(task.project),
-  },
-  // Only the creator can manage members.
-  projectMembers: {
-    insert: (member) => member.project.where(createdByMe),
-    read: (member) => anyOf(member.project.where(createdByMe), { user_id: session.user }),
-  },
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/collab-list/schema.ts#permissions
+</include>
 
 See [Declarative Permissions](/docs/schemas/policies) for `exists`, `anyOf` and `allowedTo`.
 

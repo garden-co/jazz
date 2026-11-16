@@ -20,31 +20,13 @@ and write run under different credentials.
 ## Schema
 
 Keep invite codes in their own table, not on the resource row. Jazz permissions apply to whole rows, so a
-`joinCode` on the chat would be visible to every chat member. This table has no client read rule;
-only the backend checks its code. The members table records which invite each user used to join, so
+`joinCode` on the chat would be visible to every chat member. This table's read rule is `false`, so
+invite codes never sync to a client; only the backend checks them. The members table records which invite each user used to join, so
 you can audit or revoke individual memberships later.
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-export const schema = s.defineSchema({
-  chats: s.table(
-    {},
-    {
-      members: s.reverse("chatMembers", "chat"),
-      invites: s.reverse("chatInvites", "chat"),
-    },
-  ),
-  chatMembers: s.table(
-    { chatId: s.uuid(), user_id: s.uuid(), inviteId: s.string().optional() },
-    { chat: s.rel("chats", "chatId") },
-  ),
-  chatInvites: s.table(
-    { chatId: s.uuid(), code: s.string(), singleUse: s.boolean() },
-    { chat: s.rel("chats", "chatId") },
-  ),
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/src/recipes/invite/schema.ts#schema
+</include>
 
 ## Permissions
 
@@ -54,35 +36,16 @@ else. The only way for an invitee to join is the server route below. The server 
 [backend identity](/docs/setup/deployment/own-server#trusted-backend-use) and inserts the row
 on their behalf after validating the join code.
 
-```ts title="schema.ts"
-const { definePermissions, exists, session, anyOf, allOf } = schema;
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/src/recipes/invite/schema.ts#permissions
+</include>
 
-const isChatCreator = (chatId: s.Uuid) => exists.chats({ id: chatId, $createdBy: session.user });
+Users can read their own membership row (`mine`), chat creators can read every member of their
+chats, and either can delete it: users can leave, and creators can remove any member. Invite rows can
+be created and deleted by the chat's creator, and no client can read them.
 
-export const permissions = definePermissions({
-  chats: {
-    read: (chat) => exists.chatMembers({ chatId: chat.id, user_id: session.user }),
-    insert: true,
-  },
-  chatMembers: {
-    // Users can read their own membership row; chat creators can read every member of their chats.
-    read: (m) => anyOf({ user_id: session.user }, isChatCreator(m.chatId)),
-    // The creator can insert their own membership in their own chat. Everyone else comes
-    // through the server route, which writes with backend privileges.
-    insert: (m) => allOf({ user_id: session.user }, isChatCreator(m.chatId)),
-    // Users can leave; chat creators can remove any member.
-    delete: (m) => anyOf({ user_id: session.user }, isChatCreator(m.chatId)),
-  },
-  chatInvites: {
-    // Invite codes are bearer capabilities. They never sync back down to a client.
-    read: false,
-    insert: (invite) => isChatCreator(invite.chatId),
-    delete: (invite) => isChatCreator(invite.chatId),
-  },
-});
-```
-
-`isChatCreator` is a plain TypeScript helper; `npx jazz-tools generate` inlines it wherever it's used.
+`isChatCreator` and `isChatMember` are plain TypeScript helpers and `mine` is a plain condition;
+`npx jazz-tools generate` inlines them wherever they're used.
 See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `allOf` and `anyOf`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
 
 ## Generating a link

@@ -10,56 +10,21 @@ After [user-owned data](/docs/recipes/access-control/user-owned-data), the next 
 
 Add a `todoShares` table that records which user has access to which todo.
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-export const schema = s.defineSchema({
-  todos: s.table(
-    { title: s.string(), done: s.boolean() },
-    { shares: s.reverse("todoShares", "todo") },
-  ),
-  todoShares: s.table(
-    { todoId: s.uuid(), user_id: s.uuid(), can_edit: s.boolean() },
-    { todo: s.rel("todos", "todoId") },
-  ),
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/shared-access/schema.ts#schema
+</include>
 
 ## Permissions
 
 The creator can do everything. Share recipients get read access, and optionally edit access via `can_edit`.
-A share row is readable by its recipient and by the todo's creator, who needs it to list and revoke
-access.
+Only the todo's creator can insert and delete share rows. A share row is readable by its recipient
+and by the todo's creator, who needs it to list and revoke access.
 
-```ts title="schema.ts"
-const { definePermissions, exists, session, anyOf } = schema;
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/shared-access/schema.ts#permissions
+</include>
 
-const createdByMe = { $createdBy: session.user };
-
-export const permissions = definePermissions({
-  todos: {
-    read: (todo) =>
-      anyOf(createdByMe, exists.todoShares({ todoId: todo.id, user_id: session.user })),
-    insert: true,
-    update: (todo) =>
-      anyOf(
-        createdByMe,
-        exists.todoShares({ todoId: todo.id, user_id: session.user, can_edit: true }),
-      ),
-    delete: createdByMe,
-  },
-  todoShares: {
-    // Only the todo creator can manage shares.
-    insert: (share) => share.todo.where(createdByMe),
-    // The recipient sees their share, and the todo's creator sees every share of it,
-    // so they can list who has access and revoke it.
-    read: (share) => anyOf({ user_id: session.user }, share.todo.where(createdByMe)),
-    delete: (share) => share.todo.where(createdByMe),
-  },
-});
-```
-
-See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `anyOf`, and `allOf`.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `anyOf`, and relation `.where`.
 
 ## Granting access
 
