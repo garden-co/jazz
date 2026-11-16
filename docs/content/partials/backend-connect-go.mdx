@@ -6,11 +6,6 @@ go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65
 go build ./...
 ```
 
-jazz-go needs no cgo and no C compiler: it loads Jazz's core, which the module ships for Linux
-(x86-64, arm64) and macOS (Apple silicon), on first use, from your user cache directory. On another
-platform, or to use your own build, set `JAZZ_FFI_LIBRARY` to a `libjazz_ffi.so` / `.dylib` (e.g.
-from `cargo build --release -p jazz-ffi`). Windows is not supported yet.
-
 **Generate the bindings.**
 With a `go.mod` that requires `jazz-go/v2` beside `jazz.app.json`, `jazz-tools generate` writes the
 `jazzapp` package to `jazzapp/jazz_app.go`:
