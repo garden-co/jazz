@@ -15,6 +15,9 @@ use crate::schema::{ColumnSchema as JazzColumnSchema, JazzSchema, RuntimeSchema,
 /// Semantic limits on recursively encoded policy expressions.
 pub mod policy_limits;
 
+/// What a `{ column, op, value }` where condition means, for every client.
+pub mod where_condition;
+
 // Stable public syntax and relation-facade vocabulary.
 include!("query/ast.rs");
 include!("query/relation_codec.rs");

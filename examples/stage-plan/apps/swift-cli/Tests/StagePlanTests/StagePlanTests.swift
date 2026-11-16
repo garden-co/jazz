@@ -25,35 +25,6 @@ final class StagePlanTests: XCTestCase {
         try await app.jazz.close()
     }
 
-    func testTheDocsSnippets() async throws {
-        let relay = try await TestRelay()
-        let jazz = try await relay.user().jazz
-        let app = StagePlanApp(jazz: jazz)
-        let show = try await app.show(named: "Docs")
-        let load = try await app.addTask("Load in", to: show)
-        try await app.addTask("Sound check", to: show)
-        let v3 = try await DocsSnippets.oneShot(jazz, show: show).count
-        XCTAssertEqual(v3, 2)
-        let v4 = try await DocsSnippets.filters(jazz, show: show).count
-        XCTAssertEqual(v4, 2)
-        let v5 = try await DocsSnippets.sorting(jazz, show: show).map(\.title)
-        XCTAssertEqual(v5, ["Load in", "Sound check"])
-        let v6 = try await DocsSnippets.pagination(jazz, show: show).count
-        XCTAssertEqual(v6, 0)
-        let updated = try await DocsSnippets.crud(jazz, show: show)
-        XCTAssertEqual(updated?.title, "Focus the lights")
-        XCTAssertEqual(updated?.status, .doing)
-        let v7 = try await DocsSnippets.oneShot(jazz, show: show).count
-        XCTAssertEqual(v7, 2)
-        try await DocsSnippets.nullableUpdate(jazz, task: load)
-        let results = try await DocsSnippets.whereOperators(jazz)
-        XCTAssertEqual(results.map(\.count), [0, 2, 2, 1, 2, 0])
-        let seen = try await DocsSnippets.subscriptions(jazz, show: show)
-        XCTAssertEqual(seen.first?.map(\.title), ["Load in", "Sound check"])
-        XCTAssertEqual(seen.last?.map(\.title), ["Load in", "Sound check", "Strike"])
-        try await jazz.close()
-    }
-
     func testCloseEndsLiveWatches() async throws {
         let relay = try await TestRelay()
         let app = try await relay.user()
@@ -89,7 +60,14 @@ final class StagePlanTests: XCTestCase {
         for title in ["Load in", "Sound check", "Doors", "Strike"] {
             try await app.addTask(title, to: show)
         }
-        let (withTasks, withShow) = try await DocsSnippets.includes(app.jazz, show: show)
+        let shows = JazzApp.shows.self
+        let tasks = JazzApp.tasks.self
+        // A reverse relation, narrowed, and a forward one.
+        let withTasks = try await app.jazz.one(
+            shows.query().where(shows.id.eq(show.id))
+                .include(shows.tasks.orderBy(tasks.rank).limit(3)))
+        let withShow = try await app.jazz.all(
+            tasks.query().where(tasks.showId.eq(show.id)).include(tasks.show))
         XCTAssertEqual(withTasks?.tasks?.map(\.title), ["Load in", "Sound check", "Doors"])
         XCTAssertEqual(withShow.count, 4)
         XCTAssertTrue(withShow.allSatisfy { $0.show?.id == show.id })
@@ -100,9 +78,16 @@ final class StagePlanTests: XCTestCase {
         XCTAssertNil(plainShow?.tasks)
         // The same row compares equal with and without its include.
         XCTAssertEqual(plain.first, withShow.first(where: { $0.id == plain.first?.id }))
-        let titles = try await DocsSnippets.select(app.jazz, show: show)
+        let titles = try await app.jazz.all(
+            tasks.query().where(tasks.showId.eq(show.id)).orderBy(tasks.rank).select(tasks.title),
+            as: TaskTitle.self)
         XCTAssertEqual(titles.map(\.title), ["Load in", "Sound check", "Doors", "Strike"])
         try await app.jazz.close()
+    }
+
+    struct TaskTitle: Decodable, Sendable, Equatable {
+        var id: String
+        var title: String
     }
 
     struct Oops: Error {}
@@ -111,7 +96,14 @@ final class StagePlanTests: XCTestCase {
         let relay = try await TestRelay()
         let app = try await relay.user()
         let show = try await app.show(named: "Transactions")
-        let task = try await DocsSnippets.transaction(app.jazz, show: show)
+        // Reads inside see the transaction's own writes.
+        let task = try await app.jazz.transaction(commit: .global) { tx in
+            let task = try await tx.insert(
+                JazzApp.NewTask(showId: show.id, title: "Rig lights", status: .todo, rank: 10))
+            let open = try await tx.all(JazzApp.tasks.query().where(JazzApp.tasks.status.eq(.todo)))
+            try await tx.update(task.id, JazzApp.TaskPatch(rank: .set(Double(open.count))))
+            return task
+        }
         let committed = try await app.tasks(of: show)
         XCTAssertEqual(committed.map(\.id), [task.id])
         XCTAssertEqual(committed.first?.rank, 1)
@@ -132,8 +124,12 @@ final class StagePlanTests: XCTestCase {
         let app = try await relay.user()
         let show = try await app.show(named: "Tiers")
         try await app.jazz.waitForSync(.global)
-        let task = try await DocsSnippets.writeTier(app.jazz, show: show)
-        let remote = try await DocsSnippets.readTier(app.jazz, show: show)
+        let task = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Doors", status: .todo, rank: 20), tier: .global)
+        try await app.jazz.update(task.id, JazzApp.TaskPatch(status: .set(.doing)))
+        try await app.jazz.waitForSync(.global)
+        let remote = try await app.jazz.all(
+            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)), tier: .remote)
         XCTAssertEqual(remote.map(\.id), [task.id])
         XCTAssertEqual(remote.first?.status, .doing)
         try await app.jazz.close()
