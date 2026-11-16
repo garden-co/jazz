@@ -6,6 +6,7 @@ import jazzapp.NewComment
 import jazzapp.NewCrew
 import jazzapp.TaskStatus
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import tools.jazz.history
 import tools.jazz.include
@@ -347,6 +348,12 @@ class StagePlanTest {
     @Test
     fun lifecycle_disconnect_mutation_errors_delete_storage_and_history_watch(): Unit = runBlocking {
         val me: String
+        val closing = open("user-8")
+        // Closing the app completes a mutationErrors collection (jazz-ffi's closed notice).
+        val ended = async { closing.mutationErrors.toList() }
+        kotlinx.coroutines.delay(200)
+        closing.close()
+        assertEquals(emptyList(), kotlinx.coroutines.withTimeout(30_000) { ended.await() })
         open("user-8").use { jazz ->
             me = me(jazz)
             val show = showNamed(jazz, "Lifecycle")
