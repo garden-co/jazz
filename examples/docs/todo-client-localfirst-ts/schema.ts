@@ -29,6 +29,7 @@ export const schema = s.defineSchema({
 
 // #endregion schema-define-app-ts
 
+// #region quickstart-permissions-ts
 const { definePermissions } = schema;
 
 export const permissions = definePermissions({
@@ -43,3 +44,4 @@ export const permissions = definePermissions({
     delete: true,
   },
 });
+// #endregion quickstart-permissions-ts

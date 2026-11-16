@@ -27,9 +27,10 @@ export const schema = s.defineSchema({
 
 // #endregion schema-expo
 
+// #region permissions-basic-expo
 const { definePermissions, session } = schema;
 
-const ownerIdIsMe = { owner_id: session.user };
+const ownedByMe = { owner_id: session.user };
 
 export const permissions = definePermissions({
   projects: {
@@ -37,10 +38,14 @@ export const permissions = definePermissions({
     insert: true,
   },
   todos: {
-    read: ownerIdIsMe,
-    insert: ownerIdIsMe,
-    updateIf: { owner_id: session.user, done: false },
-    updateTo: ownerIdIsMe,
-    delete: { owner_id: session.user, done: false },
+    // Each user only sees their own rows.
+    read: ownedByMe,
+    // New rows must belong to the current user.
+    insert: ownedByMe,
+    // Users can only mutate their own incomplete todos.
+    updateIf: { ...ownedByMe, done: false },
+    updateTo: ownedByMe,
+    delete: { ...ownedByMe, done: false },
   },
 });
+// #endregion permissions-basic-expo

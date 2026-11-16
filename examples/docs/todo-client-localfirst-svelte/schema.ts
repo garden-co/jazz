@@ -26,6 +26,7 @@ export const schema = s.defineSchema({
 
 // #endregion schema-svelte
 
+// #region permissions-basic-svelte
 const { definePermissions } = schema;
 
 export const permissions = definePermissions({
@@ -34,10 +35,15 @@ export const permissions = definePermissions({
     insert: true,
   },
   todos: {
+    // Everyone can read todos.
     read: true,
+    // New todos start as incomplete.
     insert: { done: false },
+    // Completed todos are immutable.
     updateIf: { done: false },
     updateTo: true,
+    // Only open todos can be deleted.
     delete: { done: false },
   },
 });
+// #endregion permissions-basic-svelte

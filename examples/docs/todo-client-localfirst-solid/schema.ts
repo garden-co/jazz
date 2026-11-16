@@ -26,6 +26,7 @@ export const schema = s.defineSchema({
 
 // #endregion schema-solid
 
+// #region permissions-basic-solid
 const { definePermissions } = schema;
 
 export const permissions = definePermissions({
@@ -41,3 +42,4 @@ export const permissions = definePermissions({
     delete: { done: false },
   },
 });
+// #endregion permissions-basic-solid

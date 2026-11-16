@@ -26,7 +26,7 @@ export const schema = s.defineSchema({
 
 const { definePermissions, session } = schema;
 
-const ownerIdIsMe = { owner_id: session.user };
+const ownedByMe = { owner_id: session.user };
 
 export const permissions = definePermissions({
   projects: {
@@ -34,9 +34,9 @@ export const permissions = definePermissions({
     insert: true,
   },
   todos: {
-    read: ownerIdIsMe,
-    insert: ownerIdIsMe,
-    update: ownerIdIsMe,
-    delete: ownerIdIsMe,
+    read: ownedByMe,
+    insert: ownedByMe,
+    update: ownedByMe,
+    delete: ownedByMe,
   },
 });
