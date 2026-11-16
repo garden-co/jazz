@@ -56,6 +56,9 @@ import {
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
+import { openThinSessionClient } from "./thin-session-client.js";
+import { asksThinResults, ThinRelay, type ThinTransactionClient } from "./thin-relay.js";
+import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   BackendClientsUnavailable,
   backendClientVerifier,
@@ -2262,6 +2265,49 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     openedAt: number;
   }>();
 
+  /** Thin sessions' transaction clients running now. */
+  let thinClients = 0;
+
+  /**
+   * The client a thin session's transactions are served by (SPEC 8.14):
+   * in memory, linked to the core as the session, for the app's schema.
+   * Refused for a thin client built against another version of it, and
+   * `null` past the cap.
+   */
+  function openThinClient(
+    schema: Uint8Array,
+    prelude: Uint8Array,
+  ): ThinTransactionClient | null | { refused: string } {
+    const app = resolveSchemaSource(options.app);
+    if (!sameBytes(schema, encodeSchema(app)))
+      return {
+        refused:
+          "not supported yet: transactions of a thin client built against another version of the app's schema",
+      };
+    if (thinClients >= MAX_THIN_TRANSACTION_CLIENTS) return null;
+    const client = openThinSessionClient({
+      appId,
+      schema: app,
+      serverUrl: core.serverUrl,
+      prelude,
+      ...(pin === undefined ? {} : { bundle: pin }),
+    });
+    thinClients += 1;
+    let closed = false;
+    return {
+      serve: (request) => client.serve(request),
+      async close() {
+        if (closed) return;
+        closed = true;
+        try {
+          await client.close();
+        } finally {
+          thinClients -= 1;
+        }
+      },
+    };
+  }
+
   function openClientSession(
     request: Request,
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
@@ -2275,6 +2321,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
+    // A thin client's socket (its Hello asks for thin results): its
+    // transactions are served here (SPEC 8.14), the rest relayed.
+    let helloSeen = false;
+    let thin: ThinRelay | undefined;
+    // The prelude the core admitted the session's socket with: its own
+    // client connects with the same.
+    let thinPrelude: Uint8Array | undefined;
     // Users `revokeUser` named while this session's admission ran.
     let admitting = true;
     const revokedWhileAdmitting = new Set<string>();
@@ -2288,6 +2341,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       ended = true;
       liveSessions.delete(live);
       stopExpiry?.();
+      thin?.end();
       socket?.close();
     };
     // A signed-in browser's session renewed in place (see
@@ -2376,6 +2430,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       userId = admitted.userId;
       trusted = admitted.trusted;
+      thinPrelude = admitted.prelude;
       stopExpiry?.();
       const admittedAt = Date.now();
       if (admitted.user) {
@@ -2432,6 +2487,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             warnGuestsOffOnCore();
         }
         onEvent(error, event);
+        if (thin && event.kind === "message" && event.data) thin.fromCore(event.data);
         if (renewal && !renewal.told && event.kind === "message") tellRenewal(renewalAt);
       };
       socket = core.openSocket(headerPairs(request.headers), relay, admitted.access);
@@ -2473,7 +2529,25 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         ? chain
             .then(async (ok) => {
               if (!ok || ended || !socket) return false;
-              return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
+              const core = socket;
+              const toCore = (message: Uint8Array) =>
+                core.sendWithRoom ? core.sendWithRoom(message) : core.send(message);
+              if (!helloSeen) {
+                helloSeen = true;
+                if (asksThinResults(data) && thinPrelude)
+                  thin = new ThinRelay({
+                    openClient: (schema) => openThinClient(schema, thinPrelude!),
+                    toCore,
+                    toClient: (message) => onEvent(null, { kind: "message", data: message }),
+                    close: (code, reason) => {
+                      onEvent(null, { kind: "close", code, reason });
+                      end();
+                    },
+                  });
+              } else if (thin) {
+                return thin.fromClient(data);
+              }
+              return toCore(data);
             })
             .catch(() => {
               // A core that failed to take a message ends the session.
@@ -4591,4 +4665,13 @@ function isLocalEndpoint(endpoint: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Thin sessions with transactions a backend serves at once, each with a client of its own. */
+const MAX_THIN_TRANSACTION_CLIENTS = 256;
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
 }

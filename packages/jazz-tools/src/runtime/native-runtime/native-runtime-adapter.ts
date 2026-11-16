@@ -252,6 +252,10 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
+  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult;
+  /** NAPI: end the thin session's open transactions. */
+  releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
@@ -2432,6 +2436,31 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.withPermissionAdviceTimeout(() =>
       request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
     );
+  }
+
+  /**
+   * @internal Serve one of a thin session's transaction requests (its wire
+   * frame) as the backend's client linked to the core as that session
+   * (SPEC 8.14); the answer is the response frame. A commit answers once the
+   * core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.serveThinTransaction(request);
+    if (this.closed) return Promise.reject(new Error("the native runtime is closed"));
+    if (!this.db.serveThinTransaction)
+      return Promise.reject(new Error("this native binding serves no thin transactions"));
+    const served = this.db.serveThinTransaction(request);
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(served);
+  }
+
+  /** @internal End the thin session's open transactions: nothing of them reached the core. */
+  async releaseThinTransactions(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.releaseThinTransactions();
+    if (this.closed || !this.db.releaseThinTransactions) return;
+    const released = this.db.releaseThinTransactions();
+    this.scheduleCoreTick();
+    await this.awaitNativeRead(released);
   }
 
   captureSnapshot(): Promise<SnapshotRef> {

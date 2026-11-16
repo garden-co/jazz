@@ -197,6 +197,10 @@ export interface Runtime {
   hasStagedTransactionWrites?(id: OpenTransactionId): boolean | undefined;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
+  /** @internal A thin session's transaction request, served by its backend's client (NAPI). */
+  serveThinTransaction?(request: Uint8Array): Promise<Uint8Array>;
+  /** @internal End the thin session's open transactions (NAPI). */
+  releaseThinTransactions?(): Promise<void>;
   readonly preparationOwner?: object;
   /** @internal Live reachability of the upstream server, for read scheduling only. */
   remoteLinkState?(): RemoteLinkState;
@@ -1278,6 +1282,18 @@ export class JazzClient {
     runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
     return new JazzClient(runtime, context, runtimeOptions);
+  }
+
+  /** @internal See {@link Runtime.serveThinTransaction}. */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (!this.runtime.serveThinTransaction)
+      return Promise.reject(new Error("this runtime serves no thin transactions"));
+    return this.runtime.serveThinTransaction(request);
+  }
+
+  /** @internal See {@link Runtime.releaseThinTransactions}. */
+  async releaseThinTransactions(): Promise<void> {
+    await this.runtime.releaseThinTransactions?.();
   }
 
   captureSnapshot(): Promise<SnapshotRef> {
