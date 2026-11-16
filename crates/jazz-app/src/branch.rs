@@ -167,6 +167,14 @@ pub struct BranchView {
 }
 
 impl BranchView {
+    /// `client`, through `view` when there is one.
+    pub(crate) fn scope(view: Option<&BranchView>, client: JazzClient) -> Result<JazzClient> {
+        match view {
+            Some(view) => view.resolve(&client),
+            None => Ok(client),
+        }
+    }
+
     fn resolve(&self, client: &JazzClient) -> Result<JazzClient> {
         let head = self.head.selector(client)?;
         let base = match &self.base {
