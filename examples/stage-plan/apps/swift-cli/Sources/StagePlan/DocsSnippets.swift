@@ -28,6 +28,29 @@ public enum DocsSnippets {
         return jazz
     }
 
+    public static func openSession(endpoint: String, appId: String, dataDir: String) async throws
+        -> (JazzSession, Jazz.Client)
+    {
+        // #region context-setup-swift-session
+        // A session follows who is signed in: a device account (a guest)
+        // until your sign-in names a user, who takes the guest's account
+        // over if they have none yet. Call `session.refresh()` when your
+        // sign-in changes.
+        let session = try await JazzSession.open(
+            app: JazzApp.app, appId: appId, serverUrl: endpoint,
+            bearer: { _ in try await MySignIn.currentToken() },  // nil while signed out
+            start: .device, dataDir: dataDir)
+        for try await snapshot in session.snapshots where snapshot.status == .ready {
+            print("signed in as", snapshot.user?.account ?? "-")
+            break
+        }
+        // The client for the user signed in now. Get it again when
+        // `clientEpoch` changes: one kept from before throws `.replaced`.
+        let jazz = try await session.client()
+        // #endregion context-setup-swift-session
+        return (session, jazz)
+    }
+
     /// The app's own sign-in, in the docs snippet: the relay used in tests
     /// accepts `token-<user>`.
     public enum MySignIn {

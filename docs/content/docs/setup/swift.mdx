@@ -101,6 +101,30 @@ only its user can read, or with a bearer token, and creates a show, lists, adds 
 A device key is the account: keep it as a password in the Keychain on Apple platforms, and in a
 file only its user can read on Linux. The Jazz Swift package has no helper for either yet.
 
+## Sessions
+
+`JazzSession` follows who is signed in, as TypeScript's `JazzSession`: it hands out a `Client` for
+the user signed in now and replaces it when the user changes. Start it as a device account (a guest
+who needs no sign-in), from your sign-in's bearer token, or signed out:
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-session
+</include>
+
+`session.snapshots` yields a `SessionSnapshot` (`status`: `.starting`, `.ready`, `.signedOut`,
+`.transitioning`, `.error` or `.closed`; `user`; `clientEpoch`; `error` and `recovery`) each time it
+changes, and ends with `JazzError.closed` when the session closes. `session.client()` gives the same
+client until `clientEpoch` changes; a client kept from before throws `JazzError.replaced`, and while
+no one is signed in `client()` throws `JazzError.noUser`.
+
+When your sign-in changes, call `session.refresh()`: the session asks `bearer` again and follows
+the user it names (`nil`: signed out). With `linkGuest` (the default, as TypeScript), a user who has
+no account yet takes over the device account signed in before; with `linkGuest: false`, call
+`linkDeviceAccount()` for that. `createDeviceAccount()`, `restoreDeviceAccount(key:)`,
+`reopenDeviceAccount()`, `exportDeviceKey()`, `signOut()` (the session stays open, signed out),
+`retry()` (as `recovery` says) and `close()` complete it. Each account's store is under
+`dataDir/<account>/`, and the device account's key in `dataDir/device.key`.
+
 ## Computed fields and transforms
 
 If `jazz.app.json` declares computed fields or transforms, the bindings declare a
@@ -134,8 +158,9 @@ On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live resu
 Every call throws a `JazzError` (catch it with `catch let error as JazzError`). The cases are
 `refused` (validation, permissions or not supported yet), `io`, `closed`, `decoding`,
 `cancelled` (the calling task was cancelled), `permissionDenied` (your backend's permissions
-refused it, seen when waiting for the `global` tier), `notSupported` and `conflict` (a serializable
-transaction lost to another write: retry it).
+refused it, seen when waiting for the `global` tier), `notSupported`, `conflict` (a serializable
+transaction lost to another write: retry it), and for a `JazzSession`'s clients `replaced` and
+`noUser`.
 
 ## Relations, transactions and tiers
 

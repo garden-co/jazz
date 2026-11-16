@@ -181,7 +181,7 @@ extension Client {
     /// The session's state each time it changes, the current one first. It
     /// fails with `JazzError.closed` once the app closes.
     public var session: AsyncThrowingStream<SessionState, any Error> {
-        watch { listener in try self.handle.watchSession(listener: listener) } decode: { try SessionState(json: $0) }
+        Self.watch { listener in try self.handle.watchSession(listener: listener) } decode: { try SessionState(json: $0) }
     }
 
     public func syncStatus() async throws -> SyncStatus {
@@ -194,7 +194,7 @@ extension Client {
     /// The sync status each time it changes, the current one first. It fails
     /// with `JazzError.closed` once the app closes.
     public var syncChanges: AsyncThrowingStream<SyncStatus, any Error> {
-        watch { listener in try self.handle.watchSync(listener: listener) } decode: {
+        Self.watch { listener in try self.handle.watchSync(listener: listener) } decode: {
             try Coding.decode(SyncStatus.self, $0)
         }
     }
@@ -218,7 +218,7 @@ extension Client {
         }
     }
 
-    func watch<T: Sendable>(
+    static func watch<T: Sendable>(
         _ start: @escaping @Sendable (StateListener) throws -> Watch,
         decode: @escaping @Sendable (String) throws -> T
     ) -> AsyncThrowingStream<T, any Error> {
