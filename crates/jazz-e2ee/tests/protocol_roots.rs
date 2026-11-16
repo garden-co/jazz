@@ -607,29 +607,103 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
     assert!(!state.is_removed(&phone.id));
 }
 
-/// A reset of an app account that one of its active devices did not expect
-/// is `root-not-mine` on that device; another account's floor follows the
-/// new generation.
+/// A device whose floor records it active and that is not active in a newer
+/// state re-enrols (`device-no-longer-active`) instead of raising an alert:
+/// it was removed while offline and the account was then reset, or the
+/// account moved to a generation it is not part of. Another account's floor
+/// follows the new generation, and a device approved in the new generation
+/// passes.
 #[test]
-fn unexpected_reset_is_not_mine_for_an_active_device() {
+fn device_no_longer_active_after_removal_and_reset() {
     let env = Env::new("alice");
     let mut rng = TestRandom(107);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let before = ledger.state(&env);
+    let phone_floor = before.floor(ledger.public.through, Some(&phone.id));
+    let laptop_floor = before.floor(ledger.public.through, Some(&laptop.id));
+    let other = before.floor(ledger.public.through, None);
+    assert_eq!(
+        phone_floor.active_device.as_deref(),
+        Some(phone.id.as_str())
+    );
+
+    // The phone is offline while it is removed: same generation.
+    ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let removed = ledger.state(&env);
+    assert_eq!(
+        removed.check_floor(ledger.public.through, &phone_floor),
+        Err(ProtocolError::DeviceNoLongerActive)
+    );
+    removed
+        .check_floor(ledger.public.through, &laptop_floor)
+        .unwrap();
+
+    // Then the account is reset by a new device.
+    let tablet = env.device(&mut rng);
+    ledger.request(&tablet, &mut rng);
+    ledger.root(&env, &tablet, 1, &mut rng);
+    let after = ledger.state(&env);
+    for floor in [&phone_floor, &laptop_floor] {
+        let outcome = after.check_floor(ledger.public.through, floor);
+        assert_eq!(outcome, Err(ProtocolError::DeviceNoLongerActive));
+        assert_eq!(outcome.unwrap_err().code(), Some("device-no-longer-active"));
+    }
+    after.check_floor(ledger.public.through, &other).unwrap();
+
+    // A device approved in the new generation passes its old floor.
+    ledger.approve(&env, &tablet, &laptop, &mut rng);
+    ledger
+        .state(&env)
+        .check_floor(ledger.public.through, &laptop_floor)
+        .unwrap();
+}
+
+/// The root this device verified, contradicted while it is still supposed
+/// to be active, stays `root-not-mine`, also when a later generation follows
+/// the replaced root.
+#[test]
+fn replaced_root_before_a_reset_is_not_mine() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(110);
     let laptop = env.device(&mut rng);
     let mut ledger = Ledger::new("alice");
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
-    let before = ledger.state(&env);
-    let own = before.floor(ledger.public.through, Some(&laptop.id));
-    let other = before.floor(ledger.public.through, None);
-    assert_eq!(own.active_device.as_deref(), Some(laptop.id.as_str()));
+    let floor = ledger
+        .state(&env)
+        .floor(ledger.public.through, Some(&laptop.id));
 
     let mallory = env.device(&mut rng);
-    ledger.request(&mallory, &mut rng);
-    ledger.root(&env, &mallory, 1, &mut rng);
-    let after = ledger.state(&env);
+    let tablet = env.device(&mut rng);
+    ledger.request(&tablet, &mut rng);
+    ledger.root(&env, &tablet, 1, &mut rng);
+    let mut replaced = Ledger::new("alice");
+    replaced.public = ledger.public.clone();
+    replaced.private = ledger.private.clone();
+    let root = &mut replaced.public.roots[0].row;
+    root.id = ids::random_v4(&mut rng).unwrap();
+    root.device_id = mallory.id.clone();
+    root.epoch_id = ids::random_v4(&mut rng).unwrap();
+    let at = replaced.public.roots[0].position;
+    replaced
+        .public
+        .keys
+        .push(Accepted::new(at, mallory.keys_row(&mut rng).unwrap()));
+    let state = replaced.state(&env);
+    assert_eq!(state.generation, 1);
     assert_eq!(
-        after.check_floor(ledger.public.through, &own),
+        state.check_floor(replaced.public.through, &floor),
         Err(ProtocolError::RootNotMine)
     );
-    after.check_floor(ledger.public.through, &other).unwrap();
 }

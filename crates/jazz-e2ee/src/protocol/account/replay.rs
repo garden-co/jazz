@@ -132,14 +132,21 @@ impl AccountState {
     }
 
     /// Checks this state, replayed from a read at cut `through`, against a
-    /// floor the device persisted earlier for the same account. Evidence
-    /// older than the floor (an earlier cut, an earlier generation, or the
-    /// floor's epoch missing from the chain) is
-    /// [`ProtocolError::StaleState`]; a chain whose root of the floor's
-    /// generation is not the floor's root is [`ProtocolError::RootNotMine`],
-    /// and so is a later generation when the floor records this device as
-    /// active: an active device never needs a reset (§2.11), so a reset it
-    /// did not see coming is a replaced root.
+    /// floor the device persisted earlier for the same account (§2.4,
+    /// "Floors"), in this order:
+    ///
+    /// 1. Evidence older than the floor (an earlier cut, an earlier
+    ///    generation, or, at the floor's generation, the floor's epoch
+    ///    missing from the chain) is [`ProtocolError::StaleState`].
+    /// 2. A chain whose root of the floor's generation is not the floor's
+    ///    root is [`ProtocolError::RootNotMine`]: the root this device
+    ///    verified was replaced.
+    /// 3. When the floor records this device as active and it is not
+    ///    active in this state (it was removed, or the account moved to a
+    ///    generation it is not part of), the outcome is
+    ///    [`ProtocolError::DeviceNoLongerActive`]: the device re-enrols. A
+    ///    device that was offline while it was removed and the account was
+    ///    then reset sees exactly this, so it is not a security alert.
     pub fn check_floor(&self, through: Position, floor: &AccountFloor) -> ProtocolResult<()> {
         if self.account_id.is_empty()
             || through < floor.through
@@ -150,9 +157,7 @@ impl AccountState {
         let root = usize::try_from(floor.generation)
             .ok()
             .and_then(|generation| self.roots.get(generation));
-        if root.is_none_or(|root| root.row.id != floor.root_id)
-            || (self.generation > floor.generation && floor.active_device.is_some())
-        {
+        if root.is_none_or(|root| root.row.id != floor.root_id) {
             return Err(ProtocolError::RootNotMine);
         }
         if self.generation == floor.generation
@@ -161,6 +166,13 @@ impl AccountState {
             })
         {
             return Err(ProtocolError::StaleState);
+        }
+        if floor
+            .active_device
+            .as_deref()
+            .is_some_and(|device| !self.is_active(device))
+        {
+            return Err(ProtocolError::DeviceNoLongerActive);
         }
         Ok(())
     }

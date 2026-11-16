@@ -1023,10 +1023,21 @@ A later read is refused with `stale-state` if its cut is earlier, its
 generation lower, or (same generation) the floor's epoch is not in its
 chain; it is `root-not-mine` if the chain's root of the floor's generation is
 not the floor's root. A floor of the device's own account also records
-whether the device was active; a later generation is then `root-not-mine`
-on that device too, because an active device never needs a reset (§2.11). The
-floor then advances to the newer state. The client runtime keeps floors for
-spaces and groups as well (§6.3a).
+whether the device was active. If it was, and the device is not active in
+the newer state (it was removed, or the account moved to a generation it is
+not part of), the outcome is `device-no-longer-active`. A device that was
+offline while it was removed and the account was then reset sees exactly
+this, as does an active device whose account another device reset, so it
+is not a security alert: the device wipes its local E2EE state for that
+account (held keys and floors, §6.4), enrols again with a new local device
+(§2.1) and requests approval (§2.5); the SDK tells the user the device must
+be approved again. `root-not-mine` stays reserved for a contradicted root:
+the root of the floor's generation is not the one this device verified
+(for example a different generation-0 root), whatever later generations
+follow it. The checks run in that order: `stale-state`, then
+`root-not-mine`, then `device-no-longer-active`. Otherwise the floor
+advances to the newer state. The client runtime keeps floors for spaces
+and groups as well (§6.3a).
 
 **Private verification.** A device that wants the account key also reads the
 private tables (same cut) and accepts: the identity only if it matches the
@@ -2880,7 +2891,8 @@ state is used: older evidence (an earlier cut, a lower generation, an epoch
 chain that no longer reaches the floor's epoch) is refused with
 `stale-state`, and the runtime fetches again; it never decrypts, writes or
 delivers with the older state. An account whose chain no longer contains the
-floor's root is `root-not-mine` (§2.4). Floors are wiped with the held keys
+floor's root is `root-not-mine`, and an own-account floor whose device is no
+longer active is `device-no-longer-active` (§2.4). Floors are wiped with the held keys
 (§6.4). Protection starts at the device's first observation of each account,
 space or group: before it, the device has nothing to compare with (§8).
 
@@ -2897,8 +2909,10 @@ space or group: before it, the device has nothing to compare with (§8).
 - `deleteClientStorage` removes the namespace's storage and the registered
   private records, and invalidates live handles. It revokes nothing remotely.
 - Membership changes never remove held keys. Records are removed only by
-  sign-out wipe, account change wipe, device removal, explicit deletion, and
-  discard of a failed space creation (§5.4). A wiped store is never recreated
+  sign-out wipe, account change wipe, device removal, re-enrolment after
+  `device-no-longer-active` (§2.4, "Floors": the account's device record,
+  held keys and floors), explicit deletion, and discard of a failed space
+  creation (§5.4). A wiped store is never recreated
   by a late operation.
 - A held-key revision counter advances on every removal, so in-flight reads
   notice and retry (3 attempts).
@@ -2921,7 +2935,9 @@ or `root-unchained` (§2.4 step 1); they never fail replay.
 permanently unusable for E2EE (the remedy is a new account) and is surfaced
 as a security alert, like `root-not-mine`. `root-not-mine` (§2.4) is a security alert
 the SDK surfaces to the user: the account's root is not the one its own
-devices know. `stale-state` (§2.4, "Floors") refuses evidence older than
+devices know. `device-no-longer-active` (§2.4, "Floors") is not an alert:
+this device was removed or the account was reset without it; the device
+wipes its E2EE state for the account and enrols again. `stale-state` (§2.4, "Floors") refuses evidence older than
 state the device already verified.
 Every reader from the first release knows all of them, so that rows written
 by a later schema version degrade to a reported gap. An equality query on a
@@ -3095,7 +3111,9 @@ Non-goals and explicit limits:
 - **A forged reset of an app account denies service, within the trust
   boundary.** Whoever can write as an app account (its sign-in or the server)
   can write a reset root for it. The account's own devices then raise
-  `root-not-mine` or lose their active state, and other accounts' clients
+  `device-no-longer-active` and must be approved again in the new
+  generation (they cannot tell a forged reset from one by another of the
+  account's devices), and other accounts' clients
   follow the new generation; but the reset generation receives no space or
   group key until a key manager approves it (§2.11), so the forgery gains no
   content without that approval. A local-first account cannot be reset this

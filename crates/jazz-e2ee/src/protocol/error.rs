@@ -216,6 +216,14 @@ pub enum ProtocolError {
     /// (`stale-state`, §2.4 "Floors"): a rollback or withheld rows.
     #[error("E2EE evidence is older than state already verified")]
     StaleState,
+    /// This device was active in the account state it last verified and is
+    /// not active in the newer one (`device-no-longer-active`, §2.4
+    /// "Floors"): it was removed, or the account was reset to a generation
+    /// it is not part of. The device wipes its E2EE state for the account
+    /// and enrols again (a new device ID, approved as in §2.5). Not a
+    /// security alert.
+    #[error("This device is no longer an active E2EE device of the account")]
+    DeviceNoLongerActive,
 }
 
 impl From<Error> for ProtocolError {
@@ -242,6 +250,7 @@ impl ProtocolError {
             Self::Recovery(kind) => Some(kind.code()),
             Self::RootNotMine => Some("root-not-mine"),
             Self::StaleState => Some("stale-state"),
+            Self::DeviceNoLongerActive => Some("device-no-longer-active"),
             _ => None,
         }
     }
