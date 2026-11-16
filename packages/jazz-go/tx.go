@@ -27,24 +27,18 @@ type TxOption func(*txOptions)
 
 type txOptions struct {
 	serializable bool
-	mergeable    bool
 	tier         WriteTier
 }
 
-// Serializable says the transaction is serializable: its reads are checked
-// at commit, which fails with ErrConflict if they changed meanwhile, and
-// is not retried. A Tx without Mergeable is serializable, so this only
-// documents it at the call.
-func Serializable() TxOption {
-	return func(o *txOptions) { o.serializable, o.mergeable = true, false }
-}
+// Serializable makes the transaction serializable, as TS's
+// db.serializableTransaction: its reads are checked at commit, which fails
+// with ErrConflict if another write changed them meanwhile, and is not
+// retried.
+func Serializable() TxOption { return func(o *txOptions) { o.serializable = true } }
 
-// Mergeable makes the transaction mergeable, as TS's default transaction:
-// its writes merge with concurrent ones, and its commit never fails with
-// ErrConflict.
-func Mergeable() TxOption {
-	return func(o *txOptions) { o.mergeable, o.serializable = true, false }
-}
+// Mergeable makes the transaction mergeable, which a Tx is by default (as
+// TS's db.transaction): it only says so at the call.
+func Mergeable() TxOption { return func(o *txOptions) { o.serializable = false } }
 
 // CommitAt makes the commit return once the transaction has reached tier.
 func CommitAt(tier WriteTier) TxOption { return func(o *txOptions) { o.tier = tier } }
@@ -52,6 +46,11 @@ func CommitAt(tier WriteTier) TxOption { return func(o *txOptions) { o.tier = ti
 // Tx runs fn in a transaction. It commits when fn returns nil, and rolls
 // back when fn returns an error (which Tx returns) or panics (Tx rolls
 // back and panics again).
+//
+// A Tx is mergeable, as TS's db.transaction: its writes merge with
+// concurrent ones by Jazz's normal rules, and its commit never fails with
+// ErrConflict. Pass Serializable() to have its reads checked at commit
+// instead.
 //
 // When ctx ends during the commit, Tx returns ctx.Err() at once, but the
 // commit still runs to its end: the transaction may have committed. Check
@@ -64,13 +63,7 @@ func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (
 	var begun struct {
 		Tx string `json:"tx"`
 	}
-	begin := map[string]any{}
-	if o.serializable {
-		begin["serializable"] = true
-	}
-	if o.mergeable {
-		begin["serializable"] = false
-	}
+	begin := map[string]any{"serializable": o.serializable}
 	if err := db.call(ctx, "txBegin", begin, &begun); err != nil {
 		return err
 	}
