@@ -2984,12 +2984,17 @@ export class Db {
             timeoutMs,
           );
     try {
-      await this.connection.waitForSync(control.signal);
+      await this.waitForUpstreamSync(control.signal);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       signal?.removeEventListener("abort", forward);
       this.shutdownAbort.signal.removeEventListener("abort", shutdown);
     }
+  }
+
+  /** @internal How {@link waitForSync} waits; a backend `Db` waits on its client. */
+  protected waitForUpstreamSync(signal: AbortSignal): Promise<void> {
+    return this.connection.waitForSync(signal);
   }
 
   getConfig(): DbConfig {

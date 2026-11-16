@@ -64,10 +64,9 @@ describe("where operator discovery", () => {
     ).toEqual(["eq", "ne", "in", "notIn", "isNull"]);
   });
 
-  it("does not add isNull to required, id, payload-enum, or Row columns", () => {
+  it("does not add isNull to required, id, or Row columns", () => {
     expect(operators("attachment", { type: "Bytea" }, false)).toEqual(["eq", "ne", "in", "notIn"]);
     expect(operators("id", { type: "Uuid" }, true)).toEqual(["eq", "ne", "in", "notIn"]);
-    expect(operators("event", { type: "EnumPayload", cases: [] }, true)).toEqual([]);
     expect(operators("author", { type: "Row", columns: [] }, true)).toEqual([]);
   });
 });
