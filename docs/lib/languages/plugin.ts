@@ -22,7 +22,9 @@ export function languageTabsPlugin(): Plugin {
     name: "jazz-language-tabs",
     doc: {
       vfile(file) {
-        const slug = file.path.replace(/^(?:.*[\\/])?content[\\/]docs[\\/]/, "").replace(/\.mdx?$/, "");
+        const slug = file.path
+          .replace(/^(?:.*[\\/])?content[\\/]docs[\\/]/, "")
+          .replace(/\.mdx?$/, "");
         const filtered = markExperimental(
           filterLanguageTabs(String(file.value), LANGUAGES, file.path),
           slug,

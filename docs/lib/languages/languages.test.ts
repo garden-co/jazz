@@ -96,8 +96,12 @@ describe("filterLanguageTabs", () => {
     expect(out).toContain('<Tab value="Rust">\n    <ExperimentalBadge language="Rust" />\n');
     expect(out).not.toContain('language="TypeScript"');
     const setup = markExperimental("---\ntitle: Rust\n---\n\nBody\n", "setup/rust", exp);
-    expect(setup).toBe('---\ntitle: Rust\n---\n\n<ExperimentalBadge language="Rust" />\n\n\nBody\n');
-    expect(markExperimental("Body\n", "setup/rust", exp)).toBe('\n<ExperimentalBadge language="Rust" />\n\nBody\n');
+    expect(setup).toBe(
+      '---\ntitle: Rust\n---\n\n<ExperimentalBadge language="Rust" />\n\n\nBody\n',
+    );
+    expect(markExperimental("Body\n", "setup/rust", exp)).toBe(
+      '\n<ExperimentalBadge language="Rust" />\n\nBody\n',
+    );
     expect(markExperimental(tabs, "reference/language-support", exp)).toBe(tabs);
   });
 
