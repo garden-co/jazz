@@ -9535,6 +9535,10 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
+    /// The branch view it read through (`None`: the root view), resolved,
+    /// and as the reader named it (for the authority to resolve again).
+    view: Option<View>,
+    source: ReadViewSourceSpec,
     rows: Vec<(RowUuid, sync::Rank)>,
 }
 
@@ -10174,6 +10178,7 @@ impl Db {
                 for read in reads {
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
+                        view: read.view.clone(),
                         ..ReadSpec::default()
                     };
                     let now = inner.read_versions(&read.prepared, None, &spec)?;
@@ -10193,6 +10198,16 @@ impl Db {
                         ));
                     }
                 }
+            }
+            if reads
+                .iter()
+                .any(|read| !matches!(read.source, ReadViewSourceSpec::Current))
+            {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "Committing a serializable transaction that read through a branch view to a \
+                     server is not supported yet",
+                ));
             }
             let reads = {
                 let inner = self.inner();
@@ -10248,6 +10263,7 @@ impl Db {
             for read in reads {
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
+                    view: read.view.clone(),
                     ..ReadSpec::default()
                 };
                 if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
@@ -10665,6 +10681,8 @@ impl Db {
         include_deleted: bool,
         prefix: usize,
         identity: Option<AuthorSubject>,
+        view: Option<View>,
+        source: &ReadViewSourceSpec,
     ) -> Result<(), Error> {
         // A mergeable read records nothing: peek without the store gate,
         // so the batch's cached overlay stays for its next stage or read.
@@ -10687,9 +10705,13 @@ impl Db {
         else {
             return Ok(());
         };
+        // A branch read records the rows of its view: the head's, or the
+        // base's it inherits, so a change to either (or a head row masking
+        // a base one) conflicts.
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
+            view: view.clone(),
             ..ReadSpec::default()
         };
         let rows = inner.read_versions(prepared, None, &read)?;
@@ -10704,6 +10726,8 @@ impl Db {
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
+                view,
+                source: source.clone(),
                 rows,
             });
         }
@@ -10885,19 +10909,6 @@ impl TxRef<'_> {
                 ));
             }
             ReadViewSourceSpec::BranchView { .. } => {
-                if matches!(
-                    self.db.inner.staging().batches.get(&self.id),
-                    Some(Batch {
-                        kind: BatchKind::Serializable { .. },
-                        ..
-                    })
-                ) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "Reading through a branch view inside a serializable transaction is not \
-                         supported yet",
-                    ));
-                }
                 let opts = ReadOpts {
                     read_view: ReadViewSpec {
                         source: source.clone(),
@@ -10927,7 +10938,15 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix, view);
+        let reading = self.read_admitted(
+            prepared,
+            include_deleted,
+            identity,
+            tier,
+            prefix,
+            view,
+            source,
+        );
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -10965,6 +10984,7 @@ impl TxRef<'_> {
         tier: ReadTier,
         prefix: BatchPrefix,
         view: Option<View>,
+        source: &ReadViewSourceSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
@@ -11040,7 +11060,7 @@ impl TxRef<'_> {
                     None,
                     None,
                     tier == ReadTier::Remote,
-                    &ReadViewSourceSpec::Current,
+                    source,
                 )
                 .await?;
             if let Some(Batch {
@@ -11084,8 +11104,15 @@ impl TxRef<'_> {
                 Ok((rows, prepared))
             })
             .await?;
-        self.db
-            .record_read(self.id, &prepared, include_deleted, prefix.ops, identity)?;
+        self.db.record_read(
+            self.id,
+            &prepared,
+            include_deleted,
+            prefix.ops,
+            identity,
+            view,
+            source,
+        )?;
         Ok(rows)
     }
 
