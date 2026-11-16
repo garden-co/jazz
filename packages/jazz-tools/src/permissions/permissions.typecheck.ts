@@ -101,8 +101,8 @@ exists.members({}).hop("chats");
 definePermissions({ chats: { select: true }, members: {} });
 
 // `old` outside updateTo's direct comparisons.
-// @ts-expect-error old values aren't values for exists
 definePermissions({
+  // @ts-expect-error old values aren't values for exists
   chats: { updateIf: true, updateTo: (c, old) => exists.chats({ size: old.size }) },
   members: {},
 });
