@@ -11,6 +11,7 @@ export { createJazzClient, type JazzClientConfig } from "./create-jazz-session.j
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
 } from "../session/jazz-session.js";

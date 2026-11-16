@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { mount, unmount, tick, createRawSnippet, getAllContexts } from "svelte";
 import JazzProvider from "./JazzProvider.svelte";
-import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
+import {
+  ownJazzSession,
+  startJazzSession,
+  type JazzSession,
+  type JazzSessionErrorViewProps,
+} from "../session/jazz-session.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "../session/state.js";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
@@ -87,6 +92,47 @@ describe("Svelte Jazz session", () => {
     (target.querySelector("button") as HTMLButtonElement).click();
     await settle();
     expect(create).toHaveBeenCalledTimes(2);
+    expect(target.textContent).toBe("Ready");
+    await unmount(component);
+    await settle();
+    create.mockRestore();
+  });
+  it("gives the error snippet { error, recovery, retry }, whose retry never rejects", async () => {
+    const events: string[] = [];
+    const { core } = await setup(events);
+    const factory = await import("../session/create-jazz-session.js");
+    const create = vi
+      .spyOn(factory, "openBrowserSessionCore")
+      .mockRejectedValueOnce(new Error("startup failed"))
+      .mockRejectedValueOnce(new Error("still failing"))
+      .mockResolvedValueOnce(core);
+    const seen: JazzSessionErrorViewProps[] = [];
+    const target = document.createElement("div");
+    const component = mount(JazzProvider, {
+      target,
+      props: {
+        config: { scope: "test", serverUrl: "http://localhost:1", initial: "device" },
+        children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
+        error: createRawSnippet((view: () => JazzSessionErrorViewProps) => {
+          seen.push(view());
+          return {
+            render: () => `<button>${view().error.message} (${view().recovery})</button>`,
+            setup: (element) => {
+              element.addEventListener("click", () => void view().retry());
+            },
+          };
+        }),
+      },
+    });
+    await settle();
+    expect(target.textContent).toBe("startup failed (session)");
+    expect(Object.keys(seen.at(-1)!).sort()).toEqual(["error", "recovery", "retry"]);
+    await expect(seen.at(-1)!.retry()).resolves.toBeUndefined();
+    await settle();
+    expect(target.textContent).toBe("still failing (session)");
+    (target.querySelector("button") as HTMLButtonElement).click();
+    await settle();
+    expect(create).toHaveBeenCalledTimes(3);
     expect(target.textContent).toBe("Ready");
     await unmount(component);
     await settle();

@@ -12,9 +12,11 @@ import {
 import {
   attachJazzSessionConsumer,
   jazzSessionActions,
+  jazzSessionErrorViewProps,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
+  type JazzSessionErrorViewProps,
   type JazzSessionSnapshot,
 } from "../session/jazz-session.js";
 import type { SessionCore } from "../session/state.js";
@@ -44,8 +46,11 @@ export type JazzSessionViewProps<Client = CoreJazzClient> = {
   signedOut?: ReactNode;
   /** Shown while the session starts or switches users. */
   loading?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
-  /** Shown when there is no usable client (`status: "error"`). */
-  error?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
+  /**
+   * Shown when there is no usable client (`status: "error"`), with
+   * `{ error, recovery, retry }`. The rest of the session is in `useJazzSession()`.
+   */
+  error?: ReactNode | ((props: JazzSessionErrorViewProps) => ReactNode);
   /**
    * Shown once the session is closed (`status: "closed"`, after
    * `session.close()`): it has no client and never starts again. Nothing by
@@ -156,6 +161,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
   );
   const render = (view: JazzSessionViewProps<Client>["loading"]) =>
     typeof view === "function" ? view(state) : view;
+
   return (
     <SessionContext.Provider value={state}>
       {state.status === "ready" && state.client ? (
@@ -163,7 +169,11 @@ function JazzSessionView<Client extends CoreJazzClient>({
       ) : state.status === "signed-out" ? (
         signedOut
       ) : state.status === "error" ? (
-        render(error)
+        typeof error === "function" ? (
+          error(jazzSessionErrorViewProps(session, state))
+        ) : (
+          error
+        )
       ) : state.status === "closed" ? (
         render(closed)
       ) : (

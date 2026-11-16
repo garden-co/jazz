@@ -156,6 +156,46 @@ describe("Vue JazzProvider", () => {
     app.unmount();
     await flush();
   });
+  it("gives the #error slot { error, recovery, retry }, whose retry never rejects", async () => {
+    const { session } = await fixture();
+    mocks.factory
+      .mockReset()
+      .mockRejectedValueOnce(new Error("startup failed"))
+      .mockRejectedValueOnce(new Error("still failing"))
+      .mockResolvedValue(session);
+    const seen: Record<string, unknown>[] = [];
+    const node = document.createElement("div");
+    const app = createApp({
+      render: () =>
+        h(
+          JazzProvider,
+          { config: { scope: "test" } },
+          {
+            default: () => h("p", "active"),
+            error: (props: { error: Error; recovery: string; retry: () => Promise<void> }) => {
+              seen.push(props);
+              return h(
+                "button",
+                { onClick: props.retry },
+                `${props.error.message} (${props.recovery})`,
+              );
+            },
+          },
+        ),
+    });
+    app.mount(node);
+    await flush();
+    expect(node.textContent).toBe("startup failed (session)");
+    expect(Object.keys(seen.at(-1)!).sort()).toEqual(["error", "recovery", "retry"]);
+    await expect((seen.at(-1)!.retry as () => Promise<void>)()).resolves.toBeUndefined();
+    await flush();
+    expect(node.textContent).toBe("still failing (session)");
+    node.querySelector("button")!.click();
+    await flush();
+    expect(node.textContent).toBe("active");
+    app.unmount();
+    await flush();
+  });
   it("keeps captured runtime configuration", async () => {
     const { session } = await fixture();
     mocks.factory.mockReset().mockResolvedValue(session);

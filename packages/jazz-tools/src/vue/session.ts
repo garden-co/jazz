@@ -18,6 +18,7 @@ import type { JazzClient } from "../web/create-jazz-client.js";
 import {
   attachJazzSessionConsumer,
   jazzSessionActions,
+  jazzSessionErrorViewProps,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
@@ -127,7 +128,6 @@ export const JazzProvider = defineComponent({
       lease.release();
       if (owned) void session.close().catch(() => {});
     });
-    const retry = () => session.retry().catch(() => {});
     const loading = () => slots.loading?.() ?? h("p", { role: "status" }, "Loading Jazz…");
     return () => {
       const state = snapshot.value;
@@ -140,14 +140,16 @@ export const JazzProvider = defineComponent({
       if (state.status === "signed-out") return slots.signedOut?.() ?? null;
       // A closed session has no client and never starts again.
       if (state.status === "closed") return slots.closed?.() ?? null;
-      if (state.status === "error")
+      if (state.status === "error") {
+        const view = jazzSessionErrorViewProps(session, state);
         return (
-          slots.error?.({ error: state.error, retry }) ??
+          slots.error?.(view) ??
           h("div", { role: "alert" }, [
-            h("p", state.error?.message ?? "Jazz could not start"),
-            h("button", { type: "button", onClick: () => void retry() }, "Retry"),
+            h("p", view.error.message),
+            h("button", { type: "button", onClick: () => void view.retry() }, "Retry"),
           ])
         );
+      }
       return loading();
     };
   },
