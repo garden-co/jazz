@@ -991,7 +991,7 @@ These results are advice, not permission enforcement. A result can become stale,
 means Jazz could not give a definite answer. The authority still makes the final decision when the
 read or write reaches it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#dry-run-permissions-ts
@@ -1002,15 +1002,27 @@ read or write reaches it.
       ../examples/docs/todo-effect/src/docs-snippets.ts#dry-run-permissions-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#dry-run-permissions-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#dry-run-permissions-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-permission-advice-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-permission-advice-kotlin
     </include>
 
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#dry-run-permissions-go
+      ../examples/docs/todo-client-go/snippets_test.go#dry-run-permissions-go
     </include>
 
   </Tab>
