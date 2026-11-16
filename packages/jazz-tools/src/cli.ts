@@ -419,7 +419,7 @@ function printHelp(): void {
   );
   console.log("  migrations graph      Visualize the full migration graph");
   console.log(
-    "  upgrade               Convert an alpha.64 app (schema.ts, permissions.ts, migrations/) to the files",
+    "  upgrade               Convert an alpha.65 app to alpha.66's schema.ts (or write it from a JSON-only app's files)",
   );
   console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",

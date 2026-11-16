@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 /**
  * `jazz-tools upgrade` end to end, on alpha.65 apps (from the examples at
  * v2.0.0-alpha.65-rc.1, trimmed), whose JSON files the published
@@ -87,6 +88,19 @@ function expectGolden(
     expect(text, path).toBe(readFileSync(join(expectedDir, path), "utf8"));
   }
   if (options.generated !== false) expect(generated, "jazz.generated.ts").toBeDefined();
+}
+
+/** The app's own (alpha.65) `validate`, which writes its JSON files. */
+function validateWithOwnJazzTools(dir: string): void {
+  execFileSync(
+    process.execPath,
+    [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
+    {
+      cwd: dir,
+      stdio: "pipe",
+      env: { ...process.env, UPGRADE_FIXTURE_ROOM: "lobby" },
+    },
+  );
 }
 
 async function identityOf(dir: string) {
@@ -189,13 +203,90 @@ describe("jazz-tools upgrade: conversions", () => {
       "canManage($chat)": "member($chat)",
     };
     writeFileSync(file, `${JSON.stringify(withDefs, null, 2)}\n`);
-    const report = await upgrade(dir, { skipFreshCheck: true });
+    // alpha.65's own check runs too: the JSON isn't stale for having `defs`.
+    const report = await upgrade(dir);
     expect(await identityOf(dir)).toEqual(before);
     expect(report.notes.join("\n")).toContain(
       "`defs` (member($chat), canManage($chat)) were expanded",
     );
     expect(readFileSync(join(dir, "schema.ts"), "utf8")).toContain(
       "const isChatMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: session.user });",
+    );
+  });
+
+  it("writes a JSON-only app's TS (defs expanded, history as migrations/), keeping the hashes and bundle id", async () => {
+    const dir = fixture("json-only");
+    // The same app with its policies written out, as alpha.65 loaded the defs.
+    const inlined = await artifactIdentity(
+      readFileSync(join(dir, "jazz.app.json"), "utf8"),
+      readFileSync(join(FIXTURES, "backend-history", "jazz.permissions.json"), "utf8"),
+    );
+    const report = await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(inlined);
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toContain("export const schema = s.defineSchema({");
+    expect(schema).toContain("export const permissions = definePermissions({");
+    expect(report.notes.join("\n")).toContain("`defs` (mine(), editable()) were expanded");
+    expect(report.notes.join("\n")).toContain("are unchanged");
+    const files = Object.keys(projectFiles(dir));
+    expect(files.filter((f) => f.startsWith("migrations/snapshots/"))).toHaveLength(2);
+    expect(files.filter((f) => /^migrations\/[^/]+\.ts$/.test(f))).toHaveLength(1);
+    expect(files).toContain("src/jazz_app.rs");
+  });
+
+  it("reports the environment reads of the old permissions and marks them in the printed ones", async () => {
+    const dir = fixture("env-permissions");
+    // As set where the app last ran `validate`: the check runs it again.
+    process.env.UPGRADE_FIXTURE_ROOM = "lobby";
+    let report: UpgradeReport;
+    try {
+      report = await upgrade(dir);
+    } finally {
+      delete process.env.UPGRADE_FIXTURE_ROOM;
+    }
+    expect(report.notes.join("\n")).toMatch(
+      /read the environment[\s\S]*permissions\.ts:\d+: reads `process\.env\.UPGRADE_FIXTURE_ROOM`/,
+    );
+    expect(readFileSync(join(dir, "schema.ts"), "utf8")).toMatch(
+      /\/\/ TODO: permissions\.ts:\d+ read `process\.env\.UPGRADE_FIXTURE_ROOM`/,
+    );
+  });
+
+  it("runs the app's own validate on its own binaries, whatever this process's Jazz overrides say", async () => {
+    // As in the monorepo's sealed test runs, which point jazz-napi at this
+    // release's build: inherited, alpha.65's validate would load it (or, here,
+    // fail to load a binding that isn't there).
+    const saved = { ...process.env };
+    Object.assign(process.env, {
+      JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+      JAZZ_CORRECTNESS_NAPI_BINDING: "/nonexistent/jazz-napi.node",
+      JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "0",
+      NAPI_RS_NATIVE_LIBRARY_PATH: "/nonexistent/jazz-napi.node",
+    });
+    try {
+      const report = await upgrade(fixture("chat"), { dryRun: true });
+      expect(report.written).toContain("schema.ts");
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
+
+  it("reports type errors the project already had apart, and doesn't count them", async () => {
+    const dir = fixture("backend-history");
+    const server = join(dir, "server", "jazz.ts");
+    writeFileSync(
+      server,
+      `${readFileSync(server, "utf8")}\nexport const planted: number = "not a number";\n`,
+    );
+    const report = await upgradeProject({ dir, generate: testGenerate });
+    const planted = (errors: string[]) =>
+      errors.filter((e) => e.includes("not assignable to type 'number'"));
+    expect(planted(report.preexistingTypeErrors)).toHaveLength(1);
+    expect(planted(report.preexistingTypeErrors)[0]).toMatch(/^server\/jazz\.ts:\d+:\d+: /);
+    expect(planted(report.typeErrors)).toHaveLength(0);
+    expect(formatReport(report)).toContain(
+      "the project had before the conversion too (not upgrade's, and not counted)",
     );
   });
 
@@ -255,6 +346,46 @@ describe("jazz-tools upgrade: refusals", () => {
       ),
     );
     await refused(dir, /`validate --check` refused the app files/);
+  });
+
+  it("refuses `true` inside anyOf/allOf, the trace of a condition that compiled to nothing", async () => {
+    const dir = fixture("env-permissions");
+    const permissions = join(dir, "permissions.ts");
+    writeFileSync(
+      permissions,
+      readFileSync(permissions, "utf8").replace(
+        "process.env.UPGRADE_FIXTURE_ROOM!",
+        "undefined as unknown as string",
+      ),
+    );
+    validateWithOwnJazzTools(dir);
+    await refused(dir, /`true` inside anyOf\/allOf at tables\.messages\.read\.anyOf\[0\]/);
+  });
+
+  it("refuses enum columns with cases, which alpha.65 removed, naming each", async () => {
+    await refused(
+      fixture("enum-cases"),
+      /column "issues\.kind" declares an enum whose cases carry fields, which Jazz no longer supports/,
+    );
+  });
+
+  it("refuses computed columns and transforms, which alpha.66 doesn't convert yet", async () => {
+    await refused(fixture("computed"), /computed columns and transforms is not supported yet/);
+  });
+
+  it("refuses an app whose schema.ts changed since its latest snapshot", async () => {
+    const dir = fixture("backend-history");
+    const schema = join(dir, "schema.ts");
+    writeFileSync(
+      schema,
+      readFileSync(schema, "utf8").replace(
+        "title: s.string(),",
+        "title: s.string(), extra: s.string(),",
+      ),
+    );
+    // alpha.65's validate writes the files, warning that the schema changed without a migration.
+    validateWithOwnJazzTools(dir);
+    await refused(dir, /schema\.ts changed since its latest snapshot/);
   });
 
   it("refuses a project without jazz.app.json", async () => {
