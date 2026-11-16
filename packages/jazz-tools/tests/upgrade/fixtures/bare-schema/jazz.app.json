@@ -1,0 +1,35 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "boards": {
+      "columns": { "title": "string", "color": "string?", "owner_id": "uuid" },
+      "relations": { "notes": { "reverse": "notes", "relation": "board" } }
+    },
+    "notes": {
+      "columns": { "text": "string", "owner_id": "uuid", "boardId": "uuid?" },
+      "relations": { "board": { "rel": "boards", "column": "boardId" } }
+    }
+  },
+  "history": {
+    "82d3aaff21db": {
+      "tables": {
+        "boards": { "columns": { "title": "string", "owner_id": "uuid" } },
+        "notes": {
+          "columns": {
+            "text": "string",
+            "owner_id": "uuid",
+            "boardId": { "type": "uuid", "optional": true, "references": "boards" }
+          }
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "82d3aaff21db",
+      "migrate": { "boards": { "color": { "add": "string", "default": null } } }
+    }
+  ],
+  "slices": { "app": ["notes", "boards"], "notesOnly": ["notes"] }
+}
