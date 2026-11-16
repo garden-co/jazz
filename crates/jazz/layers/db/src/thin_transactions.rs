@@ -77,12 +77,21 @@ pub struct ThinTransactions {
 }
 
 impl ThinTransactions {
-    pub fn new(identity: AuthorSubject) -> Self {
-        Self {
+    /// The transactions of the thin session `identity`. Never SYSTEM: a
+    /// thin session is a user's, and the client serving it must be linked
+    /// to the core as that user, whose checks its uploads pass.
+    pub fn new(identity: AuthorSubject) -> Result<Self, Error> {
+        if identity == AuthorSubject::SYSTEM {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "thin transactions run as the thin session's user, never as SYSTEM",
+            ));
+        }
+        Ok(Self {
             identity,
             open: BTreeMap::new(),
             streams: BTreeMap::new(),
-        }
+        })
     }
 
     /// Whether request `op` is served here rather than by the core: it
@@ -145,12 +154,13 @@ impl ThinTransactions {
         }
     }
 
-    /// Load row `row` of `table` into the client before transaction `open`
-    /// writes to it, as the core held every row its own transactions wrote
-    /// to: a client stages a write to an existing row only over the row it
-    /// holds. A serializable transaction reads it from the core at its
-    /// snapshot (the core validates the rows it writes in any case); a
-    /// mergeable one fetches it unless the client already holds it.
+    /// Load row `row` of `table` from the core before transaction `open`
+    /// writes to it, as the core wrote over its current row: a client
+    /// stages a write to an existing row only over the row it holds, and
+    /// one it holds may be out of date (deleted on the core since, say). A
+    /// serializable transaction reads it at its snapshot (the core
+    /// validates the rows it writes in any case); a mergeable one fetches
+    /// the current row.
     async fn load_row(
         &self,
         db: &Db,
@@ -162,24 +172,11 @@ impl ThinTransactions {
         let query = Query::from(table).filter(eq(col("id"), lit(Value::Uuid(row.0))));
         let query = postcard::to_allocvec(&query)
             .map_err(|error| argument(format!("encode row read: {error}")))?;
-        let mut opts = ReadOpts {
-            tier: ReadTier::LocalOnly,
+        let mut remote = ReadOpts {
+            tier: ReadTier::Remote,
             ..ReadOpts::default()
         };
-        opts.read_view.include_deleted = true;
-        if !serializable {
-            let held = db
-                .all_serialized_query(&query, opts.clone(), None, None, None)
-                .await
-                .map_err(|error| error_body(&error))?;
-            if !result_is_empty(&held) {
-                return Ok(());
-            }
-        }
-        let remote = ReadOpts {
-            tier: ReadTier::Remote,
-            ..opts
-        };
+        remote.read_view.include_deleted = true;
         let in_transaction = serializable.then_some(open);
         db.all_serialized_query(&query, remote, in_transaction, None, None)
             .await
@@ -539,13 +536,6 @@ impl ThinTransactions {
 
 /// A core error's answer, by its stable snake_case code, as the core's
 /// own thin answers carry it.
-fn result_is_empty(result: &SerializedReadResult) -> bool {
-    match result {
-        SerializedReadResult::Rows(rows) => rows.is_empty(),
-        SerializedReadResult::Relation(snapshot) => snapshot.rows.is_empty(),
-    }
-}
-
 fn error_body(error: &Error) -> ThinBody {
     ThinBody::Error {
         code: error.code.as_str().to_owned(),

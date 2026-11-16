@@ -17,7 +17,8 @@ use jazz::schema::JazzSchema;
 use jazz::thin::{ThinBody, ThinOp};
 use jazz::thin_transactions::ThinTransactions;
 use jazz::tools::{
-    ColumnType, OpenTransactionId, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+    CmpOp, ColumnType, OpenTransactionId, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies,
+    TableSchemaBuilder,
 };
 
 use common::{allow_all_policies, compile_schema};
@@ -29,6 +30,18 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("notes")
                     .column("title", ColumnType::Text)
                     .policies(allow_all_policies()),
+            )
+            // Each session writes only rows it owns.
+            .table(
+                TableSchemaBuilder::new("owned")
+                    .column("owner", ColumnType::Text)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(own_rows())
+                            .with_update(Some(own_rows()), own_rows()),
+                    ),
             )
             // Readable by everyone, writable by no session.
             .table(
@@ -42,6 +55,15 @@ fn schema() -> JazzSchema {
             )
             .build(),
     )
+}
+
+/// The row's `owner` is the writing session's subject.
+fn own_rows() -> PolicyExpr {
+    PolicyExpr::Cmp {
+        column: "owner".to_owned(),
+        op: CmpOp::Eq,
+        value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
+    }
 }
 
 fn authority() -> Binding {
@@ -63,20 +85,30 @@ struct Session {
     transactions: ThinTransactions,
 }
 
+fn session_user() -> AuthorSubject {
+    AuthorSubject::for_test_bytes([0xa1; 16])
+}
+
 impl Session {
     fn open() -> Self {
+        Self::open_with(session_user())
+    }
+
+    /// The session's client with an identity of its own, `own`, linked to
+    /// the core as the session all the same.
+    fn open_with(own: AuthorSubject) -> Self {
         let core = authority();
         let identity = DbIdentity {
             node: NodeUuid::from_bytes([0xa1; 16]),
-            author: AuthorSubject::for_test_bytes([0xa1; 16]),
+            author: own,
         };
         let db = block_on(Db::open(DbConfig::new(schema(), identity))).unwrap();
         let client = Binding::new(db, identity, false);
         let upstream = client.connect_upstream();
         let subscriber = core
-            .accept_subscriber(client.author(), Default::default())
+            .accept_subscriber(session_user(), Default::default())
             .unwrap();
-        let transactions = ThinTransactions::new(client.author());
+        let transactions = ThinTransactions::new(session_user()).unwrap();
         Self {
             core,
             client,
@@ -236,7 +268,7 @@ fn core_row(session: &Session, value: &str) -> RowUuid {
 
 #[test]
 fn only_transaction_requests_are_served_from_the_sessions_client() {
-    let transactions = ThinTransactions::new(AuthorSubject::for_test_bytes([1; 16]));
+    let transactions = ThinTransactions::new(AuthorSubject::for_test_bytes([1; 16])).unwrap();
     let tx = Some("0190f3e4000070008000000000000007".to_owned());
     for op in [
         ThinOp::Begin {
@@ -465,7 +497,7 @@ fn a_rolled_back_or_released_transaction_never_reaches_the_core() {
         client,
         upstream,
         subscriber,
-        transactions: ThinTransactions::new(AuthorSubject::SYSTEM),
+        transactions: ThinTransactions::new(AuthorSubject::for_test_bytes([0xa1; 16])).unwrap(),
     };
     session.pump();
     assert!(titles(&session.core).is_empty());
@@ -578,4 +610,152 @@ fn a_transaction_writes_rows_it_never_read() {
         assert!(matches!(body, ThinBody::Written { .. }), "{kind}: {body:?}");
         assert_eq!(titles(&session.core), ["updated"], "{kind}");
     }
+}
+
+fn owned(owner: AuthorSubject, value: &str) -> Vec<u8> {
+    let descriptor =
+        RecordDescriptor::new([("owner", ValueType::String), ("title", ValueType::String)]);
+    let record = OwnedRecord::new(
+        descriptor
+            .create(&[
+                Value::String(owner.principal_parts().1),
+                Value::String(value.to_owned()),
+            ])
+            .unwrap(),
+        descriptor,
+    );
+    jazz::binding_codec::encode_named_cells(&record).unwrap()
+}
+
+fn insert_owned(transaction: &str, owner: AuthorSubject, value: &str) -> ThinOp {
+    ThinOp::Insert {
+        table: "owned".to_owned(),
+        cells: owned(owner, value),
+        options: Vec::new(),
+        transaction: Some(transaction.to_owned()),
+    }
+}
+
+#[test]
+fn staged_writes_are_the_sessions_whatever_the_clients_own_identity() {
+    // The backend's client has an identity of its own; the session's
+    // writes are the session's all the same, and its policies decide.
+    let backend = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let mut session = Session::open_with(backend);
+    let tx = session.begin("mergeable");
+    session.serve(2, insert_owned(&tx, session_user(), "mine"));
+    let body = session.serve(3, commit(&tx));
+    assert!(matches!(body, ThinBody::Written { .. }), "{body:?}");
+    assert_eq!(titles_in(&session.core, "owned"), ["mine"]);
+
+    // A row owned by anyone else, the backend's own identity included, is
+    // refused, and the transaction with it.
+    for other in [backend, AuthorSubject::for_test_bytes([0xc0; 16])] {
+        let tx = session.begin("mergeable");
+        session.serve(4, insert(&tx, "beside it"));
+        session.serve(5, insert_owned(&tx, other, "not mine"));
+        let body = session.serve(6, commit(&tx));
+        assert!(matches!(body, ThinBody::Error { .. }), "{body:?}");
+    }
+    assert_eq!(titles_in(&session.core, "owned"), ["mine"]);
+    assert!(titles(&session.core).is_empty());
+}
+
+#[test]
+fn a_system_session_is_refused() {
+    assert!(ThinTransactions::new(AuthorSubject::SYSTEM).is_err());
+}
+
+#[test]
+fn a_rolled_back_or_released_transaction_leaves_no_handle() {
+    let mut session = Session::open();
+    let rolled_back = session.begin("mergeable");
+    session.serve(2, insert(&rolled_back, "x"));
+    session.serve(
+        3,
+        ThinOp::Rollback {
+            transaction: rolled_back.clone(),
+        },
+    );
+    let released = session.begin("serializable");
+    session.serve(4, insert(&released, "y"));
+    let Session {
+        client,
+        transactions,
+        ..
+    } = session;
+    block_on(transactions.release(&client.db));
+    for (tx, serializable) in [(rolled_back, false), (released, true)] {
+        let id = jazz::binding_host::open_transaction(&tx).unwrap();
+        let commit = if serializable {
+            block_on(client.db.commit_serializable_handle(id))
+        } else {
+            block_on(client.db.commit_mergeable_handle(id))
+        };
+        assert!(commit.is_err(), "{tx} has no handle left");
+    }
+}
+
+#[test]
+fn a_write_refused_for_its_rows_state_fails_the_commit() {
+    let mut session = Session::open();
+    let tx = session.begin("mergeable");
+    // Patching nothing cannot create a row: the call stages, and the
+    // commit carries the refusal, before anything is uploaded.
+    let staged = session.serve(
+        2,
+        ThinOp::Upsert {
+            table: "notes".to_owned(),
+            row: [0x42; 16],
+            cells: {
+                let descriptor = RecordDescriptor::new(Vec::<(String, ValueType)>::new());
+                jazz::binding_codec::encode_named_cells(&OwnedRecord::new(
+                    descriptor.create(&[]).unwrap(),
+                    descriptor,
+                ))
+                .unwrap()
+            },
+            options: Vec::new(),
+            transaction: Some(tx.clone()),
+        },
+    );
+    assert!(matches!(staged, ThinBody::Staged { .. }), "{staged:?}");
+    session.serve(3, insert(&tx, "kept out"));
+    let body = session.serve(4, commit(&tx));
+    let ThinBody::Error { message, .. } = &body else {
+        panic!("expected the refusal, got {body:?}");
+    };
+    assert!(
+        message.contains("missing required field `title`"),
+        "{body:?}"
+    );
+    assert!(titles(&session.core).is_empty());
+    assert!(session.transactions.is_idle());
+}
+
+#[test]
+fn a_write_builds_on_the_cores_row_not_a_stale_copy() {
+    let mut session = Session::open();
+    let row = core_row(&session, "first");
+    // The client holds the row after reading it...
+    let tx = session.begin("mergeable");
+    assert_eq!(read_titles(session.serve(2, read(&tx, row))), ["first"]);
+    session.serve(3, ThinOp::Rollback { transaction: tx });
+    // ...and the core deletes it since.
+    session
+        .core
+        .delete("notes", &row.to_bytes(), &serde_json::Value::Null)
+        .unwrap();
+    let tx = session.begin("mergeable");
+    // Read from the core again, the row is gone: the write is refused as
+    // it is staged. (The core refused it at the commit; either way the
+    // thin client's transaction fails, since it rolls back instead of
+    // committing once a staged write failed.)
+    let staged = session.serve(4, update(&tx, row, "on a deleted row"));
+    assert!(
+        matches!(&staged, ThinBody::Error { code, .. } if code == "write_rejected"),
+        "{staged:?}"
+    );
+    session.serve(5, ThinOp::Rollback { transaction: tx });
+    assert!(titles(&session.core).is_empty(), "the row stays deleted");
 }
