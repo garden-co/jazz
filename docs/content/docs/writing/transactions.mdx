@@ -94,7 +94,7 @@ earlier versions throw "empty mergeable transaction has no committed unit").
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-transaction-go
+      ../examples/docs/todo-client-go/snippets_test.go#writing-transaction-go
     </include>
 
   </Tab>
@@ -154,7 +154,7 @@ A transaction can fail at three points:
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
    with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
@@ -168,6 +168,12 @@ A transaction can fail at three points:
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
       ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-transaction-errors-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#writing-transaction-errors-go
     </include>
 
   </Tab>
@@ -244,7 +250,7 @@ write is valid only if the data you just read has not changed in a conflicting t
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-serializable-transaction-go
+      ../examples/docs/todo-client-go/snippets_test.go#writing-serializable-transaction-go
     </include>
 
   </Tab>
@@ -274,9 +280,19 @@ retry it.
 Use `beginTransaction()` when the work cannot fit in one callback. You then own the transaction and
 must call `commit()` or `rollback()`.
 
-<include cwd lang="ts" meta='title="app.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-manual-transaction-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-manual-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-manual-transaction-rust
+    </include>
+
+  </Tab>
+</Tabs>
 
 For a serializable transaction, use `beginSerializableTransaction()` instead. Call `wait()` on the
 commit result to wait for the authority to accept or reject the transaction. You do not choose a

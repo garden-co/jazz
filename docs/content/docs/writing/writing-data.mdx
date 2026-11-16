@@ -102,7 +102,7 @@ Mutations are methods on the database handle. All three take a table as their fi
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-crud-go
+      ../examples/docs/todo-client-go/snippets_test.go#writing-crud-go
     </include>
 
   </Tab>
@@ -114,7 +114,7 @@ Use `upsert(...)` when your app already knows the row ID and wants to create tha
 not exist, or update it if it does. Like `insert`, `update`, and `delete`, it returns a
 `MutationResult<void>` that can be awaited for durability.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
@@ -125,9 +125,21 @@ not exist, or update it if it does. Like `insert`, `update`, and `delete`, it re
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-upsert-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-upsert-rust
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
       ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-upsert-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#writing-upsert-go
     </include>
 
   </Tab>
@@ -149,7 +161,7 @@ if (existing?.$deletedAt) db.restore(app.todos, id, values);
 else db.update(app.todos, id, values);
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
@@ -160,9 +172,21 @@ else db.update(app.todos, id, values);
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-restore-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-restore-rust
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
       ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-restore-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#writing-restore-go
     </include>
 
   </Tab>
@@ -206,7 +230,7 @@ Required fields cannot be set to `null`.
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-nullable-update-go
+      ../examples/docs/todo-client-go/snippets_test.go#writing-nullable-update-go
     </include>
 
   </Tab>
@@ -416,7 +440,7 @@ try {
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-durability-tier-go
+      ../examples/docs/todo-client-go/snippets_test.go#writing-durability-tier-go
     </include>
 
   </Tab>
@@ -534,7 +558,7 @@ A mutation can fail when you call it or while you wait:
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-mutation-errors-go
+      ../examples/docs/todo-client-go/snippets_test.go#writing-mutation-errors-go
     </include>
 
   </Tab>
