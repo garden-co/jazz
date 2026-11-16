@@ -120,6 +120,11 @@ Without `auth`, it opens as a local client. `appId` is required for
   `wait_for_sync`) reported, as TS's `onMutationError`:
   `{"transaction", "message", "denied", "serializable"}`. Refusals from
   before the first watch come first.
+- Every watch (session, sync, mutation errors) ends when the app closes,
+  whichever way (`shutdown`, `sign_out`, `delete_client_storage`): a last
+  state `{"kind": "closed", "message"}` (UniFFI), or a last callback with
+  kind `"error"` and `{"kind": "closed", …}` (C), after which nothing
+  comes.
 
 ## Values, queries, rows, deltas
 
