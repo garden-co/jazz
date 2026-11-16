@@ -222,6 +222,7 @@ export const permissions = definePermissions({
     update: true,
     delete: true,
   },
+  // ...
 });
 ```
 
@@ -260,6 +261,7 @@ export const permissions = definePermissions({
     update: false,
     delete: false,
   },
+  // ...
 });
 ```
 
@@ -385,20 +387,21 @@ at runtime and can take any parameters, call each other and live in other module
 <Tab value="schema.ts">
 
 ```ts title="schema.ts"
-const { definePermissions, exists, session } = schema;
+const { definePermissions, exists, session, anyOf } = schema;
 
 const mine = { owner_id: session.user };
-const isProjectMember = (projectId: s.Uuid) =>
-  exists.projectMembers({ projectId, userId: session.user });
+const isSharedWithMe = (todoId: s.Uuid) =>
+  exists.todoShares({ todoId, user_id: session.user, can_read: true });
 
 export const permissions = definePermissions({
-  projects: {
-    read: (project) => anyOf(mine, isProjectMember(project.id)),
-  },
   todos: {
-    read: (todo) => anyOf(mine, isProjectMember(todo.projectId)),
+    read: (todo) => anyOf(mine, isSharedWithMe(todo.id)),
     update: mine,
     delete: mine,
+  },
+  todoShares: {
+    read: (share) => anyOf({ user_id: session.user }, share.todo.where(mine)),
+    insert: (share) => share.todo.where(mine),
   },
   // ...
 });
@@ -410,13 +413,14 @@ export const permissions = definePermissions({
 ```json title="jazz.permissions.json"
 {
   "tables": {
-    "projects": {
-      "read": "owner_id = session.user or exists projectMembers(projectId = this.id, userId = session.user)"
-    },
     "todos": {
-      "read": "owner_id = session.user or exists projectMembers(projectId = this.projectId, userId = session.user)",
+      "read": "owner_id = session.user or exists todoShares(todoId = this.id, user_id = session.user, can_read = true)",
       "update": "owner_id = session.user",
       "delete": "owner_id = session.user"
+    },
+    "todoShares": {
+      "read": "user_id = session.user or exists todos(id = this.todoId, owner_id = session.user)",
+      "insert": "exists todos(id = this.todoId, owner_id = session.user)"
     }
   }
 }
@@ -427,7 +431,8 @@ export const permissions = definePermissions({
 
 A helper's parameters are typed with the schema's value types: `s.Uuid` for a UUID column or
 `id`, `s.Value<"string">` for a string column, and so on. Pass a column of the row (`todo.projectId`)
-and the helper's condition follows that row.
+and the helper's condition follows that row. A condition object such as `mine` works on any table
+with those columns, and inside `.where(...)`.
 
 ### Session claims
 
@@ -479,7 +484,7 @@ Untyped claims accept any path. To have TypeScript check them, declare their sha
 ```ts title="schema.ts"
 export const schema = s.defineSchema(
   {
-    // tables
+    projects: s.table({ name: s.string(), orgId: s.string(), teamId: s.string() }),
   },
   { claims: s.claims<{ role: "manager" | "member"; org: string; teams: string[] }>() },
 );
@@ -816,7 +821,7 @@ export const permissions = definePermissions({
     "todos": {
       "update": {
         "old": "owner_id = session.user",
-        "new": "owner_id = session.user and exists todos(id = this.id, parentId = this.parentId, projectId = this.projectId)"
+        "new": "owner_id = session.user and exists todos(id = this.id, parentId = this.parentId) and exists todos(id = this.id, projectId = this.projectId)"
       }
     }
   }
@@ -828,7 +833,7 @@ export const permissions = definePermissions({
 
 `old` works in direct comparisons with the row's own columns: `{ status: old.status }`,
 `{ ownerId: ne(old.ownerId) }`, `{ version: gt(old.version) }`. As the generated JSON shows, each
-becomes an `exists` on the same table: while the update is checked, the stored row is still the
+comparison becomes an `exists` on the same table: while the update is checked, the stored row is still the
 old version, also inside a transaction that wrote the row before. `old` can't be used inside
 another `exists`, and TypeScript rejects it there.
 
@@ -838,7 +843,7 @@ Everything a policy can express has a form in TypeScript. Most policies need onl
 above. For the rest, such as a path of several hops, a join, or a walk up a tree of any depth,
 `exists(...)` takes a relation query built from the schema's `from`, with SQL-like steps:
 
-- `from.<table>(alias?)` starts from a table; `.join(other, { on: [["a.x", "b.y"]], left? })`
+- `from.<table>(alias?)` starts from a table, and `from(query, alias?)` from another query; `.join(other, { on: [["a.x", "b.y"]], left? })`
   joins another, and `.where({ "alias.col": value })` filters;
 - `.select({ id: "a.id" })`, `.distinctOn(...)`, `.orderBy(...)`, `.limit(n)` and `.offset(n)`
   shape the result;
@@ -848,8 +853,26 @@ maxDepth })` repeats a step from a starting set, up to `maxDepth` times or `"fix
   rows a recursive step starts from, and `rowId("row")` a row's identity.
 
 Column references in these queries are strings such as `"f.ownerId"`, so TypeScript doesn't check
-them; `generate` does. For example, a user may read a file in a folder they own, and a folder
-when they own it or any folder above it:
+them; `generate` does. For example, with folders and files:
+
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  folders: s.table(
+    { name: s.string(), ownerId: s.uuid(), parentId: s.uuid().optional() },
+    {
+      parent: s.rel("folders", "parentId"),
+    },
+  ),
+  files: s.table(
+    { name: s.string(), folderId: s.uuid() },
+    {
+      folder: s.rel("folders", "folderId"),
+    },
+  ),
+});
+```
+
+a user may read a file in a folder they own, and a folder when they own it or any folder above it:
 
 <Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
 <Tab value="schema.ts">
@@ -872,13 +895,15 @@ export const permissions = definePermissions({
     read: anyOf(
       { ownerId: session.user },
       exists(
-        recursive({
-          seed: from.folders().where({ id: outer("parentId") }),
-          step: from.folders().where({ id: frontier("parentId") }),
-          frontier: "parentId",
-          dedupe: [rowId("row")],
-          maxDepth: "fixpoint",
-        }).where({ ownerId: session.user }),
+        from(
+          recursive({
+            seed: from.folders().where({ id: outer("parentId") }),
+            step: from.folders().where({ id: frontier("parentId") }),
+            frontier: "parentId",
+            dedupe: [rowId("row")],
+            maxDepth: "fixpoint",
+          }),
+        ).where({ ownerId: session.user }),
       ),
     ),
   },
