@@ -7,4 +7,4 @@
 - A commit whose reads all went through the root view is encoded exactly as before.
 - A commit with a branch read is made like any serializable commit, offline included. It is only sent over a link that negotiated the feature. On another link (an older server), it is refused with "not supported yet by this server" instead of being validated against the wrong rows.
 
-Pending commits keep their reads' views across restarts, in a new `_jazz_pending_read_views` table. The Rust native transport, the native relay, and the napi and wasm `connectUpstreamWithSession` pass on the features they negotiated.
+Pending commits keep their reads' views across restarts, in a new `_jazz_pending_read_views` table. The table is created when a commit first needs it, so opening an existing store leaves its file unchanged. The Rust native transport, the native relay, and the napi and wasm `connectUpstreamWithSession` pass on the features they negotiated.
