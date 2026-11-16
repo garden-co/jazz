@@ -7,6 +7,10 @@ code that defines its format.
 - `../layers/db/fixtures/binding_codec_golden.json`: the binding row-batch
   codec (`jazz-db` `binding_codec.rs`, `binding-codec-golden.test.ts`). It
   lives in jazz-db, which embeds it, so the published crate contains it.
+- `../layers/db/fixtures/link_wire_failure_v1.json`: how the upstream link
+  classifies a server's `WireError` (`jazz-db` `link.rs`
+  `LinkFailure::from_wire_error`, `thin/link-failure.test.ts`). Not bytes but
+  a rule table: the thin client cannot call Rust, so it is held to this.
 - `native_query_codec.json`, `native_row_codec.json`: the TypeScript native
   query and row codecs.
 - `relation_query_postcard.json`: relation IR postcard bytes
