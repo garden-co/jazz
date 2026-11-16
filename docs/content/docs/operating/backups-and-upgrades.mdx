@@ -164,9 +164,10 @@ was. Each says what to do, with `file:line` where there is one:
   `npx jazz-tools migrations create --name <name>` first, commit, then upgrade.
 - **The wrong `jazz-tools` installed:** `upgrade` needs the app's alpha.65 (or older) installed to
   check the files, and `typescript` to read `schema.ts`.
-- **Computed fields and transforms**, in either kind of app. `upgrade` doesn't convert them yet:
-  declare them in `schema.ts` by hand, with `s.computed(…)` and `.transform(…)` (see
+- **Computed fields and transforms** in an app with `schema.ts`. `upgrade` doesn't convert them
+  yet: declare them in `schema.ts` by hand, with `s.computed(…)` and `.transform(…)` (see
   [Column Types](/docs/schemas/column-types#computed-columns)); `jazz.computed.ts` stays as it is.
+  An app without `schema.ts` is converted with them.
 - **Permissions the new DSL can't express yet**, listed with the policy and the reason.
 - **A `true` inside `anyOf`/`allOf`** in `jazz.permissions.json`. alpha.65 compiled a condition
   whose value was unset to nothing, so the policy allows more than `permissions.ts` says. Fix the
