@@ -3912,6 +3912,19 @@ fn serializable_draft_read(
             .row_uuid();
         rows.insert(title.to_owned(), row);
     }
+    // The draft already holds its own copy of Outro, and another branch a
+    // row of its own: the read set is the draft view's rows (main's Intro,
+    // the draft's Outro), not every branch's.
+    retitle(&db, rows["Outro"], &draft, Some(&main), "Outro, drafted");
+    db.insert(
+        "todos",
+        BTreeMap::from([("title".into(), Value::String("Elsewhere".into()))]),
+        jazz::db::InsertOptions {
+            target: jazz::db::ExactWriteTarget::Branch(selector(0xd3)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let base = if base_frozen {
         BranchViewBase::snapshot(main.clone(), captured_branch_snapshot(&db))
     } else {
@@ -3925,7 +3938,7 @@ fn serializable_draft_read(
         titles_in_tx(&db, view, tx).unwrap(),
         [
             (draft_id.clone(), "Intro".to_owned()),
-            (draft_id, "Outro".to_owned())
+            (draft_id, "Outro, drafted".to_owned())
         ]
     );
     block_on(db.tx_ref(tx).insert(
@@ -4005,12 +4018,19 @@ fn a_serializable_branch_read_ignores_other_branches() {
     retitle(&db, rows["Intro"], &other, Some(&main), "Intro, elsewhere");
     block_on(db.commit_serializable_handle(tx)).unwrap();
     let query = db.prepare_query(&db.table("todos")).unwrap();
-    let titles: Vec<_> = block_on(db.all(&query, ReadOpts::default().branch_view(draft, None)))
+    let mut titles: Vec<_> = block_on(db.all(&query, ReadOpts::default().branch_view(draft, None)))
         .unwrap()
         .iter()
         .map(|row| row.cell("title"))
         .collect();
-    assert_eq!(titles, [Some(Value::String("Summary".into()))]);
+    titles.sort_by_key(|title| format!("{title:?}"));
+    assert_eq!(
+        titles,
+        [
+            Some(Value::String("Outro, drafted".into())),
+            Some(Value::String("Summary".into()))
+        ]
+    );
 }
 
 /// A frozen base can't change under the read: Bob's later main edit does

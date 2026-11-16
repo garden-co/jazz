@@ -10173,6 +10173,18 @@ impl Db {
                     }
                 }
             }
+            // Refused before the precheck: a conflict found there would
+            // only be retried into this refusal.
+            if reads
+                .iter()
+                .any(|read| !matches!(read.through.source, ReadViewSourceSpec::Current))
+            {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "Committing a serializable transaction that read through a branch view to a \
+                     server is not supported yet",
+                ));
+            }
             // A read row the replica now holds at another version changed,
             // and the authority, which gets this replica's earlier writes
             // first, would refuse the commit too; so it is a conflict now.
@@ -10205,16 +10217,6 @@ impl Db {
                         ));
                     }
                 }
-            }
-            if reads
-                .iter()
-                .any(|read| !matches!(read.through.source, ReadViewSourceSpec::Current))
-            {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "Committing a serializable transaction that read through a branch view to a \
-                     server is not supported yet",
-                ));
             }
             let reads = {
                 let inner = self.inner();
