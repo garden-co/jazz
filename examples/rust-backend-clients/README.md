@@ -1,5 +1,8 @@
 # Rust backend clients against a TypeScript main backend
 
+> [!WARNING]
+> **Experimental: client only; backends are TypeScript.** See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+
 The Rust examples are **backend clients**: they sync through a TypeScript main backend's `/jazz` (`createJazz`) with a machine credential, as TypeScript's `createJazzClient` does. See [Backend Client](https://jazz.tools/docs/setup/backend-client).
 
 This package runs each example's binary against a real main backend:
