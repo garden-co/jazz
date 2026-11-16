@@ -12,8 +12,8 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use jazz_index::text::{
-    ANALYZER_VERSION, ANALYZERS, Analyzer, AnalyzerError, ENCODING, MAX_TERM_BYTES, PrefixTerm,
-    QueryError, QueryTerms, impact, row_impacts,
+    ANALYZER_VERSION, ANALYZERS, Analyzer, AnalyzerError, DEFAULT_FIELD_LENGTH, ENCODING,
+    MAX_FIELD_LENGTH, MAX_TERM_BYTES, PrefixTerm, QueryError, QueryTerms, impact, row_impacts,
 };
 
 fn en() -> Analyzer {
@@ -191,20 +191,42 @@ fn terms_over_64_bytes_are_dropped() {
     assert_eq!(simple().query(&over, false), Err(QueryError::Empty));
 }
 
-/// The impact formula, evaluated in binary64 in SPEC order, at the
+/// The impact formula, evaluated in binary64 in SPEC order, at the default
 /// reference length (32 terms) and around it.
 #[test]
 fn impacts_follow_the_formula() {
     // f = 1 at the reference length: 16 * 2.2 / 2.2 = 16 per weight.
-    assert_eq!(impact(1, 1, 32), 16);
-    assert_eq!(impact(4, 1, 32), 64);
+    assert_eq!(impact(1, 32, 1, 32), 16);
+    assert_eq!(impact(4, 32, 1, 32), 64);
     // Short fields score higher, long ones lower, never below zero.
-    assert_eq!(impact(1, 1, 1), 26);
-    assert_eq!(impact(1, 1, 1000), 1);
-    assert_eq!(impact(1, 1, 5000), 0);
+    assert_eq!(impact(1, 32, 1, 1), 26);
+    assert_eq!(impact(1, 32, 1, 1000), 1);
+    assert_eq!(impact(1, 32, 1, 5000), 0);
     // Repeats saturate; heavy weights cap at 255.
-    assert_eq!(impact(1, 10, 32), 31);
-    assert_eq!(impact(15, 10, 32), 255);
+    assert_eq!(impact(1, 32, 10, 32), 31);
+    assert_eq!(impact(15, 32, 10, 32), 255);
+}
+
+/// A field's declared reference length replaces 32: a field as long as its
+/// reference scores 16 per weight for one occurrence whatever the length, so
+/// a long body declared `length: 256` keeps scoring where the default would
+/// flatten it to 0 or 1.
+#[test]
+fn reference_length_is_the_fields_declared_length() {
+    assert_eq!(DEFAULT_FIELD_LENGTH, 32);
+    for reference in [1u16, 16, 256, MAX_FIELD_LENGTH] {
+        assert_eq!(impact(1, reference, 1, usize::from(reference)), 16);
+    }
+    assert_eq!(impact(1, 256, 1, 1000), 7);
+    assert_eq!(impact(1, 32, 1, 1000), 1);
+    assert_eq!(impact(1, 4096, 1, 5000), 14);
+    // Against a shorter reference the same title counts as longer, so it
+    // scores lower (80 against 92).
+    assert_eq!((impact(4, 16, 1, 8), impact(4, 32, 1, 8)), (80, 92));
+    assert_eq!(
+        row_impacts(&en(), &[(1, 256, "jazz")]),
+        BTreeMap::from([("jazz".to_owned(), 27)])
+    );
 }
 
 /// A row's postings sum each term's impact over its fields, capped at 255,
@@ -217,17 +239,17 @@ fn impacts_follow_the_formula() {
 /// ```
 #[test]
 fn row_impacts_sum_over_fields() {
-    let row = row_impacts(&en(), &[(4, "Jazz"), (1, "jazz and blues")]);
+    let row = row_impacts(&en(), &[(4, 32, "Jazz"), (1, 32, "jazz and blues")]);
     let expected: BTreeMap<String, u8> = [("jazz", 131), ("and", 25), ("blue", 25)]
         .into_iter()
         .map(|(t, i)| (t.to_owned(), i))
         .collect();
     assert_eq!(row, expected);
     // Capped at 255 per row.
-    let capped = row_impacts(&en(), &[(15, "jazz"), (15, "jazz")]);
+    let capped = row_impacts(&en(), &[(15, 32, "jazz"), (15, 32, "jazz")]);
     assert_eq!(capped["jazz"], 255);
     // A field with no words adds nothing.
-    assert!(row_impacts(&en(), &[(1, ""), (2, "🎷")]).is_empty());
+    assert!(row_impacts(&en(), &[(1, 32, ""), (2, 32, "🎷")]).is_empty());
 }
 
 /// A query's terms are the analyzed words, deduplicated; with `prefix`, the
@@ -305,13 +327,22 @@ const TERM_CASES: &[&str] = &[
     "\u{301}x \u{200d} tab\tnew\nline\u{a0}nbsp",
 ];
 
-const IMPACT_CASES: &[&[(u8, &str)]] = &[
-    &[(1, "jazz")],
-    &[(4, "Jazz"), (1, "jazz and blues")],
-    &[(15, "jazz jazz jazz"), (15, "jazz")],
-    &[(2, "the quick brown fox jumps over the lazy dog the end")],
-    &[(1, ""), (3, "🎷")],
-    &[(1, "Running runner runs ran")],
+const IMPACT_CASES: &[&[(u8, u16, &str)]] = &[
+    &[(1, 32, "jazz")],
+    &[(4, 32, "Jazz"), (1, 32, "jazz and blues")],
+    &[(15, 32, "jazz jazz jazz"), (15, 32, "jazz")],
+    &[(2, 32, "the quick brown fox jumps over the lazy dog the end")],
+    &[(1, 32, ""), (3, 32, "🎷")],
+    &[(1, 32, "Running runner runs ran")],
+    &[
+        (4, 16, "Jazz in the park"),
+        (
+            1,
+            256,
+            "jazz jazz and the blues, all summer long in the park",
+        ),
+    ],
+    &[(1, 1, "jazz blues"), (1, 4096, "jazz")],
 ];
 
 const QUERY_CASES: &[(&str, bool)] = &[
@@ -348,27 +379,32 @@ fn render_terms() -> String {
 fn render_impacts() -> String {
     let mut out = String::from(
         "# jazz-ix-text/1 postings (SPEC 20.10.1). Per case: `analyzer`, one\n\
-         # `field <weight> <utf8 hex>` per field, then `posting <term utf8 hex> <impact>`\n\
+         # `field <weight> <length> <utf8 hex>` per field, then `posting <term utf8 hex> <impact>`\n\
          # in term byte order.\n",
     );
     for name in ANALYZERS {
         let a = Analyzer::parse(name).unwrap();
         for fields in IMPACT_CASES {
             writeln!(out, "\nanalyzer {name}").unwrap();
-            for (w, text) in *fields {
-                writeln!(out, "field {w} {}  # {text:?}", hex(text)).unwrap();
+            for (w, length, text) in *fields {
+                writeln!(out, "field {w} {length} {}  # {text:?}", hex(text)).unwrap();
             }
             for (t, i) in row_impacts(&a, fields) {
                 writeln!(out, "posting {} {i}  # {t:?}", hex(&t)).unwrap();
             }
         }
     }
-    out.push_str("\n# impact(w, f, L) over a grid: `impact <w> <f> <L> <impact>`.\n");
+    out.push_str(
+        "\n# impact(w, R, f, L) over a grid, R the field's reference length:\n\
+         # `impact <w> <R> <f> <L> <impact>`.\n",
+    );
     for w in [1u8, 2, 4, 8, 15] {
-        for f in [1usize, 2, 3, 5, 10, 100] {
-            for l in [1usize, 2, 8, 31, 32, 33, 100, 1000, 10_000] {
-                if f <= l {
-                    writeln!(out, "impact {w} {f} {l} {}", impact(w, f, l)).unwrap();
+        for r in [1u16, 16, 32, 256, 4096] {
+            for f in [1usize, 2, 3, 5, 10, 100] {
+                for l in [1usize, 2, 8, 31, 32, 33, 100, 256, 1000, 10_000] {
+                    if f <= l {
+                        writeln!(out, "impact {w} {r} {f} {l} {}", impact(w, r, f, l)).unwrap();
+                    }
                 }
             }
         }
