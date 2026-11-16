@@ -2,10 +2,10 @@
 # Assembles the garden-co/jazz-swift mirror tree for VERSION into OUT:
 # Package.swift (from packages/jazz-swift/mirror/Package.swift.template, the
 # XCFramework's URL and checksum filled in) and the package's sources.
-# Usage: assemble-swift-mirror.sh <version> <xcframework-url> <checksum> <out>
+# Usage: assemble-swift-mirror.sh <version> <xcframework-url> <checksum> <out> [<source sha>]
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-version=$1 url=$2 checksum=$3 out=$4
+version=$1 url=$2 checksum=$3 out=$4 source=${5:-}
 pkg="$root/packages/jazz-swift"
 rm -rf "$out" && mkdir -p "$out/Sources"
 cp -R "$pkg/Sources/Jazz" "$pkg/Sources/JazzFFI" "$pkg/Sources/jazz_ffiFFI" "$out/Sources/"
@@ -15,8 +15,8 @@ cp "$root/LICENSE" "$out/LICENSE"
 cat > "$out/README.md" <<README
 # Jazz for Swift $version
 
-Published from [garden-co/jazz](https://github.com/garden-co/jazz) (packages/jazz-swift);
-change it there. See https://jazz.tools/docs/setup/swift.
+Published from [garden-co/jazz](https://github.com/garden-co/jazz) (packages/jazz-swift)${source:+ at
+\`$source\`}; change it there. See https://jazz.tools/docs/setup/swift.
 
 \`\`\`swift
 .package(url: "https://github.com/garden-co/jazz-swift", exact: "$version")

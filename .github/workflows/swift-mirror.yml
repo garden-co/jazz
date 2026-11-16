@@ -14,6 +14,14 @@ name: Swift mirror
 # artifacts. With `publish` (after the release `v<version>` exists), the
 # `publish` environment's approval gates attaching the XCFramework to the
 # release and pushing the mirror commit, tagged `<version>`, to jazz-swift.
+# Publishing takes only `ref: v<version>`, resolved once to a commit SHA that
+# every job builds and the mirror commit records.
+#
+# Recovery: the publish job refuses a version whose mirror tag or release
+# asset exists. If it uploaded the asset but failed to push the mirror,
+# check that garden-co/jazz-swift has no tag <version>, delete the asset
+# (`gh release delete-asset v<version> JazzFFI.xcframework.zip`) and run it
+# again. Never delete or move a pushed mirror tag: SwiftPM pins its checksum.
 on:
   pull_request:
     paths:
@@ -47,25 +55,58 @@ env:
   VERSION: ${{ github.event.inputs.version || format('0.0.0-dry-run.{0}', github.run_number) }}
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Validate the inputs and resolve the ref to a commit
+        id: resolve
+        env:
+          PUBLISH: ${{ github.event.inputs.publish == 'true' }}
+        run: |
+          # Plain semver (SwiftPM reads only those tags).
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::version '$VERSION' isn't semver"; exit 1; }
+          if [[ "$PUBLISH" == true ]]; then
+            # A published version is built from its own release tag, and
+            # nothing else: no other tag, branch or commit.
+            [[ "$REF" == "v$VERSION" ]] || { echo "::error::publishing $VERSION builds v$VERSION, not '$REF'"; exit 1; }
+          fi
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            sha=$REF
+          elif [[ "$REF" =~ ^v[0-9][0-9A-Za-z.-]*$ ]]; then
+            # The tag's commit in this repository (peeled, for annotated tags).
+            refs=$(git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$REF" "refs/tags/$REF^{}")
+            sha=$(awk '/\^\{\}$/ {print $1}' <<<"$refs")
+            [[ -n "$sha" ]] || sha=$(awk '{print $1}' <<<"$refs" | head -1)
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no tag $REF in ${GITHUB_REPOSITORY}"; exit 1; }
+          else
+            echo "::error::ref '$REF' isn't a v-tag or a commit SHA"; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "building $REF at $sha"
+
   xcframework:
+    needs: resolve
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
       contents: read
     steps:
-      - name: Validate the inputs
-        run: |
-          # Plain semver (SwiftPM reads only those tags), and a tag or a commit.
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::version '$VERSION' isn't semver"; exit 1; }
-          [[ "$REF" =~ ^(v[0-9][0-9A-Za-z.-]*|[0-9a-f]{40})$ ]] || { echo "::error::ref '$REF' isn't a v-tag or a commit SHA"; exit 1; }
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: "1.93.1"
           targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      # No cache when publishing: a release's core builds from scratch.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: github.event.inputs.publish != 'true'
         with:
           key: swift-xcframework
       - name: Build JazzFFI.xcframework
@@ -79,7 +120,7 @@ jobs:
           if-no-files-found: error
 
   mirror:
-    needs: xcframework
+    needs: [resolve, xcframework]
     runs-on: macos-15
     timeout-minutes: 30
     permissions:
@@ -87,16 +128,19 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: JazzFFI.xcframework
           path: ${{ runner.temp }}/xcf
       - name: Assemble the mirror
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           checksum=$(cat "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip.checksum")
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/JazzFFI.xcframework.zip"
-          dev/scripts/assemble-swift-mirror.sh "$VERSION" "$url" "$checksum" "$RUNNER_TEMP/jazz-swift"
+          dev/scripts/assemble-swift-mirror.sh "$VERSION" "$url" "$checksum" "$RUNNER_TEMP/jazz-swift" "$SHA"
       - name: Verify on macOS and the iOS simulator
         run: |
           # The release asset doesn't exist before publishing: verify against
@@ -131,7 +175,7 @@ jobs:
 
   publish:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true'
-    needs: mirror
+    needs: [resolve, mirror]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: publish
@@ -146,11 +190,15 @@ jobs:
         with:
           name: jazz-swift-mirror
           path: jazz-swift
-      - name: Refuse a version that's already published
+      - name: Refuse a version that's already published, or a moved tag
         env:
           GH_TOKEN: ${{ github.token }}
           JAZZ_SWIFT_PUSH_TOKEN: ${{ secrets.JAZZ_SWIFT_PUSH_TOKEN }}
+          SHA: ${{ needs.resolve.outputs.sha }}
         run: |
+          # The release tag still points where the build began.
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/commits/v$VERSION" -q .sha)
+          [[ "$now" == "$SHA" ]] || { echo "::error::v$VERSION is at $now now, not $SHA, which was built"; exit 1; }
           # A published version's asset is pinned by checksum: never replace it.
           git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$JAZZ_SWIFT_PUSH_TOKEN"; }; f'
           if git ls-remote --exit-code --tags https://github.com/garden-co/jazz-swift.git "refs/tags/$VERSION" >/dev/null; then
@@ -170,6 +218,7 @@ jobs:
       - name: Push and tag the mirror
         env:
           JAZZ_SWIFT_PUSH_TOKEN: ${{ secrets.JAZZ_SWIFT_PUSH_TOKEN }}
+          SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$JAZZ_SWIFT_PUSH_TOKEN"; }; f'
           git clone https://github.com/garden-co/jazz-swift.git mirror
@@ -177,6 +226,6 @@ jobs:
           git rm -rq --ignore-unmatch . && cp -R ../jazz-swift/. .
           git add -A
           git -c user.name="jazz-release-bot" -c user.email="jazz-release-bot@users.noreply.github.com" \
-            commit -qm "Jazz for Swift $VERSION (garden-co/jazz@${REF})"
+            commit -qm "Jazz for Swift $VERSION (garden-co/jazz@${SHA}, ${REF})"
           git tag "$VERSION"
           git push origin HEAD:main "refs/tags/$VERSION"
