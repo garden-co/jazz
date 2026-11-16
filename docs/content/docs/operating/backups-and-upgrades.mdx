@@ -133,16 +133,24 @@ alpha.66 and reinstall. Things to check in the diff:
 ### Apps without `schema.ts`
 
 An alpha.65 app may have no `schema.ts` at all: its `jazz.app.json` and `jazz.permissions.json`
-are its source, written by hand or by an agent. `upgrade` converts it the same way:
+are its source, written by hand or by an agent. `upgrade` converts it too, with the same command.
+It doesn't need the app's alpha.65 or `typescript` installed, since the JSON is what it reads:
 
-1. It prints `schema.ts` from the two files: the tables with `s.defineSchema`, and the permissions in
-   the new DSL. `defs` are expanded where they are called, and repeated checks become helper
-   functions.
-2. It writes `migrations/` from the files' `history` and `migrations`: a snapshot of each earlier
-   version and a migration file for each step.
-3. It runs `generate`, which writes the two JSON files back from `schema.ts`, and checks that the
-   schema hashes and the bundle id are the same as before. If they differ, it puts every file back
-   and stops.
+1. It prints `schema.ts` from the two files: the tables with `s.defineSchema`, then the permissions
+   in the new DSL. `defs` are expanded where they are called, and repeated checks become helper
+   functions, named for what they check (`isChatMember`). A long or vague one gets a placeholder
+   such as `rule1`: rename it.
+2. It writes `migrations/` from the files' `history` and `migrations`: a snapshot of each version,
+   the current one included, in `migrations/snapshots/`, and a migration file for each step.
+3. It runs `generate`, which writes the two JSON files back from `schema.ts` (overwriting them,
+   since they have no `$generated` marker yet) and the bindings for the app's language, such as
+   `jazz.generated.ts`, or `src/jazz_app.rs` for a Rust crate on `jazz-app-support`. It then checks
+   that the schema hashes and the bundle id are the same as before. If they differ, or `generate`
+   fails, it puts every file back and stops.
+
+It refuses a policy the new DSL can't express (listed by its JSON path), a `defs` call with the
+wrong number of arguments, and a `schema.ts` or `migrations/` file that already exists. `--dir`,
+`--schema-dir` (the directory holding `jazz.app.json`) and `--dry-run` work as above.
 
 From then on, `schema.ts` is the source: change it and run `generate`, rather than editing the JSON.
 
@@ -158,14 +166,20 @@ was. Each says what to do, with `file:line` where there is one:
   check the files, and `typescript` to read `schema.ts`.
 - **Computed fields and transforms.** `upgrade` doesn't convert them yet.
 - **Permissions the new DSL can't express yet**, listed with the policy and the reason.
-- **Permissions that read the environment**, or a `true` inside `anyOf`/`allOf` in
-  `jazz.permissions.json`. alpha.65 compiled a condition whose value was unset to nothing, so the
-  policy allows more than `permissions.ts` says. Fix the condition and run `validate` first.
+- **A `true` inside `anyOf`/`allOf`** in `jazz.permissions.json`. alpha.65 compiled a condition
+  whose value was unset to nothing, so the policy allows more than `permissions.ts` says. Fix the
+  condition and run `validate` first.
 - **A `schema.ts` it can't read:** two apps, no `s.defineApp(…)`, no `schema` import from
   `jazz-tools`, or a DSL-built export other files import.
 - **Imports it can't rewrite:** such as a re-export of anything but `permissions.ts`'s default
   export.
 - **Files it would overwrite:** an existing `app-extras.ts`.
+
+Permissions that read the environment (`process.env.X`) aren't refused: the printed policy uses the
+value alpha.65's `validate` resolved, under a `// TODO` comment naming the variable, and the report
+warns about it. Make the value explicit, or compute it in a helper. `defs` in an app with
+`schema.ts` aren't refused either: step 1 compares what alpha.65 writes with the expanded files by
+schema hashes and bundle id.
 
 ### Other changes
 
