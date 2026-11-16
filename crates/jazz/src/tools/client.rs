@@ -1025,8 +1025,40 @@ impl JazzClient {
             .and_then(|context| context.transaction_id)
     }
 
-    /// The explicit session reads and writes run as, with its claims
-    /// registered for policy evaluation.
+    /// The explicit session a read runs as, with its claims: carried by the
+    /// read itself ([`crate::db::PreparedQuery::with_identity_claims`]), so each
+    /// handle's reads evaluate with its own session's claims. Registering
+    /// them per author would let another handle for the same user (other
+    /// claims) change what this handle's live reads show.
+    fn read_session(&self) -> Result<Option<(AuthorSubject, BTreeMap<String, CoreValue>)>> {
+        let Some(session) = self
+            .write_context
+            .as_ref()
+            .and_then(|context| context.session())
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            session.author_subject()?,
+            session_claims_to_core_claims(session)?,
+        )))
+    }
+
+    /// `query` prepared for this handle's reads: with its session's own
+    /// claims when it acts for one, and that session's author.
+    fn prepare_read(
+        &self,
+        query: &Query,
+    ) -> Result<(crate::db::PreparedQuery, Option<AuthorSubject>)> {
+        let prepared = self.prepare(query)?;
+        Ok(match self.read_session()? {
+            Some((author, claims)) => (prepared.with_identity_claims(author, claims), Some(author)),
+            None => (prepared, None),
+        })
+    }
+
+    /// The explicit session writes run as, with its claims registered for
+    /// policy evaluation (and so carried to the core with its writes).
     fn session_identity(&self) -> Result<Option<AuthorSubject>> {
         let Some(session) = self
             .write_context
@@ -1286,9 +1318,8 @@ impl JazzClient {
         query: &Query,
         opts: ReadOpts,
     ) -> Result<CoreSubscriptionStream> {
-        let prepared = self.prepare(query)?;
+        let (prepared, session) = self.prepare_read(query)?;
         let opts = self.branch_opts(opts);
-        let session = self.session_identity()?;
         let db = self.db()?;
         crate::db::block_on(async {
             match session {
@@ -1345,8 +1376,7 @@ impl JazzClient {
                 }
             }
         } else {
-            let prepared = self.prepare(&read)?;
-            let session = self.session_identity()?;
+            let (prepared, session) = self.prepare_read(&read)?;
             let db = self.db()?;
             let read_local = || {
                 crate::db::block_on(async {
@@ -1702,7 +1732,7 @@ impl JazzClient {
         &self,
         action: PermissionAdviceRequest,
     ) -> Result<crate::protocol::PermissionAdvice> {
-        if self.session_identity()?.is_some() || self.transaction_id().is_some() {
+        if self.read_session()?.is_some() || self.transaction_id().is_some() {
             return Err(JazzError::Query(
                 "permission advice for an explicit session or in a transaction is not supported"
                     .into(),
