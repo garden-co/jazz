@@ -803,7 +803,8 @@ impl JazzClient {
     }
 
     /// Connect as a user of an app whose backend (`createJazz`) signs its
-    /// users in with the app's own bearer token: the token travels as
+    /// users in with the app's own bearer token (or as a trusted backend
+    /// client of it, stating a stand-in `backend_secret` and no session): the token travels as
     /// `Authorization: Bearer` on the upgrade, and `context.backend_session`
     /// states the user it names (with the account the backend's sign-in
     /// returned). The backend checks the one against the other and vouches
@@ -813,9 +814,14 @@ impl JazzClient {
         connector: Arc<dyn NativeTransportConnector>,
         bearer: String,
     ) -> Result<Self> {
-        if context.backend_session.is_none() {
+        // A trusted backend client states a stand-in secret its credential
+        // on the upgrade vouches for, and the backend replaces with its own.
+        let trusted = context.backend_secret.is_some() && context.backend_session.is_none();
+        if context.backend_session.is_none() && !trusted {
             return Err(JazzError::Connection(
-                "a bearer connection states the user's session (backend_session)".to_owned(),
+                "a bearer connection states the user's session (backend_session), or, for a \
+                 trusted backend client, a stand-in backend_secret"
+                    .to_owned(),
             ));
         }
         Self::connect_inner(context, Some(connector), Some(format!("Bearer {bearer}"))).await
@@ -1407,6 +1413,9 @@ impl JazzClient {
     /// [`JazzClient::push_streaming_upload`] piece by piece (as an async
     /// stream yields them), then [`JazzClient::finish_streaming_upload`].
     /// Nothing commits until the finish; the value is never held whole.
+    /// Begun on a transaction's client, the finish stages the row mutation
+    /// in that transaction, which then holds the upload until it commits
+    /// or rolls back.
     pub fn begin_streaming_upload(
         &self,
         table: &str,
@@ -1414,11 +1423,7 @@ impl JazzClient {
         column: &str,
     ) -> Result<StreamingUpload> {
         self.reject_updated_at_override("streaming uploads")?;
-        if self.transaction_id().is_some() {
-            return Err(JazzError::Write(
-                "streaming uploads in a transaction are not supported".into(),
-            ));
-        }
+        let transaction = self.open_transaction()?;
         let cells = self.core_cells(table, values)?;
         let upload = self
             .db()?
@@ -1429,6 +1434,7 @@ impl JazzClient {
             table: table.to_owned(),
             column: column.to_owned(),
             cells,
+            transaction,
         })
     }
 
@@ -1453,15 +1459,37 @@ impl JazzClient {
     }
 
     /// Finish `upload` as `kind` of row `object_id` (a new row's id when
-    /// `None`), committing the row with its streamed value.
+    /// `None`), committing the row with its streamed value. An upload begun
+    /// in a transaction is staged in it instead (no commit id): it applies
+    /// when the transaction commits.
     pub async fn finish_streaming_upload(
         &self,
         upload: StreamingUpload,
         kind: crate::db::StreamingMutationKind,
         object_id: Option<ObjectId>,
-    ) -> Result<(ObjectId, TransactionId)> {
+    ) -> Result<(ObjectId, Option<TransactionId>)> {
         let db = self.db()?;
         let row = object_id.map_or_else(|| db.next_row_id(), |id| RowUuid(*id.uuid()));
+        if let Some(transaction_id) = upload.transaction {
+            self.ensure_transaction_open(transaction_id)?;
+            db.tx_ref(transaction_id)
+                .finish_streaming_value_upload(
+                    upload.upload,
+                    kind,
+                    &upload.table,
+                    row,
+                    upload.cells,
+                    &upload.column,
+                    self.write_identity()?,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(write_error)?;
+            self.staged(transaction_id);
+            return Ok((ObjectId::from_uuid(row.0), None));
+        }
         let write = db
             .finish_streaming_value_upload(
                 upload.upload,
@@ -1479,7 +1507,7 @@ impl JazzClient {
             .map_err(write_error)?;
         Ok((
             ObjectId::from_uuid(write.row_uuid().0),
-            self.committed(write.mergeable_tx_id()),
+            Some(self.committed(write.mergeable_tx_id())),
         ))
     }
 
@@ -1888,6 +1916,11 @@ impl JazzClient {
             .closed_transactions
             .insert(transaction_id, ClosedTransaction::RolledBack);
         Ok(true)
+    }
+
+    /// How many of this client's commits await the server's verdict.
+    pub fn pending_uploads(&self) -> usize {
+        self.shared.db.pending_upload_count()
     }
 
     /// Wait until every write committed so far reached the server, failing
@@ -2449,6 +2482,8 @@ pub struct StreamingUpload {
     table: String,
     column: String,
     cells: BTreeMap<String, CoreValue>,
+    /// The transaction it was begun in, which its finish stages into.
+    transaction: Option<OpenTransactionId>,
 }
 
 /// A write of this client the server refused: see
