@@ -222,8 +222,7 @@ type SyncStatus struct {
 	Synced bool `json:"synced"`
 }
 
-// Session is the end user's session, or nil for a local app or a
-// backend.
+// Session is the end user's session, or nil for a local app.
 func (db *DB) Session(ctx context.Context) (*SessionState, error) {
 	var s *SessionState
 	err := db.call(ctx, "session", map[string]any{}, &s)

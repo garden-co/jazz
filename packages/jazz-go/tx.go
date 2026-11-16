@@ -79,9 +79,17 @@ func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (
 		tx.end(context.WithoutCancel(ctx), "txRollback")
 		return err
 	}
-	// Once sent, the commit runs to its end even if ctx is cancelled
-	// meanwhile (the call returns ctx.Err() without waiting for it).
-	return tx.end(ctx, "txCommit")
+	// The commit is sent even if ctx is cancelled from here on, so the
+	// transaction never stays open; a cancelled ctx returns ctx.Err()
+	// without waiting for it to end.
+	done := make(chan error, 1)
+	go func() { done <- tx.end(context.WithoutCancel(ctx), "txCommit") }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (tx *Tx) end(ctx context.Context, method string) error {

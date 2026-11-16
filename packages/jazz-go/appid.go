@@ -11,8 +11,8 @@ import (
 // derives from the serverUrl it is given when it passes no scope: the
 // UUIDv5, in the DNS namespace, of the endpoint's URL read as http(s)
 // (ws as http, wss as https), its origin and path without trailing
-// slashes. Run the Jazz server and your Go backend with it
-// (Config.AppID), so those clients reach your app.
+// slashes. Give it to your Go client too
+// (Config.AppID), so it reaches the same app.
 func EndpointAppID(serverURL string) (string, error) {
 	scope, err := endpointScope(serverURL)
 	if err != nil {
