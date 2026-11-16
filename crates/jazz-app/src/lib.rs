@@ -37,6 +37,7 @@ pub mod endpoint;
 mod error;
 mod handle;
 mod large;
+mod lifecycle;
 mod query;
 mod session;
 mod subscription;
@@ -53,18 +54,25 @@ pub use edit::TextColumn;
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::Jazz;
+pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
+pub use lifecycle::MutationErrors;
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
 pub use session::{
     AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
 };
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
-pub use transaction::Transaction;
+pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
 pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier};
+
+/// Stateless anchors and ranges into text values (cursors, selections,
+/// comments), captured from one value and found again in later ones, as
+/// TS's `db.textAnchors()`.
+pub use jazz_text as text;
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].
 #[doc(hidden)]

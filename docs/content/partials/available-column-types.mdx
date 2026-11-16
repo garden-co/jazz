@@ -25,10 +25,6 @@ object form. The object form takes `"type"` for a plain type and options next to
 runtime rejects fractional, non-finite, and out-of-range values before sending a write to the
 native engine. Use `float` when a wider or fractional numeric range is required.
 
-An enum's cases can carry data:
-`{ "enum": { "pending": {}, "approved": { "by": "uuid", "note": "string?" } } }` is the TypeScript
-type `{ type: "pending" } | { type: "approved"; by: string; note: string | null }`.
-
 > **JSON columns are atomic.** The entire value is replaced on every write. Use `{ "json": true }` for untyped JSON, or `{ "json": <JSON Schema> }` to validate values and get a TypeScript type for them. The generated type covers `type`, `properties`/`required`, `items`, `enum`, `const`, `anyOf`/`oneOf` and `nullable`; other keywords give `unknown`. For structured data that needs per-field updates, use separate columns or a related table instead.
 
 > Declare relations separately from columns, under the table's `relations`: `{ "rel": "targetTable", "column": "localUuidColumn" }` and `{ "reverse": "sourceTable", "relation": "forwardRelationName" }`. UUID columns have no naming convention.

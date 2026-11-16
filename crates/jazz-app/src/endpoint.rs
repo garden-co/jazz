@@ -552,8 +552,11 @@ impl Endpoint {
         let path = request.path_only();
         let inner = path.strip_prefix(self.inner.base_path.as_str())?;
         let rest = inner.strip_prefix("/apps/")?;
+        // Whatever app id the client names (a TS client derives one from
+        // its endpoint URL), the endpoint serves its own, as `createJazz`
+        // does: every route acts on the backend's app.
         let (app, rest) = rest.split_once('/')?;
-        if app != self.inner.core.app_id.to_string() {
+        if app.is_empty() {
             return None;
         }
         Some(match rest {
