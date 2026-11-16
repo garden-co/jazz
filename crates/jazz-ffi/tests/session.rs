@@ -430,63 +430,66 @@ unsafe extern "C" fn slow_cb(
     unsafe { alice_cb(ctx, reason, token) }
 }
 
-/// When `jazz_session_close` returns, the token callback is not running (a
-/// slow fetch was in flight) and is never called again: a host may free
-/// its ctx then.
+/// When `jazz_session_close` returns, the token callback is not running and
+/// is never called again, though the client was renewing its bearer on its
+/// own (the backend refused it as expired): a host may free its ctx then.
+/// No other call on the session runs meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_token_callback_runs_after_the_session_closes() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let app = App::start().await;
     let config = app.config(json!({ "auth": { "bearer": true } }));
-    tokio::task::spawn_blocking(move || unsafe {
-        let host = Box::new(SlowHost {
-            running: AtomicBool::new(false),
-            closed: AtomicBool::new(false),
-            after_close: AtomicBool::new(false),
-        });
+    let host: &'static SlowHost = Box::leak(Box::new(SlowHost {
+        running: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        after_close: AtomicBool::new(false),
+    }));
+    let session = tokio::task::spawn_blocking(move || unsafe {
         let mut err = ptr::null_mut();
         let session = jazz_session_open(
             c(&config).as_ptr(),
             Some(slow_cb),
-            &*host as *const SlowHost as *mut c_void,
+            host as *const SlowHost as *mut c_void,
             &mut err,
         );
         assert!(!session.is_null(), "{}", take(err));
-        let address = session as usize;
-        // A refresh whose fetch is still running when the session closes.
-        let refreshing = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
             let mut err = ptr::null_mut();
-            let out = jazz_session_call(
-                address as *mut _,
-                c("refresh").as_ptr(),
-                c("{}").as_ptr(),
-                &mut err,
-            );
-            for text in [out, err] {
-                if !text.is_null() {
-                    jazz_string_free(text);
-                }
+            let out =
+                jazz_session_call(session, c("snapshot").as_ptr(), c("{}").as_ptr(), &mut err);
+            if take(out)["status"] == "ready" {
+                break;
             }
-        });
-        let deadline = Instant::now() + Duration::from_secs(5);
+            assert!(Instant::now() < deadline, "not ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        session as usize
+    })
+    .await
+    .unwrap();
+    // The backend refuses alice's bearer as expired: the client asks the
+    // host for another, on its own, again and again.
+    app.relay.refuse("token-alice", "token expired");
+    app.relay.kick();
+    tokio::task::spawn_blocking(move || unsafe {
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !host.running.load(Ordering::SeqCst) {
-            assert!(Instant::now() < deadline, "no fetch");
+            assert!(Instant::now() < deadline, "no renewal");
             std::thread::sleep(Duration::from_millis(5));
         }
-        jazz_session_close(session);
+        jazz_session_close(session as *mut _);
         assert!(
             !host.running.load(Ordering::SeqCst),
             "close returned while the callback ran"
         );
         host.closed.store(true, Ordering::SeqCst);
-        refreshing.join().unwrap();
-        // The session's own renewals would come now, if any could.
+        // The client's renewals would come now, if any could.
         std::thread::sleep(Duration::from_millis(1500));
         assert!(
             !host.after_close.load(Ordering::SeqCst),
             "the callback ran after close"
         );
-        drop(host);
     })
     .await
     .unwrap();
