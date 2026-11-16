@@ -14,8 +14,8 @@ export const UPGRADE_FROM_ALPHA_64_URL =
   "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha64";
 
 const NO_REPLACEMENT =
-  "it has no replacement: schema.ts defines the app with `s.defineSchema({ … })`, and " +
-  "`npx jazz-tools generate` writes jazz.app.json, jazz.permissions.json and jazz.generated.ts from it. " +
+  "it has no replacement: jazz.app.json and jazz.permissions.json are now the app's schema, migrations and permissions, " +
+  "generated from schema.ts (`s.defineSchema`) by `npx jazz-tools generate`, with typed bindings in jazz.generated.ts. " +
   "Run `npx jazz-tools upgrade` to convert an alpha.64 or alpha.65 app";
 
 /**
