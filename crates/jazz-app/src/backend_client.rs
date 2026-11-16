@@ -94,7 +94,7 @@ async fn admits_as_trusted(endpoint: &str, app: AppId, token: &str) -> Result<bo
 /// signs in as the user the main backend trusts the credential as.
 pub(crate) async fn connect(
     mut context: AppContext,
-    connector: std::sync::Arc<jazz_native_transport::NativeWebSocketConnector>,
+    connector: std::sync::Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     credential: Bearer,
     endpoint: &str,
 ) -> Result<(JazzClient, User, Credential, BackendClientLink)> {
