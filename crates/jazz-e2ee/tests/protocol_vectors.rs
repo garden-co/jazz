@@ -507,11 +507,11 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
     ),
     (
         "public successor",
-        "9b64912a52fb8441366080d964d77cf7d2a0e2f0f62aa2e204ec3f7690746cdd",
+        "8ae7c0725064cf2d665da8905fcc11910d96f27c6c65c5348382565d35e4e16c",
     ),
     (
         "private successor",
-        "b0da33989616468ba18a476c0aadeccea14eaa6203988eb9d7a3494889918021",
+        "63906d8c1d766772ebd52286f0eb4cf032dc164573f188e93dfe09cf6c78e12c",
     ),
     (
         "recovery root",
@@ -774,6 +774,7 @@ fn signed_bytes() {
                 E1.as_bytes(),
                 b"remove-device",
                 D2.as_bytes(),
+                b"",
                 &membership,
                 &public_successor.revision,
             ],
@@ -815,6 +816,7 @@ fn signed_bytes() {
                 E1.as_bytes(),
                 b"retire-recovery-root",
                 R2.as_bytes(),
+                b"",
                 &membership,
                 &private_successor.revision,
                 b"marker",
@@ -1554,8 +1556,19 @@ fn row_validation() {
         signature: vec![1],
     };
     assert!(successor.validate().is_ok());
+    // A removal may also retire the recovery root the device recovered
+    // with; a retirement names no device.
+    assert!(
+        PublicAccountSuccessor {
+            retired_recovery_root_id: Some(R2.into()),
+            ..successor.clone()
+        }
+        .validate()
+        .is_ok()
+    );
     assert!(invalid(
         PublicAccountSuccessor {
+            action: AccountAction::RetireRecoveryRoot,
             retired_recovery_root_id: Some(R2.into()),
             ..successor.clone()
         }

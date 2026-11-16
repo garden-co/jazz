@@ -410,6 +410,41 @@ fn recovery_restores_a_new_device() {
         .unwrap()
         .is_none()
     );
+
+    // Removing the device that recovered retires the root it recovered
+    // with in the same rotation (an app account), so the recovery secret it
+    // may still hold opens nothing new.
+    let before_removal = ledger.public.clone();
+    let (at, removal) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(replacement.id.clone()),
+        &mut rng,
+    );
+    assert_eq!(
+        removal.public.retired_recovery_root_id.as_deref(),
+        Some(root.id.as_str())
+    );
+    assert!(removal.recovery_deliveries.is_empty());
+    let state = ledger.state(&env);
+    assert!(state.is_removed(&replacement.id));
+    assert!(state.recovery_roots.is_empty());
+    assert!(state.retired_recovery_roots.contains_key(&root.id));
+
+    // A removal that leaves the root active is not accepted.
+    let mut keeps_root = removal.public.clone();
+    keeps_root.retired_recovery_root_id = None;
+    let bytes = keeps_root.signed_bytes(&env.application()).unwrap();
+    keeps_root.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    let mut view = before_removal;
+    view.through = at;
+    view.successors.push(Accepted::new(at, keeps_root));
+    let state = jazz_e2ee::protocol::account::AccountReplay::new(&view, &env.domain, &env.registry)
+        .unwrap()
+        .current()
+        .unwrap()
+        .unwrap();
+    assert!(!state.is_removed(&replacement.id));
 }
 
 /// Recovery fails with its own codes: keys of another secret do not match

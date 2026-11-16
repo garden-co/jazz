@@ -447,20 +447,26 @@ impl PublicDeviceApproval {
     }
 }
 
-/// The target of a successor: exactly the column `action` names is set.
+/// The targets of a successor (§2.8): the column `action` names is set, and
+/// a `remove-device` successor may also retire the recovery root the
+/// removed device recovered with. Returns the target and that co-retired
+/// root.
 fn successor_target<'a>(
     action: AccountAction,
     removed_device_id: &'a Option<String>,
     retired_recovery_root_id: &'a Option<String>,
-) -> ProtocolResult<&'a str> {
+) -> ProtocolResult<(&'a str, Option<&'a str>)> {
     match (action, removed_device_id, retired_recovery_root_id) {
-        (AccountAction::RemoveDevice, Some(device), None) => {
+        (AccountAction::RemoveDevice, Some(device), root) => {
             ensure_id(device, IdForm::Random, "invalid removed device ID")?;
-            Ok(device)
+            if let Some(root) = root {
+                ensure_id(root, IdForm::RandomOrDerived, "invalid retired root ID")?;
+            }
+            Ok((device, root.as_deref()))
         }
         (AccountAction::RetireRecoveryRoot, None, Some(root)) => {
             ensure_id(root, IdForm::RandomOrDerived, "invalid retired root ID")?;
-            Ok(root)
+            Ok((root, None))
         }
         _ => Err(super::super::error::ProtocolError::InvalidRecord(
             "successor target does not match its action",
@@ -487,7 +493,7 @@ fn successor_header<'a>(
         ensure_id(value, IdForm::Random, "invalid successor ID")?;
     }
     ensure(predecessor != epoch_id, "successor repeats its predecessor")?;
-    let target = successor_target(action, removed_device_id, retired_recovery_root_id)?;
+    let (target, _) = successor_target(action, removed_device_id, retired_recovery_root_id)?;
     let members = json::decode_id_list(membership)?;
     ensure(
         action != AccountAction::RemoveDevice || !members.iter().any(|member| member == target),
@@ -499,6 +505,11 @@ fn successor_header<'a>(
 impl PublicAccountSuccessor {
     /// The target ID; malformed columns are invalid.
     pub fn target_id(&self) -> ProtocolResult<&str> {
+        Ok(self.targets()?.0)
+    }
+
+    /// The target ID and, for a removal, the recovery root it also retires.
+    pub fn targets(&self) -> ProtocolResult<(&str, Option<&str>)> {
         successor_target(
             self.action,
             &self.removed_device_id,
@@ -533,10 +544,11 @@ impl PublicAccountSuccessor {
     /// scope: "account", identifier: account, table:
     /// "__e2ee_public_account_successors", row: id, column: "signature",
     /// epoch: newEpoch, recipient: signerId} ‖ frame[predecessor, action,
-    /// targetId, membership, revision]` (§2.8).
+    /// targetId, alsoRetiredId, membership, revision]` (§2.8), where
+    /// `alsoRetiredId` is the recovery root a removal also retires, or empty.
     pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
-        let target = self.target_id()?;
+        let (target, also_retired) = self.targets()?;
         let prefix = context(CryptoContext {
             application: application.as_str(),
             policy: PUBLIC_SUCCESSOR_POLICY,
@@ -554,6 +566,7 @@ impl PublicAccountSuccessor {
                 self.predecessor.as_bytes(),
                 self.action.as_str().as_bytes(),
                 target.as_bytes(),
+                also_retired.unwrap_or("").as_bytes(),
                 &self.membership,
                 &self.revision,
             ],
@@ -563,6 +576,11 @@ impl PublicAccountSuccessor {
 
 impl AccountSuccessor {
     pub fn target_id(&self) -> ProtocolResult<&str> {
+        Ok(self.targets()?.0)
+    }
+
+    /// The target ID and, for a removal, the recovery root it also retires.
+    pub fn targets(&self) -> ProtocolResult<(&str, Option<&str>)> {
         successor_target(
             self.action,
             &self.removed_device_id,
@@ -607,11 +625,11 @@ impl AccountSuccessor {
     }
 
     /// The private signed bytes (§2.8): `S("signature", signerId) ‖
-    /// frame[predecessor, action, targetId, membership, revision,
-    /// verification, history, deliveries]`.
+    /// frame[predecessor, action, targetId, alsoRetiredId, membership,
+    /// revision, verification, history, deliveries]`.
     pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
-        let target = self.target_id()?;
+        let (target, also_retired) = self.targets()?;
         let prefix = successor_context(
             application,
             &self.account_id,
@@ -626,6 +644,7 @@ impl AccountSuccessor {
                 self.predecessor.as_bytes(),
                 self.action.as_str().as_bytes(),
                 target.as_bytes(),
+                also_retired.unwrap_or("").as_bytes(),
                 &self.membership,
                 &self.revision,
                 &self.verification,

@@ -808,7 +808,11 @@ pub fn rotate(
             if !members.remove(device) {
                 return refuse(RefusalCode::TargetNotActive);
             }
-            (AccountAction::RemoveDevice, Some(device.clone()), None)
+            (
+                AccountAction::RemoveDevice,
+                Some(device.clone()),
+                recovered_with(state, device),
+            )
         }
         RotationTarget::RetireRecoveryRoot(root) => {
             if state.recovery_root(root).is_none() {
@@ -898,6 +902,21 @@ pub fn rotate(
         recovery_deliveries,
         key,
     })
+}
+
+/// The recovery root a removal of `device` must also retire (§2.8): in an
+/// app account, the active root of the device's recovery approval in this
+/// generation. The SDK then asks for a new recovery secret backup.
+pub fn recovered_with(state: &AccountState, device: &str) -> Option<String> {
+    if state.root.row.kind != AccountKind::App {
+        return None;
+    }
+    state
+        .approvals
+        .iter()
+        .filter(|approval| approval.row.device_id == device)
+        .find_map(|approval| approval.row.recovery_root_id.clone())
+        .filter(|root| state.recovery_root(root).is_some())
 }
 
 /// A recovery root registration (§2.9, stage `recovery-root`), signed by an

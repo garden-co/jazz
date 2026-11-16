@@ -329,8 +329,11 @@ wherever it enters JSON. `covers` (§1.3) is text. Optional columns
 | `__e2ee_recovery_roots`            | `accountId`, `signerId`, `epochId`, `publicKey`, `mechanism`, `version`, `signingPublicKey`, `signingMechanism`, `signingVersion`, `signature`                                            | root ID         | public     | A registered recovery credential, signed by an active device.                                           |
 | `__e2ee_recovery_deliveries`       | `rootId`, `epochId`, `envelope`                                                                                                                                                           | random          | private    | Account epoch key sealed to a recovery root.                                                            |
 
-`action` is `remove-device` or `retire-recovery-root`; exactly the matching
-target column is set.
+`action` is `remove-device` or `retire-recovery-root`; the matching target
+column is set. A `retire-recovery-root` successor sets only
+`retiredRecoveryRootId`; a `remove-device` successor sets `removedDeviceId`
+and, when the removed device recovered with a root that is still active,
+also `retiredRecoveryRootId` (§2.8).
 
 A root's `kind` is `local-first` (an account founded by a local-first
 identity, §2.3) or `app` (an account of the application's own sign-in). A
@@ -428,7 +431,7 @@ Account and device tables (fixed policies):
   recovery approval's `recoveryRootId` names a recovery root of that account.
   Both successor tables: `accountId = session account`; the signer request
   and the target (removed device's request or retired recovery root) belong
-  to that account; exactly one target column is set, matching `action`; the
+  to that account; the target columns match `action` (§1.2); the
   private and public rows share their ID and are inserted in one
   transaction.
 - R9. Recovery roots: `accountId = session account`, signer request of the
@@ -1096,8 +1099,8 @@ recipient}`. Insert atomically:
   epoch; `verification = wrap(K', S("verification"), Z32)`; `history =
 wrap(K', S("history"), K)`; `deliveries` = delivery map of `seal(member.pub,
 S("delivery", deviceId), K')` for exactly the members; signature over
-  `S("signature", signerId) ‖ frame[predecessor, action, targetId, membership,
-revision, verification, history, deliveries]`;
+  `S("signature", signerId) ‖ frame[predecessor, action, targetId,
+alsoRetiredId, membership, revision, verification, history, deliveries]`;
 - public successor (same ID): same `membership`; `revision` = revision of the
   IDs of the public approval rows of the predecessor epoch that public replay
   accepted (§2.4, step 2) before the successor's position; signature
@@ -1105,20 +1108,37 @@ revision, verification, history, deliveries]`;
 scope: "account", identifier: account, table:
 "__e2ee_public_account_successors", row: id, column: "signature", epoch:
 newEpoch, recipient: signerId} ‖ frame[predecessor, action, targetId,
-membership, revision]`;
+alsoRetiredId, membership, revision]`;
 - a recovery delivery of `K'` for every unretired active recovery root whose
   sealing key is of the selected sealing mechanism; a root of another
   mechanism gets none (§0, mechanism agility) and does not block the
   rotation.
 
-Removal does not retire recovery roots; retiring a root does not remove
-devices. Only one rotation from a given predecessor can win.
+`targetId` is the removed device or the retired root; `alsoRetiredId` is the
+`retiredRecoveryRootId` of a removal, or empty.
+
+**Removing a device that recovered retires its recovery root.** In an app
+account, a device that became active by a recovery approval (§2.9) held the
+recovery key pair, and so the recovery secret, at that moment. Removing it
+therefore also retires, in the same rotation, the root named by its accepted
+recovery approval in the current generation, if that root is still valid and
+unretired: the removal sets `retiredRecoveryRootId` to it, the new key gets no
+recovery delivery for it, and replay accepts a removal of such a device only
+if it names exactly that root (and a removal of any other device only if it
+names none). The SDK then asks the user to back up a new recovery secret,
+registered as in §2.9 ("Retiring a derived root"). A local-first account's
+removals never set it (§2.9: its root derives from the account secret every
+device holds). Otherwise removal does not retire recovery roots, and
+retiring a root does not remove devices. Only one rotation from a given
+predecessor can win.
 
 **What removal achieves depends on how the account signs in.** For an
 account authenticated by the application's own sign-in, a removed device can
 no longer obtain keys: it is not active, receives no delivery of the new
-account key and cannot approve itself, and the recovery secret is separate
-from anything the device stores. For a **local-first account**, whoever holds
+account key and cannot approve itself. Recovery keys and the recovery secret
+are never persisted on a device (§2.9), and a device that used them had its
+root retired by its removal (above), so whatever it kept does not open the
+new key. For a **local-first account**, whoever holds
 the account secret is the account: every device of the account stores the
 secret in order to sign in, and the recovery root is derived from it (§2.9).
 A removed local-first device therefore still signs in to Jazz as the account
@@ -1229,6 +1249,12 @@ signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
   `epochId` was the account epoch at its position, its signer was active then
   with a supported signing mechanism, and its signature verifies. Later removal
   of the registering device does not invalidate it.
+- **Never persisted.** A device MUST NOT persist the recovery secret, the
+  recovery seed, the recovery key pairs or exported material: they exist in
+  memory for one registration or restore and are erased when it ends (a
+  local-first account's secret is stored for sign-in by local-first auth, not
+  by E2EE). Removing a device that restored with a recovery root retires
+  that root (§2.8).
 - **Restore.** The device first obtains the recovery key pair: for a
   local-first account, by restoring the account secret (passkey or recovery
   phrase) and deriving; for an external account, by signing in with the

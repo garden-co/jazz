@@ -224,6 +224,7 @@ struct ValidSuccessor {
     candidate: Accepted<PublicAccountSuccessor>,
     accepted: Vec<Accepted<PublicDeviceApproval>>,
     target: String,
+    also_retired: Option<String>,
     members: BTreeSet<String>,
 }
 
@@ -512,6 +513,7 @@ impl<'a> AccountReplay<'a> {
         run: &Run<'_, '_>,
         epoch: &AccountEpoch,
         used_epochs: &BTreeSet<String>,
+        earlier_approvals: &[Accepted<PublicDeviceApproval>],
         candidate: &Accepted<PublicAccountSuccessor>,
     ) -> ProtocolResult<Option<ValidSuccessor>> {
         let successor = &candidate.row;
@@ -537,13 +539,23 @@ impl<'a> AccountReplay<'a> {
         if !members.active.contains(&successor.signer_id) {
             return Ok(None);
         }
-        let Ok(target) = successor.target_id().map(str::to_owned) else {
+        let Ok((target, also_retired)) = successor
+            .targets()
+            .map(|(target, also)| (target.to_owned(), also.map(str::to_owned)))
+        else {
             return Ok(None);
         };
         let mut expected = members.active.clone();
         match successor.action {
             AccountAction::RemoveDevice => {
                 if !expected.remove(&target) {
+                    return Ok(None);
+                }
+                // In an app account, removing a device that recovered retires
+                // the root it recovered with, if still active (§2.8).
+                if also_retired
+                    != run.recovered_with(&target, earlier_approvals, &members.accepted)?
+                {
                     return Ok(None);
                 }
             }
@@ -576,6 +588,7 @@ impl<'a> AccountReplay<'a> {
             candidate: candidate.clone(),
             accepted: members.accepted,
             target,
+            also_retired,
             members: expected,
         }))
     }
@@ -599,6 +612,7 @@ impl<'a> AccountReplay<'a> {
             view,
             keys: &keys,
             account_id: &view.account_id,
+            kind: root.row.kind,
             root_floor: root.position,
             removed: BTreeSet::new(),
             retired: BTreeMap::new(),
@@ -632,7 +646,9 @@ impl<'a> AccountReplay<'a> {
             let epoch = epochs.last().expect("root epoch").clone();
             let mut valid = Vec::new();
             for candidate in batch {
-                if let Some(found) = self.successor_valid(&run, &epoch, &used_epochs, candidate)? {
+                if let Some(found) =
+                    self.successor_valid(&run, &epoch, &used_epochs, &approvals, candidate)?
+                {
                     valid.push(found);
                 }
             }
@@ -657,12 +673,16 @@ impl<'a> AccountReplay<'a> {
                 candidate,
                 accepted,
                 target,
+                also_retired,
                 members,
             } = valid.pop().expect("one valid successor");
             approvals.extend(accepted);
             match candidate.row.action {
                 AccountAction::RemoveDevice => {
                     run.removed.insert(target);
+                    if let Some(root) = also_retired {
+                        run.retired.insert(root, position);
+                    }
                 }
                 AccountAction::RetireRecoveryRoot => {
                     run.retired.insert(target, position);
@@ -764,6 +784,7 @@ struct Run<'r, 'a> {
     view: &'r PublicAccountLedger,
     keys: &'r BTreeMap<String, KeyColumns>,
     account_id: &'r str,
+    kind: AccountKind,
     /// The canonical root's position: rows at or before it are of an
     /// earlier history.
     root_floor: Position,
@@ -772,6 +793,41 @@ struct Run<'r, 'a> {
 }
 
 impl Run<'_, '_> {
+    /// The recovery root `device` must have retired with it when removed
+    /// (§2.8): in an app account, the root of its accepted recovery
+    /// approval in this generation, if that root is still valid and
+    /// unretired. `None` otherwise, and always for a local-first account.
+    fn recovered_with(
+        &self,
+        device: &str,
+        earlier: &[Accepted<PublicDeviceApproval>],
+        current: &[Accepted<PublicDeviceApproval>],
+    ) -> ProtocolResult<Option<String>> {
+        if self.kind != AccountKind::App {
+            return Ok(None);
+        }
+        let Some(root_id) = earlier
+            .iter()
+            .chain(current)
+            .filter(|approval| approval.row.device_id == device)
+            .find_map(|approval| approval.row.recovery_root_id.clone())
+        else {
+            return Ok(None);
+        };
+        if self.retired.contains_key(&root_id) {
+            return Ok(None);
+        }
+        let Some(root) = self
+            .view
+            .recovery_roots
+            .iter()
+            .find(|root| root.row.id == root_id)
+        else {
+            return Ok(None);
+        };
+        Ok(self.recovery_valid(root)?.then_some(root_id))
+    }
+
     /// A root valid in this view: strictly after the canonical root (so of
     /// this generation) and valid at its registration.
     fn recovery_valid(&self, root: &Accepted<RecoveryRoot>) -> ProtocolResult<bool> {
