@@ -31,8 +31,7 @@
 //! part of a release yet: `Endpoint`, the app's `/jazz` handler served
 //! natively. Run an app's main backend with TS `createJazz`.
 //!
-//! Not supported yet: subscribing to history, and partial reads of large
-//! values. A bearer session is renewed by reconnecting with a fresh bearer,
+//! Not supported yet: partial reads of large values. A bearer session is renewed by reconnecting with a fresh bearer,
 //! as TypeScript's bearer clients do (in-place renewal is for cookie
 //! sessions).
 

@@ -458,16 +458,139 @@ async fn history_lists_a_rows_accepted_versions() {
         .unwrap();
     assert_eq!(until.len(), 3);
 
-    // A history read must be bounded to rows; subscribing is not supported.
+    // A history read must be bounded to rows.
     assert!(remote(&jazz, todos::history()).await.is_err());
-    let refused = jazz
-        .subscribe(todos::history().id(f.milk.id))
-        .await
-        .err()
-        .expect("subscribing to history is refused");
-    assert!(unsupported(refused).contains("history"));
     jazz.shutdown().await.unwrap();
     server.shutdown().await;
+}
+
+/// The rows a subscription holds, once `done` says they are complete.
+async fn until<T: Row + Clone>(
+    changes: &mut jazz_app::Subscription<T>,
+    rows: &mut Rows<T>,
+    done: impl Fn(&[T]) -> bool,
+) -> Vec<T> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !done(rows.as_slice()) {
+            rows.apply(
+                changes
+                    .next()
+                    .await
+                    .expect("the subscription runs")
+                    .unwrap(),
+            );
+        }
+    })
+    .await
+    .expect("the subscription reaches the expected rows");
+    rows.as_slice().to_vec()
+}
+
+/// A history subscription, as in TypeScript: each accepted version is a
+/// row of its own (every version shares the row's id), and a new version
+/// arrives as it is accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_subscriptions_follow_accepted_versions() {
+    let (server, config) = server().await;
+    let jazz = bindings::open(config()).await.unwrap();
+    let f = fixture(&jazz).await;
+    let rename = |title: &str| TodoUpdate {
+        title: Some(title.into()),
+        ..Default::default()
+    };
+    jazz.update(f.milk.id, rename("Buy oat milk"))
+        .await
+        .unwrap();
+
+    let mut changes = jazz
+        .subscribe_with(
+            todos::history()
+                .id(f.milk.id)
+                .order_by_accepted_at(Order::Asc),
+            jazz_app::ReadTier::Remote,
+        )
+        .await
+        .unwrap();
+    let mut rows = Rows::default();
+    let versions = until(&mut changes, &mut rows, |rows| rows.len() == 2).await;
+    let got: Vec<_> = versions.iter().map(|v| v.row.title.as_str()).collect();
+    assert_eq!(got, ["Buy milk", "Buy oat milk"]);
+
+    jazz.update(f.milk.id, rename("Buy soy milk"))
+        .await
+        .unwrap();
+    let versions = until(&mut changes, &mut rows, |rows| rows.len() == 3).await;
+    let got: Vec<_> = versions.iter().map(|v| v.row.title.as_str()).collect();
+    assert_eq!(got, ["Buy milk", "Buy oat milk", "Buy soy milk"]);
+    assert!(versions.iter().all(|v| v.row.id == f.milk.id));
+    drop(changes);
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// A live union holds a row once per arm that matches it, as in
+/// TypeScript; when it leaves one arm, only that arm's occurrence goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_union_keeps_each_arms_occurrence_of_a_row() {
+    let jazz = local().await;
+    let f = fixture(&jazz).await;
+    let mut changes = jazz
+        .subscribe(
+            Query::union_named([
+                ("open", todos::query().filter(todos::done().eq(false))),
+                ("milk", todos::query().id(f.milk.id)),
+            ])
+            .order_by(todos::title(), Order::Asc),
+        )
+        .await
+        .unwrap();
+    let mut rows = Rows::default();
+    let milk = |rows: &[Todo]| rows.iter().filter(|t| t.id == f.milk.id).count();
+    let held = until(&mut changes, &mut rows, |rows| milk(rows) == 2).await;
+    assert_eq!(milk(&held), 2, "{:?}", titles(&held));
+
+    // Renamed, milk changes in both arms: each occurrence takes the update.
+    jazz.update(
+        f.milk.id,
+        TodoUpdate {
+            title: Some("Buy whole milk".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let renamed = |rows: &[Todo]| {
+        rows.iter()
+            .filter(|t| t.id == f.milk.id && t.title == "Buy whole milk")
+            .count()
+    };
+    until(&mut changes, &mut rows, |rows| renamed(rows) >= 1).await;
+    // Let the other occurrence's update arrive too, if it comes apart.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    while let Some(Some(delta)) = futures::FutureExt::now_or_never(changes.next()) {
+        rows.apply(delta.unwrap());
+    }
+    let held = rows.as_slice().to_vec();
+    assert_eq!(milk(&held), 2, "{:?}", titles(&held));
+    assert_eq!(renamed(&held), 2, "{:?}", titles(&held));
+
+    // Done, milk leaves the open arm but stays in its own.
+    jazz.update(
+        f.milk.id,
+        TodoUpdate {
+            done: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let held = until(&mut changes, &mut rows, |rows| {
+        rows.iter().any(|t| t.id == f.milk.id && t.done) && milk(rows) < 2
+    })
+    .await;
+    assert_eq!(milk(&held), 1, "{:?}", titles(&held));
+    drop(changes);
+    jazz.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

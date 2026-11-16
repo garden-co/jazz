@@ -407,11 +407,6 @@ impl Jazz {
     ) -> Result<Subscription<T>> {
         let opts = read_opts(&query, tier);
         let query = query.into_untyped()?;
-        if jazz::schema::history::is_history_table(&query.table) {
-            return Err(Error::Unsupported(
-                "subscribing to history; read it with Jazz::all".into(),
-            ));
-        }
         let (sender, receiver) = mpsc::unbounded_channel();
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {

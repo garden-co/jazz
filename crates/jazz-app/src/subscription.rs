@@ -16,6 +16,10 @@ use crate::table::{self, Implementations, Table};
 
 /// A change to a subscribed query's rows. Apply its parts in order:
 /// `removed`, then `updated`, then `added` (see [`Rows::apply`]).
+///
+/// Each part names the result it changes by its `key`. A row can be
+/// several results: a history read has one per version of a row, and a
+/// union one per arm that matches the row, all sharing the row's id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Delta<T> {
     pub removed: Vec<Removed>,
@@ -28,12 +32,16 @@ pub struct Delta<T> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Added<T> {
+    /// The result this is.
+    pub key: ResultKey,
     pub index: usize,
     pub row: T,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Updated<T> {
+    /// The result that changed.
+    pub key: ResultKey,
     pub id: ObjectId,
     pub old_index: usize,
     pub new_index: usize,
@@ -43,6 +51,8 @@ pub struct Updated<T> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removed {
+    /// The result that went.
+    pub key: ResultKey,
     pub id: ObjectId,
     pub index: usize,
 }
@@ -51,37 +61,54 @@ pub struct Removed {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rows<T> {
     rows: Vec<T>,
+    /// Each row's result, in the same order.
+    keys: Vec<ResultKey>,
 }
 
 impl<T> Default for Rows<T> {
     fn default() -> Self {
-        Self { rows: Vec::new() }
+        Self {
+            rows: Vec::new(),
+            keys: Vec::new(),
+        }
     }
 }
 
 impl<T: Row> Rows<T> {
     pub fn apply(&mut self, delta: Delta<T>) {
         for removed in delta.removed {
-            self.rows.retain(|row| row.row_id() != removed.id);
+            if let Some(at) = self.position(&removed.key) {
+                self.rows.remove(at);
+                self.keys.remove(at);
+            }
         }
         for updated in delta.updated {
-            let held = self.rows.iter().position(|row| row.row_id() == updated.id);
-            let row = match (held, updated.row) {
+            let row = match (self.position(&updated.key), updated.row) {
                 (Some(at), Some(row)) => {
                     self.rows.remove(at);
+                    self.keys.remove(at);
                     row
                 }
-                (Some(at), None) => self.rows.remove(at),
+                (Some(at), None) => {
+                    self.keys.remove(at);
+                    self.rows.remove(at)
+                }
                 (None, Some(row)) => row,
                 (None, None) => continue,
             };
             let at = updated.new_index.min(self.rows.len());
             self.rows.insert(at, row);
+            self.keys.insert(at, updated.key);
         }
         for added in delta.added {
             let at = added.index.min(self.rows.len());
             self.rows.insert(at, added.row);
+            self.keys.insert(at, added.key);
         }
+    }
+
+    fn position(&self, key: &ResultKey) -> Option<usize> {
+        self.keys.iter().position(|held| held == key)
     }
 
     pub fn as_slice(&self) -> &[T] {
@@ -158,6 +185,7 @@ fn typed<T: Row>(delta: OrderedRowDelta, implementations: &Implementations) -> R
             .map(|removed| {
                 Ok(Removed {
                     id: row_id::<T>(&removed.id)?,
+                    key: removed.id,
                     index: removed.index,
                 })
             })
@@ -168,6 +196,7 @@ fn typed<T: Row>(delta: OrderedRowDelta, implementations: &Implementations) -> R
             .map(|updated| {
                 let id = row_id::<T>(&updated.id)?;
                 Ok(Updated {
+                    key: updated.id,
                     id,
                     old_index: updated.old_index,
                     new_index: updated.new_index,
@@ -185,6 +214,7 @@ fn typed<T: Row>(delta: OrderedRowDelta, implementations: &Implementations) -> R
                 Ok(Added {
                     index: added.index,
                     row: table::decode(row_id::<T>(&added.id)?, added.row.fields, implementations)?,
+                    key: added.id,
                 })
             })
             .collect::<Result<_>>()?,
