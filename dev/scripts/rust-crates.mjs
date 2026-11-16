@@ -11,7 +11,12 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The crates users install; everything they need is published with them. */
-export const ROOT_CRATES = Object.freeze(["jazz-app", "jazz-tools", "jazz-codegen", "jazz-ffi"]);
+export const ROOT_CRATES = Object.freeze([
+  "jazz-app-support",
+  "jazz-tools",
+  "jazz-codegen",
+  "jazz-ffi",
+]);
 
 /**
  * Published crates that are versioned apart from Jazz: vendored forks keep

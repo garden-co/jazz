@@ -1,11 +1,11 @@
 //! `jazz-app-test-relay`: a stand-in for an app backend's Jazz endpoint
 //! (`createJazz`'s handler), so bindings in other languages (Swift, Go,
 //! Kotlin) can test end users against a running endpoint. It serves
-//! `tests/relay/mod.rs`, the same relay jazz-app's and jazz-ffi's end-user
+//! `tests/relay/mod.rs`, the same relay jazz-app-support's and jazz-ffi's end-user
 //! tests use.
 //!
 //! ```text
-//! cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay
+//! cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 //! JAZZ_BACKEND_SECRET=<s> JAZZ_ADMIN_SECRET=<s> \
 //!     jazz-app-test-relay --core <url> --app-id <uuid> \
 //!     --app <jazz.app.json> --permissions <jazz.permissions.json>
@@ -25,14 +25,14 @@
 //!   `--admin-secret <s>` work too, but put them in argv, where `ps` shows
 //!   them.
 //! - The bundle the relay admits end users' sockets to, one of:
-//!   - `--app <path> --permissions <path>`: the relay opens a jazz-app
+//!   - `--app <path> --permissions <path>`: the relay opens a jazz-app-support
 //!     backend on the core with the app's `jazz.app.json` and
 //!     `jazz.permissions.json` (e.g. StagePlan's), which publishes them, and
 //!     serves the bundle that backend reports. It closes that backend before
 //!     printing the endpoint: the bundle lives on the core. For client-only
 //!     bindings, which open no backend.
 //!   - `--bundle <id>`: a bundle the caller published, e.g. by opening a
-//!     backend (jazz-ffi, or jazz-app's `Backend`) with the app's permissions
+//!     backend (jazz-ffi, or jazz-app-support's `Backend`) with the app's permissions
 //!     and calling `bundle()` on it.
 //!
 //! Auth: a device key signs in on its own; a bearer `Authorization: Bearer
@@ -45,7 +45,7 @@ mod relay;
 use std::io::Write;
 use std::process::ExitCode;
 
-use jazz_app::{AppFiles, AppId, Backend, Config, Jazz};
+use jazz_app_support::{AppFiles, AppId, Backend, Config, Jazz};
 
 const USAGE: &str = "usage: JAZZ_BACKEND_SECRET=<s> JAZZ_ADMIN_SECRET=<s> \
     jazz-app-test-relay --core <url> --app-id <uuid> \

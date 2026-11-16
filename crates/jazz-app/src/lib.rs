@@ -7,7 +7,7 @@
 //! they build on: the [`Jazz`] handle and the traits they implement.
 //!
 //! ```ignore
-//! let jazz = jazz_app::open(config).await?;            // generated
+//! let jazz = jazz_app_support::open(config).await?;            // generated
 //! let open = jazz.all(todos::query().filter(todos::done().eq(false))).await?;
 //! let todo = jazz.insert(NewTodo { title: "Write docs".into(), ..Default::default() }).await?;
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
@@ -49,6 +49,7 @@ mod error;
 mod handle;
 mod history;
 mod include;
+mod jazz_session;
 mod large;
 mod lifecycle;
 mod query;
@@ -78,6 +79,9 @@ pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, Pick, RefsInclude, Row, Selection, With,
 };
 pub use jazz::tools::MutationError;
+pub use jazz_session::{
+    Initial, JazzSession, Recovery, SessionConfig, SessionError, SessionSnapshot, SessionStatus,
+};
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 pub use query::{

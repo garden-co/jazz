@@ -257,7 +257,7 @@ fn returned_strings_are_the_callers_to_free() {
 /// she chiefs and reads its tasks under StagePlan's permissions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_through_the_c_abi() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
