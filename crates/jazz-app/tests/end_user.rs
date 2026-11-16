@@ -18,6 +18,11 @@ use jazz_app::{
 };
 use jazz_server::JazzServer;
 
+/// The app's files with its permissions, as a backend client opens them.
+fn files() -> AppFiles {
+    AppFiles::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/todos")).unwrap()
+}
+
 fn client_files() -> AppFiles {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/todos");
     AppFiles::new(std::fs::read(format!("{dir}/jazz.app.json")).unwrap(), None)
@@ -615,7 +620,7 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
     use jazz_app::BackendClientKind;
     let app = App::start().await;
     let job = Jazz::open(
-        client_files(),
+        files(),
         Config::new(app.app_id)
             .server(&app.relay.endpoint)
             .credential(machine("machine-trusted")),
@@ -698,7 +703,7 @@ async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refuse
     use jazz_app::BackendClientKind;
     let app = App::start().await;
     let agent = Jazz::open(
-        client_files(),
+        files(),
         Config::new(app.app_id)
             .server(&app.relay.endpoint)
             .credential(machine("token-agent")),
@@ -726,7 +731,7 @@ async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refuse
     agent.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
 
     let untrusted = Jazz::open(
-        client_files(),
+        files(),
         Config::new(app.app_id)
             .server(&app.relay.endpoint)
             .credential(machine("not-a-credential")),
@@ -755,7 +760,7 @@ async fn closing_reports_writes_a_memory_store_loses() {
     let app = App::start().await;
     let open = || {
         Jazz::open(
-            client_files(),
+            files(),
             Config::new(app.app_id)
                 .server(&app.relay.endpoint)
                 .credential(machine("machine-trusted")),
