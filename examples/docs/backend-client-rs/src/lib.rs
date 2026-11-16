@@ -17,9 +17,9 @@ pub async fn backend_client() -> ::jazz_app::Result<()> {
         .storage(Storage::Memory)
         .credential(|_reason: TokenReason| async move {
             // The workload's OIDC token, read fresh each time it is asked for.
-            Ok(std::fs::read_to_string("/var/run/secrets/jazz/token")
-                .ok()
-                .map(|token| token.trim().to_owned()))
+            std::fs::read_to_string("/var/run/secrets/jazz/token")
+                .map(|token| Some(token.trim().to_owned()))
+                .map_err(|e| ::jazz_app::Error::Config(format!("reading the workload token: {e}")))
         });
     let jazz = jazz_app::open(config).await?;
     let open = jazz
@@ -44,7 +44,7 @@ pub async fn trusted(job: ::jazz_app::Jazz) -> ::jazz_app::Result<()> {
         Some(BackendClientKind::Trusted) => println!("a trusted machine"),
         // `as: (claims) => ({ userId })`: it acts as that one user.
         Some(BackendClientKind::Scoped) => println!("a scoped machine"),
-        None => unreachable!("opened with Config::credential"),
+        None => println!("not a backend client"),
     }
     // #endregion backend-client-trusted-rust
 
