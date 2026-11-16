@@ -643,7 +643,6 @@ impl HttpStreamFallbackConnector {
         }
     }
 
-    /// The transport the last session that opened used.
     /// Waits, for at most `timeout`, until the stream sessions this
     /// connector opened and its client has since dropped are ended on the
     /// backend (their DELETEs answered). A client calls it as it shuts
@@ -652,7 +651,14 @@ impl HttpStreamFallbackConnector {
     /// it notices the response is gone. Call it once the client has
     /// stopped: a session still in use holds it until `timeout`. Sockets
     /// need nothing: their close goes with the socket.
+    ///
+    /// A zero `timeout` returns at once without waiting for anything, as
+    /// a client closing with no time to spare (`close(Duration::ZERO)`)
+    /// asks: the backend then ends the sessions when their responses go.
     pub async fn settle(&self, timeout: Duration) {
+        if timeout.is_zero() {
+            return;
+        }
         let endings = std::mem::take(&mut *self.endings.lock().expect("endings lock"));
         let _ = tokio::time::timeout(timeout, async {
             for ending in endings {
@@ -662,6 +668,7 @@ impl HttpStreamFallbackConnector {
         .await;
     }
 
+    /// The transport the last session that opened used.
     pub fn last_transport(&self) -> Option<HttpStreamTransportKind> {
         *self.last.lock().expect("transport lock")
     }

@@ -34,7 +34,7 @@ impl Auth {
     ///
     /// ```no_run
     /// # async fn access_token(_fresh: bool) -> Option<String> { None }
-    /// let auth = jazz_app::Auth::bearer(|reason: jazz_app::TokenReason| async move {
+    /// let auth = jazz_app_support::Auth::bearer(|reason: jazz_app_support::TokenReason| async move {
     ///     Ok(access_token(reason.is_fresh()).await)
     /// });
     /// ```
