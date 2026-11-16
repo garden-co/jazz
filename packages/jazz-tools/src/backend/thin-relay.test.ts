@@ -208,3 +208,37 @@ describe("thin sessions' transactions in the backend", () => {
     expect(h.clientClosed()).toBe(true);
   });
 });
+
+describe("a request the core keeps waiting", () => {
+  it("holds the session's next request until the first one ends", async () => {
+    let finishFirst: (() => void) | undefined;
+    let calls = 0;
+    const h = harness({
+      requestTimeoutMs: 20,
+      serve: (request) => {
+        calls += 1;
+        if (calls === 1)
+          return new Promise((resolve) => {
+            finishFirst = () => resolve(clientAnswer(requestId(request)));
+          });
+        return Promise.resolve(clientAnswer(requestId(request)));
+      },
+    });
+    await h.relay.fromClient(message([1, { type: "schema", schema: SCHEMA }]));
+    h.relay.fromCore(coreAnswer(1));
+    await h.relay.fromClient(
+      message(
+        [2, { type: "query", query: new Uint8Array(), options: {}, transaction: TX }],
+        [3, { type: "query", query: new Uint8Array(), options: {}, transaction: TX }],
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // The first is answered at its timeout; the second is not served yet.
+    expect(decodeAll(h.toClient).map((answer) => answer.id)).toEqual([2]);
+    expect(h.served).toEqual([2]);
+    finishFirst!();
+    await settle();
+    expect(h.served).toEqual([2, 3]);
+    expect(decodeAll(h.toClient).map((answer) => answer.id)).toEqual([2, 3]);
+  });
+});

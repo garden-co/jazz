@@ -1,22 +1,21 @@
 /**
  * The client a thin session's transactions are served by (SPEC 8.14): an
- * in-memory replica in the backend, linked to the core exactly as the
- * session's own socket is, with the prelude the backend admitted for it:
- * the same vouched user session or guest token, pinned to the same bundle.
- * The core reads and checks for it as the session; the session's staged
- * writes run as the session.
- *
- * A trusted backend client's socket names no session: its client is the
- * backend's, as the core served it as SYSTEM.
+ * in-memory replica in the backend, on the schema version the thin client
+ * bound, linked to the core over the same kind of socket as the session's
+ * own, opened with the prelude the backend admitted for it (the same vouched
+ * user session, guest token or trusted backend link, pinned to the same
+ * bundle). The core reads and checks for it as the session; the session's
+ * staged writes run as the session.
  */
 import { NapiDb } from "jazz-napi";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient } from "../runtime/client.js";
 import type { AppContext } from "../runtime/context.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
-import { parseJwtPayload } from "../runtime/client-session.js";
 import type { NativeSelfSignedClientProof } from "../runtime/native-runtime/native-codec.js";
+import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
+import { parseJwtPayload } from "../runtime/client-session.js";
+import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
 import type { ThinTransactionClient } from "./thin-relay.js";
 
 /** The canonical author of SYSTEM, which a trusted backend client's socket is served as. */
@@ -24,13 +23,15 @@ const SYSTEM_AUTHOR = '["urn:jazz:system","system"]';
 
 export interface ThinSessionClientOptions {
   appId: string;
-  schema: WasmSchema;
-  /** The core's URL, as this backend reaches it. */
+  /** The public schema JSON the thin client bound its connection to. */
+  schema: Uint8Array;
   serverUrl: string;
-  /** The prelude the backend sent the core for the session's socket. */
+  /** The prelude the backend admitted the session's socket with. */
   prelude: Uint8Array;
-  /** The bundle the session's socket is pinned to. */
-  bundle?: string;
+  /** A trusted backend client's socket, which names no session. */
+  trusted: boolean;
+  /** Opens the session's link: a socket sending `prelude` first. */
+  webSocket: WebSocketConstructor;
 }
 
 export function openThinSessionClient(options: ThinSessionClientOptions): ThinTransactionClient {
@@ -38,30 +39,35 @@ export function openThinSessionClient(options: ThinSessionClientOptions): ThinTr
     peer_identity?: string;
     auth?: Record<string, unknown>;
   };
-  const auth = parsed.auth ?? {};
-  const trusted = auth.backend_session == null && auth.jwt_token == null;
-  const author = trusted ? SYSTEM_AUTHOR : parsed.peer_identity;
+  const author = options.trusted ? SYSTEM_AUTHOR : parsed.peer_identity;
   if (!author) throw new Error("a thin session's prelude names its peer identity");
+  // The thin client's own version: the core serves its requests pinned to
+  // it, as it does an older replica's.
+  const schema = (JSON.parse(new TextDecoder().decode(options.schema)) as { tables?: WasmSchema })
+    .tables;
+  if (!schema) throw new Error("the thin client bound no schema tables");
   const runtime = new NativeRuntimeAdapter(
     NapiDb,
-    options.schema,
+    schema,
     randomNodeUuidBytes(),
     new TextEncoder().encode(author),
     1,
     false,
-    trusted
-      ? { backendMode: true, readAuthorizationHost: "trusted-serving" }
-      : { selfSignedClientProof: guestProof(auth.jwt_token, author) },
+    {
+      webSocket: options.webSocket,
+      ...(options.trusted
+        ? { backendMode: true, readAuthorizationHost: "trusted-serving" as const }
+        : { selfSignedClientProof: guestProof(parsed.auth?.jwt_token, author) }),
+    },
   );
   const client = JazzClient.connectWithRuntime(
     runtime,
-    { appId: options.appId, schema: options.schema, serverUrl: options.serverUrl } as AppContext,
+    { appId: options.appId, schema, serverUrl: options.serverUrl } as AppContext,
     { onAuthFailure: () => {} },
   );
-  client.connectTransport(options.serverUrl, {
-    ...auth,
-    ...(options.bundle === undefined ? {} : { bundle: options.bundle }),
-  } as Parameters<JazzClient["connectTransport"]>[1]);
+  // The socket sends the admitted prelude in place of the one the runtime
+  // builds from this.
+  client.connectTransport(options.serverUrl, {});
   let closed = false;
   return {
     serve: (request) => client.serveThinTransaction(request),

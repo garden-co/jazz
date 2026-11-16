@@ -58,7 +58,6 @@ import {
 import type { BackendSchemaInput } from "./create-jazz-context.js";
 import { openThinSessionClient } from "./thin-session-client.js";
 import { asksThinResults, ThinRelay, type ThinTransactionClient } from "./thin-relay.js";
-import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   BackendClientsUnavailable,
   backendClientVerifier,
@@ -2276,21 +2275,22 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    */
   function openThinClient(
     schema: Uint8Array,
-    prelude: Uint8Array,
+    link: ThinLink,
   ): ThinTransactionClient | null | { refused: string } {
-    const app = resolveSchemaSource(options.app);
-    if (!sameBytes(schema, encodeSchema(app)))
-      return {
-        refused:
-          "not supported yet: transactions of a thin client built against another version of the app's schema",
-      };
     if (thinClients >= MAX_THIN_TRANSACTION_CLIENTS) return null;
+    // The session's own link: the socket the relay opens for it, with the
+    // prelude the backend admitted for it, as the session's own socket is
+    // opened (a guest vouched for an endpoint keeps that vouching).
+    const webSocket = inProcessWebSocket((_url, onEvent) =>
+      withPrelude(core.openSocket(link.headers, onEvent, link.access), link.prelude),
+    );
     const client = openThinSessionClient({
       appId,
-      schema: app,
+      schema,
       serverUrl: core.serverUrl,
-      prelude,
-      ...(pin === undefined ? {} : { bundle: pin }),
+      prelude: link.prelude,
+      trusted: link.trusted,
+      webSocket,
     });
     thinClients += 1;
     let closed = false;
@@ -2327,7 +2327,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let thin: ThinRelay | undefined;
     // The prelude the core admitted the session's socket with: its own
     // client connects with the same.
-    let thinPrelude: Uint8Array | undefined;
+    let thinLink: ThinLink | undefined;
     // Users `revokeUser` named while this session's admission ran.
     let admitting = true;
     const revokedWhileAdmitting = new Set<string>();
@@ -2430,7 +2430,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       userId = admitted.userId;
       trusted = admitted.trusted;
-      thinPrelude = admitted.prelude;
+      thinLink = {
+        prelude: admitted.prelude,
+        access: admitted.access,
+        trusted: admitted.trusted,
+        headers: headerPairs(request.headers),
+      };
       stopExpiry?.();
       const admittedAt = Date.now();
       if (admitted.user) {
@@ -2534,9 +2539,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 core.sendWithRoom ? core.sendWithRoom(message) : core.send(message);
               if (!helloSeen) {
                 helloSeen = true;
-                if (asksThinResults(data) && thinPrelude)
+                if (asksThinResults(data) && thinLink)
                   thin = new ThinRelay({
-                    openClient: (schema) => openThinClient(schema, thinPrelude!),
+                    openClient: (schema) => openThinClient(schema, thinLink!),
                     toCore,
                     toClient: (message) => onEvent(null, { kind: "message", data: message }),
                     close: (code, reason) => {
@@ -4670,8 +4675,31 @@ function isLocalEndpoint(endpoint: string): boolean {
 /** Thin sessions with transactions a backend serves at once, each with a client of its own. */
 const MAX_THIN_TRANSACTION_CLIENTS = 256;
 
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
-  return true;
+/** How a thin session's own client links to the core: as its socket was admitted. */
+interface ThinLink {
+  /** The prelude the backend admitted the socket with. */
+  prelude: Uint8Array;
+  access: BackendAccess;
+  /** A trusted backend client's socket, which names no session. */
+  trusted: boolean;
+  headers: string[][];
+}
+
+/** `socket`, sending `prelude` in place of the first message a client sends. */
+function withPrelude(socket: CoreSocket, prelude: Uint8Array): CoreSocket {
+  let first = true;
+  const replace = (data: Uint8Array) => {
+    if (!first) return data;
+    first = false;
+    return prelude;
+  };
+  return {
+    send: (data) => socket.send(replace(data)),
+    async sendWithRoom(data) {
+      const sent = replace(data);
+      return socket.sendWithRoom ? socket.sendWithRoom(sent) : socket.send(sent);
+    },
+    close: () => socket.close(),
+    ...(socket.opened ? { opened: socket.opened } : {}),
+  };
 }

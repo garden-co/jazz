@@ -193,7 +193,7 @@ Each write is checked against the state the transaction leaves behind:
   request.
 - Writes from other transactions don't count until the server has accepted them.
 - The order of the writes inside the transaction doesn't matter, for a local-first client, a thin
-  client or a backend alike.
+  client connected through your backend, or a backend.
 
 For example:
 
@@ -207,9 +207,11 @@ For example:
   member is rejected, even if the document insert comes first. In the state the transaction leaves
   behind, you're no longer an admin.
 
-A thin client (`jazz-tools/thin`) runs its transactions in your app's backend (`createJazz`), which
-stages the writes as you make them and sends the finished transaction to the server when you
-commit, so the server checks it as a whole, as above. Two things differ from a local-first client:
+A thin client (`jazz-tools/thin`) that connects through your app's backend (`createJazz`) runs its
+transactions there: the backend stages the writes as you make them and sends the finished
+transaction to the server when you commit, so the server checks it as a whole, as above. (A thin
+client connected to the server some other way has each write checked as it's staged, in order.)
+Two things differ from a local-first client:
 
 - A staged write the backend refuses outright, such as one with invalid values or an update of a
   row that doesn't exist, fails at once, and so does the whole transaction: committing it anyway
