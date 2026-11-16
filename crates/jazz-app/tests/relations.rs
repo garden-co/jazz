@@ -340,6 +340,15 @@ async fn include_deleted_reads_deleted_rows() {
     let with_deleted: Vec<Todo> = jazz.all(todos::query().include_deleted()).await.unwrap();
     assert!(with_deleted.iter().any(|todo| todo.id == f.loose.id));
     assert_eq!(with_deleted.len(), current.len() + 1);
+    // Read options keep it too.
+    let with_options: Vec<Todo> = jazz
+        .all_with_options(
+            todos::query().include_deleted(),
+            jazz_app::ReadOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_options.len(), with_deleted.len());
 
     let deleted: Vec<_> = jazz
         .all(
