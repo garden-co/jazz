@@ -70,7 +70,7 @@ pub use edit::TextColumn;
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
-pub use handle::Jazz;
+pub use handle::{DEFAULT_FIRST_LOAD_REMOTE_WAIT, DefaultRead, Jazz};
 pub use history::Version;
 pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
