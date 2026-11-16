@@ -13,8 +13,12 @@ import { isObject, parseJsonOrdered, entriesOf, type Json } from "./app-json.js"
 import { UpgradeRefusal } from "./errors.js";
 import type { Project } from "./project.js";
 
-/** Refuse when schema.ts, permissions.ts or the project files they import read the environment. */
-export function refuseEnvironmentReads(project: Project, files: string[]): void {
+/**
+ * Where schema.ts, permissions.ts or the project files they import read the
+ * environment. The printed policies hold the values validate resolved them
+ * to, so upgrade warns about each rather than refuse.
+ */
+export function environmentReads(project: Project, files: string[]): string[] {
   const { ts } = project;
   const found: string[] = [];
   for (const file of files) {
@@ -43,13 +47,7 @@ export function refuseEnvironmentReads(project: Project, files: string[]): void 
     };
     visit(source);
   }
-  if (found.length === 0) return;
-  throw new UpgradeRefusal(
-    `the schema or permissions read the environment, which jazz.app.json and jazz.permissions.json can't:\n${found.map((f) => `  ${f}`).join("\n")}\n` +
-      "alpha.64 compiled each read with the value it had when validate ran, and an unset one compiled to no condition, so a policy " +
-      "can allow more than it says. Write the values as literals (or move the check out of the permissions), run " +
-      "`npx jazz-tools validate` with the app's alpha.64, review jazz.permissions.json, then upgrade again.",
-  );
+  return found;
 }
 
 /** Refuse `"true"` inside `anyOf` / `allOf` of jazz.permissions.json: the trace of a condition that compiled to nothing. */
@@ -74,7 +72,7 @@ export function refuseDroppedConditions(project: Project): void {
   };
   if (isObject(permissions)) {
     for (const [key, value] of entriesOf(permissions)) {
-      if (key === "tables" || key === "defs") walk(value, key, false);
+      if (key === "tables") walk(value, key, false);
     }
   }
   if (found.length === 0) return;

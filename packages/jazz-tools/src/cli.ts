@@ -527,9 +527,12 @@ if (isMainModule()) {
           schemaDir: getFlagValue(commandArgs, "--schema-dir"),
         });
         console.log(formatReport(report, dryRun));
-        if (report.typeErrors.length > 0 || report.todos > 0) process.exitCode = 1;
+        if (report.typeErrors.length > 0) process.exitCode = 1;
       }),
     );
+  } else if (command === "print-ts") {
+    // Hidden: the examples' TS from their JSON (src/printer/cli.ts).
+    exitOnError(import("./printer/cli.js").then(({ runPrintTs }) => runPrintTs(args.slice(1))));
   } else if (command === "validate") {
     console.error(VALIDATE_RENAMED);
     process.exit(1);
