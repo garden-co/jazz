@@ -247,6 +247,25 @@ jobs:
           test "${KOTLIN_RESULT}" = success
           test "${KOTLIN_ANDROID_RESULT}" = success
 
+  # The Go bindings (packages/jazz-go over crates/jazz-ffi's C ABI) and
+  # the StagePlan Go example, on Linux: see dev/gates/go-bindings.sh.
+  test-go:
+    if: inputs.scope == 'full'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Build and test the Go bindings and the StagePlan Go example
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition go
+
   test-ts:
     if: inputs.scope == 'full'
     runs-on: blacksmith-16vcpu-ubuntu-2404

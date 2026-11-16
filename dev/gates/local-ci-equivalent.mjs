@@ -50,6 +50,7 @@ export const ciPartitionJobs = Object.freeze({
   kotlin: "test-kotlin",
   "kotlin-android": "test-kotlin-android",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
+  go: "test-go",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -325,6 +326,9 @@ export const ciPartitions = Object.freeze({
     ]),
     command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
   ]),
+  // The Go bindings and the StagePlan Go example (installs Go when the
+  // image has none).
+  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
   // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI end to end
   // against `jazz-tools server`, on the JVM.
   kotlin: Object.freeze([
