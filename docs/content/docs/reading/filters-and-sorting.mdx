@@ -12,7 +12,7 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
 <WhereOperatorsTable />
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
@@ -77,6 +77,28 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
     </include>
 
   </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#reading-filters-go
+    </include>
+
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-eq-ne-go
+    </include>
+
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-numeric-go
+    </include>
+
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-contains-go
+    </include>
+
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-null-go
+    </include>
+
+  </Tab>
 </Tabs>
 
 ## Sorting
@@ -88,7 +110,7 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   queries.
 </Callout>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
@@ -111,6 +133,12 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
     </include>
 
   </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#reading-sorting-go
+    </include>
+
+  </Tab>
 </Tabs>
 
 ### Sorting by an enum
@@ -126,7 +154,7 @@ declaration order. `min`, `max` and range filters such as `gt` follow the same o
 deterministic order. If the first sort column is not unique, add `orderBy("id")` as the final
 tie-breaker so page boundaries are stable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
@@ -146,6 +174,12 @@ tie-breaker so page boundaries are stable.
   <Tab value="Swift">
     <include cwd lang="swift">
       ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-pagination-swift
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#reading-pagination-go
     </include>
 
   </Tab>
