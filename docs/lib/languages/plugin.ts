@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { Plugin } from "fumadocs-mdx";
 import { expandBindingsExcerpts } from "./excerpt";
-import { filterLanguageTabs, LANGUAGES } from "./index";
+import { filterLanguageTabs, LANGUAGES, markExperimental } from "./index";
 
 const repoRoot = path.resolve(process.cwd(), "..");
 
@@ -12,6 +12,7 @@ const repoRoot = path.resolve(process.cwd(), "..");
  *   and neither the page nor its Markdown export mentions them;
  *   (`<include>`d partials skip this hook, so a test keeps language tabs and
  *   `<BindingsExcerpt>` out of `content/partials`);
+ * - labels experimental languages' tabs and setup pages (`markExperimental`);
  * - expands `<BindingsExcerpt language="…" />` into a code block cut by symbol
  *   from that language's generated bindings.
  * See `./index.ts` and `./README.md`.
@@ -21,7 +22,11 @@ export function languageTabsPlugin(): Plugin {
     name: "jazz-language-tabs",
     doc: {
       vfile(file) {
-        const filtered = filterLanguageTabs(String(file.value), LANGUAGES, file.path);
+        const slug = file.path.replace(/^(?:.*[\\/])?content[\\/]docs[\\/]/, "").replace(/\.mdx?$/, "");
+        const filtered = markExperimental(
+          filterLanguageTabs(String(file.value), LANGUAGES, file.path),
+          slug,
+        );
         file.value = expandBindingsExcerpts(
           filtered,
           (label) => LANGUAGES.find((l) => l.label === label && l.enabled)?.bindings,
