@@ -71,7 +71,7 @@ Every framework provides a hook to access the database handle, and query hooks r
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
@@ -85,6 +85,12 @@ Mutations are methods on the database handle. All three take a table as their fi
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-crud-go
     </include>
 
   </Tab>
@@ -145,7 +151,7 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
@@ -159,6 +165,12 @@ Required fields cannot be set to `null`.
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-nullable-update-go
     </include>
 
   </Tab>
@@ -342,7 +354,7 @@ try {
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
@@ -358,6 +370,9 @@ try {
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
     </include>
 
+  </Tab>
+  <Tab value="Go">
+    Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
   </Tab>
 </Tabs>
 
