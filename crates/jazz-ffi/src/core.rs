@@ -31,7 +31,9 @@ pub(crate) struct Core {
     parent_closed: Option<Arc<AtomicBool>>,
     /// The open subscriptions, told when the app closes.
     subscriptions: Mutex<Vec<Weak<Delivery>>>,
-    next_tx: AtomicU64,
+    /// Transaction and upload ids: shared with a `for_user` handle's
+    /// parent, so the ids in the client's tables never collide.
+    next_tx: Arc<AtomicU64>,
     /// Whether the app syncs with a server: global durability needs one.
     has_server: bool,
     /// The contract version the host speaks (`"contract"` in the config):
@@ -248,9 +250,21 @@ impl Core {
         relations: convert::Relations,
         has_server: bool,
         contract: u64,
-        parent: Option<Arc<AtomicBool>>,
+        parent: Option<(Arc<AtomicBool>, Arc<AtomicU64>)>,
     ) -> Self {
         let derived = parent.is_some();
+        let (parent, next_tx) = match parent {
+            Some((closed, next_tx)) => (Some(closed), next_tx),
+            None => (
+                None,
+                // Ids start at a random point, so a stale id from another
+                // app (or an earlier run) fails cleanly instead of naming
+                // another transaction.
+                Arc::new(AtomicU64::new(
+                    AppId::random().uuid().as_u64_pair().1 >> 12 | 1,
+                )),
+            ),
+        };
         Self {
             jazz,
             schema,
@@ -258,10 +272,7 @@ impl Core {
             closed: Arc::new(AtomicBool::new(false)),
             parent_closed: parent,
             subscriptions: Mutex::new(Vec::new()),
-            // Ids start at a random point, so a stale id from another
-            // handle (or an earlier run) fails cleanly instead of naming
-            // another transaction.
-            next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
+            next_tx,
             has_server,
             contract,
             close_hook: Mutex::new(None),
@@ -327,7 +338,7 @@ impl Core {
             self.relations.clone(),
             self.has_server,
             self.contract,
-            Some(self.closed.clone()),
+            Some((self.closed.clone(), self.next_tx.clone())),
         ))
     }
 
@@ -1769,6 +1780,38 @@ fn config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_transactions(core: &Core) -> usize {
+        block_on(
+            core.jazz
+                .with_client(|_| async { Ok(TRANSACTIONS.with(|t| t.borrow().0.len())) }),
+        )
+        .unwrap()
+    }
+
+    /// A handle sharing another's client, as `for_user` makes one, rolls
+    /// back its own open transactions when it closes, and only those (not
+    /// observable from outside: an open transaction writes nothing).
+    #[test]
+    fn closing_a_derived_handle_rolls_back_its_own_transactions() {
+        let app = r#"{"format": 1, "tables": {"todos": {"columns": {"title": "string"}}}}"#;
+        let parent = Core::open(&serde_json::json!({ "app": app }).to_string()).unwrap();
+        let derived = Core::with(
+            parent.jazz.clone(),
+            parent.schema.clone(),
+            parent.relations.clone(),
+            false,
+            parent.contract,
+            Some((parent.closed.clone(), parent.next_tx.clone())),
+        );
+        let parents = parent.tx_begin(true).unwrap();
+        derived.tx_begin(true).unwrap();
+        assert_eq!(open_transactions(&parent), 2);
+        derived.close().unwrap();
+        assert_eq!(open_transactions(&parent), 1);
+        parent.tx_rollback(parse_tx(&parents).unwrap()).unwrap();
+        parent.close().unwrap();
+    }
 
     /// The relay stand-in can't make the core answer 403, so the mapping is
     /// checked here: a refused identity is `Permission`; `NoAccount` and a

@@ -452,6 +452,65 @@ async fn a_c_host_opens_a_trusted_backend_client_and_acts_for_a_user() {
         )
         .unwrap();
         call(job, "txRollback", json!({ "tx": job_tx })).unwrap();
+        // An upload as alice reads back her row, as she sees it.
+        let mut fields = parse(&show(account.as_str().unwrap()));
+        fields.as_object_mut().unwrap().remove("name");
+        let upload = call(
+            as_alice,
+            "uploadBegin",
+            json!({ "table": "shows", "column": "name", "row": fields }),
+        )
+        .unwrap()["upload"]
+            .clone();
+        call(
+            as_alice,
+            "uploadPush",
+            json!({ "upload": upload, "bytes": "R2FsYQ==" }),
+        )
+        .unwrap();
+        let uploaded = call(as_alice, "uploadFinish", json!({ "upload": upload }))
+            .expect("the uploaded row, read back as alice");
+        assert_eq!(uploaded["name"], "Gala", "{uploaded}");
+        // Written once: nothing for a host to retry.
+        let galas = call(
+            as_alice,
+            "all",
+            json!({ "query": { "table": "shows",
+            "where": [{ "column": "name", "op": "eq", "value": "Gala" }] } }),
+        )
+        .unwrap();
+        assert_eq!(galas.as_array().map(Vec::len), Some(1), "{galas}");
+        // So does an upsert.
+        let id = uploaded["id"].as_str().unwrap();
+        let upserted = call(
+            as_alice,
+            "upsert",
+            json!({ "table": "shows", "id": id, "row": { "venue": "Side Hall" } }),
+        )
+        .expect("the upserted row, read back as alice");
+        assert_eq!(upserted["venue"], "Side Hall", "{upserted}");
+        // An upload id works only on the handle that began it.
+        let mut row = parse(&show(nil_uuid()));
+        row.as_object_mut().unwrap().remove("name");
+        let job_upload = call(
+            job,
+            "uploadBegin",
+            json!({ "table": "shows", "column": "name", "row": row }),
+        )
+        .unwrap()["upload"]
+            .clone();
+        for (method, args) in [
+            (
+                "uploadPush",
+                json!({ "upload": job_upload, "bytes": "R2FsYQ==" }),
+            ),
+            ("uploadFinish", json!({ "upload": job_upload })),
+            ("uploadAbort", json!({ "upload": job_upload })),
+        ] {
+            let escaped = call(as_alice, method, args);
+            assert_eq!(escaped.unwrap_err()["kind"], "refused", "{method}");
+        }
+        call(job, "uploadAbort", json!({ "upload": job_upload })).unwrap();
         // A scoped user's handle can't act for others.
         let bob = jazz_for_user(as_alice, c("bob").as_ptr(), ptr::null(), &mut err);
         assert!(bob.is_null());
