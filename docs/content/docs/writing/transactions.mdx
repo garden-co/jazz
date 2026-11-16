@@ -85,7 +85,10 @@ earlier versions throw "empty mergeable transaction has no committed unit").
 
   </Tab>
   <Tab value="Go">
-    Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-transaction-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -165,7 +168,7 @@ A serializable transaction reads from a stable transaction snapshot. The authori
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-serializable-transaction-ts
@@ -175,6 +178,12 @@ write is valid only if the data you just read has not changed in a conflicting t
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-serializable-transaction-effect
     </include>
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-serializable-transaction-go
+    </include>
+
   </Tab>
 </Tabs>
 
