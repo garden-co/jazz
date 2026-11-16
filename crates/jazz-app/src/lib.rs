@@ -40,6 +40,7 @@ mod advice;
 mod app;
 mod auth;
 mod backend;
+mod backend_client;
 mod config;
 mod edit;
 #[cfg(feature = "unstable-endpoint")]
@@ -64,12 +65,13 @@ mod writes;
 pub use advice::Advice;
 pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
+pub use backend_client::{BackendClientKind, CLOSE_TIMEOUT};
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
-pub use handle::Jazz;
+pub use handle::{DEFAULT_FIRST_LOAD_REMOTE_WAIT, DefaultRead, Jazz};
 pub use history::Version;
 pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,

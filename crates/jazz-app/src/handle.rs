@@ -74,6 +74,8 @@ pub(crate) struct Info {
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
+    /// How reads that name no tier read.
+    pub(crate) default_read: DefaultRead,
     /// Where the local store lives, for [`Jazz::delete_client_storage`].
     pub(crate) storage_dir: Option<std::path::PathBuf>,
     /// An end user's session ([`Config::user`]).
@@ -84,6 +86,10 @@ pub(crate) struct Info {
     /// How this backend was opened, for the trusted client its endpoint
     /// acts for its users with.
     pub(crate) opened_with: Option<(AppFiles, Config)>,
+    /// A backend client's way back to its main backend.
+    pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
+    /// The store keeps nothing past the process.
+    pub(crate) memory: bool,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -164,6 +170,14 @@ impl Jazz {
                 "a backend needs the sync server's URL (Config::server)".into(),
             ));
         }
+        if matches!(config.user, Some(Auth::Credential(_))) && !files.has_permissions() {
+            return Err(Error::App(
+                "a backend client needs the app's jazz.permissions.json (AppFiles::read, or \
+                 AppFiles::with_permissions), as createJazzClient takes its permissions: it \
+                 checks the users it acts for by them"
+                    .into(),
+            ));
+        }
         if config.backend.is_some() && !files.has_permissions() {
             return Err(Error::App(
                 "a backend needs the app's jazz.permissions.json".into(),
@@ -199,6 +213,7 @@ impl Jazz {
             ));
         }
         let serverless = config.server_url.is_none();
+        let default_read = DefaultRead::of(&config);
         let storage_dir = match &config.storage {
             Storage::Dir(dir) => Some(dir.clone()),
             Storage::Memory => None,
@@ -230,6 +245,8 @@ impl Jazz {
             session,
             sync,
             backend,
+            backend_client,
+            memory,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
@@ -238,11 +255,14 @@ impl Jazz {
                 account,
                 implementations,
                 serverless,
+                default_read,
                 storage_dir,
                 session,
                 sync,
                 backend,
                 opened_with,
+                backend_client,
+                memory,
             }),
             scope: None,
             for_user: false,
@@ -326,14 +346,22 @@ impl Jazz {
         let _ = self.commands.send(Command::Run(job));
     }
 
-    /// Every row `query` matches, reading local data first.
+    /// Every row `query` matches, read as TypeScript reads without a tier
+    /// ([`DefaultRead`]): from the server on a backend or backend client;
+    /// local first on an end user's client, whose first load waits briefly
+    /// for the server; locally without a server.
     pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
-        self.all_with(query, ReadTier::LocalFirst).await
+        let opts = self.info.default_read.opts(&query);
+        self.all_opts(query, opts).await
     }
 
     /// Every row `query` matches, read at `tier`.
     pub async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
         let opts = read_opts(&query, tier);
+        self.all_opts(query, opts).await
+    }
+
+    async fn all_opts<T: Row>(&self, query: Query<T>, opts: ReadOpts) -> Result<Vec<T>> {
         let query = query.into_untyped()?;
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
@@ -394,9 +422,10 @@ impl Jazz {
     }
 
     /// Subscribes to `query`: a stream of its changes, starting with the
-    /// rows it matches now.
+    /// rows it matches now, read as [`Jazz::all`] reads by default.
     pub async fn subscribe<T: Row>(&self, query: Query<T>) -> Result<Subscription<T>> {
-        self.subscribe_with(query, ReadTier::LocalFirst).await
+        let opts = self.info.default_read.opts(&query);
+        self.subscribe_opts(query, opts).await
     }
 
     /// [`Jazz::subscribe`] at `tier`.
@@ -406,6 +435,14 @@ impl Jazz {
         tier: ReadTier,
     ) -> Result<Subscription<T>> {
         let opts = read_opts(&query, tier);
+        self.subscribe_opts(query, opts).await
+    }
+
+    async fn subscribe_opts<T: Row>(
+        &self,
+        query: Query<T>,
+        opts: ReadOpts,
+    ) -> Result<Subscription<T>> {
         let query = query.into_untyped()?;
         if jazz::schema::history::is_history_table(&query.table) {
             return Err(Error::Unsupported(
@@ -442,6 +479,50 @@ impl Jazz {
             return Ok(());
         }
         done.await.unwrap_or(Ok(()))
+    }
+}
+
+/// How a read that names no tier reads, as TypeScript's
+/// `resolveEffectiveQueryExecutionOptions` decides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultRead {
+    /// No server: local data.
+    Local,
+    /// An end user's client (TypeScript's browser and React Native
+    /// clients): local data first, its first load waiting at most this
+    /// long for the server, so it shows neither a stale nor an empty cache.
+    LocalFirstWaiting(std::time::Duration),
+    /// A backend or backend client (TypeScript's server runtimes): the
+    /// server's answer.
+    Remote,
+}
+
+/// How long an end user's first load waits for the server, as
+/// TypeScript's `DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS`.
+pub const DEFAULT_FIRST_LOAD_REMOTE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl DefaultRead {
+    fn of(config: &Config) -> Self {
+        match (&config.server_url, &config.backend, &config.user) {
+            (None, _, _) => Self::Local,
+            (Some(_), Some(_), _) | (Some(_), _, Some(Auth::Credential(_))) => Self::Remote,
+            (Some(_), None, Some(_)) => Self::LocalFirstWaiting(DEFAULT_FIRST_LOAD_REMOTE_WAIT),
+            (Some(_), None, None) => Self::Local,
+        }
+    }
+
+    pub(crate) fn opts<T: Row>(self, query: &Query<T>) -> ReadOpts {
+        match self {
+            Self::Local => read_opts(query, ReadTier::LocalFirst),
+            Self::Remote => read_opts(query, ReadTier::Remote),
+            Self::LocalFirstWaiting(wait) => {
+                let mut opts = read_opts(query, ReadTier::LocalFirst);
+                opts.first_load = jazz::db::FirstLoad::WaitForRemote {
+                    timeout_ms: wait.as_millis() as u64,
+                };
+                opts
+            }
+        }
     }
 }
 
@@ -632,6 +713,8 @@ struct Opened {
     session: Option<UserSession>,
     sync: watch::Receiver<SyncStatus>,
     backend: Option<BackendLink>,
+    backend_client: Option<crate::backend_client::BackendClientLink>,
+    memory: bool,
 }
 
 async fn connect(
@@ -645,7 +728,12 @@ async fn connect(
     // its schema carries the permissions the backend publishes, as
     // `createJazz`'s backend session compiles them. Policies are not part
     // of the schema's hash.
-    if let (Link::TrustedForUsers, Some(app)) = (link_kind, &loaded.backend) {
+    // So does a backend client, for the users it acts for (`for_user`), and
+    // a scoped one for its own user: TS `createJazzClient` takes the app's
+    // permissions for the same reason.
+    let backend_client = matches!(config.user, Some(Auth::Credential(_)));
+    let folds_permissions = link_kind == Link::TrustedForUsers || backend_client;
+    if let (true, Some(app)) = (folds_permissions, &loaded.backend) {
         for (table, policies) in app.permissions().iter() {
             if let Some(schema) = loaded.schema.get_mut(table) {
                 schema.policies = policies.clone();
@@ -697,7 +785,18 @@ async fn connect(
         });
     }
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
+    let memory = context.storage == ClientStorage::Memory;
+    let mut backend_client = None;
     let (client, user) = match (config.user, &config.server_url) {
+        (Some(Auth::Credential(credential)), Some(endpoint)) => {
+            let (client, user, credential, link) =
+                crate::backend_client::connect(context, connector, credential, endpoint).await?;
+            if !user.account.is_system() {
+                admitted = Some(user.account);
+            }
+            backend_client = Some(link);
+            (client, Some((user, credential)))
+        }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
                 connect_user(context, connector, auth, endpoint).await?;
@@ -735,6 +834,8 @@ async fn connect(
             session,
             sync,
             backend: link,
+            backend_client,
+            memory,
         },
     ))
 }
@@ -765,6 +866,7 @@ async fn connect_user(
             };
             Ok((client, user, Credential::Device { key, app }))
         }
+        Auth::Credential(_) => unreachable!("a backend client connects through backend_client"),
         Auth::Bearer(provider) => {
             let token = provider
                 .token(TokenReason::Connect)
