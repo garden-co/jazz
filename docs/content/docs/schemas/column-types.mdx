@@ -14,7 +14,7 @@ For prose that several people edit at once, opt the column into a text merge str
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "docs": {
       "$comment": "title keeps one value: a concurrent edit replaces it whole",
@@ -72,7 +72,7 @@ implement it in `jazz.computed.ts`:
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "tasks": {
       "columns": {
@@ -146,7 +146,7 @@ read-only. Declare it under the table's `computed`, with its `type` and the colu
 
 ```json title="jazz.app.json"
 {
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "tasks": {
       "columns": {

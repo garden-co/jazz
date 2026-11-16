@@ -1,5 +1,6 @@
 Wrote:
   jazz.app.json
+  jazz.permissions.json
   jazz.computed.ts
   src/main.ts
   tsconfig.json

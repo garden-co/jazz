@@ -289,8 +289,7 @@ describe("better-auth schema helpers", () => {
     expect(file).toBe(
       [
         "{",
-        '  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",',
-        '  "format": 1,',
+        '  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",',
         '  "tables": {',
         '    "accountHolders": {',
         '      "columns": {',
@@ -639,7 +638,9 @@ describe("writing the Better Auth tables into jazz.app.json", () => {
         tables: authTables,
         ...resolvers,
       });
-      expect(JSON.parse(fresh.code).format).toBe(1);
+      const freshFile = JSON.parse(fresh.code);
+      expect(freshFile.$schema).toBe("https://jazz.tools/schemas/jazz.app.v1.json");
+      expect(freshFile).not.toHaveProperty("format");
       expect(log.mock.calls.at(-1)?.[0]).toContain("npx jazz-tools generate");
     } finally {
       log.mockRestore();

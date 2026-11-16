@@ -76,7 +76,7 @@ describe("generate", () => {
   it("refuses a missing permissions file and a name-less migration", async () => {
     const dir = await project(APP, null);
     await expect(generateApp({ cwd: dir })).rejects.toThrow(
-      /jazz\.permissions\.json is missing\. Every app has one, even if only backends read it: start from `\{ "format": 1, "tables": \{\} \}`, which denies everything\.$/,
+      /jazz\.permissions\.json is missing\. Every app has one, even if only backends read it: start from `\{ "\$schema": "https:\/\/jazz\.tools\/schemas\/jazz\.permissions\.v1\.json", "tables": \{\} \}`, which denies everything\.$/,
     );
     await expect(createAppMigration({ cwd: dir, name: "" })).rejects.toThrow(
       "`jazz-tools migrations create` needs `--name <name>`: letters, digits, `-` and `_`, e.g. `--name add-due-date`.",

@@ -36,7 +36,7 @@ pub fn read(
             return Err(refuse(
                 "(top)",
                 format!(
-                    "unknown key `{key}`{}; this file takes `format` and `tables`",
+                    "unknown key `{key}`{}; this file takes `$schema` and `tables`",
                     expr::did_you_mean(key, TOP_KEYS.iter().copied())
                 ),
             ));
@@ -367,10 +367,7 @@ pub fn write(
         one_sided("delete", &policies.delete, true, &mut ops)?;
         tables.push((name.to_string(), Json::Object(ops)));
     }
-    Ok(Json::Object(vec![
-        ("format".into(), Json::Number(super::FORMAT.to_string())),
-        ("tables".into(), Json::Object(tables)),
-    ]))
+    Ok(Json::Object(vec![("tables".into(), Json::Object(tables))]))
 }
 
 /// A policy at the top: `or` and `and` as anyOf / allOf objects, the rest as

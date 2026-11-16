@@ -517,8 +517,7 @@ fn every_construct_reads_and_prints_back() {
         ),
         ("todos", "not (owner = null or name = 'x')"),
     ] {
-        let compiled = read_policy(table, source)
-            .unwrap_or_else(|e| panic!("{source}: {e}"));
+        let compiled = read_policy(table, source).unwrap_or_else(|e| panic!("{source}: {e}"));
         assert_eq!(printed(table, &compiled), source, "{source} printed as");
     }
 }
@@ -558,11 +557,8 @@ fn defs_and_calls_are_refused() {
 
 #[test]
 fn expression_errors_point_at_the_spot_and_suggest() {
-    let error = read_policy(
-        "todos",
-        "exists shares(todo = this.id, usr = session.user)",
-    )
-    .unwrap_err();
+    let error =
+        read_policy("todos", "exists shares(todo = this.id, usr = session.user)").unwrap_err();
     assert!(
         error.starts_with("jazz.permissions.json: tables.todos.read:"),
         "{error}"
@@ -688,18 +684,108 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
 }
 
 #[test]
-fn an_unknown_format_is_refused_before_anything_else() {
+fn an_unknown_version_is_refused_before_anything_else() {
+    // `$schema` carries the version.
     let error = edited_app(|v| {
-        v["format"] = 2.into();
+        v["$schema"] = "https://jazz.tools/schemas/jazz.app.v2.json".into();
         v["something_new"] = true.into();
     });
-    assert!(error.contains("format 2 is not supported"), "{error}");
-    let error = edited_permissions(|v| v["format"] = "1".into());
-    assert!(error.contains("`format` must be the integer 1"), "{error}");
-    let error = edited_app(|v| {
-        v.as_object_mut().unwrap().remove("format");
+    assert!(
+        error.contains("version 2 was written by a newer Jazz"),
+        "{error}"
+    );
+    let error = edited_permissions(|v| {
+        v["$schema"] = "https://example.com/jazz.permissions.v1.json".into();
     });
-    assert!(error.contains("no `format`"), "{error}");
+    assert!(error.contains("`$schema` must be"), "{error}");
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("$schema");
+    });
+    assert!(error.contains("no `$schema`"), "{error}");
+    assert!(error.contains("jazz-tools"), "{error}");
+    // A legacy `format` from a newer Jazz.
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("$schema");
+        v["format"] = 2.into();
+    });
+    assert!(
+        error.contains("version 2 was written by a newer Jazz"),
+        "{error}"
+    );
+    let error = edited_permissions(|v| v["format"] = "1".into());
+    assert!(
+        error.contains("legacy `format` must be the integer 1"),
+        "{error}"
+    );
+}
+
+#[test]
+fn legacy_files_load_as_version_1() {
+    let written = write(shared_todos()).unwrap();
+    let legacy = |text: &str, url: &str, legacy_url: Option<&str>, format: bool| {
+        let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+        let o = v.as_object_mut().unwrap();
+        assert_eq!(o["$schema"], url);
+        o.remove("$schema");
+        let mut out = serde_json::Map::new();
+        if let Some(legacy_url) = legacy_url {
+            out.insert("$schema".into(), legacy_url.into());
+        }
+        if format {
+            out.insert("format".into(), 1.into());
+        }
+        out.extend(o.clone());
+        serde_json::Value::Object(out).to_string()
+    };
+    for (legacy_url, format) in [
+        (true, true),  // what Jazz before alpha.66 wrote
+        (false, true), // `format` alone
+        (true, false), // the old URL alone
+    ] {
+        let app = legacy(
+            &written.app,
+            APP_SCHEMA_URL,
+            legacy_url.then_some(LEGACY_APP_SCHEMA_URL),
+            format,
+        );
+        let permissions = legacy(
+            &written.permissions,
+            PERMISSIONS_SCHEMA_URL,
+            legacy_url.then_some(LEGACY_PERMISSIONS_SCHEMA_URL),
+            format,
+        );
+        load(app.as_bytes(), permissions.as_bytes())
+            .unwrap_or_else(|e| panic!("{legacy_url} {format}: {e}"));
+    }
+}
+
+#[test]
+fn a_legacy_format_takes_any_schema() {
+    let written = write(shared_todos()).unwrap();
+    let versioned = format!("\"$schema\": \"{APP_SCHEMA_URL}\",\n");
+    for schema in [
+        "\"./node_modules/jazz-tools/jazz.app.schema.json\"",
+        "\"http://jazz.tools/schemas/jazz.app.schema.json\"",
+        "null",
+    ] {
+        let legacy = written.app.replacen(
+            &versioned,
+            &format!("\"$schema\": {schema},\n  \"format\": 1,\n"),
+            1,
+        );
+        load(legacy.as_bytes(), written.permissions.as_bytes())
+            .unwrap_or_else(|e| panic!("{schema}: {e}"));
+    }
+    // Without `format`, `$schema` is the version and must be Jazz's.
+    let error = edited_app(|v| v["$schema"] = "./jazz.app.schema.json".into());
+    assert!(error.contains("`$schema` must be"), "{error}");
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("$schema");
+        v["format"] = 0.into();
+    });
+    assert!(error.contains("version 0 is not supported"), "{error}");
+    let error = edited_app(|v| v["$schema"] = "https://jazz.tools/schemas/jazz.app.v0.json".into());
+    assert!(error.contains("version 0 is not supported"), "{error}");
 }
 
 #[test]
@@ -1389,7 +1475,8 @@ fn relation_hops_and_nested_exists_round_trip() {
     assert_eq!(
         read_policy(
             "todos",
-            "exists shares(todo = this.id).todoRow(owner = session.user)")
+            "exists shares(todo = this.id).todoRow(owner = session.user)"
+        )
         .unwrap(),
         hop
     );
@@ -1427,11 +1514,7 @@ fn relation_hops_and_nested_exists_round_trip() {
     );
     through_the_permissions_file(&nested);
     // Deeper in, the engine refuses an outer-row reference; so does the reader.
-    let error = read_policy(
-        "todos",
-        "exists shares as s(exists todos(id = s.todo))",
-    )
-    .unwrap_err();
+    let error = read_policy("todos", "exists shares as s(exists todos(id = s.todo))").unwrap_err();
     assert!(
         error.contains("names only its own row's columns"),
         "{error}"
@@ -2055,22 +2138,14 @@ fn version_names_javascript_would_reorder_are_refused() {
 
 #[test]
 fn the_exact_login_is_session_identity() {
-    let expr = read_policy(
-        "todos",
-        "$createdBy.identity = session.identity",
-    )
-    .unwrap();
+    let expr = read_policy("todos", "$createdBy.identity = session.identity").unwrap();
     assert_eq!(
         printed("todos", &expr),
         "$createdBy.identity = session.identity"
     );
     let account = read_policy("todos", "$createdBy = session.user").unwrap();
     assert_ne!(expr, account);
-    let error = read_policy(
-        "todos",
-        "$createdBy.identity = session.identty",
-    )
-    .unwrap_err();
+    let error = read_policy("todos", "$createdBy.identity = session.identty").unwrap_err();
     assert!(error.contains("`session.identity`"), "{error}");
 }
 
@@ -2168,11 +2243,18 @@ fn committed(file: &str) -> Vec<std::path::PathBuf> {
 
 #[test]
 fn every_committed_app_file_fits_its_json_schema() {
-    for (file, schema) in [
-        (APP_FILE, "jazz.app.schema.json"),
-        (PERMISSIONS_FILE, "jazz.permissions.schema.json"),
+    for (file, schema, legacy_schema) in [
+        (APP_FILE, "jazz.app.v1.json", "jazz.app.schema.json"),
+        (
+            PERMISSIONS_FILE,
+            "jazz.permissions.v1.json",
+            "jazz.permissions.schema.json",
+        ),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
+        // Legacy files (`format` and/or the unversioned URL) still load, and
+        // the old JSON Schema still describes them.
+        let legacy_validator = jsonschema::validator_for(&json_schema(legacy_schema)).unwrap();
         // `jazz-tools upgrade`'s input fixtures are alpha.64 apps on purpose:
         // their files carry alpha.63's `tsOnly`, which upgrade converts. What
         // upgrade writes from them (`expected/`) is checked like any app.
@@ -2187,6 +2269,15 @@ fn every_committed_app_file_fits_its_json_schema() {
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
             let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let validator = if instance.get("format").is_some()
+                || !instance["$schema"]
+                    .as_str()
+                    .is_some_and(|s| s.ends_with(schema))
+            {
+                &legacy_validator
+            } else {
+                &validator
+            };
             let errors: Vec<String> = validator
                 .iter_errors(&instance)
                 .map(|e| format!("{} at {}", e, e.instance_path()))
@@ -2202,8 +2293,8 @@ fn every_committed_app_file_fits_its_json_schema() {
     // And what the writer writes.
     let written = write(shared_todos()).unwrap();
     for (text, schema) in [
-        (&written.app, "jazz.app.schema.json"),
-        (&written.permissions, "jazz.permissions.schema.json"),
+        (&written.app, "jazz.app.v1.json"),
+        (&written.permissions, "jazz.permissions.v1.json"),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
         let instance: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -2224,15 +2315,16 @@ fn properties(value: &serde_json::Value) -> BTreeSet<String> {
 fn keys(list: &[&str]) -> BTreeSet<String> {
     // `slices` and `tsOnly` load (with a warning) but aren't written any
     // more: the JSON Schema flags them.
+    // `format` is legacy: `$schema` carries the version.
     list.iter()
-        .filter(|k| !matches!(**k, "slices" | "tsOnly"))
+        .filter(|k| !matches!(**k, "slices" | "tsOnly" | "format"))
         .map(|k| k.to_string())
         .collect()
 }
 
 #[test]
 fn the_json_schemas_take_the_keys_the_readers_take() {
-    let app = json_schema("jazz.app.schema.json");
+    let app = json_schema("jazz.app.v1.json");
     let defs = &app["$defs"];
     for (what, schema, reader) in [
         ("the top level", properties(&app), keys(app_file::TOP_KEYS)),
@@ -2269,19 +2361,15 @@ fn the_json_schemas_take_the_keys_the_readers_take() {
     ] {
         assert_eq!(schema, reader, "{what}");
     }
-    let permissions = json_schema("jazz.permissions.schema.json");
-    assert_eq!(
-        properties(&permissions),
-        keys(permissions_file::TOP_KEYS)
-    );
+    let permissions = json_schema("jazz.permissions.v1.json");
+    assert_eq!(properties(&permissions), keys(permissions_file::TOP_KEYS));
 }
 
 #[test]
 fn the_permissions_json_schema_names_every_grammar_construct() {
-    let text = std::fs::read_to_string(
-        repo_root().join("docs/public/schemas/jazz.permissions.schema.json"),
-    )
-    .unwrap();
+    let text =
+        std::fs::read_to_string(repo_root().join("docs/public/schemas/jazz.permissions.v1.json"))
+            .unwrap();
     let words: BTreeSet<&str> = text
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .collect();
@@ -2426,9 +2514,7 @@ fn an_index_names_a_stored_column() {
 #[test]
 fn policies_the_dsl_and_the_engine_refused_are_refused() {
     let refused = |table: &str, source: &str, expected: &str| {
-        let error = read_policy(table, source)
-            .expect_err(source)
-            .to_string();
+        let error = read_policy(table, source).expect_err(source).to_string();
         assert!(error.contains(expected), "{source}:\n{error}");
         error
     };
@@ -2458,11 +2544,7 @@ fn policies_the_dsl_and_the_engine_refused_are_refused() {
         );
     }
     read_policy("todos", "allowedTo.read(shares)").unwrap();
-    read_policy(
-        "shares",
-        "allowedTo.read(todoRow, maxDepth: 3)",
-    )
-    .unwrap();
+    read_policy("shares", "allowedTo.read(todoRow, maxDepth: 3)").unwrap();
     // A bad `maxDepth`.
     refused(
         "shares",
@@ -2708,6 +2790,28 @@ fn generated_files_carry_a_marker_after_schema_that_loaders_ignore() {
     assert_eq!(loaded_plain.bundle(), loaded_marked.bundle());
     assert_eq!(loaded_plain.current_hash(), loaded_marked.current_hash());
     load_client(marked.app.as_bytes()).unwrap();
+    for (text, schema) in [
+        (&marked.app, "jazz.app.v1.json"),
+        (&marked.permissions, "jazz.permissions.v1.json"),
+        (&marked.app, "jazz.app.schema.json"),
+        (&marked.permissions, "jazz.permissions.schema.json"),
+    ] {
+        let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
+        let instance: serde_json::Value = serde_json::from_str(text).unwrap();
+        if schema.ends_with("v1.json") {
+            let errors: Vec<String> = validator
+                .iter_errors(&instance)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "{schema}: {errors:?}");
+        } else {
+            // The unversioned schemas describe `$generated` too.
+            let marker = serde_json::json!({ "$generated": instance[GENERATED_KEY].clone() });
+            let generated = &json_schema(schema)["$defs"]["generated"];
+            let validator = jsonschema::validator_for(generated).unwrap();
+            assert!(validator.is_valid(&marker[GENERATED_KEY]), "{schema}");
+        }
+    }
 }
 
 #[test]
@@ -2793,8 +2897,7 @@ fn rewriting_readable_files_gives_the_canonical_text() {
     assert_eq!(
         rewritten.permissions,
         r#"{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "shares": { "read": "allowedTo.read(todoRow)", "update": "true" },
     "todos": {

@@ -267,6 +267,42 @@ function withTransform(spec: Json, transform: string): JsonObject {
   return { ...rest, transform };
 }
 
+/** The versioned `$schema` of jazz.app.json, which carries the file's version. */
+export const APP_SCHEMA_URL = "https://jazz.tools/schemas/jazz.app.v1.json";
+
+/**
+ * The file in the versioned form: `$schema` first, naming the version, and
+ * no `format` (Jazz before alpha.66 wrote `"format": 1` and an unversioned `$schema`).
+ */
+export function versionedAppJson(value: JsonObject): JsonObject {
+  const rest = entriesOf(value).filter(([key]) => key !== "format" && key !== "$schema");
+  return Object.fromEntries([["$schema", APP_SCHEMA_URL], ...rest]) as JsonObject;
+}
+
+/** The versioned `$schema` of jazz.permissions.json. */
+export const PERMISSIONS_SCHEMA_URL = "https://jazz.tools/schemas/jazz.permissions.v1.json";
+const LEGACY_PERMISSIONS_SCHEMA_URL = "https://jazz.tools/schemas/jazz.permissions.schema.json";
+
+/**
+ * A pre-alpha.66 jazz.permissions.json's text in the versioned form, edited in place
+ * so the rest keeps its bytes; the text unchanged when it is versioned already
+ * or laid out unlike a tool-written file (it still loads).
+ */
+export function versionedPermissionsText(text: string): string {
+  let out = text.replace(/\n  "format": 1,\n/, "\n");
+  if (out.includes(`"$schema": "${LEGACY_PERMISSIONS_SCHEMA_URL}"`)) {
+    out = out.replace(LEGACY_PERMISSIONS_SCHEMA_URL, PERMISSIONS_SCHEMA_URL);
+  } else if (!out.includes('"$schema"') && out.startsWith("{\n  ")) {
+    out = `{\n  "$schema": "${PERMISSIONS_SCHEMA_URL}",\n  ${out.slice(4)}`;
+  }
+  try {
+    JSON.parse(out);
+    return out;
+  } catch {
+    return text;
+  }
+}
+
 /** Print as Jazz's Rust writer does. */
 export function printAppJson(value: Json): string {
   return `${writeValue(value, 0, 0)}\n`;

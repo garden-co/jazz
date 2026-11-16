@@ -2583,10 +2583,7 @@ fn relation_predicate(
             };
             RelationPredicate::In {
                 left: col,
-                values: values
-                    .iter()
-                    .map(|v| value(v))
-                    .collect::<Result<_, _>>()?,
+                values: values.iter().map(|v| value(v)).collect::<Result<_, _>>()?,
             }
         }
         Ast::Contains { left, right, span } => {

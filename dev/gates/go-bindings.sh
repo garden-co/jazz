@@ -22,7 +22,7 @@ fi
 git config --global --add safe.directory "${root}" || true
 
 cargo build -p jazz-ffi
-cargo build -p jazz-cli --bin jazz-tools
+cargo build -p jazz-tools --bin jazz-tools
 # The tests' stand-in for a TS main backend's /jazz (jazz#5754).
 cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay
 cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings

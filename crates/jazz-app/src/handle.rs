@@ -804,11 +804,19 @@ async fn connect(
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
     let memory = context.storage == ClientStorage::Memory;
     let mut backend_client = None;
+    // The permissions bundle this client's files make: a trusted backend
+    // client checks it against the one its main backend serves.
+    let own_bundle = loaded.backend.as_ref().map(|app| app.bundle().to_string());
     let (client, user) = match (config.user, &config.server_url) {
         (Some(Auth::Credential(credential)), Some(endpoint)) => {
-            let (client, user, credential, link) =
-                crate::backend_client::connect(context, endpoint_connector, credential, endpoint)
-                    .await?;
+            let (client, user, credential, link) = crate::backend_client::connect(
+                context,
+                endpoint_connector,
+                credential,
+                endpoint,
+                own_bundle,
+            )
+            .await?;
             if !user.account.is_system() {
                 admitted = Some(user.account);
             }
