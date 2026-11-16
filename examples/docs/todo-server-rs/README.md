@@ -14,11 +14,7 @@ The documentation copy of [`examples/todo-server-rs`](../../todo-server-rs): the
 - `src/routes.rs`: CRUD over `/todos` and the `/todos/live` SSE stream.
 - `src/docs_snippets.rs`: the snippets. The docs include each `// #region <name>` by name, so keep the names when you edit them.
 
-Most snippets use the typed API: `jazz.all`, `one`, `get`, `insert`, `update`, `delete`, `transaction` and `subscribe`, with `todos::query()`, `todos::done().eq(false)`, `todos::title().contains("milk")`, `order_by(jazz_app::created_at(), …)`, `projects::todos().of(id)`, `NewTodo::new(title, done)` and `TodoUpdate { parent: Some(None), .. }`. What `jazz-app-support` doesn't cover yet uses the low-level `JazzClient`, either directly or through `Jazz::with_client`:
-
-- includes, `select`, recursive queries (`gather`);
-- files (large values);
-- serializable transactions that read.
+Most snippets use the typed API: `jazz.all`, `one`, `get`, `insert`, `update`, `delete`, `transaction` and `subscribe`, with `todos::query()`, `todos::done().eq(false)`, `todos::title().contains("milk")`, `order_by(jazz_app::created_at(), …)`, `projects::todos().of(id)`, `NewTodo::new(title, done)` and `TodoUpdate { parent: Some(None), .. }`. The includes, `select` and files snippets still use the low-level `JazzClient`, either directly or through `Jazz::with_client`, though `jazz-app-support` covers them too now: includes (`Query::include`), `select` (`Partial` rows), `hop_to`, `gather` and `union`, `history()`, large values (`LargeColumn`, streaming inserts) and serializable transactions that read. It doesn't support reading part of a large value yet.
 
 ## Schema
 
@@ -35,7 +31,7 @@ npx jazz-tools migrations create --name <name>   # resolve any "TODO: …" it wr
 npx jazz-tools generate                          # writes jazz.app.json, jazz.permissions.json and src/jazz_app.rs
 ```
 
-`generate` finds `Cargo.toml` beside `schema.ts` and writes the Rust bindings; the crate needs no `package.json`. Commit `schema.ts`, `migrations/` and the generated files. The `bindings_are_current` test refuses stale bindings, and `npx jazz-tools generate --check` refuses stale files in CI.
+`generate` finds `Cargo.toml` beside `schema.ts` and writes the Rust bindings; the crate needs no `package.json`. Run it with `npx`: the standalone `jazz-tools` binary refuses to write beside a `schema.ts`, though its `generate --check` still checks the committed files and bindings (not that they are fresh from the TypeScript). Commit `schema.ts`, `migrations/` and the generated files. The `bindings_are_current` test refuses stale bindings, and `npx jazz-tools generate --check` refuses stale files in CI.
 
 ## Running locally
 
