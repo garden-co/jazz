@@ -319,4 +319,26 @@ class StagePlanTest {
             jazz.all(jazzapp.Shows.query())
         }
     }
+
+    @Test
+    fun one_users_show_is_invisible_to_another_who_cant_write_into_it(): Unit = runBlocking {
+        val (showId, taskId) = open("alice").use { alice ->
+            val show = showNamed(alice, "Alice's private show")
+            show.id to addTask(alice, show, "Secret setlist").id
+        }
+        open("bob").use { bob ->
+            assertNull(showById(bob, showId))
+            assertEquals(emptyList(), bob.all(Tasks.where(Tasks.showId eq showId), tools.jazz.ReadTier.Remote))
+            val notHers = jazzapp.Show(showId, "x", "x", "x", "x", me(bob))
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Permission> { addTask(bob, notHers, "Sneaky") }
+            // Bob can't read her task, so he can't update it either.
+            val refused = runCatching { moveTask(bob, taskId, TaskStatus.Done) }.exceptionOrNull()
+            kotlin.test.assertTrue(refused is tools.jazz.JazzException.Permission || refused is tools.jazz.JazzException.Refused, "$refused")
+        }
+        open("alice").use { alice ->
+            kotlin.test.assertNotNull(showById(alice, showId))
+            val hers = alice.all(Tasks.where(Tasks.showId eq showId), tools.jazz.ReadTier.Remote)
+            assertEquals(listOf("Secret setlist" to TaskStatus.Todo), hers.map { it.title to it.status })
+        }
+    }
 }

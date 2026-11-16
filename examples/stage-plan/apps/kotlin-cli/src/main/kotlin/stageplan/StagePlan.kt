@@ -10,6 +10,8 @@ import jazzapp.Tasks
 import tools.jazz.Jazz
 import tools.jazz.JazzAuth
 import tools.jazz.JazzConfig
+import tools.jazz.ReadTier
+import tools.jazz.WriteTier
 import tools.jazz.SessionState
 import tools.jazz.Storage
 
@@ -39,8 +41,12 @@ suspend fun showNamed(jazz: Jazz, name: String): Show {
     return jazz.insert(
         Shows,
         NewShow(name = name, venue = "TBA", date = "TBA", doors = "TBA", chiefAccount = me),
+        tier = WriteTier.Global,
     )
 }
+
+/** The show [id], as the server lets this user see it: `null` if it doesn't exist or isn't theirs to read. */
+suspend fun showById(jazz: Jazz, id: String): Show? = jazz.one(Shows.where(Shows.id eq id), tier = ReadTier.Remote)
 
 /** The show's tasks, in `rank` order. */
 suspend fun tasksOf(jazz: Jazz, show: Show): List<Task> =
@@ -52,10 +58,12 @@ suspend fun addTask(jazz: Jazz, show: Show, title: String): Task {
     return jazz.insert(
         Tasks,
         NewTask(showId = show.id, title = title, status = TaskStatus.Todo, rank = (last?.rank ?: 0.0) + 1.0),
+        // Returns once the server accepted it: a write its permissions refuse throws.
+        tier = WriteTier.Global,
     )
 }
 
 /** Moves a task to another stage. */
 suspend fun moveTask(jazz: Jazz, taskId: String, status: TaskStatus) {
-    jazz.update(Tasks, taskId) { status(status) }
+    jazz.update(Tasks, taskId, tier = WriteTier.Global) { status(status) }
 }
