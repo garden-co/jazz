@@ -140,3 +140,52 @@ func TestBoard(t *testing.T) {
 		t.Fatalf("moved: %+v, %v", moved, err)
 	}
 }
+
+func TestLiveBoardFollowsRank(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Live Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := addTask(ctx, db, show.ID, "Load-in")
+	b, _ := addTask(ctx, db, show.ID, "Line check")
+	live, err := jazzapp.Tasks.Query().
+		Where(jazzapp.Tasks.ShowID.Eq(show.ID)).
+		OrderBy(jazzapp.Tasks.Rank.Asc()).
+		Live(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-live.Ready()
+	order := func() []string {
+		var out []string
+		for _, task := range live.Rows() {
+			out = append(out, task.Title)
+		}
+		return out
+	}
+	if got := order(); len(got) != 2 || got[0] != a.Title {
+		t.Fatalf("first result: %v", got)
+	}
+	// Moving Line check to the top re-sorts the live rows.
+	if err := jazzapp.Tasks.Update(ctx, db, b.ID, jazzapp.TaskPatch{Rank: jazz.Set(0.5)}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if got := order(); got[0] == b.Title {
+			break
+		}
+		select {
+		case <-live.Changes():
+		case <-live.Done():
+			t.Fatal(live.Err())
+		case <-ctx.Done():
+			t.Fatalf("never re-sorted: %v", order())
+		}
+	}
+	cancel()
+	<-live.Done()
+}
