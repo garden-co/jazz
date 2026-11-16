@@ -55,8 +55,22 @@ public interface Native : AutoCloseable {
     /** Returns once every write so far reached [tier]. */
     public fun waitForSync(tier: String) {}
 
-    /** Starts a transaction. */
+    /** Starts a serializable transaction: a commit that conflicts with a concurrent one fails. */
     public fun begin(): NativeTransaction = throw JazzException.NotSupported("transactions")
+
+    /** Starts a mergeable transaction (TS's default): its writes merge with concurrent ones. */
+    public fun beginMergeable(): NativeTransaction = begin()
+
+    /** Stops syncing until [reconnect]; reads and writes go on locally. */
+    public fun disconnect(): Unit = throw JazzException.NotSupported("disconnect")
+
+    public fun reconnect(): Unit = throw JazzException.NotSupported("reconnect")
+
+    /** Closes the app and deletes its local store. */
+    public fun deleteClientStorage(): Unit = throw JazzException.NotSupported("deleting client storage")
+
+    /** Calls [onError] with each refused write nobody waited on (JSON); returns a cancel. */
+    public fun watchMutationErrors(onError: (String) -> Unit): () -> Unit = {}
 
     /** The end user's session as JSON, or `null` for a local app or a backend. */
     public fun sessionState(): String? = null
