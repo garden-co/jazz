@@ -73,11 +73,18 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
  *              every required column; an existing row: the columns it names)
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
+ *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
+ *   "uploadPush"   {"upload", "bytes": base64}                -> null
+ *   "uploadFinish" {"upload", "tier"?}                        -> the row
+ *   "uploadAbort"  {"upload"}                                 -> null
  *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
  *                     | null (a local app or a backend)
  *   "syncStatus" {} -> {"link": ...}
  *   "refresh"  {}  -> null (asks the token callback for a fresh token)
+ *   "link"     {"bearer"} -> the user (links a device account to the app's
+ *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
+ *   "bundle"   {}  -> "<published permissions bundle>" | null (a backend's)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
