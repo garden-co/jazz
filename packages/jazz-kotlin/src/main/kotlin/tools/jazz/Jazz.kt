@@ -406,16 +406,22 @@ public class Jazz internal constructor(
         val rows = LinkedHashMap<String, JsonObject>()
         raw(query, tier).collect { d ->
             if (d.reset) rows.clear()
-            for (id in d.removed) rows.remove(id)
-            for (row in d.added + d.updated) rows[(row["id"] as JsonPrimitive).content] = row
+            // A result's key: `$key` where the core sends one (a history or union
+            // result, where one row id can be several results), else the row's id.
+            for (key in d.removedKeys ?: d.removed) rows.remove(key)
+            for (row in d.added + d.updated) rows[resultKey(row)] = row
             emit(query.sort(rows.values.toList()).map { decode(query, it) })
         }
     }.distinctUntilChanged()
+
+    private fun resultKey(row: JsonObject): String =
+        ((row["\$key"] ?: row["id"]) as JsonPrimitive).content
 
     private class RawDelta(
         val added: List<JsonObject>,
         val updated: List<JsonObject>,
         val removed: List<String>,
+        val removedKeys: List<String>?,
         val reset: Boolean,
         val coalesced: Boolean,
     )
@@ -437,6 +443,7 @@ public class Jazz internal constructor(
                             added = (o["added"] as? JsonArray)?.objects() ?: emptyList(),
                             updated = (o["updated"] as? JsonArray)?.objects() ?: emptyList(),
                             removed = o["removed"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+                            removedKeys = o["removedKeys"]?.jsonArray?.map { it.jsonPrimitive.content },
                             reset = o["reset"]?.jsonPrimitive?.booleanOrNull ?: false,
                             coalesced = o["coalesced"]?.jsonPrimitive?.booleanOrNull ?: false,
                         ),
