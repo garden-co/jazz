@@ -112,3 +112,12 @@ export function fresh(base: string, taken: Set<string>): string {
   taken.add(name);
   return name;
 }
+
+/** A JSON value as a JS literal: `{ type: "object" }`, keys unquoted where they can be. */
+export function jsLiteral(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(jsLiteral).join(", ")}]`;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return "{}";
+  return `{ ${entries.map(([k, v]) => `${propKey(k)}: ${jsLiteral(v)}`).join(", ")} }`;
+}

@@ -1,6 +1,6 @@
 /** `jazz.app.json` tables → `.64` builders (`s.table(…)`) for `s.defineSchema({…})`. */
 import type { AppJson, ColumnJson, ColumnObject, TableJson } from "./app-json.js";
-import { propKey } from "./names.js";
+import { jsLiteral, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
 
 export interface TablesPrintOptions {
@@ -120,7 +120,7 @@ function baseColumn(column: ColumnObject, options: TablesPrintOptions): string {
   if (column.enum !== undefined)
     return `s.enum(${column.enum.map((v) => JSON.stringify(v)).join(", ")})`;
   if (column.json !== undefined)
-    return column.json === true ? "s.json()" : `s.json(${JSON.stringify(column.json)})`;
+    return column.json === true ? "s.json()" : `s.json(${jsLiteral(column.json)})`;
   if (column.array !== undefined) return `s.array(${printColumn(column.array, options)})`;
   options.unsupported.push({
     path: options.path,
@@ -134,7 +134,7 @@ function baseColumn(column: ColumnObject, options: TablesPrintOptions): string {
 export function printDefault(column: ColumnJson, value: unknown): string {
   const type = typeof column === "string" ? column.replace(/\?$/, "") : column.type;
   if (type === "bigint" && typeof value === "string") return `${value}n`;
-  return JSON.stringify(value);
+  return jsLiteral(value);
 }
 
 function lineComment(text: string): string {

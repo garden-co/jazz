@@ -33,7 +33,7 @@ import {
   type Typed,
   type ValueRef,
 } from "./expr.js";
-import { camel, fresh, isBindable, member, pascal, propKey, singular } from "./names.js";
+import { camel, fresh, isBindable, jsLiteral, member, pascal, propKey, singular } from "./names.js";
 
 export interface Unsupported {
   /** JSON path, e.g. `tables.todos.read.anyOf[1]`. */
@@ -403,13 +403,11 @@ class Printer {
       case "bool":
         return String(ast.value);
       case "or":
-        if (ast.items.length === 0) throw new Unprintable("", "an empty `anyOf()`");
         return this.call(
           "anyOf",
           ast.items.map((i) => this.expr(i, ctx, scope)),
         );
       case "and": {
-        if (ast.items.length === 0) throw new Unprintable("", "an empty `allOf()`");
         const merged = this.mergeConditions(ast.items, ctx, scope);
         if (merged) return merged;
         return this.call(
@@ -816,7 +814,7 @@ class Printer {
         ) {
           return this.typed(v.value as Typed);
         }
-        if (v.text.startsWith("json(")) return this.fn("jsonValue", JSON.stringify(v.value));
+        if (v.text.startsWith("json(")) return this.fn("jsonValue", jsLiteral(v.value));
         return JSON.stringify(v.value);
       case "session":
         return this.sessionText(v.path);

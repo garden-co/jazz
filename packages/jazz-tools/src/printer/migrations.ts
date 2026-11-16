@@ -4,7 +4,7 @@
  * (the engine schema of each version, as `migrations create` writes them).
  */
 import type { AppJson, ColumnJson, MigrateOpJson, MigrationJson, TableJson } from "./app-json.js";
-import { member, propKey } from "./names.js";
+import { jsLiteral, member, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
 import { printColumn, printDefault, printTable } from "./schema.js";
 
@@ -247,7 +247,7 @@ function printTypedOp(
   if (type.json !== undefined) {
     return type.json === true
       ? `${fn}.json({ ${def} })`
-      : `${fn}.json({ ${def}, schema: ${JSON.stringify(type.json)} })`;
+      : `${fn}.json({ ${def}, schema: ${jsLiteral(type.json)} })`;
   }
   if (type.array !== undefined) {
     const of = printColumn(type.array, { relations: false, path, unsupported });

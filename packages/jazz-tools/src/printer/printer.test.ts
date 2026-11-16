@@ -159,7 +159,7 @@ describe("the schema printer", () => {
     const schema = out.files["schema.ts"]!;
     expect(schema).toContain('shareCount: s.computed(s.int(), ["id"])');
     expect(schema).toContain(
-      'meta: s.json({"type":"object"}).optional().transform("jsonText", s.string())',
+      'meta: s.json({ type: "object" }).optional().transform("jsonText", s.string())',
     );
     expect(schema).toContain('.indexOnly(["owner"])');
     expect(schema).toContain('.history("latest")');
