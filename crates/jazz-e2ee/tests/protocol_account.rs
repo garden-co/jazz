@@ -418,10 +418,7 @@ fn recovery_restores_a_new_device() {
         RotationTarget::RemoveDevice(replacement.id.clone()),
         &mut rng,
     );
-    assert_eq!(
-        removal.public.retired_recovery_root_id.as_deref(),
-        Some(root.id.as_str())
-    );
+    assert_eq!(removal.public.targets().unwrap().1, vec![root.id.clone()]);
     assert!(removal.recovery_deliveries.is_empty());
     let state = ledger.state(&env);
     assert!(state.is_removed(&replacement.id));
@@ -430,7 +427,7 @@ fn recovery_restores_a_new_device() {
 
     // A removal that leaves the root active is not accepted.
     let mut keeps_root = removal.public.clone();
-    keeps_root.retired_recovery_root_id = None;
+    keeps_root.retired_recovery_root_ids = b"[]".to_vec();
     let bytes = keeps_root.signed_bytes(&env.application()).unwrap();
     keeps_root.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
     let mut view = before_removal;
@@ -1150,4 +1147,150 @@ fn private_evidence_is_bound_to_its_state() {
     assert!(state.is_active(&phone.id));
     let evidence = verify_private(&replay, &state, &ledger.private).unwrap();
     assert!(evidence.approvals.is_empty());
+}
+
+/// Accepts a recovery approval of `device` with `recovery` in the current
+/// epoch, as replay would see it even if the device is already active.
+fn recover_with(
+    env: &Env,
+    ledger: &mut Ledger,
+    holder: &build::LocalDevice,
+    device: &build::LocalDevice,
+    recovery: &RecoveryKeys,
+    rng: &mut TestRandom,
+) {
+    let key = ledger.acquire(env, holder).unwrap();
+    let mut state = ledger.state(env);
+    state.active.remove(&device.id);
+    let records = build::recovery_approve(&env.writer(), &state, device, recovery, &key, rng)
+        .unwrap()
+        .expect("not active in the given state");
+    let at = ledger.next();
+    ledger
+        .private
+        .challenges
+        .push(Accepted::new(at, records.challenge));
+    ledger.private.proofs.push(Accepted::new(at, records.proof));
+    ledger.accept_approval(at, &records.records);
+}
+
+/// Removing the device that registered a recovery root retires that root
+/// with it, as it held the root's key pair; a removal that leaves it active
+/// is not accepted. A device that both registered a root and recovered with
+/// another retires both in one rotation.
+#[test]
+fn removing_a_registering_device_retires_its_roots() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(30);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let first =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([1; 32]), &env.application(), 0).unwrap();
+    let second =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([2; 32]), &env.application(), 0).unwrap();
+    // The laptop registers the first root; the phone registers the second
+    // and recovers with the first.
+    ledger.register_recovery(&env, &laptop, &first, &mut rng);
+    ledger.register_recovery(&env, &phone, &second, &mut rng);
+    recover_with(&env, &mut ledger, &laptop, &phone, &first, &mut rng);
+
+    let before = ledger.public.clone();
+    let (at, removal) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let mut both = vec![first.root_id.clone(), second.root_id.clone()];
+    both.sort();
+    assert_eq!(removal.public.targets().unwrap().1, both);
+    assert!(removal.recovery_deliveries.is_empty());
+    let state = ledger.state(&env);
+    assert!(state.is_removed(&phone.id));
+    assert!(state.recovery_roots.is_empty());
+
+    // Naming only one of them is not accepted.
+    let mut partial = removal.public.clone();
+    partial.retired_recovery_root_ids =
+        jazz_e2ee::protocol::json::encode_root_id_list([&second.root_id]).unwrap();
+    let bytes = partial.signed_bytes(&env.application()).unwrap();
+    partial.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    let mut view = before;
+    view.through = at;
+    view.successors.push(Accepted::new(at, partial));
+    let state = jazz_e2ee::protocol::account::AccountReplay::new(&view, &env.domain, &env.registry)
+        .unwrap()
+        .current()
+        .unwrap()
+        .unwrap();
+    assert!(!state.is_removed(&phone.id));
+
+    // Removing the laptop, which registered only the first root.
+    let mut ledger2 = Ledger::new("alice");
+    ledger2.request(&laptop, &mut rng);
+    ledger2.root(&env, &laptop, 0, &mut rng);
+    ledger2.request(&phone, &mut rng);
+    ledger2.approve(&env, &laptop, &phone, &mut rng);
+    ledger2.register_recovery(&env, &laptop, &first, &mut rng);
+    let (_, removal) = ledger2.rotate(
+        &env,
+        &phone,
+        RotationTarget::RemoveDevice(laptop.id.clone()),
+        &mut rng,
+    );
+    assert_eq!(
+        removal.public.targets().unwrap().1,
+        vec![first.root_id.clone()]
+    );
+    assert!(ledger2.state(&env).recovery_roots.is_empty());
+}
+
+/// Every recovery approval of a device counts, not only its first: a device
+/// whose first recovery root is already retired and that recovered again
+/// with another root retires that other root when removed.
+#[test]
+fn removal_retires_every_root_a_device_recovered_with() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(31);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let first =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([1; 32]), &env.application(), 0).unwrap();
+    let second =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([2; 32]), &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &first, &mut rng);
+    recover_with(&env, &mut ledger, &laptop, &phone, &first, &mut rng);
+    ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RetireRecoveryRoot(first.root_id.clone()),
+        &mut rng,
+    );
+    ledger.register_recovery(&env, &laptop, &second, &mut rng);
+    recover_with(&env, &mut ledger, &laptop, &phone, &second, &mut rng);
+    assert!(ledger.state(&env).is_active(&phone.id));
+
+    let (_, removal) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    assert_eq!(
+        removal.public.targets().unwrap().1,
+        vec![second.root_id.clone()]
+    );
+    let state = ledger.state(&env);
+    assert!(state.is_removed(&phone.id));
+    assert!(state.retired_recovery_roots.contains_key(&second.root_id));
+    assert!(state.recovery_roots.is_empty());
 }

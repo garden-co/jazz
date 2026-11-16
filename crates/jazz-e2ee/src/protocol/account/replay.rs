@@ -236,7 +236,7 @@ struct ValidSuccessor {
     candidate: Accepted<PublicAccountSuccessor>,
     accepted: Vec<Accepted<PublicDeviceApproval>>,
     target: String,
-    also_retired: Option<String>,
+    also_retired: Vec<String>,
     members: BTreeSet<String>,
 }
 
@@ -552,10 +552,7 @@ impl<'a> AccountReplay<'a> {
         if !members.active.contains(&successor.signer_id) {
             return Ok(None);
         }
-        let Ok((target, also_retired)) = successor
-            .targets()
-            .map(|(target, also)| (target.to_owned(), also.map(str::to_owned)))
-        else {
+        let Ok((target, also_retired)) = successor.targets() else {
             return Ok(None);
         };
         let mut expected = members.active.clone();
@@ -564,11 +561,12 @@ impl<'a> AccountReplay<'a> {
                 if !expected.remove(&target) {
                     return Ok(None);
                 }
-                // In an app account, removing a device that recovered retires
-                // the root it recovered with, if still active (§2.8).
-                if also_retired
-                    != run.recovered_with(&target, earlier_approvals, &members.accepted)?
-                {
+                // In an app account, removing a device retires every still
+                // active root it held the key pair of: the roots it
+                // registered and the roots it recovered with (§2.8).
+                let required =
+                    run.held_roots(&target, position, earlier_approvals, &members.accepted)?;
+                if !also_retired.iter().eq(required.iter()) {
                     return Ok(None);
                 }
             }
@@ -693,7 +691,7 @@ impl<'a> AccountReplay<'a> {
             match candidate.row.action {
                 AccountAction::RemoveDevice => {
                     run.removed.insert(target);
-                    if let Some(root) = also_retired {
+                    for root in also_retired {
                         run.retired.insert(root, position);
                     }
                 }
@@ -806,39 +804,40 @@ struct Run<'r, 'a> {
 }
 
 impl Run<'_, '_> {
-    /// The recovery root `device` must have retired with it when removed
-    /// (§2.8): in an app account, the root of its accepted recovery
-    /// approval in this generation, if that root is still valid and
-    /// unretired. `None` otherwise, and always for a local-first account.
-    fn recovered_with(
+    /// The recovery roots a removal of `device` at `position` must retire
+    /// with it (§2.8): in an app account, every valid root of this
+    /// generation, unretired before `position`, whose key pair the device
+    /// held: each root it registered before `position`, and each root named
+    /// by any of its accepted recovery approvals. Empty for a local-first
+    /// account, whose roots derive from the secret every device holds.
+    fn held_roots(
         &self,
         device: &str,
+        position: Position,
         earlier: &[Accepted<PublicDeviceApproval>],
         current: &[Accepted<PublicDeviceApproval>],
-    ) -> ProtocolResult<Option<String>> {
+    ) -> ProtocolResult<BTreeSet<String>> {
+        let mut held = BTreeSet::new();
         if self.kind != AccountKind::App {
-            return Ok(None);
+            return Ok(held);
         }
-        let Some(root_id) = earlier
+        let recovered: BTreeSet<&str> = earlier
             .iter()
             .chain(current)
             .filter(|approval| approval.row.device_id == device)
-            .find_map(|approval| approval.row.recovery_root_id.clone())
-        else {
-            return Ok(None);
-        };
-        if self.retired.contains_key(&root_id) {
-            return Ok(None);
+            .filter_map(|approval| approval.row.recovery_root_id.as_deref())
+            .collect();
+        for root in &self.view.recovery_roots {
+            let id = root.row.id.as_str();
+            let registered = root.row.signer_id == device && root.position < position;
+            if (registered || recovered.contains(id))
+                && !self.retired.contains_key(id)
+                && self.recovery_valid(root)?
+            {
+                held.insert(root.row.id.clone());
+            }
         }
-        let Some(root) = self
-            .view
-            .recovery_roots
-            .iter()
-            .find(|root| root.row.id == root_id)
-        else {
-            return Ok(None);
-        };
-        Ok(self.recovery_valid(root)?.then_some(root_id))
+        Ok(held)
     }
 
     /// A root valid in this view: strictly after the canonical root (so of

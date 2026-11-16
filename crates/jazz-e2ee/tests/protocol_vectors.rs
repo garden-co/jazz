@@ -515,11 +515,11 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
     ),
     (
         "public successor",
-        "8ae7c0725064cf2d665da8905fcc11910d96f27c6c65c5348382565d35e4e16c",
+        "cf9e203e93b191c5a3bf56cd52ff9bd2b4f3ff331ecbb518f1ca5dbe47d829f2",
     ),
     (
         "private successor",
-        "63906d8c1d766772ebd52286f0eb4cf032dc164573f188e93dfe09cf6c78e12c",
+        "070c4fad3a2c47261e2974d1540caa4a0a9aa4b1615c3ad34fc4eb2ff6c80a43",
     ),
     (
         "recovery root",
@@ -758,7 +758,7 @@ fn signed_bytes() {
         signer_id: D1.into(),
         action: AccountAction::RemoveDevice,
         removed_device_id: Some(D2.into()),
-        retired_recovery_root_id: None,
+        retired_recovery_root_ids: b"[]".to_vec(),
         membership: membership.clone(),
         revision: json::encode_revision([R2]).unwrap(),
         signature: vec![],
@@ -782,7 +782,7 @@ fn signed_bytes() {
                 E1.as_bytes(),
                 b"remove-device",
                 D2.as_bytes(),
-                b"",
+                b"[]",
                 &membership,
                 &public_successor.revision,
             ],
@@ -797,7 +797,7 @@ fn signed_bytes() {
         signer_id: D1.into(),
         action: AccountAction::RetireRecoveryRoot,
         removed_device_id: None,
-        retired_recovery_root_id: Some(R2.into()),
+        retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
         membership: membership.clone(),
         revision: json::encode_id_list([R2]).unwrap(),
         verification: b"marker".to_vec(),
@@ -824,7 +824,7 @@ fn signed_bytes() {
                 E1.as_bytes(),
                 b"retire-recovery-root",
                 R2.as_bytes(),
-                b"",
+                format!("[\"{R2}\"]").as_bytes(),
                 &membership,
                 &private_successor.revision,
                 b"marker",
@@ -1558,26 +1558,49 @@ fn row_validation() {
         signer_id: D1.into(),
         action: AccountAction::RemoveDevice,
         removed_device_id: Some(D2.into()),
-        retired_recovery_root_id: None,
+        retired_recovery_root_ids: b"[]".to_vec(),
         membership: json::encode_id_list([D1]).unwrap(),
         revision: b"[]".to_vec(),
         signature: vec![1],
     };
     assert!(successor.validate().is_ok());
-    // A removal may also retire the recovery root the device recovered
-    // with; a retirement names no device.
+    // A removal may also retire the recovery roots the device held (derived
+    // ones included); a retirement names no device and exactly one root.
+    let derived_root = ids::uuid_v8([0x5a; 16]);
     assert!(
         PublicAccountSuccessor {
-            retired_recovery_root_id: Some(R2.into()),
+            retired_recovery_root_ids: json::encode_root_id_list([R2, &derived_root]).unwrap(),
             ..successor.clone()
         }
         .validate()
         .is_ok()
     );
+    let retirement = PublicAccountSuccessor {
+        action: AccountAction::RetireRecoveryRoot,
+        removed_device_id: None,
+        retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
+        ..successor.clone()
+    };
+    assert_eq!(retirement.targets().unwrap(), (R2.to_owned(), Vec::new()));
+    for ids in [
+        b"[]".to_vec(),
+        json::encode_root_id_list([R1, R2]).unwrap(),
+        format!("[\"{R2}\",\"{R1}\"]").into_bytes(),
+        format!("[\"{R2}\", \"{R1}\"]").into_bytes(),
+    ] {
+        assert!(invalid(
+            PublicAccountSuccessor {
+                retired_recovery_root_ids: ids,
+                ..retirement.clone()
+            }
+            .validate()
+            .map(|_| ())
+        ));
+    }
     assert!(invalid(
         PublicAccountSuccessor {
             action: AccountAction::RetireRecoveryRoot,
-            retired_recovery_root_id: Some(R2.into()),
+            retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
             ..successor.clone()
         }
         .validate()

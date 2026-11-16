@@ -813,16 +813,17 @@ pub fn rotate(
             (
                 AccountAction::RemoveDevice,
                 Some(device.clone()),
-                recovered_with(state, device),
+                held_recovery_roots(state, device),
             )
         }
         RotationTarget::RetireRecoveryRoot(root) => {
             if state.recovery_root(root).is_none() {
                 return refuse(RefusalCode::TargetNotActive);
             }
-            (AccountAction::RetireRecoveryRoot, None, Some(root.clone()))
+            (AccountAction::RetireRecoveryRoot, None, vec![root.clone()])
         }
     };
+    let retired_ids = json::encode_root_id_list(&retired)?;
     let application = writer.application()?;
     let account_id = writer.account_id;
     let id = ids::random_v4(rng)?;
@@ -864,7 +865,7 @@ pub fn rotate(
         signer_id: author.id.clone(),
         action,
         removed_device_id: removed.clone(),
-        retired_recovery_root_id: retired.clone(),
+        retired_recovery_root_ids: retired_ids.clone(),
         membership: membership.clone(),
         revision: private_revision,
         verification,
@@ -881,7 +882,7 @@ pub fn rotate(
         signer_id: author.id.clone(),
         action,
         removed_device_id: removed,
-        retired_recovery_root_id: retired.clone(),
+        retired_recovery_root_ids: retired_ids,
         membership,
         revision: public_revision,
         signature: Vec::new(),
@@ -889,7 +890,7 @@ pub fn rotate(
     public.signature = writer.sign(&author.signing, &public.signed_bytes(&application)?)?;
     let mut recovery_deliveries = Vec::new();
     for root in &state.recovery_roots {
-        if retired.as_deref() == Some(root.row.id.as_str())
+        if retired.contains(&root.row.id)
             || root.row.keys.sealing_key().mechanism != writer.suite.key_seal.mechanism()
         {
             continue;
@@ -906,19 +907,27 @@ pub fn rotate(
     })
 }
 
-/// The recovery root a removal of `device` must also retire (§2.8): in an
-/// app account, the active root of the device's recovery approval in this
-/// generation. The SDK then asks for a new recovery secret backup.
-pub fn recovered_with(state: &AccountState, device: &str) -> Option<String> {
+/// The recovery roots a removal of `device` must also retire (§2.8): in
+/// an app account, every active root whose key pair the device held, the
+/// roots it registered and the roots of all its recovery approvals in this
+/// generation, by position then ID. The SDK then asks for a new recovery
+/// secret backup.
+pub fn held_recovery_roots(state: &AccountState, device: &str) -> Vec<String> {
     if state.root.row.kind != AccountKind::App {
-        return None;
+        return Vec::new();
     }
     state
-        .approvals
+        .recovery_roots
         .iter()
-        .filter(|approval| approval.row.device_id == device)
-        .find_map(|approval| approval.row.recovery_root_id.clone())
-        .filter(|root| state.recovery_root(root).is_some())
+        .filter(|root| {
+            root.row.signer_id == device
+                || state.approvals.iter().any(|approval| {
+                    approval.row.device_id == device
+                        && approval.row.recovery_root_id.as_deref() == Some(root.row.id.as_str())
+                })
+        })
+        .map(|root| root.row.id.clone())
+        .collect()
 }
 
 /// A recovery root registration (§2.9, stage `recovery-root`), signed by an

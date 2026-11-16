@@ -242,11 +242,11 @@ fn sorted_strings(ids: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String>
     sorted
 }
 
-fn check_id_list(ids: &[String], require_uuid: bool) -> ProtocolResult<()> {
+fn check_id_list(ids: &[String], form: Option<IdForm>) -> ProtocolResult<()> {
     let valid = strictly_increasing(ids, String::as_str)
         && ids
             .iter()
-            .all(|id| !id.is_empty() && (!require_uuid || ids::is_id(id, IdForm::Random)));
+            .all(|id| !id.is_empty() && form.is_none_or(|form| ids::is_id(id, form)));
     if valid {
         Ok(())
     } else {
@@ -263,13 +263,29 @@ fn encode_list(ids: &[String]) -> Vec<u8> {
 /// every ID a version 4 or 7 UUID. Duplicates are refused.
 pub fn encode_id_list(ids: impl IntoIterator<Item = impl AsRef<str>>) -> ProtocolResult<Vec<u8>> {
     let sorted = sorted_strings(ids);
-    check_id_list(&sorted, true)?;
+    check_id_list(&sorted, Some(IdForm::Random))?;
     Ok(encode_list(&sorted))
 }
 
 pub fn decode_id_list(bytes: &[u8]) -> ProtocolResult<Vec<String>> {
     let ids = into_strings(parse_canonical(bytes)?)?;
-    check_id_list(&ids, true)?;
+    check_id_list(&ids, Some(IdForm::Random))?;
+    Ok(ids)
+}
+
+/// A recovery root ID list: the ID-list encoding over recovery root IDs,
+/// which may also be derived (version 8). May be empty.
+pub fn encode_root_id_list(
+    ids: impl IntoIterator<Item = impl AsRef<str>>,
+) -> ProtocolResult<Vec<u8>> {
+    let sorted = sorted_strings(ids);
+    check_id_list(&sorted, Some(IdForm::RandomOrDerived))?;
+    Ok(encode_list(&sorted))
+}
+
+pub fn decode_root_id_list(bytes: &[u8]) -> ProtocolResult<Vec<String>> {
+    let ids = into_strings(parse_canonical(bytes)?)?;
+    check_id_list(&ids, Some(IdForm::RandomOrDerived))?;
     Ok(ids)
 }
 
@@ -277,13 +293,13 @@ pub fn decode_id_list(bytes: &[u8]) -> ProtocolResult<Vec<String>> {
 /// UUIDs.
 pub fn encode_revision(ids: impl IntoIterator<Item = impl AsRef<str>>) -> ProtocolResult<Vec<u8>> {
     let sorted = sorted_strings(ids);
-    check_id_list(&sorted, false)?;
+    check_id_list(&sorted, None)?;
     Ok(encode_list(&sorted))
 }
 
 pub fn decode_revision(bytes: &[u8]) -> ProtocolResult<Vec<String>> {
     let ids = into_strings(parse_canonical(bytes)?)?;
-    check_id_list(&ids, false)?;
+    check_id_list(&ids, None)?;
     Ok(ids)
 }
 
