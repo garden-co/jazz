@@ -79,6 +79,10 @@ pub(crate) struct Info {
     /// How this backend was opened, for the trusted client its endpoint
     /// acts for its users with.
     pub(crate) opened_with: Option<(AppFiles, Config)>,
+    /// A backend client's way back to its main backend.
+    pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
+    /// The store keeps nothing past the process.
+    pub(crate) memory: bool,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -213,6 +217,8 @@ impl Jazz {
             session,
             sync,
             backend,
+            backend_client,
+            memory,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
@@ -225,6 +231,8 @@ impl Jazz {
                 sync,
                 backend,
                 opened_with,
+                backend_client,
+                memory,
             }),
             scope: None,
             for_user: false,
@@ -577,6 +585,8 @@ struct Opened {
     session: Option<UserSession>,
     sync: watch::Receiver<SyncStatus>,
     backend: Option<BackendLink>,
+    backend_client: Option<crate::backend_client::BackendClientLink>,
+    memory: bool,
 }
 
 async fn connect(
@@ -642,7 +652,18 @@ async fn connect(
         });
     }
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
+    let memory = context.storage == ClientStorage::Memory;
+    let mut backend_client = None;
     let (client, user) = match (config.user, &config.server_url) {
+        (Some(Auth::Credential(credential)), Some(endpoint)) => {
+            let (client, user, credential, link) =
+                crate::backend_client::connect(context, connector, credential, endpoint).await?;
+            if !user.account.is_system() {
+                admitted = Some(user.account);
+            }
+            backend_client = Some(link);
+            (client, Some((user, credential)))
+        }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
                 connect_user(context, connector, auth, endpoint).await?;
@@ -680,6 +701,8 @@ async fn connect(
             session,
             sync,
             backend: link,
+            backend_client,
+            memory,
         },
     ))
 }
@@ -710,6 +733,7 @@ async fn connect_user(
             };
             Ok((client, user, Credential::Device { key, app }))
         }
+        Auth::Credential(_) => unreachable!("a backend client connects through backend_client"),
         Auth::Bearer(provider) => {
             let token = provider
                 .token(TokenReason::Connect)

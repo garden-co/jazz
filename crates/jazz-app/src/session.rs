@@ -111,6 +111,8 @@ pub enum UserKind {
     Device,
     /// A user the app's backend signed in ([`crate::Auth::Bearer`]).
     Backend,
+    /// The system: a trusted backend client ([`crate::Config::credential`]).
+    System,
 }
 
 /// How the client syncs, as TypeScript's `SyncStatus`.
