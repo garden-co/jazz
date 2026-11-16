@@ -273,20 +273,22 @@ version (the Gradle builds read it from `packages/jazz-tools/package.json`).
 `.github/workflows/publish-jazz-kotlin.yml` runs `dev/scripts/publish-kotlin.sh`.
 
 1. **After "Attach language artifacts" and the GitHub Release are published,**
-   dispatch "Publish jazz-kotlin" with `mode=dry-run`, `tag=v<version>`: it
-   builds the jar from the release's `libjazz_ffi-<platform>.tar.gz` (checked
-   against its `SHA256SUMS`) and the AAR, signs both with a throwaway key and
-   checks every file, POM and signature. Its artifact is what Central would get.
+   dispatch "Publish jazz-kotlin" with `mode=dry-run`, `tag=v<version>`. It
+   builds `refs/tags/v<version>`'s commit (never a branch of that name) with
+   the pinned JDK and Gradle 8.14.3: the jar from the release's
+   `libjazz_ffi-<platform>.tar.gz` (checked against `SHA256SUMS-languages`,
+   their build-provenance attestations, and `libjazz_ffi-source.txt` naming
+   that commit) and the AAR. It signs both with a throwaway key and checks
+   every file, POM and signature. Its artifact is what Central would get.
 2. **Publish:** dispatch it with `mode=publish`, `tag=v<version>`. The `publish`
    environment's reviewer approves; it reads `MAVEN_CENTRAL_USERNAME` and
    `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token) and
-   `MAVEN_SIGNING_KEY` / `MAVEN_SIGNING_KEY_PASSWORD`. With `release=manual`
-   (the default) the two deployments wait, validated, on
-   central.sonatype.com → Publish → Deployments: check them and press Publish.
-   `release=automatic` publishes them at once.
+   `MAVEN_SIGNING_KEY` / `MAVEN_SIGNING_KEY_PASSWORD`. One Gradle run builds,
+   signs and uploads; the same checks then run on those files. The two
+   deployments wait, validated, on central.sonatype.com → Publish →
+   Deployments: once the run is green, check them and press Publish.
 3. A published version can't be replaced or deleted on Central. A failed run
-   before the upload changes nothing; a deployment left unpublished can be
-   dropped in the portal.
+   publishes nothing; drop any deployment it left in the portal.
 
 The artifacts are signed by the release key, RSA 4096, `Jazz Releases
 <releases@jazz.tools>`, fingerprint

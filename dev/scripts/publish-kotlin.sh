@@ -9,10 +9,11 @@
 #   <mode>     local: build, sign and publish both to the local Maven
 #                     repository (~/.m2), and check what's there. Nothing
 #                     leaves the machine.
-#              central: the same, then upload both to the Central Portal.
-#                     CENTRAL_RELEASE=automatic releases them at once;
-#                     otherwise (manual) they wait, validated, for Publish
-#                     in the portal.
+#              central: the same build, in the same Gradle run, also
+#                     uploaded to the Central Portal, where both deployments
+#                     wait, validated, for Publish (never released from
+#                     here): what's checked is what was uploaded, and a
+#                     failed check leaves them to drop.
 #
 # Signing, in both modes: ORG_GRADLE_PROJECT_signingInMemoryKey (an
 # ASCII-armored private key) and ORG_GRADLE_PROJECT_signingInMemoryKeyPassword.
@@ -39,14 +40,20 @@ done
 [ "${#platforms[@]}" -gt 0 ] || { echo "$natives holds no platform directories" >&2; exit 1; }
 echo "jazz-kotlin $version with ${platforms[*]} ($mode)"
 
+# The pinned JDK and Gradle (8.14.3: AGP 8.13 and maven-publish 0.35 need
+# Gradle 8), whatever PATH has.
+export KOTLIN_TOOLCHAIN=pinned
 source dev/scripts/kotlin-toolchain.sh
+gradle --version | grep -q '^Gradle 8\.14\.3$' || { gradle --version >&2; echo "not the pinned Gradle 8.14.3" >&2; exit 1; }
 
 m2="$HOME/.m2/repository/tools/jazz"
 rm -rf "$m2/jazz-kotlin/$version" "$m2/jazz-kotlin-android/$version"
 
 jvm=(gradle --no-daemon --console=plain -p packages/jazz-kotlin -PcargoProfile=release -PnativeLibs="$natives")
-"${jvm[@]}" clean publishToMavenLocal
-KOTLIN_ANDROID_TASKS=publishToMavenLocal CARGO_PROFILE=release-mobile bash dev/scripts/test-kotlin-android.sh
+tasks=(publishToMavenLocal)
+[ "$mode" = central ] && tasks+=(publishToMavenCentral)
+"${jvm[@]}" clean "${tasks[@]}"
+KOTLIN_ANDROID_TASKS="${tasks[*]}" CARGO_PROFILE=release-mobile bash dev/scripts/test-kotlin-android.sh
 
 # What Central will get: every file, signed by the key; the jar with every
 # platform's library, the AAR with every ABI's; POMs Central accepts.
@@ -89,10 +96,6 @@ grep -q '<type>aar</type>' "$m2/jazz-kotlin-android/$version/jazz-kotlin-android
   fail "jazz-kotlin-android's POM must take JNA's AAR"
 echo "Checked tools.jazz:jazz-kotlin:$version and tools.jazz:jazz-kotlin-android:$version in $m2"
 
-[ "$mode" = central ] || exit 0
-task=publishToMavenCentral
-[ "${CENTRAL_RELEASE:-manual}" = automatic ] && task=publishAndReleaseToMavenCentral
-# The same builds (Gradle reuses their outputs), uploaded: one deployment each.
-"${jvm[@]}" "$task"
-KOTLIN_ANDROID_TASKS="$task" CARGO_PROFILE=release-mobile bash dev/scripts/test-kotlin-android.sh
-echo "Uploaded tools.jazz:jazz-kotlin:$version and tools.jazz:jazz-kotlin-android:$version ($task)"
+if [ "$mode" = central ]; then
+  echo "Uploaded both to the Central Portal: check the two deployments there and press Publish."
+fi

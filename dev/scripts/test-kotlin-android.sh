@@ -52,7 +52,10 @@ install_zip() {
   echo "$sha256" >"$dest/.jazz-sha256"
 }
 
-if ! command -v java >/dev/null; then
+# KOTLIN_TOOLCHAIN=pinned uses the pinned ones even when PATH has others
+# (dev/scripts/publish-kotlin.sh: a runner's Gradle 9 breaks AGP 8).
+pinned="${KOTLIN_TOOLCHAIN:-}"
+if [ "$pinned" = pinned ] || ! command -v java >/dev/null; then
   if [ ! -x "$cache/jdk-$jdk_version/bin/java" ]; then
     mkdir -p "$cache/jdk-$jdk_version"
     fetch "$jdk_url" "$cache/jdk.tar.gz" "$jdk_sha256"
@@ -62,7 +65,7 @@ if ! command -v java >/dev/null; then
   export JAVA_HOME="$cache/jdk-$jdk_version"
   export PATH="$JAVA_HOME/bin:$PATH"
 fi
-if ! command -v gradle >/dev/null; then
+if [ "$pinned" = pinned ] || ! command -v gradle >/dev/null; then
   if [ ! -x "$cache/gradle-$gradle_version/bin/gradle" ]; then
     mkdir -p "$cache"
     fetch "$gradle_url" "$cache/gradle.zip" "$gradle_sha256"
