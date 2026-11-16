@@ -36,14 +36,14 @@ plugins {
 repositories { mavenCentral() }
 
 dependencies {
-    implementation(files("libs/jazz-kotlin-2.0.0-alpha.65.jar"))
+    implementation(files("libs/jazz-kotlin-2.0.0-alpha.66.jar"))
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("net.java.dev.jna:jna:5.17.0")
 }
 ```
 
-On Android, depend on `files("libs/jazz-kotlin-android-2.0.0-alpha.65.aar")` and
+On Android, depend on `files("libs/jazz-kotlin-android-2.0.0-alpha.66.aar")` and
 `net.java.dev.jna:jna:5.17.0@aar` instead of the jar and `jna`. Keep `tools.jazz.**`,
 `uniffi.jazz_ffi.**` and `com.sun.jna.**` if you minify.
 
