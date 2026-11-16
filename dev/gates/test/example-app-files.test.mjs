@@ -1,8 +1,6 @@
-// Every example and fixture app is its files (SPEC 10.10): jazz.app.json,
-// jazz.permissions.json and the jazz.generated.ts `jazz-tools generate`
-// writes from the first, all committed. None keeps an alpha.64 source
-// (schema.ts, permissions.ts, migrations/) beside them: `jazz-tools upgrade`
-// deletes those, and a leftover would read as a second source of truth.
+// Every example app is written in TS (alpha.66): its schema.ts is the source,
+// and `jazz-tools generate` writes jazz.app.json, jazz.permissions.json and
+// the bindings from it, all committed. Stress-test apps stay JSON-only.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -59,16 +57,26 @@ test("every example app commits its files and its bindings", () => {
   );
 });
 
-test("no example keeps an alpha.64 schema source beside its files", () => {
-  const leftovers = projects().flatMap((dir) =>
-    ["schema.ts", "permissions.ts", "migrations"]
-      .filter((file) => existsSync(join(root, dir, file)))
-      .map((file) => `${dir}/${file}`),
+test("every example app has its schema.ts, and no alpha.64 leftovers", () => {
+  // Every language: Rust crates, Swift packages and Go modules too.
+  const examples = tracked("examples/**/jazz.app.json").map(dirname);
+  // generate discovers schema.ts in the app's directory, ./src or ./src/lib;
+  // an app whose JSON sits in one of those has schema.ts beside it.
+  const missing = examples
+    .filter((dir) => !existsSync(join(root, dir, "schema.ts")))
+    .map((dir) => `${dir}/schema.ts`);
+  const leftovers = examples
+    .filter((dir) => existsSync(join(root, dir, "migrations", "index.ts")))
+    .map((dir) => `${dir}/migrations/index.ts`);
+  assert.deepEqual(
+    missing,
+    [],
+    `jazz.app.json is generated from schema.ts; these apps have none:\n${missing.join("\n")}`,
   );
   assert.deepEqual(
     leftovers,
     [],
-    `jazz.app.json and jazz.permissions.json are the app's only source; \`jazz-tools upgrade\` removes these:\n${leftovers.join("\n")}`,
+    `alpha.66 reads migrations/*.ts itself; \`jazz-tools upgrade\` deletes these:\n${leftovers.join("\n")}`,
   );
 });
 

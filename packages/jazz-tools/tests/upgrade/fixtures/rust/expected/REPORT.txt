@@ -1,0 +1,15 @@
+Wrote:
+  schema.ts
+  jazz.app.json
+  jazz.permissions.json
+  src/jazz_app.rs
+Deleted:
+  migrations/index.ts
+  permissions.ts
+Rewrote:
+  schema.ts:29: `s.defineApp(…)` → `export const schema = s.defineSchema({…})`
+  schema.ts:2: dropped the import of migrations/index.ts
+Notes:
+  The permissions were printed from jazz.permissions.json: repeated conditions became helpers (`isChatMember`, `rule1`, …). Rename them, and bring back what the old permissions.ts said in comments or constants.
+  The schema hashes and the bundle id (b0e7c3029eb1) are unchanged.
+  This is a Rust app: run `cargo check` to typecheck it against the new bindings.

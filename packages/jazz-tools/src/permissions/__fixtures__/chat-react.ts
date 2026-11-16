@@ -43,7 +43,7 @@ export const schema = s.defineSchema({
 const { definePermissions, exists, allowedTo, session, anyOf, allOf, ne } = schema;
 
 const mine = { userId: session.user };
-const createdByMe = { $createdBy: session.user };
+const createdByMe = { "$createdBy.account": session.user };
 const isMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: session.user });
 
 export const permissions = definePermissions({

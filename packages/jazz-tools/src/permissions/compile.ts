@@ -322,13 +322,8 @@ export function unknownMember(meta: SchemaMeta, table: string, member: string): 
   fail(`unknown column or relation "${member}" in ${table}${suggestion(known, member)}`);
 }
 
-/** The column a condition key names, as written in an expression (magic provenance spelled out). */
-function conditionColumn(key: string, value: unknown): string {
-  if (key === "$createdBy" || key === "$updatedBy" || key === "$deletedBy") {
-    const h = handleOf(opOf(value)?.operand ?? value);
-    const identity = h?.k === "session" && h.path.length === 1 && h.path[0] === "identity";
-    return `${key}.${identity ? "identity" : "account"}`;
-  }
+/** The column a condition key names, as written in an expression: magic keys one to one. */
+function conditionColumn(key: string): string {
   if (isMagicColumn(key)) return key;
   return name(key);
 }
@@ -411,7 +406,7 @@ function condition(key: string, raw: unknown, ctx: Ctx): string {
   if (!isConditionColumn(ctx.meta, ctx.table, key)) unknownColumn(ctx.meta, ctx.table, key);
   if (raw === undefined)
     fail(`${ctx.table}.${key} is undefined: leave the key out, or compare with null`);
-  const lhs = conditionColumn(key, raw);
+  const lhs = conditionColumn(key);
   if (raw === null) return `${lhs} = null`;
   if (Array.isArray(raw)) return `${lhs} in [${raw.map((item) => value(item, ctx)).join(", ")}]`;
   const o = opOf(raw);
@@ -485,8 +480,9 @@ export function text(input: unknown, ctx: Ctx): string {
   switch (data.k) {
     case "and":
     case "or": {
+      // One item stays a one-item node, no items an empty one: the engine
+      // keeps both as written (SPEC §10.10).
       const items = data.items.map((item) => text(item, ctx));
-      if (items.length === 1) return items[0]!;
       return `${data.k === "and" ? "allOf" : "anyOf"}(${items.join(", ")})`;
     }
     case "not":
@@ -514,9 +510,8 @@ export function json(input: unknown, ctx: Ctx): PolicyJson {
   if (isNode(input)) {
     const data = input[NODE];
     if (data.k === "and" || data.k === "or") {
-      if (data.items.length === 0) return data.k === "and" ? "true" : "false";
+      if (data.items.length === 0) return data.k === "and" ? "allOf()" : "anyOf()";
       const items = data.items.map((item) => json(item, ctx));
-      if (items.length === 1) return items[0]!;
       return data.k === "and" ? { allOf: items } : { anyOf: items };
     }
   }
