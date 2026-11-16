@@ -125,3 +125,72 @@ async fn for_user_claims_do_not_bleed_between_handles_of_one_user() {
         })
         .await;
 }
+
+/// Write-side claims bleed (jazz#5927 row 1): a write's claims are taken
+/// from the per-user registry (`Db::set_identity_claims`) when its commit
+/// is recorded for upload, not when it was staged. A transaction opened by
+/// Bob's handle in org `o1` stages a doc for org `o2`, which `o1`'s claims
+/// forbid. Before it commits, another handle for Bob in `o2` writes, which
+/// re-registers Bob's claims as `o2`. The commit then goes up with `o2`'s
+/// claims and the core accepts it: a wrong allow.
+#[tokio::test]
+async fn for_user_write_claims_do_not_bleed_between_handles_of_one_user() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("docs")
+                        .column("org", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_read().always();
+                            p.allow_insert()
+                                .where_(pe::eq("org", pe::session(vec!["claims", "org"])));
+                        })),
+                )
+                .table(probe_table())
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
+            let backend = fresh_backend(&server, &schema, "backend").await;
+            let in_o1 = backend.for_session(bob().with_claims(serde_json::json!({ "org": "o1" })));
+            let in_o2 = backend.for_session(bob().with_claims(serde_json::json!({ "org": "o2" })));
+
+            // Control: o1's handle may not write an o2 doc on its own.
+            let alone = in_o1
+                .insert("docs", row_input!("org" => "o2"))
+                .unwrap()
+                .2
+                .unwrap();
+            assert!(
+                backend
+                    .wait_for_transaction(alone, DurabilityTier::GlobalServer)
+                    .await
+                    .is_err(),
+                "o1's claims forbid an o2 doc"
+            );
+
+            let tx = in_o1.begin_mergeable_transaction().unwrap();
+            tx.client()
+                .insert("docs", row_input!("org" => "o2"))
+                .unwrap();
+            // Another request for Bob, in o2, writes meanwhile.
+            let other = in_o2
+                .insert("docs", row_input!("org" => "o2"))
+                .unwrap()
+                .2
+                .unwrap();
+            backend
+                .wait_for_transaction(other, DurabilityTier::GlobalServer)
+                .await
+                .unwrap();
+            let committed = tx.commit().unwrap();
+            let outcome = backend
+                .wait_for_transaction(committed, DurabilityTier::GlobalServer)
+                .await;
+            assert!(
+                outcome.is_err(),
+                "o1's transaction must be checked with o1's claims, and refused"
+            );
+            server.shutdown().await;
+        })
+        .await;
+}
