@@ -1,3 +1,4 @@
+import { SessionKey } from "./session-key.js";
 import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 import {
   computed,
@@ -51,9 +52,13 @@ export const JazzClientProvider = defineComponent({
       type: Object as PropType<JazzClientProviderProps["client"]>,
       required: true,
     },
+    /** @internal Set by `<JazzProvider>` for its session's own client. */
+    inSession: { type: Boolean, default: false },
   },
   setup(props, { slots, attrs }) {
     refuseAutoAttachDevTools("JazzClientProvider", attrs);
+    // Its children read this client, not an enclosing <JazzProvider>'s session.
+    if (!props.inSession) provide(SessionKey, undefined);
     const clientRef = shallowRef<JazzClientContextValue | null>(null);
     const errorRef = shallowRef<Error | null>(null);
     let runId = 0;

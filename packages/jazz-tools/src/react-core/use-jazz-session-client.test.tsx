@@ -5,6 +5,7 @@ import { renderHook } from "@testing-library/react";
 import { JazzClientProvider, useSession } from "./provider.js";
 import { useJazzSession } from "./session.js";
 import { makeFakeClient } from "./test-utils.js";
+import { SessionContext } from "./session-context.js";
 
 function clientWithSession(authMode: "external" | "local-first" | "anonymous") {
   const client = makeFakeClient({ authMode, userId: "u-1", claims: { role: "admin" } });
@@ -58,6 +59,23 @@ describe("useJazzSession under <JazzClientProvider client>", () => {
     const first = result.current;
     rerender();
     expect(result.current).toBe(first);
+  });
+
+  it("reads its own client, not an enclosing <JazzProvider>'s session", async () => {
+    const outerSignOut = vi.fn(async () => {});
+    const outer = { status: "ready", user: { accountId: "outer" }, signOut: outerSignOut };
+    const inner = clientWithSession("external");
+    const { result } = renderHook(() => useJazzSession(), {
+      wrapper: ({ children }) => (
+        <SessionContext.Provider value={outer}>
+          <JazzClientProvider client={inner as any}>{children}</JazzClientProvider>
+        </SessionContext.Provider>
+      ),
+    });
+    expect(result.current.client).toBe(inner);
+    expect(result.current.user?.accountId).toBe("00000000-0000-4000-8000-000000000002");
+    await expect(result.current.signOut()).rejects.toThrow(/outside a Jazz session/);
+    expect(outerSignOut).not.toHaveBeenCalled();
   });
 
   it("still throws outside any provider", () => {

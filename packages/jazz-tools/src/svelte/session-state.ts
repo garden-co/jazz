@@ -30,6 +30,15 @@ export function sessionState<Client>(session: JazzSession<Client>): JazzSessionS
   return { ...jazzSessionActions(session), subscribe: state.subscribe };
 }
 
+/**
+ * @internal A `<JazzSvelteClientProvider client>` hides an enclosing
+ * `<JazzProvider>`'s session from its children: they read that client,
+ * which is not the session's.
+ */
+export function hideJazzSession(): void {
+  setContext(SESSION_CONTEXT, undefined);
+}
+
 /** @internal */
 export function setJazzSession(session: JazzSession<JazzClient>): void {
   setContext(SESSION_CONTEXT, sessionState(session));

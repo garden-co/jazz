@@ -16,6 +16,7 @@ import {
 import type { PublicSession } from "../runtime/context.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { trackPromise } from "../subscriptions-orchestrator.js";
+import { SessionContext } from "./session-context.js";
 import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 
 type CoreJazzDb = {
@@ -108,7 +109,20 @@ function usePromise<T extends object>(promise: Promise<T> | T): T {
  * Makes a Jazz client available to children components through a React context.
  * Useful if you need to create a Jazz client outside of the React component lifecycle.
  */
-export function JazzClientProvider({ client: clientPromise, children }: JazzClientProviderProps) {
+export function JazzClientProvider(props: JazzClientProviderProps) {
+  // Its children read this client, not an enclosing <JazzProvider>'s session.
+  return (
+    <SessionContext.Provider value={null}>
+      <JazzClientContextProvider {...props} />
+    </SessionContext.Provider>
+  );
+}
+
+/** @internal `<JazzClientProvider>` for a session's own client: the session stays visible. */
+export function JazzClientContextProvider({
+  client: clientPromise,
+  children,
+}: JazzClientProviderProps) {
   const client = usePromise(clientPromise);
 
   const authRev = useAuthSubscription(client);

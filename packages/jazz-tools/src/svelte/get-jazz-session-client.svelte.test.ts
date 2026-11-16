@@ -3,7 +3,7 @@ import { get } from "svelte/store";
 import { contextStore } from "./test-helpers.svelte.js";
 
 const { initJazzContext, getSession } = await import("./context.svelte.js");
-const { getJazzSession } = await import("./session-state.js");
+const { getJazzSession, hideJazzSession, setJazzSession } = await import("./session-state.js");
 
 const session = {
   user: "00000000-0000-4000-8000-000000000002",
@@ -37,6 +37,25 @@ describe("getJazzSession under <JazzSvelteClientProvider client>", () => {
   it("refuses session operations, naming why", async () => {
     initJazzContext();
     await expect(getJazzSession().signOut()).rejects.toThrow(/outside a Jazz session/);
+  });
+
+  it("a nested client provider hides the enclosing <JazzProvider>'s session", async () => {
+    const outerSignOut = vi.fn(async () => {});
+    setJazzSession({
+      getSnapshot: () => ({ status: "ready", user: null, localFirst: false }),
+      subscribe: () => () => {},
+      signOut: outerSignOut,
+    } as never);
+    expect(getJazzSession().signOut).toBe(outerSignOut);
+    // What <JazzSvelteClientProvider client> does unless <JazzProvider> renders it.
+    hideJazzSession();
+    const ctx = initJazzContext();
+    ctx.client = { db: {}, session };
+    ctx.session = session;
+    const nested = getJazzSession();
+    expect(get(nested).user?.accountId).toBe(session.user);
+    await expect(nested.signOut()).rejects.toThrow(/outside a Jazz session/);
+    expect(outerSignOut).not.toHaveBeenCalled();
   });
 
   it("still throws outside any provider", () => {

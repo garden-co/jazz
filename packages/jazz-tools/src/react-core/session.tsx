@@ -1,5 +1,4 @@
 import {
-  createContext,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -21,15 +20,15 @@ import {
 } from "../session/jazz-session.js";
 import type { SessionCore } from "../session/state.js";
 import {
-  JazzClientProvider,
+  JazzClientContextProvider,
   useOptionalJazzClientContext,
   type CoreJazzClient,
 } from "./provider.js";
+import { SessionContext } from "./session-context.js";
 
 /** `useJazzSession()`: the session's state, and its operations. */
 export type UseJazzSessionResult<Client = CoreJazzClient> = JazzSessionSnapshot<Client> &
   Omit<JazzSession<Client>, "getSnapshot" | "subscribe" | "db">;
-const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
 
 /**
  * Who is signed in and what the session is doing, with its operations
@@ -45,7 +44,7 @@ const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
  * no session to sign in or out.
  */
 export function useJazzSession<Client = CoreJazzClient>(): UseJazzSessionResult<Client> {
-  const value = useContext(SessionContext);
+  const value = useContext(SessionContext) as UseJazzSessionResult<Client> | null;
   // A client opened outside a session (`<JazzClientProvider client>`): its
   // user, always ready, with operations that reject naming why. Its context
   // value changes when the client's auth does.
@@ -185,7 +184,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
   return (
     <SessionContext.Provider value={state}>
       {state.status === "ready" && state.client ? (
-        <JazzClientProvider client={state.client}>{children}</JazzClientProvider>
+        <JazzClientContextProvider client={state.client}>{children}</JazzClientContextProvider>
       ) : state.status === "signed-out" ? (
         signedOut
       ) : state.status === "error" ? (

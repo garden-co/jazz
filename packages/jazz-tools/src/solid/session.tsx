@@ -1,5 +1,4 @@
 import {
-  createContext,
   createEffect,
   createSignal,
   onCleanup,
@@ -25,19 +24,14 @@ import {
 import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
-import { JazzClientContext, JazzClientProvider } from "./provider.js";
+import { JazzClientContext } from "./provider.js";
+import { SessionContext } from "./session-context.js";
 import { assertNoClassicProviderProps } from "../classic-api.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
 import type { SolidJazzClient } from "./create-solid-jazz-client.js";
-
-type ProvidedSession = {
-  session: JazzSession<JazzClient>;
-  snapshot: Accessor<JazzSessionSnapshot<JazzClient>>;
-};
-const SessionContext = createContext<ProvidedSession>();
 
 /** `useJazzSession()`: the session's state as an accessor, and its operations. */
 export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe" | "db"> & {
@@ -125,7 +119,8 @@ export function ActiveClient(props: { client: JazzClient; children: JSX.Element 
     },
     getSubscriptionStore(client),
   );
-  return <JazzClientProvider client={adapted}>{props.children}</JazzClientProvider>;
+  // The session's own client: its children still read the session.
+  return <JazzClientContext.Provider value={adapted}>{props.children}</JazzClientContext.Provider>;
 }
 /**
  * Jazz for a Solid app: owns a session (`config`) or shows yours (`session`),

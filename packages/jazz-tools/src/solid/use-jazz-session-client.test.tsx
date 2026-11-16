@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { JazzClientProvider, useSession } from "./provider.js";
 import { useJazzSession, type UseJazzSession } from "./session.js";
+import { SessionContext } from "./session-context.js";
 
 vi.mock("../runtime/db.js", () => ({}));
 vi.mock("../session/create-jazz-session.js", () => ({ openBrowserSessionCore: vi.fn() }));
@@ -52,6 +53,34 @@ describe("solid/useJazzSession under <JazzClientProvider client>", () => {
       claims: {},
     });
     await expect(session.signOut()).rejects.toThrow(/outside a Jazz session/);
+    dispose();
+  });
+
+  it("reads its own client, not an enclosing <JazzProvider>'s session", async () => {
+    const outerSignOut = vi.fn(async () => {});
+    const outer = {
+      session: { signOut: outerSignOut } as never,
+      snapshot: () => ({ status: "ready", user: null, localFirst: false }) as never,
+    };
+    const client = makeClient();
+    let session!: UseJazzSession;
+    const dispose = render(
+      () => (
+        <SessionContext.Provider value={outer}>
+          <JazzClientProvider client={client}>
+            {(() => {
+              session = useJazzSession();
+              return null;
+            })()}
+          </JazzClientProvider>
+        </SessionContext.Provider>
+      ),
+      container,
+    );
+    expect(session.snapshot().client).toBe(client);
+    expect(session.snapshot().user?.kind).toBe("device");
+    await expect(session.signOut()).rejects.toThrow(/outside a Jazz session/);
+    expect(outerSignOut).not.toHaveBeenCalled();
     dispose();
   });
 

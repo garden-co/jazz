@@ -11,7 +11,6 @@ import {
   provide,
   shallowReadonly,
   shallowRef,
-  type InjectionKey,
   type PropType,
   type ShallowRef,
 } from "vue";
@@ -28,6 +27,7 @@ import {
 } from "../session/jazz-session.js";
 import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
 import { JazzClientProvider, injectOptionalJazzClient } from "./provider.js";
+import { SessionKey } from "./session-key.js";
 
 const STARTING_SNAPSHOT = Object.freeze({
   status: "starting",
@@ -39,12 +39,6 @@ import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
-
-type ProvidedSession = {
-  session: JazzSession<JazzClient>;
-  snapshot: Readonly<ShallowRef<JazzSessionSnapshot<JazzClient>>>;
-};
-const SessionKey: InjectionKey<ProvidedSession> = Symbol("JazzSession");
 
 /** `useJazzSession()`: the session's state as a ref, and its operations. */
 export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe" | "db"> & {
@@ -155,7 +149,7 @@ export const JazzProvider = defineComponent({
       if (state.status === "ready" && state.client)
         return h(
           JazzClientProvider,
-          { client: state.client },
+          { client: state.client, inSession: true },
           { default: slots.default, fallback: loading },
         );
       if (state.status === "signed-out") return slots.signedOut?.() ?? null;
