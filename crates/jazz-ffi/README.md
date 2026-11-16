@@ -122,7 +122,11 @@ columns (`merge: "text"`) take plain string writes.
   an `updated` row when its related rows change.
 - **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
   always) instead of all of them, at the root or in an include. `"*"` selects
-  every column.
+  every column. An entry may read part of a large value instead of all of
+  it: `{"column", "from", "to", "units": "utf8"|"utf16"|"bytes"}` (half-open;
+  UTF-8 on code point boundaries; bytes come back base64) or `{"column",
+"at": "<JSON pointer>"}` for a json column. Parts are for the root query,
+  not inside includes.
 - A forward relation through a `uuid[]` column reads as an array of the
   referenced rows; `required` on it keeps only rows whose every reference is
   readable. Stricter than TS: `required` on reverse relations or optional
