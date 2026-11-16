@@ -117,8 +117,8 @@ guest's account; `false` leaves the guest until `link_device_account()`.
 Linking reopens the account on the bearer: `clientEpoch` moves on.
 
 - `snapshot()` / `"snapshot"`: `{"status": "starting"|"ready"|"signed-out"|
-  "transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
-  {"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
+"transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
+{"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
 - `jazz()` / `jazz_session_jazz`: a `JazzHandle` for the user signed in now
   (`NoUser`, kind `"noUser"` with `"status"`, while there is none). Once the
   user changes (or signs out) every call on it fails with `Replaced` (kind
