@@ -79,7 +79,7 @@ impl From<Lang> for Selected {
 
 /// The languages `dir`'s app is written in: those given, or else each that
 /// [`Lang::detected_in`] finds there (a `package.json`; a `Cargo.toml` of
-/// a crate depending on `jazz-app`; a `Package.swift` depending on Jazz;
+/// a crate depending on `jazz-app-support`; a `Package.swift` depending on Jazz;
 /// a `go.mod` requiring `jazz-go`) or
 /// whose bindings are committed there.
 pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
@@ -138,7 +138,7 @@ pub fn languages_or(
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, the Cargo.toml of a crate depending on jazz-app, a Package.swift depending on Jazz (jazz-swift), or a go.mod requiring jazz-go); pass --lang",
+             (a package.json, the Cargo.toml of a crate depending on jazz-app-support, a Package.swift depending on Jazz (jazz-swift), or a go.mod requiring jazz-go); pass --lang",
             shown(&dir),
         ));
     }
@@ -487,7 +487,8 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    const RUST_APP: &str = "[package]\nname = \"todos\"\n\n[dependencies]\njazz-app = \"0.1\"\n";
+    const RUST_APP: &str =
+        "[package]\nname = \"todos\"\n\n[dependencies]\njazz-app-support = \"0.1\"\n";
 
     #[test]
     fn a_rust_app_generates_checks_and_migrates() {

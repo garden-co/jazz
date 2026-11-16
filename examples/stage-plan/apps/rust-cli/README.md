@@ -1,6 +1,6 @@
 # StagePlan: Rust CLI
 
-StagePlan from the command line, in Rust, with the `jazz-app` crate. It is a **backend client** of StagePlan's TypeScript main backend (`createJazz`): it connects to the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. As a **scoped** client it acts as one user (`session.user` in the permissions). As a **trusted** client it acts as the system, and for any user with `for_user`. It can:
+StagePlan from the command line, in Rust, with the `jazz-app-support` crate. It is a **backend client** of StagePlan's TypeScript main backend (`createJazz`): it connects to the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. As a **scoped** client it acts as one user (`session.user` in the permissions). As a **trusted** client it acts as the system, and for any user with `for_user`. It can:
 
 - create the user's show, as its crew chief;
 - list a show's tasks by rank;
@@ -61,7 +61,7 @@ The open fails when the main backend trusts the token as the other kind.
 
 - **Shows:** the TS apps also make the chief a `showCrew` member, write a first invite, and log moves in `activity`. The permissions let a show's chief work on its tasks without those rows, so the slice writes only shows and tasks.
 - **Mergeable `tasks.notes`:** the column is in the bindings as `Option<String>`. Its text merge works through the core, but the slice doesn't edit notes.
-- **Relations** become typed queries (`shows::tasks().of(show)`). Includes, which load related rows in one result, aren't supported by `jazz-app` yet.
+- **Relations** become typed queries (`shows::tasks().of(show)`). Includes, which load related rows in one result, aren't supported by `jazz-app-support` yet.
 
 ## Tests
 

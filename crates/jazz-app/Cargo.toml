@@ -1,5 +1,5 @@
 [package]
-name = "jazz-app"
+name = "jazz-app-support"
 version.workspace = true
 edition = "2024"
 description = "Typed, Send + Clone Rust handle for a Jazz app opened from its jazz.app.json"

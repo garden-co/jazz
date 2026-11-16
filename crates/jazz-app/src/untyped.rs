@@ -17,7 +17,7 @@
 //! decodes it to milliseconds since the Unix epoch).
 //!
 //! ```ignore
-//! use jazz_app::untyped::{Hop, Query, Table};
+//! use jazz_app_support::untyped::{Hop, Query, Table};
 //! let todos = Table::new("todos", ["title", "done", "project"]);
 //! let projects = Table::new("projects", ["name"]);
 //! let open_projects = Query::table(todos)

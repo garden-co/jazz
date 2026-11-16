@@ -1,4 +1,4 @@
-//! Probes jazz-app's backend-client contract against a TypeScript main
+//! Probes jazz-app-support's backend-client contract against a TypeScript main
 //! backend (`createJazz` with `trustWorkload`), for
 //! `tests/backend-client.test.ts`: what the stage-plan gate does not cover.
 //!
@@ -17,7 +17,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, BackendClientKind, CLOSE_TIMEOUT, Config, Error, Jazz, TokenReason,
 };
 use serde_json::{Value, json};
