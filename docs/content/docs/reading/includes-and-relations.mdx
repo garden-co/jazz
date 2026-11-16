@@ -34,7 +34,7 @@ export const schema = s.defineSchema({
 });
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
@@ -48,6 +48,12 @@ export const schema = s.defineSchema({
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-includes-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-includes-swift
     </include>
 
   </Tab>
@@ -92,7 +98,7 @@ Jazz does not generate an inverse or infer names from UUID columns.
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-reverse-relation-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-reverse-relation-swift
     </include>
   </Tab>
   <Tab value="Kotlin">
@@ -116,7 +122,7 @@ relation.
 
 Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
@@ -130,6 +136,12 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-select-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-select-swift
     </include>
 
   </Tab>
@@ -330,7 +342,7 @@ Depth is counted from the start relation: `maxDepth: 0` returns only the start r
 `maxDepth: 1` may also return rows reached by one `step` hop. A zero bound never performs an
 implicit first hop.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
@@ -339,6 +351,12 @@ implicit first hop.
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-recursive-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-recursive-swift
     </include>
 
   </Tab>
