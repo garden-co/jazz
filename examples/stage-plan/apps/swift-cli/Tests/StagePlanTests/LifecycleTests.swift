@@ -84,6 +84,29 @@ final class LifecycleTests: XCTestCase {
         try await reopened.jazz.close()
     }
 
+    func testMutationErrorsFailClosedWhenTheAppCloses() async throws {
+        let relay = try await TestRelay()
+        let app = try await relay.user()
+        let errors = app.jazz.mutationErrors
+        try await app.jazz.close()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                do {
+                    for try await _ in errors {}
+                    XCTFail("the stream should fail with .closed")
+                } catch let error as JazzError {
+                    XCTAssertEqual(error, .closed)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 10_000_000_000)
+                throw TimedOut()
+            }
+            defer { group.cancelAll() }
+            try await group.next()!
+        }
+    }
+
     struct TimedOut: Error {}
 
     func first<T: Sendable>(of stream: AsyncThrowingStream<T, any Error>, within seconds: UInt64)

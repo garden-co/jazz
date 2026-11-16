@@ -252,7 +252,8 @@ extension Client {
 
     /// Each write the server refused that no durable wait (a `.global`
     /// tier, `waitForSync`) reported (TS's `onMutationError`). Refusals
-    /// from before the first iteration come first.
+    /// from before the first iteration come first. It fails with
+    /// `JazzError.closed` once the app closes.
     public var mutationErrors: AsyncThrowingStream<MutationError, any Error> {
         watch { listener in try self.handle.watchMutationErrors(listener: listener) } decode: {
             try Coding.decode(MutationError.self, $0)
