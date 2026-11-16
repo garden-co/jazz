@@ -88,6 +88,10 @@ impl Config {
     /// credential, as TypeScript's `createJazzClient({ credential })`: see
     /// [`crate::BackendClientKind`]. The provider is asked for a fresh token
     /// for every connection and request, so short-lived tokens just work.
+    ///
+    /// The app files must carry the app's `jazz.permissions.json`, the one
+    /// its main backend publishes: a trusted client evaluates the reads of
+    /// the users it acts for ([`crate::Jazz::for_user`]) by them.
     pub fn credential(self, provider: impl crate::auth::TokenProvider + 'static) -> Self {
         let Auth::Bearer(bearer) = Auth::bearer(provider) else {
             unreachable!("Auth::bearer is a bearer")

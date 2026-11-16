@@ -46,7 +46,8 @@ func (db *DB) BackendClient(ctx context.Context) (BackendKind, error) {
 // ForUser is db acting as the user userID, with claims as that user's
 // claims (nil for none), for a trusted backend client. It never creates
 // an account: a user without one is ErrNoAccount; a user the main
-// backend won't let it act for (its 403) is ErrPermission; a scoped
+// backend won't let it act for (its 403) is ErrPermission; permissions
+// that aren't the bundle the main backend serves are ErrBundleMismatch; a scoped
 // client, or a DB ForUser returned, gets ErrRefused. Close the result
 // when done (db stays open); after db closes, the result's calls return
 // ErrClosed. db's Shutdown drains the result's writes too.
