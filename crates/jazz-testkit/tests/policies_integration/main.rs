@@ -211,6 +211,7 @@ mod complex_policies;
 mod declared_fk_inheritance;
 mod exists_policies;
 mod exists_rel_policies;
+mod for_user_reads;
 mod inheritance_validation;
 mod inherited_policies;
 mod insert_policies;
