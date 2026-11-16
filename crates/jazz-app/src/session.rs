@@ -14,7 +14,7 @@ use tokio::time::Instant;
 
 use futures_core::Stream;
 use jazz::account_registry::AccountId;
-use jazz::link::{AuthFailureReason, LinkPhase};
+use jazz::link::{AuthFailureReason, LinkPhase, LinkStatus};
 use jazz::tools::{AppId, JazzClient};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -115,89 +115,230 @@ pub enum UserKind {
     System,
 }
 
-/// How the client syncs, as TypeScript's `SyncStatus`.
+/// How the client syncs, as TypeScript's `SyncStatus` (serialized the same
+/// way, camelCase).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct SyncStatus {
+    /// The upstream connection.
     pub link: Link,
+    /// Transactions this client committed that the server has neither
+    /// accepted nor rejected yet, including ones recovered from local
+    /// storage after a restart.
+    pub pending_uploads: usize,
+    /// When the oldest of them was committed, in Unix ms.
+    pub oldest_pending_at: Option<u64>,
+    /// This client's transactions the server rejected since it opened.
+    pub rejected: u64,
+    /// The latest thing that went wrong with sync since the client opened:
+    /// a rejected transaction, or the link failing. It stays after the link
+    /// recovers (`link` says how things are now).
+    pub last_error: Option<SyncError>,
+    /// Nothing waits for upload, and the link is connected (or there is no
+    /// server).
+    pub synced: bool,
     /// How many times the server refused the credential: a refusal of a
     /// renewed one leaves `link` as it was.
     #[serde(skip)]
     pub(crate) refusals: u64,
 }
 
-/// The upstream link, as TypeScript's `SyncStatus.link`. Serializes as
-/// `{"state": "connected"}`, `{"state": "offline", "reason": "network",
-/// "retrying": true, "message": ".."}` and so on.
+/// The upstream link, as TypeScript's `SyncStatus.link`: `{"state":
+/// "connected"}`, `{"state": "offline", "reason": "network", "retrying":
+/// true}` and so on. A dropped link that is retrying reads as `Connecting`
+/// until the client publishes an outage, so a short blip never shows as
+/// offline.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(tag = "state", rename_all = "kebab-case")]
 pub enum Link {
     /// No server: the app runs locally.
     LocalOnly,
-    /// A first attempt, or the first after a new credential.
     Connecting,
     Connected,
     /// Not syncing; `retrying` when the client reconnects on its own.
     Offline {
         reason: Offline,
         retrying: bool,
-        message: Option<String>,
+        /// Why the server refused the credential, with `reason: auth`. An
+        /// extension of TypeScript's shape, which has no such field.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth: Option<AuthFailure>,
     },
 }
 
-/// Why the link is offline: `"network"`, `{"auth": "expired"}`, `"stopped"`.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Why the link is offline, as TypeScript's `OfflineReason`. This client
+/// does not report TypeScript's `authority-changed` (its link has no such
+/// phase yet) nor the browser's `held-by-another-tab`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Offline {
     /// The network failed or the server is unreachable.
     Network,
     /// The server refused the credential.
-    Auth(AuthFailure),
-    /// A fatal failure, or the client stopped.
+    Auth,
+    /// A fatal failure; nothing happens until the client is reopened.
     Stopped,
+    /// The application took the client offline.
+    Disconnected,
 }
 
-impl SyncStatus {
-    fn of(client: &JazzClient) -> Self {
-        let refusals = client.auth_refusals();
-        let Some(status) = client.upstream_status() else {
-            return Self {
-                link: Link::LocalOnly,
-                refusals,
-            };
-        };
-        let offline = |reason, retrying| Link::Offline {
-            reason,
-            retrying,
-            message: status.reason.clone(),
-        };
-        let link = match &status.phase {
-            LinkPhase::NoServer => Link::LocalOnly,
-            LinkPhase::Connecting => Link::Connecting,
-            LinkPhase::Live => Link::Connected,
-            LinkPhase::Backoff => offline(Offline::Network, true),
-            LinkPhase::Offline => offline(Offline::Network, false),
-            LinkPhase::AwaitingCredential(reason) => {
-                offline(Offline::Auth((*reason).into()), false)
-            }
-            LinkPhase::Stopped => offline(Offline::Stopped, false),
-        };
-        Self { link, refusals }
+/// What went wrong with sync, as TypeScript's `SyncError`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum SyncError {
+    /// The server rejected a transaction this client committed.
+    Rejected {
+        /// The public error code, such as `permission_denied`.
+        code: String,
+        message: String,
+        /// When, in Unix ms.
+        at: u64,
+    },
+    /// The link failed this way.
+    Network {
+        message: String,
+        at: u64,
+    },
+    Auth {
+        message: String,
+        at: u64,
+    },
+    Stopped {
+        message: String,
+        at: u64,
+    },
+}
+
+impl SyncError {
+    fn at(&self) -> u64 {
+        match self {
+            Self::Rejected { at, .. }
+            | Self::Network { at, .. }
+            | Self::Auth { at, .. }
+            | Self::Stopped { at, .. } => *at,
+        }
     }
 }
 
-/// How often the link's status is read: the client publishes it as a value,
-/// not as changes.
-const STATUS_POLL: Duration = Duration::from_millis(100);
+/// The app-facing link, as TypeScript's `linkStatusFromUpstream`.
+fn link_of(status: Option<&LinkStatus>) -> Link {
+    let offline = |reason, auth| Link::Offline {
+        reason,
+        retrying: reason == Offline::Network,
+        auth,
+    };
+    let Some(status) = status else {
+        return Link::LocalOnly;
+    };
+    match &status.phase {
+        LinkPhase::NoServer => Link::LocalOnly,
+        LinkPhase::Offline => offline(Offline::Disconnected, None),
+        LinkPhase::Live => Link::Connected,
+        LinkPhase::Connecting | LinkPhase::Backoff if status.outage_published => {
+            offline(Offline::Network, None)
+        }
+        LinkPhase::Connecting | LinkPhase::Backoff => Link::Connecting,
+        LinkPhase::AwaitingCredential(reason) => offline(Offline::Auth, Some((*reason).into())),
+        LinkPhase::Stopped => offline(Offline::Stopped, None),
+    }
+}
 
-/// Publishes the client's link status as it changes, until the client's
-/// thread ends.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
+/// Assembles the status from what the client reports, remembering the
+/// latest link failure (the client keeps only its rejections), as
+/// TypeScript's `noteLinkFailure`: a failure is recorded the first time the
+/// link is seen failing that way, and stays after the link recovers.
+#[derive(Default)]
+struct SyncTracker {
+    /// How the link is failing now, if it is.
+    failing_as: Option<Offline>,
+    link_failure: Option<SyncError>,
+}
+
+impl SyncTracker {
+    fn status(&mut self, client: &JazzClient) -> SyncStatus {
+        let upstream = client.upstream_status();
+        let link = link_of(upstream.as_ref());
+        let failing = match &link {
+            Link::Offline { reason, .. } => Some(*reason),
+            _ => None,
+        };
+        if failing != self.failing_as {
+            self.failing_as = failing;
+            let message = upstream.as_ref().and_then(|status| status.reason.clone());
+            if let Some(failure) = failing.and_then(|reason| link_failure(reason, message)) {
+                self.link_failure = Some(failure);
+            }
+        }
+        let uploads = client.upload_status();
+        let rejection = uploads.last_rejection.map(|refusal| SyncError::Rejected {
+            code: refusal.code,
+            message: refusal.message,
+            at: refusal.at,
+        });
+        let last_error = match (rejection, self.link_failure.clone()) {
+            (Some(rejection), Some(link)) if link.at() > rejection.at() => Some(link),
+            (Some(rejection), _) => Some(rejection),
+            (None, link) => link,
+        };
+        SyncStatus {
+            synced: uploads.pending == 0 && matches!(link, Link::Connected | Link::LocalOnly),
+            link,
+            pending_uploads: uploads.pending,
+            oldest_pending_at: uploads.oldest_pending_at.filter(|_| uploads.pending > 0),
+            rejected: uploads.rejected,
+            last_error,
+            refusals: client.auth_refusals(),
+        }
+    }
+}
+
+/// The failure an offline link reports, as TypeScript's `linkFailureOf`:
+/// none for a link the app took offline, and TypeScript's words when the
+/// client gave none.
+fn link_failure(reason: Offline, message: Option<String>) -> Option<SyncError> {
+    let said = |fallback: &str| {
+        message
+            .clone()
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| fallback.to_owned())
+    };
+    let at = now_ms();
+    match reason {
+        Offline::Disconnected => None,
+        Offline::Network => Some(SyncError::Network {
+            message: said("The server is unreachable; retrying."),
+            at,
+        }),
+        Offline::Auth => Some(SyncError::Auth {
+            message: said("The server refused this client's credential."),
+            at,
+        }),
+        Offline::Stopped => Some(SyncError::Stopped {
+            message: said("The link stopped for good; only reopening the client tries again."),
+            at,
+        }),
+    }
+}
+
+/// Publishes the client's sync status as it changes, until the client
+/// shuts down.
 pub(crate) fn watch_sync(client: JazzClient) -> watch::Receiver<SyncStatus> {
-    let (sender, receiver) = watch::channel(SyncStatus::of(&client));
+    let mut tracker = SyncTracker::default();
+    let mut changes = client.status_changes();
+    let (sender, receiver) = watch::channel(tracker.status(&client));
     tokio::task::spawn_local(async move {
         loop {
-            tokio::time::sleep(STATUS_POLL).await;
-            let status = SyncStatus::of(&client);
+            if changes.changed().await.is_err() {
+                return;
+            }
+            let status = tracker.status(&client);
             sender.send_if_modified(|current| {
                 let changed = *current != status;
                 *current = status;
@@ -295,6 +436,11 @@ impl Session {
     /// keeps syncing on the device key, unless the backend revokes it on
     /// linking (`guestKeyAfterLink: "revoke"`), when the session expires and
     /// the app reopens with the bearer.
+    ///
+    /// Where the backend keeps linked keys (TS's default), linking the same
+    /// device again with another user's bearer brings that user into this
+    /// account too: link only a device that is its user's alone, or have
+    /// the backend revoke keys on linking.
     ///
     /// Fails with [`Error::SignedOut`] when the bearer names no one, and
     /// with [`Error::Refused`] when the backend refuses the link for good
@@ -531,8 +677,7 @@ impl Machine {
                 });
             }
             Link::Offline {
-                reason: Offline::Auth(reason),
-                ..
+                auth: Some(reason), ..
             } if refused => {
                 if self
                     .live_since

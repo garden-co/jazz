@@ -66,6 +66,11 @@ pub enum Error {
     #[error("the call panicked: {0}")]
     Panicked(String),
 
+    /// The local store is in use by another open app (in this process or
+    /// another), so it can't be deleted (TS's `StoreHeldByAnotherTabError`).
+    #[error("the local store is held: {0}")]
+    StoreHeld(String),
+
     /// The client's worker thread stopped.
     #[error("the Jazz client stopped")]
     Stopped,
