@@ -2494,10 +2494,9 @@ impl JazzClient {
             let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
             let (code, reason) =
                 super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
-                    (
-                        rejection.error.code.as_str().to_owned(),
-                        rejection.error.message.clone(),
-                    )
+                    // Any other refusal is a plain `write_rejected`, as TS
+                    // reports it, with the core's diagnostic.
+                    ("write_rejected".to_owned(), rejection.error.to_string())
                 });
             errors.push(MutationError {
                 transaction: TransactionId::from_committed_tx(TxId {
