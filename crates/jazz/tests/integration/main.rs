@@ -145,6 +145,8 @@ mod reconnect_fanout;
 mod rejected_retry_store;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
+#[path = "../relation_policy_validation.rs"]
+mod relation_policy_validation;
 #[path = "../relation_queries.rs"]
 mod relation_queries;
 #[path = "../relation_results.rs"]
