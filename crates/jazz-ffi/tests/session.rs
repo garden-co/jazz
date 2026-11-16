@@ -140,10 +140,10 @@ async fn a_session_follows_the_bearer_from_user_to_user() {
 
         // Signed out: no user, and no client to fetch.
         session.sign_out().unwrap();
-        let out = snapshot_until(&session, |s| s["status"] == "signedOut");
+        let out = snapshot_until(&session, |s| s["status"] == "signed-out");
         assert!(out.get("user").is_none_or(Value::is_null), "{out}");
         match session.jazz() {
-            Err(JazzError::NoUser { status, .. }) => assert_eq!(status, "signedOut"),
+            Err(JazzError::NoUser { status, .. }) => assert_eq!(status, "signed-out"),
             other => panic!("no user: {:?}", other.map(|_| ())),
         }
         assert!(matches!(
@@ -153,7 +153,7 @@ async fn a_session_follows_the_bearer_from_user_to_user() {
 
         session.shutdown().unwrap();
         assert!(matches!(session.snapshot(), Err(JazzError::Closed)));
-        // The watch saw alice, bob, signed out, then a last closed.
+        // The watch saw alice, bob, then a last closed.
         let mut seen = Vec::new();
         loop {
             let state = states.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -168,7 +168,8 @@ async fn a_session_follows_the_bearer_from_user_to_user() {
             .map(|s| s["user"]["subject"].clone())
             .collect();
         assert!(subjects.contains(&json!("alice")) && subjects.contains(&json!("bob")));
-        assert!(seen.iter().any(|s| s["status"] == "signedOut"));
+        // (A watch delivers the latest snapshot: signing out and closing in
+        // quick succession may skip the one between.)
         watch.cancel();
     })
     .await
@@ -183,7 +184,7 @@ async fn a_session_keeps_a_device_account() {
     let config = app.config(json!({ "initial": "signed-out" }));
     tokio::task::spawn_blocking(move || {
         let session = Session::open(config.clone(), None).unwrap();
-        snapshot_until(&session, |s| s["status"] == "signedOut");
+        snapshot_until(&session, |s| s["status"] == "signed-out");
         session.create_device_account().unwrap();
         let guest = snapshot_until(&session, |s| s["status"] == "ready");
         assert_eq!(guest["user"]["kind"], "device", "{guest}");
@@ -326,7 +327,7 @@ async fn a_c_host_follows_a_session() {
         let error = take(err);
         assert_eq!(
             (error["kind"].as_str(), error["status"].as_str()),
-            (Some("noUser"), Some("signedOut")),
+            (Some("noUser"), Some("signed-out")),
             "{error}"
         );
         let out = jazz_call(handle, c("account").as_ptr(), c("{}").as_ptr(), &mut err);
