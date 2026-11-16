@@ -154,7 +154,7 @@ A transaction can fail at three points:
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
    with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Swift", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
@@ -164,6 +164,12 @@ A transaction can fail at three points:
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-errors-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-errors-rust
+    </include>
+
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
