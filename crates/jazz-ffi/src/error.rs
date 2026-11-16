@@ -53,6 +53,15 @@ impl JazzError {
     }
 }
 
+/// A foreign callback that failed in a way its signature doesn't name.
+impl From<uniffi::UnexpectedUniFFICallbackError> for JazzError {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::Io {
+            reason: error.reason,
+        }
+    }
+}
+
 pub(crate) type FfiError = JazzErrorKind;
 
 /// Internal shorthand, converted into [`JazzError`] at the surfaces.
