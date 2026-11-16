@@ -99,11 +99,16 @@ The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) p
 for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan
 command-line app.
 
+A Go service can also connect to your main backend as a backend client, with a machine credential
+(trusted, acting for users with `ForUser`, or scoped): see [Backend Client](/docs/setup/backend-client).
+
 ## Not supported yet
 
 - running your main backend in Go (publishing permissions, serving `/jazz`): run it in TypeScript
   with `createJazz`;
-- connecting as a backend client with a machine credential (trusted or scoped, `forUser`): see
-  [Backend Client](/docs/setup/backend-client);
+- guest (anonymous) users: a Go app signs in with your app's own sign-in (`jazz.Token`) or a device
+  account (`jazz.DeviceAccount`), and has no guest mode;
+- nested rows, catalogue enums and transaction-id columns: `npx jazz-tools generate` refuses Go
+  bindings for an app that declares them;
 - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column reads
   them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the column.
