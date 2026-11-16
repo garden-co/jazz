@@ -42,6 +42,10 @@ func CommitAt(tier WriteTier) TxOption { return func(o *txOptions) { o.tier = ti
 // Tx runs fn in a transaction. It commits when fn returns nil, and rolls
 // back when fn returns an error (which Tx returns) or panics (Tx rolls
 // back and panics again).
+//
+// When ctx ends during the commit, Tx returns ctx.Err() at once, but the
+// commit still runs to its end: the transaction may have committed. Check
+// before retrying a ctx.Err() from Tx.
 func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (err error) {
 	var o txOptions
 	for _, opt := range opts {
