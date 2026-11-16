@@ -82,14 +82,16 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "${EVENT}" = workflow_dispatch ] && [ "${MODE}" = publish ] && ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+$ ]]; then
-            echo "::error::A publish needs tag=v2.0.0-alpha.N, got '${TAG}'"
+          # A release candidate's tag (v2.0.0-alpha.N-rc.M, or a rehearsal's
+          # v2.0.0-alpha.N.K-rc.M) publishes too: Maven orders -rc below the release.
+          if [ "${EVENT}" = workflow_dispatch ] && [ "${MODE}" = publish ] && ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::A publish needs tag=v2.0.0-alpha.N (or an rc), got '${TAG}'"
             exit 1
           fi
           if [ -z "${TAG}" ]; then
             sha="${EVENT_SHA}"
           else
-            if ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            if ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
               echo "::error::tag must look like v2.0.0-alpha.N, got '${TAG}'"
               exit 1
             fi
