@@ -147,8 +147,8 @@ const admin = (organizationId: s.Uuid) =>
   exists.memberships({ organizationId, userId: session.user, role: "admin" });
 const editor = (organizationId: s.Uuid) =>
   exists.memberships({ organizationId, userId: session.user, role: catalogueEditors });
-const inTenant = (org: s.Uuid, ...rels: s.Rel<{ organizationId: s.Uuid }>[]) =>
-  allOf(...rels.map((rel) => rel.where({ organizationId: org })));
+const inTenant = (org: s.Uuid, rel: s.Rel<{ organizationId: s.Uuid }>) =>
+  rel.where({ organizationId: org });
 const releaseRefsInTenant = (r: s.Row<typeof schema, "releases">) =>
   allOf(
     inTenant(r.organizationId, r.artist),
@@ -203,24 +203,46 @@ export const permissions = definePermissions({
   },
   teamAssignments: {
     read: (r) => allowedTo.read(r.team),
-    insert: (r) => allOf(allowedTo.insert(r.team), inTenant(r.organizationId, r.team, r.membership)),
+    insert: (r) =>
+      allOf(
+        allowedTo.insert(r.team),
+        inTenant(r.organizationId, r.team),
+        inTenant(r.organizationId, r.membership),
+      ),
     updateIf: (r) => allowedTo.update(r.team),
     updateTo: (r) =>
-      allOf(allowedTo.update(r.team), inTenant(r.organizationId, r.team, r.membership)),
+      allOf(
+        allowedTo.update(r.team),
+        inTenant(r.organizationId, r.team),
+        inTenant(r.organizationId, r.membership),
+      ),
     delete: (r) => allowedTo.delete(r.team),
   },
   releaseAssignments: {
     read: (r) => allowedTo.read(r.release),
     insert: (r) =>
-      allOf(admin(r.organizationId), inTenant(r.organizationId, r.release, r.membership)),
+      allOf(
+        admin(r.organizationId),
+        inTenant(r.organizationId, r.release),
+        inTenant(r.organizationId, r.membership),
+      ),
     updateIf: (r) => admin(r.organizationId),
     updateTo: (r) =>
-      allOf(admin(r.organizationId), inTenant(r.organizationId, r.release, r.membership)),
+      allOf(
+        admin(r.organizationId),
+        inTenant(r.organizationId, r.release),
+        inTenant(r.organizationId, r.membership),
+      ),
     delete: (r) => admin(r.organizationId),
   },
   releaseTeams: {
     read: (r) => member(r.organizationId),
-    insert: (r) => allOf(editor(r.organizationId), inTenant(r.organizationId, r.release, r.team)),
+    insert: (r) =>
+      allOf(
+        editor(r.organizationId),
+        inTenant(r.organizationId, r.release),
+        inTenant(r.organizationId, r.team),
+      ),
     delete: (r) => editor(r.organizationId),
   },
 });
