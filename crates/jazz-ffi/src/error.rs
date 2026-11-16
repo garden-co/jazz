@@ -16,7 +16,7 @@ pub enum JazzError {
     /// Contract 2: the app's permissions don't allow it.
     #[error("{reason}")]
     Permission { reason: String },
-    /// Contract 2: something this layer or jazz-app doesn't support yet.
+    /// Contract 2: something this layer or jazz-app-support doesn't support yet.
     #[error("{reason}")]
     NotSupported { reason: String },
     /// Contract 2: a serializable transaction conflicted with another write;
@@ -40,6 +40,16 @@ pub enum JazzError {
     /// session's (`signedOut`, `transitioning`, …).
     #[error("{reason}")]
     NoUser { status: String, reason: String },
+    /// Contract 2: a trusted backend client's `for_user` refused because
+    /// the client's permissions bundle (`own`) isn't the one the main
+    /// backend serves (`served`): reopen it with the app's published
+    /// `jazz.permissions.json` (TS's `code: "bundle_mismatch"`).
+    #[error("{reason}")]
+    BundleMismatch {
+        own: String,
+        served: String,
+        reason: String,
+    },
 }
 
 impl JazzError {
@@ -57,6 +67,7 @@ impl JazzError {
             Self::Unsynced { reason, .. } => Self::Io { reason },
             Self::Replaced { .. } => Self::Closed,
             Self::NoUser { reason, .. } => Self::Refused { reason },
+            Self::BundleMismatch { reason, .. } => Self::Refused { reason },
             other => other,
         }
     }
@@ -74,6 +85,7 @@ impl JazzError {
             Self::Unsynced { .. } => "unsynced",
             Self::Replaced { .. } => "replaced",
             Self::NoUser { .. } => "noUser",
+            Self::BundleMismatch { .. } => "bundleMismatch",
         }
     }
 }
@@ -98,10 +110,24 @@ pub(crate) enum JazzErrorKind {
     Permission(String),
     NotSupported(String),
     Conflict(String),
-    NoAccount { user_id: String, reason: String },
-    Unsynced { pending: u64, reason: String },
+    NoAccount {
+        user_id: String,
+        reason: String,
+    },
+    Unsynced {
+        pending: u64,
+        reason: String,
+    },
+    BundleMismatch {
+        own: String,
+        served: String,
+        reason: String,
+    },
     Replaced(String),
-    NoUser { status: String, reason: String },
+    NoUser {
+        status: String,
+        reason: String,
+    },
 }
 
 impl From<JazzErrorKind> for JazzError {
@@ -117,6 +143,15 @@ impl From<JazzErrorKind> for JazzError {
             JazzErrorKind::Unsynced { pending, reason } => Self::Unsynced { pending, reason },
             JazzErrorKind::Replaced(reason) => Self::Replaced { reason },
             JazzErrorKind::NoUser { status, reason } => Self::NoUser { status, reason },
+            JazzErrorKind::BundleMismatch {
+                own,
+                served,
+                reason,
+            } => Self::BundleMismatch {
+                own,
+                served,
+                reason,
+            },
         }
     }
 }
@@ -127,10 +162,10 @@ pub(crate) fn refused(message: impl Into<String>) -> JazzErrorKind {
     JazzErrorKind::Refused(message.into())
 }
 
-/// `Refused` for what jazz-app (or this layer) cannot do yet.
+/// `Refused` for what jazz-app-support (or this layer) cannot do yet.
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> JazzErrorKind {
     let what = what.to_string();
-    // jazz-app's own messages may already say it.
+    // jazz-app-support's own messages may already say it.
     if what.starts_with("not supported yet") {
         JazzErrorKind::NotSupported(what)
     } else {
@@ -154,7 +189,7 @@ pub(crate) fn rejection(reason: &str, otherwise: String) -> JazzErrorKind {
     }
 }
 
-/// jazz-app's `NotFound` displays as `no {table} row {id}`.
+/// jazz-app-support's `NotFound` displays as `no {table} row {id}`.
 fn is_not_found(message: &str) -> bool {
     message.contains("not found")
         || message
@@ -162,10 +197,10 @@ fn is_not_found(message: &str) -> bool {
             .is_some_and(|rest| rest.contains(" row "))
 }
 
-impl From<jazz_app::Error> for JazzErrorKind {
-    fn from(error: jazz_app::Error) -> Self {
-        use jazz_app::Error as E;
-        use jazz_app::jazz::tools::JazzError as J;
+impl From<jazz_app_support::Error> for JazzErrorKind {
+    fn from(error: jazz_app_support::Error) -> Self {
+        use jazz_app_support::Error as E;
+        use jazz_app_support::jazz::tools::JazzError as J;
         let message = error.to_string();
         // Only what contract 1 reports as `Refused` is told apart, so a
         // contract 1 host sees exactly what it did before.
@@ -190,6 +225,11 @@ impl From<jazz_app::Error> for JazzErrorKind {
                 status: status.to_string(),
                 reason: message,
             },
+            E::BundleMismatch { own, served } => Self::BundleMismatch {
+                own,
+                served,
+                reason: message,
+            },
             E::Unsynced { pending } => Self::Unsynced {
                 pending: pending as u64,
                 reason: message,
@@ -208,7 +248,7 @@ impl From<jazz_app::Error> for JazzErrorKind {
                 Self::Refused(message)
             }
             E::Jazz(_) => Self::Io(message),
-            // Variants jazz-app adds (it is becoming `#[non_exhaustive]`)
+            // Variants jazz-app-support adds (it is becoming `#[non_exhaustive]`)
             // until this layer names them: an edit of a missing row
             // (`NotFound`) is a refusal; anything else, such as a host
             // stream's failure (`Upload`), is I/O.
@@ -218,7 +258,7 @@ impl From<jazz_app::Error> for JazzErrorKind {
     }
 }
 
-/// White-box: jazz-app's `NotFound` doesn't exist on main yet, so its
+/// White-box: jazz-app-support's `NotFound` doesn't exist on main yet, so its
 /// message shape is checked directly.
 #[cfg(test)]
 mod tests {

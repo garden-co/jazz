@@ -3216,7 +3216,7 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Permission(reason: String
     )
     /**
-     * Contract 2: something this layer or jazz-app doesn't support yet.
+     * Contract 2: something this layer or jazz-app-support doesn't support yet.
      */
     case NotSupported(reason: String
     )
@@ -3250,6 +3250,14 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      * session's (`signedOut`, `transitioning`, …).
      */
     case NoUser(status: String, reason: String
+    )
+    /**
+     * Contract 2: a trusted backend client's `for_user` refused because
+     * the client's permissions bundle (`own`) isn't the one the main
+     * backend serves (`served`): reopen it with the app's published
+     * `jazz.permissions.json` (TS's `code: "bundle_mismatch"`).
+     */
+    case BundleMismatch(own: String, served: String, reason: String
     )
 
     
@@ -3309,6 +3317,11 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             )
         case 10: return .NoUser(
             status: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 11: return .BundleMismatch(
+            own: try FfiConverterString.read(from: &buf), 
+            served: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -3372,6 +3385,13 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
         case let .NoUser(status,reason):
             writeInt(&buf, Int32(10))
             FfiConverterString.write(status, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .BundleMismatch(own,served,reason):
+            writeInt(&buf, Int32(11))
+            FfiConverterString.write(own, into: &buf)
+            FfiConverterString.write(served, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
         }

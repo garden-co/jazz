@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bindings::{NewTodo, todos};
 use futures::StreamExt;
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, Backend, Config, Error, Initial, Jazz, JazzSession, ReadTier, SessionConfig,
     SessionStatus, Storage, TokenReason, UserKind,
 };
@@ -271,7 +271,7 @@ async fn a_session_starts_as_a_guest_and_reports_failures() {
     let snapshot = session.snapshot();
     assert_eq!(snapshot.status, SessionStatus::Ready);
     assert_eq!(snapshot.error.as_ref().unwrap().kind, "config");
-    assert_eq!(snapshot.recovery, Some(jazz_app::Recovery::Action));
+    assert_eq!(snapshot.recovery, Some(jazz_app_support::Recovery::Action));
     let json = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(json["error"]["kind"], "config");
     assert_eq!(json["recovery"], "action");

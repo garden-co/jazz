@@ -253,7 +253,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     newAppText === appText ? [] : [[project.appFile, newAppText]];
   if (computed.computedFile) writes.push([computedFile, computed.computedFile]);
   if (extras.extrasFile) writes.push([extrasFile, extras.extrasFile]);
-  // A Rust app (a crate on `jazz-app`) gets Rust bindings instead, as `jazz-tools generate` writes them.
+  // A Rust app (a crate on `jazz-app-support`) gets Rust bindings instead, as `jazz-tools generate` writes them.
   const rustApp = isRustApp(project.schemaDir);
   if (generatedText && !rustApp) writes.push([generatedFile, generatedText]);
   if (rustApp && computed.todos === 0) {
@@ -351,7 +351,7 @@ const RUST_BINDINGS_FILE = join("src", "jazz_app.rs");
 
 /**
  * Whether `dir` is a Rust app, as `jazz-tools generate` tells: a crate (a
- * `Cargo.toml` with `[package]`) that depends on `jazz-app`, or one with
+ * `Cargo.toml` with `[package]`) that depends on `jazz-app-support`, or one with
  * committed `src/jazz_app.rs`. A workspace root or an unrelated crate isn't.
  */
 export function isRustApp(dir: string): boolean {
@@ -360,10 +360,12 @@ export function isRustApp(dir: string): boolean {
   const text = readFileSync(manifest, "utf8");
   if (!/^\s*\[package\]/m.test(text)) return false;
   if (existsSync(join(dir, RUST_BINDINGS_FILE))) return true;
-  return /^\s*jazz-app\s*=|^\s*\[(?:dev-|build-)?dependencies\.jazz-app\]/m.test(text);
+  return /^\s*jazz-app-support\s*=|^\s*\[(?:dev-|build-)?dependencies\.jazz-app-support\]/m.test(
+    text,
+  );
 }
 
-/** The `jazz-app` crate's bindings, or why this jazz-napi can't generate them. */
+/** The `jazz-app-support` crate's bindings, or why this jazz-napi can't generate them. */
 async function rustBindings(appJson: string): Promise<string | { reason: string }> {
   try {
     const napi = (await import("jazz-napi")) as unknown as {

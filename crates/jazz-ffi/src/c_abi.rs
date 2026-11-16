@@ -35,6 +35,10 @@ fn error_json(error: &JazzError) -> String {
         JazzError::NoAccount { user_id, .. } => json["userId"] = json!(user_id),
         JazzError::Unsynced { pending, .. } => json["pending"] = json!(pending),
         JazzError::NoUser { status, .. } => json["status"] = json!(status),
+        JazzError::BundleMismatch { own, served, .. } => {
+            json["own"] = json!(own);
+            json["served"] = json!(served);
+        }
         _ => {}
     }
     json.to_string()
@@ -290,7 +294,7 @@ pub unsafe extern "C" fn jazz_call(
                 )?
             }
             "uploadBegin" => {
-                // jazz-app streams outside transactions only: an upload
+                // jazz-app-support streams outside transactions only: an upload
                 // that named one would escape it.
                 if args.get("tx").is_some_and(|tx| !tx.is_null()) {
                     return Err(crate::error::unsupported(
@@ -568,7 +572,8 @@ pub unsafe extern "C" fn jazz_session_open(
         let (tokens, gate) = match token_cb {
             Some(cb) => {
                 let (host, gate) = host_tokens(cb, ctx);
-                let tokens: std::sync::Arc<dyn jazz_app::TokenProvider> = std::sync::Arc::new(host);
+                let tokens: std::sync::Arc<dyn jazz_app_support::TokenProvider> =
+                    std::sync::Arc::new(host);
                 (Some(tokens), Some(gate))
             }
             None => (None, None),

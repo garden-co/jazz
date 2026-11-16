@@ -2427,7 +2427,7 @@ impl JazzClient {
 
     /// Keep the writes the server refuses, for
     /// [`JazzClient::take_mutation_errors`] (TS's `onMutationError`).
-    /// Owned by `jazz-app`, like that: not public API.
+    /// Owned by `jazz-app-support`, like that: not public API.
     #[doc(hidden)]
     pub fn track_mutation_errors(&self) {
         self.shared.db.track_upstream_rejections();
@@ -2437,7 +2437,7 @@ impl JazzClient {
     /// [`JazzClient::track_mutation_errors`] on), oldest first. Each is
     /// reported once; their payloads are released.
     ///
-    /// Destructive, and owned by `jazz-app`: its reporter takes these for
+    /// Destructive, and owned by `jazz-app-support`: its reporter takes these for
     /// `Jazz::mutation_errors`, so another caller (say through
     /// `Jazz::with_client`) would steal refusals from it. Not public API.
     #[doc(hidden)]

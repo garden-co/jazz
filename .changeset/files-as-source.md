@@ -14,7 +14,7 @@ Breaking: `jazz.app.json` and `jazz.permissions.json` are now an app's only sour
 - deletes `schema.ts`, `permissions.ts` and `migrations/`;
 - rewrites imports (`./schema` becomes `./jazz.generated`, and backends import `./jazz.permissions.json`) and every `app.slice(...)`;
 - rewrites `jazz-tools validate` in your package.json scripts to `jazz-tools generate`;
-- generates `jazz.generated.ts` (`src/jazz_app.rs` for a `jazz-app` Rust crate) and typechecks the app, reporting what is left to fix.
+- generates `jazz.generated.ts` (`src/jazz_app.rs` for a `jazz-app-support` Rust crate) and typechecks the app, reporting what is left to fix.
 
 Upgrade refuses, before writing anything, a transform with `dependsOn` or a computed field read from another computed field (the files can't express them yet), and permissions that read `process.env`/`import.meta.env`: policies are data, so a per-deployment value belongs in `session.claims`.
 
