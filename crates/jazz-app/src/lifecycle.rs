@@ -115,8 +115,9 @@ impl Jazz {
     fn refuse_for_user(&self, what: &str) -> Result<()> {
         if self.for_user {
             return Err(Error::Unsupported(format!(
-                "{what} on a handle acting for a user (Endpoint::for_user): \
-                 it shares the backend's client; call it on the backend's own handle"
+                "{what} is not supported on a handle acting for a user (for_user): it \
+                 shares its client's link and store with every other user; call it on the \
+                 handle for_user was called on"
             )));
         }
         Ok(())

@@ -612,6 +612,11 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
         as_alice.for_user("bob", serde_json::Value::Null).await,
         Err(Error::Config(_))
     ));
+    // Its link and store are the job's: a user's handle doesn't manage them.
+    match as_alice.disconnect().await {
+        Err(Error::Unsupported(message)) => assert!(message.contains("(for_user)"), "{message}"),
+        other => panic!("disconnect on a user's handle: {other:?}"),
+    }
 
     job.close(jazz_app_support::CLOSE_TIMEOUT)
         .await
