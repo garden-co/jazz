@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PersistedWriteRejectedError } from "jazz-tools";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -29,7 +29,7 @@ import { TransportBar } from "@/components/transport-bar";
 import { usePlayhead, useSequencerAudio } from "@/components/use-sequencer-audio";
 
 export function SessionPage({ sessionId }: { sessionId: string }) {
-  const author = useSession()?.user;
+  const author = useJazzSession().user?.accountId;
   const {
     data: sessions = [],
     isLoading,

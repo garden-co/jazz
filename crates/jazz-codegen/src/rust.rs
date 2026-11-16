@@ -567,6 +567,7 @@ impl<'a> Writer<'a> {
             out,
             "\n    /// The row's id. (`{RT}::created_at()` and `updated_at()` are columns of every table too.)\n    pub fn id() -> {RT}::Column<{row}, {RT}::ObjectId> {{\n        {RT}::id()\n    }}"
         );
+        let mut picks = BTreeSet::new();
         for field in &fields {
             // A column named as the module's own `query`, `id` or `history` gets
             // `_column` after it.
@@ -578,15 +579,37 @@ impl<'a> Writer<'a> {
             if !fns.insert(ident.clone()) {
                 return Err(clash(table, &field.name, &ident));
             }
-            let note = if field.transform.is_some() {
-                " Compared as stored, before its transform."
+            let Some(transform) = &field.transform else {
+                let _ = writeln!(
+                    out,
+                    "\n    /// Column `{}`.\n    pub fn {ident}() -> {RT}::Column<{row}, {}> {{\n        {RT}::Column::new({:?})\n    }}",
+                    field.name, field.stored, field.name
+                );
+                continue;
+            };
+            // `select` reads a transformed column as its view value, through
+            // the app's transform, as a row does.
+            let pick = format!("{}View", pascal(&field.name));
+            if !picks.insert(pick.clone()) {
+                return Err(clash(table, &field.name, &pick));
+            }
+            let view = if field.nullable {
+                format!(
+                    "row.take_next::<{}>()?.map(|stored| computed.{transform}_view(stored))",
+                    field.stored
+                )
             } else {
-                ""
+                format!(
+                    "computed.{transform}_view(row.take_next::<{}>()?)",
+                    field.stored
+                )
             };
             let _ = writeln!(
                 out,
-                "\n    /// Column `{}`.{note}\n    pub fn {ident}() -> {RT}::Column<{row}, {}> {{\n        {RT}::Column::new({:?})\n    }}",
-                field.name, field.stored, field.name
+                "\n    /// Column `{name}`. Compared as stored, before its transform; selected as viewed, through it.\n    pub fn {ident}() -> {RT}::Column<{row}, {stored}, {pick}> {{\n        {RT}::Column::new({name:?})\n    }}\n\n    /// How `select` reads column `{name}`: as viewed, through its transform.\n    #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n    pub struct {pick};\n\n    impl {RT}::Pick for {pick} {{\n        type Value = {view_ty};\n\n        fn pick(row: &mut {RT}::Fields<'_>) -> {RT}::Result<Self::Value> {{\n            let computed = &row.implementations().get::<Implementations>()?.0;\n            ::std::result::Result::Ok({view})\n        }}\n    }}",
+                name = field.name,
+                stored = field.stored,
+                view_ty = field.view,
             );
         }
         for relation in &table.relations {
