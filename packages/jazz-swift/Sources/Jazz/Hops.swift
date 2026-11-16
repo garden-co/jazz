@@ -235,8 +235,11 @@ extension Client {
     public func upload<R: Row, S: AsyncSequence & Sendable>(
         _ type: R.Type, id: Jazz.ID, column: String, from bytes: S
     ) async throws(JazzError) -> R where S.Element == Data {
-        try await upload(R.self, column: column, kind: "update", id: id, row: Optional<Never?>.none, from: bytes)
+        try await upload(R.self, column: column, kind: "update", id: id, row: Optional<NoRow>.none, from: bytes)
     }
+
+    /// No row to send (an update's upload): `Never` is `Encodable` only from macOS 14.
+    struct NoRow: Encodable {}
 
     func upload<R: Row, E: Encodable, S: AsyncSequence & Sendable>(
         _ type: R.Type, column: String, kind: String, id: Jazz.ID?, row: E?, from bytes: S

@@ -65,6 +65,9 @@ jobs:
         with:
           toolchain: "1.93.1"
           targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: swift-xcframework
       - name: Build JazzFFI.xcframework
         run: dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/xcf"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
