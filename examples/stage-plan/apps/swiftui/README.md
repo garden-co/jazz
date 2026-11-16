@@ -1,10 +1,12 @@
 # StagePlan in SwiftUI
 
 A small SwiftUI app (iOS 17 and macOS 14) over StagePlan's Swift bindings
-(`../swift-cli/JazzApp.swift`): it lists a show's tasks with `JazzQuery`,
-which keeps them current, and adds tasks. It opens a local client so it runs
-without a server; your app opens `.client(appId:serverUrl:auth:)` through your
-backend's `/jazz`.
+(`../swift-cli/JazzApp.swift`): it lists a show's tasks with `@JazzAll`, which
+keeps them current, and adds tasks. It opens a local client so it runs
+without a server, and puts it in the environment (`.environment(\.jazz, …)`).
+Your app keeps a `JazzApp.session(appId:serverUrl:…)` and wraps its views in
+`JazzRoot(session) { … } signedOut: { … }`, which does that for the signed-in
+user.
 
 ```bash
 brew install xcodegen

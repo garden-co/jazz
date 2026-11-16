@@ -1,6 +1,9 @@
-// StagePlan in SwiftUI: a show's tasks, live, through JazzQuery. It opens a
-// local client (no server) so it runs on its own; an app of yours opens
-// `.client(appId:serverUrl:auth:)` through your backend's /jazz instead.
+// StagePlan in SwiftUI: a show's tasks, live, through @JazzAll. It opens a
+// local client (no server) so it runs on its own, and puts it in the
+// environment as `\.jazz`. An app of yours uses
+// a `JazzApp.session(appId:serverUrl:…)` kept in its App, and
+// `JazzRoot(session) { … } signedOut: { … }`,
+// which does that for the signed-in user.
 import Jazz
 import SwiftUI
 
@@ -20,7 +23,7 @@ struct ContentView: View {
 
     var body: some View {
         if let jazz, let show {
-            TasksView(jazz: jazz, show: show)
+            TasksView(show: show).environment(\.jazz, jazz)
         } else if let failure {
             Text(failure)
         } else {
@@ -43,26 +46,23 @@ struct ContentView: View {
 }
 
 struct TasksView: View {
-    let jazz: Jazz.Client
     let show: JazzApp.Show
+    @Environment(\.jazz) private var jazz
     /// The show's tasks, in rank order, kept current as they change.
-    @State private var tasks: JazzQuery<JazzApp.Task>
+    @JazzAll<JazzApp.Task> private var tasks: [JazzApp.Task]
 
-    init(jazz: Jazz.Client, show: JazzApp.Show) {
-        self.jazz = jazz
+    init(show: JazzApp.Show) {
         self.show = show
-        _tasks = State(
-            initialValue: JazzQuery(
-                jazz, JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)).orderBy(JazzApp.tasks.rank)))
+        _tasks = JazzAll(JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)).orderBy(JazzApp.tasks.rank))
     }
 
     var body: some View {
         NavigationStack {
-            List(tasks.rows, id: \.id) { task in
+            List(tasks, id: \.id) { task in
                 Text(task.title)
             }
             .overlay {
-                if !tasks.isLoading && tasks.rows.isEmpty { Text("No tasks yet") }
+                if $tasks?.isLoading == false && tasks.isEmpty { Text("No tasks yet") }
             }
             .navigationTitle(show.name)
             .toolbar {
@@ -74,7 +74,8 @@ struct TasksView: View {
     }
 
     func add() async {
-        let rank = (tasks.rows.last?.rank ?? 0) + 1
+        guard let jazz else { return }
+        let rank = (tasks.last?.rank ?? 0) + 1
         _ = try? await jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Task \(Int(rank))", status: .todo, rank: rank))
     }

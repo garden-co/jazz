@@ -62,6 +62,22 @@ public enum JazzApp {
         try await Jazz.Client.open(app: app, config: config)
     }
 
+    /// A session of the app, following who is signed in (a device account,
+    /// your sign-in's `bearer` token, or no one) through its Jazz endpoint
+    /// `serverUrl`: `try await session.client()` is the signed-in user's
+    /// client, and in SwiftUI `JazzRoot(session) { … } signedOut: { … }`
+    /// hands it to your views.
+    public static func session(
+        appId: Swift.String, serverUrl: Swift.String,
+        bearer: (@Sendable (Jazz.TokenReason) async throws -> Swift.String?)? = nil,
+        start: Jazz.JazzSession.Start? = nil, linkGuest: Swift.Bool = true,
+        storage: Jazz.Config.Storage = .persistent, dataDir: Swift.String? = nil
+    ) -> Jazz.JazzSession {
+        Jazz.JazzSession(
+            app: app, appId: appId, serverUrl: serverUrl, bearer: bearer, start: start, linkGuest: linkGuest,
+            storage: storage, dataDir: dataDir, implementations: nil)
+    }
+
     /// A row of `folders`.
     public struct Folder: Jazz.Row {
         public static let table = "folders"
