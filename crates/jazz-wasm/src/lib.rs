@@ -1876,7 +1876,13 @@ impl WasmDb {
                 "server negotiated wire features {features:#x}, but this WASM binding was not compiled with {unsupported:#x}"
             )));
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(js_sys::Promise::resolve(&JsValue::from(
+            WasmTransport::new(link),
+        )))
     }
 
     /// Serve a subscriber (a tab's in-memory database) as `identity`.
