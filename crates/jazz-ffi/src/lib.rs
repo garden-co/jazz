@@ -111,7 +111,8 @@ impl JazzHandle {
         self.watch("sync", listener)
     }
 
-    /// Not part of the documented .65 surface; `None` for every client.
+    /// Not part of the documented surface (the backend publish mode); `None`
+    /// for every client.
     pub fn bundle(&self) -> Result<Option<String>> {
         self.core.surface(self.core.bundle())
     }
