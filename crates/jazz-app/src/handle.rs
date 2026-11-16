@@ -511,7 +511,7 @@ impl DefaultRead {
         }
     }
 
-    fn opts<T: Row>(self, query: &Query<T>) -> ReadOpts {
+    pub(crate) fn opts<T: Row>(self, query: &Query<T>) -> ReadOpts {
         match self {
             Self::Local => read_opts(query, ReadTier::LocalFirst),
             Self::Remote => read_opts(query, ReadTier::Remote),

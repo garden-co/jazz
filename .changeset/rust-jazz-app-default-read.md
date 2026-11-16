@@ -8,4 +8,4 @@
 - **An end user's client (`Config::user`):** reads local data first, and its first load waits up to `DEFAULT_FIRST_LOAD_REMOTE_WAIT` (5 s) for the server, as TypeScript's browser and React Native clients do.
 - **No server:** reads stay local.
 
-`all_with(query, tier)` and `subscribe_with(query, tier)` still read exactly at the tier they name. Reads inside a transaction stay local. To get the old behaviour, call `all_with(query, ReadTier::LocalFirst)`.
+`ReadOptions` that name no tier follow the same defaults. `all_with(query, tier)` and `subscribe_with(query, tier)` still read exactly at the tier they name. Reads inside a transaction stay local. To get the old behaviour, call `all_with(query, ReadTier::LocalFirst)`.

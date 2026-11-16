@@ -1,7 +1,7 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
-#![allow(dead_code, clippy::all)]
+#![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
 pub const SOURCE: &str = "sha256:2585de3597efe8dff21e520492a7377766afd44796c9f71d84782cf16729a6ff";
