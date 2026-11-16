@@ -1502,7 +1502,8 @@ public func FfiConverterTypeJazzHandle_lower(_ value: JazzHandle) -> UInt64 {
 
 
 /**
- * What a session or sync watch calls with each state (JSON).
+ * What a watch calls with each state (JSON); when the app closes, a last
+ * `{"kind": "closed", "message"}`, after which no call comes.
  */
 public protocol StateListener: AnyObject, Sendable {
     
@@ -1510,7 +1511,8 @@ public protocol StateListener: AnyObject, Sendable {
     
 }
 /**
- * What a session or sync watch calls with each state (JSON).
+ * What a watch calls with each state (JSON); when the app closes, a last
+ * `{"kind": "closed", "message"}`, after which no call comes.
  */
 open class StateListenerImpl: StateListener, @unchecked Sendable {
     fileprivate let handle: UInt64

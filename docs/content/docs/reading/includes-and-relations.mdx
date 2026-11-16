@@ -64,7 +64,7 @@ relation `"project": { "rel": "projects", "column": "projectId" }`, `projects` c
 The reverse relation returns matching source rows as an array. Its name is your choice;
 Jazz does not generate an inverse or infer names from UUID columns.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-reverse-relation-ts
@@ -80,6 +80,11 @@ Jazz does not generate an inverse or infer names from UUID columns.
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-reverse-relation-rust
     </include>
 
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-reverse-relation-swift
+    </include>
   </Tab>
   <Tab value="Go">
     Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).

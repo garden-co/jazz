@@ -1,4 +1,4 @@
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { app } from "../../jazz.generated.js";
 
 /**
@@ -11,8 +11,8 @@ import { app } from "../../jazz.generated.js";
  * 4. "Chat" while loading
  */
 export function useChatDisplayName(chatId: string, chatName?: string): string {
-  const session = useSession();
-  const userId = session?.user ?? null;
+  const session = useJazzSession();
+  const userId = session.user?.accountId ?? null;
 
   const { data: members = [] } = useAll(app.chatMembers.where({ chatId }));
   const { data: allProfiles = [] } = useAll(app.profiles);
