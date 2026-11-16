@@ -217,7 +217,8 @@ const STORE_FILES: [&str; 4] = [
     "client_id",
 ];
 /// Held shared by every open app of a directory, and exclusively while its
-/// store is deleted: the guard across processes.
+/// store is deleted: the guard across processes. The delete removes it
+/// last, so nothing is left behind.
 const LOCK_FILE: &str = "jazz.lock";
 
 #[derive(Default)]
@@ -247,6 +248,68 @@ fn held(dir: &Path, by: &str) -> Error {
     Error::StoreHeld(format!("{} is {by}", dir.display()))
 }
 
+fn io(error: std::io::Error) -> Error {
+    jazz::tools::JazzError::Io(error).into()
+}
+
+fn remove(file: &Path) -> Result<()> {
+    match std::fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io(error)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Lock {
+    Shared,
+    Exclusive,
+}
+
+/// Locks `dir`'s [`LOCK_FILE`], creating it if needed; `None` when
+/// another holder's lock conflicts. A delete removes the file while it
+/// holds it exclusively, so a lock taken on a file that was meanwhile
+/// removed (or replaced) guards nothing: it is dropped and taken again on
+/// the file the path names now.
+fn lock_store(dir: &Path, kind: Lock) -> Result<Option<File>> {
+    let path = dir.join(LOCK_FILE);
+    loop {
+        let lock = File::create(&path).map_err(io)?;
+        let locked = match kind {
+            Lock::Shared => lock.try_lock_shared(),
+            Lock::Exclusive => lock.try_lock(),
+        };
+        match locked {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
+        }
+        if still_named(&lock, &path)? {
+            return Ok(Some(lock));
+        }
+    }
+}
+
+/// Whether `path` still names the open file `lock`.
+#[cfg(unix)]
+fn still_named(lock: &File, path: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let open = lock.metadata().map_err(io)?;
+    match std::fs::metadata(path) {
+        Ok(named) => Ok(named.dev() == open.dev() && named.ino() == open.ino()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io(error)),
+    }
+}
+
+/// Without unix file identities, trust the open: a lock file the delete
+/// removes stays at its path until closed, and the delete releases its
+/// own lock before removing it.
+#[cfg(not(unix))]
+fn still_named(_lock: &File, _path: &Path) -> Result<bool> {
+    Ok(true)
+}
+
 /// An app's hold on its store directory, from open until its client has
 /// stopped.
 pub(crate) struct StoreDir {
@@ -266,16 +329,9 @@ impl StoreDir {
         if state.deleting {
             return Err(held(&path, "being deleted"));
         }
-        let lock = File::create(path.join(LOCK_FILE)).map_err(jazz::tools::JazzError::Io)?;
-        match lock.try_lock_shared() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(held(&path, "being deleted by another process"));
-            }
-            Err(std::fs::TryLockError::Error(error)) => {
-                return Err(jazz::tools::JazzError::Io(error).into());
-            }
-        }
+        let Some(lock) = lock_store(&path, Lock::Shared)? else {
+            return Err(held(&path, "being deleted by another process"));
+        };
         state.open += 1;
         Ok(Self { path, _lock: lock })
     }
@@ -328,21 +384,27 @@ impl Deleting {
         {
             return Err(held(&self.path, "open in another app of this process"));
         }
-        let io = |error| Error::from(jazz::tools::JazzError::Io(error));
-        let lock = File::create(self.path.join(LOCK_FILE)).map_err(io)?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(held(&self.path, "open in another process"));
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
-        }
+        let Some(lock) = lock_store(&self.path, Lock::Exclusive)? else {
+            return Err(held(&self.path, "open in another process"));
+        };
         for file in STORE_FILES {
-            match std::fs::remove_file(self.path.join(file)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(io(error)),
-            }
+            remove(&self.path.join(file))?;
+        }
+        // The lock file goes last, while still held: an app that opened it
+        // just before finds, once it has its lock, that the path no longer
+        // names that file, and starts over (`lock_store`).
+        #[cfg(unix)]
+        {
+            remove(&self.path.join(LOCK_FILE))?;
+            drop(lock);
+        }
+        // Elsewhere (Windows) an open file's removal is only pending until
+        // it is closed, and an open handle can't be checked against its
+        // path: release it first, and remove it if nothing took it since.
+        #[cfg(not(unix))]
+        {
+            drop(lock);
+            let _ = std::fs::remove_file(self.path.join(LOCK_FILE));
         }
         Ok(())
     }
@@ -356,5 +418,26 @@ impl Drop for Deleting {
         {
             state.deleting = false;
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A lock held on a lock file the delete removed, or replaced, isn't
+    /// the directory's lock: the locker takes it again.
+    #[test]
+    fn a_removed_lock_file_is_not_still_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let lock = lock_store(dir.path(), Lock::Shared).unwrap().unwrap();
+        assert!(still_named(&lock, &path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        assert!(!still_named(&lock, &path).unwrap());
+        // Another app's fresh lock file at the same path.
+        let fresh = lock_store(dir.path(), Lock::Exclusive).unwrap().unwrap();
+        assert!(!still_named(&lock, &path).unwrap());
+        assert!(still_named(&fresh, &path).unwrap());
     }
 }
