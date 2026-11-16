@@ -214,3 +214,52 @@ async fn the_bin_publishes_the_bundle_itself() {
     laptop.shutdown().await.unwrap();
     server.shutdown().await;
 }
+
+/// Exit codes a caller can rely on: 0 for `--help`, 2 for bad arguments,
+/// 1 when it can't publish.
+#[test]
+fn the_bin_exits_with_its_codes() {
+    let run = |args: &[&str]| {
+        Command::new(relay_bin())
+            .args(args)
+            .env("JAZZ_BACKEND_SECRET", "backend")
+            .env("JAZZ_ADMIN_SECRET", "admin")
+            .output()
+            .unwrap()
+    };
+    let help = run(&["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).starts_with("usage:"));
+
+    let core = ["--core", "http://127.0.0.1:9", "--app-id"];
+    let app_id = AppId::random().to_string();
+    let with = |more: &[&'static str]| {
+        let mut args = core.to_vec();
+        args.push(&app_id);
+        args.extend_from_slice(more);
+        run(&args).status.code()
+    };
+    assert_eq!(run(&[]).status.code(), Some(2));
+    assert_eq!(run(&["--nope"]).status.code(), Some(2));
+    assert_eq!(with(&[]), Some(2), "no bundle");
+    assert_eq!(
+        with(&["--app", APP]),
+        Some(2),
+        "--app without --permissions"
+    );
+    assert_eq!(
+        with(&["--bundle", "b", "--app", APP, "--permissions", PERMISSIONS]),
+        Some(2),
+        "both ways to the bundle"
+    );
+    assert_eq!(
+        with(&[
+            "--app",
+            "/nonexistent/jazz.app.json",
+            "--permissions",
+            PERMISSIONS
+        ]),
+        Some(1),
+        "unreadable app files"
+    );
+}

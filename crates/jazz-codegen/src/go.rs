@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use jazz::tools::public_schema::ColumnType;
 
 use crate::CodegenError;
-use crate::model::{App, Column, Table};
+use crate::model::{App, Column, RelationKind, Table};
 use crate::names::{pascal, singular};
 
 /// Where the bindings go, relative to `jazz.app.json`.
@@ -335,6 +335,24 @@ impl<'a> Writer<'a> {
             }
             fields.push(self.field(table, &row, column, ident)?);
         }
+        // Relations: a field of the row, filled when the query includes it,
+        // and a value of the table to include it with.
+        let mut relations = Vec::new();
+        for relation in &table.relations {
+            let ident = go_ident(&pascal_words(&relation.name), &relation.name)?;
+            if !idents.insert(ident.clone()) {
+                return Err(CodegenError::unsupported(format!(
+                    "relation `{}.{}` is the Go name `{ident}`, which a column, another relation or a method of `{value}` already is",
+                    table.name, relation.name
+                )));
+            }
+            let target = self.tables[relation.target.as_str()].row.clone();
+            let ty = match relation.kind {
+                RelationKind::One { .. } => format!("*{target}"),
+                RelationKind::Many { .. } => format!("[]{target}"),
+            };
+            relations.push((ident, relation.name.clone(), target, ty));
+        }
 
         let mut out = String::new();
         let tag = |name: &str, omitempty: bool| {
@@ -351,6 +369,9 @@ impl<'a> Writer<'a> {
         let mut lines = vec![["ID".to_owned(), "string".to_owned(), tag("id", false)]];
         for f in &fields {
             lines.push([f.ident.clone(), f.ty.clone(), tag(&f.name, false)]);
+        }
+        for (ident, name, _, ty) in &relations {
+            lines.push([ident.clone(), ty.clone(), tag(name, true)]);
         }
         write_struct(&mut out, &row, &lines);
 
@@ -405,7 +426,7 @@ impl<'a> Writer<'a> {
         // The table value: columns, query, writes.
         let _ = writeln!(
             out,
-            "// {ty} is the type of {value}: the columns of `{}`, to build conditions and orders from.",
+            "// {ty} is the type of {value}: the columns of `{}`, to build conditions and orders from, and its relations, to include.",
             table.name
         );
         let mut lines = vec![[
@@ -417,6 +438,13 @@ impl<'a> Writer<'a> {
             lines.push([
                 f.ident.clone(),
                 format!("jazz.Column[{row}, {}]", f.value),
+                String::new(),
+            ]);
+        }
+        for (ident, _, target, _) in &relations {
+            lines.push([
+                ident.clone(),
+                format!("jazz.Relation[{row}, {target}]"),
                 String::new(),
             ]);
         }
@@ -438,6 +466,14 @@ impl<'a> Writer<'a> {
                 go_string(&f.name)
             );
         }
+        for (ident, name, target, _) in &relations {
+            let _ = writeln!(
+                out,
+                "\t{:<width$} jazz.NewRelation[{row}, {target}]({}),",
+                format!("{ident}:"),
+                go_string(name)
+            );
+        }
         out.push_str("}\n\n");
         let table_name = go_string(&table.name);
         let _ = writeln!(out, "// Query starts a query of `{}`.", table.name);
@@ -452,7 +488,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "func ({ty}) Insert(ctx context.Context, db *jazz.DB, row {new}) ({row}, error) {{\n\treturn jazz.Insert[{new}, {row}](ctx, db, {table_name}, row)\n}}\n"
+            "func ({ty}) Insert(ctx context.Context, db jazz.Querier, row {new}) ({row}, error) {{\n\treturn jazz.Insert[{new}, {row}](ctx, db, {table_name}, row)\n}}\n"
         );
         let _ = writeln!(
             out,
@@ -461,7 +497,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "func ({ty}) Update(ctx context.Context, db *jazz.DB, id string, patch {patch}) error {{\n\treturn db.Update(ctx, {table_name}, id, patch)\n}}\n"
+            "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch)\n}}\n"
         );
         let _ = writeln!(
             out,
@@ -470,7 +506,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "func ({ty}) Delete(ctx context.Context, db *jazz.DB, id string) error {{\n\treturn db.Delete(ctx, {table_name}, id)\n}}\n"
+            "func ({ty}) Delete(ctx context.Context, db jazz.Querier, id string) error {{\n\treturn jazz.Delete(ctx, db, {table_name}, id)\n}}\n"
         );
         Ok(out)
     }
