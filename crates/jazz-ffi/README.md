@@ -76,8 +76,12 @@ or none (signed out). `session_state()` / `"session"` gives
 subject, claims, kind}}`; `sync_status()` / `"syncStatus"` gives `{"link":
 …}`; `watch_session` / `watch_sync` (C `jazz_watch(h, "session"|"sync", …)`,
 `jazz_unwatch`) call back with each state, the current one first;
-`refresh()` asks for a fresh token; `sign_out()` signs out and closes the
-app. Anonymous users are not supported (as in TS).
+`refresh()` asks for a fresh token; `link(bearer)` / `"link"` links a
+device account to the app's own sign-in (the session becomes that user's, on
+the device's account); `sign_out()` signs out and closes the app. The sync
+status is TS's `SyncStatus` (`{link, pendingUploads, oldestPendingAt,
+rejected, lastError, synced}`). A backend's `bundle()` / `"bundle"` is the
+permissions bundle it published. Anonymous users are not supported (as in TS).
 
 Without `permissions` or `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
@@ -118,7 +122,11 @@ columns (`merge: "text"`) take plain string writes.
   an `updated` row when its related rows change.
 - **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
   always) instead of all of them, at the root or in an include. `"*"` selects
-  every column.
+  every column. An entry may read part of a large value instead of all of
+  it: `{"column", "from", "to", "units": "utf8"|"utf16"|"bytes"}` (half-open;
+  UTF-8 on code point boundaries; bytes come back base64) or `{"column",
+"at": "<JSON pointer>"}` for a json column. Parts are for the root query,
+  not inside includes.
 - A forward relation through a `uuid[]` column reads as an array of the
   referenced rows; `required` on it keeps only rows whose every reference is
   readable. Stricter than TS: `required` on reverse relations or optional
@@ -175,6 +183,14 @@ field`), for an existing row the columns `row` names (a partial row
   deleted row as it was, or with `patch` (a whole row) as its content; a
   patch naming another row's `id` is refused. Both
   return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
+- **Streaming uploads:** UniFFI `begin_upload(table, column, kind, id?,
+row?) -> Upload` (`push(bytes)`, `finish() -> row`, `abort()`); C ABI
+  `uploadBegin {table, column, kind?: "insert"|"update"|"upsert", id?,
+row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
+{upload, tier?}` → the row, `uploadAbort {upload}`. An insert takes the
+  row's other columns as `row` and no `id`; update and upsert take the `id`.
+  Not inside a transaction. Read a large value back in pages with `select`
+  parts.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`
@@ -182,6 +198,26 @@ field`), for an existing row the columns `row` names (a partial row
   lost to another write; retry it). UniFFI: `JazzError.Permission`,
   `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
   these as `refused`, as before.
+- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app's
+  `untyped` builder, as the typed Rust API and TS lower them):
+  - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
+…], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
+    of the last hop's table; the top-level clauses filter the rows hopped
+    from, `after` the rows reached.
+  - `{"table", "where"?, "gather": {"relation", "maxDepth"?}}`: the rows
+    matching `where` and every row reached along a forward relation of the
+    table to itself, up to `maxDepth` (default 10).
+  - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows,
+    as TS's union: a row matched by two arms comes twice, and `limit` /
+    `offset` count every occurrence; arms read one table, with `where` only.
+    Subscribing to a union whose arms overlap can mis-apply removals (deltas
+    name rows by id), as in jazz-app.
+  - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
+    versions the server accepted, each row with `"$history":
+{"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
+    tier `remote`. Not subscribable yet.
+  - `"includeDeleted": true` on any of these or a plain query reads deleted
+    rows too.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",

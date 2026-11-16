@@ -17,6 +17,7 @@ mod convert;
 mod core;
 mod error;
 mod gate;
+mod relational;
 
 use std::sync::Arc;
 
@@ -87,6 +88,13 @@ impl JazzHandle {
         self.core.surface(self.core.refresh())
     }
 
+    /// Links this device account to the user's account with the app's own
+    /// sign-in (`bearer`): the session becomes that user's. Returns the user
+    /// as JSON.
+    pub fn link(&self, bearer: String) -> Result<String> {
+        self.core.surface(self.core.link(&bearer))
+    }
+
     /// Signs the end user out and closes the app.
     pub fn sign_out(&self) -> Result<()> {
         self.core.surface(self.core.sign_out())
@@ -100,6 +108,12 @@ impl JazzHandle {
     /// Calls `listener` with each sync status, the current one first.
     pub fn watch_sync(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
         self.watch("sync", listener)
+    }
+
+    /// The permissions bundle a backend published and is pinned to;
+    /// `None` for a client.
+    pub fn bundle(&self) -> Result<Option<String>> {
+        self.core.surface(self.core.bundle())
     }
 
     /// The account id of the user a backend acts as (`session.user`);
@@ -269,6 +283,29 @@ impl JazzHandle {
             patch_json.as_deref(),
             &Default::default(),
         ))
+    }
+
+    /// Begins uploading a large value of `column` piece by piece: `kind`
+    /// `"insert"` (a new row, `id` none, its other columns `row_json`),
+    /// `"update"` or `"upsert"` (the row with `id`).
+    pub fn begin_upload(
+        self: Arc<Self>,
+        table: String,
+        column: String,
+        kind: String,
+        id: Option<String>,
+        row_json: Option<String>,
+    ) -> Result<Arc<Upload>> {
+        let upload = self.core.surface(
+            self.core
+                .upload_begin(&table, &column, &kind, id.as_deref(), row_json.as_deref())
+                .and_then(|id| core::parse_tx(&id)),
+        )?;
+        Ok(Arc::new(Upload {
+            handle: self,
+            upload,
+            open: std::sync::atomic::AtomicBool::new(true),
+        }))
     }
 
     /// Begins a serializable transaction. Its reads see a snapshot and its
@@ -550,6 +587,50 @@ impl Watch {
     /// When it returns, no callback is running (unless called from one).
     pub fn cancel(&self) {
         self.inner.cancel();
+    }
+}
+
+/// A large value being uploaded: `push` its pieces, then `finish` (or
+/// `abort`). Use it from one thread at a time.
+#[derive(uniffi::Object)]
+pub struct Upload {
+    handle: Arc<JazzHandle>,
+    upload: u64,
+    /// Not yet finished or aborted: dropped, it aborts.
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        if self.open.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let _ = self.handle.core.upload_abort(self.upload);
+        }
+    }
+}
+
+#[uniffi::export]
+impl Upload {
+    pub fn push(&self, bytes: Vec<u8>) -> Result<()> {
+        self.handle
+            .core
+            .surface(self.handle.core.upload_push(self.upload, bytes))
+    }
+
+    /// Commits the row with its value; returns the row.
+    pub fn finish(&self) -> Result<String> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
+        self.handle.core.surface(
+            self.handle
+                .core
+                .upload_finish(self.upload, &Default::default()),
+        )
+    }
+
+    pub fn abort(&self) -> Result<()> {
+        self.open.store(false, std::sync::atomic::Ordering::Release);
+        self.handle
+            .core
+            .surface(self.handle.core.upload_abort(self.upload))
     }
 }
 

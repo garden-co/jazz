@@ -83,6 +83,18 @@ impl Config {
         self
     }
 
+    /// Opens as a backend client of the app's main backend
+    /// (`Config::server` is its `/jazz`), proving itself with this machine
+    /// credential, as TypeScript's `createJazzClient({ credential })`: see
+    /// [`crate::BackendClientKind`]. The provider is asked for a fresh token
+    /// for every connection and request, so short-lived tokens just work.
+    pub fn credential(self, provider: impl crate::auth::TokenProvider + 'static) -> Self {
+        let Auth::Bearer(bearer) = Auth::bearer(provider) else {
+            unreachable!("Auth::bearer is a bearer")
+        };
+        self.user(Auth::Credential(bearer))
+    }
+
     /// See [`Config::allow_insecure_http`].
     pub fn allow_insecure_http(mut self) -> Self {
         self.allow_insecure_http = true;
