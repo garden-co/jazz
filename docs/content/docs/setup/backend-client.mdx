@@ -112,21 +112,24 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
     Commit `src/jazz_app.rs` and declare it with `mod jazz_app;`. The [Reading](/docs/reading/queries)
     and [Writing](/docs/writing/writing-data) pages have a Rust tab for each example.
 
-    A Rust process connects as a scoped machine, one your main backend trusts as a user
-    (`trustWorkload({ …, as: (claims) => ({ userId }) })`): it signs in at your main backend's
-    `/jazz` with the workload's token as a bearer credential, which it asks for again before each
-    token expires (at 80% of its life, so give tokens at least five minutes).
+    `Config::credential(…)` takes a function that returns a fresh token, like TS's `credential`. Your
+    main backend's `backendClients` decide whether it's a trusted or a scoped client:
 
     <include cwd lang="rust" meta='title="src/main.rs"'>
       ../examples/docs/backend-client-rs/src/lib.rs#backend-client-connect-rust
     </include>
 
-    `jazz.shutdown().await` closes it, for every clone of the handle. Calls already made get up to 30
-    seconds to finish, then fail with `Error::Stopped`, like any call made after; subscriptions end,
-    and with `Storage::Dir` the last writes are flushed and the store closed.
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-trusted-rust
+    </include>
 
-    A trusted machine (`as: "backend"`) and `forUser(userId)` aren't supported in Rust yet. See
-    [Language support](/docs/reference/language-support).
+    `job.close(timeout)` first waits for the writes the client holds to reach the backend, for up to
+    the timeout, then stops it. With `Storage::Memory`, writes still queued are lost and `close`
+    returns `Error::Unsynced { pending }`; `Duration::ZERO` closes at once:
+
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-close-rust
+    </include>
 
   </Tab>
 </Tabs>
@@ -159,18 +162,32 @@ database as that user, just like `jazz.forReqUser(request)` in your main backend
 user's identity and are checked against that user's permissions. `userId` is the id your main
 backend's `authenticate` names the user by.
 
-```ts title="digest-job.ts"
-import { isNoJazzAccountError } from "jazz-tools/backend";
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    ```ts title="digest-job.ts"
+    import { isNoJazzAccountError } from "jazz-tools/backend";
 
-const { client } = session.getSnapshot();
-try {
-  const db = await client!.forUser("user_123", { claims: { org: "acme" } });
-  await db.insert(app.notifications, { text: "Your weekly digest" }).wait({ tier: "global" });
-} catch (error) {
-  if (!isNoJazzAccountError(error)) throw error;
-  // This user hasn't signed in yet, so they have no account to act as.
-}
-```
+    const { client } = session.getSnapshot();
+    try {
+      const db = await client!.forUser("user_123", { claims: { org: "acme" } });
+      await db.insert(app.notifications, { text: "Your weekly digest" }).wait({ tier: "global" });
+    } catch (error) {
+      if (!isNoJazzAccountError(error)) throw error;
+      // This user hasn't signed in yet, so they have no account to act as.
+    }
+    ```
+
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-for-user-rust
+    </include>
+
+    `job.for_user(user_id, claims)` fails with `Error::NoAccount` for a user with no account yet,
+    and with `Error::Refused` when your main backend refuses the identity.
+
+  </Tab>
+</Tabs>
 
 - `forUser` never creates an account. A user with no account yet rejects with a
   `NoJazzAccountError` (`code: "no_account"`). They get one when they first sign in, or when your
