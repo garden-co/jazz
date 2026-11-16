@@ -44,6 +44,10 @@ var ffi struct {
 	generateKey func(err *uintptr) uintptr
 	malloc      func(n uintptr) uintptr
 
+	// Backend-client calls, nil with a libjazz_ffi that predates them.
+	forUser     func(h uintptr, userID, claims *byte, err *uintptr) uintptr
+	closeWithin func(h uintptr, timeoutMs uint64, err *uintptr) int32
+
 	// The C callbacks, made once: each gets a Go id as its ctx.
 	subscriptionCallback, tokenCallback uintptr
 }
@@ -78,6 +82,11 @@ func bind() error {
 			return fmt.Errorf("jazz: %s has no %s (an older libjazz_ffi?)", path, name)
 		}
 		purego.RegisterFunc(fn, sym)
+	}
+	for name, fn := range map[string]any{"jazz_for_user": &ffi.forUser, "jazz_close_within": &ffi.closeWithin} {
+		if sym, err := purego.Dlsym(lib, name); err == nil {
+			purego.RegisterFunc(fn, sym)
+		}
 	}
 	purego.RegisterLibFunc(&ffi.malloc, libc, "malloc")
 	ffi.subscriptionCallback = purego.NewCallback(onSubscription)

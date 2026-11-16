@@ -37,13 +37,21 @@ const (
 // auth provider) keeps the session: Jazz asks again later.
 type TokenProvider func(ctx context.Context, reason TokenReason) (string, error)
 
-type tokenAuth struct{ provider TokenProvider }
+type tokenAuth struct {
+	provider   TokenProvider
+	credential bool
+}
 
 // Token signs in with the bearer tokens provider gets, asking again on
 // renewal and when one is refused.
-func Token(provider TokenProvider) Auth { return tokenAuth{provider} }
+func Token(provider TokenProvider) Auth { return tokenAuth{provider: provider} }
 
-func (tokenAuth) authJSON() (map[string]any, error) { return map[string]any{"bearer": true}, nil }
+func (a tokenAuth) authJSON() (map[string]any, error) {
+	if a.credential {
+		return map[string]any{"credential": true}, nil
+	}
+	return map[string]any{"bearer": true}, nil
+}
 
 type deviceAuth struct {
 	key   string
