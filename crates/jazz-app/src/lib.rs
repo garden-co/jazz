@@ -1,5 +1,8 @@
 //! A typed Rust client for a Jazz app, opened from its `jazz.app.json`.
 //!
+//! **Experimental: client only; backends are TypeScript.** See
+//! [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+//!
 //! The app is authored in TypeScript: `schema.ts` beside `Cargo.toml`
 //! declares its tables and permissions, and `npx jazz-tools generate` writes
 //! `jazz.app.json`, `jazz.permissions.json` and `src/jazz_app.rs` from it.
@@ -31,10 +34,6 @@
 //! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
 //! [`Jazz::session`] follows it; [`Session::link`] carries a device account
 //! over to the user's provider sign-in.
-//!
-//! Unstable, behind the non-default `unstable-endpoint` feature and not
-//! part of a release yet: `Endpoint`, the app's `/jazz` handler served
-//! natively. Run an app's main backend with TS `createJazz`.
 //!
 //! [`Query::part`] reads part of a large value ([`ValuePart`]): a byte
 //! range, a text range or a JSON subtree.

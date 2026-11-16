@@ -1,5 +1,8 @@
 # todo-server-rs (docs copy)
 
+> [!WARNING]
+> **Experimental: client only; backends are TypeScript.** See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+
 The documentation copy of [`examples/todo-server-rs`](../../todo-server-rs): the same Axum REST + SSE service over a Jazz app, run as a backend client of the app's TypeScript main backend with the `jazz-app-support` crate, plus the Rust snippets the docs include. It is the workspace package `todo-server-docs`.
 
 ## Files
