@@ -11,5 +11,6 @@ npx jazz-tools migrations create --name <name>
 npx jazz-tools generate
 
 # 3) Commit jazz.app.json and src/jazz_app.rs (CI runs
-#    `npx jazz-tools generate --check`). The backend publishes the new
-#    version with its permissions bundle when it next starts.
+#    `npx jazz-tools generate --check`). Your TypeScript main backend
+#    (createJazz) publishes the new version when it next starts, from the
+#    same jazz.app.json; this service opens it as a backend client.

@@ -309,6 +309,49 @@ async fn no_token_callback_runs_after_sign_out() {
     result.unwrap();
 }
 
+/// `deleteClientStorage` ends the app too: when it returns the token
+/// callback is not running (a slow fetch was in flight), and it is never
+/// called again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_token_callback_runs_after_deleting_the_store() {
+    let app = app().await;
+    let bearer = (app.config)(json!({ "bearer": true }));
+    let result = tokio::task::spawn_blocking(move || unsafe {
+        let host = Host::new(Some("offline"), Duration::from_millis(800));
+        let mut err = ptr::null_mut();
+        let alice = jazz_open_user(
+            c(&bearer).as_ptr(),
+            Some(token_cb),
+            &*host as *const Host as *mut c_void,
+            &mut err,
+        );
+        assert!(!alice.is_null());
+        let _ = call(alice, "refresh", json!({}));
+        let asked = host.calls.load(Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(host.calls.load(Ordering::SeqCst) > asked && host.running.load(Ordering::SeqCst)) {
+            assert!(std::time::Instant::now() < deadline, "no retry came");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        call(alice, "deleteClientStorage", json!({})).unwrap();
+        assert!(
+            !host.running.load(Ordering::SeqCst),
+            "deleting returned while the callback ran"
+        );
+        host.closed.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !host.after_close.load(Ordering::SeqCst),
+            "the callback ran after the store was deleted"
+        );
+        jazz_close(alice);
+        drop(host);
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
 /// When `jazz_close` returns, the token callback is not running and is never
 /// called again: a host may free its ctx (Go: delete its cgo.Handle) then.
 /// Here a slow fetch is in progress when close is called.

@@ -68,58 +68,57 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
 public struct Config: Sendable {
     public enum Storage: String, Sendable { case memory, persistent }
 
-    /// The session a backend acts in: `subject` is the user's id.
-    public struct Session: Sendable {
-        public var issuer: String
-        public var subject: String
-        public init(issuer: String = "jazz:backend", subject: String) {
-            self.issuer = issuer
-            self.subject = subject
-        }
-    }
-
     public var storage: Storage
     public var appId: String?
     public var serverUrl: String?
     public var dataDir: String?
-    /// The text of `jazz.permissions.json`: set, the app opens as a backend.
-    public var permissions: String?
-    public var backendSecret: String?
-    public var adminSecret: String?
-    public var session: Session?
+    /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
+    public var auth: Auth?
 
-    public init(
-        storage: Storage = .memory, appId: String? = nil, serverUrl: String? = nil,
-        dataDir: String? = nil, permissions: String? = nil, backendSecret: String? = nil,
-        adminSecret: String? = nil, session: Session? = nil
-    ) {
+    /// Swift apps are clients (`.client`, `.local`); the app's backend runs
+    /// in TypeScript (`createJazz`).
+    init(storage: Storage, appId: String? = nil, serverUrl: String? = nil, dataDir: String? = nil) {
         self.storage = storage
         self.appId = appId
         self.serverUrl = serverUrl
         self.dataDir = dataDir
-        self.permissions = permissions
-        self.backendSecret = backendSecret
-        self.adminSecret = adminSecret
-        self.session = session
     }
 
-    /// A client of the server at `serverUrl`.
+    /// An end user's client: it syncs through the app's Jazz endpoint
+    /// (`serverUrl`, its backend's handler, never the core) as `auth` says.
     public static func client(
-        appId: String, serverUrl: String, storage: Storage = .memory, dataDir: String? = nil
+        appId: String, serverUrl: String, auth: Auth, storage: Storage = .persistent,
+        dataDir: String? = nil
     ) -> Config {
-        Config(storage: storage, appId: appId, serverUrl: serverUrl, dataDir: dataDir)
+        var config = Config(storage: storage, appId: appId, serverUrl: serverUrl, dataDir: dataDir)
+        config.auth = auth
+        return config
     }
 
-    /// A backend with its `jazz.permissions.json`, acting for `user`.
-    public static func backend(
-        appId: String, permissions: String, serverUrl: String? = nil,
-        backendSecret: String? = nil, adminSecret: String? = nil, user: String? = nil,
-        storage: Storage = .memory, dataDir: String? = nil
-    ) -> Config {
-        Config(
-            storage: storage, appId: appId, serverUrl: serverUrl, dataDir: dataDir,
-            permissions: permissions, backendSecret: backendSecret, adminSecret: adminSecret,
-            session: user.map { Session(subject: $0) })
+    /// A local-only client: no server.
+    public static func local(appId: String? = nil, storage: Storage = .memory, dataDir: String? = nil)
+        -> Config
+    {
+        Config(storage: storage, appId: appId, dataDir: dataDir)
+    }
+
+    /// Where a persistent store goes without a `dataDir`: Application
+    /// Support on Apple platforms, `$XDG_DATA_HOME` (or `~/.local/share`)
+    /// elsewhere, under `jazz/<appId>`.
+    static func defaultDataDir(appId: String?) throws -> String {
+        guard let appId else { throw JazzError.refused("a persistent store needs an appId") }
+        #if canImport(Darwin)
+            let base = try FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        #else
+            let env = ProcessInfo.processInfo.environment
+            let base =
+                env["XDG_DATA_HOME"].map { URL(fileURLWithPath: $0) }
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share")
+        #endif
+        let dir = base.appendingPathComponent("jazz").appendingPathComponent(appId)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.path
     }
 
     func json(app: String) throws -> String {
@@ -128,16 +127,17 @@ public struct Config: Sendable {
             // Contract 2: permission, not-supported and conflict errors apart.
             "contract": .number(2),
         ]
-        object["permissions"] = permissions.map(JSONValue.string)
         object["appId"] = appId.map(JSONValue.string)
         object["serverUrl"] = serverUrl.map(JSONValue.string)
-        object["dataDir"] = dataDir.map(JSONValue.string)
-        object["backendSecret"] = backendSecret.map(JSONValue.string)
-        object["adminSecret"] = adminSecret.map(JSONValue.string)
-        if let session {
-            object["session"] = .object([
-                "issuer": .string(session.issuer), "subject": .string(session.subject),
-            ])
+        if storage == .persistent {
+            object["dataDir"] = .string(try dataDir ?? Self.defaultDataDir(appId: appId))
+        } else {
+            object["dataDir"] = dataDir.map(JSONValue.string)
+        }
+        switch auth {
+        case .deviceKey(let key)?: object["auth"] = .object(["deviceKey": .string(key)])
+        case .bearer?: object["auth"] = .object(["bearer": .bool(true)])
+        case nil: break
         }
         return try Coding.json(JSONValue.object(object))
     }
@@ -177,7 +177,7 @@ public final class Client: Sendable {
     /// passes it), with the app's `JazzApp.Computed` if it declares computed
     /// fields or transforms.
     public static func open(app: String, config: Config, implementations: (any Sendable)? = nil)
-        async throws(JazzError) -> Client
+        async throws -> Client
     {
         try await typed { try await openUntyped(app: app, config: config, implementations: implementations) }
     }
@@ -186,23 +186,28 @@ public final class Client: Sendable {
         async throws -> Client
     {
         let json = try config.json(app: app)
-        let handle = try await run { try JazzHandle.open(configJson: json) }
+        let handle: JazzHandle
+        if case .bearer(let tokens)? = config.auth {
+            let provider = Tokens(tokens)
+            handle = try await run { try JazzHandle.openWithTokens(configJson: json, tokens: provider) }
+        } else {
+            handle = try await run { try JazzHandle.open(configJson: json) }
+        }
         return Client(handle: handle, implementations: implementations)
     }
 
-    /// The account id of the user a backend acts for (`session.user` in
-    /// permissions). A client has none: this throws `refused`.
-    public func account() async throws(JazzError) -> Jazz.ID {
+    /// The signed-in user's account id (`session.user` in permissions).
+    public func account() async throws -> Jazz.ID {
         try await Self.typed {
             guard let account = try await Self.run({ try self.handle.account() }) else {
-                throw JazzError.refused("account() needs a backend acting for a user (`Config.backend(…, user:)`)")
+                throw JazzError.refused("no one is signed in")
             }
             return account
         }
     }
 
     /// Every row `query` matches.
-    public func all<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws(JazzError) -> [R] {
+    public func all<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws -> [R] {
         try await Self.typed {
             let json = try query.json()
             let rows = try await Self.run {
@@ -215,7 +220,7 @@ public final class Client: Sendable {
     /// Rows of `selection`'s columns, decoded into `T` (a `Decodable` with
     /// those properties, and `id` if it wants it).
     public func all<R, T: Decodable & Sendable>(_ selection: Selection<R>, as type: T.Type)
-        async throws(JazzError) -> [T]
+        async throws -> [T]
     {
         try await Self.typed {
             let json = try selection.json()
@@ -225,7 +230,7 @@ public final class Client: Sendable {
     }
 
     /// The first row `query` matches, if any.
-    public func one<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws(JazzError) -> R? {
+    public func one<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws -> R? {
         try await Self.typed {
             let json = try query.json()
             guard
@@ -241,7 +246,7 @@ public final class Client: Sendable {
 
     /// Inserts `row`, returning it as stored (with its `id`).
     @discardableResult
-    public func insert<I: Insert>(_ row: I, tier: WriteTier? = nil) async throws(JazzError) -> I.Row {
+    public func insert<I: Insert>(_ row: I, tier: WriteTier? = nil) async throws -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
             let inserted = try await Self.run {
@@ -257,7 +262,7 @@ public final class Client: Sendable {
 
     /// Changes the columns `patch` sets on row `id`.
     public func update<P: Patch>(_ id: Jazz.ID, _ patch: P, tier: WriteTier? = nil)
-        async throws(JazzError)
+        async throws
     {
         try await Self.typed {
             let json = try Coding.json(patch, userInfo)
@@ -273,13 +278,13 @@ public final class Client: Sendable {
 
     /// Changes the columns `patch` sets on `row`.
     public func update<P: Patch>(_ row: P.Row, _ patch: P, tier: WriteTier? = nil)
-        async throws(JazzError)
+        async throws
     {
         try await update(row.id, patch, tier: tier)
     }
 
     public func delete<R: Row>(_ type: R.Type, id: Jazz.ID, tier: WriteTier? = nil)
-        async throws(JazzError)
+        async throws
     {
         try await Self.typed {
             try await Self.run {
@@ -292,12 +297,12 @@ public final class Client: Sendable {
         }
     }
 
-    public func delete<R: Row>(_ row: R, tier: WriteTier? = nil) async throws(JazzError) {
+    public func delete<R: Row>(_ row: R, tier: WriteTier? = nil) async throws {
         try await delete(R.self, id: row.id, tier: tier)
     }
 
     /// Returns once every write made so far has reached `tier`.
-    public func waitForSync(_ tier: WriteTier = .global) async throws(JazzError) {
+    public func waitForSync(_ tier: WriteTier = .global) async throws {
         try await Self.typed {
             try await Self.run { try self.handle.waitForSync(tier: tier.rawValue) }
         }
@@ -371,7 +376,7 @@ public final class Client: Sendable {
         }
     }
 
-    public func close() async throws(JazzError) {
+    public func close() async throws {
         try await Self.typed {
             try await Self.run { try self.handle.shutdown() }
         }
@@ -406,7 +411,7 @@ public final class Client: Sendable {
     }
 
     /// `body`'s failures as `JazzError`s.
-    static func typed<T>(_ body: () async throws -> T) async throws(JazzError) -> T {
+    static func typed<T>(_ body: () async throws -> T) async throws -> T {
         do {
             return try await body()
         } catch {
@@ -480,4 +485,17 @@ extension AsyncThrowingStream where Failure == any Error {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+}
+
+extension Config: CustomStringConvertible, CustomDebugStringConvertible {
+    /// Without secrets: logs and crash reports mustn't carry them.
+    public var description: String {
+        var parts = ["storage: \(storage.rawValue)"]
+        if let appId { parts.append("appId: \(appId)") }
+        if let serverUrl { parts.append("serverUrl: \(serverUrl)") }
+        if let dataDir { parts.append("dataDir: \(dataDir)") }
+        if let auth { parts.append("auth: \(auth)") }
+        return "Config(\(parts.joined(separator: ", ")))"
+    }
+    public var debugDescription: String { description }
 }
