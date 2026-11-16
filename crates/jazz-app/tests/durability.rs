@@ -409,10 +409,13 @@ async fn delete_client_storage_removes_every_file() {
 
     assert!(data.path().join("jazz.lock").exists());
     jazz.delete_client_storage().await.unwrap();
-    for file in files.into_iter().chain(["jazz.lock"]) {
+    // The lock file goes too, except on Windows, where it stays.
+    let lock = cfg!(unix).then_some("jazz.lock");
+    for file in files.into_iter().chain(lock) {
         assert!(!data.path().join(file).exists(), "{file} left behind");
     }
     // Like TS's deleteClientStorage, nothing is left behind.
+    #[cfg(unix)]
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
     let reopened = bindings::open(open_dir(&server, app_id, data.path()))
         .await
@@ -468,6 +471,7 @@ async fn delete_client_storage_refuses_a_held_store() {
     drop(other);
     reopened.delete_client_storage().await.unwrap();
     assert!(!data.path().join("jazz.sqlite").exists());
+    #[cfg(unix)]
     assert!(!data.path().join("jazz.lock").exists());
     // A later open of the directory locks it afresh, and is guarded again.
     let again = bindings::open(config()).await.unwrap();
@@ -478,6 +482,7 @@ async fn delete_client_storage_refuses_a_held_store() {
     ));
     second.shutdown().await.unwrap();
     again.delete_client_storage().await.unwrap();
+    #[cfg(unix)]
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
 }
 
