@@ -2001,3 +2001,94 @@ fn a_base_version_another_views_read_holds_by_id_still_ships() {
         titles(&server, &query, main_view)
     );
 }
+
+/// Run `future`, pumping the link between polls, as a host would.
+fn drive<T>(server: &Db, client: &Db, future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..64 {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    panic!("did not complete");
+}
+
+/// Alice's replica opens a serializable transaction, reads her draft over
+/// main (the two main rows, under the draft's coordinate) and stages a
+/// draft insert. Returns the transaction.
+fn serializable_draft_read(
+    server: &Db,
+    client: &Db,
+) -> jazz::model::transaction::OpenTransactionId {
+    seed_main(server, client);
+    draft_read(server, client)
+}
+
+/// Main's two rows, at the server and on Alice's replica.
+fn seed_main(server: &Db, client: &Db) {
+    put(server, &branch(0xa1), 1, "Intro", 1);
+    put(server, &branch(0xa1), 2, "Outro", 2);
+    pump(server, client);
+}
+
+/// [`serializable_draft_read`] over rows already seeded.
+fn draft_read(server: &Db, client: &Db) -> jazz::model::transaction::OpenTransactionId {
+    let tx = jazz::model::transaction::OpenTransactionId::new();
+    drive(server, client, client.begin_serializable(tx)).unwrap();
+    let opts =
+        ReadOpts::default().branch_view(branch(0xa2), Some(BranchViewBase::current(branch(0xa1))));
+    let bytes = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let rows = match drive(
+        server,
+        client,
+        client.all_serialized_query(&bytes, opts, Some(tx), None, None),
+    )
+    .unwrap()
+    {
+        jazz::db::SerializedReadResult::Rows(rows) => rows,
+        other => panic!("{other:?}"),
+    };
+    let mut titles: Vec<_> = rows.iter().map(|row| row.cell("title")).collect();
+    titles.sort_by_key(|title| format!("{title:?}"));
+    assert_eq!(
+        titles,
+        [
+            Some(Value::String("Intro".into())),
+            Some(Value::String("Outro".into()))
+        ]
+    );
+    drive(
+        server,
+        client,
+        client.tx_ref(tx).insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("Summary".into())),
+                ("rank".to_owned(), Value::I32(3)),
+            ]),
+            InsertOptions {
+                target: ExactWriteTarget::Branch(branch(0xa2)),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    tx
+}
+
+/// A serializable commit that read through a branch view is refused on a
+/// replica: its server would check the read as a root read, against other
+/// rows (jazz#5806), until the sync protocol carries the view.
+#[test]
+fn a_replica_refuses_to_commit_a_serializable_branch_read() {
+    let (server, client, _) = connected();
+    let tx = serializable_draft_read(&server, &client);
+    let error = drive(&server, &client, client.commit_serializable_handle(tx)).unwrap_err();
+    assert!(error.to_string().contains("not supported yet"), "{error}");
+    pump(&server, &client);
+    let draft_only = ReadOpts::default().branch_view(branch(0xa2), None);
+    assert!(titles(&server, &Query::from("todos"), draft_only).is_empty());
+}
