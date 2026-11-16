@@ -321,7 +321,7 @@ pub(super) struct Fanout {
 
 /// The canonical form of a stored SQL value, for watch matching.
 fn canon(value: &Sql) -> String {
-    format!("{value:?}")
+    value.key()
 }
 
 fn canon_value(value: &Value) -> Option<String> {
