@@ -6,8 +6,14 @@ import Jazz
 /// and move them between stages.
 public struct StagePlanApp: Sendable {
     public let jazz: Jazz.Client
+    /// Where reads go: `nil` (local first) in a long-lived app; `.remote`
+    /// for a one-shot process (the CLI), whose fresh store hasn't synced yet.
+    public var readTier: ReadTier?
 
-    public init(jazz: Jazz.Client) { self.jazz = jazz }
+    public init(jazz: Jazz.Client, readTier: ReadTier? = nil) {
+        self.jazz = jazz
+        self.readTier = readTier
+    }
 
     /// Opens StagePlan as an end user of the app's Jazz endpoint (its
     /// backend's handler, in TS, Rust or Go), signed in as `auth` says (in
@@ -31,12 +37,14 @@ public struct StagePlanApp: Sendable {
     public func show(named name: String) async throws -> JazzApp.Show {
         let me = try await jazz.account()
         if let show = try await jazz.one(
-            JazzApp.shows.query().where(JazzApp.shows.chiefAccount.eq(me), JazzApp.shows.name.eq(name)))
+            JazzApp.shows.query().where(JazzApp.shows.chiefAccount.eq(me), JazzApp.shows.name.eq(name)),
+            tier: readTier)
         {
             return show
         }
         return try await jazz.insert(
-            JazzApp.NewShow(name: name, venue: "TBA", date: "TBA", doors: "TBA", chiefAccount: me))
+            JazzApp.NewShow(name: name, venue: "TBA", date: "TBA", doors: "TBA", chiefAccount: me),
+            tier: .global)
     }
 
     /// The show's tasks, in `rank` order.
@@ -47,7 +55,8 @@ public struct StagePlanApp: Sendable {
     /// The tasks of the show with this id the user may read, in `rank` order
     /// (none of a show the app's permissions don't let them see).
     public func tasks(ofShow showId: Jazz.ID) async throws -> [JazzApp.Task] {
-        try await jazz.all(JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(showId)).orderBy(JazzApp.tasks.rank))
+        try await jazz.all(
+            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(showId)).orderBy(JazzApp.tasks.rank), tier: readTier)
     }
 
     /// Adds a task to the bottom of the show's `todo` stage.
@@ -62,7 +71,8 @@ public struct StagePlanApp: Sendable {
     @discardableResult
     public func addTask(_ title: String, toShow showId: Jazz.ID) async throws -> JazzApp.Task {
         let last = try await jazz.one(
-            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(showId)).orderBy(JazzApp.tasks.rank.desc).limit(1))
+            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(showId)).orderBy(JazzApp.tasks.rank.desc).limit(1),
+            tier: readTier)
         return try await jazz.insert(
             JazzApp.NewTask(showId: showId, title: title, status: .todo, rank: (last?.rank ?? 0) + 1),
             tier: .global)
@@ -70,7 +80,7 @@ public struct StagePlanApp: Sendable {
 
     /// Moves the task to `status`.
     public func move(_ task: Jazz.ID, to status: JazzApp.TaskStatus) async throws {
-        try await jazz.update(task, JazzApp.TaskPatch(status: .set(status)))
+        try await jazz.update(task, JazzApp.TaskPatch(status: .set(status)), tier: .global)
     }
 }
 

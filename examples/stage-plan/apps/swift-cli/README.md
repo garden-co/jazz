@@ -20,7 +20,7 @@ them between stages.
 export PKG_CONFIG_PATH=../../../../target/release/jazz-ffi-static
 export JAZZ_ENDPOINT=http://127.0.0.1:8780/jazz JAZZ_APP_ID=<the app's id>
 swift run stage-plan-swift --key-file /tmp/alice.key demo
-swift run stage-plan-swift --key-file /tmp/alice.key add "Load in"    # prints the task's id
+swift run stage-plan-swift --key-file /tmp/alice.key add "Load in"    # prints the task's id, then "show <show id>"
 swift run stage-plan-swift --key-file /tmp/alice.key list             # <id>  todo    Load in
 swift run stage-plan-swift --key-file /tmp/alice.key move <task-id> doing
 swift run stage-plan-swift --key-file /tmp/bob.key --show-id <alice's show id> list   # nothing

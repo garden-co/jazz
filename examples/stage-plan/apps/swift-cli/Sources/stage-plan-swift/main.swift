@@ -13,7 +13,7 @@ import StagePlan
 // --show-id any show by id (list shows only what they may read; add into a
 // show they may not write into exits 1 with "permission denied").
 //   list                    the show's tasks, by rank
-//   add <title>             add a task
+//   add <title>             add a task; prints its id, then "show <show id>"
 //   move <task-id> <stage>  todo | doing | done | blocked
 //   demo                    create a show, add tasks, move one, list them
 var args = Array(CommandLine.arguments.dropFirst())
@@ -52,7 +52,9 @@ do {
     } else {
         auth = .deviceKey(try deviceKey(at: keyFile))
     }
-    let app = try await StagePlanApp.open(endpoint: endpoint, appId: appId, auth: auth, dataDir: dataDir)
+    var app = try await StagePlanApp.open(endpoint: endpoint, appId: appId, auth: auth, dataDir: dataDir)
+    // A fresh process: read from the server, not the empty local store.
+    app.readTier = .remote
     let show: Jazz.ID
     if let showId {
         show = showId
@@ -65,6 +67,7 @@ do {
     case "add"? where args.count == 2:
         let task = try await app.addTask(args[1], toShow: show)
         print(task.id)
+        print("show \(show)")
     case "move"? where args.count == 3:
         guard let status = JazzApp.TaskStatus(rawValue: args[2]) else {
             throw JazzError.refused("stage must be one of todo, doing, done, blocked")
