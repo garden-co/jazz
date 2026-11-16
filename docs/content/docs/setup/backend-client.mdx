@@ -125,8 +125,12 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
     token expires (at 80% of its life, so give tokens at least five minutes).
 
     <include cwd lang="rust" meta='title="src/main.rs"'>
-      ../examples/docs/endpoint-server-rs/src/lib.rs#backend-client-rust
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-connect-rust
     </include>
+
+    `jazz.shutdown().await` closes it, for every clone of the handle. Calls already made get up to 30
+    seconds to finish, then fail with `Error::Stopped`, like any call made after; subscriptions end,
+    and with `Storage::Dir` the last writes are flushed and the store closed.
 
     A trusted machine (`as: "backend"`) and `forUser(userId)` aren't supported in Rust yet. See
     [Language support](/docs/reference/language-support).
