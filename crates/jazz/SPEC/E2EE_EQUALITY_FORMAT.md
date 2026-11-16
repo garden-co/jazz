@@ -131,3 +131,10 @@ comparison semantics. A provider failure is `CryptoFailure`, never a
 non-matching token. Changes to the derivation, framing or value encoding
 require an explicit compatibility decision before persisted indexes can use
 them. There is no implicit reindexing or migration in this version.
+
+A token is a one-way function of one value under one context and type. A
+token of one value under a column's new context or type cannot be computed
+from a token of the old one, and the source values that a schema conversion
+maps to a searched value cannot in general be enumerated from it; equality
+on a converting column is therefore limited as [E2EE migrations](E2EE_MIGRATIONS.md)
+§3.3 states.

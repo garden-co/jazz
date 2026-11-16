@@ -237,8 +237,13 @@ are the default implementations.
   `unsupported-format`, never `invalid-ciphertext`. Retiring a mechanism is
   removing it from the list, and is a breaking change by design: records
   and signed chains that depend on it become unreadable or unverifiable at
-  once, with no grace path, so the developer rotates and re-encrypts onto
-  the replacement before retiring (the protocol's mechanism agility rules).
+  once, with no grace path. Retirement is not the same as migrating the
+  selection: rotating and re-encrypting onto a replacement lets a content
+  mechanism be retired, but not a signature or key wrapping mechanism used
+  in an existing account or space chain, since every later key is
+  authenticated back through those immutable links (the protocol's
+  mechanism agility rules). Such a mechanism stays allowed while any chain
+  uses it.
 - **Advertisement.** Public keys carry their mechanism: the advertised form
   is `env(mechanism, publicKey)`. Each identity (a device, a recovery root)
   has exactly one sealing key and one signing key, fixed at creation; a
@@ -254,7 +259,8 @@ are the default implementations.
   configuration, let recipients create identities of the new mechanism, and
   let the next key rotation seal and wrap the new epoch key with it. Old
   records keep their mechanism and stay readable while it remains
-  registered.
+  registered and listed; a migration does not by itself make the old
+  mechanism retirable.
 - **Errors.** Every role keeps these outcomes apart, and no layer above may
   merge them:
   - `InvalidCiphertext` (an authentication failure, or malformed or truncated

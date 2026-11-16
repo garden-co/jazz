@@ -39,23 +39,25 @@ changes that touch encrypted data when the app files (`jazz.app.json`,
 - **Writes cannot move a row between spaces** (spec §5.1), and a write needs
   a held key for the row's space (spec §5.1); the `move` write of §4.4 is the
   one exception, stated in the protocol too. Creating a space needs Jazz
-  update permission on the space row (spec §3.2).
+  read and update permission on the space row (spec R13, §3.2); the client
+  does not evaluate it and creates optimistically, in the transaction of the
+  first encrypted write that needs the space.
 
 ## 2. Which changes are lens-only
 
-| Change                                                     | Stored ciphertext               | Mechanism                                                 |
-| ---------------------------------------------------------- | ------------------------------- | --------------------------------------------------------- |
-| New encrypted table                                        | None exists                     | Lens `createTables`; spaces created on first insert       |
-| New encrypted column on an encrypted table                 | None exists                     | Lens `add` with the empty-bytes default (§4.5)            |
-| Rename an encrypted column                                 | Unchanged                       | Lens rename of the column **and** its `__e2ee_eq_` column |
-| Rename an encrypted table, its scope table or space column | Unchanged                       | Lens rename; identities kept                              |
-| Drop equality tagging                                      | Unchanged                       | Lens drop of the tag column                               |
-| Encoding-compatible type widening                          | Unchanged                       | Pinned `sealedType` (§4.3); no rewrite                    |
-| Other plaintext type change                                | Rewrite                         | Re-encrypt into a new column                              |
-| Add equality tagging                                       | Cells unchanged; tokens written | Tag backfill                                              |
-| Encrypt a plaintext column / table                         | Rewrite                         | Encrypt conversion                                        |
-| Decrypt to plaintext                                       | Rewrite                         | Decrypt conversion                                        |
-| Change scope table; move rows between spaces               | Rewrite                         | Re-home conversion / move write                           |
+| Change                                                     | Stored ciphertext               | Mechanism                                                    |
+| ---------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------ |
+| New encrypted table                                        | None exists                     | Lens `createTables`; spaces created on first encrypted write |
+| New encrypted column on an encrypted table                 | None exists                     | Lens `add` with the empty-bytes default (§4.5)               |
+| Rename an encrypted column                                 | Unchanged                       | Lens rename of the column **and** its `__e2ee_eq_` column    |
+| Rename an encrypted table, its scope table or space column | Unchanged                       | Lens rename; identities kept                                 |
+| Drop equality tagging                                      | Unchanged                       | Lens drop of the tag column                                  |
+| Encoding-compatible type widening                          | Unchanged                       | Pinned `sealedType` (§4.3); no rewrite                       |
+| Other plaintext type change                                | Rewrite                         | Re-encrypt into a new column                                 |
+| Add equality tagging                                       | Cells unchanged; tokens written | Tag backfill                                                 |
+| Encrypt a plaintext column / table                         | Rewrite                         | Encrypt conversion                                           |
+| Decrypt to plaintext                                       | Rewrite                         | Decrypt conversion                                           |
+| Change scope table; move rows between spaces               | Rewrite                         | Re-home conversion / move write                              |
 
 Lens-only changes need nothing beyond what the deploy already checks, plus the
 transition rules in §3.1. Every other change is a **conversion**: a pair of
@@ -141,6 +143,10 @@ re-encrypt are per column; re-home is per entry:
 - `convert` names a conversion function between the source and target types,
   implemented in every language like a `computed` field. It is required when
   the types differ and refused when they are equal.
+- `reverse` optionally names, for a `convert`, a function returning the
+  complete and exact list (at most 16) of source values that convert to a
+  given target value. Only with it can equality queries reach unconverted
+  source rows by index (§3.3).
 - `backfill` lists equality columns whose tokens are still being written
   (§4.3).
 - A re-home adds `"rehome": { "space": <old space column>, "scope": <old scope> }`,
@@ -157,8 +163,41 @@ Equality queries (H4) on a converting column must not send the searched value
 to the server, and must not scan unconverted rows that could match (a cost
 that grows with unrelated data):
 
-- **Re-encrypt and re-home** are indexed both ways: the query computes tokens
-  for the source's context and the target's, so `tag IN tokens` covers both.
+A converting column's logical value is the source when present, otherwise
+the target (§3.2), and an equality query must match exactly that value. The
+physical query therefore has two tag predicates, one per column:
+`__e2ee_eq_<source> IN sourceTokens OR __e2ee_eq_<target> IN targetTokens`,
+each with its own context (source type or old space, and target), and the
+residual applies **source-present precedence**: a row with a present source
+matches iff its source, decrypted under its own context and converted,
+equals the searched value, whatever its target or target tag holds (an
+older target or tag left by an earlier write is ignored); a row whose
+source is absent matches iff its target does. Residual comparison removes
+false candidates but cannot add omitted ones, so the source predicate must
+reach **every** source value that converts to the searched value. That is
+possible only in two cases:
+
+- **Identity conversions**: a re-home, and a re-encrypt without `convert`.
+  The source value equals the target value, so `sourceTokens` are the
+  searched value's tokens under the source context.
+- **A declared bounded reverse mapping**: a re-encrypt whose `convert` names
+  a `reverse` function (`"reverse": "<name>"`, implemented in every language
+  like `convert`) that returns, for a target value, the complete, exact list
+  of source values that convert to it, at most 16 values. `sourceTokens`
+  covers each of them. A `reverse` that cannot list the exact preimage (a
+  string-to-integer conversion maps `"1"`, `"01"`, `"+1"`, … to 1) must not
+  be declared.
+
+The source column must also be equality-tagged. Otherwise (an arbitrary or
+non-injective `convert` without `reverse`, or an untagged source) the source
+rows cannot be found by index, and an equality query on the target column
+fails with `conversion-pending` while any row of the space has a present
+source, as below. Required tests: a non-injective conversion with an
+unconverted source row that converts to the searched value gives
+`conversion-pending`, not a result without that row; and a row whose
+present source does not match but whose stale target tag does is not
+returned.
+
 - **Encrypt and tag backfill** have rows with no token. An equality query on a
   space that still has such rows fails with a typed `conversion-pending` error
   (spec §7) naming the table, column and space and the pending count, and the
@@ -173,10 +212,11 @@ that grows with unrelated data):
   `WriteCells`, for every insert, update and upsert that supplies the column.
   An update that leaves the column out leaves both as they are.
 - A row in a space with no root yet: the first conversion or encrypted write
-  is the space creation (spec §3.2), in one mixed ledger transaction with the
-  row write (H8), and only a session that may update the space row can do
-  it; any other session's encrypted write is refused `space-pending`.
-  This is the "atomic first write" of an existing space row: the row is never
+  stages the space creation (spec §3.2) in the same transaction as the row
+  write, and the authority accepts it only from a session that may read and
+  update the space row. A refusal fails that transaction alone; the session
+  then writes a space request and its later encrypted writes are refused
+  `space-pending` (spec §3.2). Within one transaction the row is never
   observable encrypted under a space that was not accepted.
 - A decrypt writes plaintext. It is refused unless the deploy confirmed the
   decrypt (§5).
@@ -185,7 +225,7 @@ that grows with unrelated data):
 
 | Work                                   | Who                                                                                                                       |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Create missing spaces                  | Sessions that may update the space row, as part of their sweep (spec §3.2)                                                |
+| Create missing spaces                  | Sessions that may read and update the space row, as part of their sweep, and on a space request (spec §3.2)               |
 | Convert a row the client writes anyway | Any writer (it holds the key by spec §5.1)                                                                                |
 | Background sweep of a space            | By default, online sessions that may update the space row and hold its key; `"sweep": "readers"` opts in every key holder |
 | Report progress                        | The server, without keys (§3.6)                                                                                           |
@@ -200,7 +240,9 @@ overwrite. A sweeper starts at a random row of its space, so several sweepers
 rarely collide. Sweeping needs Jazz update permission on the rows; a sweeper
 without it skips them and they appear in progress. A sweeper that may update
 a space row without a space creates the space in its first conversion
-transaction (§3.4).
+transaction (§3.4). The client does not evaluate permissions: a sweeper
+learns that it may not create or convert from refusals, and stops
+sweeping a space after one.
 
 A sweep starts only when the authority's active schema is the converting
 version or later (§3.7). It pauses when the session goes offline; conversions
@@ -358,7 +400,7 @@ hold the plaintext. Rows in spaces no key holder reaches stay encrypted (§3.8).
   converts whole rows (all encrypted columns and the new space value at once).
   The sweeper needs keys of both the old and new space and the right to write
   the row; target spaces that do not exist are created by sessions that may
-  update their space rows.
+  read and update their space rows (spec §3.2).
 - **Moving one row between spaces of the same scope** is a new write kind,
   `move`: it re-encrypts every encrypted column of the row under the target
   space and changes the space column in one serializable transaction. It
@@ -406,11 +448,11 @@ table (§5.1).
 
 1. Add the new table to `jazz.app.json` with its `encryption` entry, and
    `createTables` it in the migration; deploy and ship.
-2. In a client that may update the space row, read the old rows of a space
-   and, in one serializable transaction, insert their copies into the new
-   table. When the space has no root yet, the same transaction creates it
-   (spec §3.2), so the first encrypted rows and the space are accepted
-   together.
+2. In a client that may read and update the space row, read the old rows of
+   a space and, in one serializable transaction, insert their copies into
+   the new table. When the space has no root yet, the same transaction
+   creates it (spec §3.2), so the first encrypted rows and the space are
+   accepted together.
 3. Point the app's code, relations and permissions at the new table; rows get
    new IDs, so references to them must be rewritten in the same transactions
    or mapped by the app.
@@ -426,14 +468,14 @@ table (§5.1).
 | Declarations carry `from`, `to`, `convert`, `sealedType`, `backfill`, `rehome`, `sweep`                | H1 `E2eeDeclarations`                                                    |
 | Write target and clear source; tag-only writes; `move` write kind                                      | H2 (`WriteCells` gains the source cells; a `Move` kind with both spaces) |
 | Source-or-target selection; short values; `superseded` and `stale-space` reports; epoch → space lookup | H3, from held-key records (spec §4.1, §6.2)                              |
-| Tokens for both contexts; the `conversion-pending` check                                               | H4                                                                       |
+| Tokens for both contexts (identity or declared `reverse` only); the `conversion-pending` check         | H4                                                                       |
 | Sweep task, activation gate, status API                                                                | Client runtime above `Db`, beside key requests (H11)                     |
 | The client can read the authority's active schema version                                              | Core catalogue API (new)                                                 |
 | Lens: rename plus optionality widening on one stored column, with a backward default for null          | Core lens (to confirm)                                                   |
 | Native encoding unchanged under each allowed widening                                                  | Core values (to confirm)                                                 |
 | Pending-row counts per table and space                                                                 | Server admin read; CLI `migrations status`                               |
 | Optional write floor: the authority refuses commits to a table authored below a version                | Core sync admission; an explicit exception to `INV-LENS-16`              |
-| Conversion functions named by `convert`, implemented in every language                                 | Bindings, like `computed`                                                |
+| Conversion functions named by `convert` and `reverse`, implemented in every language                   | Bindings, like `computed`                                                |
 
 No private local state is needed: progress lives in the rows. A sweeper may
 cache its position in memory; it is never authoritative.
@@ -493,3 +535,7 @@ cache its position in memory; it is never authoritative.
     such columns use the copy-to-new-table recipe (§5.1). Conversions clear an
     encrypted cell to the cleared marker, not to the empty byte string, which
     keeps meaning "never written".
+14. Equality queries on a converting column follow source-present
+    precedence and index the source rows only for identity conversions or a
+    declared bounded `reverse` mapping; otherwise they fail with
+    `conversion-pending` until the space's conversion is done (§3.3).
