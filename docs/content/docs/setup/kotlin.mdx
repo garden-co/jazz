@@ -197,11 +197,9 @@ view value. Queries compare a transformed column as stored.
 In Kotlin, Jazz doesn't support these yet:
 
 - reading part of a large value inside an include (root queries only);
-- subscribing to history queries;
 - guest (anonymous) users;
 - nested rows and catalogue enums in bindings;
 - Kotlin Multiplatform targets other than the JVM and Android;
-- Maven Central: install the jar or AAR from the GitHub release;
 - non-finite doubles (`NaN`, infinities): writing or comparing one throws, as JSON has none;
 - `limit` and `offset` with `watch`: they apply to the server's result before `watch` re-sorts it
   locally, so a page can be off after changes. Use them with `all`.
