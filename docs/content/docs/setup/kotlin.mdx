@@ -3,8 +3,8 @@ title: Kotlin
 description: "Build Jazz apps in Kotlin, for Android and the JVM, with the jazz-kotlin library and typed bindings generated from jazz.app.json."
 ---
 
-Kotlin is for apps: Android apps and JVM desktop or command-line clients. For apps: run your backend
-in TypeScript, Rust or Go. A Kotlin app opens the same `jazz.app.json` as every other language,
+Kotlin is for apps: Android apps and JVM desktop or command-line clients. Your app's main backend
+runs in TypeScript. A Kotlin app opens the same `jazz.app.json` as every other language,
 with typed bindings generated from it, and syncs as an end user through your backend's Jazz
 endpoint (`createJazz`'s handler), or runs locally.
 
@@ -18,8 +18,8 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 [GitHub release](https://github.com/garden-co/jazz/releases), checked by the `SHA256SUMS` beside
 them:
 
-- `jazz-kotlin-<version>.jar`: the JVM library, with `libjazz_ffi` for Linux (x86-64, arm64) and
-  macOS (arm64) inside, which JNA loads from the jar;
+- `jazz-kotlin-<version>.jar`: the JVM library, with `libjazz_ffi` for Linux (x86-64, arm64),
+  macOS (arm64, x86-64) and Windows (x86-64) inside, which JNA loads from the jar;
 - `jazz-kotlin-android-<version>.aar`: the Android library, with `libjazz_ffi` for arm64-v8a,
   armeabi-v7a and x86_64.
 
@@ -47,7 +47,7 @@ On Android, depend on `files("libs/jazz-kotlin-android-2.0.0-alpha.65.aar")` and
 `net.java.dev.jna:jna:5.17.0@aar` instead of the jar and `jna`. Keep `tools.jazz.**`,
 `uniffi.jazz_ffi.**` and `com.sun.jna.**` if you minify.
 
-On another platform (Windows, an Intel Mac), or to build from source: in a Jazz checkout,
+To build from source: in a Jazz checkout,
 `cargo build -p jazz-ffi --release`, then either build the jar with Gradle in `packages/jazz-kotlin`
 (it bundles your platform's library) or set `-Djna.library.path` to `target/release`.
 
@@ -187,7 +187,6 @@ In Kotlin, Jazz doesn't support these yet:
 - nested rows and catalogue enums in bindings;
 - Kotlin Multiplatform targets other than the JVM and Android;
 - Maven Central: install the jar or AAR from the GitHub release;
-- prebuilt libraries for Windows and Intel Macs: build `jazz-ffi` there yourself;
 - non-finite doubles (`NaN`, infinities): writing or comparing one throws, as JSON has none;
 - `limit` and `offset` with `watch`: they apply to the server's result before `watch` re-sorts it
   locally, so a page can be off after changes. Use them with `all`.
