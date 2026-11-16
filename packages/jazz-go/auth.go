@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +16,6 @@ import (
 
 // Auth is how an end user signs in: Token (a JWT from your auth provider)
 // or DeviceAccount / DeviceKey (a local-first account kept on this device).
-// A backend sets Permissions, BackendSecret, AdminSecret and Session
-// instead.
 type Auth interface {
 	authJSON() (map[string]any, error)
 }
@@ -58,6 +57,12 @@ func DeviceKey(key string) Auth { return deviceAuth{key: key} }
 // DeviceAccount signs in as this device's local-first account, whose key
 // store keeps: it is created (signing up) the first time.
 func DeviceAccount(store SecretStore) Auth { return deviceAuth{store: store} }
+
+// String keeps the key out of logs.
+func (a deviceAuth) String() string { return "jazz.DeviceAccount([redacted])" }
+
+// GoString is String, for %#v.
+func (a deviceAuth) GoString() string { return a.String() }
 
 func (a deviceAuth) authJSON() (map[string]any, error) {
 	key := a.key
@@ -129,9 +134,17 @@ var (
 
 // onToken is jazz-ffi's token callback: 0 with *token set (NULL: signed
 // out), or non-zero for a failed fetch, *token its message.
-func onToken(ctx, reason, token uintptr) int32 {
+func onToken(ctx, reason, token uintptr) (status int32) {
 	out := (*uintptr)(unsafe.Add(unsafe.Pointer(nil), token))
 	*out = 0
+	// A panicking provider fails closed as a failed fetch: no token, the
+	// session stays, and the panic doesn't cross into jazz-ffi.
+	defer func() {
+		if r := recover(); r != nil {
+			*out = mallocString(fmt.Sprintf("token provider panicked: %v", r))
+			status = 1
+		}
+	}()
 	value, ok := providers.Load(uint64(ctx))
 	if !ok {
 		return 0 // the app closed: signed out
@@ -230,16 +243,6 @@ func (db *DB) Link(ctx context.Context, bearer string) (*User, error) {
 	var u *User
 	err := db.call(ctx, "link", map[string]any{"bearer": bearer}, &u)
 	return u, err
-}
-
-// Bundle is the permissions bundle a backend published ("" for a client):
-// what an app endpoint serving end users hands their sockets.
-func (db *DB) Bundle(ctx context.Context) (string, error) {
-	var b *string
-	if err := db.call(ctx, "bundle", map[string]any{}, &b); err != nil || b == nil {
-		return "", err
-	}
-	return *b, nil
 }
 
 // Refresh asks the TokenProvider for a fresh token now.

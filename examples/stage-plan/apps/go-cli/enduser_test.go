@@ -16,17 +16,11 @@ func TestEndUsersSignInAndSyncThroughTheApp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	srv := testServer(t)
-	backend := openTest(t, srv, "stage-plan")
-	bundle, err := backend.Bundle(ctx)
-	if err != nil || bundle == "" {
-		t.Fatalf("bundle: %q %v", bundle, err)
-	}
-	app := startEndpoint(t, srv, bundle)
 
 	// Carol: a device account, created on first open.
 	keyFile := filepath.Join(t.TempDir(), "device-key")
 	carol, err := jazzapp.Open(ctx, jazz.Config{
-		AppID: srv.appID, ServerURL: app.url, Storage: jazz.StorageMemory,
+		AppID: srv.appID, ServerURL: srv.url, Storage: jazz.StorageMemory,
 		Auth: jazz.DeviceAccount(jazz.FileStore(keyFile)),
 	})
 	if err != nil {
@@ -50,7 +44,7 @@ func TestEndUsersSignInAndSyncThroughTheApp(t *testing.T) {
 	var mu sync.Mutex
 	var asked []jazz.TokenReason
 	alice, err := jazzapp.Open(ctx, jazz.Config{
-		AppID: srv.appID, ServerURL: app.url, Storage: jazz.StorageMemory,
+		AppID: srv.appID, ServerURL: srv.url, Storage: jazz.StorageMemory,
 		Auth: jazz.Token(func(ctx context.Context, reason jazz.TokenReason) (string, error) {
 			mu.Lock()
 			asked = append(asked, reason)

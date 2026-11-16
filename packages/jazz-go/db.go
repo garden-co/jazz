@@ -10,35 +10,76 @@ package jazz
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 )
 
 // Config is how an app is opened. Generated bindings' Open sets App.
 type Config struct {
 	// App is the text of jazz.app.json.
-	App string `json:"app"`
-	// Permissions is the text of jazz.permissions.json: set, the app is
-	// opened as a backend (it publishes the bundle and acts as Session).
-	Permissions string `json:"permissions,omitempty"`
-	AppID       string `json:"appId,omitempty"`
+	App   string `json:"app"`
+	AppID string `json:"appId,omitempty"`
 	// ServerURL is the sync server; empty keeps the app local.
 	ServerURL string `json:"serverUrl,omitempty"`
 	// DataDir is where persistent storage lives.
 	DataDir string `json:"dataDir,omitempty"`
 	// Storage is StorageMemory or StoragePersistent (the default).
-	Storage       Storage `json:"storage,omitempty"`
-	BackendSecret string  `json:"backendSecret,omitempty"`
+	Storage Storage `json:"storage,omitempty"`
 	// Computed is the app's implementation of its generated Computed
 	// interface (jazzapp.Open sets it).
 	Computed any `json:"-"`
-	// AdminSecret lets a backend publish the app's schema and permissions.
-	AdminSecret string `json:"adminSecret,omitempty"`
 	// Auth signs an end user in (Token, DeviceAccount, DeviceKey): with
 	// ServerURL set to the app's Jazz endpoint (its backend's /jazz).
 	Auth Auth `json:"-"`
-	// Session is the user a backend acts as. Its Issuer is "jazz:backend"
-	// (left empty, it is set so).
-	Session *Session `json:"session,omitempty"`
+	// AllowPlaintext lets ServerURL be http:// or ws:// to a host other than
+	// this machine (passed to the core as allowInsecureHttp). Credentials
+	// then cross the network unencrypted: only for a private network you
+	// trust.
+	AllowPlaintext bool `json:"allowInsecureHttp,omitempty"`
+}
+
+// String is c without its secrets, so logging a Config never leaks them.
+// (json.Marshal(c), which Open sends to the core, does include them.)
+func (c Config) String() string {
+	auth := "none"
+	if c.Auth != nil {
+		auth = fmt.Sprintf("%T", c.Auth)
+	}
+	return fmt.Sprintf("jazz.Config{AppID: %q, ServerURL: %q, Storage: %q, DataDir: %q, Auth: %s}",
+		c.AppID, c.ServerURL, c.Storage, c.DataDir, auth)
+}
+
+// GoString is String, for %#v.
+func (c Config) GoString() string { return c.String() }
+
+// checkTransport refuses plaintext (http, ws) to a host other than this
+// machine, unless AllowPlaintext.
+func (c Config) checkTransport() error {
+	if c.ServerURL == "" || c.AllowPlaintext {
+		return nil
+	}
+	u, err := url.Parse(c.ServerURL)
+	if err != nil {
+		return &Error{Kind: KindRefused, Message: "config.ServerURL is not a URL"}
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
+		return nil
+	case "http", "ws":
+		host := u.Hostname()
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return &Error{Kind: KindRefused, Message: "config.ServerURL is plaintext (" + u.Scheme + "://) to " + host +
+			": use https:// or wss://, or set AllowPlaintext for a trusted private network"}
+	}
+	return &Error{Kind: KindRefused, Message: "config.ServerURL must be http(s):// or ws(s)://"}
 }
 
 // Storage is where an app keeps its rows.
@@ -48,15 +89,6 @@ const (
 	StorageMemory     Storage = "memory"
 	StoragePersistent Storage = "persistent"
 )
-
-// BackendIssuer is the issuer of a backend's Session.
-const BackendIssuer = "jazz:backend"
-
-// Session is the user an app acts as.
-type Session struct {
-	Issuer  string `json:"issuer"`
-	Subject string `json:"subject"`
-}
 
 // DB is an open app. It is safe for concurrent use.
 type DB struct {
@@ -71,13 +103,11 @@ func (db *DB) computed() any { return db.app }
 // Open opens the app cfg describes. Prefer the generated jazzapp.Open,
 // which embeds the app's jazz.app.json.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
-	if err := loadFFI(); err != nil {
+	if err := cfg.checkTransport(); err != nil {
 		return nil, err
 	}
-	if cfg.Session != nil && cfg.Session.Issuer == "" {
-		session := *cfg.Session
-		session.Issuer = BackendIssuer
-		cfg.Session = &session
+	if err := loadFFI(); err != nil {
+		return nil, err
 	}
 	var auth map[string]any
 	if cfg.Auth != nil {
