@@ -1926,7 +1926,7 @@ mod tests {
         // A bundle mismatch is its own kind, a refusal: never retryable I/O.
         let mismatch = JazzError::from(for_user_error(
             "alice",
-            jazz_app::Error::BundleMismatch {
+            jazz_app_support::Error::BundleMismatch {
                 own: "aa".into(),
                 served: "bb".into(),
             },

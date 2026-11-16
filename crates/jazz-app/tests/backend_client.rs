@@ -208,7 +208,7 @@ async fn a_trusted_client_with_other_permissions_acts_for_no_user() {
     assert_eq!(served, backend.bundle().unwrap());
     assert_ne!(own, served);
 
-    job.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+    job.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
     a.shutdown().await.unwrap();
     backend.shutdown().await.unwrap();
     server.shutdown().await;
