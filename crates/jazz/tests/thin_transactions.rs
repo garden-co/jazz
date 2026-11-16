@@ -15,7 +15,9 @@ use jazz::query::Query;
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::schema::JazzSchema;
 use jazz::thin::{ThinBody, ThinOp};
-use jazz::thin_transactions::ThinTransactions;
+use jazz::thin_transactions::{
+    MAX_OPEN_TRANSACTION_UPLOADS, Step, ThinRouter, ThinTransactions, answer_frames,
+};
 use jazz::tools::{
     CmpOp, ColumnType, OpenTransactionId, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies,
     TableSchemaBuilder,
@@ -758,4 +760,345 @@ fn a_write_builds_on_the_cores_row_not_a_stale_copy() {
     );
     session.serve(5, ThinOp::Rollback { transaction: tx });
     assert!(titles(&session.core).is_empty(), "the row stays deleted");
+}
+
+const TX: &str = "0190f3e4000070008000000000000007";
+
+fn frame(id: u64, op: ThinOp) -> Vec<u8> {
+    jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinRequest(
+        jazz::thin::ThinRequest { id, op },
+    ))
+    .unwrap()
+}
+
+fn plain_insert(value: &str) -> ThinOp {
+    ThinOp::Insert {
+        table: "notes".to_owned(),
+        cells: title(value),
+        options: Vec::new(),
+        transaction: None,
+    }
+}
+
+fn plain_read(row: RowUuid) -> ThinOp {
+    ThinOp::Query {
+        query: by_id(row),
+        options: Vec::new(),
+        transaction: None,
+    }
+}
+
+/// The core's answer to request `id`, as the client receives it.
+fn core_answer(id: u64) -> Vec<u8> {
+    jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
+        jazz::thin::ThinResponse {
+            id,
+            body: ThinBody::Ok,
+        },
+    ))
+    .unwrap()
+}
+
+/// What `steps` release: core frames, and backend requests by id.
+fn released(steps: Vec<Step>) -> Vec<String> {
+    steps
+        .into_iter()
+        .map(|step| match step {
+            Step::ToCore(frames) => format!("core:{}", frames.len()),
+            Step::ToBackend(request) => format!("backend:{}", request.id),
+        })
+        .collect()
+}
+
+#[test]
+fn a_thin_connection_routes_transaction_requests_to_the_backend_and_the_rest_to_the_core() {
+    let mut router = ThinRouter::default();
+    let core_frames = vec![
+        frame(
+            1,
+            ThinOp::Subscribe {
+                query: by_id(RowUuid::from_bytes([1; 16])),
+                options: Vec::new(),
+            },
+        ),
+        // A frame that is not a thin request passes through too.
+        jazz::wire::encode_frame(&jazz::wire::WireFrame::Heartbeat).unwrap(),
+    ];
+    router
+        .from_client(vec![
+            core_frames[0].clone(),
+            core_frames[1].clone(),
+            frame(
+                2,
+                ThinOp::Begin {
+                    transaction: TX.to_owned(),
+                    kind: "mergeable".to_owned(),
+                },
+            ),
+            frame(3, insert(TX, "staged")),
+        ])
+        .unwrap();
+    // A live query is not waited on: the transaction goes on at once.
+    let steps = router.ready();
+    assert_eq!(steps[0], Step::ToCore(core_frames));
+    assert_eq!(released(steps), ["core:2", "backend:2", "backend:3"]);
+    assert!(router.from_client(vec![vec![0xff, 0xff, 0xff]]).is_err());
+}
+
+#[test]
+fn a_transaction_request_waits_for_the_plain_write_sent_before_it() {
+    let mut router = ThinRouter::default();
+    let row = RowUuid::from_bytes([7; 16]);
+    // insert(x), not awaited, then the transaction reads x.
+    router
+        .from_client(vec![
+            frame(1, plain_insert("x")),
+            frame(
+                2,
+                ThinOp::Begin {
+                    transaction: TX.to_owned(),
+                    kind: "mergeable".to_owned(),
+                },
+            ),
+            frame(3, read(TX, row)),
+        ])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["core:1"]);
+    assert!(
+        router.ready().is_empty(),
+        "the core has not answered the write"
+    );
+    router.from_core(&[core_answer(9)]);
+    assert!(router.ready().is_empty(), "another request's answer");
+    router.from_core(&[core_answer(1)]);
+    assert_eq!(released(router.ready()), ["backend:2", "backend:3"]);
+}
+
+#[test]
+fn a_plain_read_sent_after_a_commit_waits_for_the_commit() {
+    let mut router = ThinRouter::default();
+    let row = RowUuid::from_bytes([7; 16]);
+    router
+        .from_client(vec![frame(5, commit(TX)), frame(6, plain_read(row))])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["backend:5"]);
+    assert!(router.ready().is_empty(), "the commit is not answered yet");
+    router.answered(5);
+    assert_eq!(released(router.ready()), ["core:1"]);
+    // Later backend requests wait for the read in turn.
+    router.from_client(vec![frame(7, read(TX, row))]).unwrap();
+    assert!(router.ready().is_empty());
+    router.from_core(&[core_answer(6)]);
+    assert_eq!(released(router.ready()), ["backend:7"]);
+}
+
+#[test]
+fn a_split_answer_from_the_core_frees_what_waits_on_it() {
+    let mut router = ThinRouter::default();
+    router
+        .from_client(vec![
+            frame(1, plain_read(RowUuid::from_bytes([1; 16]))),
+            frame(2, commit(TX)),
+        ])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["core:1"]);
+    let parts = answer_frames(jazz::thin::ThinResponse {
+        id: 1,
+        body: ThinBody::Rows {
+            rows: vec![7; 3 * 1024 * 1024],
+            relation: false,
+        },
+    });
+    assert!(parts.len() > 1);
+    router.from_core(&parts[..1]);
+    assert!(router.ready().is_empty(), "not whole yet");
+    router.from_core(&parts[1..]);
+    assert_eq!(released(router.ready()), ["backend:2"]);
+}
+
+#[test]
+fn an_upload_begun_in_a_transaction_is_the_backends_until_it_ends() {
+    let begin = |id: u64, transaction: Option<&str>| {
+        frame(
+            id,
+            ThinOp::BeginStream {
+                table: "notes".to_owned(),
+                row: [3; 16],
+                cells: Vec::new(),
+                column: "title".to_owned(),
+                mutation: "insert".to_owned(),
+                options: Vec::new(),
+                transaction: transaction.map(str::to_owned),
+            },
+        )
+    };
+    let chunk = |id: u64, stream: u64| {
+        frame(
+            id,
+            ThinOp::StreamChunk {
+                stream,
+                chunk: vec![1, 2, 3],
+            },
+        )
+    };
+    let mut router = ThinRouter::default();
+    router
+        .from_client(vec![
+            begin(7, Some(TX)),
+            chunk(8, 7),
+            frame(9, ThinOp::FinishStream { stream: 7 }),
+        ])
+        .unwrap();
+    assert_eq!(
+        released(router.ready()),
+        ["backend:7", "backend:8", "backend:9"]
+    );
+    for id in [7, 8, 9] {
+        router.answered(id);
+    }
+    // Finished: a chunk naming it is the core's now, as is an upload
+    // outside a transaction.
+    router
+        .from_client(vec![chunk(10, 7), begin(11, None), chunk(12, 11)])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["core:3"]);
+    for id in [10, 11, 12] {
+        router.from_core(&[core_answer(id)]);
+    }
+
+    // A transaction's end ends its uploads, and only so many stay open.
+    let mut ids = 100..;
+    let mut frames = Vec::new();
+    for _ in 0..=MAX_OPEN_TRANSACTION_UPLOADS {
+        frames.push(begin(ids.next().unwrap(), Some(TX)));
+    }
+    let last = 100 + MAX_OPEN_TRANSACTION_UPLOADS as u64;
+    frames.push(chunk(ids.next().unwrap(), last));
+    frames.push(chunk(ids.next().unwrap(), 100));
+    router.from_client(frames).unwrap();
+    let steps = released(router.ready());
+    assert_eq!(steps.len(), MAX_OPEN_TRANSACTION_UPLOADS + 1, "{steps:?}");
+    assert!(steps.iter().all(|step| step.starts_with("backend:")));
+    for id in 100..=last {
+        router.answered(id);
+    }
+    // The chunk of the upload past the bound went to the core; the other,
+    // the backend's, waits for its answer.
+    assert_eq!(released(router.ready()), ["core:1"]);
+    router.from_core(&[core_answer(117)]);
+    assert_eq!(released(router.ready()), ["backend:118"]);
+    router.answered(118);
+    router
+        .from_client(vec![frame(200, commit(TX)), chunk(201, 100)])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["backend:200"]);
+    router.answered(200);
+    assert_eq!(
+        released(router.ready()),
+        ["core:1"],
+        "ended with its transaction"
+    );
+}
+
+#[test]
+fn a_split_request_is_joined_to_route_it_and_reaches_the_core_as_its_parts() {
+    let big = "x".repeat(3 * 1024 * 1024);
+    let mut router = ThinRouter::default();
+
+    let staged = jazz::thin::thin_wire_frames(frame(1, insert(TX, &big))).unwrap();
+    assert!(staged.len() > 1, "split");
+    for part in staged {
+        router.from_client(vec![part]).unwrap();
+    }
+    let steps = router.ready();
+    let [Step::ToBackend(request)] = steps.as_slice() else {
+        panic!("expected the joined request, got {steps:?}");
+    };
+    assert_eq!(request.op, insert(TX, &big));
+    router.answered(1);
+
+    let plain = jazz::thin::thin_wire_frames(frame(2, plain_insert(&big))).unwrap();
+    router.from_client(plain.clone()).unwrap();
+    assert_eq!(router.ready(), [Step::ToCore(plain)], "the same parts");
+}
+
+#[test]
+fn a_large_answer_travels_in_parts_the_client_joins() {
+    let answer = jazz::thin::ThinResponse {
+        id: 9,
+        body: ThinBody::Rows {
+            rows: vec![7u8; 3 * 1024 * 1024],
+            relation: false,
+        },
+    };
+    let frames = answer_frames(answer.clone());
+    assert!(frames.len() > 1);
+    let mut assembler = jazz::thin::ThinAssembler::default();
+    let mut joined = None;
+    for frame in frames {
+        let jazz::wire::WireFrame::ThinPart(part) = jazz::wire::decode_frame(&frame).unwrap()
+        else {
+            panic!("expected parts");
+        };
+        joined = assembler.push(part).unwrap();
+    }
+    let jazz::wire::WireFrame::ThinResponse(joined) =
+        jazz::wire::decode_postcard_frame(&joined.unwrap()).unwrap()
+    else {
+        panic!("expected the answer");
+    };
+    assert_eq!(joined, answer);
+    let small = jazz::thin::ThinResponse {
+        id: 1,
+        body: ThinBody::Ok,
+    };
+    assert_eq!(answer_frames(small).len(), 1);
+}
+
+#[test]
+fn the_router_keeps_the_schema_the_client_bound() {
+    let mut router = ThinRouter::default();
+    assert!(router.schema().is_none());
+    router
+        .from_client(vec![frame(
+            1,
+            ThinOp::Schema {
+                schema: b"{}".to_vec(),
+            },
+        )])
+        .unwrap();
+    assert_eq!(router.schema(), Some(&b"{}"[..]));
+    assert_eq!(released(router.ready()), ["core:1"]);
+}
+
+#[test]
+fn routed_requests_are_served_by_the_sessions_transactions() {
+    let mut session = Session::open();
+    let existing = core_row(&session, "on the core");
+    let tx = OpenTransactionId::new().to_string();
+    let mut router = ThinRouter::default();
+    router
+        .from_client(vec![
+            frame(
+                1,
+                ThinOp::Begin {
+                    transaction: tx.clone(),
+                    kind: "serializable".to_owned(),
+                },
+            ),
+            frame(2, update(&tx, existing, "changed")),
+            frame(3, commit(&tx)),
+        ])
+        .unwrap();
+    let mut answers = Vec::new();
+    for step in router.ready() {
+        let Step::ToBackend(request) = step else {
+            panic!("all the backend's");
+        };
+        answers.push(session.serve(request.id, request.op));
+    }
+    assert_eq!(answers[0], ThinBody::Ok);
+    assert!(matches!(answers[1], ThinBody::Staged { .. }));
+    assert!(matches!(answers[2], ThinBody::Written { .. }));
+    assert_eq!(titles(&session.core), ["changed"]);
 }
