@@ -128,6 +128,28 @@ public class Jazz internal constructor(
         return flow
     }
 
+    /** Stops syncing (TS's `disconnect`): reads and writes go on locally until [reconnect]. */
+    public suspend fun disconnect(): Unit = io { native.disconnect() }
+
+    /** Syncs again after [disconnect]. */
+    public suspend fun reconnect(): Unit = io { native.reconnect() }
+
+    /**
+     * Closes the app and deletes its local store (e.g. on sign-out from a
+     * shared device). Refused while another open app uses the same `dataDir`.
+     */
+    public suspend fun deleteClientStorage(): Unit = io { native.deleteClientStorage() }
+
+    /**
+     * Each write the server refused that nobody waited on (a local-first
+     * write, not at [WriteTier.Global]), as TS's `onMutationError`.
+     * Collecting starts watching.
+     */
+    public val mutationErrors: Flow<MutationError> get() = callbackFlow {
+        val cancel = withContext(dispatcher) { native.watchMutationErrors { json -> trySend(MutationError.parse(json)) } }
+        awaitClose { cancel() }
+    }.buffer(Channel.UNLIMITED)
+
     /** Asks the [JazzAuth.Bearer] provider for a fresh token ([TokenReason.Refresh]), e.g. after an `Expired` session. */
     public suspend fun refreshSession(): Unit = io { native.refresh() }
 
@@ -282,7 +304,9 @@ public class Jazz internal constructor(
 
     /**
      * Runs [block] in a transaction: its reads see its own writes, and its
-     * writes apply together. It commits when [block] returns (at [tier]:
+     * writes apply together. By default (as TS's `transaction`) its writes
+     * merge with concurrent ones; with [serializable] a commit that conflicts
+     * with a concurrent one throws [JazzException.Conflict] instead. It commits when [block] returns (at [tier]:
      * with [WriteTier.Global] it returns once the server accepted it) and
      * rolls back when [block] throws, rethrowing. Returns [block]'s value.
      *
@@ -294,8 +318,12 @@ public class Jazz internal constructor(
      * }
      * ```
      */
-    public suspend fun <T> transaction(tier: WriteTier? = null, block: suspend (Transaction) -> T): T {
-        val native = io { native.begin() }
+    public suspend fun <T> transaction(
+        tier: WriteTier? = null,
+        serializable: Boolean = false,
+        block: suspend (Transaction) -> T,
+    ): T {
+        val native = io { if (serializable) native.begin() else native.beginMergeable() }
         val tx = Transaction(native)
         val result = try {
             block(tx)
@@ -406,16 +434,22 @@ public class Jazz internal constructor(
         val rows = LinkedHashMap<String, JsonObject>()
         raw(query, tier).collect { d ->
             if (d.reset) rows.clear()
-            for (id in d.removed) rows.remove(id)
-            for (row in d.added + d.updated) rows[(row["id"] as JsonPrimitive).content] = row
+            // A result's key: `$key` where the core sends one (a history or union
+            // result, where one row id can be several results), else the row's id.
+            for (key in d.removedKeys ?: d.removed) rows.remove(key)
+            for (row in d.added + d.updated) rows[resultKey(row)] = row
             emit(query.sort(rows.values.toList()).map { decode(query, it) })
         }
     }.distinctUntilChanged()
+
+    private fun resultKey(row: JsonObject): String =
+        ((row["\$key"] ?: row["id"]) as JsonPrimitive).content
 
     private class RawDelta(
         val added: List<JsonObject>,
         val updated: List<JsonObject>,
         val removed: List<String>,
+        val removedKeys: List<String>?,
         val reset: Boolean,
         val coalesced: Boolean,
     )
@@ -437,6 +471,7 @@ public class Jazz internal constructor(
                             added = (o["added"] as? JsonArray)?.objects() ?: emptyList(),
                             updated = (o["updated"] as? JsonArray)?.objects() ?: emptyList(),
                             removed = o["removed"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+                            removedKeys = o["removedKeys"]?.jsonArray?.map { it.jsonPrimitive.content },
                             reset = o["reset"]?.jsonPrimitive?.booleanOrNull ?: false,
                             coalesced = o["coalesced"]?.jsonPrimitive?.booleanOrNull ?: false,
                         ),

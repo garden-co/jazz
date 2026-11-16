@@ -135,8 +135,37 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun subscribeAt(queryJson: String, tier: String, onDelta: (String) -> Unit, onError: (String, String) -> Unit): () -> Unit =
         listen(onDelta, onError) { handle.subscribeAt(queryJson, tier, it) }
 
-    override fun begin(): NativeTransaction {
-        val tx = live { handle.begin() }
+    override fun begin(): NativeTransaction = transaction(live { handle.begin() })
+
+    override fun beginMergeable(): NativeTransaction = transaction(live { handle.beginMergeable() })
+
+    override fun disconnect(): Unit = live { handle.disconnect() }
+    override fun reconnect(): Unit = live { handle.reconnect() }
+
+    override fun deleteClientStorage() {
+        if (!closed.compareAndSet(false, true)) throw JazzException.Closed()
+        try {
+            call { handle.deleteClientStorage() }
+        } finally {
+            handle.destroy()
+        }
+    }
+
+    override fun watchMutationErrors(onError: (String) -> Unit): () -> Unit {
+        val listener = object : uniffi.jazz_ffi.StateListener {
+            override fun onChange(stateJson: String) = onError(stateJson)
+        }
+        val watch = live { handle.watchMutationErrors(listener) }
+        return {
+            try {
+                watch.cancel()
+            } finally {
+                watch.destroy()
+            }
+        }
+    }
+
+    private fun transaction(tx: uniffi.jazz_ffi.Transaction): NativeTransaction {
         return object : NativeTransaction {
             override fun all(queryJson: String): String = call { tx.all(queryJson) }
             override fun one(queryJson: String): String? = call { tx.one(queryJson) }
