@@ -10,32 +10,19 @@ After [user-owned data](/docs/recipes/access-control/user-owned-data), the next 
 
 Add a `todoShares` table that records which user has access to which todo.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "columns": {
-        "title": "string",
-        "done": "boolean"
-      },
-      "relations": {
-        "shares": { "reverse": "todoShares", "relation": "todo" }
-      }
-    },
-    "todoShares": {
-      "columns": {
-        "todoId": "uuid",
-        "user_id": "uuid",
-        "can_edit": "boolean"
-      },
-      "relations": {
-        "todo": { "rel": "todos", "column": "todoId" }
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  todos: s.table(
+    { title: s.string(), done: s.boolean() },
+    { shares: s.reverse("todoShares", "todo") },
+  ),
+  todoShares: s.table(
+    { todoId: s.uuid(), user_id: s.uuid(), can_edit: s.boolean() },
+    { todo: s.rel("todos", "todoId") },
+  ),
+});
 ```
 
 ## Permissions
@@ -44,45 +31,32 @@ The creator can do everything. Share recipients get read access, and optionally 
 A share row is readable by its recipient and by the todo's creator, who needs it to list and revoke
 access.
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": {
-        "anyOf": [
-          "$createdBy.account = session.user",
-          "exists todoShares(todoId = this.id, user_id = session.user)"
-        ]
-      },
-      "insert": "true",
-      "update": {
-        "anyOf": [
-          "$createdBy.account = session.user",
-          "exists todoShares(todoId = this.id, user_id = session.user, can_edit = true)"
-        ]
-      },
-      "delete": "$createdBy.account = session.user"
-    },
-    "todoShares": {
-      "insert": {
-        "$comment": "Only the todo creator can manage shares.",
-        "where": "exists todos(id = this.todoId, $createdBy.account = session.user)"
-      },
-      "read": {
-        "$comment": "The recipient sees their share, and the todo's creator sees every share of it, so they can list who has access and revoke it.",
-        "where": {
-          "anyOf": [
-            "user_id = session.user",
-            "exists todos(id = this.todoId, $createdBy.account = session.user)"
-          ]
-        }
-      },
-      "delete": "exists todos(id = this.todoId, $createdBy.account = session.user)"
-    }
-  }
-}
+```ts title="schema.ts"
+const { definePermissions, exists, session, anyOf } = schema;
+
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: (todo) =>
+      anyOf(createdByMe, exists.todoShares({ todoId: todo.id, user_id: session.user })),
+    insert: true,
+    update: (todo) =>
+      anyOf(
+        createdByMe,
+        exists.todoShares({ todoId: todo.id, user_id: session.user, can_edit: true }),
+      ),
+    delete: createdByMe,
+  },
+  todoShares: {
+    // Only the todo creator can manage shares.
+    insert: (share) => share.todo.where(createdByMe),
+    // The recipient sees their share, and the todo's creator sees every share of it,
+    // so they can list who has access and revoke it.
+    read: (share) => anyOf({ user_id: session.user }, share.todo.where(createdByMe)),
+    delete: (share) => share.todo.where(createdByMe),
+  },
+});
 ```
 
 See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `anyOf`, and `allOf`.

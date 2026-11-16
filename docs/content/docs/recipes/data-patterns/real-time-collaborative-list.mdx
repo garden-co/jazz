@@ -10,82 +10,62 @@ Every client subscribes to the same data and sees changes as they happen. This r
 
 A shared project with collaboratively-edited tasks.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "projects": {
-      "columns": {
-        "name": "string"
-      },
-      "relations": {
-        "tasks": { "reverse": "tasks", "relation": "project" },
-        "members": { "reverse": "projectMembers", "relation": "project" }
-      }
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  projects: s.table(
+    { name: s.string() },
+    {
+      tasks: s.reverse("tasks", "project"),
+      members: s.reverse("projectMembers", "project"),
     },
-    "tasks": {
-      "columns": {
-        "title": "string",
-        "done": "boolean",
-        "assignee_id": "uuid?",
-        "projectId": "uuid"
-      },
-      "relations": {
-        "project": { "rel": "projects", "column": "projectId" }
-      }
+  ),
+  tasks: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      assignee_id: s.uuid().optional(),
+      projectId: s.uuid(),
     },
-    "projectMembers": {
-      "columns": {
-        "projectId": "uuid",
-        "user_id": "uuid"
-      },
-      "relations": {
-        "project": { "rel": "projects", "column": "projectId" }
-      }
-    }
-  }
-}
+    { project: s.rel("projects", "projectId") },
+  ),
+  projectMembers: s.table(
+    { projectId: s.uuid(), user_id: s.uuid() },
+    { project: s.rel("projects", "projectId") },
+  ),
+});
 ```
 
 ## Permissions
 
 Project members can read and write tasks. The creator can manage membership. Tasks inherit access from their project via `allowedTo`.
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "projects": {
-      "$comment": "The creator and members.",
-      "read": {
-        "anyOf": [
-          "$createdBy.account = session.user",
-          "exists projectMembers(projectId = this.id, user_id = session.user)"
-        ]
-      },
-      "insert": "true",
-      "update": "$createdBy.account = session.user"
-    },
-    "tasks": {
-      "$comment": "Inherit from the project.",
-      "read": "allowedTo.read(project)",
-      "insert": "allowedTo.read(project)",
-      "update": "allowedTo.read(project)"
-    },
-    "projectMembers": {
-      "$comment": "Only the creator can manage members.",
-      "insert": "exists projects(id = this.projectId, $createdBy.account = session.user)",
-      "read": {
-        "anyOf": [
-          "exists projects(id = this.projectId, $createdBy.account = session.user)",
-          "user_id = session.user"
-        ]
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+const { definePermissions, exists, allowedTo, session, anyOf } = schema;
+
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  // The creator and members.
+  projects: {
+    read: (project) =>
+      anyOf(createdByMe, exists.projectMembers({ projectId: project.id, user_id: session.user })),
+    insert: true,
+    update: createdByMe,
+  },
+  // Inherit from the project.
+  tasks: {
+    read: (task) => allowedTo.read(task.project),
+    insert: (task) => allowedTo.read(task.project),
+    update: (task) => allowedTo.read(task.project),
+  },
+  // Only the creator can manage members.
+  projectMembers: {
+    insert: (member) => member.project.where(createdByMe),
+    read: (member) => anyOf(member.project.where(createdByMe), { user_id: session.user }),
+  },
+});
 ```
 
 See [Declarative Permissions](/docs/schemas/policies) for `exists`, `anyOf` and `allowedTo`.

@@ -19,118 +19,98 @@ This recipe shows how to build a workspace where users have different levels of 
 
 Three tables: the workspace itself, a members join table that records each user's role, and the documents that belong to the workspace.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "workspaces": {
-      "columns": {
-        "name": "string"
-      },
-      "relations": {
-        "members": { "reverse": "workspaceMembers", "relation": "workspace" },
-        "documents": { "reverse": "documents", "relation": "workspace" }
-      }
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  workspaces: s.table(
+    { name: s.string() },
+    {
+      members: s.reverse("workspaceMembers", "workspace"),
+      documents: s.reverse("documents", "workspace"),
     },
-    "workspaceMembers": {
-      "columns": {
-        "workspaceId": "uuid",
-        "user_id": "uuid",
-        "role": { "enum": ["reader", "writer", "contributor", "admin"] }
-      },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspaceId" }
-      }
+  ),
+  workspaceMembers: s.table(
+    {
+      workspaceId: s.uuid(),
+      user_id: s.uuid(),
+      role: s.enum("reader", "writer", "contributor", "admin"),
     },
-    "documents": {
-      "columns": {
-        "title": "string",
-        "content": "string",
-        "workspaceId": "uuid"
-      },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspaceId" }
-      }
-    }
-  }
-}
+    { workspace: s.rel("workspaces", "workspaceId") },
+  ),
+  documents: s.table(
+    { title: s.string(), content: s.string(), workspaceId: s.uuid() },
+    { workspace: s.rel("workspaces", "workspaceId") },
+  ),
+});
 ```
 
 ## Permissions
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "defs": {
-    "isMember($workspace)": "exists workspaceMembers(workspaceId = $workspace, user_id = session.user)",
-    "hasRole($workspace, $role)": "exists workspaceMembers(workspaceId = $workspace, user_id = session.user, role = $role)",
-    "isAdmin($workspace)": "hasRole($workspace, 'admin')"
+```ts title="schema.ts"
+const { definePermissions, exists, session, anyOf, allOf } = schema;
+
+type Role = "reader" | "writer" | "contributor" | "admin";
+
+const isMember = (workspaceId: s.Uuid) =>
+  exists.workspaceMembers({ workspaceId, user_id: session.user });
+const hasRole = (workspaceId: s.Uuid, role: Role) =>
+  exists.workspaceMembers({ workspaceId, user_id: session.user, role });
+const isAdmin = (workspaceId: s.Uuid) => hasRole(workspaceId, "admin");
+
+export const permissions = definePermissions({
+  documents: {
+    read: (doc) => isMember(doc.workspaceId),
+    insert: (doc) =>
+      anyOf(
+        hasRole(doc.workspaceId, "writer"),
+        hasRole(doc.workspaceId, "contributor"),
+        hasRole(doc.workspaceId, "admin"),
+      ),
+    // Writers and admins can edit any document; contributors only their own.
+    update: (doc) =>
+      anyOf(
+        hasRole(doc.workspaceId, "writer"),
+        hasRole(doc.workspaceId, "admin"),
+        allOf({ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")),
+      ),
+    // Writers and admins can delete any document; contributors only their own.
+    delete: (doc) =>
+      anyOf(
+        hasRole(doc.workspaceId, "writer"),
+        isAdmin(doc.workspaceId),
+        allOf({ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")),
+      ),
   },
-  "tables": {
-    "documents": {
-      "read": "isMember(this.workspaceId)",
-      "insert": {
-        "anyOf": [
-          "hasRole(this.workspaceId, 'writer')",
-          "hasRole(this.workspaceId, 'contributor')",
-          "hasRole(this.workspaceId, 'admin')"
-        ]
-      },
-      "update": {
-        "$comment": "Writers and admins can edit any document; contributors only their own.",
-        "where": {
-          "anyOf": [
-            "hasRole(this.workspaceId, 'writer')",
-            "hasRole(this.workspaceId, 'admin')",
-            "$createdBy.account = session.user and hasRole(this.workspaceId, 'contributor')"
-          ]
-        }
-      },
-      "delete": {
-        "$comment": "Writers and admins can delete any document; contributors only their own.",
-        "where": {
-          "anyOf": [
-            "hasRole(this.workspaceId, 'writer')",
-            "isAdmin(this.workspaceId)",
-            "$createdBy.account = session.user and hasRole(this.workspaceId, 'contributor')"
-          ]
-        }
-      }
-    },
-    "workspaces": {
-      "read": "isMember(this.id)",
-      "insert": "true",
-      "update": "isAdmin(this.id)",
-      "delete": "isAdmin(this.id)"
-    },
-    "workspaceMembers": {
-      "read": "isMember(this.workspaceId)",
-      "insert": {
-        "$comment": "Admins add members; a workspace's creator can add themselves as its first admin.",
-        "where": {
-          "anyOf": [
-            "isAdmin(this.workspaceId)",
-            "user_id = session.user and role = 'admin' and exists workspaces(id = this.workspaceId, $createdBy.account = session.user)"
-          ]
-        }
-      },
-      "update": "isAdmin(this.workspaceId)",
-      "delete": {
-        "$comment": "Admins can remove any member; members can leave on their own.",
-        "where": { "anyOf": ["isAdmin(this.workspaceId)", "user_id = session.user"] }
-      }
-    }
-  }
-}
+  workspaces: {
+    read: (ws) => isMember(ws.id),
+    insert: true,
+    update: (ws) => isAdmin(ws.id),
+    delete: (ws) => isAdmin(ws.id),
+  },
+  workspaceMembers: {
+    read: (m) => isMember(m.workspaceId),
+    // Admins add members; a workspace's creator can add themselves as its first admin.
+    insert: (m) =>
+      anyOf(
+        isAdmin(m.workspaceId),
+        allOf(
+          { user_id: session.user, role: "admin" },
+          exists.workspaces({ id: m.workspaceId, $createdBy: session.user }),
+        ),
+      ),
+    update: (m) => isAdmin(m.workspaceId),
+    // Admins can remove any member; members can leave on their own.
+    delete: (m) => anyOf(isAdmin(m.workspaceId), { user_id: session.user }),
+  },
+});
 ```
 
-The `defs` are reusable helpers: `isMember`, `hasRole` and `isAdmin` take the workspace id to check
-(`this.workspaceId` on a document or membership, `this.id` on a workspace). See
-[expressions](/docs/reference/app-files#expressions) for the grammar.
+`isMember`, `hasRole` and `isAdmin` are plain TypeScript helpers: they take the workspace id to check
+(`doc.workspaceId` on a document, `m.workspaceId` on a membership, `ws.id` on a workspace).
+`npx jazz-tools generate` inlines them into `jazz.permissions.json`.
 
-- **Contributor** edit access requires both `$createdBy.account = session.user` (the row belongs to this author) and a matching contributor membership. Writers and admins bypass the creator check entirely.
+- **Contributor** edit access requires both `{ $createdBy: session.user }` (the row belongs to this author) and a matching contributor membership. Writers and admins bypass the creator check entirely.
 - **Bootstrap insert**: the second branch of the `workspaceMembers` insert policy lets the workspace creator add themselves as the first admin&hairsp;—&hairsp;otherwise `isAdmin` would block everyone, since there are no members yet.
 - **Leave on your own**: members can delete their own membership row regardless of role. Admins can remove anyone.
 
