@@ -61,9 +61,11 @@ public struct Splice: Sendable {
 
 /// A text-merge column of one row, for editing: each edit is a merge with
 /// what others changed meanwhile, not a whole-value write. `jazz.text(task,
-/// JazzApp.tasks.notes)`. Offsets are in UTF-16 units (as `NSRange` and
-/// `UITextView` count); one inside a surrogate pair is refused. Edits run
-/// one at a time. `current` is the text as last written here or, once this
+/// JazzApp.tasks.notes)`. Positions are `String.Index`es of `current`
+/// (take them just before the edit); `NSRange`s, as `UITextView` and
+/// `NSAttributedString` give them, are UTF-16, and `utf16:` takes raw
+/// UTF-16 offsets. A position inside a character (or a surrogate pair) is
+/// refused. Edits run one at a time. `current` is the text as last written here or, once this
 /// handle's own writes have come back, as `changes` last delivered it.
 public final class JazzText<R: Row>: @unchecked Sendable {
     let jazz: Client
@@ -90,29 +92,51 @@ public final class JazzText<R: Row>: @unchecked Sendable {
         try await edit { _ in text }
     }
 
-    public func insert(_ text: String, at offset: Int) async throws {
-        try await replace(offset..<offset, with: text)
+    /// Inserts `text` at `index`, a position in `current`.
+    public func insert(_ text: String, at index: String.Index) async throws {
+        try await replace(index..<index, with: text)
     }
 
-    public func delete(_ range: Range<Int>) async throws {
+    /// Deletes `range` of `current`.
+    public func delete(_ range: Range<String.Index>) async throws {
         try await replace(range, with: "")
     }
 
-    /// Replaces the UTF-16 range `range` of `current` with `text`.
-    public func replace(_ range: Range<Int>, with text: String) async throws {
+    /// Replaces `range` of `current` (`current.range(of: "draft")`, say)
+    /// with `text`. Refused when `range` isn't on character boundaries of
+    /// `current` as the edit runs.
+    public func replace(_ range: Range<String.Index>, with text: String) async throws {
         try await edit { base throws in
-            let utf16 = Array(base.utf16)
-            guard range.lowerBound >= 0, range.upperBound <= utf16.count else {
-                throw JazzError.refused("range \(range) is outside the text (\(utf16.count) UTF-16 units)")
+            guard range.upperBound <= base.endIndex,
+                let lower = String.Index(range.lowerBound, within: base),
+                let upper = String.Index(range.upperBound, within: base)
+            else {
+                throw JazzError.refused("the range isn't on character boundaries of the text: take it from `current`")
             }
-            for offset in [range.lowerBound, range.upperBound] where offset < utf16.count {
-                if UTF16.isTrailSurrogate(utf16[offset]) {
-                    throw JazzError.refused("offset \(offset) is inside a surrogate pair")
-                }
-            }
-            return String(decoding: utf16[..<range.lowerBound], as: UTF16.self) + text
-                + String(decoding: utf16[range.upperBound...], as: UTF16.self)
+            var edited = base
+            edited.replaceSubrange(lower..<upper, with: text)
+            return edited
         }
+    }
+
+    /// Replaces the UTF-16 `range` (as `UITextView`'s `selectedRange` and
+    /// `textView(_:shouldChangeTextIn:replacementText:)` give it) with `text`.
+    public func replace(_ range: NSRange, with text: String) async throws {
+        try await edit { base throws in
+            guard let range = Range(range, in: base) else {
+                throw JazzError.refused(
+                    "range \(range) is outside the text or inside a surrogate pair (\(base.utf16.count) UTF-16 units)")
+            }
+            var edited = base
+            edited.replaceSubrange(range, with: text)
+            return edited
+        }
+    }
+
+    /// Replaces the raw UTF-16 offsets `range` of `current` with `text`. An
+    /// offset inside a surrogate pair is refused.
+    public func replace(utf16 range: Range<Int>, with text: String) async throws {
+        try await replace(NSRange(location: range.lowerBound, length: range.count), with: text)
     }
 
     /// One edit at a time, from `current`.

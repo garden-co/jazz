@@ -195,15 +195,38 @@ final class StagePlanTests: XCTestCase {
         let task = try await app.jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "a😀b", rank: 1))
         let notes = try await app.jazz.text(task, JazzApp.tasks.notes)
-        // Inside the emoji's surrogate pair: refused, nothing written.
+        // UTF-16 inside the emoji's surrogate pair: refused, nothing written,
+        // as an NSRange and as raw offsets.
+        for attempt in [
+            { try await notes.replace(NSRange(location: 2, length: 0), with: "X") },
+            { try await notes.replace(utf16: 2..<2, with: "X") },
+        ] as [() async throws -> Void] {
+            do {
+                try await attempt()
+                XCTFail("an offset inside a surrogate pair must be refused")
+            } catch let error as JazzError {
+                guard case .refused = error else { return XCTFail("\(error)") }
+            }
+        }
+        XCTAssertEqual(notes.current, "a😀b")
+        // String.Index: after the emoji, then the first character.
+        let text = notes.current
+        try await notes.insert("X", at: text.index(text.startIndex, offsetBy: 2))
+        try await notes.delete(notes.current.startIndex..<notes.current.index(after: notes.current.startIndex))
+        XCTAssertEqual(notes.current, "😀Xb")
+        // An index that falls inside a character of `current` (UTF-8 offset 2
+        // is inside the emoji): refused.
+        let other = "xyz"
         do {
-            try await notes.insert("X", at: 2)
-            XCTFail("an offset inside a surrogate pair must be refused")
+            try await notes.insert("Y", at: other.utf8.index(other.utf8.startIndex, offsetBy: 2))
+            XCTFail("an index that isn't on a character boundary must be refused")
         } catch let error as JazzError {
             guard case .refused = error else { return XCTFail("\(error)") }
         }
-        try await notes.insert("X", at: 3)  // after the emoji
-        try await notes.delete(0..<1)
+        // NSRange, as a UITextView gives it: after the emoji's 2 UTF-16 units.
+        try await notes.replace(NSRange(location: 2, length: 1), with: "Z")
+        XCTAssertEqual(notes.current, "😀Zb")
+        try await notes.replace(NSRange(location: 2, length: 1), with: "X")
         XCTAssertEqual(notes.current, "😀Xb")
 
         var seen: [String] = []
@@ -246,11 +269,11 @@ final class StagePlanTests: XCTestCase {
         let notes = try await app.jazz.text(task, JazzApp.tasks.notes)
         // Someone else's change is in the store before the handle edits.
         try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "Hello world", to: "Hello world!")
-        try await notes.insert("brave ", at: 6)
+        try await notes.insert("brave ", at: notes.current.index(notes.current.startIndex, offsetBy: 6))
         for try await text in notes.changes where text == "Hello brave world!" { break }
         XCTAssertEqual(notes.current, "Hello brave world!")
         // An append at the delivered end works.
-        try await notes.insert("?", at: notes.current.utf16.count)
+        try await notes.insert("?", at: notes.current.endIndex)
         let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
         XCTAssertEqual(stored?.notes, "Hello brave world!?")
         try await app.jazz.close()

@@ -191,6 +191,12 @@ handle:
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-mergeable-text-swift
 </include>
 
+Positions are Swift's own: `String.Index` and `Range<String.Index>` of `notes.current`
+(`notes.current.range(of: "draft")`, say), so an edit can't land inside a character. From a
+`UITextView` or `NSAttributedString`, pass their `NSRange` (UTF-16) to `notes.replace(range, with:)`
+as it is; `replace(utf16:with:)` takes raw UTF-16 offsets. A position inside a character or a
+surrogate pair is refused.
+
 `notes.changes` yields the merged text each time the row changes. Lower level, `jazz.edit(id,
 patch, edits: [.text(…), .splice(…), .jsonSet(…)])` makes several partial edits as one write.
 
