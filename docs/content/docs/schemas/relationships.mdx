@@ -15,10 +15,19 @@ with `{ "rel": "<target table>", "column": "<column>" }`:
   "format": 1,
   "tables": {
     "posts": {
-      "columns": { "authorId": "uuid", "title": "string" },
-      "relations": { "author": { "rel": "users", "column": "authorId" } }
+      "columns": {
+        "authorId": "uuid",
+        "title": "string"
+      },
+      "relations": {
+        "author": { "rel": "users", "column": "authorId" }
+      }
     },
-    "users": { "columns": { "name": "string" } }
+    "users": {
+      "columns": {
+        "name": "string"
+      }
+    }
   }
 }
 ```
@@ -47,12 +56,21 @@ relation's name, not the column:
   "format": 1,
   "tables": {
     "posts": {
-      "columns": { "authorId": "uuid", "title": "string" },
-      "relations": { "author": { "rel": "users", "column": "authorId" } }
+      "columns": {
+        "authorId": "uuid",
+        "title": "string"
+      },
+      "relations": {
+        "author": { "rel": "users", "column": "authorId" }
+      }
     },
     "users": {
-      "columns": { "name": "string" },
-      "relations": { "authoredPosts": { "reverse": "posts", "relation": "author" } }
+      "columns": {
+        "name": "string"
+      },
+      "relations": {
+        "authoredPosts": { "reverse": "posts", "relation": "author" }
+      }
     }
   }
 }

@@ -243,7 +243,11 @@ impl Jazz {
                 "for_user: pass the user's id, as the main backend's authenticate names it".into(),
             ));
         }
-        let session = user_session(link, user_id, claims).await?;
+        // On the client's runtime, whatever the caller's executor.
+        let (link, user) = (link.clone(), user_id.to_owned());
+        let session = self
+            .with_client(move |_| async move { user_session(&link, &user, claims).await })
+            .await?;
         Ok(self.scoped(session))
     }
 }
@@ -269,11 +273,22 @@ impl Jazz {
         if !self.info.serverless && !timeout.is_zero() {
             // An outage, or the server refusing, ends the wait: what is still
             // pending then is counted below.
-            // The wait ends on the client's thread too, so shutting down
-            // does not wait for it in turn.
+            // Every write the client holds, its users' handles' too (TS
+            // `close()` drains them all), not only this handle's: wait until
+            // none is pending, re-reading on each change of the client's
+            // status. The wait ends on the client's thread too, so shutting
+            // down does not wait for it in turn.
             let _ = self
                 .with_client(move |client| async move {
-                    let _ = tokio::time::timeout(timeout, client.wait_for_sync()).await;
+                    let mut changes = client.status_changes();
+                    let drained = async {
+                        while client.pending_uploads() > 0 {
+                            if changes.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+                    let _ = tokio::time::timeout(timeout, drained).await;
                     Ok(())
                 })
                 .await;

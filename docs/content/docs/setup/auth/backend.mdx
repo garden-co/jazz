@@ -1,7 +1,7 @@
 ---
 title: How Auth Works in Jazz
 description: "Learn how your backend decides who a user is, how the browser follows your auth, and what a session is."
-languageTabs: backend
+languageTabs: main-backend
 ---
 
 To authenticate users with Jazz, sign in your users with your auth library as usual. Provide an
@@ -339,7 +339,12 @@ column and base your policies on it:
   "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
   "tables": {
-    "todos": { "columns": { "title": "string", "owner_id": "uuid" } }
+    "todos": {
+      "columns": {
+        "title": "string",
+        "owner_id": "uuid"
+      }
+    }
   }
 }
 ```
