@@ -87,6 +87,13 @@ impl JazzHandle {
         self.core.surface(self.core.refresh())
     }
 
+    /// Links this device account to the user's account with the app's own
+    /// sign-in (`bearer`): the session becomes that user's. Returns the user
+    /// as JSON.
+    pub fn link(&self, bearer: String) -> Result<String> {
+        self.core.surface(self.core.link(&bearer))
+    }
+
     /// Signs the end user out and closes the app.
     pub fn sign_out(&self) -> Result<()> {
         self.core.surface(self.core.sign_out())
@@ -100,6 +107,12 @@ impl JazzHandle {
     /// Calls `listener` with each sync status, the current one first.
     pub fn watch_sync(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
         self.watch("sync", listener)
+    }
+
+    /// The permissions bundle a backend published and is pinned to;
+    /// `None` for a client.
+    pub fn bundle(&self) -> Result<Option<String>> {
+        self.core.surface(self.core.bundle())
     }
 
     /// The account id of the user a backend acts as (`session.user`);
