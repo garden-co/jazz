@@ -143,7 +143,7 @@ describe("generate in a Swift app", () => {
 });
 
 const KOTLIN_BUILD = `plugins { kotlin("jvm") version "2.2.21" }
-dependencies { implementation("tools.jazz:jazz-kotlin:2.0.0-alpha.65") }
+dependencies { implementation("tools.jazz:jazz-kotlin:2.0.0-alpha.66") }
 `;
 
 describe("generate in a Kotlin app", () => {
