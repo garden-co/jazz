@@ -49,6 +49,11 @@ pub enum Error {
     #[error("user {0:?} has no Jazz account yet")]
     NoAccount(String),
 
+    /// Closing left writes the server never got, and the store kept them
+    /// only in memory: they are lost.
+    #[error("closed with {pending} write(s) the server never got, lost with the memory store")]
+    Unsynced { pending: usize },
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
