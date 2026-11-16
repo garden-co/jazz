@@ -225,9 +225,27 @@ func (q *Query[R]) MarshalJSON() ([]byte, error) {
 	return json.Marshal(q.toJSON())
 }
 
+// readable is what a Select's rows may have fields for: the selected
+// columns and the included relations (nil without a Select).
+func (q *Query[R]) readable() []string {
+	if q.selected == nil {
+		return nil
+	}
+	names := append([]string(nil), q.selected...)
+	if q.raw != nil {
+		for _, inc := range q.raw.Include {
+			names = append(names, inc.Relation)
+		}
+	}
+	for _, inc := range q.include {
+		names = append(names, inc.relation)
+	}
+	return names
+}
+
 // All is every row the query matches, read through db (a *DB or a *Tx).
 func (q *Query[R]) All(ctx context.Context, db Querier) ([]R, error) {
-	if err := checkSelect[R](q.table, q.selected); err != nil {
+	if err := checkSelect[R](q.table, q.readable()); err != nil {
 		return nil, err
 	}
 	var raws []json.RawMessage
@@ -239,7 +257,7 @@ func (q *Query[R]) All(ctx context.Context, db Querier) ([]R, error) {
 
 // One is the first row the query matches, or nil if none does.
 func (q *Query[R]) One(ctx context.Context, db Querier) (*R, error) {
-	if err := checkSelect[R](q.table, q.selected); err != nil {
+	if err := checkSelect[R](q.table, q.readable()); err != nil {
 		return nil, err
 	}
 	var raw json.RawMessage
