@@ -16,10 +16,12 @@ swap() { # switch an app dir's jazz deps to the RC tarballs
   grep -oE "alpha\.6[0-9][^ '\"]*" pnpm-lock.yaml | sort -u | tr '\n' ' '; echo; }
 for a in t1-migrations:8601 t2-computed:8602 t3-permissions:8603 t6-import-style:8606 t7-enum-cases:8607; do
   d=${a%%:*}; p=${a##*:}; echo "===== $d"
-  ( cd $d && pnpm install >/dev/null 2>&1 && node $CLI upgrade > upgrade.log 2>&1; echo "upgrade exit=$?"; grep -E "^(Typecheck|Refus|Error)" upgrade.log | head -3; git status --short . | grep -v "upgrade.log" | head -40 > ../$d.changes; [ $d = t7-enum-cases ] && exit 0; swap
+  ( cd $d && pnpm install >/dev/null 2>&1 && node $CLI upgrade > upgrade.log 2>&1; echo "upgrade exit=$?"; grep -E "^(Typecheck|Refus|Error)" upgrade.log | head -3; git status --short . | grep -v "upgrade.log" | head -40 > ../$d.changes; case $d in t7-enum-cases|t2-computed) exit 0;; esac; swap
     npx jazz-tools generate > gen.log 2>&1; echo "generate exit=$?"
     npx jazz-tools generate --check > gc.log 2>&1; echo "generate --check exit=$?"; tail -1 gc.log )
-  if [ $d = t7-enum-cases ]; then grep -q 'tickets.kind' $d/upgrade.log && echo "PASS t7 refusal names tickets.kind" || echo "FAIL t7 refusal text"; [ -z "$(cat $d.changes)" ] && echo "PASS t7 untouched" || { echo "FAIL t7 files changed:"; cat $d.changes; }; continue; fi
+  # expected refusals (.66): t7 payload enum names tickets.kind; t2 computed/transforms "not supported yet". Nothing may be written.
+  case $d in t7-enum-cases) pat='tickets.kind';; t2-computed) pat='computed columns and transforms';; *) pat='';; esac
+  if [ -n "$pat" ]; then grep -q "$pat" $d/upgrade.log && echo "PASS $d refusal mentions '$pat'" || { echo "FAIL $d refusal text:"; head -5 $d/upgrade.log; }; [ -z "$(cat $d.changes)" ] && echo "PASS $d untouched" || { echo "FAIL $d files changed:"; cat $d.changes; }; continue; fi
   ./_common/run-smoke.sh $d $p | grep -E "^(PASS|FAIL|SMOKE|SERVER)"
 done
 echo "===== t1 fixture store (.65-written data)"; ./t1-migrations/fixture-check.sh | grep -E "^(PASS|FAIL|SMOKE|SERVER)"
