@@ -9535,11 +9535,18 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
-    /// The branch view it read through (`None`: the root view), resolved,
-    /// and as the reader named it (for the authority to resolve again).
+    /// The view it read through.
+    through: ReadThrough,
+    rows: Vec<(RowUuid, sync::Rank)>,
+}
+
+/// The view a transaction's read goes through: the root view, or a branch
+/// view, resolved (`view`) and as the reader named it (`source`, for the
+/// authority to resolve again).
+#[derive(Clone, Debug)]
+struct ReadThrough {
     view: Option<View>,
     source: ReadViewSourceSpec,
-    rows: Vec<(RowUuid, sync::Rank)>,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -10178,7 +10185,7 @@ impl Db {
                 for read in reads {
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
-                        view: read.view.clone(),
+                        view: read.through.view.clone(),
                         ..ReadSpec::default()
                     };
                     let now = inner.read_versions(&read.prepared, None, &spec)?;
@@ -10201,7 +10208,7 @@ impl Db {
             }
             if reads
                 .iter()
-                .any(|read| !matches!(read.source, ReadViewSourceSpec::Current))
+                .any(|read| !matches!(read.through.source, ReadViewSourceSpec::Current))
             {
                 return Err(Error::new(
                     ErrorCode::Query,
@@ -10263,7 +10270,7 @@ impl Db {
             for read in reads {
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    view: read.view.clone(),
+                    view: read.through.view.clone(),
                     ..ReadSpec::default()
                 };
                 if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
@@ -10681,8 +10688,7 @@ impl Db {
         include_deleted: bool,
         prefix: usize,
         identity: Option<AuthorSubject>,
-        view: Option<View>,
-        source: &ReadViewSourceSpec,
+        through: ReadThrough,
     ) -> Result<(), Error> {
         // A mergeable read records nothing: peek without the store gate,
         // so the batch's cached overlay stays for its next stage or read.
@@ -10711,7 +10717,7 @@ impl Db {
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
-            view: view.clone(),
+            view: through.view.clone(),
             ..ReadSpec::default()
         };
         let rows = inner.read_versions(prepared, None, &read)?;
@@ -10726,8 +10732,7 @@ impl Db {
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
-                view,
-                source: source.clone(),
+                through,
                 rows,
             });
         }
@@ -10938,15 +10943,12 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let reading = self.read_admitted(
-            prepared,
-            include_deleted,
-            identity,
-            tier,
-            prefix,
+        let through = ReadThrough {
             view,
-            source,
-        );
+            source: source.clone(),
+        };
+        let reading =
+            self.read_admitted(prepared, include_deleted, identity, tier, prefix, through);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -10983,8 +10985,7 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
         prefix: BatchPrefix,
-        view: Option<View>,
-        source: &ReadViewSourceSpec,
+        through: ReadThrough,
     ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
@@ -11060,7 +11061,7 @@ impl TxRef<'_> {
                     None,
                     None,
                     tier == ReadTier::Remote,
-                    source,
+                    &through.source,
                 )
                 .await?;
             if let Some(Batch {
@@ -11095,7 +11096,7 @@ impl TxRef<'_> {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
-                        view: view.clone(),
+                        view: through.view.clone(),
                         ..ReadSpec::default()
                     };
                     let roots = inner.run(&prepared, identity, &read)?;
@@ -11110,8 +11111,7 @@ impl TxRef<'_> {
             include_deleted,
             prefix.ops,
             identity,
-            view,
-            source,
+            through,
         )?;
         Ok(rows)
     }
