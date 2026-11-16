@@ -49,6 +49,8 @@ export const ciPartitionJobs = Object.freeze({
   "react-native": "test-react-native",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
   go: "test-go",
+  kotlin: "test-kotlin",
+  "kotlin-android": "test-kotlin-android",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -345,6 +347,16 @@ export const ciPartitions = Object.freeze({
     command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
       env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
     }),
+  ]),
+  // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI end to end
+  // against `jazz-tools server`, on the JVM.
+  kotlin: Object.freeze([
+    command("Kotlin runtime and example", "bash", ["dev/scripts/test-kotlin.sh"]),
+  ]),
+  // jazz-kotlin-android's AAR built for arm64-v8a, armeabi-v7a and x86_64
+  // with cargo-ndk: a build check, no emulator.
+  "kotlin-android": Object.freeze([
+    command("Kotlin Android AAR build", "bash", ["dev/scripts/test-kotlin-android.sh"]),
   ]),
 });
 

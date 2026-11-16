@@ -138,7 +138,7 @@ pub fn languages_or(
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, the Cargo.toml of a crate depending on jazz-app, a Package.swift depending on Jazz (jazz-swift), or a go.mod requiring jazz-go); pass --lang",
+             (a package.json, the Cargo.toml of a crate depending on jazz-app, a Package.swift depending on Jazz (jazz-swift), a build.gradle.kts depending on jazz-kotlin, or a go.mod requiring jazz-go); pass --lang",
             shown(&dir),
         ));
     }

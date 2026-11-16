@@ -444,3 +444,123 @@ fn the_swift_package_tests_the_computed_bindings() {
         );
     }
 }
+
+#[test]
+fn every_app_generates_its_committed_kotlin_byte_for_byte() {
+    for dir in apps() {
+        let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+        let app = App::load(&app_json).unwrap();
+        let path = dir.join("JazzApp.kt");
+        let generated = match generate(Lang::Kotlin, &app_json) {
+            Ok(generated) => generated,
+            Err(error) => {
+                // Computed fields and transforms aren't supported in Kotlin yet.
+                assert!(error.is_unsupported(), "{}: {error}", dir.display());
+                assert!(!path.exists(), "{} should not exist", path.display());
+                continue;
+            }
+        };
+        assert_eq!(generated, generate(Lang::Kotlin, &app_json).unwrap());
+        let recorded = bindings::read(Lang::Kotlin, &generated).unwrap();
+        assert_eq!(recorded.source, app.source);
+        assert_eq!(recorded.format, Lang::Kotlin.format());
+        assert_eq!(
+            bindings::staleness(&app, Lang::Kotlin, Some(&generated)).unwrap(),
+            None
+        );
+        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+            std::fs::write(&path, &generated).unwrap();
+            continue;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing; run with JAZZ_UPDATE_FIXTURES=1",
+                path.display()
+            )
+        });
+        assert_eq!(generated, committed, "{} differs", path.display());
+    }
+}
+
+#[test]
+fn kotlin_refuses_edited_bindings() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/notes");
+    let generated = generate(
+        Lang::Kotlin,
+        &std::fs::read(dir.join("jazz.app.json")).unwrap(),
+    )
+    .unwrap();
+    // CRLF, as an editor on Windows leaves it, still reads.
+    assert!(bindings::read(Lang::Kotlin, &generated.replace('\n', "\r\n")).is_ok());
+    let edited = generated.replacen("\\\"notes\\\"", "\\\"memos\\\"", 1);
+    let error = bindings::read(Lang::Kotlin, &edited).unwrap_err();
+    assert!(error.to_string().contains("was edited"), "{error}");
+    assert!(bindings::read(Lang::Kotlin, "// something else\n").is_err());
+}
+
+#[test]
+fn kotlin_bindings_read_back_with_columns_named_as_their_constants() {
+    let app = br#"{ "format": 1, "tables": { "items": { "columns": { "source": "string", "app": "string?", "APP": "int" } } } }"#;
+    let loaded = App::load(app).unwrap();
+    let generated = generate(Lang::Kotlin, app).unwrap();
+    let recorded = bindings::read(Lang::Kotlin, &generated).unwrap();
+    assert_eq!(recorded.source, loaded.source);
+    assert_eq!(
+        bindings::staleness(&loaded, Lang::Kotlin, Some(&generated)).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn kotlin_tables_may_be_named_as_stdlib_and_runtime_types() {
+    // The file names everything outside `jazzapp` fully qualified.
+    for (table, ty) in [
+        ("results", "Result"),
+        ("lists", "List"),
+        ("units", "Unit"),
+        ("columns", "Column"),
+        ("strings", "String"),
+    ] {
+        let app = format!(
+            r#"{{ "format": 1, "tables": {{ "{table}": {{ "columns": {{ "a": "string" }} }} }} }}"#
+        );
+        let generated = generate(Lang::Kotlin, app.as_bytes()).unwrap();
+        assert!(
+            generated.contains(&format!("public data class {ty}(")),
+            "{generated}"
+        );
+        assert!(!generated.contains("\nimport "), "the file imports nothing");
+    }
+    // Names that clash inside the package are still refused.
+    let app = br#"{ "format": 1, "tables": { "tasks": { "columns": { "a": "string" } }, "newTasks": { "columns": { "a": "string" } } } }"#;
+    let error = generate(Lang::Kotlin, app).unwrap_err();
+    assert!(
+        error.to_string().contains("Kotlin type `NewTask`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn kotlin_is_a_cli_language() {
+    assert_eq!(Lang::parse("kotlin").unwrap(), Lang::Kotlin);
+    assert!(Lang::ALL.contains(&Lang::Kotlin));
+}
+
+#[test]
+fn the_stage_plan_kotlin_cli_commits_its_bindings_byte_for_byte() {
+    let dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stage-plan/apps/kotlin-cli");
+    let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+    let generated = generate(Lang::Kotlin, &app_json).unwrap();
+    let path = dir.join(jazz_codegen::kotlin::FILE);
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &generated).unwrap();
+        return;
+    }
+    assert_eq!(
+        generated,
+        std::fs::read_to_string(&path).unwrap(),
+        "{} differs from what the generator writes; run with JAZZ_UPDATE_FIXTURES=1",
+        path.display()
+    );
+}
