@@ -171,6 +171,7 @@ class StagePlanTest {
         jazz.close()
         val ended = kotlinx.coroutines.withTimeout(30_000) { watching.await() }
         kotlin.test.assertTrue(ended.exceptionOrNull() is tools.jazz.JazzException.Closed, "$ended")
+        assertEquals(tools.jazz.SessionState.SignedOut, jazz.session.value)
         kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { tasksOf(jazz, show) }
     }
 
@@ -304,6 +305,41 @@ class StagePlanTest {
             jazz.delete(Tasks, c.id, tier = tools.jazz.WriteTier.Global)
             assertEquals(2, tasksOf(jazz, show).size)
             kotlin.test.assertTrue(DocsSnippets.includeDeleted(jazz, show.id).any { it.id == c.id })
+        }
+    }
+
+    @Test
+    fun a_token_provider_that_throws_doesnt_sign_the_user_out(): Unit = runBlocking {
+        var n = 0
+        val jazz = openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { if (n++ == 0) "token-tp" else throw java.io.IOException("sign-in server down") })
+        jazz.use {
+            assertEquals("tp", (jazz.session.value as tools.jazz.SessionState.SignedIn).user.subject)
+            runCatching { jazz.refreshSession() }
+            kotlin.test.assertTrue(jazz.session.value !is tools.jazz.SessionState.SignedOut, "${jazz.session.value}")
+            // Still open, and reading.
+            jazz.all(jazzapp.Shows.query())
+        }
+    }
+
+    @Test
+    fun one_users_show_is_invisible_to_another_who_cant_write_into_it(): Unit = runBlocking {
+        val (showId, taskId) = open("alice").use { alice ->
+            val show = showNamed(alice, "Alice's private show")
+            show.id to addTask(alice, show, "Secret setlist").id
+        }
+        open("bob").use { bob ->
+            assertNull(showById(bob, showId))
+            assertEquals(emptyList(), bob.all(Tasks.where(Tasks.showId eq showId), tools.jazz.ReadTier.Remote))
+            val notHers = jazzapp.Show(showId, "x", "x", "x", "x", me(bob))
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Permission> { addTask(bob, notHers, "Sneaky") }
+            // Bob can't read her task, so he can't update it either.
+            val refused = runCatching { moveTask(bob, taskId, TaskStatus.Done) }.exceptionOrNull()
+            kotlin.test.assertTrue(refused is tools.jazz.JazzException.Permission || refused is tools.jazz.JazzException.Refused, "$refused")
+        }
+        open("alice").use { alice ->
+            kotlin.test.assertNotNull(showById(alice, showId))
+            val hers = alice.all(Tasks.where(Tasks.showId eq showId), tools.jazz.ReadTier.Remote)
+            assertEquals(listOf("Secret setlist" to TaskStatus.Todo), hers.map { it.title to it.status })
         }
     }
 }
