@@ -26,6 +26,7 @@ import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../dr
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   SerializableWriteHandle,
+  EmptyTransactionWriteResult,
   SerializableWriteResult,
   WriteResult,
   JazzClient,
@@ -1099,9 +1100,14 @@ function applyPartialValueSelections<T>(
       projected[column] = jsonPointerValue(value, selection.at);
       continue;
     }
+    // Like the engine (#5502): a range past the end of the value clamps to
+    // it, empty when it starts past it; an inverted range fails.
     if (value instanceof Uint8Array) {
-      if ("fromUtf8" in selection || selection.from > selection.to || selection.to > value.length) {
-        throw new Error(`Byte range for "${column}" is out of bounds.`);
+      if ("fromUtf8" in selection) {
+        throw new Error(`Byte range for "${column}" takes from and to, not fromUtf8 and toUtf8.`);
+      }
+      if (selection.from > selection.to) {
+        throw new Error(`Byte range for "${column}" ends before it starts.`);
       }
       projected[column] = value.slice(selection.from, selection.to);
       continue;
@@ -1111,29 +1117,29 @@ function applyPartialValueSelections<T>(
     }
     if ("fromUtf8" in selection) {
       const bytes = new TextEncoder().encode(value);
-      if (
-        selection.fromUtf8 > selection.toUtf8 ||
-        selection.toUtf8 > bytes.length ||
-        (selection.fromUtf8 < bytes.length &&
-          (bytes[selection.fromUtf8]! & 0b1100_0000) === 0b1000_0000) ||
-        (selection.toUtf8 < bytes.length &&
-          (bytes[selection.toUtf8]! & 0b1100_0000) === 0b1000_0000)
-      ) {
-        throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
+      const to = Math.min(selection.toUtf8, bytes.length);
+      const from = Math.min(selection.fromUtf8, to);
+      if (selection.fromUtf8 > selection.toUtf8) {
+        throw new Error(`UTF-8 range for "${column}" ends before it starts.`);
       }
-      projected[column] = new Utf8Decoder({ fatal: true }).decode(
-        bytes.slice(selection.fromUtf8, selection.toUtf8),
-      );
+      if (
+        (from < bytes.length && (bytes[from]! & 0b1100_0000) === 0b1000_0000) ||
+        (to < bytes.length && (bytes[to]! & 0b1100_0000) === 0b1000_0000)
+      ) {
+        throw new Error(`UTF-8 range for "${column}" splits a code point.`);
+      }
+      projected[column] = new Utf8Decoder({ fatal: true }).decode(bytes.slice(from, to));
       continue;
     }
-    if (
-      selection.from > selection.to ||
-      !utf16Boundary(value, selection.from) ||
-      !utf16Boundary(value, selection.to)
-    ) {
-      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair or is out of bounds.`);
+    const to = Math.min(selection.to, value.length);
+    const from = Math.min(selection.from, to);
+    if (selection.from > selection.to) {
+      throw new Error(`UTF-16 range for "${column}" ends before it starts.`);
     }
-    projected[column] = value.slice(selection.from, selection.to);
+    if (!utf16Boundary(value, from) || !utf16Boundary(value, to)) {
+      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair.`);
+    }
+    projected[column] = value.slice(from, to);
   }
   return projected as T;
 }
@@ -1832,7 +1838,17 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   }
   let committed: TransactionCommitHandle<TKind>;
   try {
-    committed = await transaction.commit();
+    // A callback that wrote nothing has nothing to commit: its result
+    // resolves at once (an explicit `commit()` of an empty mergeable
+    // transaction still refuses).
+    const outcome = await transaction.commitUnlessEmpty();
+    if (outcome === "empty") {
+      return new EmptyTransactionWriteResult(
+        resolvedValue,
+        resultClient(),
+      ) as unknown as TransactionWriteResult<Awaited<TResult>, TKind>;
+    }
+    committed = outcome;
   } catch (error) {
     try {
       await transaction.rollback();
@@ -1977,6 +1993,39 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       return new SerializableWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
     }
     return new WriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
+  }
+
+  /**
+   * @internal The callback form's commit: a mergeable transaction that staged
+   * no write is rolled back instead, as there is nothing to commit, and
+   * `"empty"` is returned. Anything else commits as {@link commit} does.
+   */
+  async commitUnlessEmpty(): Promise<TransactionCommitHandle<TKind> | "empty"> {
+    if (this.kind !== "mergeable") return this.commit();
+    const { ownerClient, openTransactionId, preparation } = this.requireBinding("commit");
+    // Staged, or this runtime can't tell: commit at once, as `commit` does
+    // (reads still in flight settle through the commit's `txId`).
+    if (ownerClient.hasStagedTransactionWrites(openTransactionId) !== false) return this.commit();
+    // Nothing staged yet, but a write still being prepared may stage. Reads
+    // stage nothing, so only preparations are waited for, and the
+    // transaction takes no more operations meanwhile.
+    if (preparation.pending || preparation.failed) {
+      this.committing = true;
+      let drained = true;
+      try {
+        await preparation.drain();
+      } catch {
+        drained = false;
+      } finally {
+        this.committing = false;
+      }
+      // A preparation that failed fails the commit, as for `commit`.
+      if (!drained || ownerClient.hasStagedTransactionWrites(openTransactionId) !== false) {
+        return this.commit();
+      }
+    }
+    await this.rollback();
+    return "empty";
   }
 
   /**

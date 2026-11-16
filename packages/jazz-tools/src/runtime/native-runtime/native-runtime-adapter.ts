@@ -2477,6 +2477,12 @@ export class NativeRuntimeAdapter implements Runtime {
     return id;
   }
 
+  hasStagedTransactionWrites(openTransactionId: OpenTransactionId): boolean | undefined {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.hasStagedTransactionWrites(openTransactionId);
+    return this.pendingTxs.get(openTransactionId)?.hasStagedMutations;
+  }
+
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
     if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openTransactionId);
     if (this.closed) {

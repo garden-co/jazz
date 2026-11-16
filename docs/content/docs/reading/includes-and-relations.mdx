@@ -77,6 +77,12 @@ Text coordinates use JavaScript UTF-16 code units by default, so they match
 a byte-oriented protocol. Jazz rejects a range that would split a UTF-8 code
 point or UTF-16 surrogate pair rather than rounding it.
 
+A range past the end of the value is clamped to it, like
+`String.prototype.slice`: one that starts past the end returns an empty string
+or empty bytes, and one that runs past it returns what the value still covers.
+So a subscription to a window of a text keeps going when the text shrinks
+below it, and shows the window again as the text grows back.
+
 ```ts
 const [document] = await db.all(
   app.documents.where({ id: documentId }).select({
