@@ -133,11 +133,24 @@ add-description` writes:
 {
   "format": 1,
   "tables": {
-    "todos": { "columns": { "title": "string", "done": "boolean", "description": "string?" } }
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "description": "string?"
+      }
+    }
   },
   "history": {
     "e5628c8e53c8": {
-      "tables": { "todos": { "columns": { "title": "string", "done": "boolean" } } }
+      "tables": {
+        "todos": {
+          "columns": {
+            "title": "string",
+            "done": "boolean"
+          }
+        }
+      }
     }
   },
   "migrations": [
@@ -145,7 +158,9 @@ add-description` writes:
       "name": "add-description",
       "from": "e5628c8e53c8",
       "migrate": {
-        "todos": { "description": { "add": "string", "default": null } }
+        "todos": {
+          "description": { "add": "string", "default": null }
+        }
       }
     }
   ]
