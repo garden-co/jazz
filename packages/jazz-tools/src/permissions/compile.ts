@@ -485,8 +485,9 @@ export function text(input: unknown, ctx: Ctx): string {
   switch (data.k) {
     case "and":
     case "or": {
+      // One item stays a one-item node, no items an empty one: the engine
+      // keeps both as written (SPEC §10.10).
       const items = data.items.map((item) => text(item, ctx));
-      if (items.length === 1) return items[0]!;
       return `${data.k === "and" ? "allOf" : "anyOf"}(${items.join(", ")})`;
     }
     case "not":
@@ -514,9 +515,8 @@ export function json(input: unknown, ctx: Ctx): PolicyJson {
   if (isNode(input)) {
     const data = input[NODE];
     if (data.k === "and" || data.k === "or") {
-      if (data.items.length === 0) return data.k === "and" ? "true" : "false";
+      if (data.items.length === 0) return data.k === "and" ? "allOf()" : "anyOf()";
       const items = data.items.map((item) => json(item, ctx));
-      if (items.length === 1) return items[0]!;
       return data.k === "and" ? { allOf: items } : { anyOf: items };
     }
   }

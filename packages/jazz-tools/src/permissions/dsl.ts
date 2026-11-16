@@ -228,6 +228,8 @@ const TYPED = (kind: string) => (...args: unknown[]) => {
   });
   if (kind === "double" && typeof args[0] === "number" && Number.isInteger(args[0]))
     parts[0] = `${args[0]}.0`;
+  // `row(id, …)`: the id is a uuid string (written `uuid('…')`) or null.
+  if (kind === "row" && typeof args[0] === "string") parts[0] = `uuid(${parts[0]})`;
   return handle({ k: "text", text: `${kind}(${parts.join(", ")})` }) as unknown as Value<any, any>;
 };
 
