@@ -20,6 +20,12 @@ show exists with them as its chief (`--show <name>`) or targets one by id
 (`--show-id <id>`), lists the show's tasks by `rank`, adds tasks and moves
 them between stages.
 
+This example lives in the Jazz repository and depends on the Swift package
+from source (`.package(name: "jazz", path: "../../../..")`), so it builds the
+Jazz core first. Your app depends on the published package instead,
+`.package(url: "https://github.com/garden-co/jazz-swift", exact: "2.0.0-alpha.66")`,
+which brings the core prebuilt on macOS and iOS (see the Swift setup page).
+
 ```bash
 ../../../../packages/jazz-swift/scripts/build-ffi.sh --lib-only   # once, and after jazz-ffi changes
 export PKG_CONFIG_PATH=../../../../target/release/jazz-ffi-static
