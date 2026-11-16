@@ -165,6 +165,9 @@ func TestBackendClient(t *testing.T) {
 	if _, err := jazzapp.Shows.Query().All(ctx, asAlice); !errors.Is(err, jazz.ErrClosed) {
 		t.Errorf("a ForUser DB's query after its parent's Shutdown = %v, want ErrClosed", err)
 	}
+	if _, err := asAlice.Account(ctx); !errors.Is(err, jazz.ErrClosed) {
+		t.Errorf("a ForUser DB's Account after its parent's Shutdown = %v, want ErrClosed", err)
+	}
 	asAlice.Close()
 	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(200 * time.Millisecond) {
 		shows, err := jazzapp.Shows.Query().Where(jazzapp.Shows.ID.Eq(show.ID)).Tier(jazz.ReadRemote).All(ctx, alice)
