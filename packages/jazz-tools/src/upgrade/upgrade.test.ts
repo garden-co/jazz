@@ -340,6 +340,20 @@ describe("jazz-tools upgrade: refusals", () => {
     );
   });
 
+  it("passes an enum with cases through when only an older version declares it (a store keeps every version)", async () => {
+    const dir = fixture("enum-cases-history");
+    const before = JSON.parse(readFileSync(join(dir, "jazz.app.json"), "utf8"));
+    const report = await upgrade(dir);
+    const after = JSON.parse(readFileSync(join(dir, "jazz.app.json"), "utf8"));
+    // History and migrations as alpha.64 wrote them, the legacy column included.
+    expect(after.history).toEqual(before.history);
+    expect(after.migrations).toEqual(before.migrations);
+    expect(JSON.stringify(after.history)).toContain('"enum":{"bug":{"severity":"int"}');
+    expect(after.tables).toEqual(before.tables);
+    expect(report.notes.join("\n")).toContain("2 schema versions and 1 migration");
+    expect(existsSync(join(dir, "jazz.generated.ts"))).toBe(true);
+  });
+
   it("refuses a project without jazz.app.json", async () => {
     const dir = fixture("backend-history");
     rmSync(join(dir, "jazz.app.json"));

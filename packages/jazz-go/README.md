@@ -1,16 +1,20 @@
 # jazz-go
 
 The Go runtime for Jazz: `package jazz`, which opens an app through the
-[`jazz-ffi`](../../crates/jazz-ffi) C ABI with cgo. It uses only the standard
-library: `context` for every call, channels for subscriptions and
-`encoding/json` for rows.
+[`jazz-ffi`](../../crates/jazz-ffi) C ABI. It needs no cgo; its only
+dependency is purego. It uses `context` for every call, channels for
+subscriptions and `encoding/json` for rows.
+
+`db.Tx(ctx, fn)` is a mergeable transaction, as TypeScript's
+`db.transaction`; `db.Tx(ctx, fn, jazz.Serializable())` is a serializable
+one, whose commit fails with `jazz.ErrConflict` if its reads changed.
 
 Apps don't use it on its own. `jazz-tools generate` writes typed bindings,
 a `jazzapp` package, beside a `go.mod` that requires this module. See
 [examples/stage-plan/apps/go-cli](../../examples/stage-plan/apps/go-cli)
 and the [Go setup page](https://jazz.tools/docs/setup/go).
 
-Install it with `go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65`
+Install it with `go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.66`
 and build as usual. Its versions are Jazz's, in lockstep (each release tags
 `packages/jazz-go/v<version>`).
 

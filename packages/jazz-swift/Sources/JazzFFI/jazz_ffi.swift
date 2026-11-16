@@ -628,7 +628,8 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?) throws  -> Upload
     
     /**
-     * Not part of the documented .65 surface; `None` for every client.
+     * Not part of the documented surface (the backend publish mode); `None`
+     * for every client.
      */
     func bundle() throws  -> String?
     
@@ -1008,7 +1009,8 @@ open func beginUpload(table: String, column: String, kind: String, id: String?, 
 }
     
     /**
-     * Not part of the documented .65 surface; `None` for every client.
+     * Not part of the documented surface (the backend publish mode); `None`
+     * for every client.
      */
 open func bundle()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -3120,7 +3122,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_begin_upload() != 36715) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_bundle() != 24631) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_bundle() != 9426) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_can() != 65067) {

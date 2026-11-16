@@ -16,7 +16,7 @@ public struct StagePlanApp: Sendable {
     }
 
     /// Opens StagePlan as an end user of the app's Jazz endpoint (its
-    /// backend's handler, in TS, Rust or Go), signed in as `auth` says (in
+    /// TypeScript backend's `createJazz` handler), signed in as `auth` says (in
     /// memory unless `dataDir` is given).
     public static func open(endpoint: String, appId: String, auth: Jazz.Auth, dataDir: String? = nil)
         async throws -> StagePlanApp

@@ -17,7 +17,7 @@ Add the module. Its versions are Jazz's: each release tags it as `packages/jazz-
 its path ends in `/v2`:
 
 ```bash
-go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65
+go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.66
 go build ./...
 ```
 
@@ -41,7 +41,9 @@ Commit `jazzapp/jazz_app.go` and import it as `<your module>/jazzapp`. Per table
   includes them: `q.Include(jazzapp.Tasks.Show)`;
 - a table value (`jazzapp.Tasks`) with typed columns (`jazzapp.Tasks.Status.Eq(…)`), relations,
   `Query()`, `Insert`, `Update` and `Delete`. Writes and reads take a `jazz.Querier`: the `*jazz.DB`,
-  or a `*jazz.Tx` inside `db.Tx(ctx, func(tx *jazz.Tx) error { … })`.
+  or a `*jazz.Tx` inside `db.Tx(ctx, func(tx *jazz.Tx) error { … })`. A `db.Tx` is mergeable, as
+  TypeScript's `db.transaction`; pass `jazz.Serializable()` for a
+  [serializable transaction](/docs/writing/transactions#use-a-serializable-transaction-to-reject-conflicts).
 
 If your app declares computed fields or transforms, the bindings also declare a `jazzapp.Computed`
 interface. `jazzapp.Open(ctx, cfg, computed)` takes your implementation, so a missing method is a
