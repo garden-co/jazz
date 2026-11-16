@@ -109,6 +109,8 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       OUT: target/${{ matrix.target }}/release
+      # The oldest macOS the darwin libraries load on (ignored elsewhere).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - name: Validate inputs
         run: |
@@ -116,6 +118,11 @@ jobs:
             echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
             exit 1
           fi
+
+      # The header ships with LF line endings from every platform.
+      - name: Keep LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -177,6 +184,14 @@ jobs:
             "-Fe${RUNNER_TEMP}/jazz-ffi-c-test.exe" \
             -link "${OUT}/jazz_ffi.lib" $(cat "${RUNNER_TEMP}/LINK_FLAGS")
           "${RUNNER_TEMP}/jazz-ffi-c-test.exe"
+          # And the shipped DLL, through its import library.
+          mkdir -p "${RUNNER_TEMP}/dll"
+          clang-cl -MD -W3 -WX -Icrates/jazz-ffi/include \
+            crates/jazz-ffi/tests/c/jazz_ffi_smoke.c \
+            "-Fe${RUNNER_TEMP}/dll/jazz-ffi-c-test.exe" \
+            -link "${OUT}/jazz_ffi.dll.lib"
+          cp "${OUT}/jazz_ffi.dll" "${RUNNER_TEMP}/dll/"
+          "${RUNNER_TEMP}/dll/jazz-ffi-c-test.exe"
 
       - name: Stage
         env:
