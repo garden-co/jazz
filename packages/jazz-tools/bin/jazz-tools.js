@@ -75,11 +75,13 @@ function printWrapperHelp() {
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
   console.log("  migrations graph      Visualize the full migration graph");
-  console.log("  login                 Sign in to Jazz Cloud with your dashboard account");
+  console.log(
+    "  login                 (deprecated) Sign in to Jazz Cloud with your dashboard account",
+  );
   console.log("  logout                Forget the stored Jazz Cloud session");
   console.log("  whoami                Show the signed-in Jazz Cloud user and teams");
-  console.log("  teams list            List your Jazz Cloud teams");
-  console.log("  apps <command>        Manage Jazz Cloud apps (run `apps --help`)");
+  console.log("  teams list            (deprecated) List your Jazz Cloud teams");
+  console.log("  apps <command>        (deprecated) Manage Jazz Cloud apps (run `apps --help`)");
   console.log(
     "  inspect <command>     Read and change an app's data through its backend (run `inspect --help`)",
   );
