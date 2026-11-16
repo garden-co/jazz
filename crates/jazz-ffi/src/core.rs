@@ -34,6 +34,8 @@ pub(crate) struct Core {
     /// The contract version the host speaks (`"contract"` in the config):
     /// 1 unless it says 2.
     pub(crate) contract: u64,
+    /// Run first when the app closes: a C host's callbacks stop here.
+    close_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// How a call runs: inside a transaction, and/or at a durability or read
@@ -231,6 +233,7 @@ impl Core {
             next_tx: AtomicU64::new(AppId::random().uuid().as_u64_pair().0 >> 12 | 1),
             has_server,
             contract,
+            close_hook: Mutex::new(None),
         })
     }
 
@@ -307,10 +310,17 @@ impl Core {
         opts: &Opts,
         limit: Option<usize>,
     ) -> Result<Vec<Json>> {
-        let mut lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
-        if let Some(limit) = limit {
-            lowered.query.limit = Some(lowered.query.limit.map_or(limit, |l| l.min(limit)));
-        }
+        // A limit goes in before lowering: a relation query carries its
+        // window inside the relation, not as an ordinary clause.
+        let limited;
+        let query = match limit {
+            Some(limit) => {
+                limited = crate::relational::with_limit(query, limit);
+                &limited
+            }
+            None => query,
+        };
+        let lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
         let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
         let core_query = lowered.query.clone();
         let reads_deleted = lowered.reads_deleted;
@@ -389,9 +399,9 @@ impl Core {
         Ok(row.to_string())
     }
 
-    /// Writes the row with this id: inserts it if there is none, otherwise
-    /// replaces its columns. `row_json` is a whole row, as for an insert
-    /// (TS's `upsert`). Returns the row as stored.
+    /// Writes the row with this id: inserts it if there is none (then
+    /// `row_json` is a whole row, as for an insert), otherwise sets the
+    /// columns `row_json` names (a partial row updates). Returns the row.
     pub fn upsert(
         &self,
         table_name: &str,
@@ -432,7 +442,13 @@ impl Core {
         let id = convert::parse_id(id, "the id")?;
         let table = self.table(table_name)?.clone();
         let cells = match patch_json {
-            Some(patch) => Some(convert::cells(&table, table_name, patch, "the patch")?.1),
+            Some(patch) => {
+                let (named, cells) = convert::cells(&table, table_name, patch, "the patch")?;
+                if named.is_some_and(|named| named != id) {
+                    return Err(refused("a restore's patch cannot name another row's id"));
+                }
+                Some(cells)
+            }
             None => None,
         };
         let name = table_name.to_owned();
@@ -752,7 +768,15 @@ impl Core {
             ));
         }
         let cells = match row_json {
-            Some(row) => convert::cells(&table, table_name, row, "the row")?.1,
+            Some(row) => {
+                let (named, cells) = convert::cells(&table, table_name, row, "the row")?;
+                if named.is_some() {
+                    return Err(refused(
+                        "an upload's row takes no \"id\": give it as the upload's id (update/upsert)",
+                    ));
+                }
+                cells
+            }
             None => Vec::new(),
         };
         let upload_id = self.next_tx.fetch_add(1, Ordering::Relaxed);
@@ -804,7 +828,7 @@ impl Core {
             let (id, committed) = client
                 .finish_streaming_upload(entry.upload, entry.kind, entry.id)
                 .await?;
-            settle(&client, Some(committed), tier).await?;
+            settle(&client, committed, tier).await?;
             read_back(&client, &entry.table, &entry.name, id).await
         }))?;
         Ok(row.to_string())
@@ -958,6 +982,8 @@ impl Core {
         }
         block_on(jazz.sign_out())?;
         self.closed.store(true, Ordering::Release);
+        // Signed out, the app has ended: no token callback after this.
+        self.run_close_hook();
         Ok(())
     }
 
@@ -1014,7 +1040,27 @@ impl Core {
 
     /// Closes the app: the calls already made finish, subscriptions end,
     /// and every later call fails with `Closed`. Closing again does nothing.
+    /// Runs `hook` first when the app closes (once).
+    pub(crate) fn on_close(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.close_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// Runs the close hook if it hasn't run (whichever way the app ends).
+    fn run_close_hook(&self) {
+        let hook = self
+            .close_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     pub fn close(&self) -> Result<()> {
+        // Even when signing out already ended the app: the host's callbacks
+        // stop here.
+        self.run_close_hook();
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }

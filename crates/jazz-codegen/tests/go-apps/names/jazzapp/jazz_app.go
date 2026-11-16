@@ -82,7 +82,7 @@ func (p ActivityPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// activityTable is the type of ActivityTable: the columns of `activity`, to build conditions and orders from.
+// activityTable is the type of ActivityTable: the columns of `activity`, to build conditions and orders from, and its relations, to include.
 type activityTable struct {
 	ID   jazz.Column[Activity, string]
 	Kind jazz.Column[Activity, string]
@@ -100,18 +100,18 @@ func (activityTable) Query() *jazz.Query[Activity] {
 }
 
 // Insert inserts a row into `activity` and returns it, with its id.
-func (activityTable) Insert(ctx context.Context, db *jazz.DB, row NewActivity) (Activity, error) {
+func (activityTable) Insert(ctx context.Context, db jazz.Querier, row NewActivity) (Activity, error) {
 	return jazz.Insert[NewActivity, Activity](ctx, db, "activity", row)
 }
 
 // Update changes the fields patch sets of the row of `activity` with id.
-func (activityTable) Update(ctx context.Context, db *jazz.DB, id string, patch ActivityPatch) error {
-	return db.Update(ctx, "activity", id, patch)
+func (activityTable) Update(ctx context.Context, db jazz.Querier, id string, patch ActivityPatch) error {
+	return jazz.Update(ctx, db, "activity", id, patch)
 }
 
 // Delete deletes the row of `activity` with id.
-func (activityTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "activity", id)
+func (activityTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
+	return jazz.Delete(ctx, db, "activity", id)
 }
 
 // Context is a row of `contexts`.
@@ -153,7 +153,7 @@ func (p ContextPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// contextsTable is the type of Contexts: the columns of `contexts`, to build conditions and orders from.
+// contextsTable is the type of Contexts: the columns of `contexts`, to build conditions and orders from, and its relations, to include.
 type contextsTable struct {
 	ID   jazz.Column[Context, string]
 	At   jazz.Column[Context, jazz.Timestamp]
@@ -179,18 +179,18 @@ func (contextsTable) Query() *jazz.Query[Context] {
 }
 
 // Insert inserts a row into `contexts` and returns it, with its id.
-func (contextsTable) Insert(ctx context.Context, db *jazz.DB, row NewContext) (Context, error) {
+func (contextsTable) Insert(ctx context.Context, db jazz.Querier, row NewContext) (Context, error) {
 	return jazz.Insert[NewContext, Context](ctx, db, "contexts", row)
 }
 
 // Update changes the fields patch sets of the row of `contexts` with id.
-func (contextsTable) Update(ctx context.Context, db *jazz.DB, id string, patch ContextPatch) error {
-	return db.Update(ctx, "contexts", id, patch)
+func (contextsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ContextPatch) error {
+	return jazz.Update(ctx, db, "contexts", id, patch)
 }
 
 // Delete deletes the row of `contexts` with id.
-func (contextsTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "contexts", id)
+func (contextsTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
+	return jazz.Delete(ctx, db, "contexts", id)
 }
 
 // Error is a row of `errors`.
@@ -228,7 +228,7 @@ func (p ErrorPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// errorsTable is the type of Errors: the columns of `errors`, to build conditions and orders from.
+// errorsTable is the type of Errors: the columns of `errors`, to build conditions and orders from, and its relations, to include.
 type errorsTable struct {
 	ID      jazz.Column[Error, string]
 	Error   jazz.Column[Error, string]
@@ -252,18 +252,18 @@ func (errorsTable) Query() *jazz.Query[Error] {
 }
 
 // Insert inserts a row into `errors` and returns it, with its id.
-func (errorsTable) Insert(ctx context.Context, db *jazz.DB, row NewError) (Error, error) {
+func (errorsTable) Insert(ctx context.Context, db jazz.Querier, row NewError) (Error, error) {
 	return jazz.Insert[NewError, Error](ctx, db, "errors", row)
 }
 
 // Update changes the fields patch sets of the row of `errors` with id.
-func (errorsTable) Update(ctx context.Context, db *jazz.DB, id string, patch ErrorPatch) error {
-	return db.Update(ctx, "errors", id, patch)
+func (errorsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ErrorPatch) error {
+	return jazz.Update(ctx, db, "errors", id, patch)
 }
 
 // Delete deletes the row of `errors` with id.
-func (errorsTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "errors", id)
+func (errorsTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
+	return jazz.Delete(ctx, db, "errors", id)
 }
 
 // String is a row of `strings`.
@@ -301,7 +301,7 @@ func (p StringPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// stringsTable is the type of Strings: the columns of `strings`, to build conditions and orders from.
+// stringsTable is the type of Strings: the columns of `strings`, to build conditions and orders from, and its relations, to include.
 type stringsTable struct {
 	ID     jazz.Column[String, string]
 	Source jazz.Column[String, string]
@@ -325,16 +325,16 @@ func (stringsTable) Query() *jazz.Query[String] {
 }
 
 // Insert inserts a row into `strings` and returns it, with its id.
-func (stringsTable) Insert(ctx context.Context, db *jazz.DB, row NewString) (String, error) {
+func (stringsTable) Insert(ctx context.Context, db jazz.Querier, row NewString) (String, error) {
 	return jazz.Insert[NewString, String](ctx, db, "strings", row)
 }
 
 // Update changes the fields patch sets of the row of `strings` with id.
-func (stringsTable) Update(ctx context.Context, db *jazz.DB, id string, patch StringPatch) error {
-	return db.Update(ctx, "strings", id, patch)
+func (stringsTable) Update(ctx context.Context, db jazz.Querier, id string, patch StringPatch) error {
+	return jazz.Update(ctx, db, "strings", id, patch)
 }
 
 // Delete deletes the row of `strings` with id.
-func (stringsTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "strings", id)
+func (stringsTable) Delete(ctx context.Context, db jazz.Querier, id string) error {
+	return jazz.Delete(ctx, db, "strings", id)
 }

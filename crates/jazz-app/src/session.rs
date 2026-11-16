@@ -111,6 +111,8 @@ pub enum UserKind {
     Device,
     /// A user the app's backend signed in ([`crate::Auth::Bearer`]).
     Backend,
+    /// The system: a trusted backend client ([`crate::Config::credential`]).
+    System,
 }
 
 /// How the client syncs, as TypeScript's `SyncStatus` (serialized the same
@@ -385,6 +387,9 @@ struct Linking {
     endpoint: String,
     app: AppId,
     key: DeviceKey,
+    /// The client's runtime: the link's requests run there, whatever the
+    /// caller's executor.
+    runtime: tokio::runtime::Handle,
 }
 
 /// An end user's session with the app: `Send + Clone`, from
@@ -434,13 +439,31 @@ impl Session {
     /// keeps syncing on the device key, unless the backend revokes it on
     /// linking (`guestKeyAfterLink: "revoke"`), when the session expires and
     /// the app reopens with the bearer.
+    ///
+    /// Where the backend keeps linked keys (TS's default), linking the same
+    /// device again with another user's bearer brings that user into this
+    /// account too: link only a device that is its user's alone, or have
+    /// the backend revoke keys on linking.
+    ///
+    /// Fails with [`Error::SignedOut`] when the bearer names no one, and
+    /// with [`Error::Refused`] when the backend refuses the link for good
+    /// (its user already has another account).
     pub async fn link(&self, bearer: &str) -> Result<User> {
         let linking = self.linking.as_ref().ok_or_else(|| {
             Error::Config("only a device account's session links (Auth::Device)".into())
         })?;
         let device = linking.key.account(linking.app);
-        let linked =
-            crate::backend::link(&linking.endpoint, linking.app, bearer, &linking.key).await?;
+        let request = {
+            let (linking, bearer) = (linking.clone(), bearer.to_owned());
+            async move {
+                crate::backend::link(&linking.endpoint, linking.app, &bearer, &linking.key).await
+            }
+        };
+        let linked = linking
+            .runtime
+            .spawn(request)
+            .await
+            .map_err(|_| Error::Stopped)??;
         if linked.account != device {
             // The backend has linked the user by now: say so, as the
             // session stays the device's.
@@ -509,6 +532,7 @@ pub(crate) fn start(
             endpoint: endpoint.to_owned(),
             app: *app,
             key: key.clone(),
+            runtime: tokio::runtime::Handle::current(),
         })),
         Credential::Bearer { .. } => None,
     };

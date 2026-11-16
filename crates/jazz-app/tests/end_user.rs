@@ -18,6 +18,11 @@ use jazz_app::{
 };
 use jazz_server::JazzServer;
 
+/// The app's files with its permissions, as a backend client opens them.
+fn files() -> AppFiles {
+    AppFiles::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/todos")).unwrap()
+}
+
 fn client_files() -> AppFiles {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/todos");
     AppFiles::new(std::fs::read(format!("{dir}/jazz.app.json")).unwrap(), None)
@@ -299,6 +304,17 @@ async fn an_end_user_needs_someone_signed_in_and_the_apps_endpoint() {
     )
     .await;
     assert!(matches!(plain, Err(Error::Config(_))), "{plain:?}");
+    let plain_socket = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server("ws://todos.example/jazz")
+            .user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await;
+    assert!(
+        matches!(plain_socket, Err(Error::Config(_))),
+        "{plain_socket:?}"
+    );
 
     let local = Jazz::open(
         client_files(),
@@ -512,6 +528,190 @@ async fn a_slow_provider_does_not_hold_up_signing_out() {
     app.stop().await;
 }
 
+fn machine(token: &'static str) -> impl jazz_app::TokenProvider + 'static {
+    move |_: TokenReason| async move { Ok(Some(token.to_owned())) }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts() {
+    use jazz_app::BackendClientKind;
+    let app = App::start().await;
+    let job = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(machine("machine-trusted")),
+    )
+    .await
+    .expect("open as a trusted backend client");
+    assert_eq!(job.backend_client(), Some(BackendClientKind::Trusted));
+    let Some(SessionState::SignedIn { user }) = job.session().map(|s| s.state()) else {
+        panic!("signed in as the system");
+    };
+    assert_eq!(user.kind, UserKind::System);
+    assert_eq!(job.account(), None);
+    connected(&job).await;
+    let imported = job.insert(NewTodo::new("Imported", false)).await.unwrap();
+    assert_eq!(remote_todos(&app.backend, 1).await, vec![imported]);
+    assert!(
+        app.relay
+            .admitted
+            .lock()
+            .unwrap()
+            .contains(&"trusted".to_owned())
+    );
+
+    // Alice has not signed in yet: no account to act as, and none is made.
+    let none = job.for_user("alice", serde_json::Value::Null).await;
+    assert!(
+        matches!(&none, Err(Error::NoAccount(user)) if user == "alice"),
+        "{none:?}"
+    );
+
+    // Once she has, the job acts as her: her identity, her permissions.
+    let alice = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-alice".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    let as_alice = job
+        .for_user("alice", serde_json::json!({ "org": "acme" }))
+        .await
+        .expect("act for alice");
+    assert!(as_alice.acts_for_user());
+    // From any executor, not only Tokio's: the requests run on the client's.
+    let elsewhere = {
+        let job = job.clone();
+        std::thread::spawn(move || {
+            futures::executor::block_on(job.for_user("alice", serde_json::Value::Null))
+        })
+        .join()
+        .expect("no panic outside a Tokio runtime")
+    };
+    assert!(elsewhere.is_ok(), "{elsewhere:?}");
+    as_alice
+        .insert(NewTodo::new("Your weekly digest", false))
+        .await
+        .unwrap();
+    assert_eq!(remote_todos(&alice, 2).await.len(), 2);
+    // Closing drains what users' handles wrote too, not only the job's own.
+    let digest = as_alice
+        .insert(NewTodo::new("Another digest", false))
+        .await
+        .unwrap();
+    // A handle acting for a user acts for no one else.
+    assert!(matches!(
+        as_alice.for_user("bob", serde_json::Value::Null).await,
+        Err(Error::Config(_))
+    ));
+
+    job.close(jazz_app::CLOSE_TIMEOUT).await.expect("drained");
+    assert!(remote_todos(&alice, 3).await.contains(&digest));
+    assert!(matches!(job.all(todos::query()).await, Err(Error::Stopped)));
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refused() {
+    use jazz_app::BackendClientKind;
+    let app = App::start().await;
+    let agent = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(machine("token-agent")),
+    )
+    .await
+    .expect("open as a scoped backend client");
+    assert_eq!(agent.backend_client(), Some(BackendClientKind::Scoped));
+    let Some(SessionState::SignedIn { user }) = agent.session().map(|s| s.state()) else {
+        panic!("signed in as its user");
+    };
+    assert_eq!(
+        (user.kind, user.subject.as_str()),
+        (UserKind::Backend, "agent")
+    );
+    assert!(agent.account().is_some());
+    assert!(matches!(
+        agent.for_user("alice", serde_json::Value::Null).await,
+        Err(Error::Config(_))
+    ));
+    agent
+        .insert(NewTodo::new("By the agent", false))
+        .await
+        .unwrap();
+    assert_eq!(remote_todos(&app.backend, 1).await.len(), 1);
+    agent.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+
+    let untrusted = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(machine("not-a-credential")),
+    )
+    .await;
+    assert!(matches!(untrusted, Err(Error::Refused(_))), "{untrusted:?}");
+
+    // Not a backend client at all: no for_user.
+    let device = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(device.backend_client(), None);
+    assert!(matches!(
+        device.for_user("alice", serde_json::Value::Null).await,
+        Err(Error::Config(_))
+    ));
+    device.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_reports_writes_a_memory_store_loses() {
+    let app = App::start().await;
+    let open = || {
+        Jazz::open(
+            files(),
+            Config::new(app.app_id)
+                .server(&app.relay.endpoint)
+                .credential(machine("machine-trusted")),
+        )
+    };
+    // The main backend stops admitting the machine: its writes stay here.
+    let job = open().await.unwrap();
+    connected(&job).await;
+    app.relay.refuse("machine-trusted", "account revoked");
+    app.relay.kick();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    job.insert(NewTodo::new("Never arrives", false))
+        .await
+        .unwrap();
+    let lost = job.close(Duration::from_millis(500)).await;
+    assert!(
+        matches!(lost, Err(Error::Unsynced { pending: 1 })),
+        "{lost:?}"
+    );
+
+    // A zero timeout closes at once, accepting the loss.
+    app.relay.refusing.lock().unwrap().clear();
+    let quick = open().await.unwrap();
+    app.relay.refuse("machine-trusted", "account revoked");
+    app.relay.kick();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    quick
+        .insert(NewTodo::new("Also lost", false))
+        .await
+        .unwrap();
+    quick.close(Duration::ZERO).await.unwrap();
+    app.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sync_status_reports_rejections_and_link_failures_as_typescript_does() {
     // No server: local-only, and synced.
@@ -605,11 +805,15 @@ async fn a_device_account_links_to_the_users_provider_account() {
         .unwrap();
     let session = device.session().unwrap().clone();
 
-    // Carol signs up with the app's own auth, and keeps her device's data.
-    let carol = session
-        .link("token-carol")
-        .await
-        .expect("link the device account");
+    // Carol signs up with the app's own auth, and keeps her device's data,
+    // from any executor (the request runs on the client's runtime).
+    let carol = std::thread::spawn({
+        let session = session.clone();
+        move || futures::executor::block_on(session.link("token-carol"))
+    })
+    .join()
+    .expect("no panic outside a Tokio runtime")
+    .expect("link the device account");
     assert_eq!(carol.account, key.account(app.app_id));
     assert_eq!(carol.kind, UserKind::Backend);
     assert_eq!(carol.subject, "carol");
@@ -624,6 +828,27 @@ async fn a_device_account_links_to_the_users_provider_account() {
         session.link("not-a-token").await,
         Err(Error::SignedOut)
     ));
+
+    // Dave already has an account of his own: the backend refuses to link
+    // him to another device's, for good, not as a server failure.
+    let dave = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-dave".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    let other = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .unwrap();
+    let refused = other.session().unwrap().link("token-dave").await;
+    assert!(matches!(refused, Err(Error::Refused(_))), "{refused:?}");
+    other.shutdown().await.unwrap();
+    dave.shutdown().await.unwrap();
 
     // Signed in with her bearer elsewhere, she reaches the same account.
     let laptop = Jazz::open(
@@ -646,5 +871,68 @@ async fn a_device_account_links_to_the_users_provider_account() {
 
     laptop.shutdown().await.unwrap();
     device.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Reads that name no tier read as TypeScript's do: a backend client from
+/// the server, an end user's first load waiting for it, so neither shows an
+/// empty cache of what the server already has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_without_a_tier_see_what_the_server_has() {
+    let app = App::start().await;
+    let written = app
+        .backend
+        .insert(NewTodo::new("By the main backend", false))
+        .await
+        .unwrap();
+    app.backend.wait_for_sync().await.unwrap();
+
+    let agent = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(machine("token-agent")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        agent.all(todos::query()).await.unwrap(),
+        vec![written.clone()]
+    );
+    // Options that name no tier read the same way.
+    assert_eq!(
+        agent
+            .all_with_options(todos::query(), jazz_app::ReadOptions::default())
+            .await
+            .unwrap(),
+        vec![written.clone()]
+    );
+    let mut changes = agent.subscribe(todos::query()).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), changes.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let added: Vec<_> = first.added.into_iter().map(|added| added.row).collect();
+    assert_eq!(added, vec![written.clone()]);
+
+    let user = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(user.all(todos::query()).await.unwrap(), vec![written]);
+
+    // Without a server, reads stay local.
+    let local = Jazz::open(client_files(), Config::new(AppId::random()))
+        .await
+        .unwrap();
+    assert_eq!(local.all(todos::query()).await.unwrap(), vec![]);
+
+    drop(changes);
+    agent.shutdown().await.unwrap();
+    user.shutdown().await.unwrap();
+    local.shutdown().await.unwrap();
     app.stop().await;
 }
