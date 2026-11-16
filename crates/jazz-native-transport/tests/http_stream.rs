@@ -46,6 +46,9 @@ enum Upgrades {
     BrokenInBetween,
     /// Not a `createJazz` backend: no stream, no 426.
     NoStream,
+    /// Serves the stream, but upgrades get this status before reaching it
+    /// (a WAF or CDN's 403, or a refused credential's 401).
+    UpgradeRefused(u16),
 }
 
 /// A stream session: its key, and the core socket it relays to.
@@ -62,7 +65,7 @@ struct Backend {
 
 async fn socket_path(State(backend): State<Arc<Backend>>) -> Response {
     match backend.upgrades {
-        Upgrades::StreamInstead => (
+        Upgrades::StreamInstead | Upgrades::UpgradeRefused(_) => (
             StatusCode::UPGRADE_REQUIRED,
             [("x-jazz-stream", "1")],
             "use the HTTP stream",
@@ -84,6 +87,11 @@ async fn refused_upgrade(
         && matches!(backend.upgrades, Upgrades::BrokenInBetween)
     {
         return StatusCode::BAD_GATEWAY.into_response();
+    }
+    if let (true, Upgrades::UpgradeRefused(status)) =
+        (headers.contains_key("upgrade"), backend.upgrades)
+    {
+        return StatusCode::from_u16(status).unwrap().into_response();
     }
     socket_path(State(backend)).await
 }
@@ -427,5 +435,61 @@ async fn a_server_without_the_stream_fails_as_a_socket_would() {
             "fails as the socket did: {error}"
         );
     }
+    assert_eq!(served.backend.opened.load(Ordering::SeqCst), 0);
+}
+
+fn request_for(
+    served: &Served,
+    app_id: AppId,
+) -> jazz::tools::native_transport_connector::NativeTransportRequest {
+    jazz::tools::native_transport_connector::NativeTransportRequest {
+        requested_link: Default::default(),
+        server_url: served.url.clone(),
+        app_id,
+        peer_identity: jazz::ids::AuthorSubject::SYSTEM,
+        auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+            admin_secret: Some("secret".to_owned()),
+            ..Default::default()
+        },
+        authorization: None,
+        bundle: None,
+        wake: Arc::new(|| {}),
+    }
+}
+
+/// A WAF or CDN that refuses upgrades with 403 is in between: the backend
+/// still says it serves the stream, and the client switches (as TS does).
+#[tokio::test]
+async fn an_upgrade_refused_with_403_still_falls_back() {
+    let app_id = AppId::from_name("http-stream-fallback-403");
+    let served = serve(app_id, schema(), Upgrades::UpgradeRefused(403)).await;
+    let connector = HttpStreamFallbackConnector::new();
+    let _connected = connector
+        .connect(request_for(&served, app_id))
+        .await
+        .expect("falls back to the stream");
+    assert_eq!(
+        connector.last_transport(),
+        Some(HttpStreamTransportKind::HttpStream)
+    );
+    assert_eq!(served.backend.opened.load(Ordering::SeqCst), 1);
+}
+
+/// An upgrade refused for its credential (401) was the backend's answer:
+/// no probe, no stream, an auth rejection.
+#[tokio::test]
+async fn an_upgrade_refused_with_401_is_an_auth_rejection() {
+    let app_id = AppId::from_name("http-stream-fallback-401");
+    let served = serve(app_id, schema(), Upgrades::UpgradeRefused(401)).await;
+    let connector = HttpStreamFallbackConnector::new();
+    let error = connector
+        .connect(request_for(&served, app_id))
+        .await
+        .err()
+        .expect("refused");
+    assert!(
+        matches!(error, NativeTransportError::AuthRejected(_)),
+        "{error:?}"
+    );
     assert_eq!(served.backend.opened.load(Ordering::SeqCst), 0);
 }
