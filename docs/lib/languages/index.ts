@@ -82,7 +82,7 @@ export const LANGUAGES: readonly Language[] = [
   },
   {
     label: "Go",
-    backend: true,
+    backend: false,
     bindings: {
       file: "examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go",
       lang: "go",
