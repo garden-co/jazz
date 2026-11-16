@@ -1,4 +1,4 @@
-//! Todo Server - Example backend using the `jazz-app` crate.
+//! Todo Server - Example backend using the `jazz-app-support` crate.
 //!
 //! Demonstrates a simple todo list API over a Jazz app, run as a backend
 //! client of the app's TypeScript main backend (`createJazz`): local
@@ -31,7 +31,7 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use ::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
+use ::jazz_app_support::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use futures_util::FutureExt;
 use todo_server_docs::{credential::Credential, jazz_app, router_until};
 use tower_http::cors::CorsLayer;

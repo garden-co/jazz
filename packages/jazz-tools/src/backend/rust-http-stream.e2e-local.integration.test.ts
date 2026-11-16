@@ -1,4 +1,4 @@
-// Local check (skipped unless RUST_CLIENT is set): a Rust jazz-app backend
+// Local check (skipped unless RUST_CLIENT is set): a Rust jazz-app-support backend
 // client of a createJazz main backend that can't upgrade sockets syncs over
 // the HTTP stream, and an idle stream session outlives the socket's silence
 // deadline. See dev/e2e/rust-http-stream-client/README.md.

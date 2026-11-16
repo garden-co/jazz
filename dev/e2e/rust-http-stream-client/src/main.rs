@@ -9,7 +9,7 @@ mod jazz_app {
 
 use std::time::Duration;
 
-use ::jazz_app::{
+use ::jazz_app_support::{
     AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Link, ObjectId, Storage, TokenReason,
 };
 use futures::StreamExt;
