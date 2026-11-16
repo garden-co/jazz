@@ -24,6 +24,10 @@ var (
 	// ErrNoAccount: ForUser's user has no account yet (a backend client
 	// never creates one).
 	ErrNoAccount = errors.New("jazz: no account")
+	// ErrReplaced: a Session's DB whose user changed; get the new one.
+	ErrReplaced = errors.New("jazz: replaced")
+	// ErrNoUser: a Session has no one signed in (Error.SessionStatus).
+	ErrNoUser = errors.New("jazz: no user")
 	// ErrBundleMismatch: ForUser on a trusted backend client whose
 	// Config.Permissions isn't the bundle the main backend serves
 	// (Error.OwnBundle, Error.ServedBundle): deploy the same
@@ -45,6 +49,8 @@ const (
 	KindNoAccount      = "noAccount"
 	KindUnsynced       = "unsynced"
 	KindBundleMismatch = "bundleMismatch"
+	KindReplaced       = "replaced"
+	KindNoUser         = "noUser"
 )
 
 // Error is what Jazz refused or failed at.
@@ -58,6 +64,8 @@ type Error struct {
 	UserID string
 	// Pending is how many writes a KindUnsynced close lost.
 	Pending int
+	// SessionStatus is where a KindNoUser session is.
+	SessionStatus SessionPhase
 	// OwnBundle and ServedBundle are a KindBundleMismatch's permissions
 	// bundle ids: this client's, and the one the main backend serves.
 	OwnBundle, ServedBundle string
@@ -83,6 +91,10 @@ func (e *Error) Unwrap() error {
 		return ErrNoAccount
 	case KindUnsynced:
 		return ErrUnsynced
+	case KindReplaced:
+		return ErrReplaced
+	case KindNoUser:
+		return ErrNoUser
 	case KindBundleMismatch:
 		return ErrBundleMismatch
 	default:
@@ -100,6 +112,7 @@ func parseError(text string) error {
 		Column  string `json:"column"`
 		UserID  string `json:"userId"`
 		Pending int    `json:"pending"`
+		Status  string `json:"status"`
 		Own     string `json:"own"`
 		Served  string `json:"served"`
 	}
@@ -112,7 +125,7 @@ func parseError(text string) error {
 	kind := normalizeKind(e.Kind, e.Message)
 	return &Error{Kind: kind, Message: e.Message, Table: e.Table, Column: e.Column,
 		UserID: e.UserID, Pending: e.Pending,
-		OwnBundle: e.Own, ServedBundle: e.Served}
+		SessionStatus: SessionPhase(e.Status), OwnBundle: e.Own, ServedBundle: e.Served}
 }
 
 // normalizeKind maps jazz-ffi's kinds onto Go's. jazz-ffi v1 reports
@@ -134,6 +147,10 @@ func normalizeKind(kind, message string) string {
 		return KindNoAccount
 	case "unsynced":
 		return KindUnsynced
+	case "replaced":
+		return KindReplaced
+	case "nouser":
+		return KindNoUser
 	case "bundlemismatch":
 		return KindBundleMismatch
 	}
