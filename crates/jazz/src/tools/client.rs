@@ -1965,8 +1965,9 @@ impl JazzClient {
     /// (SPEC 8.14): a client a thin session's backend opened in memory,
     /// linked to the core as that session, serves the session's
     /// transaction requests ([`crate::thin_transactions`]).
-    pub fn thin_transactions(&self) -> crate::thin_transactions::ThinTransactions {
+    pub fn thin_transactions(&self) -> Result<crate::thin_transactions::ThinTransactions> {
         crate::thin_transactions::ThinTransactions::new(self.shared.identity.author)
+            .map_err(|error| JazzError::Connection(error.message))
     }
 
     /// Serve one of the thin session's transaction requests: a commit

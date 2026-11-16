@@ -11,12 +11,17 @@
 //! back what it left open.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use jazz::thin::{ThinBody, ThinRequest, ThinResponse};
+use jazz::thin::{ThinBody, ThinOp, ThinRequest, ThinResponse};
 use jazz::tools::{AppContext, ClientStorage, JazzClient, Schema, Session};
 use tokio::sync::mpsc;
 
 pub(crate) use jazz::thin_transactions::{ThinRouter, answer_frames};
+
+/// How long a transaction request waits for the core (a commit, for its
+/// verdict) before it is answered without it.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Who the session's client connects to the core as: what the socket's
 /// prelude stated, on the backend's word.
@@ -164,20 +169,51 @@ fn run(
                 return;
             }
         };
-        let mut transactions = client.thin_transactions();
+        let mut transactions = match client.thin_transactions() {
+            Ok(transactions) => transactions,
+            Err(error) => {
+                let message = format!("the session's client cannot serve transactions: {error}");
+                let _ = answers.send(refused(first.id, "Argument", message.clone()));
+                requests.close();
+                while let Some(request) = requests.recv().await {
+                    let _ = answers.send(refused(request.id, "Argument", message.clone()));
+                }
+                let _ = client.shutdown().await;
+                return;
+            }
+        };
         let mut next = Some(first);
         while let Some(request) = match next.take() {
             Some(request) => Some(request),
             None => requests.recv().await,
         } {
-            let body = match client
-                .serve_thin_transaction(&mut transactions, &request)
-                .await
-            {
-                Ok(body) => body,
-                Err(error) => ThinBody::Error {
+            // A core that does not answer must not hold the session's later
+            // requests forever. A commit that times out may still reach the
+            // core: the client is told its fate is unknown, not that it
+            // failed.
+            let served = tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                client.serve_thin_transaction(&mut transactions, &request),
+            )
+            .await;
+            let body = match served {
+                Ok(Ok(body)) => body,
+                Ok(Err(error)) => ThinBody::Error {
                     code: "storage".to_owned(),
                     message: error.to_string(),
+                },
+                Err(_) => ThinBody::Error {
+                    code: "not_observed".to_owned(),
+                    message: match request.op {
+                        ThinOp::Commit { .. } => format!(
+                            "the core did not confirm the commit within {}s: it may still apply",
+                            REQUEST_TIMEOUT.as_secs()
+                        ),
+                        _ => format!(
+                            "the core did not answer within {}s",
+                            REQUEST_TIMEOUT.as_secs()
+                        ),
+                    },
                 },
             };
             if answers

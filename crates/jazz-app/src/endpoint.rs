@@ -13,7 +13,10 @@
 //!   resolves (or creates) their account;
 //! - `<base>/apps/<id>/ws`: the user's sync socket, whose prelude the
 //!   backend admits on its own word and relays to the core, pinned to the
-//!   permissions bundle it published ([`Endpoint::serve_socket`]).
+//!   permissions bundle it published ([`Endpoint::serve_socket`]). A thin
+//!   client's transactions are served here, by an in-memory client linked
+//!   to the core as the same session (SPEC 8.14): the core only accepts
+//!   them finished.
 //! - `POST <base>/apps/<id>/accounts/backend-link[/challenge]`: a device
 //!   account links to the user who signs up, proving its key on a
 //!   challenge issued for them.
@@ -1193,11 +1196,10 @@ impl Endpoint {
                                 thin = Some(ThinSocket::default());
                             }
                         } else if let Some(thin) = &mut thin {
-                            let Some(message) = thin.route(message, &target, &answers) else {
+                            if !thin.from_client(&message) {
                                 break Closed::policy("undecodable thin frame");
-                            };
-                            let Some(message) = message else { continue };
-                            if to_core.send(Message::Binary(message.into())).await.is_err() {
+                            }
+                            if !send_all(&mut to_core, thin.release(&target, &answers)).await {
                                 break Closed { code: 1011, reason: "the sync server went away".into() };
                             }
                             continue;
@@ -1209,6 +1211,9 @@ impl Endpoint {
                     None => break Closed::normal(),
                 },
                 Some(answer) = answered.recv() => {
+                    if let Some(thin) = &mut thin {
+                        thin.router.answered(answer.id);
+                    }
                     let mut sent = true;
                     for frame in thin::answer_frames(answer) {
                         let Ok(message) = encode_websocket_frame_batch(&[frame]) else {
@@ -1222,11 +1227,26 @@ impl Endpoint {
                     if !sent {
                         break Closed::normal();
                     }
+                    // The backend's answer may free frames waiting on it.
+                    if let Some(thin) = &mut thin
+                        && !send_all(&mut to_core, thin.release(&target, &answers)).await
+                    {
+                        break Closed { code: 1011, reason: "the sync server went away".into() };
+                    }
                 },
                 message = from_core.next() => match message {
                     Some(Ok(Message::Binary(data))) => {
+                        if let Some(thin) = &mut thin {
+                            thin.from_core(&data);
+                        }
                         if outgoing.send(data.to_vec()).await.is_err() {
                             break Closed::normal();
+                        }
+                        // The core's answers may free requests waiting on them.
+                        if let Some(thin) = &mut thin
+                            && !send_all(&mut to_core, thin.release(&target, &answers)).await
+                        {
+                            break Closed { code: 1011, reason: "the sync server went away".into() };
                         }
                     }
                     Some(Ok(Message::Close(frame))) => {
@@ -1544,6 +1564,25 @@ fn reauthenticate() -> Vec<u8> {
     )
 }
 
+/// Send `messages` to the core, in order. False once it went away.
+async fn send_all<S>(to_core: &mut S, messages: Vec<Vec<u8>>) -> bool
+where
+    S: Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+{
+    for message in messages {
+        if to_core
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                message.into(),
+            ))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Whether a client's Hello (its first message after the prelude) asks
 /// for thin results: a thin client, whose transactions the backend serves.
 fn asks_thin_results(message: &[u8]) -> bool {
@@ -1559,7 +1598,7 @@ fn asks_thin_results(message: &[u8]) -> bool {
 }
 
 /// A thin client's socket, past its Hello: its frames split between the
-/// core and the session's client.
+/// core and the session's client, in the client's order.
 #[derive(Default)]
 struct ThinSocket {
     router: thin::ThinRouter,
@@ -1568,44 +1607,61 @@ struct ThinSocket {
 }
 
 impl ThinSocket {
-    /// Route one client message: the message for the core (`Some(None)`
-    /// when nothing of it is the core's), or `None` when it does not decode.
-    fn route(
+    /// Take one client message. False when it does not decode.
+    fn from_client(&mut self, message: &[u8]) -> bool {
+        jazz::wire::decode_websocket_frame_batch(message)
+            .ok()
+            .is_some_and(|frames| self.router.from_client(frames).is_ok())
+    }
+
+    /// Note one message the core sent the client.
+    fn from_core(&mut self, message: &[u8]) {
+        if let Ok(frames) = jazz::wire::decode_websocket_frame_batch(message) {
+            self.router.from_core(&frames);
+        }
+    }
+
+    /// Release what may go now: backend requests to the session's client,
+    /// and the messages for the core, returned (a frame each).
+    fn release(
         &mut self,
-        message: Vec<u8>,
         target: &thin::SessionTarget,
         answers: &tokio::sync::mpsc::UnboundedSender<jazz::thin::ThinResponse>,
-    ) -> Option<Option<Vec<u8>>> {
-        let frames = jazz::wire::decode_websocket_frame_batch(&message).ok()?;
-        let routed = self.router.route(frames).ok()?;
-        for request in routed.to_backend {
-            let client = match &self.client {
-                Some(client) => client,
-                None => {
-                    let Some(schema) = self.router.schema() else {
-                        let _ = answers.send(jazz::thin::ThinResponse {
-                            id: request.id,
-                            body: jazz::thin::ThinBody::Error {
-                                code: "Argument".to_owned(),
-                                message: "bind the connection to a schema first".to_owned(),
-                            },
-                        });
-                        continue;
-                    };
-                    self.client.insert(thin::SessionClient::start(
-                        target.clone(),
-                        schema.to_vec(),
-                        answers.clone(),
-                    ))
+    ) -> Vec<Vec<u8>> {
+        let mut to_core = Vec::new();
+        for step in self.router.ready() {
+            match step {
+                jazz::thin_transactions::Step::ToCore(frames) => {
+                    to_core.extend(frames.iter().filter_map(|frame| {
+                        encode_websocket_frame_batch(std::slice::from_ref(frame)).ok()
+                    }))
                 }
-            };
-            client.send(request);
+                jazz::thin_transactions::Step::ToBackend(request) => {
+                    let client = match &self.client {
+                        Some(client) => client,
+                        None => {
+                            let Some(schema) = self.router.schema() else {
+                                let _ = answers.send(jazz::thin::ThinResponse {
+                                    id: request.id,
+                                    body: jazz::thin::ThinBody::Error {
+                                        code: "Argument".to_owned(),
+                                        message: "bind the connection to a schema first".to_owned(),
+                                    },
+                                });
+                                continue;
+                            };
+                            self.client.insert(thin::SessionClient::start(
+                                target.clone(),
+                                schema.to_vec(),
+                                answers.clone(),
+                            ))
+                        }
+                    };
+                    client.send(request);
+                }
+            }
         }
-        if routed.to_core.is_empty() {
-            return Some(None);
-        }
-        // Unchanged frames, fewer of them: they fit one message again.
-        encode_websocket_frame_batch(&routed.to_core).ok().map(Some)
+        to_core
     }
 }
 

@@ -1427,6 +1427,50 @@ impl ThinSocket {
         thin
     }
 
+    /// Send a request without waiting for its answer; its id.
+    async fn send(&mut self, op: jazz_app_support::jazz::thin::ThinOp) -> u64 {
+        use jazz_app_support::jazz::wire::{WireFrame, encode_frame, encode_websocket_frame_batch};
+        let id = self.next;
+        self.next += 1;
+        let frame = encode_frame(&WireFrame::ThinRequest(
+            jazz_app_support::jazz::thin::ThinRequest { id, op },
+        ))
+        .unwrap();
+        self.socket
+            .send(Message::Binary(
+                encode_websocket_frame_batch(&[frame]).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        id
+    }
+
+    /// The answers to `ids`, by id, in whatever order they come.
+    async fn answers(
+        &mut self,
+        ids: &[u64],
+    ) -> std::collections::BTreeMap<u64, jazz_app_support::jazz::thin::ThinBody> {
+        use jazz_app_support::jazz::wire::{WireFrame, decode_frame, decode_websocket_frame_batch};
+        let mut answers = std::collections::BTreeMap::new();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while answers.len() < ids.len() {
+                let Some(Ok(Message::Binary(message))) = self.socket.next().await else {
+                    panic!("the socket ended before answering");
+                };
+                for frame in decode_websocket_frame_batch(&message).unwrap() {
+                    if let Ok(WireFrame::ThinResponse(response)) = decode_frame(&frame)
+                        && ids.contains(&response.id)
+                    {
+                        answers.insert(response.id, response.body);
+                    }
+                }
+            }
+        })
+        .await
+        .expect("answered");
+        answers
+    }
+
     async fn call(
         &mut self,
         op: jazz_app_support::jazz::thin::ThinOp,
@@ -1631,5 +1675,88 @@ async fn a_thin_clients_transactions_run_in_the_backend_as_its_user() {
         .unwrap();
     assert!(todos_now.iter().all(|todo| todo.title != "dave's"));
 
+    app.stop().await;
+}
+
+/// Requests keep the client's order across the backend and the core: a
+/// transaction reads a plain write sent just before it, unawaited, and a
+/// plain read sent right after a commit sees the commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_clients_pipelined_requests_keep_their_order() {
+    use jazz_app_support::jazz::thin::{ThinBody, ThinOp};
+    let app = App::start().await;
+    let mut erin = ThinSocket::open(&app, "token-erin", "erin").await;
+    let row = jazz_app_support::ObjectId::new();
+    let by_id = postcard::to_allocvec(&todos::query().id(row).into_untyped().unwrap()).unwrap();
+    let tx = jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+    let todo = |title: &str| {
+        cells(&[
+            ("title", text(title)),
+            ("done", jazz_app_support::jazz::records::Value::Bool(false)),
+        ])
+    };
+    let inserted = erin
+        .send(ThinOp::Insert {
+            table: "todos".into(),
+            cells: todo("plain"),
+            options: serde_json::to_vec(&json!({ "rowId": row.uuid().as_bytes() })).unwrap(),
+            transaction: None,
+        })
+        .await;
+    let begun = erin
+        .send(ThinOp::Begin {
+            transaction: tx.clone(),
+            kind: "mergeable".into(),
+        })
+        .await;
+    let read_in_tx = erin
+        .send(ThinOp::Query {
+            query: by_id.clone(),
+            options: Vec::new(),
+            transaction: Some(tx.clone()),
+        })
+        .await;
+    let staged = erin
+        .send(ThinOp::Update {
+            table: "todos".into(),
+            row: *row.uuid().as_bytes(),
+            patch: cells(&[("title", text("in the transaction"))]),
+            options: Vec::new(),
+            transaction: Some(tx.clone()),
+        })
+        .await;
+    let committed = erin.send(ThinOp::Commit { transaction: tx }).await;
+    let read_after = erin
+        .send(ThinOp::Query {
+            query: by_id,
+            options: Vec::new(),
+            transaction: None,
+        })
+        .await;
+    let answers = erin
+        .answers(&[inserted, begun, read_in_tx, staged, committed, read_after])
+        .await;
+    assert!(
+        matches!(answers[&inserted], ThinBody::Written { .. }),
+        "{answers:?}"
+    );
+    assert_eq!(
+        rows_of(answers[&read_in_tx].clone()),
+        1,
+        "the transaction reads the write before it"
+    );
+    assert!(
+        matches!(answers[&committed], ThinBody::Written { .. }),
+        "{answers:?}"
+    );
+    let ThinBody::Rows { rows, .. } = answers[&read_after].clone() else {
+        panic!("{answers:?}");
+    };
+    let after = jazz_app_support::jazz::binding_codec::decode_rows(&rows).unwrap();
+    assert_eq!(
+        after[0].rows[0].cells["title"],
+        text("in the transaction"),
+        "the read after the commit sees it"
+    );
     app.stop().await;
 }
