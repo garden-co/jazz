@@ -102,7 +102,21 @@ async fn end_users_sign_in_and_sync_through_the_app() {
         let account = state["user"]["account"].as_str().unwrap().to_owned();
         carol.insert("shows".into(), show(&account)).unwrap();
         carol.wait_for_sync("global".into()).unwrap();
-        assert!(parse(&carol.sync_status().unwrap()).get("link").is_some());
+        let status = parse(&carol.sync_status().unwrap());
+        assert!(status.get("link").is_some(), "{status}");
+        assert!(status.get("pendingUploads").is_some(), "{status}");
+
+        // carol links her device account to her account with the app's
+        // sign-in: the session becomes that user's, on her device account.
+        // From a plain thread with no tokio runtime, as Swift or Go call it.
+        let user = std::thread::scope(|scope| {
+            scope.spawn(|| carol.link("token-carol".into())).join().unwrap()
+        });
+        let user = parse(&user.unwrap());
+        assert_eq!(user["kind"], "backend", "{user}");
+        assert_eq!(user["account"], account);
+        let state = parse(&carol.session_state().unwrap().unwrap());
+        assert_eq!(state["user"]["subject"], "carol", "{state}");
 
         let asked = Arc::new(Tokens(Mutex::new(Vec::new()), "alice"));
         let alice_config = alice.clone();
