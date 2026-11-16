@@ -64,6 +64,7 @@ describe("generate", () => {
     const dir = await project();
     await generateApp({ cwd: dir });
     const before = await readFile(join(dir, "jazz.generated.ts"), "utf8");
+    const appBefore = await readFile(join(dir, "jazz.app.json"), "utf8");
     await writeFile(
       join(dir, "schema.ts"),
       SCHEMA.replace("done: s.boolean() }", "done: s.boolean(), note: s.string().optional() }"),
@@ -71,7 +72,9 @@ describe("generate", () => {
     await expect(generateApp({ cwd: dir })).rejects.toThrow(
       "the schema changed since the last version: run `jazz-tools migrations create --name <name>`",
     );
+    // Nothing is written when generate refuses: not the bindings, not jazz.app.json.
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe(before);
+    expect(await readFile(join(dir, "jazz.app.json"), "utf8")).toBe(appBefore);
 
     const created = await createAppMigration({ cwd: dir, name: "add-note" });
     expect(created).toMatchObject({ changed: true, todos: [] });
