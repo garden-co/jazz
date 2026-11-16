@@ -34,7 +34,7 @@ export const schema = s.defineSchema({
 });
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
@@ -43,6 +43,11 @@ export const schema = s.defineSchema({
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-includes-effect
+    </include>
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-includes-swift
     </include>
   </Tab>
   <Tab value="Kotlin">
@@ -86,7 +91,7 @@ Jazz does not generate an inverse or infer names from UUID columns.
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-reverse-relation-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-reverse-relation-swift
     </include>
   </Tab>
   <Tab value="Kotlin">
@@ -110,7 +115,7 @@ relation.
 
 Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
@@ -119,6 +124,11 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-select-effect
+    </include>
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-select-swift
     </include>
   </Tab>
   <Tab value="Kotlin">

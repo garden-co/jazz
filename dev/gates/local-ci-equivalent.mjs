@@ -358,12 +358,15 @@ export const ciPartitions = Object.freeze({
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
   // run against the library (needs a JDK and swiftc: the runner image); then
-  // the Jazz Swift package and the StagePlan Swift example on top of it.
+  // the Jazz Swift package, the StagePlan Swift example and the docs Swift
+  // snippets on top of it.
   "jazz-ffi-bindings": Object.freeze([
     command("jazz-ffi Kotlin and Swift bindings", "bash", [
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
-    command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
+    command("Jazz Swift package, StagePlan Swift example and docs Swift snippets", "bash", [
+      "dev/gates/jazz-swift.sh",
+    ]),
   ]),
   // Every crate publish-jazz-crates-alpha.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.
