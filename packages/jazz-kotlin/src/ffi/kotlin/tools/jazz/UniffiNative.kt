@@ -45,6 +45,8 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
                 is FfiException.Permission -> JazzException.Permission(e.reason)
                 is FfiException.NotSupported -> JazzException.NotSupported(e.reason)
                 is FfiException.Conflict -> JazzException.Conflict(e.reason)
+                // Kinds a newer jazz-ffi adds (e.g. NoAccount, Unsynced): refused, with its message.
+                else -> JazzException.Refused(e.message ?: e.toString())
             }
         }
     }
