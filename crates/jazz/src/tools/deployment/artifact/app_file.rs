@@ -51,6 +51,7 @@ pub struct AppFile {
 pub const TOP_KEYS: &[&str] = &[
     "format",
     "$schema",
+    "$generated",
     "tables",
     "history",
     "migrations",

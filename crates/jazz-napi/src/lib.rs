@@ -110,20 +110,85 @@ pub struct WrittenAppFiles {
     pub permissions: String,
 }
 
+/// The `$generated` marker to write: `{ by }`, what wrote the files.
+#[napi(object)]
+pub struct GeneratedBy {
+    /// E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+    /// this file".
+    pub by: String,
+}
+
+/// How [`write_app_artifact`] and [`write_app_files`] write the files.
+#[napi(object)]
+pub struct WriteAppFilesOptions {
+    /// Mark each file `"$generated": { "by", "sha256" }`, first after
+    /// `$schema`.
+    pub generated: Option<GeneratedBy>,
+}
+
 /// Build the `jazz.app.json` and `jazz.permissions.json` texts from what
 /// `jazz-tools validate` compiled (an
 /// [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
-/// JSON): the files' only writer, which refuses what a reader would.
+/// JSON): the files' only writer, which refuses what a reader would. With
+/// `options.generated`, each file carries a `$generated` marker.
 #[napi(js_name = "writeAppArtifact")]
-pub fn write_app_artifact(input: String) -> js::Result<WrittenAppFiles> {
+pub fn write_app_artifact(
+    input: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
     use jazz::tools::deployment::artifact;
     let input: artifact::ArtifactInput = serde_json::from_str(&input)
         .map_err(|error| napi::Error::from_reason(format!("jazz.app.json input: {error}")))?;
-    let written = artifact::write(input).map_err(artifact_error)?;
+    let written = match options.and_then(|o| o.generated) {
+        Some(generated) => artifact::write_generated(input, &generated.by),
+        None => artifact::write(input),
+    }
+    .map_err(artifact_error)?;
     Ok(WrittenAppFiles {
         app: written.app,
         permissions: written.permissions,
     })
+}
+
+/// Check an app's readable `jazz.app.json` (`app`) and
+/// `jazz.permissions.json` (`permissions`) as a backend does and render
+/// them canonically through the writer, which reads its output back to
+/// exactly the same app. With `options.generated`, each file carries a
+/// `$generated` marker. Idempotent.
+#[napi(js_name = "writeAppFiles")]
+pub fn write_app_files(
+    app: String,
+    permissions: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
+    let by = options.and_then(|o| o.generated).map(|g| g.by);
+    let written = jazz::tools::deployment::artifact::rewrite(
+        app.as_bytes(),
+        permissions.as_bytes(),
+        by.as_deref(),
+    )
+    .map_err(artifact_error)?;
+    Ok(WrittenAppFiles {
+        app: written.app,
+        permissions: written.permissions,
+    })
+}
+
+/// Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+/// its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+/// or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+/// when the text isn't a JSON object or the marker is malformed.
+#[napi(js_name = "verifyGenerated")]
+pub fn verify_generated(text: String) -> napi::Result<String> {
+    use jazz::tools::deployment::artifact::{self, GeneratedCheck};
+    Ok(
+        match artifact::verify_generated(text.as_bytes()).map_err(napi::Error::from_reason)? {
+            GeneratedCheck::Unmarked => "none",
+            GeneratedCheck::Matches(_) => "match",
+            GeneratedCheck::Mismatch { .. } => "mismatch",
+        }
+        .to_owned(),
+    )
 }
 
 /// Read and check an app's `jazz.app.json` (`app`) and

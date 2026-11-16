@@ -600,6 +600,147 @@ pub fn source_hash(file: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// The top-level key of the marker a tool writes into the files it
+/// generates from TypeScript: `{"by": "<text>", "sha256": "<hex>"}`.
+pub const GENERATED_KEY: &str = "$generated";
+
+/// The `by` of the marker `npx jazz-tools generate` writes.
+pub const GENERATED_BY_TS: &str =
+    "jazz-tools generate from schema.ts — edit the TypeScript, not this file";
+
+/// A file's `$generated` marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedMarker {
+    /// What wrote the file, for people reading it.
+    pub by: String,
+    /// The hex SHA-256 of the file's canonical text without the marker
+    /// ([`generated_digest`]) when it was written.
+    pub sha256: String,
+}
+
+/// What [`verify_generated`] found in a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedCheck {
+    /// No `$generated`: written by hand (or by an older tool).
+    Unmarked,
+    /// The marker's digest matches: the file is as its tool wrote it, give
+    /// or take formatting.
+    Matches(GeneratedMarker),
+    /// The marker's digest doesn't match: the file was edited since.
+    Mismatch {
+        marker: GeneratedMarker,
+        /// The digest of the file as it is.
+        actual: String,
+    },
+}
+
+/// The `$generated` marker of a parsed file, checked: `None` when there is
+/// none, a refusal (at `$generated`) when it isn't
+/// `{"by": "<text>", "sha256": "<64 lowercase hex>"}`.
+fn generated_marker(root: &Json) -> Result<Option<GeneratedMarker>, String> {
+    const SHAPE: &str =
+        "must be { \"by\": \"<text>\", \"sha256\": \"<64 lowercase hex characters>\" }";
+    let Some(value) = root.get(GENERATED_KEY) else {
+        return Ok(None);
+    };
+    let refuse = |what: String| format!("{GENERATED_KEY}: {what}");
+    let entries = value
+        .as_object()
+        .ok_or_else(|| refuse(format!("{SHAPE}, not {}", value.kind())))?;
+    for (key, _) in entries {
+        if key != "by" && key != "sha256" {
+            return Err(refuse(format!("unknown key `{key}`; {SHAPE}")));
+        }
+    }
+    let by = value.get("by").and_then(Json::as_str);
+    let sha256 = value.get("sha256").and_then(Json::as_str);
+    match (by, sha256) {
+        (Some(by), Some(sha256))
+            if sha256.len() == 64
+                && sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            Ok(Some(GeneratedMarker {
+                by: by.to_string(),
+                sha256: sha256.to_string(),
+            }))
+        }
+        _ => Err(refuse(SHAPE.to_string())),
+    }
+}
+
+/// The digest a `$generated` marker records: the hex SHA-256 of the file's
+/// canonical text ([`json::print`], the writer's) with the `$generated`
+/// member removed, i.e. of exactly what the writer produces without the
+/// marker.
+pub fn generated_digest(root: &Json) -> String {
+    use sha2::{Digest, Sha256};
+    let unmarked = match root {
+        Json::Object(entries) => Json::Object(
+            entries
+                .iter()
+                .filter(|(key, _)| key != GENERATED_KEY)
+                .cloned()
+                .collect(),
+        ),
+        other => other.clone(),
+    };
+    hex::encode(Sha256::digest(json::print(&unmarked).as_bytes()))
+}
+
+fn parse_file_text(file: &[u8]) -> Result<Json, String> {
+    let file = file.strip_prefix("\u{feff}".as_bytes()).unwrap_or(file);
+    let root = json::parse(file)?;
+    if root.as_object().is_none() {
+        return Err(format!("must be a JSON object, not {}", root.kind()));
+    }
+    Ok(root)
+}
+
+/// `file` (a `jazz.app.json` or `jazz.permissions.json` text) printed
+/// canonically with a `$generated` marker saying it was written `by`, first
+/// after `$schema` (first of all when there is no `$schema`); an existing
+/// marker is replaced.
+pub fn mark_generated(file: &[u8], by: &str) -> Result<String, String> {
+    let root = parse_file_text(file)?;
+    let digest = generated_digest(&root);
+    let Json::Object(mut entries) = root else {
+        unreachable!("checked by parse_file_text");
+    };
+    entries.retain(|(key, _)| key != GENERATED_KEY);
+    let at = usize::from(entries.first().is_some_and(|(key, _)| key == "$schema"));
+    entries.insert(
+        at,
+        (
+            GENERATED_KEY.to_string(),
+            Json::object(vec![
+                ("by", Json::string(by)),
+                ("sha256", Json::string(digest)),
+            ]),
+        ),
+    );
+    Ok(json::print(&Json::Object(entries)))
+}
+
+/// Whether `file` (a `jazz.app.json` or `jazz.permissions.json` text) is as
+/// the tool its `$generated` marker names wrote it: no marker, a matching
+/// digest, or a mismatch (it was edited since). Formatting alone (indent,
+/// line ends, a BOM) doesn't count as an edit. A file that isn't a JSON
+/// object, or whose marker is malformed, is refused.
+pub fn verify_generated(file: &[u8]) -> Result<GeneratedCheck, String> {
+    let root = parse_file_text(file)?;
+    let Some(marker) = generated_marker(&root)? else {
+        return Ok(GeneratedCheck::Unmarked);
+    };
+    let actual = generated_digest(&root);
+    Ok(if actual == marker.sha256 {
+        GeneratedCheck::Matches(marker)
+    } else {
+        GeneratedCheck::Mismatch { marker, actual }
+    })
+}
+
 /// The engine's hash of a schema in its own JSON form (`{ "tables": … }`,
 /// what generated bindings embed per version), its policies dropped as a
 /// deployment drops them: the one schema-hash implementation every
@@ -754,6 +895,8 @@ fn read_format(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
             root.kind()
         )));
     };
+    // Ignored on load, but well-formed.
+    generated_marker(&root).map_err(refuse)?;
     match object.iter().find(|(k, _)| k == "format").map(|(_, v)| v) {
         None => Err(refuse(format!(
             "no `format`; the file starts {{ \"format\": {FORMAT}, … }}"
@@ -1421,6 +1564,88 @@ pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
         return Err(round_trip("a migration"));
     }
     Ok(written)
+}
+
+/// [`write`], each file marked as generated `by` a tool (see
+/// [`mark_generated`]): what `npx jazz-tools generate` writes from the TS.
+pub fn write_generated(input: ArtifactInput, by: &str) -> Result<WrittenApp, ArtifactError> {
+    let written = write(input)?;
+    let mark = |file: &'static str, text: &str| {
+        mark_generated(text.as_bytes(), by).map_err(|error| ArtifactError::in_file(file, error))
+    };
+    Ok(WrittenApp {
+        app: mark(APP_FILE, &written.app)?,
+        permissions: mark(PERMISSIONS_FILE, &written.permissions)?,
+    })
+}
+
+/// An app's two readable files (`app`, `permissions`, as people, agents or
+/// the TS tooling write them) checked as [`load`] checks them and
+/// re-rendered by [`write`]: the canonical text, which reads back to
+/// exactly the same engine input. With `generated_by`, each file carries a
+/// `$generated` marker ([`mark_generated`]). Migration `name`s are kept;
+/// `$comment`s, a version's own name (the writer names a version by its
+/// short schema hash) and what loads only with a warning are not.
+/// Idempotent: rewriting its output gives the same text.
+pub fn rewrite(
+    app: &[u8],
+    permissions: &[u8],
+    generated_by: Option<&str>,
+) -> Result<WrittenApp, ArtifactError> {
+    let loaded = load(app, permissions)?;
+    let input = ArtifactInput {
+        current: loaded.current_hash().to_string(),
+        schemas: loaded.schemas().iter().map(|(_, s)| s.clone()).collect(),
+        migrations: loaded.migrations().to_vec(),
+        permissions: loaded.permissions().clone(),
+        codegen: loaded.codegen().clone(),
+    };
+    let mut written = write(input)?;
+    written.app = keep_migration_names(app, &written.app);
+    if let Some(by) = generated_by {
+        let mark = |file: &'static str, text: &str| {
+            mark_generated(text.as_bytes(), by).map_err(|error| ArtifactError::in_file(file, error))
+        };
+        written = WrittenApp {
+            app: mark(APP_FILE, &written.app)?,
+            permissions: mark(PERMISSIONS_FILE, &written.permissions)?,
+        };
+    }
+    Ok(written)
+}
+
+/// `written` (the writer's `jazz.app.json`) with the migration `name`s of
+/// `source`, the file it was loaded from: the writer has no names, and the
+/// file's migrations come first, in order, in what loading it gives.
+fn keep_migration_names(source: &[u8], written: &str) -> String {
+    let source = source
+        .strip_prefix("\u{feff}".as_bytes())
+        .unwrap_or(source);
+    let (Ok(source), Ok(Json::Object(mut top))) =
+        (json::parse(source), json::parse(written.as_bytes()))
+    else {
+        return written.to_string();
+    };
+    let Some(Json::Array(named)) = source.get("migrations") else {
+        return written.to_string();
+    };
+    let Some((_, Json::Array(migrations))) = top.iter_mut().find(|(k, _)| k == "migrations")
+    else {
+        return written.to_string();
+    };
+    let mut changed = false;
+    for (from, to) in named.iter().zip(migrations.iter_mut()) {
+        if let (Some(name), Json::Object(entries)) = (from.get("name"), to) {
+            entries.retain(|(k, _)| k != "name");
+            entries.insert(0, ("name".to_string(), name.clone()));
+            changed = true;
+        }
+    }
+    if changed {
+        json::print(&Json::Object(top))
+    } else {
+        written.to_string()
+    }
 }
 
 /// `file` with `$schema` first.

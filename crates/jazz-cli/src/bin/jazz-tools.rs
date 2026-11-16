@@ -335,6 +335,29 @@ fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
     std::process::exit(code)
 }
 
+/// Where a TS app keeps its `schema.ts`, relative to the app's directory
+/// (jazz-tools' `SCHEMA_ROOTS`, `packages/jazz-tools/src/upgrade/project.ts`).
+const SCHEMA_ROOTS: &[&str] = &[".", "src", "src/lib"];
+
+/// Refuse to write an app's files when it is authored in TypeScript: there
+/// `jazz.app.json` and `jazz.permissions.json` are generated from
+/// `schema.ts` by `npx jazz-tools generate`, which this binary can't run.
+fn refuse_ts_authored(dir: &std::path::Path, command: &str) -> Result<(), String> {
+    let Some(schema) = SCHEMA_ROOTS
+        .iter()
+        .map(|root| dir.join(root).join("schema.ts"))
+        .find(|path| path.is_file())
+    else {
+        return Ok(());
+    };
+    Err(format!(
+        "{} exists: this app is authored in TypeScript, and its jazz.app.json and \
+         jazz.permissions.json are generated from it. Run `npx jazz-tools {command}` instead \
+         (the standalone binary can't read TypeScript)",
+        schema.display()
+    ))
+}
+
 fn langs(
     dir: &std::path::Path,
     names: &[String],
@@ -393,7 +416,9 @@ async fn run() {
             lang: name,
             check,
         } => finish_app_files(
-            langs(&dir, &name).and_then(|langs| jazz_cli::app_files::generate(&dir, &langs, check)),
+            refuse_ts_authored(&dir, "generate")
+                .and_then(|()| langs(&dir, &name))
+                .and_then(|langs| jazz_cli::app_files::generate(&dir, &langs, check)),
         ),
         Commands::Migrations {
             action:
@@ -403,7 +428,8 @@ async fn run() {
                     lang: language,
                 },
         } => finish_app_files(
-            langs(&dir, &language)
+            refuse_ts_authored(&dir, "migrations create")
+                .and_then(|()| langs(&dir, &language))
                 .and_then(|langs| jazz_cli::app_files::migrations_create(&dir, &langs, &name)),
         ),
         Commands::Create { resource } => match resource {

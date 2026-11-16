@@ -512,6 +512,15 @@ export interface ExplainedReadRow {
  */
 export declare function generate(lang: string, appJson: string): string
 
+/** The `$generated` marker to write: `{ by }`, what wrote the files. */
+export interface GeneratedBy {
+  /**
+   * E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+   * this file".
+   */
+  by: string
+}
+
 /**
  * `jazz-tools generate [--check]` in `dir`, the directory of the app's
  * `jazz.app.json`: the same languages, checks and bytes as the
@@ -716,6 +725,14 @@ export declare function validateBindings(appJson: string, bindings?: string | un
 /** Validate a schema and its embedded permissions without opening a database. */
 export declare function validateSchema(schema: Uint8Array): void
 
+/**
+ * Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+ * its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+ * or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+ * when the text isn't a JSON object or the marker is malformed.
+ */
+export declare function verifyGenerated(text: string): string
+
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
 export interface VerifyTokenResult {
@@ -728,9 +745,28 @@ export interface VerifyTokenResult {
  * Build the `jazz.app.json` and `jazz.permissions.json` texts from what
  * `jazz-tools validate` compiled (an
  * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
- * JSON): the files' only writer, which refuses what a reader would.
+ * JSON): the files' only writer, which refuses what a reader would. With
+ * `options.generated`, each file carries a `$generated` marker.
  */
-export declare function writeAppArtifact(input: string): WrittenAppFiles
+export declare function writeAppArtifact(input: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/**
+ * Check an app's readable `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does and render
+ * them canonically through the writer, which reads its output back to
+ * exactly the same app. With `options.generated`, each file carries a
+ * `$generated` marker. Idempotent.
+ */
+export declare function writeAppFiles(app: string, permissions: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/** How [`write_app_artifact`] and [`write_app_files`] write the files. */
+export interface WriteAppFilesOptions {
+  /**
+   * Mark each file `"$generated": { "by", "sha256" }`, first after
+   * `$schema`.
+   */
+  generated?: GeneratedBy
+}
 
 /** An app's two files, as [`write_app_artifact`] renders them. */
 export interface WrittenAppFiles {

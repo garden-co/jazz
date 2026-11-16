@@ -348,11 +348,6 @@ pub enum Ast {
         /// The bound and where `maxDepth: n` is written.
         max_depth: Option<(usize, Span)>,
     },
-    Call {
-        name: String,
-        span: Span,
-        args: Vec<Operand>,
-    },
 }
 
 /// `.rel(…)` after `exists t(…)`.
@@ -399,7 +394,6 @@ pub enum Operand {
     Typed(Value, Span),
     Null(Span),
     Session(Vec<String>, Span),
-    Param(String, Span),
 }
 
 impl Operand {
@@ -409,8 +403,7 @@ impl Operand {
             | Operand::Literal(_, span)
             | Operand::Typed(_, span)
             | Operand::Null(span)
-            | Operand::Session(_, span)
-            | Operand::Param(_, span) => *span,
+            | Operand::Session(_, span) => *span,
         }
     }
 }
@@ -720,7 +713,13 @@ impl Parser<'_> {
                     && !TYPED.contains(&word.as_str())
                     && self.peek_at(1) == Some(&Tok::LParen) =>
             {
-                self.call()
+                Err(ExprError::new(
+                    token.span,
+                    format!(
+                        "unknown function `{word}`; a policy calls only `anyOf`, `allOf` and typed literals such as `int(5)`"
+                    ),
+                )
+                .example("anyOf(isPublic = true, userId = session.user)"))
             }
             _ => self.comparison(),
         }
@@ -867,38 +866,6 @@ impl Parser<'_> {
             target,
             max_depth,
         })
-    }
-
-    fn call(&mut self) -> Result<Ast, ExprError> {
-        let Some(Token {
-            tok: Tok::Ident(name),
-            span,
-        }) = self.next()
-        else {
-            unreachable!("checked by atom");
-        };
-        self.at += 1;
-        let mut args = Vec::new();
-        if self.is_tok(&Tok::RParen) {
-            self.at += 1;
-        } else {
-            loop {
-                args.push(self.operand()?);
-                match self.next() {
-                    Some(Token {
-                        tok: Tok::Comma, ..
-                    }) => continue,
-                    Some(Token {
-                        tok: Tok::RParen, ..
-                    }) => break,
-                    _ => {
-                        return Err(ExprError::new(self.here(), "expected `,` or `)`")
-                            .example("isChatMember(this.id)"));
-                    }
-                }
-            }
-        }
-        Ok(Ast::Call { name, span, args })
     }
 
     fn comparison(&mut self) -> Result<Ast, ExprError> {
@@ -1070,7 +1037,13 @@ impl Parser<'_> {
                         span: (span.0, end),
                     });
                 }
-                Ok(Operand::Param(name, span))
+                Err(ExprError::new(
+                    span,
+                    format!(
+                        "unknown column `{column}`{}",
+                        did_you_mean(&column, MAGIC_COLUMNS.iter().copied())
+                    ),
+                ))
             }
             Tok::Ident(word) if word == "null" => Ok(Operand::Null(span)),
             Tok::Ident(word) if word == "true" => Ok(Operand::Literal(Literal::Bool(true), span)),
@@ -1803,7 +1776,6 @@ impl Parser<'_> {
 pub struct Context<'a> {
     pub schema: &'a Schema,
     pub relations: &'a BTreeMap<String, BTreeMap<String, CodegenRelation>>,
-    pub defs: &'a Defs,
     /// Each table's computed fields: not stored, so no policy reads them;
     /// named only to say so when one does.
     pub computed: &'a ComputedNames,
@@ -1811,95 +1783,6 @@ pub struct Context<'a> {
 
 /// Table → the names of its computed fields.
 pub type ComputedNames = BTreeMap<String, BTreeSet<String>>;
-
-/// Parsed `defs`: name → (parameters, body).
-pub type Defs = BTreeMap<String, Def>;
-
-#[derive(Debug, Clone)]
-pub struct Def {
-    pub params: Vec<String>,
-    /// The body's policy, already parsed; its source for error reports.
-    pub body: DefBody,
-}
-
-#[derive(Debug, Clone)]
-pub enum DefBody {
-    Expr(Ast, String),
-    AnyOf(Vec<DefBody>),
-    AllOf(Vec<DefBody>),
-}
-
-/// Parse a def signature `name($a, $b)`.
-pub fn parse_signature(signature: &str) -> Result<(String, Vec<String>), ExprError> {
-    const EXAMPLE: &str = "isChatMember($chat)";
-    let tokens = lex(signature)?;
-    let mut iter = tokens.iter();
-    let Some(Token {
-        tok: Tok::Ident(name),
-        ..
-    }) = iter.next()
-    else {
-        return Err(
-            ExprError::new((0, signature.len()), "a definition is `name($param, …)`")
-                .example(EXAMPLE),
-        );
-    };
-    let mut params = Vec::new();
-    match iter.next() {
-        None => return Ok((name.clone(), params)),
-        Some(Token {
-            tok: Tok::LParen, ..
-        }) => {}
-        Some(t) => return Err(ExprError::new(t.span, "expected `(`").example(EXAMPLE)),
-    }
-    loop {
-        match iter.next() {
-            Some(Token {
-                tok: Tok::RParen, ..
-            }) if params.is_empty() => break,
-            Some(Token {
-                tok: Tok::Dollar(p),
-                span,
-            }) => {
-                if params.contains(p) {
-                    return Err(ExprError::new(*span, format!("parameter `${p}` repeats")));
-                }
-                params.push(p.clone());
-            }
-            Some(t) => {
-                return Err(
-                    ExprError::new(t.span, "parameters are written `$name`").example(EXAMPLE)
-                );
-            }
-            None => {
-                return Err(ExprError::new(
-                    (signature.len(), signature.len()),
-                    "expected `)`",
-                ));
-            }
-        }
-        match iter.next() {
-            Some(Token {
-                tok: Tok::Comma, ..
-            }) => continue,
-            Some(Token {
-                tok: Tok::RParen, ..
-            }) => break,
-            _ => {
-                return Err(
-                    ExprError::new((0, signature.len()), "expected `,` or `)`").example(EXAMPLE)
-                );
-            }
-        }
-    }
-    if let Some(t) = iter.next() {
-        return Err(ExprError::new(
-            t.span,
-            "unexpected text after the parameters",
-        ));
-    }
-    Ok((name.clone(), params))
-}
 
 /// One `exists` level a compile is in: its table, and the alias that names it.
 #[derive(Clone)]
@@ -1918,10 +1801,6 @@ impl Level {
 #[derive(Clone)]
 struct Scope {
     levels: Vec<Level>,
-    /// Arguments of the definition being expanded.
-    params: BTreeMap<String, Operand>,
-    /// Definitions being expanded, to refuse recursion.
-    calling: Vec<String>,
 }
 
 impl Scope {
@@ -1941,33 +1820,8 @@ pub fn compile(ast: &Ast, context: &Context<'_>, table: &str) -> Result<PolicyEx
             table: table.to_string(),
             alias: None,
         }],
-        params: BTreeMap::new(),
-        calling: Vec::new(),
     };
     compile_in(ast, context, &scope)
-}
-
-/// Compile a def body (or any [`DefBody`]) in `scope`.
-fn compile_body(
-    body: &DefBody,
-    context: &Context<'_>,
-    scope: &Scope,
-) -> Result<PolicyExpr, ExprError> {
-    match body {
-        DefBody::Expr(ast, _) => compile_in(ast, context, scope),
-        DefBody::AnyOf(items) => Ok(PolicyExpr::Or(
-            items
-                .iter()
-                .map(|item| compile_body(item, context, scope))
-                .collect::<Result<_, _>>()?,
-        )),
-        DefBody::AllOf(items) => Ok(PolicyExpr::And(
-            items
-                .iter()
-                .map(|item| compile_body(item, context, scope))
-                .collect::<Result<_, _>>()?,
-        )),
-    }
 }
 
 fn columns_of<'a>(context: &'a Context<'_>, table: &str) -> Option<Vec<(&'a str, &'a ColumnType)>> {
@@ -2070,13 +1924,13 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
             span,
         } => compile_cmp(left, op.clone(), right, *span, context, scope),
         Ast::InList { left, values, span } => {
-            let left = resolve(left, scope);
+            let left = left.clone();
             match classify(&left, context, scope)? {
                 Ref::Column(column, ty) => Ok(PolicyExpr::InList {
                     column,
                     values: values
                         .iter()
-                        .map(|v| policy_value(&resolve(v, scope), ty.as_ref(), context, scope))
+                        .map(|v| policy_value(v, ty.as_ref(), context, scope))
                         .collect::<Result<_, _>>()?,
                 }),
                 _ => match left {
@@ -2084,7 +1938,7 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
                         path,
                         values: values
                             .iter()
-                            .map(|v| literal_value(&resolve(v, scope), None))
+                            .map(|v| literal_value(v, None))
                             .collect::<Result<_, _>>()?,
                     }),
                     other => Err(ExprError::new(
@@ -2096,7 +1950,7 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
             }
         }
         Ast::InSession { left, path, .. } => {
-            let left = resolve(left, scope);
+            let left = left.clone();
             match classify(&left, context, scope)? {
                 Ref::Column(column, _) => Ok(PolicyExpr::In {
                     column,
@@ -2109,8 +1963,8 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
             }
         }
         Ast::Contains { left, right, .. } => {
-            let left = resolve(left, scope);
-            let right = resolve(right, scope);
+            let left = left.clone();
+            let right = right.clone();
             match classify(&left, context, scope)? {
                 Ref::Column(column, ty) => {
                     let element = match ty {
@@ -2167,55 +2021,6 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
             target,
             max_depth,
         } => compile_allowed(*op, target, *max_depth, context, scope),
-        Ast::Call { name, span, args } => {
-            let Some(def) = context.defs.get(name) else {
-                let names: Vec<&str> = context.defs.keys().map(String::as_str).collect();
-                return Err(ExprError::new(
-                    *span,
-                    format!("unknown definition `{name}`{}", did_you_mean(name, names)),
-                )
-                .example("isChatMember(this.id)"));
-            };
-            if scope.calling.contains(name) {
-                return Err(ExprError::new(
-                    *span,
-                    format!(
-                        "`{name}` calls itself ({} → {name}): definitions may not be recursive",
-                        scope.calling.join(" → ")
-                    ),
-                ));
-            }
-            if def.params.len() != args.len() {
-                return Err(ExprError::new(
-                    *span,
-                    format!(
-                        "`{name}` takes {} argument(s), not {}",
-                        def.params.len(),
-                        args.len()
-                    ),
-                ));
-            }
-            if scope.calling.len() >= MAX_DEPTH {
-                return Err(ExprError::new(
-                    *span,
-                    "definitions call each other too deeply",
-                ));
-            }
-            let mut calling = scope.calling.clone();
-            calling.push(name.clone());
-            let params = def
-                .params
-                .iter()
-                .cloned()
-                .zip(args.iter().map(|a| resolve(a, scope)))
-                .collect();
-            let inner = Scope {
-                params,
-                calling,
-                ..scope.clone()
-            };
-            compile_body(&def.body, context, &inner)
-        }
     }
 }
 
@@ -2317,18 +2122,6 @@ fn forward_column(context: &Context<'_>, table: &str, relation: &str) -> Option<
     }
 }
 
-/// `operand` with a `$param` replaced by its argument.
-fn resolve(operand: &Operand, scope: &Scope) -> Operand {
-    match operand {
-        Operand::Param(name, _) => scope
-            .params
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| operand.clone()),
-        other => other.clone(),
-    }
-}
-
 /// What a column operand names, from where the compile is.
 enum Ref {
     /// A column of the row the condition filters (type `None`: magic).
@@ -2410,7 +2203,7 @@ fn compile_cmp(
     context: &Context<'_>,
     scope: &Scope,
 ) -> Result<PolicyExpr, ExprError> {
-    let (left, right) = (resolve(left, scope), resolve(right, scope));
+    let (left, right) = (left.clone(), right.clone());
     if let Ref::Column(column, ty) = classify(&left, context, scope)? {
         return column_cmp(column, ty, op, &right, context, scope);
     }
@@ -2489,10 +2282,6 @@ fn policy_value(
             )
             .example("exists chats(id = this.chatId, isPublic = true)")),
         },
-        Operand::Param(name, span) => Err(ExprError::new(
-            *span,
-            format!("`${name}` is not a parameter of this definition"),
-        )),
         other => Ok(PolicyValue::Literal(literal_value(other, ty)?)),
     }
 }
@@ -2738,12 +2527,6 @@ fn relation_predicate(
             Operand::Null(span) => {
                 return Err(ExprError::new(*span, "compare with null by `col = null`"));
             }
-            Operand::Param(name, span) => {
-                return Err(ExprError::new(
-                    *span,
-                    format!("`${name}` is not a parameter of this definition"),
-                ));
-            }
         })
     };
     Ok(match ast {
@@ -2760,7 +2543,7 @@ fn relation_predicate(
             right,
             span,
         } => {
-            let (left, right) = (resolve(left, scope), resolve(right, scope));
+            let (left, right) = (left.clone(), right.clone());
             let (col, op, other) = if let Some(c) = column(&left)? {
                 (c, op.clone(), right)
             } else if let Some(c) = column(&right)? {
@@ -2792,7 +2575,7 @@ fn relation_predicate(
             }
         }
         Ast::InList { left, values, span } => {
-            let Some(col) = column(&resolve(left, scope))? else {
+            let Some(col) = column(left)? else {
                 return Err(ExprError::new(
                     *span,
                     "`in` tests a column of the hop's table",
@@ -2802,12 +2585,12 @@ fn relation_predicate(
                 left: col,
                 values: values
                     .iter()
-                    .map(|v| value(&resolve(v, scope)))
+                    .map(|v| value(v))
                     .collect::<Result<_, _>>()?,
             }
         }
         Ast::Contains { left, right, span } => {
-            let Some(col) = column(&resolve(left, scope))? else {
+            let Some(col) = column(left)? else {
                 return Err(ExprError::new(
                     *span,
                     "`contains` tests a column of the hop's table",
@@ -2815,14 +2598,13 @@ fn relation_predicate(
             };
             RelationPredicate::Contains {
                 left: col,
-                right: value(&resolve(right, scope))?,
+                right: value(right)?,
             }
         }
         Ast::InSession { span, .. }
         | Ast::Exists {
             table_span: span, ..
-        }
-        | Ast::Call { span, .. } => {
+        } => {
             return Err(ExprError::new(
                 *span,
                 "a hop's conditions are comparisons; write this one as `exists (from …)`",

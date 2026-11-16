@@ -1,6 +1,6 @@
 //! `jazz.permissions.json` (SPEC §10.10): each table's read / insert /
 //! update / delete policies, as expression strings and anyOf / allOf
-//! objects, with `defs` for shared expressions.
+//! objects.
 
 use std::collections::BTreeMap;
 
@@ -8,7 +8,7 @@ use crate::catalogue::Permissions;
 use crate::tools::public_schema::{OperationPolicy, PolicyExpr, Schema, TableName, TablePolicies};
 
 use super::CodegenRelation;
-use super::expr::{self, ComputedNames, Context, Def, DefBody, Defs};
+use super::expr::{self, Ast, ComputedNames, Context};
 use super::json::Json;
 
 /// A refusal at a JSON path of the permissions file.
@@ -17,6 +17,10 @@ pub type Refusal = (String, String);
 fn refuse(path: impl Into<String>, message: impl Into<String>) -> Refusal {
     (path.into(), message.into())
 }
+
+/// The keys the file takes at the top (besides `$comment`), which the JSON
+/// Schema in docs/public/schemas/ must list too.
+pub const TOP_KEYS: &[&str] = &["format", "$schema", "$generated", "tables"];
 
 pub fn read(
     root: &Json,
@@ -28,40 +32,21 @@ pub fn read(
         .as_object()
         .ok_or_else(|| refuse("(top)", "must be an object"))?;
     for (key, _) in top {
-        if !matches!(
-            key.as_str(),
-            "format" | "$schema" | "$comment" | "defs" | "tables"
-        ) {
+        if key != "$comment" && !TOP_KEYS.contains(&key.as_str()) {
             return Err(refuse(
                 "(top)",
-                format!("unknown key `{key}`; this file takes `format`, `defs` and `tables`"),
+                format!(
+                    "unknown key `{key}`{}; this file takes `format` and `tables`",
+                    expr::did_you_mean(key, TOP_KEYS.iter().copied())
+                ),
             ));
-        }
-    }
-    let mut defs = Defs::new();
-    if let Some(entries) = root.get("defs") {
-        let entries = entries
-            .as_object()
-            .ok_or_else(|| refuse("defs", "must be an object of `name($param)`: policy"))?;
-        for (signature, body) in entries {
-            let path = format!("defs.{signature}");
-            let (name, params) = expr::parse_signature(signature)
-                .map_err(|e| refuse("defs", e.render(signature)))?;
-            if defs.contains_key(&name) {
-                return Err(refuse(&path, format!("`{name}` is defined twice")));
-            }
-            let body = read_body(body, &path)?;
-            defs.insert(name, Def { params, body });
         }
     }
     let context = Context {
         schema,
         relations,
-        defs: &defs,
         computed,
     };
-    // A definition must compile on its own terms too: its body is checked
-    // where it is called, and here for recursion through any table.
     let mut permissions = Permissions::new();
     let Some(tables) = root.get("tables") else {
         return Ok(permissions);
@@ -190,11 +175,19 @@ fn is_two_sided(value: &Json) -> bool {
     })
 }
 
-fn read_body(value: &Json, path: &str) -> Result<DefBody, Refusal> {
+/// A policy read, before it is compiled: an expression (with its source,
+/// for error reports) or an `anyOf` / `allOf` of policies.
+enum Body {
+    Expr(Ast, String),
+    AnyOf(Vec<Body>),
+    AllOf(Vec<Body>),
+}
+
+fn read_body(value: &Json, path: &str) -> Result<Body, Refusal> {
     match value {
         Json::String(source) => {
             let ast = expr::parse(source).map_err(|e| refuse(path, e.render(source)))?;
-            Ok(DefBody::Expr(ast, source.clone()))
+            Ok(Body::Expr(ast, source.clone()))
         }
         Json::Object(entries) => {
             let key = |k: &str| value.get(k);
@@ -208,7 +201,7 @@ fn read_body(value: &Json, path: &str) -> Result<DefBody, Refusal> {
                     ));
                 }
             }
-            let list = |items: &Json, kind: &str| -> Result<Vec<DefBody>, Refusal> {
+            let list = |items: &Json, kind: &str| -> Result<Vec<Body>, Refusal> {
                 match items {
                     Json::Array(items) if !items.is_empty() => items
                         .iter()
@@ -222,8 +215,8 @@ fn read_body(value: &Json, path: &str) -> Result<DefBody, Refusal> {
                 }
             };
             match (key("anyOf"), key("allOf"), key("where")) {
-                (Some(items), None, None) => Ok(DefBody::AnyOf(list(items, "anyOf")?)),
-                (None, Some(items), None) => Ok(DefBody::AllOf(list(items, "allOf")?)),
+                (Some(items), None, None) => Ok(Body::AnyOf(list(items, "anyOf")?)),
+                (None, Some(items), None) => Ok(Body::AllOf(list(items, "allOf")?)),
                 (None, None, Some(inner)) => read_body(inner, &format!("{path}.where")),
                 _ => Err(refuse(
                     path,
@@ -262,23 +255,23 @@ fn compile(
 }
 
 fn compile_body(
-    body: &DefBody,
+    body: &Body,
     path: &str,
     context: &Context<'_>,
     table: &str,
 ) -> Result<PolicyExpr, Refusal> {
     match body {
-        DefBody::Expr(ast, source) => {
+        Body::Expr(ast, source) => {
             expr::compile(ast, context, table).map_err(|e| refuse(path, e.render(source)))
         }
-        DefBody::AnyOf(items) => Ok(PolicyExpr::Or(
+        Body::AnyOf(items) => Ok(PolicyExpr::Or(
             items
                 .iter()
                 .enumerate()
                 .map(|(i, item)| compile_body(item, &format!("{path}.anyOf[{i}]"), context, table))
                 .collect::<Result<_, _>>()?,
         )),
-        DefBody::AllOf(items) => Ok(PolicyExpr::And(
+        Body::AllOf(items) => Ok(PolicyExpr::And(
             items
                 .iter()
                 .enumerate()
@@ -288,18 +281,16 @@ fn compile_body(
     }
 }
 
-/// The file for `permissions`, with no `defs` (TS inlines its helpers).
+/// The file for `permissions`.
 pub fn write(
     permissions: &Permissions,
     schema: &Schema,
     relations: &BTreeMap<String, BTreeMap<String, CodegenRelation>>,
 ) -> Result<Json, String> {
-    let defs = Defs::new();
     let computed = ComputedNames::new();
     let context = Context {
         schema,
         relations,
-        defs: &defs,
         computed: &computed,
     };
     let mut tables = Vec::new();

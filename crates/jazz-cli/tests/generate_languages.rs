@@ -71,3 +71,30 @@ fn a_ts_app_gets_exactly_the_bytes_the_shared_code_writes() {
         jazz_codegen::generate(jazz_codegen::Lang::TypeScript, APP.as_bytes()).unwrap()
     );
 }
+
+#[test]
+fn a_ts_authored_app_is_left_to_npx_jazz_tools() {
+    for root in [".", "src", "src/lib"] {
+        let dir = app_dir(&format!("ts-authored-{}", root.replace(['.', '/'], "_")));
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join(root)).unwrap();
+        std::fs::write(dir.join(root).join("schema.ts"), "export {};\n").unwrap();
+        for args in [
+            &["generate", "--dir"][..],
+            &["migrations", "create", "--name", "x", "--dir"][..],
+        ] {
+            let output = Command::new(support::cargo_binary("jazz-tools"))
+                .args(args)
+                .arg(&dir)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{root} {args:?}: {stderr}");
+            assert!(
+                stderr.contains("schema.ts exists") && stderr.contains("npx jazz-tools"),
+                "{root} {args:?}: {stderr}"
+            );
+            assert!(!dir.join("jazz.generated.ts").exists(), "{root}");
+        }
+    }
+}
