@@ -151,8 +151,6 @@ was. Each says what to do, with `file:line` where there is one:
 
 ### Other changes
 
-- **`defs` are gone.** A condition used in several policies is a plain TypeScript function or
-  constant, inlined when `generate` runs.
 - **`jazz-tools validate` is now `jazz-tools generate`.** It reads `schema.ts`, writes the two JSON
   files and `jazz.generated.ts`; `generate --check` is for CI. `validate` fails with a message
   naming the new command.
@@ -200,7 +198,7 @@ used: follow them with that release installed, one release at a time, before upg
 
   then run `npx jazz-tools migrations create`. It records `schema.ts` as the app's first version
   and generates `migrations/index.ts`. Commit the `migrations/` directory with your schema. See
-  [Shipping migrations with your app](/docs/schemas/migrations#shipping-migrations-with-your-app).
+  [Shipping migrations with your app](/docs/schemas/migrations#where-migrations-live).
 
 - **Schema history first.** If your app still uses `{ migrations: "none" }`, run
   `npx jazz-tools migrations create` on your current, unchanged `schema.ts` before anything below
