@@ -11,18 +11,13 @@ import {
   resolveEnvVar,
   generate,
 } from "./cli.js";
-import { createAppMigration } from "./dev/project.js";
+import { createAppMigration, generateApp } from "./dev/project.js";
 import { loadAppFiles } from "./dev/codegen-napi.js";
-import * as napi from "jazz-napi";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
 
 const { tmpBase, createWorkspace, fileExists, captureConsoleLogs, writeAppFiles, writeTsApp } =
   createCliFixtures(import.meta.url);
-
-/** Whether this jazz-napi checks `$generated` markers (the Rust writer of alpha.66). */
-const napiVerifiesGenerated =
-  typeof (napi as { verifyGenerated?: unknown }).verifyGenerated === "function";
 
 /** `todos` with a title and a done flag. */
 describe("loadDotEnv", () => {
@@ -330,24 +325,61 @@ describe("cli generate", () => {
     expect((error as Error).message).toMatch(/\n  at \S*schema\.ts:13 \(tables\.todos\.read\)$/);
   });
 
-  it.runIf(hasNapi("verifyGenerated"))(
-    "refuses to overwrite a file edited by hand unless --force",
-    async () => {
-      const { root } = await createWorkspace();
-      await writeTsApp(root);
-      await generate({ schemaDir: root });
-      const file = join(root, "jazz.permissions.json");
-      const edited = JSON.parse(await readFile(file, "utf8"));
-      edited.tables.projects = { read: "true" };
-      await writeFile(file, `${JSON.stringify(edited, null, 2)}\n`);
-      await writeTsApp(root, { permissions: "  projects: {},\n  todos: {}," });
+  it("passes --check on a checkout with CRLF line endings", async () => {
+    const { root } = await createWorkspace();
+    await writeTsApp(root);
+    await generate({ schemaDir: root });
+    for (const file of ["jazz.app.json", "jazz.permissions.json"]) {
+      const path = join(root, file);
+      await writeFile(path, (await readFile(path, "utf8")).replaceAll("\n", "\r\n"));
+    }
+    await expect(generateApp({ cwd: root, check: true })).resolves.toMatchObject({
+      wroteFiles: false,
+    });
+    // Nor does generate rewrite them.
+    await generate({ schemaDir: root });
+    expect(await readFile(join(root, "jazz.app.json"), "utf8")).toContain("\r\n");
+  });
 
-      await expect(generate({ schemaDir: root })).rejects.toThrow(/edited by hand/);
-      await generate({ schemaDir: root, force: true });
-      // The hand edit is gone: a table that allows nothing has no entry.
-      expect(JSON.parse(await readFile(file, "utf8")).tables.projects).toBeUndefined();
-    },
-  );
+  it("refuses to replace a file generate didn't write unless --force", async () => {
+    const { root } = await createWorkspace();
+    await writeTsApp(root);
+    await writeFile(
+      join(root, "jazz.permissions.json"),
+      '{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": { "todos": { "read": "true" } } }\n',
+    );
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
+      /jazz\.permissions\.json was not written by `jazz-tools generate`.*--force/,
+    );
+    await generate({ schemaDir: root, force: true });
+    const file = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
+    expect(file.$generated).toBeDefined();
+  });
+
+  it("refuses a permissions.ts without a named `permissions` export", async () => {
+    const { root } = await createWorkspace();
+    await writeTsApp(root, { permissions: null });
+    await writeFile(join(root, "permissions.ts"), "export default { todos: {} };\n");
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
+      /permissions\.ts doesn't export `permissions` \(it has an alpha\.64-style default export\).*export const permissions = schema\.definePermissions/,
+    );
+  });
+
+  it("refuses to overwrite a file edited by hand unless --force", async () => {
+    const { root } = await createWorkspace();
+    await writeTsApp(root);
+    await generate({ schemaDir: root });
+    const file = join(root, "jazz.permissions.json");
+    const edited = JSON.parse(await readFile(file, "utf8"));
+    edited.tables.projects = { read: "true" };
+    await writeFile(file, `${JSON.stringify(edited, null, 2)}\n`);
+    await writeTsApp(root, { permissions: "  projects: {},\n  todos: {}," });
+
+    await expect(generate({ schemaDir: root })).rejects.toThrow(/edited by hand/);
+    await generate({ schemaDir: root, force: true });
+    // The hand edit is gone: a table that allows nothing has no entry.
+    expect(JSON.parse(await readFile(file, "utf8")).tables.projects).toBeUndefined();
+  });
 
   it("ships the history migrations/ holds", async () => {
     const { root } = await createWorkspace();
@@ -369,10 +401,6 @@ describe("cli generate", () => {
     expect(app.tables.todos.columns.notes).toBe("string?");
   });
 });
-
-function hasNapi(name: string): boolean {
-  return typeof (napi as unknown as Record<string, unknown>)[name] === "function";
-}
 
 async function compileOutput(schemaDir: string): Promise<CompiledOutput> {
   const writes: string[] = [];

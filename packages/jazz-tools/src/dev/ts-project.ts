@@ -110,7 +110,13 @@ export async function loadTsApp(
   }
   if (existsSync(permissionsTs)) {
     const permissionsModule = await loadModule(permissionsTs);
-    if ("permissions" in permissionsModule) {
+    if (!("permissions" in permissionsModule))
+      throw new Error(
+        `${shown(permissionsTs)} doesn't export \`permissions\`${"default" in permissionsModule ? " (it has an alpha.64-style default export)" : ""}: ` +
+          "write `export const permissions = schema.definePermissions({ … })` with the new permissions DSL, " +
+          "or run `npx jazz-tools upgrade` to convert an alpha.65 app.",
+      );
+    {
       if (permissionsFile)
         throw new Error(
           `permissions are defined twice: in ${shown(schemaFile)} and in ${shown(permissionsTs)}. Keep one.`,

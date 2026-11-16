@@ -16,7 +16,8 @@
  * "bundleMismatch" (jazz_for_user: this client's permissions bundle isn't
  * the one the main backend serves; with "own" and "served", the two
  * bundle ids), "noAccount" (jazz_for_user: the user has no account yet;
- * with "userId")
+ * with "userId"), "replaced" (a session's handle after its user changed),
+ * "noUser" (a session has no user; with "status")
  * and "unsynced" (jazz_close_within: writes left unsent; with "pending"))
  * (*err is set to NULL on success). Functions block until done. Calls on
  * one handle may come from any threads at once, except jazz_close: no call
@@ -223,6 +224,61 @@ JazzHandle *jazz_for_user(const JazzHandle *handle, const char *user_id,
  * keeps answering while it drains.
  */
 int jazz_close_within(JazzHandle *handle, uint64_t timeout_ms, char **err);
+
+/*
+ * A user-following session (TS's JazzSession): who is signed in (the app's
+ * bearer, a device account, or no one) and a client for that user,
+ * replaced when the user changes. config_json is the app's config with
+ * "serverUrl" (the app's /jazz), "appId", "storage"/"dataDir" (each
+ * account's store under dataDir/<account>/, the device key in
+ * dataDir/device.key), "auth"?: {"bearer": true} (token_cb gives the
+ * bearer; NULL without), "initial"?: "backend" (follow the bearer; the
+ * default, needs one) | "device" | "signed-out", "linkGuest"?: true (a
+ * user with no account yet takes over the device guest's; false: only
+ * with "linkDeviceAccount"), "contract"?: 2.
+ */
+typedef struct JazzSession JazzSession;
+JazzSession *jazz_session_open(const char *config_json, JazzTokenCallback token_cb, void *ctx,
+                               char **err);
+
+/*
+ * Calls a session's method with args_json; returns its result as JSON:
+ *   "snapshot" {} -> {"status": "starting"|"ready"|"signed-out"|
+ *                     "transitioning"|"error"|"closed", "user"?,
+ *                     "clientEpoch", "error"?: {"kind", "message"},
+ *                     "recovery"?: "action"|"session"}
+ *   "refresh" {}  -> null (the app's auth changed: ask the bearer, follow)
+ *   "createDeviceAccount" {} | "reopenDeviceAccount" {}
+ *   | "restoreDeviceAccount" {"deviceKey"} | "linkDeviceAccount" {}
+ *   | "signOut" {} (the session stays, signed out) | "retry" {} -> null
+ *   "exportDeviceKey" {} -> "jazz-auth-v1:..."
+ */
+char *jazz_session_call(JazzSession *session, const char *method, const char *args_json,
+                        char **err);
+
+/*
+ * A handle acting for the user signed in now; kind "noUser" (with
+ * "status") while there is none. Free it with jazz_close, which leaves the
+ * session open. Once the user changes, its calls fail with kind
+ * "replaced" ("closed" without contract 2): fetch the new one when the
+ * snapshot's "clientEpoch" changes.
+ */
+JazzHandle *jazz_session_jazz(JazzSession *session, char **err);
+
+/*
+ * Calls cb with kind "session" and each snapshot's JSON, the current one
+ * first, on a thread of its own, until jazz_unwatch; when the session
+ * closes, a last call with kind "error" and {"kind":"closed",...}.
+ */
+JazzWatch *jazz_session_watch(JazzSession *session, JazzCallback cb, void *ctx, char **err);
+
+/*
+ * Closes and frees the session: its handles fail with kind "closed" (free
+ * them with jazz_close, before or after), its watches get their last call,
+ * and the token callback never runs once this returns. No other call on
+ * the session may run concurrently with or follow it.
+ */
+void jazz_session_close(JazzSession *session);
 
 /* Frees a string returned by, or stored in *err by, this API. */
 void jazz_string_free(char *text);

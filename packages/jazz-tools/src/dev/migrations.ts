@@ -912,6 +912,18 @@ async function loadMigrationFiles(
   for (const name of await listDir(migrationsDir)) {
     if (!name.endsWith(".ts") || name.endsWith(".d.ts") || name === "index.ts") continue;
     const file = join(migrationsDir, name);
+    // A stub's TODOs are decisions `migrations create` left to the author:
+    // a migration with one left would publish the wrong lens.
+    const todos = (await readFile(file, "utf8"))
+      .split("\n")
+      .map((line, index) => ({ line: index + 1, match: UNFILLED_STUB_TODO.exec(line) }))
+      .filter((entry) => entry.match);
+    if (todos.length > 0)
+      throw new Error(
+        `migrations/${name} has ${todos.length} unresolved TODO${todos.length === 1 ? "" : "s"} left by \`jazz-tools migrations create\`: ` +
+          todos.map(({ line, match }) => `line ${line}: ${match![1]}`).join("; ") +
+          ". Write the step it asks for (e.g. `col: m.add.int({ default: 0 })`) and delete the TODO comment.",
+      );
     const exports = await loadModule(file);
     const migration = unwrapDefault(exports.default ?? exports.migration);
     if (!isDefinedMigration(migration))
