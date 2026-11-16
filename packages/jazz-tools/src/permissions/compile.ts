@@ -451,6 +451,11 @@ function condition(key: string, raw: unknown, ctx: Ctx): string {
  * `exists t(id = this.id, c <flipped op> this.col)`.
  */
 function oldComparison(key: string, symbol: CmpOp, raw: unknown, ctx: Ctx): string {
+  return `exists ${name(ctx.table)}(id = this.id, ${oldCondition(key, symbol, raw, ctx)})`;
+}
+
+/** `col op old.c` as a condition of the self-lookup: `c <flipped op> this.col`. */
+function oldCondition(key: string, symbol: CmpOp, raw: unknown, ctx: Ctx): string {
   const old = handleOf(raw) as HandleData & { k: "old" };
   if (!ctx.old) fail("`old` is only available in `updateTo: (row, old) => …`");
   if (ctx.depth !== 0 || ctx.scope.id !== ctx.root.id || old.table !== ctx.table)
@@ -459,12 +464,46 @@ function oldComparison(key: string, symbol: CmpOp, raw: unknown, ctx: Ctx): stri
     );
   const column = isMagicColumn(old.column) ? old.column : name(old.column);
   const self = isMagicColumn(key) ? key : name(key);
-  return `exists ${name(ctx.table)}(id = this.id, ${column} ${FLIPPED[symbol]} this.${self})`;
+  return `${column} ${FLIPPED[symbol]} this.${self}`;
 }
 
-/** A condition object's expressions in `ctx`, one per key. */
+/** The `old` comparison `{ key: raw }` makes, if any: its operator and old handle. */
+function oldOperand(raw: unknown): { symbol: CmpOp; operand: unknown } | undefined {
+  if (handleOf(raw)?.k === "old") return { symbol: "=", operand: raw };
+  const o = opOf(raw);
+  if (
+    o &&
+    o.op !== "contains" &&
+    o.op !== "in" &&
+    o.op !== "is" &&
+    handleOf(o.operand)?.k === "old"
+  )
+    return { symbol: OP_SYMBOL[o.op]!, operand: o.operand };
+  return undefined;
+}
+
+/**
+ * A condition object's expressions in `ctx`, one per key, except that its
+ * `old` comparisons share one self-lookup, `exists t(id = this.id, …)`,
+ * where the first of them is.
+ */
 function conditionList(object: Record<string, unknown>, ctx: Ctx): string[] {
-  return Object.entries(object).map(([key, raw]) => condition(key, raw, ctx));
+  const out: string[] = [];
+  const olds: string[] = [];
+  let at = -1;
+  for (const [key, raw] of Object.entries(object)) {
+    const old = ctx.relation ? undefined : oldOperand(raw);
+    if (old) {
+      if (!isConditionColumn(ctx.meta, ctx.table, key)) unknownColumn(ctx.meta, ctx.table, key);
+      if (at < 0) at = out.length;
+      olds.push(oldCondition(key, old.symbol, old.operand, ctx));
+      continue;
+    }
+    out.push(condition(key, raw, ctx));
+  }
+  if (olds.length > 0)
+    out.splice(at, 0, `exists ${name(ctx.table)}(id = this.id, ${olds.join(", ")})`);
+  return out;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
