@@ -203,7 +203,7 @@ silence timeout of its own.
 A server refusing a credential says why: `expired`, `missing`, `invalid`,
 `disabled` or `revoked`, or `reauthenticate` for a planned re-authentication
 (`WireErrorReason`). A client that advertises `FEATURE_TYPED_ERROR_REASON`
-(`1 << 13`) in its Hello gets the reason at the end of the `WireFrame::Error`
+(`1 << 14`) in its Hello gets the reason at the end of the `WireFrame::Error`
 body, after the message: same tag (1), then the reason's postcard enum tag
 (encoding `wire-error-reason-v1`, pinned by
 `crates/jazz/layers/protocol/fixtures/wire_reasoned_error_v1.json`). There is

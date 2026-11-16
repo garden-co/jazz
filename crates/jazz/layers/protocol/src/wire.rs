@@ -66,7 +66,7 @@ pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
 /// message. Decided by what the client offered, not by
 /// negotiation, so a server can use it for errors before its own hello; a
 /// server never advertises it (SPEC 8, "Typed error reasons").
-pub const FEATURE_TYPED_ERROR_REASON: WireFeatures = 1 << 13;
+pub const FEATURE_TYPED_ERROR_REASON: WireFeatures = 1 << 14;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;

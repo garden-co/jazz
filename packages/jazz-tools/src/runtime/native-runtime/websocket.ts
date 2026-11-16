@@ -234,7 +234,7 @@ export const HEARTBEAT_SILENCE_MS = 120_000;
  * end of the `Error` frame's body, instead of only in the message. Every carrier
  * offers it; the server never does, so it never reaches the runtime above.
  */
-export const FEATURE_TYPED_ERROR_REASON = 1 << 13;
+export const FEATURE_TYPED_ERROR_REASON = 1 << 14;
 /**
  * How long a connection may take from opening the socket to the server's
  * hello. An attempt nobody answers (a proxy holding the upgrade for a

@@ -1,6 +1,6 @@
 {
   "encoding": "wire-error-reason-v1",
-  "description": "An Error frame that names its reason (encoding wire-error-reason-v1): WireFrame::Error's tag (1) and body (code, retry, message) followed by the WireErrorReason tag. Sent only to a client whose Hello offered FEATURE_TYPED_ERROR_REASON (1 << 13); every other client gets plain_hex, the WireFrame::Error bytes, unchanged. Append-only: never change a row.",
+  "description": "An Error frame that names its reason (encoding wire-error-reason-v1): WireFrame::Error's tag (1) and body (code, retry, message) followed by the WireErrorReason tag. Sent only to a client whose Hello offered FEATURE_TYPED_ERROR_REASON (1 << 14); every other client gets plain_hex, the WireFrame::Error bytes, unchanged. Append-only: never change a row.",
   "cases": [
     {
       "name": "expired",
