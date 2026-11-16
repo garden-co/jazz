@@ -18,8 +18,8 @@ let app = #"""
     { "format": 1, "tables": { "notes": { "columns": { "text": "string" } } } }
     """#
 
-// Not top-level code: Swift 6.1 (Xcode 16) crashes compiling top-level
-// async code that calls Jazz's typed-throws methods.
+// Not top-level code: Swift 6.1 (Xcode 16) has crashed compiling top-level
+// async code that calls Jazz.
 @main
 struct Smoke {
     static func main() async throws {
