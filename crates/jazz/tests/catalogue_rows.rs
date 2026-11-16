@@ -13,9 +13,9 @@ use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    ColumnDescriptor, EnumCaseDescriptor, PolicyExpr, RelationCmpOp, RelationColumnRef,
-    RelationExpr, RelationPredicate, RelationValueRef, RowDescriptor, Schema, SchemaHash,
-    TableName, TablePolicies, TableSchema,
+    ColumnDescriptor, PolicyExpr, RelationCmpOp, RelationColumnRef, RelationExpr,
+    RelationPredicate, RelationValueRef, RowDescriptor, Schema, SchemaHash, TableName,
+    TablePolicies, TableSchema,
 };
 use jazz::tools::schema_lens::runtime::compile_lens;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
@@ -334,10 +334,6 @@ fn column(name: &str, column_type: ColumnType) -> ColumnDescriptor {
 /// nested, relation and session policies.
 #[test]
 fn every_definition_shape_reads_back_equal_after_a_reopen() {
-    let case = |name: &str| EnumCaseDescriptor {
-        name: name.to_owned(),
-        fields: vec![column("note", ColumnType::Text).nullable()],
-    };
     let wide = TableSchema {
         columns: RowDescriptor::new(vec![
             // Declared out of name order: column order is kept.
@@ -358,13 +354,6 @@ fn every_definition_shape_reads_back_equal_after_a_reopen() {
                 },
             )
             .default(Value::Text("glad".into())),
-            column(
-                "state",
-                ColumnType::EnumPayload {
-                    cases: vec![case("open"), case("closed")],
-                },
-            )
-            .nullable(),
             column(
                 "doc",
                 ColumnType::Json {

@@ -32,8 +32,12 @@ Including a relation adds the resolved object alongside the foreign-key column&h
       }
     },
     "projects": {
-      "columns": { "name": "string" },
-      "relations": { "todos": { "reverse": "todos", "relation": "project" } }
+      "columns": {
+        "name": "string"
+      },
+      "relations": {
+        "todos": { "reverse": "todos", "relation": "project" }
+      }
     }
   }
 }

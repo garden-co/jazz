@@ -82,7 +82,7 @@ Values are plain JSON, typed by the schema:
 | optional           | `null`                                         |
 
 A float that isn't finite (NaN, ±infinity) reads as `null`; JSON can't
-write one. Enums with payloads read as `{ "case": …, "fields": { … } }`. Text-merge
+write one. Text-merge
 columns (`merge: "text"`) take plain string writes.
 
 - **Query:** `{ "table", "where": [{ "column", "op", "value"? }], "orderBy":
@@ -125,6 +125,30 @@ columns (`merge: "text"`) take plain string writes.
   at once), and fails if the server refused one. It checks up to the last
   4096 writes individually; older ones rely on the core wait, which can miss
   a refusal that is no longer pending until jazz#5728 is fixed.
+- **Partial edits:** UniFFI `edit_text(table, id, column, edited_from,
+text)` sets a text-merge column (`merge: "text"`) to `text`, an edit of
+  `edited_from`, the value its writer last saw: changes others made since are
+  kept, as the server merges them (TS's `editedFrom`). `edit(table, id,
+patch?, edits)` takes a list of `{"kind": "text", "column", "text",
+"editedFrom"}`, `{"kind": "splice", "column", "within": {"units":
+"utf8"|"utf16"|"bytes", "from", "to"}, "splices": [{"at", "delete",
+"insert"}]}` (`insert` a string, or base64 for bytes; `at` relative to
+  `from`) and `{"kind": "jsonSet", "column", "edits": [{"at": "<JSON
+pointer>", "value"}]}`, plus an optional whole-column patch, as one write.
+  Without `within`, a splice's page is the whole current value, in
+  `"units"` (default `"utf8"`). Both on `Transaction` too. C ABI: `jazz_call`
+  `textEdit {table, id, column, units?, edits: [{pos, delete, insert}]}`
+  (splices over the whole value), `editText {table, id, column,
+editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
+  `"tier"`.
+- **Permission advice:** UniFFI `can(table, op, args_json) -> Option<bool>`,
+  C ABI `can {table, op, id?, row?}` → `true` | `false` | `null`: whether the
+  server would let this user `read` / `insert` / `update` / `delete`, without
+  doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
+  take `id`; `update` takes `id` and an optional `row` patch. `null` (no
+  server, or no decision) means unknown. It is advice: `true` doesn't promise
+  the write will succeed, as the data or permissions may change first. Not
+  inside a transaction.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`
@@ -169,7 +193,6 @@ yet":
 - `offset` in an include, and `required` on reverse relations or on optional
   references;
 - connecting to a sync server as an end user (with a JWT);
-- writing enums with payloads;
 - a session issuer other than `jazz:backend`;
 - transactions, and with them reads inside transactions.
 

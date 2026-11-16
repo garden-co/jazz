@@ -2,7 +2,7 @@
 //! hand-written lexer and parser with byte spans, the compile to the
 //! engine's [`PolicyExpr`], and the printer back to canonical text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::query::{
     OrderDirection, RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr,
@@ -436,7 +436,6 @@ const TYPED: &[&str] = &[
     "bool",
     "array",
     "row",
-    "enumcase",
     "json",
 ];
 
@@ -1264,15 +1263,6 @@ impl Parser<'_> {
                 }
                 Value::Row { id, values }
             }
-            "enumcase" => {
-                let (case, _) = self.string_arg()?;
-                let mut values = Vec::new();
-                while self.is_tok(&Tok::Comma) {
-                    self.at += 1;
-                    values.push(self.typed_arg()?);
-                }
-                Value::Enum { case, values }
-            }
             other => {
                 return Err(ExprError::new(
                     start,
@@ -1703,18 +1693,6 @@ impl Parser<'_> {
             let right = self.value_ref()?;
             return Ok(RelationPredicate::Contains { left, right });
         }
-        if self.is_word("is") {
-            self.at += 1;
-            let (case, _) = self.name("an enum case")?;
-            self.expect(Tok::LParen, "`(` and the payload's condition")?;
-            let payload = self.deeper(|p| p.predicate())?;
-            self.expect(Tok::RParen, "`)`")?;
-            return Ok(RelationPredicate::EnumMatch {
-                column: left,
-                case,
-                payload: Box::new(payload),
-            });
-        }
         let op = self.cmp_op()?;
         if self.is_word("null") && matches!(op, CmpOp::Eq | CmpOp::Ne) {
             self.at += 1;
@@ -1826,7 +1804,13 @@ pub struct Context<'a> {
     pub schema: &'a Schema,
     pub relations: &'a BTreeMap<String, BTreeMap<String, CodegenRelation>>,
     pub defs: &'a Defs,
+    /// Each table's computed fields: not stored, so no policy reads them;
+    /// named only to say so when one does.
+    pub computed: &'a ComputedNames,
 }
+
+/// Table → the names of its computed fields.
+pub type ComputedNames = BTreeMap<String, BTreeSet<String>>;
 
 /// Parsed `defs`: name → (parameters, body).
 pub type Defs = BTreeMap<String, Def>;
@@ -2011,6 +1995,20 @@ fn column_type<'a>(
     let columns = columns_of(context, table).unwrap_or_default();
     if let Some((_, ty)) = columns.iter().find(|(name, _)| *name == column) {
         return Ok(Some(ty));
+    }
+    if context
+        .computed
+        .get(table)
+        .is_some_and(|fields| fields.contains(column))
+    {
+        return Err(ExprError::new(
+            span,
+            format!(
+                "unknown column `{column}` in {table}: `{column}` is a computed field, which isn't \
+                 stored, so a permission can't read it; write the policy over the columns it's \
+                 computed from"
+            ),
+        ));
     }
     let names: Vec<&str> = columns
         .iter()
@@ -2994,7 +2992,7 @@ fn value_too_deep(value: &Value, depth: usize) -> bool {
         return true;
     }
     match value {
-        Value::Array(values) | Value::Row { values, .. } | Value::Enum { values, .. } => {
+        Value::Array(values) | Value::Row { values, .. } => {
             values.iter().any(|v| value_too_deep(v, depth + 1))
         }
         _ => false,
@@ -3051,7 +3049,7 @@ fn predicate_too_deep(p: &RelationPredicate, depth: usize) -> bool {
             items.iter().any(|i| predicate_too_deep(i, next))
         }
         RelationPredicate::Not(inner) => predicate_too_deep(inner, next),
-        RelationPredicate::EnumMatch { payload, .. } => predicate_too_deep(payload, next),
+        RelationPredicate::Removed(removed) => match *removed {},
         RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
             value(right)
         }
@@ -3140,11 +3138,6 @@ fn typed_text(value: &Value) -> String {
             }];
             parts.extend(list(values));
             format!("row({})", parts.join(", "))
-        }
-        Value::Enum { case, values } => {
-            let mut parts = vec![quoted(case)];
-            parts.extend(list(values));
-            format!("enumcase({})", parts.join(", "))
         }
         Value::Null => "null".into(),
     }
@@ -3523,7 +3516,7 @@ impl Printer<'_, '_> {
             RelationPredicate::Contains { left, right } => {
                 format!("{} contains {}", column(left)?, value(right)?)
             }
-            RelationPredicate::EnumMatch { .. } => return None,
+            RelationPredicate::Removed(removed) => match *removed {},
         })
     }
 }
@@ -3741,16 +3734,7 @@ fn predicate_text(p: &RelationPredicate, precedence: u8) -> String {
         RelationPredicate::Contains { left, right } => {
             format!("{} contains {}", colref_text(left), value_ref_text(right))
         }
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => format!(
-            "{} is {}({})",
-            colref_text(column),
-            name_text(case),
-            predicate_text(payload, 0)
-        ),
+        RelationPredicate::Removed(removed) => match *removed {},
     }
 }
 
