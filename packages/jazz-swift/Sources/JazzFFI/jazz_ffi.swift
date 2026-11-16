@@ -715,8 +715,9 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func updateAt(table: String, id: String, patchJson: String, tier: String) throws 
     
     /**
-     * Writes the row with this id: inserts it, or replaces its columns.
-     * `row_json` is a whole row, as for an insert. Returns the row.
+     * Writes the row with this id: a new id inserts (`row_json` then holds
+     * every required column), an existing one sets the columns `row_json`
+     * names. Returns the row.
      */
     func upsert(table: String, id: String, rowJson: String) throws  -> String
     
@@ -1194,8 +1195,9 @@ open func updateAt(table: String, id: String, patchJson: String, tier: String)th
 }
     
     /**
-     * Writes the row with this id: inserts it, or replaces its columns.
-     * `row_json` is a whole row, as for an insert. Returns the row.
+     * Writes the row with this id: a new id inserts (`row_json` then holds
+     * every required column), an existing one sets the columns `row_json`
+     * names. Returns the row.
      */
 open func upsert(table: String, id: String, rowJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -2940,7 +2942,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_update_at() != 60136) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_upsert() != 49645) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_upsert() != 59620) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_wait_for_sync() != 43748) {
