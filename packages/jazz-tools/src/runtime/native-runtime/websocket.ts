@@ -169,8 +169,18 @@ export const HANDSHAKE_TIMEOUT_MS = 10_000;
  * a frozen page or a long task held back are delivered before it counts. */
 const HEARTBEAT_CONFIRM_MS = 1_000;
 const WIRE_FRAME_HEARTBEAT = 7;
+/**
+ * `FEATURE_SERIALIZABLE_BRANCH_READS` in `crates/jazz/layers/protocol/src/wire.rs`:
+ * the server validates a serializable transaction's reads through a branch
+ * view at commit. Without it, the core refuses to commit such a transaction
+ * upstream rather than have it validated against the wrong rows (jazz#5806).
+ */
+export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
 export const CLIENT_WIRE_FEATURES =
-  FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS;
+  FEATURE_PAYLOAD_ZSTD |
+  FEATURE_AUTHORIZATION_SCOPE_VIEWS |
+  FEATURE_AUXILIARY_CHUNKS |
+  FEATURE_SERIALIZABLE_BRANCH_READS;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains

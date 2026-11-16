@@ -180,7 +180,7 @@ describe("branch API", () => {
     expect(await db.one(app.documents, frozen)).toMatchObject({ title: "Draft" });
   });
 
-  it("refuses branch reads inside a serializable transaction instead of ignoring the branch (jazz#5806)", async () => {
+  it("reads through a branch view inside a serializable transaction (jazz#5806)", async () => {
     db = await createDb({
       ...(await localAccountConfig("branch-api-tx-read-serializable")),
       driver: { type: "memory" },
@@ -191,24 +191,19 @@ describe("branch API", () => {
       { branch: "main" },
     ).value;
     // Also warms up the client, which serializable transactions need.
-    expect(await db.all(app.documents, { branch: "draft", base: "main" })).toEqual([
-      { ...original, branch: "draft" },
-    ]);
+    expect(await db.all(app.documents, { branch: "main" })).toEqual([original]);
 
     const tx = db.beginSerializableTransaction();
-    const unsupported = /inside a serializable transaction is not supported yet \(jazz#5806\)/;
-    await expect(tx.all(app.documents, { branch: "draft", base: "main" })).rejects.toThrow(
-      unsupported,
-    );
-    await expect(tx.one(app.documents, { branch: "draft" })).rejects.toThrow(unsupported);
-    await expect(tx.all(app.documents, { base: "main" })).rejects.toThrow(unsupported);
-
-    // Branch writes inside a transaction stay allowed.
+    expect(await tx.all(app.documents, { branch: "draft", base: "main" })).toEqual([
+      { ...original, branch: "draft" },
+    ]);
     tx.update(app.documents, original.id, { title: "Draft" }, { branch: "draft", base: "main" });
-    await tx.commit().wait({ tier: "local" });
-    expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+    expect(await tx.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      branch: "draft",
       title: "Draft",
     });
+    // Committing it is validated upstream through the view (see
+    // db.serializable-branch-read.test.ts); this Db has no server.
   });
 
   it("reports unavailable history when restoring onto an empty store", async () => {
