@@ -32,9 +32,12 @@ pub struct VerifiedApproval {
     pub recovery: bool,
 }
 
-/// The authentic private records of an account at one cut.
+/// The authentic private records of an account at one cut, bound to the
+/// exact current state they were verified against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateEvidence {
+    state: AccountState,
+    through: Position,
     /// The identity of the canonical root, if it matches it.
     pub identity: Option<Accepted<AccountIdentity>>,
     pub approvals: Vec<VerifiedApproval>,
@@ -74,21 +77,28 @@ impl Requests<'_> {
     }
 }
 
-/// Verifies `private` against `state`, the current state replayed from the
-/// same cut. Unsupported signing mechanisms and provider failures stop
-/// verification; anything else that fails only leaves the record out.
+impl PrivateEvidence {
+    /// Whether this evidence was verified against exactly `state`, the
+    /// current state of a read at `through`. A state as of a position, or
+    /// of another read, is refused.
+    pub fn is_bound_to(&self, state: &AccountState, through: Position) -> bool {
+        self.through == through && self.state == *state
+    }
+}
+
+/// Verifies `private` against `state`, which must be exactly the current
+/// state of `replay` (not a state as of a position). Unsupported signing
+/// mechanisms and provider failures stop verification; anything else that
+/// fails only leaves the record out.
 pub fn verify_private(
     replay: &AccountReplay<'_>,
     state: &AccountState,
     private: &PrivateAccountLedger,
 ) -> ProtocolResult<PrivateEvidence> {
     private.check()?;
-    let same_root = replay
-        .canonical_root()?
-        .is_some_and(|root| root == state.root);
     if private.through != replay.ledger().through
         || state.account_id != replay.ledger().account_id
-        || !same_root
+        || replay.current()?.as_ref() != Some(state)
     {
         return Err(ProtocolError::InconsistentEvidence);
     }
@@ -152,7 +162,8 @@ pub fn verify_private(
         }
         let coordinates = challenge.row.coordinates();
         let Some(public) = state.approvals.iter().find(|public| {
-            public.position == position
+            public.row.id == approval.row.id
+                && public.position == position
                 && public.row.account_id == *account_id
                 && public.row.epoch_id == challenge.row.epoch_id
                 && public.row.signer_id == approval.row.signer_id
@@ -259,6 +270,8 @@ pub fn verify_private(
     }
 
     Ok(PrivateEvidence {
+        state: state.clone(),
+        through: private.through,
         identity,
         approvals,
         successors,

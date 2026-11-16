@@ -366,13 +366,10 @@ fn recovery_restores_a_new_device() {
     let restored = RecoveryKeys::derive(&secret, &env.application(), 0).unwrap();
     let (state, evidence) = ledger.evidence(&env);
     let replay = ledger.replay(&env);
-    let account_key = AccountKeyEvidence {
-        replay: &replay,
-        state: &state,
-        private: &evidence,
-    }
-    .acquire_with_recovery(&restored, &ledger.private.recovery_deliveries)
-    .unwrap();
+    let account_key = AccountKeyEvidence::new(&replay, &state, &evidence)
+        .unwrap()
+        .acquire_with_recovery(&restored, &ledger.private.recovery_deliveries)
+        .unwrap();
     assert_eq!(*account_key.key(), key);
 
     let records = build::recovery_approve(
@@ -462,11 +459,7 @@ fn recovery_failures_keep_their_codes() {
     ledger.register_recovery(&env, &laptop, &recovery, &mut rng);
     let (state, evidence) = ledger.evidence(&env);
     let replay = ledger.replay(&env);
-    let keys = AccountKeyEvidence {
-        replay: &replay,
-        state: &state,
-        private: &evidence,
-    };
+    let keys = AccountKeyEvidence::new(&replay, &state, &evidence).unwrap();
     let stranger =
         RecoveryKeys::derive(&RecoverySecret::from_bytes([8; 32]), &env.application(), 0).unwrap();
     assert_eq!(
@@ -846,11 +839,7 @@ fn private_verification_drops_unverified_records() {
     let evidence = verify_private(&replay, &state, &tampered).unwrap();
     assert!(evidence.identity.is_none());
     assert!(evidence.approvals.is_empty());
-    let keys = AccountKeyEvidence {
-        replay: &replay,
-        state: &state,
-        private: &evidence,
-    };
+    let keys = AccountKeyEvidence::new(&replay, &state, &evidence).unwrap();
     assert_eq!(
         keys.acquire(&phone.id, std::slice::from_ref(&phone.sealing))
             .unwrap_err(),
@@ -1073,13 +1062,10 @@ fn recovery_secret_survives_a_reset() {
     let (state, evidence) = ledger.evidence(&env);
     assert!(state.recovery_root(&gen1.root_id).is_some());
     let replay = ledger.replay(&env);
-    let restored = AccountKeyEvidence {
-        replay: &replay,
-        state: &state,
-        private: &evidence,
-    }
-    .acquire_with_recovery(&gen1, &ledger.private.recovery_deliveries)
-    .unwrap();
+    let restored = AccountKeyEvidence::new(&replay, &state, &evidence)
+        .unwrap()
+        .acquire_with_recovery(&gen1, &ledger.private.recovery_deliveries)
+        .unwrap();
     assert_eq!(restored.key(), ledger.acquire(&env, &phone).unwrap().key());
 }
 
@@ -1117,4 +1103,51 @@ fn rotation_skips_recovery_roots_of_other_mechanisms() {
     );
     assert_eq!(rotation.recovery_deliveries.len(), 1);
     assert_eq!(rotation.recovery_deliveries[0].root_id, native.root_id);
+}
+
+/// Private evidence is bound to the exact current state it was verified
+/// against: a state as of a position cannot be verified or mixed in, and a
+/// private approval pairs with the public approval of its own ID only.
+#[test]
+fn private_evidence_is_bound_to_its_state() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(31);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let (at, records) = ledger.approve(&env, &laptop, &phone, &mut rng);
+    assert_eq!(records.public.id, records.approval.id);
+
+    let replay = ledger.replay(&env);
+    let state = replay.current().unwrap().unwrap();
+    let evidence = verify_private(&replay, &state, &ledger.private).unwrap();
+    assert_eq!(evidence.approvals.len(), 1);
+    let earlier = replay.as_of(at).unwrap().unwrap();
+    assert_eq!(
+        verify_private(&replay, &earlier, &ledger.private).unwrap_err(),
+        ProtocolError::InconsistentEvidence
+    );
+    assert_eq!(
+        AccountKeyEvidence::new(&replay, &earlier, &evidence)
+            .err()
+            .unwrap(),
+        ProtocolError::InconsistentEvidence
+    );
+
+    // The same approval published under another ID no longer pairs.
+    let mut public = ledger.public.clone();
+    let row = &mut public.approvals[0].row;
+    row.id = ids::random_v4(&mut rng).unwrap();
+    let bytes = row.signed_bytes(&env.application()).unwrap();
+    row.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&public, &env.domain, &env.registry)
+            .unwrap();
+    let state = replay.current().unwrap().unwrap();
+    assert!(state.is_active(&phone.id));
+    let evidence = verify_private(&replay, &state, &ledger.private).unwrap();
+    assert!(evidence.approvals.is_empty());
 }

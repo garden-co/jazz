@@ -177,12 +177,9 @@ impl Ledger {
         let replay = self.replay(env);
         let state = replay.current()?.expect("a root");
         let private = verify_private(&replay, &state, &self.private)?;
-        AccountKeyEvidence {
-            replay: &replay,
-            state: &state,
-            private: &private,
-        }
-        .acquire(&device.id, std::slice::from_ref(&device.sealing))
+        AccountKeyEvidence::new(&replay, &state, &private)
+            .unwrap()
+            .acquire(&device.id, std::slice::from_ref(&device.sealing))
     }
 
     /// The challenge, proof and approval of `requester` by `approver`, each

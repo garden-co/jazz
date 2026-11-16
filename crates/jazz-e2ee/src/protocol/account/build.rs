@@ -602,8 +602,10 @@ fn approval_records(
         signature: writer.sign(&approver.signing, &approval_bytes)?,
         verification,
     };
+    // The public approval shares the challenge's ID, so private
+    // verification pairs the two by ID (§2.4).
     let mut public = PublicDeviceApproval {
-        id: ids::random_v4(rng)?,
+        id: challenge.id.clone(),
         account_id: writer.account_id.to_owned(),
         epoch_id: state.epoch_id().to_owned(),
         device_id: requester.id.clone(),

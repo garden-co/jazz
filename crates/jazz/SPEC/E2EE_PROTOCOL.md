@@ -323,7 +323,7 @@ wherever it enters JSON. `covers` (§1.3) is text. Optional columns
 | `__e2ee_device_proofs`             | `challengeId`, `proof`, `signature`                                                                                                                                                       | challenge ID    | private    | The requesting device's possession proof.                                                               |
 | `__e2ee_device_approvals`          | `challengeId`, `signerId`, `verification`, `signature`                                                                                                                                    | challenge ID    | private    | Private approval with its account-key marker.                                                           |
 | `__e2ee_device_deliveries`         | `challengeId`, `envelope`, `verification`                                                                                                                                                 | challenge ID    | private    | Account epoch key sealed to the approved device.                                                        |
-| `__e2ee_public_device_approvals`   | `accountId`, `epochId`, `deviceId`, `signerId`, `signature`, `recoveryRootId?`, `recoverySignature?`                                                                                      | random          | public     | Key-free signed approval: the membership grant.                                                         |
+| `__e2ee_public_device_approvals`   | `accountId`, `epochId`, `deviceId`, `signerId`, `signature`, `recoveryRootId?`, `recoverySignature?`                                                                                      | challenge ID    | public     | Key-free signed approval: the membership grant.                                                         |
 | `__e2ee_account_successors`        | `accountId`, `predecessor`, `epochId`, `signerId`, `action`, `removedDeviceId?`, `retiredRecoveryRootId?`, `membership`, `revision`, `verification`, `history`, `deliveries`, `signature` | random          | private    | Private account rotation with the new key's deliveries.                                                 |
 | `__e2ee_public_account_successors` | the private columns minus `verification`, `history`, `deliveries`                                                                                                                         | same as private | public     | Key-free signed rotation: the membership change.                                                        |
 | `__e2ee_recovery_roots`            | `accountId`, `signerId`, `epochId`, `publicKey`, `mechanism`, `version`, `signingPublicKey`, `signingMechanism`, `signingVersion`, `signature`                                            | root ID         | public     | A registered recovery credential, signed by an active device.                                           |
@@ -426,7 +426,9 @@ Account and device tables (fixed policies):
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.
-- R8. Public device approvals: `accountId = session account`; the signer's
+- R8. Public device approvals: `accountId = session account`; the row ID is
+  the ID of a private approval of the same account inserted in the same
+  transaction; the signer's
   request and the approved device's request belong to that account; a
   recovery approval's `recoveryRootId` names a recovery root of that account.
   Both successor tables: `accountId = session account`; the signer request
@@ -991,17 +993,21 @@ spaces and groups as well (§6.3a).
 private tables (same cut) and accepts: the identity only if it matches the
 public root (same generation, device, epoch and ledger version) at exactly
 the same position; a private approval only if its
-challenge and proof were accepted at or before it, a public approval with the
-same `(account, epoch, signer, device, position)` exists, request and key
+challenge and proof were accepted at or before it, the public approval with
+the same ID (the challenge ID) was accepted by replay at the same position
+with the same account, epoch, signer and device, request and key
 projections match at its position, both the proof signature and the approval
 signature verify; a private successor only if the accepted public successor
 with the same ID is at the same position and has the same `accountId`,
 `predecessor`, `epochId`, `signerId`, `action`, target column and
 `membership`, its signer's request matches, every ID of its private
 `revision` is a verified private approval of the predecessor epoch before it,
-and its own signature verifies. The two `revision` fields differ by design
-(private approval IDs and public approval IDs, §2.8) and each is checked, with
-its signature, in its own domain.
+and its own signature verifies. The two `revision` fields list the same kind
+of ID (challenge IDs) but are computed differently (authenticated private
+approvals, and approvals public replay accepted, §2.8); each is checked, with
+its signature, in its own domain. Private evidence is bound to the exact
+current state it was verified against: it is never combined with a state as
+of a position or with a state of another read.
 
 ### 2.5 Device approval by challenge and response
 
@@ -1027,7 +1033,8 @@ sign(P("proof-signature") ‖ frame[proof])}`.
    - approval `{id: challengeId, signerId, verification: wrap(K,
 P("approval"), Z32), signature: sign(P("approval-signature:" ‖ signerId)
 ‖ frame[verification])}`;
-   - public approval `{accountId, epochId, deviceId, signerId, signature}`
+   - public approval `{id: challengeId, accountId, epochId, deviceId, signerId,
+signature}`
      signed over `ctx{application: D, policy:
 "jazz.e2ee.public-device-approval.v1", scope: "account", identifier:
 account, table: "__e2ee_public_device_approvals", row: approvalId, column:

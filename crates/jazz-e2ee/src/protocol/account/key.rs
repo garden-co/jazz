@@ -68,13 +68,15 @@ impl core::fmt::Debug for AccountKey {
     }
 }
 
-/// The evidence the account key is checked against: public replay and the
-/// private records verified at the same cut.
+/// The evidence the account key is checked against: public replay, its
+/// current state, and the private records verified against exactly that
+/// state. Built only by [`AccountKeyEvidence::new`], which refuses parts
+/// from different reads or states.
 #[derive(Clone, Copy)]
 pub struct AccountKeyEvidence<'a> {
-    pub replay: &'a AccountReplay<'a>,
-    pub state: &'a AccountState,
-    pub private: &'a PrivateEvidence,
+    replay: &'a AccountReplay<'a>,
+    state: &'a AccountState,
+    private: &'a PrivateEvidence,
 }
 
 /// Unwraps `envelope` under `key`; `None` when provably invalid.
@@ -115,6 +117,32 @@ struct KeyEpoch<'e> {
     position: Position,
     members: &'e BTreeSet<String>,
     successor: Option<&'e AccountSuccessor>,
+}
+
+impl<'a> AccountKeyEvidence<'a> {
+    /// Binds the three parts. `private` must have been verified against
+    /// exactly `state`, and `state` must be the current state of `replay`'s
+    /// read; anything else is [`ProtocolError::InconsistentEvidence`].
+    pub fn new(
+        replay: &'a AccountReplay<'a>,
+        state: &'a AccountState,
+        private: &'a PrivateEvidence,
+    ) -> ProtocolResult<Self> {
+        if !private.is_bound_to(state, replay.ledger().through)
+            || state.account_id != replay.ledger().account_id
+        {
+            return Err(ProtocolError::InconsistentEvidence);
+        }
+        Ok(Self {
+            replay,
+            state,
+            private,
+        })
+    }
+
+    pub fn state(&self) -> &AccountState {
+        self.state
+    }
 }
 
 impl AccountKeyEvidence<'_> {
