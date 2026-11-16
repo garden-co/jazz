@@ -852,6 +852,19 @@ fn a_legacy_format_takes_any_schema_and_generate_replaces_it() {
 }
 
 #[test]
+fn generate_rewrites_a_compact_legacy_file_in_the_canonical_layout() {
+    let compact = r#"{"format":1,"tables":{"todos":{"columns":{"title":"string"}}}}"#;
+    let upgraded = upgrade_legacy(APP_FILE, compact).unwrap().unwrap();
+    assert!(
+        upgraded.starts_with(&format!("{{\n  \"$schema\": \"{APP_SCHEMA_URL}\",\n")),
+        "{upgraded}"
+    );
+    assert!(!upgraded.contains("format"), "{upgraded}");
+    load_app(upgraded.as_bytes()).unwrap();
+    assert_eq!(upgrade_legacy(APP_FILE, &upgraded).unwrap(), None);
+}
+
+#[test]
 fn migrations_must_name_versions_and_pass_their_lens_checks() {
     let error = edited_app(|v| v["migrations"][0]["from"] = "nope".into());
     assert!(error.contains("no version `nope` in `history`"), "{error}");

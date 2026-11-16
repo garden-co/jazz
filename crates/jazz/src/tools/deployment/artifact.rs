@@ -922,14 +922,27 @@ pub fn upgrade_legacy(file: &'static str, text: &str) -> Result<Option<String>, 
         b.remove(0);
         (a == b).then_some(())
     };
-    if !ok || check().is_none() {
+    if ok && check().is_some() {
+        return Ok(Some(out));
+    }
+    // A layout the textual edit doesn't know (e.g. compact JSON): print the
+    // whole file in the canonical layout instead.
+    let mut entries = vec![("$schema".to_string(), Json::string(url))];
+    entries.extend(
+        object
+            .iter()
+            .filter(|(k, _)| k != "format" && k != "$schema")
+            .cloned(),
+    );
+    let printed = json::print(&Json::Object(entries));
+    if read_version(file, printed.as_bytes()).is_err() {
         return Err(refuse(format!(
             "is in the legacy form (`\"format\": 1` and/or `$schema` \"{legacy_url}\") and \
              couldn't be rewritten automatically: drop `format` and start the file with \
              {{ \"$schema\": \"{url}\", … }}"
         )));
     }
-    Ok(Some(out))
+    Ok(Some(printed))
 }
 
 /// What [`load`] and [`load_client`] check of the app file's history: its
