@@ -55,6 +55,7 @@ import {
   type Project,
 } from "./project.js";
 import { refuseDroppedConditions, refuseEnvironmentReads } from "./permissions-check.js";
+import { refusePayloadEnums } from "./payload-enums.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
 import { PackageAliases } from "./aliases.js";
 
@@ -112,6 +113,8 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   const appText = readFileSync(project.appFile, "utf8");
   const app = parseAppJson(appText);
   const tables = appTables(app);
+  // Enum columns with cases are gone in alpha.65; refuse before anything is written.
+  refusePayloadEnums(app);
   const markers = tsOnlyMarkers(app);
 
   // 2. TS-only columns → computed / transforms.

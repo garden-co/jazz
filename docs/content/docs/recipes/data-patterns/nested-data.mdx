@@ -16,19 +16,32 @@ A simple schema with three tables linked by foreign keys. A project has tasks, a
   "format": 1,
   "tables": {
     "projects": {
-      "columns": { "name": "string" },
-      "relations": { "tasks": { "reverse": "tasks", "relation": "project" } }
+      "columns": {
+        "name": "string"
+      },
+      "relations": {
+        "tasks": { "reverse": "tasks", "relation": "project" }
+      }
     },
     "tasks": {
-      "columns": { "title": "string", "done": "boolean", "projectId": "uuid" },
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "projectId": "uuid"
+      },
       "relations": {
         "project": { "rel": "projects", "column": "projectId" },
         "comments": { "reverse": "comments", "relation": "task" }
       }
     },
     "comments": {
-      "columns": { "body": "string", "taskId": "uuid" },
-      "relations": { "task": { "rel": "tasks", "column": "taskId" } }
+      "columns": {
+        "body": "string",
+        "taskId": "uuid"
+      },
+      "relations": {
+        "task": { "rel": "tasks", "column": "taskId" }
+      }
     }
   }
 }

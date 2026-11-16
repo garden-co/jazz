@@ -8,8 +8,8 @@ use crate::query::{
 use crate::tools::deployment::{DeploymentCatalogue, prepare_deployment};
 use crate::tools::public_schema::Value;
 use crate::tools::public_schema::{
-    CmpOp, ColumnDescriptor, ColumnType, EnumCaseDescriptor, HistoryRetention, Operation,
-    OperationPolicy, PolicyExpr, PolicyValue, RowDescriptor, SchemaBuilder, TableName,
+    CmpOp, ColumnDescriptor, ColumnType, HistoryRetention, Operation, OperationPolicy, PolicyExpr,
+    PolicyValue, RowDescriptor, SchemaBuilder, TableName,
 };
 use std::collections::BTreeSet;
 
@@ -163,17 +163,8 @@ fn shared_todos() -> ArtifactInput {
                 ),
                 nullable(
                     "status",
-                    ColumnType::EnumPayload {
-                        cases: vec![
-                            EnumCaseDescriptor {
-                                name: "open".into(),
-                                fields: vec![],
-                            },
-                            EnumCaseDescriptor {
-                                name: "done".into(),
-                                fields: vec![ColumnDescriptor::new("at", ColumnType::Timestamp)],
-                            },
-                        ],
+                    ColumnType::Enum {
+                        variants: vec!["open".into(), "done".into()],
                     },
                 ),
                 nullable(
@@ -208,10 +199,7 @@ fn shared_todos() -> ArtifactInput {
                  "column_type": {"type": "Array", "element": {"type": "Text"}},
                  "value": {"type": "Array", "value": []}},
                 {"type": "introduce", "column": "status",
-                 "column_type": {"type": "EnumPayload", "cases": [
-                     {"name": "open", "fields": []},
-                     {"name": "done", "fields": [{"name": "at", "column_type": {"type": "Timestamp"}, "nullable": false}]}
-                 ]},
+                 "column_type": {"type": "Enum", "variants": ["open", "done"]},
                  "value": {"type": "Null"}},
                 {"type": "introduce", "column": "meta",
                  "column_type": {"type": "Json", "schema": {"type": "object"}},
@@ -493,6 +481,7 @@ fn printed(table: &str, expr: &PolicyExpr) -> String {
         schema: loaded.current_schema(),
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     expr::print(expr, &context, table).unwrap()
 }
@@ -881,14 +870,10 @@ fn every_policy_variant() -> PolicyExpr {
             left: column("g"),
             right: RelationValueRef::Literal(serde_json::json!("bare")),
         },
-        RelationPredicate::EnumMatch {
-            column: column("h"),
-            case: "done".into(),
-            payload: Box::new(RelationPredicate::True),
-        },
         RelationPredicate::And(vec![RelationPredicate::Not(Box::new(
             RelationPredicate::False,
         ))]),
+        RelationPredicate::Not(Box::new(RelationPredicate::True)),
     ]);
     let key = RelationKeyRef::Column(column("id"));
     let rel = RelationExpr::Limit {
@@ -1048,10 +1033,6 @@ fn every_policy_variant() -> PolicyExpr {
                 Value::Row {
                     id: None,
                     values: vec![],
-                },
-                Value::Enum {
-                    case: "done".into(),
-                    values: vec![Value::Timestamp(5)],
                 },
             ],
         },
@@ -1220,10 +1201,7 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
                 value(right, seen);
                 "Pred.Contains"
             }
-            RelationPredicate::EnumMatch { payload, .. } => {
-                pred(payload, seen);
-                "Pred.EnumMatch"
-            }
+            RelationPredicate::Removed(removed) => match *removed {},
             RelationPredicate::And(all) => {
                 all.iter().for_each(|p| pred(p, seen));
                 "Pred.And"
@@ -1302,7 +1280,7 @@ fn through_the_permissions_file(expr: &PolicyExpr) -> TablePolicies {
     let text = json::print(&file);
     only_strings(&file, &text);
     let reread = json::parse(text.as_bytes()).unwrap();
-    let read = permissions_file::read(&reread, &current, &relations)
+    let read = permissions_file::read(&reread, &current, &relations, &Default::default())
         .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("todos")], policies, "{text}");
     policies
@@ -1355,8 +1333,8 @@ fn every_policy_and_relation_variant_round_trips_through_the_file() {
     let mut seen = BTreeSet::new();
     policy_variants(&expr, &mut seen);
     // 20 policy variants, 10 relation variants (+2 join kinds, 2 projections,
-    // 2 bounds), 11 predicates, 8 value refs.
-    assert_eq!(seen.len(), 20 + 10 + 6 + 11 + 8, "{seen:?}");
+    // 2 bounds), 10 predicates, 8 value refs.
+    assert_eq!(seen.len(), 20 + 10 + 6 + 10 + 8, "{seen:?}");
     through_the_permissions_file(&expr);
     // And each top-level alternative on its own, so a leaf the grammar spells
     // is checked as a string too.
@@ -1635,6 +1613,7 @@ fn epic_drops_hop_prints_as_a_hop() {
         schema: &schema,
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     let text = expr::print(&hop, &context, "files").unwrap();
     assert_eq!(
@@ -1674,8 +1653,13 @@ fn epic_drops_hop_prints_as_a_hop() {
         "{text}"
     );
     assert!(!text.contains("__hop"), "{text}");
-    let read = permissions_file::read(&json::parse(text.as_bytes()).unwrap(), &schema, &relations)
-        .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
+    let read = permissions_file::read(
+        &json::parse(text.as_bytes()).unwrap(),
+        &schema,
+        &relations,
+        &Default::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("files")], policies, "{text}");
 }
 
@@ -2356,10 +2340,8 @@ fn the_permissions_json_schema_names_every_grammar_construct() {
         "id(outer)",
         "id(frontier)",
         "param.",
-        "enumcase(",
         "row(",
         "json(",
-        "is ",
     ] {
         assert!(
             text.contains(construct),
@@ -2381,6 +2363,7 @@ fn recursive_relations_with_several_selected_columns_print_and_read_back() {
         schema: loaded.current_schema(),
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     let text = "exists (from recursive(seed: from todos where todos.owner = session.user select todos.id as id, todos.name as name, step: from todos where todos.id = id(frontier) order by todos.name, todos.id select todos.id as id, todos.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: 3) where todos.id = outer.id)";
     let ast = expr::parse(text).unwrap_or_else(|e| panic!("{}", e.render(text)));
@@ -2609,4 +2592,58 @@ fn relations_must_lead_where_they_say() {
     let error =
         edited_app(|v| v["tables"]["shares"]["relations"]["todoRow"]["rel"] = "todoz".into());
     assert!(error.contains("todoz"), "{error}");
+}
+
+#[test]
+fn a_relation_leads_where_its_column_references() {
+    // `shares.todo` references todos; a relation over it can't lead elsewhere.
+    let error = edited_app(|v| {
+        v["tables"]["shares"]["columns"]["todo"] =
+            serde_json::json!({ "type": "uuid?", "references": "todos" });
+        v["tables"]["shares"]["relations"]["todoRow"]["rel"] = "shares".into();
+    });
+    assert!(
+        error.contains(
+            "tables.shares.relations.todoRow: column todo references todos, so a relation over it leads to todos, not shares"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_policy_reading_a_computed_field_is_told_it_is_computed() {
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "shareCount = 1".into();
+    });
+    assert!(
+        error.contains(
+            "unknown column `shareCount` in todos: `shareCount` is a computed field, which isn't \
+             stored, so a permission can't read it; write the policy over the columns it's \
+             computed from"
+        ),
+        "{error}"
+    );
+    // A plain unknown column keeps the nearest-name hint.
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "nmae = 'x'".into();
+    });
+    assert!(
+        error.contains("unknown column `nmae` in todos; did you mean `name`?"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_relation_policy_reading_a_computed_outer_field_is_told_it_is_computed() {
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "exists (from shares where todo = outer.shareCount)".into();
+    });
+    assert!(
+        error.contains(
+            "unknown column todos.shareCount: `shareCount` is a computed field, which isn't \
+             stored, so a permission can't read it; write the policy over the columns it's \
+             computed from"
+        ),
+        "{error}"
+    );
 }

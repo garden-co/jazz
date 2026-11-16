@@ -562,7 +562,8 @@ it is never length-wrapped as a byte vector at the native read boundary.
 Postcard enum ordinals follow the declared Rust order: relation
 expressions are `TableScan`, `Filter`, `Union`, `Join`, `Project`, `Gather`,
 `Distinct`, `OrderBy`, `Offset`, `Limit`; predicates are `Cmp`, `IsNull`,
-`IsNotNull`, `In`, `Contains`, `EnumMatch`, `And`, `Or`, `Not`, `True`, `False`;
+`IsNotNull`, `In`, `Contains`, a reserved ordinal 5 (payload-enum matches
+until 2.0.0-alpha.65; decoding it is refused), `And`, `Or`, `Not`, `True`, `False`;
 and value references are `Literal`, `Param`, `SessionRef`, `OuterColumn`,
 `FrontierColumn`, `RowId`. Struct fields use declaration order. Literal ordinals
 are `Null`, `Bool`, `I64`, `U64`, `F64(bits)`, `String`, `Array`, and `Object`.

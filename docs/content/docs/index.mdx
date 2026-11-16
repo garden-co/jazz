@@ -12,7 +12,12 @@ Every Jazz app is defined first by its database schema and permission policies. 
   "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
   "tables": {
-    "todos": { "columns": { "title": "string", "done": "boolean" } }
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean"
+      }
+    }
   }
 }
 ```
@@ -22,12 +27,15 @@ Every Jazz app is defined first by its database schema and permission policies. 
   "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
   "format": 1,
   "$comment": "Each user sees and edits only the todos they created",
+  "defs": {
+    "isCreator": "$createdBy.account = session.user"
+  },
   "tables": {
     "todos": {
-      "read": "$createdBy.account = session.user",
-      "insert": "$createdBy.account = session.user",
-      "update": "$createdBy.account = session.user",
-      "delete": "$createdBy.account = session.user"
+      "read": "isCreator()",
+      "insert": "isCreator()",
+      "update": "isCreator()",
+      "delete": "isCreator()"
     }
   }
 }
@@ -238,7 +246,7 @@ Set up the client: [Thin Client](/docs/setup/web-client/thin-client) (the defaul
 
 ## What you'll learn, in order
 
-- [Setup](/docs/setup/run-locally)&hairsp;—&hairsp;run locally, deploy to Vercel, Jazz Cloud or your own server, add a backend, then a client
+- [Setup](/docs/setup/run-locally)&hairsp;—&hairsp;run locally, deploy to Vercel or your own server, add a backend, then a client
 - [Schemas & Policies](/docs/schemas/defining-tables)&hairsp;—&hairsp;tables, column types, relationships, who can do what, and migrations
 - [Reading Data](/docs/reading/queries)&hairsp;—&hairsp;queries, live subscriptions and framework hooks
 - [Writing Data](/docs/writing/writing-data)&hairsp;—&hairsp;inserts, updates, transactions and mergeable text
