@@ -2,13 +2,16 @@ import Foundation
 import Jazz
 import StagePlan
 
-// stage-plan-swift [--key-file <path>] [--bearer-stdin] [--data-dir <dir>] [--show <name>] <command>
+// stage-plan-swift [--key-file <path>] [--bearer-stdin] [--data-dir <dir>] [--show <name> | --show-id <id>] <command>
 // An end user of StagePlan: it signs in to the app's Jazz endpoint
 // (JAZZ_ENDPOINT, the backend's handler; JAZZ_APP_ID) with a device account,
 // whose key lives in --key-file (made on first use, mode 0600; default
 // ~/.config/stage-plan-swift/device-key), or with the app's bearer token,
 // from $JAZZ_BEARER or, with --bearer-stdin, a line on stdin (never argv,
 // which `ps` and shell history show).
+// --show picks the user's own show by name (made if they have none);
+// --show-id any show by id (list shows only what they may read; add into a
+// show they may not write into exits 1 with "permission denied").
 //   list                    the show's tasks, by rank
 //   add <title>             add a task
 //   move <task-id> <stage>  todo | doing | done | blocked
@@ -30,6 +33,7 @@ let bearer: String? =
     : ProcessInfo.processInfo.environment["JAZZ_BEARER"]
 let dataDir = option("--data-dir")
 let showName = option("--show") ?? "Opening night"
+let showId = option("--show-id")
 
 func printTasks(_ tasks: [JazzApp.Task]) {
     for task in tasks {
@@ -49,12 +53,17 @@ do {
         auth = .deviceKey(try deviceKey(at: keyFile))
     }
     let app = try await StagePlanApp.open(endpoint: endpoint, appId: appId, auth: auth, dataDir: dataDir)
-    let show = try await app.show(named: showName)
+    let show: Jazz.ID
+    if let showId {
+        show = showId
+    } else {
+        show = try await app.show(named: showName).id
+    }
     switch args.first {
     case "list"?:
-        printTasks(try await app.tasks(of: show))
+        printTasks(try await app.tasks(ofShow: show))
     case "add"? where args.count == 2:
-        let task = try await app.addTask(args[1], to: show)
+        let task = try await app.addTask(args[1], toShow: show)
         print(task.id)
     case "move"? where args.count == 3:
         guard let status = JazzApp.TaskStatus(rawValue: args[2]) else {
@@ -62,12 +71,12 @@ do {
         }
         try await app.move(args[1], to: status)
     case "demo"?:
-        let load = try await app.addTask("Load in", to: show)
-        try await app.addTask("Sound check", to: show)
+        let load = try await app.addTask("Load in", toShow: show)
+        try await app.addTask("Sound check", toShow: show)
         try await app.move(load.id, to: .doing)
-        printTasks(try await app.tasks(of: show))
+        printTasks(try await app.tasks(ofShow: show))
     default:
-        print("usage: stage-plan-swift [--key-file <path>] [--bearer-stdin] [--data-dir <dir>] [--show <name>] list | add <title> | move <task-id> <stage> | demo")
+        print("usage: stage-plan-swift [--key-file <path>] [--bearer-stdin] [--data-dir <dir>] [--show <name> | --show-id <id>] list | add <title> | move <task-id> <stage> | demo")
         exit(2)
     }
     try await app.jazz.close()

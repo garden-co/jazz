@@ -41,16 +41,31 @@ public struct StagePlanApp: Sendable {
 
     /// The show's tasks, in `rank` order.
     public func tasks(of show: JazzApp.Show) async throws -> [JazzApp.Task] {
-        try await jazz.all(JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)).orderBy(JazzApp.tasks.rank))
+        try await tasks(ofShow: show.id)
+    }
+
+    /// The tasks of the show with this id the user may read, in `rank` order
+    /// (none of a show the app's permissions don't let them see).
+    public func tasks(ofShow showId: Jazz.ID) async throws -> [JazzApp.Task] {
+        try await jazz.all(JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(showId)).orderBy(JazzApp.tasks.rank))
     }
 
     /// Adds a task to the bottom of the show's `todo` stage.
     @discardableResult
     public func addTask(_ title: String, to show: JazzApp.Show) async throws -> JazzApp.Task {
+        try await addTask(title, toShow: show.id)
+    }
+
+    /// Adds a task to the show with this id, waiting until the server
+    /// accepted it: a show the user may not write into fails with
+    /// `JazzError.permissionDenied`.
+    @discardableResult
+    public func addTask(_ title: String, toShow showId: Jazz.ID) async throws -> JazzApp.Task {
         let last = try await jazz.one(
-            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)).orderBy(JazzApp.tasks.rank.desc).limit(1))
+            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(showId)).orderBy(JazzApp.tasks.rank.desc).limit(1))
         return try await jazz.insert(
-            JazzApp.NewTask(showId: show.id, title: title, status: .todo, rank: (last?.rank ?? 0) + 1))
+            JazzApp.NewTask(showId: showId, title: title, status: .todo, rank: (last?.rank ?? 0) + 1),
+            tier: .global)
     }
 
     /// Moves the task to `status`.
