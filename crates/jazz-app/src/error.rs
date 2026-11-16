@@ -33,6 +33,12 @@ pub enum Error {
     #[error("subscription rejected: {0}")]
     Rejected(String),
 
+    /// The app's backend refused the request for good: retrying it as it is
+    /// will not help (e.g. linking a device account to a user who already
+    /// has another account).
+    #[error("refused: {0}")]
+    Refused(String),
+
     /// No one is signed in: the token provider gave no bearer, or the app's
     /// backend named no user from it.
     #[error("signed out")]
@@ -42,6 +48,11 @@ pub enum Error {
     /// from a client, or with [`crate::Endpoint::create_account_for`].
     #[error("user {0:?} has no Jazz account yet")]
     NoAccount(String),
+
+    /// Closing left writes the server never got, and the store kept them
+    /// only in memory: they are lost.
+    #[error("closed with {pending} write(s) the server never got, lost with the memory store")]
+    Unsynced { pending: usize },
 
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]

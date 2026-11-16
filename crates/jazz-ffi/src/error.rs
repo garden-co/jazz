@@ -145,6 +145,7 @@ impl From<jazz_app::Error> for JazzErrorKind {
             E::Server(reason) if reason.contains("refused the link") => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
+            E::Refused(_) => Self::Refused(message),
             // A bearer the backend names no one by (e.g. a rejected link):
             // a refusal, not a network blip to retry.
             E::SignedOut => Self::Refused(message),

@@ -111,6 +111,8 @@ pub enum UserKind {
     Device,
     /// A user the app's backend signed in ([`crate::Auth::Bearer`]).
     Backend,
+    /// The system: a trusted backend client ([`crate::Config::credential`]).
+    System,
 }
 
 /// How the client syncs, as TypeScript's `SyncStatus` (serialized the same
@@ -439,6 +441,10 @@ impl Session {
     /// device again with another user's bearer brings that user into this
     /// account too: link only a device that is its user's alone, or have
     /// the backend revoke keys on linking.
+    ///
+    /// Fails with [`Error::SignedOut`] when the bearer names no one, and
+    /// with [`Error::Refused`] when the backend refuses the link for good
+    /// (its user already has another account).
     pub async fn link(&self, bearer: &str) -> Result<User> {
         let linking = self.linking.as_ref().ok_or_else(|| {
             Error::Config("only a device account's session links (Auth::Device)".into())
