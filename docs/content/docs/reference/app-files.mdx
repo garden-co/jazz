@@ -3,24 +3,25 @@ title: App files
 description: The format of jazz.app.json and jazz.permissions.json, an app's schema, history and permissions.
 ---
 
-Two readable JSON files are an app's source of truth, in every language:
+Two readable JSON files describe an app to every language:
 
 - **`jazz.app.json`**: your tables, the relations between them, computed fields and transforms,
   and the schema history your app ships. Clients and backends read it.
 - **`jazz.permissions.json`**: your permissions. Only backends read it, so no client bundle
   carries your policies.
 
-You write both, by hand or with an agent. `npx jazz-tools generate` checks them with the loader
-every backend runs and writes the typed bindings (`jazz.generated.ts` for TypeScript); see
-[Defining Tables](/docs/schemas/defining-tables) for how they fit together. This page is the
-format reference.
+`npx jazz-tools generate` writes both from your `schema.ts` and `migrations/`, checks them with the
+loader every backend runs, and writes the typed bindings (`jazz.generated.ts` for TypeScript); see
+[Defining Tables](/docs/schemas/defining-tables) for how they fit together. You don't edit them:
+`generate` refuses to overwrite a file whose `$generated` checksum no longer matches, unless you pass
+`--force`. This page is the format reference, for reading what `generate` wrote.
 
 Both files are plain JSON: no comments, no trailing commas, no repeated keys, and unknown keys are
 refused. A `$comment` string is allowed in every object. Each file starts with a `$schema` naming its
 JSON Schema and so its version (`https://jazz.tools/schemas/jazz.app.v1.json`, resp.
 `https://jazz.tools/schemas/jazz.permissions.v1.json`); it also points your editor at the schema.
 Jazz refuses a file written by a newer version. Files written before alpha.66 carry `"format": 1`
-and an unversioned `…/jazz.app.schema.json` URL instead: they still load as version 1. `migrations create` writes `jazz.app.json` back in a canonical
+and an unversioned `…/jazz.app.schema.json` URL instead: they still load as version 1. `generate` writes both files in a canonical
 layout. The bindings record a hash of `jazz.app.json`'s text, so reformatting it makes them out of
 date until the next `generate`: add `jazz.app.json` to `.prettierignore` (or your formatter's
 ignore file) to keep the two in step.
@@ -105,9 +106,9 @@ ignore file) to keep the two in step.
 Each table has `read`, `insert`, `update` and `delete`; a missing one is denied. `update` is one
 policy, or `{ "old": …, "new": … }` to check the row before and after the update. A policy is an expression
 string, `{ "anyOf": [...] }`, `{ "allOf": [...] }`, or `{ "$comment": "…", "where": … }`.
-`defs` holds named expressions, `"isChatMember($chat)": "exists chatMembers(chatId = $chat, userId = session.user)"`,
-which policies call as `isChatMember(this.id)`. Definitions may call each other, but never
-recursively. Policies can't refer to computed fields or transformed values. See
+alpha.66 removed `defs`, the named expressions of alpha.63–65: a file that has them is refused,
+with a hint to inline each one. In `schema.ts`, a repeated condition is a plain TypeScript helper,
+and `generate` writes it out wherever it's used. Policies can't refer to computed fields or transformed values. See
 [Declarative Permissions](/docs/schemas/policies) for how to write them.
 
 ## Expressions
