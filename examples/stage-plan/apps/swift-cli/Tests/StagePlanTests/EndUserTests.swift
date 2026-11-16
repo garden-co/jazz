@@ -69,7 +69,7 @@ final class EndUserTests: XCTestCase {
             _ = try await alice.all(JazzApp.shows.query())
             XCTFail("signOut closes the app")
         } catch {
-            XCTAssertEqual(error, .closed)
+            XCTAssertEqual(error as? JazzError, .closed)
         }
     }
 
@@ -95,7 +95,7 @@ final class EndUserTests: XCTestCase {
         do {
             try await alice.refresh()
             XCTFail("refresh should surface the failed fetch")
-        } catch {
+        } catch let error as JazzError {
             guard case .io = error else { return XCTFail("\(error)") }
         }
         let state = try await alice.sessionState()

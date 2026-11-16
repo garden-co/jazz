@@ -27,6 +27,17 @@ fn next(deltas: &mpsc::Receiver<Result<Value, String>>) -> Value {
         .expect("not an error")
 }
 
+/// A delta's rows without their result keys (`$key`, checked where results
+/// share an id: tests/result_keys.rs), to compare with written rows.
+fn unkeyed(rows: &Value) -> Value {
+    let mut rows = rows.clone();
+    for row in rows.as_array_mut().unwrap() {
+        assert!(row["$key"].is_string(), "{row}");
+        row.as_object_mut().unwrap().remove("$key");
+    }
+    rows
+}
+
 fn refused(result: Result<impl std::fmt::Debug, JazzError>) -> String {
     match result {
         Err(JazzError::Refused { reason }) => reason,
@@ -253,7 +264,7 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     let reset = next(&deltas);
     assert_eq!(reset["reset"], true);
     assert_eq!(reset["coalesced"], false);
-    assert_eq!(reset["added"], json!([first]));
+    assert_eq!(unkeyed(&reset["added"]), json!([first]));
 
     let second = parse(
         &jazz
@@ -262,7 +273,7 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     );
     let added = next(&deltas);
     assert_eq!(added["reset"], false);
-    assert_eq!(added["added"], json!([second]));
+    assert_eq!(unkeyed(&added["added"]), json!([second]));
 
     let first_id = first["id"].as_str().unwrap().to_owned();
     jazz.update(
@@ -303,7 +314,7 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     assert_eq!(counts.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
 }
 
-/// What jazz-app cannot do (offsets in includes, foreign session issuers),
+/// What jazz-app-support cannot do (offsets in includes, foreign session issuers),
 /// misconfigured servers and invalid input are refused with `Refused`, naming the pattern.
 #[test]
 fn refuses_what_it_cannot_do_by_name() {
@@ -399,7 +410,7 @@ fn refuses_what_it_cannot_do_by_name() {
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_acts_as_its_session_user_under_permissions() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()

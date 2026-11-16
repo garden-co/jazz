@@ -9,7 +9,7 @@ mod relay;
 use std::time::Duration;
 
 use guarded::{NewNote, notes};
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, Auth, Backend, Config, Error, Jazz, ObjectId, ReadTier, TokenReason,
 };
 use jazz_server::JazzServer;
@@ -20,7 +20,7 @@ fn files() -> AppFiles {
     AppFiles::read(FIXTURE).unwrap()
 }
 
-fn token(token: &'static str) -> impl jazz_app::TokenProvider + 'static {
+fn token(token: &'static str) -> impl jazz_app_support::TokenProvider + 'static {
     move |_: TokenReason| async move { Ok(Some(token.to_owned())) }
 }
 
@@ -101,7 +101,7 @@ async fn a_trusted_client_reads_as_each_user_by_the_apps_permissions() {
     // B sees none of it, and may not write as A.
     assert_eq!(as_b.all(notes::query()).await.unwrap(), vec![]);
     let refused = as_b
-        .durable(jazz_app::DurabilityTier::GlobalServer)
+        .durable(jazz_app_support::DurabilityTier::GlobalServer)
         .insert(NewNote::new(owner_a, "Not B's"))
         .await;
     assert!(refused.is_err(), "{refused:?}");
@@ -119,7 +119,7 @@ async fn a_trusted_client_reads_as_each_user_by_the_apps_permissions() {
     .unwrap();
     assert_eq!(mine, vec![note]);
 
-    job.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+    job.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
     backend.shutdown().await.unwrap();
@@ -140,4 +140,76 @@ async fn a_backend_client_needs_the_apps_permissions() {
     )
     .await;
     assert!(matches!(opened, Err(Error::App(_))), "{opened:?}");
+}
+
+/// A trusted client evaluates its users' reads by its own permissions: one
+/// opened with other permissions than the main backend serves acts for no
+/// user, rather than read by stale or laxer policies (jazz#5808). Its own
+/// system reads and writes go on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trusted_client_with_other_permissions_acts_for_no_user() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let backend = Jazz::open(
+        files(),
+        Config::new(app_id)
+            .server(server.base_url())
+            .backend(Backend::new(
+                server.backend_secret(),
+                server.admin_secret(),
+                "notes-service",
+            )),
+    )
+    .await
+    .unwrap();
+    let relay = relay::start(
+        &server.base_url(),
+        app_id,
+        server.backend_secret(),
+        server.admin_secret(),
+        backend.bundle().unwrap(),
+    )
+    .await;
+    let a = Jazz::open(
+        files(),
+        Config::new(app_id)
+            .server(&relay.endpoint)
+            .user(Auth::bearer(token("token-a"))),
+    )
+    .await
+    .unwrap();
+
+    // Everyone may read every note, by this client's copy.
+    let laxer = AppFiles::new(
+        std::fs::read(format!("{FIXTURE}/jazz.app.json")).unwrap(),
+        Some(
+            br#"{ "format": 1, "tables": { "notes": {
+                "read": "true", "insert": "owner = session.user",
+                "update": "owner = session.user", "delete": "owner = session.user" } } }"#
+                .to_vec(),
+        ),
+    );
+    let job = Jazz::open(
+        laxer,
+        Config::new(app_id)
+            .server(&relay.endpoint)
+            .credential(token("machine-trusted")),
+    )
+    .await
+    .expect("it opens: only acting for users is refused");
+    let refused = job.for_user("a", serde_json::Value::Null).await;
+    let Err(Error::BundleMismatch { own, served }) = &refused else {
+        panic!("for_user is refused: {refused:?}");
+    };
+    assert_eq!(served, backend.bundle().unwrap());
+    assert_ne!(own, served);
+
+    job.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
+    a.shutdown().await.unwrap();
+    backend.shutdown().await.unwrap();
+    server.shutdown().await;
 }

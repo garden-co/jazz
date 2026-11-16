@@ -22,6 +22,10 @@ type Config struct {
 	// App is the text of jazz.app.json.
 	App   string `json:"app"`
 	AppID string `json:"appId,omitempty"`
+	// Permissions is the text of the app's jazz.permissions.json: a
+	// backend client (Auth: Credential) needs it, as TS createJazzClient
+	// does. It is not published.
+	Permissions string `json:"permissions,omitempty"`
 	// ServerURL is the sync server; empty keeps the app local.
 	ServerURL string `json:"serverUrl,omitempty"`
 	// DataDir is where persistent storage lives.
@@ -96,6 +100,27 @@ type DB struct {
 	handle   uintptr
 	app      any
 	provider uint64 // the TokenProvider's id, if any
+
+	// streams are the DB's open subscriptions and watches, by id: each
+	// stops its jazz-ffi side at once; its channel closes once what was
+	// queued is sent.
+	streamsMu sync.Mutex
+	streams   map[uint64]func()
+}
+
+// endStreams ends the DB's subscriptions and watches (closing their
+// channels) before the handle closes.
+func (db *DB) endStreams() {
+	db.streamsMu.Lock()
+	ends := make([]func(), 0, len(db.streams))
+	for _, end := range db.streams {
+		ends = append(ends, end)
+	}
+	db.streams = nil
+	db.streamsMu.Unlock()
+	for _, end := range ends {
+		end()
+	}
 }
 
 func (db *DB) computed() any { return db.app }
@@ -158,6 +183,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 
 // Close closes the app; later calls return ErrClosed.
 func (db *DB) Close() error {
+	db.endStreams()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.handle != 0 {

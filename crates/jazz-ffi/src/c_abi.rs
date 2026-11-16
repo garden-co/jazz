@@ -34,6 +34,10 @@ fn error_json(error: &JazzError) -> String {
     match error {
         JazzError::NoAccount { user_id, .. } => json["userId"] = json!(user_id),
         JazzError::Unsynced { pending, .. } => json["pending"] = json!(pending),
+        JazzError::BundleMismatch { own, served, .. } => {
+            json["own"] = json!(own);
+            json["served"] = json!(served);
+        }
         _ => {}
     }
     json.to_string()
@@ -258,6 +262,18 @@ pub unsafe extern "C" fn jazz_call(
                 core.sign_out()?;
                 "null".into()
             }
+            "disconnect" => {
+                core.disconnect()?;
+                "null".into()
+            }
+            "reconnect" => {
+                core.reconnect()?;
+                "null".into()
+            }
+            "deleteClientStorage" => {
+                core.delete_client_storage()?;
+                "null".into()
+            }
             "upsert" => core.upsert(
                 &string("table")?,
                 &string("id")?,
@@ -277,7 +293,7 @@ pub unsafe extern "C" fn jazz_call(
                 )?
             }
             "uploadBegin" => {
-                // jazz-app streams outside transactions only: an upload
+                // jazz-app-support streams outside transactions only: an upload
                 // that named one would escape it.
                 if args.get("tx").is_some_and(|tx| !tx.is_null()) {
                     return Err(crate::error::unsupported(
@@ -647,7 +663,12 @@ pub unsafe extern "C" fn jazz_watch(
             what,
             Box::new(move |state| {
                 let ctx = &ctx;
-                let json = CString::new(state).unwrap_or_default();
+                // The app closed: a last "error" callback, kind "closed".
+                let (kind, json) = match state {
+                    Some(state) => (kind.as_c_str(), state),
+                    None => (c"error", error_json(&JazzError::Closed)),
+                };
+                let json = CString::new(json).unwrap_or_default();
                 // SAFETY: per `jazz_watch`'s contract.
                 unsafe { cb(ctx.0, kind.as_ptr(), json.as_ptr()) };
             }),

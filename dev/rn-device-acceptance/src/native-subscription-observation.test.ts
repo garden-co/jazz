@@ -11,7 +11,10 @@ import {
 
 const fixture = JSON.parse(
   fs.readFileSync(
-    path.resolve(import.meta.dirname, "../../../crates/jazz/fixtures/binding_codec_golden.json"),
+    path.resolve(
+      import.meta.dirname,
+      "../../../crates/jazz/layers/db/fixtures/binding_codec_golden.json",
+    ),
     "utf8",
   ),
 ) as { subscription_deltas: Array<{ name: string; payload_hex: string }> };

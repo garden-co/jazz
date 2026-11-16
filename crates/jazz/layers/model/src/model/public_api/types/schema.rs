@@ -102,6 +102,15 @@ pub enum ColumnType {
     /// catalogue source round-tripping; ordinary application enums use `Enum`.
     #[doc(hidden)]
     ScalarEnum { name: String, variants: Vec<String> },
+    /// An enum whose cases carry fields, as 2.0.0-alpha.64 and earlier
+    /// accepted it. Jazz has no such columns any more (jazz#5758); this
+    /// reads them back where an older store or app history still names one,
+    /// so it opens and can migrate away. A current schema declaring one is
+    /// refused, and the column holds no values: no store ever wrote one
+    /// (jazz#5621).
+    #[doc(hidden)]
+    #[serde(rename = "EnumPayload")]
+    LegacyEnumPayload { cases: Vec<LegacyEnumCase> },
     /// 8-byte unsigned timestamp (Unix milliseconds).
     Timestamp,
     /// 8-byte IEEE 754 double-precision float (f64).
@@ -140,6 +149,14 @@ impl ColumnType {
             _ => None,
         }
     }
+}
+
+/// One case of a [`ColumnType::LegacyEnumPayload`], as it was declared.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyEnumCase {
+    pub name: String,
+    pub fields: Vec<ColumnDescriptor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

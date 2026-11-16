@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bindings::{NewTodo, Todo, todos};
 use futures::StreamExt;
-use jazz_app::{
+use jazz_app_support::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, Error, Jazz, Link, ReadTier, SessionState,
     Storage, TokenReason, UserKind,
 };
@@ -37,7 +37,12 @@ struct App {
 
 impl App {
     async fn start() -> Self {
-        let app_id = AppId::random();
+        Self::start_for(AppId::random()).await
+    }
+
+    /// A fresh server, store and backend for `app_id`: a new history, as a
+    /// recreated server store has.
+    async fn start_for(app_id: AppId) -> Self {
         let server = JazzServer::builder()
             .with_app_id(app_id)
             .start()
@@ -328,8 +333,8 @@ async fn an_end_user_needs_someone_signed_in_and_the_apps_endpoint() {
 /// The status once `done` holds for it.
 async fn sync_until(
     jazz: &Jazz,
-    done: impl Fn(&jazz_app::SyncStatus) -> bool,
-) -> jazz_app::SyncStatus {
+    done: impl Fn(&jazz_app_support::SyncStatus) -> bool,
+) -> jazz_app_support::SyncStatus {
     let mut changes = jazz.sync_changes();
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(status) = changes.next().await {
@@ -390,7 +395,7 @@ async fn sync_status_counts_uploads_until_the_server_has_them() {
 
 /// The session's state once `done` holds for it.
 async fn session_until(
-    session: &jazz_app::Session,
+    session: &jazz_app_support::Session,
     done: impl Fn(&SessionState) -> bool,
 ) -> SessionState {
     let mut changes = session.changes();
@@ -408,7 +413,7 @@ async fn session_until(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_bearer_is_renewed_expires_and_recovers_but_a_revoked_one_is_not() {
-    use jazz_app::AuthFailure;
+    use jazz_app_support::AuthFailure;
     let app = App::start().await;
     let token = Arc::new(Mutex::new("token-alice".to_owned()));
     let asked = Arc::new(Mutex::new(Vec::new()));
@@ -528,13 +533,13 @@ async fn a_slow_provider_does_not_hold_up_signing_out() {
     app.stop().await;
 }
 
-fn machine(token: &'static str) -> impl jazz_app::TokenProvider + 'static {
+fn machine(token: &'static str) -> impl jazz_app_support::TokenProvider + 'static {
     move |_: TokenReason| async move { Ok(Some(token.to_owned())) }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts() {
-    use jazz_app::BackendClientKind;
+    use jazz_app_support::BackendClientKind;
     let app = App::start().await;
     let job = Jazz::open(
         files(),
@@ -608,7 +613,9 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
         Err(Error::Config(_))
     ));
 
-    job.close(jazz_app::CLOSE_TIMEOUT).await.expect("drained");
+    job.close(jazz_app_support::CLOSE_TIMEOUT)
+        .await
+        .expect("drained");
     assert!(remote_todos(&alice, 3).await.contains(&digest));
     assert!(matches!(job.all(todos::query()).await, Err(Error::Stopped)));
     alice.shutdown().await.unwrap();
@@ -617,7 +624,7 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refused() {
-    use jazz_app::BackendClientKind;
+    use jazz_app_support::BackendClientKind;
     let app = App::start().await;
     let agent = Jazz::open(
         files(),
@@ -645,7 +652,7 @@ async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refuse
         .await
         .unwrap();
     assert_eq!(remote_todos(&app.backend, 1).await.len(), 1);
-    agent.close(jazz_app::CLOSE_TIMEOUT).await.unwrap();
+    agent.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
 
     let untrusted = Jazz::open(
         files(),
@@ -752,7 +759,7 @@ async fn sync_status_reports_rejections_and_link_failures_as_typescript_does() {
     .await
     .unwrap();
     let rejected = sync_until(&erin, |status| status.rejected == 1).await;
-    let Some(jazz_app::SyncError::Rejected { code, .. }) = &rejected.last_error else {
+    let Some(jazz_app_support::SyncError::Rejected { code, .. }) = &rejected.last_error else {
         panic!("a rejection: {rejected:?}");
     };
     assert!(!code.is_empty());
@@ -767,7 +774,7 @@ async fn sync_status_reports_rejections_and_link_failures_as_typescript_does() {
         matches!(
             status.link,
             Link::Offline {
-                reason: jazz_app::Offline::Auth,
+                reason: jazz_app_support::Offline::Auth,
                 ..
             }
         )
@@ -902,7 +909,7 @@ async fn reads_without_a_tier_see_what_the_server_has() {
     // Options that name no tier read the same way.
     assert_eq!(
         agent
-            .all_with_options(todos::query(), jazz_app::ReadOptions::default())
+            .all_with_options(todos::query(), jazz_app_support::ReadOptions::default())
             .await
             .unwrap(),
         vec![written.clone()]
@@ -934,5 +941,152 @@ async fn reads_without_a_tier_see_what_the_server_has() {
     agent.shutdown().await.unwrap();
     user.shutdown().await.unwrap();
     local.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// A server serving another history than the client's store (its store was
+/// recreated): the client stops syncing with it and says so, as TypeScript
+/// does (`authority-changed`), and its local data stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_with_another_history_is_reported_as_authority_changed() {
+    let first = App::start().await;
+    let app_id = first.app_id;
+    let key = DeviceKey::generate().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let open = |app: &App| {
+        Jazz::open(
+            client_files(),
+            app.user(Auth::Device(key.clone()))
+                .storage(Storage::Dir(dir.path().into())),
+        )
+    };
+    let phone = open(&first).await.unwrap();
+    let kept = phone
+        .insert(NewTodo::new("Synced once", false))
+        .await
+        .unwrap();
+    phone.wait_for_sync().await.unwrap();
+    phone.shutdown().await.unwrap();
+    first.stop().await;
+
+    // The same app's server, on a new store.
+    let second = App::start_for(app_id).await;
+    let phone = open(&second)
+        .await
+        .expect("an authority change still opens");
+    let stopped = sync_until(&phone, |status| matches!(status.link, Link::Offline { .. })).await;
+    assert_eq!(
+        stopped.link,
+        Link::Offline {
+            reason: jazz_app_support::Offline::AuthorityChanged,
+            retrying: false,
+            auth: None,
+        },
+        "{stopped:?}"
+    );
+    assert!(matches!(
+        stopped.last_error,
+        Some(jazz_app_support::SyncError::AuthorityChanged { .. })
+    ));
+    let json = serde_json::to_value(&stopped).unwrap();
+    assert_eq!(json["link"]["reason"], "authority-changed");
+    assert_eq!(json["lastError"]["kind"], "authority-changed");
+
+    // Reconnecting tries the server again (as TS's `db.reconnect()`), and
+    // finds it serving another history still.
+    tokio::time::timeout(Duration::from_secs(10), phone.reconnect())
+        .await
+        .expect("reconnect returns after an authority change")
+        .unwrap();
+    let again = sync_until(&phone, |status| {
+        matches!(
+            status.link,
+            Link::Offline {
+                reason: jazz_app_support::Offline::AuthorityChanged,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(!again.synced);
+
+    // Local data stays usable, and nothing is reset.
+    assert_eq!(
+        phone
+            .all_with(todos::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap(),
+        vec![kept]
+    );
+    phone
+        .insert(NewTodo::new("Written after", false))
+        .await
+        .unwrap();
+
+    phone.shutdown().await.unwrap();
+    second.stop().await;
+}
+
+/// While the server is unreachable, a backend client's default (`Remote`)
+/// read and subscription wait for it, as TypeScript's do: they neither fail
+/// nor answer from the local store. Once it is back, they answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_reads_wait_for_an_unreachable_server() {
+    let app = App::start().await;
+    let agent = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(machine("token-agent")),
+    )
+    .await
+    .unwrap();
+    connected(&agent).await;
+    let written = app
+        .backend
+        .insert(NewTodo::new("While the agent was away", false))
+        .await
+        .unwrap();
+    app.backend.wait_for_sync().await.unwrap();
+
+    app.relay.set_unreachable(true);
+    let read = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.all(todos::query()).await }
+    });
+    let mut changes = agent.subscribe(todos::query()).await.unwrap();
+    let first = tokio::spawn(async move {
+        let first = changes.next().await;
+        (first, changes)
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!read.is_finished(), "the read waits for the server");
+    assert!(
+        !first.is_finished(),
+        "the subscription waits for the server"
+    );
+
+    app.relay.set_unreachable(false);
+    let rows = tokio::time::timeout(Duration::from_secs(30), read)
+        .await
+        .expect("the read answers once the server is back")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rows, vec![written.clone()]);
+    let (first, changes) = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the subscription answers once the server is back")
+        .unwrap();
+    let added: Vec<_> = first
+        .unwrap()
+        .unwrap()
+        .added
+        .into_iter()
+        .map(|added| added.row)
+        .collect();
+    assert_eq!(added, vec![written]);
+
+    drop(changes);
+    agent.shutdown().await.unwrap();
     app.stop().await;
 }

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures::{SinkExt, StreamExt};
-use jazz_app::AppId;
+use jazz_app_support::AppId;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -40,6 +40,9 @@ pub struct Relay {
     /// answers an unverified credential.
     pub refusing: Arc<Mutex<HashMap<String, String>>>,
     connections: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
+    /// While set, connections are dropped as they arrive: the backend is
+    /// unreachable.
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -48,6 +51,16 @@ impl Relay {
     pub fn kick(&self) {
         for connection in self.connections.lock().unwrap().drain(..) {
             connection.abort();
+        }
+    }
+
+    /// Makes the backend unreachable (`true`: open connections drop, new
+    /// ones are closed at once) or reachable again.
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.unreachable
+            .store(unreachable, std::sync::atomic::Ordering::SeqCst);
+        if unreachable {
+            self.kick();
         }
     }
 
@@ -85,12 +98,18 @@ pub async fn start(
     let admitted = Arc::new(Mutex::new(Vec::new()));
     let refusing = Arc::new(Mutex::new(HashMap::new()));
     let connections = Arc::new(Mutex::new(Vec::new()));
+    let unreachable = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (log, refused, open) = (admitted.clone(), refusing.clone(), connections.clone());
+    let down = unreachable.clone();
     let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            if down.load(std::sync::atomic::Ordering::SeqCst) {
+                drop(stream);
+                continue;
+            }
             let connection =
                 tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
             open.lock().unwrap().push(connection.abort_handle());
@@ -101,6 +120,7 @@ pub async fn start(
         admitted,
         refusing,
         connections,
+        unreachable,
         task,
     }
 }
@@ -259,15 +279,21 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
     } else {
         ("404 Not Found", "Not found".to_owned())
     };
+    // `backend/admit` names the bundle the main backend serves (jazz#5808).
+    let bundle = if path.ends_with("/backend/admit") {
+        format!("x-jazz-bundle: {}\r\n", backend.bundle)
+    } else {
+        String::new()
+    };
     let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{bundle}connection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
 fn uuid_v4() -> String {
-    jazz_app::ObjectId::new().to_string()
+    jazz_app_support::ObjectId::new().to_string()
 }
 
 /// `backendLink`: the challenge was issued for this user, the device's proof
@@ -279,14 +305,14 @@ async fn link(backend: &Backend, user: &str, body: &[u8]) -> Option<Value> {
     if issued_for != user {
         return None;
     }
-    let subject = jazz_app::jazz::tools::identity::verify_local_first_challenge(
+    let subject = jazz_app_support::jazz::tools::identity::verify_local_first_challenge(
         body["proof"].as_str()?,
         challenge,
     )
     .ok()?
     .to_string();
     let guest = json!({
-        "issuer": jazz_app::jazz::tools::identity::LOCAL_FIRST_ISSUER,
+        "issuer": jazz_app_support::jazz::tools::identity::LOCAL_FIRST_ISSUER,
         "subject": subject,
     });
     let admin = |operation: &str, body: Value| {
@@ -378,7 +404,7 @@ async fn relay_socket(
         .and_then(|header| header.strip_prefix("Bearer "))
         .and_then(|bearer| refusing.lock().unwrap().get(bearer).cloned());
     if let Some(message) = refusal {
-        use jazz_app::jazz::wire::{
+        use jazz_app_support::jazz::wire::{
             WireError, WireErrorCode, WireFrame, WireRetry, encode_frame,
             encode_websocket_frame_batch,
         };

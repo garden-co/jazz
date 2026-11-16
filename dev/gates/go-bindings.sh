@@ -22,9 +22,9 @@ fi
 git config --global --add safe.directory "${root}" || true
 
 cargo build -p jazz-ffi
-cargo build -p jazz-cli --bin jazz-tools
+cargo build -p jazz-tools --bin jazz-tools
 # The tests' stand-in for a TS main backend's /jazz (jazz#5754).
-cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay
+cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings
 (cd examples/stage-plan/apps/go-cli && ../../../../target/debug/jazz-tools generate --check)
 
@@ -50,3 +50,10 @@ done
 # The race detector needs cgo; purego runs under it too.
 (cd packages/jazz-go && CGO_ENABLED=1 go test -race ./...)
 (cd examples/stage-plan/apps/go-cli && CGO_ENABLED=1 go test -race -v ./...)
+
+# The same suite with StagePlan's main backend in TypeScript (createJazz,
+# go-cli/ts-main) as the server, and Go backend clients of it: needs the
+# repository's jazz-tools build (the go partition makes it).
+if [ "${JAZZ_GO_TS_MAIN_BACKEND:-}" = "1" ]; then
+  (cd examples/stage-plan/apps/go-cli && JAZZ_MAIN_BACKEND=ts CGO_ENABLED=1 go test -race -v -count=1 ./...)
+fi

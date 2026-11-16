@@ -61,6 +61,8 @@ struct Backend {
     opened: AtomicUsize,
     sends: AtomicUsize,
     deleted: AtomicUsize,
+    /// How long a DELETE takes to be answered, in milliseconds.
+    delete_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 async fn socket_path(State(backend): State<Arc<Backend>>) -> Response {
@@ -202,6 +204,8 @@ async fn stream_end(
     backend.sessions.lock().unwrap().remove(&id);
     backend.deleted.fetch_add(1, Ordering::SeqCst);
     let _ = sink.lock().await.close().await;
+    let delay = backend.delete_delay_ms.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(delay)).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -241,6 +245,7 @@ async fn serve(app_id: AppId, schema: jazz::tools::Schema, upgrades: Upgrades) -
         opened: AtomicUsize::new(0),
         sends: AtomicUsize::new(0),
         deleted: AtomicUsize::new(0),
+        delete_delay_ms: std::sync::atomic::AtomicU64::new(0),
     });
     let router = axum::Router::new()
         .route("/jazz/apps/{app}/ws", axum::routing::any(refused_upgrade))
@@ -492,4 +497,91 @@ async fn an_upgrade_refused_with_401_is_an_auth_rejection() {
         "{error:?}"
     );
     assert_eq!(served.backend.opened.load(Ordering::SeqCst), 0);
+}
+
+/// A client that shuts down on its own runtime (as jazz-app-support's does) ends its
+/// stream session before the runtime goes: `settle` waits for the DELETE,
+/// which would otherwise die with the runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settle_ends_the_session_before_the_runtime_goes() {
+    let app_id = AppId::from_name("http-stream-settle");
+    let served = serve(app_id, schema(), Upgrades::StreamInstead).await;
+    let url = served.url.clone();
+    let client_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async move {
+            let connector = Arc::new(HttpStreamFallbackConnector::new());
+            let client =
+                JazzClient::connect_with_native_transport(context(app_id, url), connector.clone())
+                    .await
+                    .expect("connects over the stream");
+            insert_and_read_back(&client, "then shut down").await;
+            client.shutdown().await.expect("shutdown");
+            connector.settle(Duration::from_secs(5)).await;
+        });
+        // The runtime, and every task still on it, goes here.
+    });
+    tokio::task::spawn_blocking(move || client_thread.join().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(served.backend.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        served.backend.deleted.load(Ordering::SeqCst),
+        1,
+        "the session was DELETEd before the client's runtime went"
+    );
+}
+
+/// `settle(Duration::ZERO)` (a client closing with no time to spare) returns
+/// at once, and a budget holds even when the backend is slow to answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settle_with_no_time_waits_for_nothing() {
+    let app_id = AppId::from_name("http-stream-settle-zero");
+    let served = serve(app_id, schema(), Upgrades::StreamInstead).await;
+    // The backend takes 5 s to answer a DELETE.
+    served
+        .backend
+        .delete_delay_ms
+        .store(5_000, Ordering::SeqCst);
+    let url = served.url.clone();
+    let client_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async move {
+            let connector = Arc::new(HttpStreamFallbackConnector::new());
+            let client =
+                JazzClient::connect_with_native_transport(context(app_id, url), connector.clone())
+                    .await
+                    .expect("connects over the stream");
+            insert_and_read_back(&client, "then close at once").await;
+            client.shutdown().await.expect("shutdown");
+
+            let started = std::time::Instant::now();
+            connector.settle(Duration::ZERO).await;
+            let zero = started.elapsed();
+
+            let started = std::time::Instant::now();
+            connector.settle(Duration::from_millis(300)).await;
+            let budget = started.elapsed();
+            (zero, budget)
+        })
+    });
+    let (zero, budget) = tokio::task::spawn_blocking(move || client_thread.join().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        zero < Duration::from_millis(50),
+        "settle(ZERO) waited {zero:?}"
+    );
+    assert!(
+        budget >= Duration::from_millis(250) && budget < Duration::from_secs(2),
+        "settle(300 ms) against a 5 s DELETE took {budget:?}"
+    );
 }

@@ -41,9 +41,10 @@ swift --version
 
 cd "$root"
 cargo test -q -p jazz-codegen --test golden -- swift
-cargo build -q -p jazz-cli --bin jazz-tools
+cargo build -q -p jazz-tools --bin jazz-tools
+"$root/target/debug/jazz-tools" generate --check --dir "$example"
 # The app endpoint the end-user tests sign in through.
-cargo build -q -p jazz-app --features test-relay --bin jazz-app-test-relay
+cargo build -q -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 # The committed UniFFI sources match what uniffi-bindgen generates from
 # this tree's jazz-ffi; then the library and its jazz_ffi.pc.
 "$root/packages/jazz-swift/scripts/build-ffi.sh" --debug --check
@@ -58,8 +59,8 @@ export CI="${CI:-1}"
 (cd "$example" && swift test)
 
 # The CLI as an end user: a sync server, and in front of it the app's
-# endpoint (the test relay standing in for a TS, Rust or Go backend's
-# handler), which publishes StagePlan's permissions.
+# endpoint (the test relay standing in for the TypeScript backend's
+# `createJazz` handler), which publishes StagePlan's permissions.
 app_id=00000000-0000-4000-8000-00000057a9e0
 export JAZZ_BACKEND_SECRET=gate-backend-secret
 export JAZZ_ADMIN_SECRET=gate-admin-secret
