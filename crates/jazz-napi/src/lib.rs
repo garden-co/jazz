@@ -178,7 +178,10 @@ pub fn write_app_files(
 /// its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
 /// or `"mismatch"` (edited since; formatting alone doesn't count). Throws
 /// when the text isn't a JSON object or the marker is malformed.
-#[napi(js_name = "verifyGenerated")]
+#[napi(
+    js_name = "verifyGenerated",
+    ts_return_type = "\"none\" | \"match\" | \"mismatch\""
+)]
 pub fn verify_generated(text: String) -> napi::Result<String> {
     use jazz::tools::deployment::artifact::{self, GeneratedCheck};
     Ok(

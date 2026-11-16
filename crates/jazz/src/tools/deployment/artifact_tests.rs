@@ -548,7 +548,8 @@ fn defs_and_calls_are_refused() {
     let error = load(written.app.as_bytes(), file.to_string().as_bytes())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("unknown key `defs`"), "{error}");
+    assert!(error.contains("`defs` was removed in alpha.66"), "{error}");
+    assert!(error.contains("inline each definition"), "{error}");
     let error = read_policy("todos", "mine(this.id)").unwrap_err();
     assert!(error.contains("unknown function `mine`"), "{error}");
     let error = read_policy("todos", "owner = $todo").unwrap_err();

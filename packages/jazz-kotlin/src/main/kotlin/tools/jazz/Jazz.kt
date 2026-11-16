@@ -168,8 +168,16 @@ public class Jazz internal constructor(
     /** Asks the [JazzAuth.Bearer] provider for a fresh token ([TokenReason.Refresh]), e.g. after an `Expired` session. */
     public suspend fun refreshSession(): Unit = io { native.refresh() }
 
-    /** Signs the end user out, and closes the app. */
-    public suspend fun signOut(): Unit = io { native.signOut() }
+    /**
+     * Signs the end user out, and closes the app: [session] reads
+     * `SignedOut` when this returns.
+     */
+    public suspend fun signOut() {
+        io { native.signOut() }
+        // jazz-ffi may end the watches (`closed`) before it delivers the final
+        // `signedOut` state, so set it here, as [close] does.
+        endWatches()
+    }
 
     /**
      * Links this device account to the user's account with your app's own
