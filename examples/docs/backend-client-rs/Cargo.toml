@@ -1,0 +1,11 @@
+[package]
+name = "backend-client-docs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jazz-app = { path = "../../../crates/jazz-app" }
+# The todo app's generated bindings.
+todo-server-docs = { path = "../todo-server-rs" }
+tokio = { version = "1", features = ["full"] }
