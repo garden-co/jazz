@@ -270,6 +270,7 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        let started = std::time::Instant::now();
         if !self.info.serverless && !timeout.is_zero() {
             // An outage, or the server refusing, ends the wait: what is still
             // pending then is counted below.
@@ -297,10 +298,40 @@ impl Jazz {
             .with_client(|client| async move { Ok(client.pending_uploads()) })
             .await
             .unwrap_or(0);
-        self.shutdown().await?;
+        // Ending the client's HTTP stream sessions gets what is left of
+        // `timeout`: nothing at all for `Duration::ZERO`.
+        self.shutdown_within(session_end_budget(timeout, started.elapsed()))
+            .await?;
         if pending > 0 && self.info.memory && !self.info.serverless && !timeout.is_zero() {
             return Err(Error::Unsynced { pending });
         }
         Ok(())
+    }
+}
+
+/// What `close(timeout)` leaves, after `spent`, for ending the client's HTTP
+/// stream sessions: zero for `Duration::ZERO`, or once `timeout` is spent.
+fn session_end_budget(timeout: Duration, spent: Duration) -> Duration {
+    timeout.saturating_sub(spent)
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    #[test]
+    fn close_passes_what_is_left_of_its_timeout_to_ending_stream_sessions() {
+        assert_eq!(
+            session_end_budget(Duration::ZERO, Duration::ZERO),
+            Duration::ZERO
+        );
+        assert_eq!(
+            session_end_budget(Duration::from_secs(10), Duration::from_secs(3)),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            session_end_budget(Duration::from_secs(10), Duration::from_secs(12)),
+            Duration::ZERO
+        );
     }
 }
