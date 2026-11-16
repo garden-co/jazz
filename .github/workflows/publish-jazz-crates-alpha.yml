@@ -53,6 +53,8 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Up to 15 minutes waiting for npm to list the release.
+    timeout-minutes: 20
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       version: ${{ steps.resolve.outputs.version }}
@@ -86,17 +88,22 @@ jobs:
           # Only a release commit whose crates are versioned with npm publishes
           # crates. A release cut from an older branch, without the crates.io
           # packaging (or with crates behind npm), publishes none.
+          # Only a missing file (HTTP 404) means "no packaging"; any other
+          # API error fails the run rather than skipping a release.
           CRATES=false
-          if gh api "repos/${REPO}/contents/dev/scripts/publish-crates.mjs?ref=${SHA}" --silent 2>/dev/null; then
+          if probe=$(gh api "repos/${REPO}/contents/dev/scripts/publish-crates.mjs?ref=${SHA}" --silent 2>&1); then
             CRATE_VERSION=$(gh api "repos/${REPO}/contents/Cargo.toml?ref=${SHA}" --jq .content | base64 -d \
               | awk '/^\[workspace\.package\]/{p=1; next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; exit}')
-            if [ "${CRATE_VERSION}" = "${VERSION}" ]; then
-              CRATES=true
-            else
-              echo "::notice::The crates at ${SHA} are '${CRATE_VERSION}', not ${VERSION}; no crates to publish."
+            if [ "${CRATE_VERSION}" != "${VERSION}" ]; then
+              echo "::error::The crates at ${SHA} are '${CRATE_VERSION}', not jazz-tools' ${VERSION}. Run dev/scripts/sync-crate-versions.mjs on the release branch."
+              exit 1
             fi
-          else
+            CRATES=true
+          elif printf '%s' "${probe}" | grep -q "HTTP 404"; then
             echo "::notice::${SHA} has no crates.io packaging; no crates to publish."
+          else
+            echo "::error::Could not check ${SHA} for crates.io packaging: ${probe}"
+            exit 1
           fi
           PUBLISH=${CRATES}
           if [ "${DRY_RUN}" != "true" ] && [ "${CRATES}" = "true" ]; then
@@ -105,14 +112,14 @@ jobs:
             # registry can lag the npm job by minutes, so wait for it.
             listed=false
             for _ in $(seq 1 30); do
-              if curl -sfo /dev/null "https://registry.npmjs.org/jazz-tools/${VERSION}"; then
+              if curl -sfo /dev/null --max-time 20 "https://registry.npmjs.org/jazz-tools/${VERSION}"; then
                 listed=true
                 break
               fi
               sleep 30
             done
             if [ "${listed}" != "true" ]; then
-              echo "jazz-tools@${VERSION} is not on npm after 15 minutes; nothing to publish to crates.io."
+              echo "::warning::jazz-tools@${VERSION} is not on npm after 15 minutes; no crates published. Dispatch this workflow with mode=publish, tag=v${VERSION} once it is."
               PUBLISH=false
             else
               TAG_SHA=$(gh api "repos/${REPO}/commits/v${VERSION}" --jq .sha 2>/dev/null || true)
