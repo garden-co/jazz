@@ -2063,6 +2063,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
+    "test-go",
   ])
     assert.equal(
       suite.jobs[name].if,
@@ -2078,6 +2079,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     Object.keys(suite.jobs).sort(),
     [
       "lint",
+      "test-go",
       "test-jazz-ffi-bindings",
       "test-next-trace",
       "test-react-native",
