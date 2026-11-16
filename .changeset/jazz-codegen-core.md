@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-`jazz.app.json` declares computed fields (`"computed": { "<field>": { "type", "from" } }` per table) and transforms (top-level `"transforms": { "<name>": { "stored", "view" } }`, named by a column's `"transform"`), replacing `tsOnly`. A file written before alpha.65 with `tsOnly` or `slices` loads with a warning that they are ignored.
+`jazz.app.json` declares computed fields (`"computed": { "<field>": { "type", "from" } }` per table) and transforms (top-level `"transforms": { "<name>": { "stored", "view" } }`, named by a column's `"transform"`), replacing `tsOnly`. A file written before alpha.66 with `tsOnly` or `slices` loads with a warning that they are ignored.
 
 Loaders now refuse, naming the JSON path:
 
