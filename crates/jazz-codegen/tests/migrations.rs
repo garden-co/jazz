@@ -516,3 +516,49 @@ fn a_reference_follows_a_renamed_table() {
     assert!(created.todos.is_empty(), "{:?}", created.todos);
     App::load(created.app.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// The decisions every language renders its stub from, as the JSON the TS
+/// CLI reads (jazz-napi `migrationDiff`): a table renamed, one created,
+/// one dropped; in a kept table, a column that may be renamed, one added
+/// without the value existing rows get, one dropped with its default, and
+/// an enum gaining a variant.
+#[test]
+fn the_diff_steps_are_what_every_stub_is_rendered_from() {
+    let schema = |tables: &str| {
+        App::load(file(tables).as_bytes())
+            .unwrap()
+            .compiled
+            .current_schema()
+            .clone()
+    };
+    let before = schema(
+        r#"{ "todos": { "columns": { "title": "string", "note": "string?", "status": { "enum": ["open"] } } },
+             "projects": { "columns": { "name": "string" } },
+             "legacy": { "columns": { "n": "int" } } }"#,
+    );
+    let after = schema(
+        r#"{ "todos": { "columns": { "name": "string", "rank": "int", "status": { "enum": ["open", "done"] } } },
+             "lists": { "columns": { "name": "string" } },
+             "tags": { "columns": { "label": "string" } } }"#,
+    );
+    let steps = jazz_codegen::migrations::diff_steps(&before, &after).unwrap();
+    assert_eq!(
+        serde_json::to_value(&steps).unwrap(),
+        serde_json::json!({
+            "createTables": ["tags"],
+            "dropTables": ["legacy"],
+            "renameTables": [{ "from": "projects", "to": "lists" }],
+            "migrate": [{
+                "table": "todos",
+                "steps": [
+                    { "step": "maybeRenamed", "column": "name", "candidates": ["title"] },
+                    { "step": "add", "column": "rank", "needsDefault": true },
+                    { "step": "drop", "column": "note", "needsBackwardsDefault": false },
+                    { "step": "maybeRenamedAway", "column": "title" },
+                ],
+                "addedVariants": [{ "column": "status", "variants": ["done"] }],
+                "unchangedRows": [],
+            }],
+        })
+    );
+}

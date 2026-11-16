@@ -578,6 +578,16 @@ export declare function loadAppArtifact(app: string, permissions: string): JsonV
 export declare function loadBackendApp(schema: string, permissions: string): JsonValue
 
 /**
+ * What the migration between two schemas in the engine's JSON form
+ * (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+ * `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+ * [{ table, steps, addedVariants, unchangedRows }] }`, each step
+ * `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+ * Throws, with the reason, for a change no migration step does.
+ */
+export declare function migrationDiff(fromJson: string, toJson: string): string
+
+/**
  * Write the migration from the version the committed bindings
  * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
  * generated from to `appJson`'s edited `tables`, named `name`.

@@ -178,6 +178,38 @@ describe("migrations create", () => {
     expect(await stubs(root)).toHaveLength(2);
   });
 
+  // Rust's diff (jazz-napi `migrationDiff`) decides the steps; TS only renders them.
+  it("refuses moving a kept column's reference to another table", async () => {
+    const tables = (target: string) => ({
+      lists: "s.table({ name: s.string() }, {})",
+      boards: "s.table({ name: s.string() }, {})",
+      todos: `s.table({ title: s.string(), parent: s.uuid() }, { parentRel: s.rel(${JSON.stringify(target)}, "parent") })`,
+    });
+    const root = await baseline(tables("lists"));
+    await writeSchema(root, tables("boards"));
+    await expect(createAppMigration({ cwd: root, name: "move-parent" })).rejects.toThrow(
+      /Moving the reference of column `todos.parent` from lists to boards is not supported yet/,
+    );
+    expect(await stubs(root)).toEqual([]);
+  });
+
+  it("says what changed when rows pass unchanged, and the stub loads", async () => {
+    const root = await baseline({
+      notes: 's.table({ title: s.string(), branch: s.string().default("main") }, {})',
+    });
+    await writeSchema(root, {
+      notes:
+        's.table({ title: s.string(), branch: s.string().default("main") }, {}).branchBy("branch")',
+    });
+    const created = await createAppMigration({ cwd: root, name: "branch-by" });
+    const stub = await stubText(root, created.file);
+    expect(stub).toContain("// Rows pass unchanged: only branchBy changed.");
+    expect(created.todos).toEqual([]);
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations).toHaveLength(1);
+  });
+
   it("writes createTables and dropTables for added and removed tables", async () => {
     const root = await baseline({
       todos: TODOS,
