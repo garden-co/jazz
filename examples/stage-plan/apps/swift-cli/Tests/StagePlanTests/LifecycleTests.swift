@@ -70,6 +70,14 @@ final class LifecycleTests: XCTestCase {
         return results
     }
 
+    /// The default `transaction` is mergeable: both concurrent moves commit.
+    func testConcurrentTransactionsBothCommit() async throws {
+        let results = try await concurrentMoves(serializable: false)
+        for result in results {
+            if case .failure(let error) = result { XCTFail("\(error)") }
+        }
+    }
+
     func testConcurrentSerializableTransactionsConflict() async throws {
         let results = try await concurrentMoves(serializable: true)
         let conflicts = results.filter {
