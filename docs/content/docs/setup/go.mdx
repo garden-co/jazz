@@ -1,12 +1,12 @@
 ---
 title: Go
-description: "Use Jazz from a Go app: sign in as an end user and sync through your main backend, with typed bindings generated from jazz.app.json."
+description: "Use Jazz from a Go app: sign in as an end user and sync through your main backend, with typed bindings generated from your app's schema."
 ---
 
 For apps: run your backend in TypeScript. A Go program is a client of your app, like a browser or a
 mobile app: it signs in as one of your users and syncs through your main backend's `/jazz`, the
-route `createJazz` serves. It opens the app from the same `jazz.app.json` as every other language,
-with typed bindings generated from it.
+route `createJazz` serves. Like every other language, it works from your app's TypeScript schema
+and permissions: `npx jazz-tools generate` writes its typed bindings from them.
 
 The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, needs no cgo; its only dependency
 is purego. It uses `context` for every call and channels for subscriptions.
@@ -23,8 +23,9 @@ go build ./...
 
 ## Generate the bindings
 
-With a `go.mod` that requires `jazz-go/v2` beside `jazz.app.json`, `jazz-tools generate` writes the
-`jazzapp` package to `jazzapp/jazz_app.go`:
+With a `go.mod` that requires `jazz-go/v2` beside your app's schema, `npx jazz-tools generate` writes
+the `jazzapp` package to `jazzapp/jazz_app.go`, along with the app's other bindings. Run it with
+`npx`: the standalone `jazz-tools` binary refuses `generate` in an app with a `schema.ts`.
 
 ```bash
 npx jazz-tools generate            # checks the files, writes jazzapp/jazz_app.go
