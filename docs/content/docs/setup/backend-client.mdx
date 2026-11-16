@@ -75,7 +75,7 @@ A token from a listed issuer that fails any check is refused. It never reaches `
 On the machine, open a Jazz session against your main backend and pass a function that returns a
 fresh token. Jazz calls it for every request and socket, so short-lived tokens just work:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     ```ts title="import-job.ts"
     import { createJazzClient } from "jazz-tools/backend";
@@ -131,10 +131,6 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
     A trusted machine (`as: "backend"`) and `forUser(userId)` aren't supported in Rust yet. See
     [Language support](/docs/reference/language-support).
 
-  </Tab>
-  <Tab value="Go">
-    Not in Go yet. A Go process can sign in to your backend's `/jazz` as an end user (`jazz.Token`,
-    `jazz.DeviceAccount`): see [Language support](/docs/reference/language-support).
   </Tab>
 </Tabs>
 
