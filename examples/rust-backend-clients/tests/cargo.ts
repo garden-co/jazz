@@ -16,7 +16,11 @@ export function cargoBin(pkg: string, bin: string): string {
   for (const line of build.stdout.split("\n")) {
     if (!line.startsWith("{")) continue;
     const message = JSON.parse(line);
-    if (message.reason === "compiler-artifact" && message.target?.name === bin && message.executable) {
+    if (
+      message.reason === "compiler-artifact" &&
+      message.target?.name === bin &&
+      message.executable
+    ) {
       return message.executable as string;
     }
   }

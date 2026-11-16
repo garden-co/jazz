@@ -29,8 +29,7 @@ use ::jazz_app::{
 };
 use serde_json::{Value, json};
 use stage_plan_rust_cli::{
-    ShowDetails, add_task, ensure_show, jazz_app, move_task, parse_status, tasks_of,
-    tasks_of_with,
+    ShowDetails, add_task, ensure_show, jazz_app, move_task, parse_status, tasks_of, tasks_of_with,
 };
 
 const USAGE: &str = "usage:
@@ -97,7 +96,10 @@ impl TokenSource {
         if let Ok(command) = env("JAZZ_TOKEN_COMMAND") {
             return Ok(Self::Command(command));
         }
-        Err("set JAZZ_TOKEN, JAZZ_TOKEN_FILE or JAZZ_TOKEN_COMMAND to the machine credential".into())
+        Err(
+            "set JAZZ_TOKEN, JAZZ_TOKEN_FILE or JAZZ_TOKEN_COMMAND to the machine credential"
+                .into(),
+        )
     }
 
     async fn token(&self) -> Result<String, String> {
@@ -306,7 +308,9 @@ async fn gate(target: &Target) -> Result<(), Error> {
                 let d = details(format!("Gate system show {run}"));
                 let nobody = ObjectId::from_uuid(uuid::Uuid::new_v4());
                 global
-                    .insert(jazz_app::NewShow::new(d.name, d.venue, d.date, d.doors, nobody))
+                    .insert(jazz_app::NewShow::new(
+                        d.name, d.venue, d.date, d.doors, nobody,
+                    ))
                     .await?
             }
         };
@@ -352,10 +356,16 @@ async fn gate(target: &Target) -> Result<(), Error> {
             }
         }
         Mode::Trusted => {
-            let user_a = env("STAGE_PLAN_USER_A").map_err(|error| fail("for_user_write", &error))?;
+            let user_a =
+                env("STAGE_PLAN_USER_A").map_err(|error| fail("for_user_write", &error))?;
             let user_b = env("STAGE_PLAN_USER_B").map_err(|error| fail("for_user_read", &error))?;
             let fail_for = |step: &str, user: &str, error: &dyn std::fmt::Display| {
-                emit(step, mode, false, json!({ "user": user, "error": error.to_string() }));
+                emit(
+                    step,
+                    mode,
+                    false,
+                    json!({ "user": user, "error": error.to_string() }),
+                );
                 format!("{step} as {user} failed: {error}")
             };
 
@@ -366,8 +376,16 @@ async fn gate(target: &Target) -> Result<(), Error> {
                 .map_err(|error| fail_for("for_user_write", &user_a, &error))?;
             let global_a = as_a.durable(DurabilityTier::GlobalServer);
             let written = async {
-                let show = ensure_show(&global_a, details(format!("{user_a}'s private show {run}"))).await?;
-                let task = add_task(&global_a, show.id, "Secret setlist", jazz_app::TaskStatus::Todo).await?;
+                let show =
+                    ensure_show(&global_a, details(format!("{user_a}'s private show {run}")))
+                        .await?;
+                let task = add_task(
+                    &global_a,
+                    show.id,
+                    "Secret setlist",
+                    jazz_app::TaskStatus::Todo,
+                )
+                .await?;
                 Ok::<_, stage_plan_rust_cli::Error>((show, task))
             }
             .await;
@@ -384,8 +402,15 @@ async fn gate(target: &Target) -> Result<(), Error> {
                     "task": a_task.id.uuid().to_string(),
                 }),
             );
-            read_back(&as_a, mode, "for_user_read", Some(user_a.clone()), a_show.id, a_task.id)
-                .await?;
+            read_back(
+                &as_a,
+                mode,
+                "for_user_read",
+                Some(user_a.clone()),
+                a_show.id,
+                a_task.id,
+            )
+            .await?;
 
             // B can neither see A's show nor add to it.
             let as_b = reader
@@ -414,23 +439,38 @@ async fn read_back(
     let tasks = match tasks_of_with(jazz, show, ReadTier::Remote).await {
         Ok(tasks) => tasks,
         Err(error) => {
-            emit(step, mode, false, json!({ "user": user, "error": error.to_string() }));
+            emit(
+                step,
+                mode,
+                false,
+                json!({ "user": user, "error": error.to_string() }),
+            );
             return Err(format!("{step} failed: {error}").into());
         }
     };
     let found = tasks.iter().any(|t| t.id == task);
-    emit(
-        step,
-        mode,
-        found,
-        json!({
-            "user": user,
-            "show": show.uuid().to_string(),
-            "task": task.uuid().to_string(),
-            "tasks": tasks.iter().map(|t| t.id.uuid().to_string()).collect::<Vec<_>>(),
-            "visible": found,
-        }),
-    );
+    let mut fields = json!({
+        "user": user,
+        "show": show.uuid().to_string(),
+        "task": task.uuid().to_string(),
+        "tasks": tasks.iter().map(|t| t.id.uuid().to_string()).collect::<Vec<_>>(),
+        "visible": found,
+    });
+    if !found {
+        // What the client has locally, to tell a server-side refusal from a
+        // write that never left.
+        let local = tasks_of_with(jazz, show, ReadTier::LocalOnly)
+            .await
+            .map(|tasks| {
+                tasks
+                    .iter()
+                    .map(|t| t.id.uuid().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| error.to_string());
+        fields["local_tasks"] = json!(local);
+    }
+    emit(step, mode, found, fields);
     if !found {
         return Err(format!(
             "{step} failed: task {} not among show {}'s tasks",
@@ -457,14 +497,16 @@ async fn kept_out(
         Mode::Trusted => ("for_user_read", "for_user_write"),
     };
     let fail = |step: &str, error: &dyn std::fmt::Display| {
-        emit(step, mode, false, json!({ "user": user, "error": error.to_string() }));
+        emit(
+            step,
+            mode,
+            false,
+            json!({ "user": user, "error": error.to_string() }),
+        );
         format!("{step} failed: {error}")
     };
     let seen = jazz
-        .all_with(
-            jazz_app::shows::query().id(show),
-            ReadTier::Remote,
-        )
+        .all_with(jazz_app::shows::query().id(show), ReadTier::Remote)
         .await
         .map_err(|error| fail(read_step, &error))?;
     let tasks = tasks_of_with(jazz, show, ReadTier::Remote)
@@ -500,7 +542,11 @@ async fn kept_out(
                     "task": task.id.uuid().to_string(),
                 }),
             );
-            Err(format!("{write_step} failed: the server accepted a task in {}", show.uuid()).into())
+            Err(format!(
+                "{write_step} failed: the server accepted a task in {}",
+                show.uuid()
+            )
+            .into())
         }
         Err(error) => {
             emit(
@@ -576,14 +622,24 @@ async fn run(mut args: Vec<String>) -> Result<(), Error> {
                     return Err(USAGE.into());
                 };
                 let task = add_task(&global, id(show)?, title.clone(), stage).await?;
-                println!("{}\t{}\t{}", task.id.uuid(), task.status.as_str(), task.rank);
+                println!(
+                    "{}\t{}\t{}",
+                    task.id.uuid(),
+                    task.status.as_str(),
+                    task.rank
+                );
             }
             "move" => {
                 let [task, stage] = args.as_slice() else {
                     return Err(USAGE.into());
                 };
                 let task = move_task(&global, id(task)?, status(stage)?).await?;
-                println!("{}\t{}\t{}", task.id.uuid(), task.status.as_str(), task.rank);
+                println!(
+                    "{}\t{}\t{}",
+                    task.id.uuid(),
+                    task.status.as_str(),
+                    task.rank
+                );
             }
             _ => unreachable!(),
         }

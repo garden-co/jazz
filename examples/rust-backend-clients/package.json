@@ -2,8 +2,8 @@
   "name": "rust-backend-clients",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "description": "Runs the Rust examples as backend clients of a TypeScript createJazz main backend",
+  "type": "module",
   "scripts": {
     "main-backend": "node --experimental-strip-types main-backend.ts",
     "test": "vitest run",

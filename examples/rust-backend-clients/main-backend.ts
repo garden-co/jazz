@@ -25,17 +25,27 @@ export const AUDIENCE = "jazz:rust-examples";
 /** The `sub` of the scoped machine, and the user the backend maps it to. */
 export const SCOPED_SUB = "rust-example";
 export const SCOPED_USER = "machine:rust-example";
+/** The `sub` of the trusted machine: it acts as the system, and for users. */
+export const TRUSTED_SUB = "rust-example-ops";
+/** Two of the app's users, with accounts, for a trusted client's `for_user`. */
+export const USER_A = "user-a";
+export const USER_B = "user-b";
 
 export interface MainBackend {
   jazz: Jazz;
   /** The app as `createJazz` serves it, for reading through `jazz.db`. */
   app: ReturnType<typeof testApp>;
+  /** USER_A's and USER_B's accounts. */
+  accounts: { a: string; b: string };
   /** The main backend's Jazz endpoint, for JAZZ_SERVER_URL. */
   serverUrl: string;
   appId: string;
   issuer: string;
   /** A token from the stand-in issuer, for AUDIENCE unless told otherwise. */
-  mint(claims: Record<string, unknown>, options?: { audience?: string; ttlSeconds?: number }): string;
+  mint(
+    claims: Record<string, unknown>,
+    options?: { audience?: string; ttlSeconds?: number },
+  ): string;
   close(): Promise<void>;
 }
 
@@ -71,8 +81,10 @@ function shut(server: Server): Promise<void> {
 
 /**
  * Serves the app in `exampleDir` (its `jazz.app.json` and
- * `jazz.permissions.json`), trusting a token with `sub: SCOPED_SUB` as the
- * user SCOPED_USER: a scoped backend client.
+ * `jazz.permissions.json`). It trusts a token with `sub: TRUSTED_SUB` as a
+ * trusted backend client, and one with `sub: SCOPED_SUB` as the user
+ * SCOPED_USER (a scoped one). USER_A and USER_B have accounts, for a
+ * trusted client to act for (`for_user` never creates one).
  */
 export async function startMainBackend(exampleDir: string): Promise<MainBackend> {
   const app = testApp(readFileSync(join(exampleDir, "jazz.app.json"), "utf8"));
@@ -102,6 +114,8 @@ export async function startMainBackend(exampleDir: string): Promise<MainBackend>
     // The app's people sign in elsewhere; this backend serves machines only.
     authenticate: () => null,
     backendClients: [
+      // Trusted: the system's authority, and acting for any user.
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: TRUSTED_SUB }, as: "backend" }),
       // Scoped: the example acts as its own user, under the app's permissions.
       trustWorkload({
         issuer,
@@ -112,6 +126,11 @@ export async function startMainBackend(exampleDir: string): Promise<MainBackend>
     ],
   }).ready();
 
+  const accounts = {
+    a: await jazz.createAccountFor(USER_A),
+    b: await jazz.createAccountFor(USER_B),
+  };
+
   const server = createServer((req, res) => jazz.nodeHandler(req, res));
   await jazz.attach(server);
   const origin = await listen(server);
@@ -119,6 +138,7 @@ export async function startMainBackend(exampleDir: string): Promise<MainBackend>
   return {
     jazz,
     app,
+    accounts,
     serverUrl: `${origin}/jazz`,
     appId: jazz.appId,
     issuer,
