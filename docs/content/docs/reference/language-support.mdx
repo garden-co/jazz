@@ -15,6 +15,8 @@ lists what that language doesn't support yet, compared with TypeScript.
     backend's `/jazz`. It doesn't run a main backend, serve your users, or run Jazz's core in its
     own process. As a backend client, it doesn't support yet:
 
+    - on a scoped client, rows your main backend itself writes (with `jazz.db`) don't reach it yet;
+      writes from the client do reach the main backend;
     - subscribing to history reads, and partial reads of large values (use `jazz.with_client(…)` for
       the low-level client).
 
