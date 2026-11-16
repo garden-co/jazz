@@ -7,7 +7,7 @@
 //! Permissions are the app's `jazz.permissions.json`.
 #![allow(dead_code)]
 
-use crate::jazz_app::jazz;
+use ::jazz_app_support::jazz;
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Gather, Query, col, eq, lit};
 use jazz::tools::{JazzClient, Value};
 

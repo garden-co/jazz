@@ -9,8 +9,8 @@ pub mod client;
 /// closes.
 pub async fn backend_client() -> jazz_app::Result<()> {
     // #region backend-client-connect-rust
-    use jazz_app::todos;
-    use jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage, TokenReason}; // the generated bindings
+    // `jazz_app` is the generated bindings; they re-export jazz-app-support.
+    use jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage, TokenReason, todos};
 
     // The main backend trusts this workload in `backendClients`, with
     // `trustWorkload({ issuer, audience, claims, as })`.
