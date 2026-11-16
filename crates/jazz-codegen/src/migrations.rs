@@ -293,6 +293,16 @@ fn refuse_shared_column_changes(
                  are not comparable). {KEEP_VALUES_ADVICE}"
             )));
         }
+        // SPEC 20.1: no lens converts to or from a point (which of two
+        // columns is the latitude is not something a migration can guess).
+        if matches!(source.column_type, ColumnType::Point)
+            != matches!(column.column_type, ColumnType::Point)
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Changing the type of column `{name}` to or from a point is not supported: no \
+                 migration converts points. {KEEP_VALUES_ADVICE}"
+            )));
+        }
         let what = if matches!(
             (&source.column_type, &column.column_type),
             (ColumnType::Json { .. }, ColumnType::Json { .. })

@@ -138,6 +138,13 @@ pub enum ColumnType {
     /// refused at admission. Written `{ "vector": n }` in `jazz.app.json`.
     /// Appended last so existing serde variant indices are unchanged.
     Vector { dimensions: u32 },
+    /// A WGS84 point (SPEC 20.1), carried as
+    /// [`Value::Bytea`](super::Value::Bytea) of exactly 16 bytes in encoding
+    /// `point-f64le/1`: longitude then latitude, binary64 little-endian
+    /// (GeoJSON order). Non-finite or out-of-range coordinates are refused
+    /// at admission. Written `"point"` in `jazz.app.json`. Appended last so
+    /// existing serde variant indices are unchanged.
+    Point,
 }
 
 impl ColumnType {

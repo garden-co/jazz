@@ -182,6 +182,8 @@ fn persisted_descriptor_kind_payloads_preserve_types_and_reject_incomplete_trees
         ValueType::Bytes,
         ValueType::Vector(3),
         ValueType::Nullable(Box::new(ValueType::Vector(4096))),
+        ValueType::Point,
+        ValueType::Nullable(Box::new(ValueType::Point)),
         ValueType::raw_string(),
         ValueType::raw_bytes(),
         ValueType::Uuid,
@@ -3359,4 +3361,112 @@ fn vector_values_refuse_wrong_length_non_finite_and_bad_dimensions() {
     let len = zero.len();
     zero[len - 4..].copy_from_slice(&0u32.to_le_bytes());
     assert!(decode_persisted_record_descriptor(&zero).is_err());
+}
+
+// A `point` (SPEC 20.1) is a variable-width field whose payload is its 16
+// `point-f64le/1` bytes: longitude, then latitude, each binary64
+// little-endian. Nullable points use the variable-width nullable form (flag,
+// then payload). The literal bytes are the durable receipt.
+const POINT_RECORD_FIXTURE: &[u8] = &[
+    0x07, // id: U8 (fixed region)
+    0x19, 0x00, 0x00, 0x00, // end offset of `location` (25)
+    0x2a, 0x00, 0x00, 0x00, // end offset of `maybe` (42)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // location lng: 1.0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, // location lat: -2.0
+    0x01, // maybe: Some
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x3f, // lng: 0.5
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x3f, // lat: 0.25
+    0x00, // none: null
+];
+
+// `groove.persisted_descriptor.v2` node 28 (`Point`) has no payload; every
+// older node keeps its tag and payload.
+const POINT_DESCRIPTOR_FIXTURE: &[u8] = &[
+    0x03, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x1b, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x01, 0x01, b'l', b'o', b'c', b'a', b't', b'i', b'o', b'n', // field
+    0x1c, // Point
+];
+
+fn point_value(lng: f64, lat: f64) -> Value {
+    Value::Bytes(encode_point_f64le(lng, lat).unwrap().to_vec())
+}
+
+/// A point field encodes as its exact `point-f64le/1` bytes and its
+/// descriptor node as tag 28; both round-trip.
+#[test]
+fn point_record_and_descriptor_fixtures_are_exact() {
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::U8),
+        ("location", ValueType::Point),
+        ("maybe", ValueType::Nullable(Box::new(ValueType::Point))),
+        ("none", ValueType::Nullable(Box::new(ValueType::Point))),
+    ]);
+    let values = vec![
+        Value::U8(7),
+        point_value(1.0, -2.0),
+        Value::Nullable(Some(Box::new(point_value(0.5, 0.25)))),
+        Value::Nullable(None),
+    ];
+    assert_eq!(descriptor.create(&values).unwrap(), POINT_RECORD_FIXTURE);
+    let bound = descriptor.bind(POINT_RECORD_FIXTURE);
+    assert_eq!(bound.to_values().unwrap(), values);
+    bound.validate().unwrap();
+
+    let persisted = RecordDescriptor::new([("location", ValueType::Point)]);
+    assert_eq!(
+        encode_persisted_record_descriptor(&persisted).unwrap(),
+        POINT_DESCRIPTOR_FIXTURE
+    );
+    let decoded = decode_persisted_record_descriptor(POINT_DESCRIPTOR_FIXTURE).unwrap();
+    assert_eq!(decoded.fields()[0].value_type, ValueType::Point);
+}
+
+/// `decode_point_f64le` returns `[lng, lat]`; encoders, decoders and
+/// validation refuse a wrong length, a non-finite coordinate or one out of
+/// range, and a point is not a fixed-width tuple member.
+#[test]
+fn point_values_refuse_wrong_length_non_finite_and_out_of_range() {
+    assert_eq!(
+        decode_point_f64le(&encode_point_f64le(-122.5, 37.75).unwrap()),
+        Ok([-122.5, 37.75])
+    );
+    for (lng, lat) in [
+        (f64::NAN, 0.0),
+        (0.0, f64::NEG_INFINITY),
+        (180.000_000_1, 0.0),
+        (0.0, 90.5),
+    ] {
+        assert!(encode_point_f64le(lng, lat).is_err(), "{lng}, {lat}");
+    }
+    assert!(encode_point_f64le(-180.0, 90.0).is_ok());
+
+    let only = RecordDescriptor::new([("p", ValueType::Point)]);
+    assert!(matches!(
+        only.create(&[Value::Bytes(vec![0; 8])]),
+        Err(Error::PointLength { bytes: 8 })
+    ));
+    let mut swapped = 37.75f64.to_le_bytes().to_vec();
+    swapped.extend_from_slice(&(-122.5f64).to_le_bytes());
+    assert!(matches!(
+        only.create(&[Value::Bytes(swapped.clone())]),
+        Err(Error::PointOutOfRange { .. })
+    ));
+    assert!(
+        Value::Bytes(swapped.clone())
+            .check_type(&ValueType::Point)
+            .is_err()
+    );
+    assert!(point_value(1.0, 2.0).check_type(&ValueType::Point).is_ok());
+    assert!(only.create(&[Value::String("ab".into())]).is_err());
+
+    // Raw bytes from a peer are validated the same way.
+    assert!(only.bind(&swapped).validate().is_err());
+    assert!(only.bind(&swapped).to_values().is_err());
+    assert!(only.bind(&[0u8; 15]).to_values().is_err());
+
+    assert!(matches!(
+        validate_schema_value_type(&ValueType::Tuple(vec![ValueType::Point])),
+        Err(Error::InvalidTupleMember { .. })
+    ));
+    assert!(validate_schema_value_type(&ValueType::Point).is_ok());
 }

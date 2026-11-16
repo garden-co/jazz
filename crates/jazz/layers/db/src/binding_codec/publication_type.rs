@@ -199,6 +199,8 @@ pub(super) fn read_type(
             }
             ValueType::Vector(dimensions)
         }
+        // `ValueType::Point`: a unit variant, no payload (SPEC 20.1).
+        20 => ValueType::Point,
         _ => return Err("unknown binding value type".to_owned()),
     })
 }

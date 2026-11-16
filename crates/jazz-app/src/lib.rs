@@ -34,7 +34,7 @@ pub use handle::{Jazz, Transaction};
 pub use query::{Column, Condition, Many, One, Order, Query};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
-pub use value::{ColumnValue, Json, Timestamp};
+pub use value::{ColumnValue, Json, Point, Timestamp};
 
 pub use jazz::account_registry::AccountId;
 pub use jazz::tools::{AppId, ObjectId, ReadTier};

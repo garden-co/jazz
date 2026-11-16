@@ -426,6 +426,10 @@ pub(crate) fn from_sql(
         (ValueType::Vector(_), ValueRef::Blob(bytes)) => {
             return Ok(Some(Value::Bytes(bytes.to_vec())));
         }
+        // A point cell is its 16 `point-f64le/1` bytes inline.
+        (ValueType::Point, ValueRef::Blob(bytes)) => {
+            return Ok(Some(Value::Bytes(bytes.to_vec())));
+        }
         // An author record, read as a JSON array of its fields (see
         // `compile::column_sql`).
         (ValueType::Record(descriptor), ValueRef::Text(cell)) => {

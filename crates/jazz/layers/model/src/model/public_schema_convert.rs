@@ -756,6 +756,7 @@ fn convert_table(
                     descriptor.column_type,
                     ColumnType::Bytea
                         | ColumnType::Vector { .. }
+                        | ColumnType::Point
                         | ColumnType::Array { .. }
                         | ColumnType::Row { .. }
                         | ColumnType::EnumPayload { .. }
@@ -985,6 +986,11 @@ fn convert_default_for_column_type(
                 .map_err(|error| column_err(table, column, format!("vector default: {error}")))?;
             Ok(RecordValue::Bytes(value.clone()))
         }
+        (ColumnType::Point, Value::Bytea(value)) => {
+            jazz_types::records::decode_point_f64le(value)
+                .map_err(|error| column_err(table, column, format!("point default: {error}")))?;
+            Ok(RecordValue::Bytes(value.clone()))
+        }
         (ColumnType::Integer, Value::Integer(value)) => Ok(RecordValue::I32(*value)),
         (ColumnType::Integer, Value::BigInt(value)) => {
             i32::try_from(*value).map(RecordValue::I32).map_err(|_| {
@@ -1065,6 +1071,13 @@ fn convert_column_type(
                     "an array of vectors is not supported",
                 ));
             }
+            if matches!(element.as_ref(), ColumnType::Point) {
+                return Err(column_err(
+                    table,
+                    column,
+                    "an array of points is not supported",
+                ));
+            }
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
         // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
@@ -1093,6 +1106,7 @@ fn convert_column_type(
                 ))
             }
         }
+        ColumnType::Point => Ok(StorageColumnType::Point),
     }
 }
 
@@ -4542,6 +4556,7 @@ mod tests {
             jazz_types::records::ValueType::Vector(dimensions) => {
                 RecordValue::Bytes(vec![0; *dimensions as usize * 4])
             }
+            jazz_types::records::ValueType::Point => RecordValue::Bytes(vec![0; 16]),
             // Author columns hold dictionary codes.
             value_type if value_type.as_interned().is_some() => RecordValue::U32(0),
             jazz_types::records::ValueType::Internal(_) => {
