@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "title": "jazz.permissions.json",
+  "description": "An app's permissions for its current schema. Only backends read this file. An absent operation is denied. See https://jazz.tools/docs/reference/app-files",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "tables"],
+  "properties": {
+    "$schema": {
+      "const": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+      "description": "The file's version: this JSON Schema's URL. A newer Jazz may write a later version."
+    },
+    "$comment": {
+      "type": "string"
+    },
+    "defs": {
+      "type": "object",
+      "description": "Named, parameterised expressions, e.g. \"isChatMember($chat)\": \"exists chatMembers(chatId = $chat, userId = session.user)\", called as isChatMember(this.id). Definitions may call each other but never recursively.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\(\\s*(\\$[A-Za-z_][A-Za-z0-9_]*\\s*(,\\s*\\$[A-Za-z_][A-Za-z0-9_]*\\s*)*)?\\))?$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/policy"
+      }
+    },
+    "tables": {
+      "type": "object",
+      "description": "Each table's policies; every key is a table of jazz.app.json.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "$comment": {
+            "type": "string"
+          },
+          "read": {
+            "$ref": "#/$defs/policy",
+            "description": "Who may read a row, e.g. \"userId = session.user\"."
+          },
+          "insert": {
+            "$ref": "#/$defs/policy",
+            "description": "Which rows may be inserted, checked against the new row."
+          },
+          "update": {
+            "description": "A policy checked before and after an update, or { \"old\": …, \"new\": … } for each side.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/policy"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "$comment": {
+                    "type": "string"
+                  },
+                  "old": {
+                    "$ref": "#/$defs/policy"
+                  },
+                  "new": {
+                    "$ref": "#/$defs/policy"
+                  }
+                }
+              }
+            ]
+          },
+          "delete": {
+            "$ref": "#/$defs/policy",
+            "description": "Which rows may be deleted."
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "policy": {
+      "description": "An expression string, { \"anyOf\": [...] }, { \"allOf\": [...] }, or { \"$comment\": …, \"where\": … }.",
+      "anyOf": [
+        {
+          "type": "string",
+          "description": "A policy expression, SQL-like, with single-quoted strings; every policy the engine holds has one. Comparisons: column = | != | < | <= | > | >= value; column in ['a', 'b']; column in session.claims.teams; column contains value; column = null / != null. Values: literals ('text', 42, 1.5, true, false), typed literals (int(5), text('5'), uuid('…'), timestamp(…), array(…), literal(null), …), session.user (the account), session.identity (the exact login), session.identity.subject, session.identity.issuer, session.authMode, session.claims.<path>, $param (inside defs), this.<column> (inside exists: the row being checked). Logic: and, or, not, parentheses, anyOf(…), allOf(…); true / false. Existence: exists <table> [as a](col = value, …), e.g. exists chatMembers(chatId = this.id, userId = session.user); hops: exists files(id = this.fileId).folder(ownerId = session.user); any relation: exists (from t join u as x on t.uId = x.id where x.ownerId = session.user). Inheritance: allowedTo.read(<relation>) / allowedTo.insert / allowedTo.update / allowedTo.delete, or allowedTo.read(via <column>) / allowedTo.read(via <table>.<column>), optionally with maxDepth: 8. Magic columns: $createdBy, $createdBy.account, $createdBy.identity, $updatedBy, $deletedBy, $createdAt, $updatedAt, $deletedAt. Names that are keywords go in backticks: `order`. Definitions: name(arg, …) calls a defs entry. Relations inside exists ( … ), each clause wrapping what comes before: from t [as a], join u as b on a.x = b.y (or left join),  where <predicate>, select a.x as name, …, distinct on (a.x), order by a.x asc | desc, limit n, offset n; sources union(label: query, …) and recursive(seed: query, step: query, frontier: id(row), dedupe: (id(row)), maxDepth: n | fixpoint). In their predicates: outer.<column> and frontier.<column> (the outer and frontier rows), id(row) / id(outer) / id(frontier), param.<name>, json('…') and row(…). Grammar: https://jazz.tools/docs/reference/app-files#expressions",
+          "examples": [
+            "true",
+            "userId = session.user",
+            "exists chatMembers(chatId = this.id, userId = session.user)",
+            "allowedTo.read(chat)",
+            "$createdBy.account = session.user",
+            "joinCode != null and isPublic = true"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["anyOf"],
+          "properties": {
+            "anyOf": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/policy"
+              }
+            },
+            "$comment": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allOf"],
+          "properties": {
+            "allOf": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/policy"
+              }
+            },
+            "$comment": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["where"],
+          "properties": {
+            "where": {
+              "$ref": "#/$defs/policy"
+            },
+            "$comment": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

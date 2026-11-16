@@ -1,5 +1,5 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Output d86736977ac79589. Formatters may reformat this file, except `app` below.
+// Bindings format 1. Output 2e92fbf286134239. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type BetterAuthAccount = {
@@ -441,7 +441,7 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:30aade2e8fcd3da107d77776aed3ff85efd081f34b66ba8446873671eb542541",
+  "source": "sha256:bf985c9e08c91977b7d57ab03d2e93740a60d7cbced6e2a78cbf3831f594e61e",
   "schema": {
     "current": "c05382c3683b3e0390ca0bdeb64182fadd80af33a2056b314645abb06c3a49b0",
     "schemas": [

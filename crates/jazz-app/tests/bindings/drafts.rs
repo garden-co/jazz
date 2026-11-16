@@ -4,7 +4,7 @@
 #![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:41d0d59975d1210f69d1e18ea613c3ad018fa7512eda14d96fa74a1abcd30dc2";
+pub const SOURCE: &str = "sha256:a01d4647f906d3c4c8b239f5bda2e5a83fecb68fb596cde909ff4af0d71a80a2";
 
 /// A row of `documents`.
 #[derive(Debug, Clone, PartialEq)]
@@ -263,8 +263,7 @@ pub mod drafts {
 /// The app's `jazz.app.json`: its schema, every earlier version and the
 /// migrations between them.
 pub const APP: &str = r#"{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "drafts": {
       "columns": { "name": "string", "base": "string?", "base_snapshot_ref": "string?" }

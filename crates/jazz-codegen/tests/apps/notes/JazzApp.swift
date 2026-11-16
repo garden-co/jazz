@@ -10,14 +10,13 @@ import Jazz
 /// (`JazzApp.Task`, not `Task`).
 public enum JazzApp {
     /// `sha256:…` of the `jazz.app.json` these bindings were generated from.
-    public static let source = "sha256:320aeff40326a9b6076a5196c5e24d44d5eaec47c105abdecae9c0b5d77a49ae"
+    public static let source = "sha256:5ccc0713e28b92a571e092aa1dc450c53bb6bc14d130cb468dd60f878a052b22"
 
     /// The app's `jazz.app.json`: its schema, every earlier version and the
     /// migrations between them.
     public static let app = #"""
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "notes": {
       "columns": {
