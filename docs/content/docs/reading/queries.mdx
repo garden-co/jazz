@@ -10,7 +10,7 @@ import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 A one-shot query runs once against the database without subscribing to changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
@@ -33,6 +33,12 @@ A one-shot query runs once against the database without subscribing to changes.
     </include>
 
   </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#reading-oneshot-go
+    </include>
+
+  </Tab>
 </Tabs>
 
 To read a single row, use `db.one`. It runs the query with a limit of one and resolves to the
@@ -46,7 +52,7 @@ first matching row, or `null` if no row matches or you aren't allowed to read it
 
 Subscribe to a query to receive updates whenever the underlying data changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
@@ -66,6 +72,12 @@ Subscribe to a query to receive updates whenever the underlying data changes.
   <Tab value="Swift">
     <include cwd lang="swift">
       ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-subscriptions-swift
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#reading-subscriptions-go
     </include>
 
   </Tab>
@@ -108,7 +120,7 @@ behavior and how subscriptions change between offline and online operation.
 These are the only read tiers. Write waits use the separate durability tiers `"local"` and
 `"global"`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
@@ -129,6 +141,9 @@ These are the only read tiers. Write waits use the separate durability tiers `"l
     <include cwd lang="swift">
       ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-durability-tier-swift
     </include>
+  </Tab>
+  <Tab value="Go">
+    Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
   </Tab>
 </Tabs>
 
