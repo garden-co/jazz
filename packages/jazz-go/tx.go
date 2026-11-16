@@ -59,6 +59,14 @@ func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (
 		}
 		return err
 	}
+	// A ctx cancelled while fn ran would stop the commit before it reached
+	// Jazz and leave the transaction open: roll it back instead.
+	if err := ctx.Err(); err != nil {
+		tx.end(context.WithoutCancel(ctx), "txRollback")
+		return err
+	}
+	// Once sent, the commit runs to its end even if ctx is cancelled
+	// meanwhile (the call returns ctx.Err() without waiting for it).
 	return tx.end(ctx, "txCommit")
 }
 
