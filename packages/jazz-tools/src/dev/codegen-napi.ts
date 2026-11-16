@@ -38,12 +38,12 @@ interface CodegenNapi {
   loadAppArtifact(app: string, permissions: string): unknown;
   loadBackendApp(schema: string, permissions: string): unknown;
   compileApp(appJson: string): string;
-  writeAppFiles?(
+  writeAppFiles(
     app: string,
     permissions: string,
     options?: { generated?: { by: string } },
   ): { app: string; permissions: string };
-  verifyGenerated?(text: string): "none" | "match" | "mismatch";
+  verifyGenerated(text: string): "none" | "match" | "mismatch";
   generateForDir?(dir: string, options?: DirOptions): DirOutcome;
   migrationsCreateForDir?(dir: string, name: string, options?: DirOptions): DirOutcome;
 }
@@ -211,31 +211,24 @@ export interface WrittenAppFiles {
  * Check and print an app's two files from their readable input (what
  * `jazz-tools generate` assembles from the app's TS): the Rust writer runs
  * every check `load` runs and prints the canonical text, with a
- * `$generated` marker when `options.generated` is given. A jazz-napi without
- * `writeAppFiles` (until the Rust format change lands) checks with
- * `loadAppArtifact` and prints the input as JSON.
+ * `$generated` marker when `options.generated` is given.
  */
 export async function writeAppFiles(
   app: string,
   permissions: string,
   options: { generated?: { by: string } } = {},
 ): Promise<WrittenAppFiles> {
-  const loaded = await codegen();
-  if (loaded.writeAppFiles) return loaded.writeAppFiles(app, permissions, options);
-  loaded.loadAppArtifact(app, permissions);
-  const print = (text: string) => `${JSON.stringify(JSON.parse(text), null, 2)}\n`;
-  return { app: print(app), permissions: print(permissions) };
+  return (await codegen()).writeAppFiles(app, permissions, options);
 }
 
 /**
  * Whether a file's `$generated` marker matches its contents: `"none"` when
  * it has none (hand-written, or written before alpha.66), `"mismatch"` when
- * it was edited by hand since it was generated.
+ * it was edited by hand since it was generated. Reformatting (line endings,
+ * indentation) isn't an edit.
  */
 export async function verifyGenerated(text: string): Promise<"none" | "match" | "mismatch"> {
-  const loaded = await codegen();
-  if (loaded.verifyGenerated) return loaded.verifyGenerated(text);
-  return "none";
+  return (await codegen()).verifyGenerated(text);
 }
 
 /** Check `jazz.permissions.json` against the bindings' compiled schema, as a deployed backend does. */
