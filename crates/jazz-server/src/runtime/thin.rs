@@ -806,7 +806,7 @@ fn serve_thin_op(
                 return Err(argument("a live query with this id is already open"));
             }
             let opts = read_opts(&options_json(options)?).map_err(host_error)?;
-            let query: jazz::query::Query = postcard::from_bytes(query)
+            let query = jazz::query::decode_client_query_postcard(query)
                 .map_err(|error| argument(format!("undecodable query: {error}")))?;
             let opened = db.prepare_query(&query).and_then(|mut prepared| {
                 if let Some((author, claims)) = scope {

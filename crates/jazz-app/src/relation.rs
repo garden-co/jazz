@@ -168,7 +168,9 @@ impl<T: Table> Query<T> {
 
     /// The rows of each query, one after another: a row several match comes
     /// once for each. Like TypeScript's `union`, it takes `order_by`,
-    /// `limit` and `offset`, and nothing else.
+    /// `limit` and `offset`, and nothing else. Each arm is labelled by what
+    /// it reads, as every client labels it; two identical arms are refused
+    /// (use [`Query::union_named`] to read the same query twice).
     ///
     /// ```ignore
     /// Query::union([
@@ -177,12 +179,10 @@ impl<T: Table> Query<T> {
     /// ])
     /// ```
     pub fn union(queries: impl IntoIterator<Item = Self>) -> Self {
-        Self::union_named(
-            queries
-                .into_iter()
-                .enumerate()
-                .map(|(at, query)| (at.to_string(), query)),
-        )
+        Self::wrap(untyped::Query::union_unnamed(
+            table::<T>(),
+            queries.into_iter().map(|query| query.inner),
+        ))
     }
 
     /// [`Query::union`] with a label of each query's own: 1 to 4096 bytes,

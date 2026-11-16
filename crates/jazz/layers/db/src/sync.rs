@@ -15420,7 +15420,7 @@ impl Db {
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<SerializedReadResult, Error> {
-        let query: Query = postcard::from_bytes(query)
+        let query: Query = jazz_model::query::decode_client_query_postcard(query)
             .map_err(|e| Error::new(ErrorCode::Query, format!("undecodable query: {e}")))?;
         let mut prepared = self.prepare_query(&query)?;
         // An explicit identity reads what its policies let it see.
