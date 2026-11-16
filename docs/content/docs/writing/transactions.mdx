@@ -64,7 +64,7 @@ if the callback throws or returns a rejected promise.
 
 A mergeable callback that writes nothing, such as a cleanup that finds nothing to delete, commits
 nothing and doesn't fail: `db.transaction(...)` resolves with the callback's value, its `wait()`
-resolves at once, and its `txId` rejects, since there is no transaction to name (from alpha.65;
+resolves at once, and its `txId` rejects, since there is no transaction to name (from alpha.66;
 earlier versions throw "empty mergeable transaction has no committed unit").
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
