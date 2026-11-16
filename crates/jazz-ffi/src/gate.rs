@@ -3,7 +3,7 @@
 //! from inside a call), and after that no call passes. A C host may free the
 //! callback's `ctx` once close returns.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::sync::{Condvar, Mutex};
 
 pub(crate) struct Gate<T> {
@@ -17,8 +17,15 @@ struct State<T> {
 }
 
 thread_local! {
-    /// How many gated calls this thread is inside.
-    static INSIDE: Cell<usize> = const { Cell::new(0) };
+    /// The gates this thread is inside a call of (by address; a gate may
+    /// appear more than once for nested calls).
+    static INSIDE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+impl<T> Gate<T> {
+    fn address(&self) -> usize {
+        self as *const Self as *const () as usize
+    }
 }
 
 impl<T: Clone> Gate<T> {
@@ -43,13 +50,19 @@ impl<T: Clone> Gate<T> {
         struct Leave<'a, T>(&'a Gate<T>);
         impl<T> Drop for Leave<'_, T> {
             fn drop(&mut self) {
-                INSIDE.with(|inside| inside.set(inside.get() - 1));
+                let me = self.0.address();
+                INSIDE.with(|inside| {
+                    let mut inside = inside.borrow_mut();
+                    if let Some(at) = inside.iter().rposition(|gate| *gate == me) {
+                        inside.remove(at);
+                    }
+                });
                 let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.active -= 1;
                 self.0.idle.notify_all();
             }
         }
-        INSIDE.with(|inside| inside.set(inside.get() + 1));
+        INSIDE.with(|inside| inside.borrow_mut().push(self.address()));
         let _leave = Leave(self);
         Some(call(&value))
     }
@@ -57,7 +70,10 @@ impl<T: Clone> Gate<T> {
     /// Closes the gate and waits until no call is running but this
     /// thread's own (when closed from inside a call).
     pub fn close(&self) {
-        let own = INSIDE.with(Cell::get);
+        // Only this thread's calls into this gate: closing another gate from
+        // inside a call of this one waits for all of that gate's calls.
+        let me = self.address();
+        let own = INSIDE.with(|inside| inside.borrow().iter().filter(|gate| **gate == me).count());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.value = None;
         while state.active > own {
@@ -109,5 +125,35 @@ mod tests {
         for other in others {
             other.join().unwrap();
         }
+    }
+
+    /// Closing gate B from inside a call of gate A still waits for B's
+    /// calls on other threads (A's call isn't one of B's).
+    #[test]
+    fn close_from_inside_another_gate_waits_for_all_of_its_calls() {
+        let (a, b) = (Arc::new(Gate::new(())), Arc::new(Gate::new(())));
+        let running = Arc::new(AtomicUsize::new(0));
+        let other = {
+            let (b, running) = (b.clone(), running.clone());
+            std::thread::spawn(move || {
+                b.call(|_| {
+                    running.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(400));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+        };
+        while running.load(Ordering::SeqCst) < 1 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        a.call(|_| {
+            b.close();
+            assert_eq!(
+                running.load(Ordering::SeqCst),
+                0,
+                "B closed while its call ran"
+            );
+        });
+        other.join().unwrap();
     }
 }
