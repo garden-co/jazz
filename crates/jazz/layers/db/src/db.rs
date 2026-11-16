@@ -10206,22 +10206,6 @@ impl Db {
                     }
                 }
             }
-            // The authority validates a branch read through its view only
-            // over a link that negotiated it; an older server would check
-            // it as a root read, against other rows.
-            if reads
-                .iter()
-                .any(|read| !matches!(read.through.source, ReadViewSourceSpec::Current))
-                && self.inner().client.as_mut().is_none_or(|client| {
-                    client.upstream_features() & crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS == 0
-                })
-            {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "Committing a serializable transaction that read through a branch view is not \
-                     supported yet by this server",
-                ));
-            }
             let reads = {
                 let inner = self.inner();
                 let reads = reads

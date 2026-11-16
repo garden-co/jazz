@@ -2040,9 +2040,19 @@ fn serializable_draft_read(
     server: &Db,
     client: &Db,
 ) -> jazz::model::transaction::OpenTransactionId {
+    seed_main(server, client);
+    draft_read(server, client)
+}
+
+/// Main's two rows, at the server and on Alice's replica.
+fn seed_main(server: &Db, client: &Db) {
     put(server, &branch(0xa1), 1, "Intro", 1);
     put(server, &branch(0xa1), 2, "Outro", 2);
     pump(server, client);
+}
+
+/// [`serializable_draft_read`] over rows already seeded.
+fn draft_read(server: &Db, client: &Db) -> jazz::model::transaction::OpenTransactionId {
     let tx = jazz::model::transaction::OpenTransactionId::new();
     drive(server, client, client.begin_serializable(tx)).unwrap();
     let opts =
@@ -2148,8 +2158,9 @@ fn the_server_accepts_a_serializable_branch_read_when_only_another_branch_change
 }
 
 /// Over a link that did not negotiate the feature (an older server), the
-/// commit is refused before it is sent: such a server would check the
-/// draft read as a root read, against other rows.
+/// commit is made, as any serializable commit is, but refused when it would
+/// be sent: such a server would check the draft read as a root read,
+/// against other rows.
 #[test]
 fn a_serializable_branch_read_needs_a_server_that_negotiated_it() {
     let server = open(0x01, AuthorSubject::SYSTEM);
@@ -2158,11 +2169,46 @@ fn a_serializable_branch_read_needs_a_server_that_negotiated_it() {
     let (upstream, _) = connect_negotiating(&server, &client, jazz::wire::FEATURE_NONE);
     std::mem::forget(upstream);
     let tx = serializable_draft_read(&server, &client);
-    let error = drive(&server, &client, client.commit_serializable_handle(tx)).unwrap_err();
+    let error = commit_at_server(&server, &client, tx).unwrap_err();
     assert!(
         error
             .to_string()
             .contains("not supported yet by this server"),
         "{error}"
+    );
+    let draft_only = ReadOpts::default().branch_view(branch(0xa2), None);
+    assert!(titles(&server, &Query::from("todos"), draft_only).is_empty());
+}
+
+/// Offline, Alice's replica makes the commit as it makes any serializable
+/// one; once the link (one that negotiated the feature) is back, the server
+/// validates it through the draft's view and accepts it.
+#[test]
+fn an_offline_serializable_branch_read_commits_when_the_link_returns() {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open(0x02, alice());
+    let (upstream, _) = connect(&server, &client);
+    // The app keeps its draft live, so the replica holds its rows offline.
+    let view =
+        ReadOpts::default().branch_view(branch(0xa2), Some(BranchViewBase::current(branch(0xa1))));
+    let prepared = client.prepare_query(&Query::from("todos")).unwrap();
+    let _live = block_on(client.subscribe(&prepared, view)).unwrap();
+    seed_main(&server, &client);
+    assert!(client.detach_connection(&upstream));
+    let tx = draft_read(&server, &client);
+    let receipt = drive(&server, &client, client.commit_serializable_handle(tx)).unwrap();
+    let (upstream, _) = connect(&server, &client);
+    std::mem::forget(upstream);
+    drive(
+        &server,
+        &client,
+        client.wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+    )
+    .unwrap();
+    let draft_only = ReadOpts::default().branch_view(branch(0xa2), None);
+    assert_eq!(
+        titles(&server, &Query::from("todos"), draft_only),
+        ["Summary"]
     );
 }

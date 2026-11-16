@@ -2288,21 +2288,8 @@ pub struct RejectedTransaction {
 #[derive(Debug)]
 pub struct Upstream(u64);
 
-impl Client {
-    /// The upstream's negotiated wire features: the live link's, or (while
-    /// detached) the last link's.
-    pub(crate) fn upstream_features(&mut self) -> crate::wire::WireFeatures {
-        if let Some(transport) = &self.transport {
-            self.last_features = transport.features();
-        }
-        self.last_features
-    }
-}
-
 pub(crate) struct Client {
     transport: Option<Box<dyn Transport>>,
-    /// The wire features the last link negotiated, kept while detached.
-    last_features: crate::wire::WireFeatures,
     /// A new link came up: the versions the last upstream held unsettled
     /// are dropped before anything it sends applies (see
     /// [`Inner::forget_upstream_band`]).
@@ -7730,7 +7717,6 @@ impl Client {
             connection: 0,
             sent: SentCommits::default(),
             transport: None,
-            last_features: crate::wire::FEATURE_NONE,
             forget_upstream: false,
             hint: Rc::new(StdCell::new(Link {
                 hint: RemoteLinkHint::NoServer,
@@ -10091,11 +10077,16 @@ impl Db {
             (commits, pushes) = kept.into_iter().unzip();
         }
         // A commit with a read through a branch view is checked against
-        // that view only by an upstream that negotiated it: this link's
-        // (an older server, reached after the commit was made) would check
-        // it as a root read. It is refused here, for good, as a rejected
-        // fate (jazz#5806).
-        if client.upstream_features() & crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS == 0 {
+        // that view only by an upstream that negotiated it (jazz#5806). It
+        // is made like any serializable commit, offline too, and decided
+        // here, when a link is up: one without the feature (an older
+        // server) would check it as a root read, against other rows, so
+        // it is refused, for good, as a rejected fate.
+        let features = client
+            .transport
+            .as_ref()
+            .map_or(crate::wire::FEATURE_NONE, |transport| transport.features());
+        if features & crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS == 0 {
             let mut kept = Vec::with_capacity(commits.len());
             for (commit, push) in commits.into_iter().zip(pushes) {
                 match &commit {
