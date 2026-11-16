@@ -258,6 +258,18 @@ pub unsafe extern "C" fn jazz_call(
                 core.sign_out()?;
                 "null".into()
             }
+            "disconnect" => {
+                core.disconnect()?;
+                "null".into()
+            }
+            "reconnect" => {
+                core.reconnect()?;
+                "null".into()
+            }
+            "deleteClientStorage" => {
+                core.delete_client_storage()?;
+                "null".into()
+            }
             "upsert" => core.upsert(
                 &string("table")?,
                 &string("id")?,
