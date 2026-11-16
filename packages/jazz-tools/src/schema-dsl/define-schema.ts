@@ -17,9 +17,20 @@
 import type { AnyColumnDefinition } from "../dsl.js";
 import { isComputedColumn } from "../dsl.js";
 import type { Column } from "../schema.js";
-import { handle, type ColumnMeta, type SchemaMeta, type TableMeta } from "../permissions/compile.js";
+import {
+  handle,
+  type ColumnMeta,
+  type SchemaMeta,
+  type TableMeta,
+} from "../permissions/compile.js";
 import { permissionTools, type PermissionTools } from "../permissions/dsl.js";
-import type { AnyClaims, ClaimsMarker, SchemaTables, TableHandles, TypedClaims } from "../permissions/types.js";
+import type {
+  AnyClaims,
+  ClaimsMarker,
+  SchemaTables,
+  TableHandles,
+  TypedClaims,
+} from "../permissions/types.js";
 import { readableApp, type ReadableApp } from "./readable-app.js";
 import { isDefinedTable, type DefinedTable } from "./table.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
@@ -97,7 +108,9 @@ export function defineSchema<const S extends Record<string, DefinedTable<any, an
   for (const [name, table] of Object.entries(tables)) {
     assertSchemaNameAllowed(name);
     if (!isDefinedTable(table))
-      throw new Error(`s.defineSchema: "${name}" is not a table; define it with s.table(columns, relations).`);
+      throw new Error(
+        `s.defineSchema: "${name}" is not a table; define it with s.table(columns, relations).`,
+      );
     meta.set(name, tableMetaOf(table));
   }
   checkRelations(tables);

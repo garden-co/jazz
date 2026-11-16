@@ -5,14 +5,7 @@
  * walks). Column refs are strings (`"a.x"`), unchecked until Rust loads the
  * file.
  */
-import {
-  colref,
-  handle,
-  name,
-  PermissionsDslError,
-  text,
-  type Ctx,
-} from "./compile.js";
+import { colref, handle, name, PermissionsDslError, text, type Ctx } from "./compile.js";
 import type { ValueHandle } from "./types.js";
 
 const QUERY: unique symbol = Symbol("jazz.permissions.query") as never;
@@ -39,7 +32,10 @@ function keyText(key: RelationKey): string {
 function sourceText(source: RelationSource | string, ctx: Ctx): string {
   if (typeof source === "string") return name(source);
   const data = (source as RelationSource)[QUERY];
-  if (!data) throw new PermissionsDslError("not a relation source: use from.<table>, a query, union(…) or recursive(…)");
+  if (!data)
+    throw new PermissionsDslError(
+      "not a relation source: use from.<table>, a query, union(…) or recursive(…)",
+    );
   return data.source(ctx);
 }
 
@@ -183,11 +179,17 @@ export function outer(column: string): ValueHandle<any, any> {
 }
 /** `frontier.col`: a column of a recursive walk's frontier row. */
 export function frontier(column: string): ValueHandle<any, any> {
-  return handle({ k: "text", text: `frontier.${colref(column)}` }) as unknown as ValueHandle<any, any>;
+  return handle({ k: "text", text: `frontier.${colref(column)}` }) as unknown as ValueHandle<
+    any,
+    any
+  >;
 }
 /** `param.name`: a query parameter. */
 export function param(paramName: string): ValueHandle<any, any> {
-  return handle({ k: "text", text: `param.${name(paramName)}` }) as unknown as ValueHandle<any, any>;
+  return handle({ k: "text", text: `param.${name(paramName)}` }) as unknown as ValueHandle<
+    any,
+    any
+  >;
 }
 /** `id(row)`, `id(outer)`, `id(frontier)`: a row id, as a value or a key. */
 export function rowId(of: "row" | "outer" | "frontier"): RowIdRef & ValueHandle<any, any> {
@@ -198,5 +200,8 @@ export function rowId(of: "row" | "outer" | "frontier"): RowIdRef & ValueHandle<
 }
 /** `json('…')`: a JSON value the relation holds as is. */
 export function jsonValue(value: unknown): ValueHandle<any, any> {
-  return handle({ k: "text", text: `json('${JSON.stringify(value).replaceAll("'", "''")}')` }) as unknown as ValueHandle<any, any>;
+  return handle({
+    k: "text",
+    text: `json('${JSON.stringify(value).replaceAll("'", "''")}')`,
+  }) as unknown as ValueHandle<any, any>;
 }

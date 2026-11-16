@@ -874,4 +874,3 @@ export const migrationOperations = {
     oldName,
   }),
 };
-

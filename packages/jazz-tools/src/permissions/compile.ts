@@ -56,16 +56,28 @@ export type NodeData =
       readonly k: "exists";
       readonly table: string;
       readonly conditions: readonly unknown[];
-      readonly hops: readonly { readonly relation: string; readonly conditions: readonly unknown[] }[];
+      readonly hops: readonly {
+        readonly relation: string;
+        readonly conditions: readonly unknown[];
+      }[];
     }
-  | { readonly k: "relWhere"; readonly rel: HandleData & { k: "rel" }; readonly conditions: unknown }
+  | {
+      readonly k: "relWhere";
+      readonly rel: HandleData & { k: "rel" };
+      readonly conditions: unknown;
+    }
   | {
       readonly k: "allowed";
       readonly op: "read" | "insert" | "update" | "delete";
       readonly target: HandleData;
       readonly maxDepth?: number;
     }
-  | { readonly k: "compare"; readonly left: unknown; readonly op: OpData["op"] | "eq"; readonly right: unknown }
+  | {
+      readonly k: "compare";
+      readonly left: unknown;
+      readonly op: OpData["op"] | "eq";
+      readonly right: unknown;
+    }
   | { readonly k: "existsQuery"; readonly query: { render(ctx: Ctx): string } };
 
 export interface PolicyObject {
@@ -332,7 +344,8 @@ function conditionColumn(key: string): string {
 export function value(raw: unknown, ctx: Ctx): string {
   const h = handleOf(raw);
   if (!h) {
-    if (opOf(raw)) fail("a comparison helper (ne, gt, …) is a condition's value: `{ column: gt(1) }`");
+    if (opOf(raw))
+      fail("a comparison helper (ne, gt, …) is a condition's value: `{ column: gt(1) }`");
     if (isNode(raw)) fail("a policy is not a value: compare a column with a value");
     return literal(raw);
   }
@@ -415,7 +428,9 @@ function condition(key: string, raw: unknown, ctx: Ctx): string {
     if (o.op === "in") {
       const h = handleOf(o.operand);
       if (h?.k !== "session")
-        fail("isIn(…) takes a session list, e.g. isIn(session.claims.teams); use an array for literals");
+        fail(
+          "isIn(…) takes a session list, e.g. isIn(session.claims.teams); use an array for literals",
+        );
       return `${lhs} in ${value(o.operand, ctx)}`;
     }
     if (o.op === "is") fail("is(…) is for relation predicates: exists(from.t.where({…}))");
@@ -437,8 +452,7 @@ function condition(key: string, raw: unknown, ctx: Ctx): string {
  */
 function oldComparison(key: string, symbol: CmpOp, raw: unknown, ctx: Ctx): string {
   const old = handleOf(raw) as HandleData & { k: "old" };
-  if (!ctx.old)
-    fail("`old` is only available in `updateTo: (row, old) => …`");
+  if (!ctx.old) fail("`old` is only available in `updateTo: (row, old) => …`");
   if (ctx.depth !== 0 || ctx.scope.id !== ctx.root.id || old.table !== ctx.table)
     fail(
       "`old` columns can only be compared directly with the updated row's columns, at the top of `updateTo`",
@@ -526,7 +540,8 @@ function innerConditions(
 ): string[] {
   const out: string[] = [];
   for (const raw of conditions) {
-    const input = typeof raw === "function" ? (raw as (row: unknown) => unknown)(makeRow(inner.scope)) : raw;
+    const input =
+      typeof raw === "function" ? (raw as (row: unknown) => unknown)(makeRow(inner.scope)) : raw;
     if (isPlainObject(input)) out.push(...conditionList(input, inner));
     else if (input === true) continue;
     else out.push(text(input, inner));
@@ -589,7 +604,8 @@ function isArrayColumn(meta: SchemaMeta, table: string, column: string): boolean
  */
 function relWhereText(data: NodeData & { k: "relWhere" }, ctx: Ctx): string {
   const rel = data.rel;
-  if (ctx.relation) fail(`row.${rel.relation}.where(…) can't be used inside a relation's predicate`);
+  if (ctx.relation)
+    fail(`row.${rel.relation}.where(…) can't be used inside a relation's predicate`);
   if (rel.scope.id !== ctx.root.id || ctx.depth !== 0)
     fail(
       `row.${rel.relation}.where(…) inside an \`exists\` would refer to an enclosing row: use exists.<table>(…).hop("${rel.relation}", {…})`,
@@ -607,8 +623,7 @@ function relWhereText(data: NodeData & { k: "relWhere" }, ctx: Ctx): string {
     link = `id = this.${name(relation.column)}`;
   } else {
     const column = forwardColumn(ctx.meta, target, relation.relation);
-    if (isArrayColumn(ctx.meta, target, column))
-      link = `${name(column)} contains this.id`;
+    if (isArrayColumn(ctx.meta, target, column)) link = `${name(column)} contains this.id`;
     else link = `${name(column)} = this.id`;
   }
   const scope = newScope(target);
@@ -626,7 +641,9 @@ function allowedText(data: NodeData & { k: "allowed" }, ctx: Ctx): string {
   let argument: string;
   if (target.k === "rel") {
     if (target.scope.id !== ctx.scope.id)
-      fail(`allowedTo.${data.op}(row.${target.relation}) names a relation of another row than the one checked here`);
+      fail(
+        `allowedTo.${data.op}(row.${target.relation}) names a relation of another row than the one checked here`,
+      );
     const relation = tableMeta(ctx.meta, target.scope.table).relations[target.relation];
     if (!relation) unknownRelation(ctx.meta, target.scope.table, target.relation);
     argument = name(target.relation);
@@ -636,7 +653,9 @@ function allowedText(data: NodeData & { k: "allowed" }, ctx: Ctx): string {
       );
   } else if (target.k === "column") {
     if (target.scope.id !== ctx.scope.id)
-      fail(`allowedTo.${data.op}(row.${target.column}) names a column of another row than the one checked here`);
+      fail(
+        `allowedTo.${data.op}(row.${target.column}) names a column of another row than the one checked here`,
+      );
     argument = `via ${name(target.column)}`;
   } else if (target.k === "tableColumn") {
     argument = `via ${name(target.table)}.${name(target.column)}`;
@@ -675,7 +694,8 @@ function compareText(data: NodeData & { k: "compare" }, ctx: Ctx): string {
     case "contains":
       return `${left} contains ${operandValue(right, ctx)}`;
     case "in": {
-      if (Array.isArray(right)) return `${left} in [${right.map((v) => operandValue(v, ctx)).join(", ")}]`;
+      if (Array.isArray(right))
+        return `${left} in [${right.map((v) => operandValue(v, ctx)).join(", ")}]`;
       if (handleOf(right)?.k !== "session") fail("isIn(a, b) takes an array or a session list");
       return `${left} in ${value(right, ctx)}`;
     }
@@ -709,7 +729,8 @@ function relationCondition(key: string, raw: unknown, ctx: Ctx): string {
   if (raw === undefined) fail(`${key} is undefined: leave the key out, or compare with null`);
   const lhs = colref(key);
   if (raw === null) return `${lhs} = null`;
-  if (Array.isArray(raw)) return `${lhs} in [${raw.map((item) => relationValue(item, ctx)).join(", ")}]`;
+  if (Array.isArray(raw))
+    return `${lhs} in [${raw.map((item) => relationValue(item, ctx)).join(", ")}]`;
   const o = opOf(raw);
   if (o) {
     if (o.op === "contains") return `${lhs} contains ${relationValue(o.operand, ctx)}`;

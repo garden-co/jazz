@@ -681,7 +681,12 @@ const MIGRATION_FILE = /-([0-9a-f]{12})-([0-9a-f]{12})\.ts$/i;
 export async function snapshotFromVersion(
   versionTables: Record<string, ReadableTable>,
 ): Promise<{ hash: string; schema: WasmSchema }> {
-  const compiled = (await compileApp(JSON.stringify({ $schema: "https://jazz.tools/schemas/jazz.app.v1.json", tables: versionTables }))) as {
+  const compiled = (await compileApp(
+    JSON.stringify({
+      $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+      tables: versionTables,
+    }),
+  )) as {
     schema: { current: string; schemas: Array<{ hash: string; schema: { tables: WasmSchema } }> };
   };
   const current = compiled.schema.schemas.find((entry) => entry.hash === compiled.schema.current);
@@ -799,7 +804,9 @@ export function snapshotToVersion(schema: WasmSchema): ReadableVersion {
   const tables: Record<string, ReadableTable> = {};
   for (const [name, table] of Object.entries(schema)) {
     const entry: ReadableTable = {
-      columns: Object.fromEntries(table.columns.map((column) => [column.name, engineColumn(column)])),
+      columns: Object.fromEntries(
+        table.columns.map((column) => [column.name, engineColumn(column)]),
+      ),
     };
     const indexes: ReadableJson[] = [
       ...(table.indexed_columns ?? []),
@@ -918,7 +925,12 @@ async function loadMigrationFiles(
       throw new Error(
         `migrations/${name}: name its versions with fromHash and toHash (or end the file name with -<from>-<to>.ts).`,
       );
-    out.push({ file: name, fromHash: shortSchemaHash(fromHash), toHash: shortSchemaHash(toHash), migration });
+    out.push({
+      file: name,
+      fromHash: shortSchemaHash(fromHash),
+      toHash: shortSchemaHash(toHash),
+      migration,
+    });
   }
   return out;
 }
@@ -1176,4 +1188,3 @@ export async function createMigration(options: {
     todos: stub.split("\n").filter((line) => UNFILLED_STUB_TODO.test(line)),
   };
 }
-

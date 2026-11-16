@@ -53,10 +53,10 @@ type AnySchema = { readonly __tables?: SchemaTables };
 export type Schema<S extends SchemaTables = SchemaTables> = DefinedSchema<S, any>;
 
 /** The row handle of a table: `s.Row<typeof schema, "releases">`. */
-export type Row<
-  TSchema extends AnySchema,
-  TTable extends keyof TablesOf<TSchema> & string,
-> = RowOf<TablesOf<TSchema>, TTable>;
+export type Row<TSchema extends AnySchema, TTable extends keyof TablesOf<TSchema> & string> = RowOf<
+  TablesOf<TSchema>,
+  TTable
+>;
 
 /** The row before an update (`updateTo`'s `old`): `s.OldRow<typeof schema, "chats">`. */
 export type OldRow<

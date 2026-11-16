@@ -21,7 +21,8 @@ definePermissions({
     read: (chat) => anyOf({ isPublic: true }, isMember(chat.id), { name: null }),
     insert: { ownerId: session.user, size: gt(0) },
     updateIf: (chat) => isMember(chat.id),
-    updateTo: (chat, old) => allOf(isMember(chat.id), { isPublic: old.isPublic, size: gt(old.size) }),
+    updateTo: (chat, old) =>
+      allOf(isMember(chat.id), { isPublic: old.isPublic, size: gt(old.size) }),
     delete: (chat) => not(chat.members.where({ role: "admin" })),
   },
   members: {
@@ -101,4 +102,7 @@ definePermissions({ chats: { select: true }, members: {} });
 
 // `old` outside updateTo's direct comparisons.
 // @ts-expect-error old values aren't values for exists
-definePermissions({ chats: { updateIf: true, updateTo: (c, old) => exists.chats({ size: old.size }) }, members: {} });
+definePermissions({
+  chats: { updateIf: true, updateTo: (c, old) => exists.chats({ size: old.size }) },
+  members: {},
+});

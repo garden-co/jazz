@@ -44,7 +44,10 @@ describe("acceptance: the reference renderings", () => {
             "exists chats(id = this.chatId, isPublic = true)",
             "exists chats(id = this.chatId, $createdBy.account = session.user)",
             {
-              allOf: ["joinCode != null", "exists chats(id = this.chatId, joinCode = this.joinCode)"],
+              allOf: [
+                "joinCode != null",
+                "exists chats(id = this.chatId, joinCode = this.joinCode)",
+              ],
             },
           ],
         },
