@@ -662,6 +662,82 @@ fn splices_edit_chunked_values_in_place() {
     );
 }
 
+/// UTF-8 text splices count bytes and refuse an offset inside a code point,
+/// in the stored value or in an earlier splice's insert, without rebuilding
+/// the whole chunked value.
+#[test]
+fn partial_updates_refuse_utf8_offsets_off_a_char_boundary() {
+    let db = db();
+    let original = format!("{}{}", "é\u{1F600}".repeat(30_000), "tail");
+    assert!(original.len() > LARGE / 2);
+    insert(&db, 1, &original, b"");
+    let splice = |within: std::ops::Range<usize>, splices: Vec<LargeValueUpdateSplice>| {
+        vec![LargeValueUpdate::Splice {
+            column: "body".into(),
+            within: LargeValueUpdatePage::text(within),
+            splices,
+        }]
+    };
+    let update = |edits| {
+        let before = jazz::large_values::full_materializations_for_test();
+        let result = block_on(db.update_with_large_value_mutations(
+            "docs",
+            row(1),
+            BTreeMap::new(),
+            edits,
+            Default::default(),
+        ));
+        assert_eq!(
+            jazz::large_values::full_materializations_for_test(),
+            before,
+            "a UTF-8 splice reads only the bytes at its ends"
+        );
+        result
+    };
+    // "é" is 2 bytes and "😀" 4: one repeat is 6 bytes.
+    let middle = 6 * 20_000;
+    for (at, delete) in [
+        (middle + 1, 0),
+        (middle, 1),
+        (middle + 2, 2),
+        (middle + 3, 0),
+    ] {
+        let error = update(splice(
+            0..original.len(),
+            vec![LargeValueUpdateSplice::text(at, delete, "x")],
+        ))
+        .expect_err("an offset inside a code point is refused");
+        assert!(
+            error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY),
+            "{at}+{delete}: {error:?}"
+        );
+    }
+    // The second splice lands inside the first one's "ü".
+    let error = update(splice(
+        middle..middle + 6,
+        vec![
+            LargeValueUpdateSplice::text(0, 2, "ü"),
+            LargeValueUpdateSplice::text(1, 0, "x"),
+        ],
+    ))
+    .expect_err("an offset inside an earlier insert's code point is refused");
+    assert!(error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY));
+    assert_eq!(body(&db, 1), original, "refused splices change nothing");
+
+    // On boundaries: "é" → "ü", then the emoji after it → "🚀!".
+    update(splice(
+        middle..middle + 6,
+        vec![
+            LargeValueUpdateSplice::text(0, 2, "ü"),
+            LargeValueUpdateSplice::text(2, 4, "\u{1F680}!"),
+        ],
+    ))
+    .unwrap();
+    let mut expected = original.clone();
+    expected.replace_range(middle..middle + 6, "ü\u{1F680}!");
+    assert_eq!(body(&db, 1), expected);
+}
+
 #[test]
 fn partial_updates_splice_utf16_pages_and_set_json_members() {
     let db = db();

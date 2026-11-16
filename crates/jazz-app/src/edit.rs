@@ -83,11 +83,14 @@ pub(crate) fn not_found<T: crate::Table>(
     error: jazz::tools::JazzError,
     id: ObjectId,
 ) -> crate::Error {
-    if error.to_string().contains("NotObserved") {
+    let message = error.to_string();
+    if message.contains("NotObserved") {
         crate::Error::NotFound {
             table: T::NAME,
             id: id.uuid().to_string(),
         }
+    } else if let Some(at) = message.find(jazz::db::NOT_CHAR_BOUNDARY) {
+        crate::Error::TextOffset(message[at..].to_owned())
     } else {
         error.into()
     }
@@ -189,8 +192,9 @@ impl<T> Edits<T> {
     }
 
     /// Splices within one page of a bytes or text cell, as
-    /// [`Jazz::splice`] (TS's `applyDiffs`). The update must leave `column`
-    /// unset.
+    /// [`Jazz::splice`] (TS's `applyDiffs`), in the same units: UTF-8 bytes
+    /// on a text column ([`Page::text`](crate::Page::text)). The update
+    /// must leave `column` unset.
     pub fn splice<V: crate::LargeColumn>(
         self,
         column: Column<T, V>,
