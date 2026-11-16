@@ -16,7 +16,9 @@ A shared project with collaboratively-edited tasks.
   "format": 1,
   "tables": {
     "projects": {
-      "columns": { "name": "string" },
+      "columns": {
+        "name": "string"
+      },
       "relations": {
         "tasks": { "reverse": "tasks", "relation": "project" },
         "members": { "reverse": "projectMembers", "relation": "project" }
@@ -29,11 +31,18 @@ A shared project with collaboratively-edited tasks.
         "assignee_id": "uuid?",
         "projectId": "uuid"
       },
-      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+      "relations": {
+        "project": { "rel": "projects", "column": "projectId" }
+      }
     },
     "projectMembers": {
-      "columns": { "projectId": "uuid", "user_id": "uuid" },
-      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+      "columns": {
+        "projectId": "uuid",
+        "user_id": "uuid"
+      },
+      "relations": {
+        "project": { "rel": "projects", "column": "projectId" }
+      }
     }
   }
 }

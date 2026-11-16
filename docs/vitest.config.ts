@@ -16,6 +16,7 @@ export default defineConfig({
       "lib/jazz-version/**/*.test.ts",
       "lib/languages/**/*.test.ts",
       "lib/code-tokenizers.test.ts",
+      "lib/app-file-blocks.test.ts",
       "lib/llm-text.test.ts",
       "lib/quickstart-links.test.ts",
     ],

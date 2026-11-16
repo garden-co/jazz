@@ -116,7 +116,10 @@ page is read straight from the index:
   "tables": {
     "messages": {
       "$comment": "Serves app.messages.where({ roomId }).orderBy(\"$createdAt\", \"desc\").limit(50)",
-      "columns": { "roomId": "uuid", "text": "string" },
+      "columns": {
+        "roomId": "uuid",
+        "text": "string"
+      },
       "indexes": [["roomId", "$createdAt"]]
     }
   }

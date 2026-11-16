@@ -299,6 +299,17 @@ async fn an_end_user_needs_someone_signed_in_and_the_apps_endpoint() {
     )
     .await;
     assert!(matches!(plain, Err(Error::Config(_))), "{plain:?}");
+    let plain_socket = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server("ws://todos.example/jazz")
+            .user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await;
+    assert!(
+        matches!(plain_socket, Err(Error::Config(_))),
+        "{plain_socket:?}"
+    );
 
     let local = Jazz::open(
         client_files(),
@@ -369,6 +380,85 @@ async fn sync_status_counts_uploads_until_the_server_has_them() {
     assert!(waiting.oldest_pending_at.is_some());
     assert_ne!(waiting.link, Link::Connected);
     offline.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_account_links_to_the_users_provider_account() {
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let device = Jazz::open(client_files(), app.user(Auth::Device(key.clone())))
+        .await
+        .unwrap();
+    connected(&device).await;
+    let written = device
+        .insert(NewTodo::new("Before signing up", false))
+        .await
+        .unwrap();
+    let session = device.session().unwrap().clone();
+
+    // Carol signs up with the app's own auth, and keeps her device's data.
+    let carol = session
+        .link("token-carol")
+        .await
+        .expect("link the device account");
+    assert_eq!(carol.account, key.account(app.app_id));
+    assert_eq!(carol.kind, UserKind::Backend);
+    assert_eq!(carol.subject, "carol");
+    assert_eq!(
+        session.state(),
+        SessionState::SignedIn {
+            user: carol.clone()
+        }
+    );
+    // Linking needs someone signed in.
+    assert!(matches!(
+        session.link("not-a-token").await,
+        Err(Error::SignedOut)
+    ));
+
+    // Dave already has an account of his own: the backend refuses to link
+    // him to another device's, for good, not as a server failure.
+    let dave = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-dave".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    let other = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .unwrap();
+    let refused = other.session().unwrap().link("token-dave").await;
+    assert!(matches!(refused, Err(Error::Refused(_))), "{refused:?}");
+    other.shutdown().await.unwrap();
+    dave.shutdown().await.unwrap();
+
+    // Signed in with her bearer elsewhere, she reaches the same account.
+    let laptop = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-carol".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(laptop.account(), Some(carol.account));
+    assert_eq!(remote_todos(&laptop, 1).await, vec![written]);
+
+    // A bearer's session has no device key to link.
+    let bearer_session = laptop.session().unwrap();
+    assert!(matches!(
+        bearer_session.link("token-carol").await,
+        Err(Error::Config(_))
+    ));
+
+    laptop.shutdown().await.unwrap();
+    device.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -588,63 +678,5 @@ async fn sync_status_reports_rejections_and_link_failures_as_typescript_does() {
     assert!(!refused.synced);
 
     erin.shutdown().await.unwrap();
-    app.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_account_links_to_the_users_provider_account() {
-    let app = App::start().await;
-    let key = DeviceKey::generate().unwrap();
-    let device = Jazz::open(client_files(), app.user(Auth::Device(key.clone())))
-        .await
-        .unwrap();
-    connected(&device).await;
-    let written = device
-        .insert(NewTodo::new("Before signing up", false))
-        .await
-        .unwrap();
-    let session = device.session().unwrap().clone();
-
-    // Carol signs up with the app's own auth, and keeps her device's data.
-    let carol = session
-        .link("token-carol")
-        .await
-        .expect("link the device account");
-    assert_eq!(carol.account, key.account(app.app_id));
-    assert_eq!(carol.kind, UserKind::Backend);
-    assert_eq!(carol.subject, "carol");
-    assert_eq!(
-        session.state(),
-        SessionState::SignedIn {
-            user: carol.clone()
-        }
-    );
-    // Linking needs someone signed in.
-    assert!(matches!(
-        session.link("not-a-token").await,
-        Err(Error::SignedOut)
-    ));
-
-    // Signed in with her bearer elsewhere, she reaches the same account.
-    let laptop = Jazz::open(
-        client_files(),
-        app.user(Auth::bearer(|_| async {
-            Ok(Some("token-carol".to_owned()))
-        })),
-    )
-    .await
-    .unwrap();
-    assert_eq!(laptop.account(), Some(carol.account));
-    assert_eq!(remote_todos(&laptop, 1).await, vec![written]);
-
-    // A bearer's session has no device key to link.
-    let bearer_session = laptop.session().unwrap();
-    assert!(matches!(
-        bearer_session.link("token-carol").await,
-        Err(Error::Config(_))
-    ));
-
-    laptop.shutdown().await.unwrap();
-    device.shutdown().await.unwrap();
     app.stop().await;
 }
