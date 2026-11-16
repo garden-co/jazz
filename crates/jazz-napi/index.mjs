@@ -38,6 +38,7 @@ export const {
   Transport,
   Write,
   mintLocalFirstToken,
+  verifyGenerated,
   verifyLocalFirstIdentityProof,
   nativeArtifactFingerprint,
   resolveTextAnchor,
@@ -47,4 +48,5 @@ export const {
   validateBindings,
   validateSchema,
   writeAppArtifact,
+  writeAppFiles,
 } = nativeBinding;

@@ -356,7 +356,8 @@ function typeExpression(type: unknown): string {
   const object = type as Record<string, unknown>;
   if (Array.isArray(object.enum))
     return `s.enum(${(object.enum as string[]).map((variant) => JSON.stringify(variant)).join(", ")})`;
-  if (object.json !== undefined) return object.json === true ? "s.json()" : `s.json(${JSON.stringify(object.json)})`;
+  if (object.json !== undefined)
+    return object.json === true ? "s.json()" : `s.json(${JSON.stringify(object.json)})`;
   if (object.array !== undefined) return `s.array(${typeExpression(object.array)})`;
   if (typeof object.type === "string") return scalarExpression(object.type);
   throw new Error(`unsupported column type ${JSON.stringify(type)}`);

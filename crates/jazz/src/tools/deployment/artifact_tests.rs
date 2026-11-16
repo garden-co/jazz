@@ -453,13 +453,13 @@ fn the_files_read_like_the_dsl() {
 // ---------------------------------------------------------------------------
 
 /// Compile `source` as `table`'s read policy, in `shared-todos`' current
-/// schema, with `defs`.
-fn read_policy(table: &str, source: &str, defs: serde_json::Value) -> Result<PolicyExpr, String> {
+/// schema.
+fn read_policy(table: &str, source: &str) -> Result<PolicyExpr, String> {
     let written = write(shared_todos()).unwrap();
     // `allowedTo` needs the table it inherits from to have the policy.
     let other = if table == "shares" { "todos" } else { "shares" };
     let file = serde_json::json!({
-        "format": 1, "defs": defs,
+        "format": 1,
         "tables": { table: { "read": source }, other: { "read": "true", "update": "true" } },
     });
     let loaded =
@@ -476,11 +476,9 @@ fn printed(table: &str, expr: &PolicyExpr) -> String {
     let codegen = shared_todos().codegen;
     let relations = codegen.relations();
     let loaded = loaded(shared_todos());
-    let defs = expr::Defs::new();
     let context = expr::Context {
         schema: loaded.current_schema(),
         relations: &relations,
-        defs: &defs,
         computed: &expr::ComputedNames::new(),
     };
     expr::print(expr, &context, table).unwrap()
@@ -523,8 +521,7 @@ const CONSTRUCTS: &[(&str, &str)] = &[
 #[test]
 fn every_construct_reads_and_prints_back() {
     for &(table, source) in CONSTRUCTS {
-        let compiled = read_policy(table, source, serde_json::json!({}))
-            .unwrap_or_else(|e| panic!("{source}: {e}"));
+        let compiled = read_policy(table, source).unwrap_or_else(|e| panic!("{source}: {e}"));
         assert_eq!(printed(table, &compiled), source, "{source} printed as");
     }
 }
@@ -533,8 +530,8 @@ fn every_construct_reads_and_prints_back() {
 fn equivalent_spellings_compile_alike() {
     let same = |a: &str, b: &str| {
         assert_eq!(
-            read_policy("todos", a, serde_json::json!({})).unwrap(),
-            read_policy("todos", b, serde_json::json!({})).unwrap(),
+            read_policy("todos", a).unwrap(),
+            read_policy("todos", b).unwrap(),
             "{a} vs {b}"
         );
     };
@@ -545,44 +542,27 @@ fn equivalent_spellings_compile_alike() {
 }
 
 #[test]
-fn defs_expand_where_they_are_called() {
-    let defs = serde_json::json!({
-        "sharedWith($todo)": "exists shares(todo = $todo, user = session.user)",
-        "mineOrShared($todo)": { "anyOf": ["owner = session.user", "sharedWith($todo)"] },
+fn defs_and_calls_are_refused() {
+    let written = write(shared_todos()).unwrap();
+    let file = serde_json::json!({
+        "format": 1,
+        "defs": { "mine($todo)": "owner = session.user" },
+        "tables": { "todos": { "read": "true" } },
     });
-    assert_eq!(
-        read_policy("todos", "mineOrShared(this.id)", defs).unwrap(),
-        read_policy(
-            "todos",
-            "owner = session.user or exists shares(todo = this.id, user = session.user)",
-            serde_json::json!({})
-        )
-        .unwrap()
-    );
-}
-
-#[test]
-fn recursive_defs_are_refused() {
-    let defs = serde_json::json!({
-        "a($x)": "b($x)",
-        "b($x)": "a($x) or owner = session.user",
-    });
-    let error = read_policy("todos", "a(this.id)", defs).unwrap_err();
-    assert!(
-        error.contains("definitions may not be recursive"),
-        "{error}"
-    );
-    assert!(error.contains("a → b"), "{error}");
+    let error = load(written.app.as_bytes(), file.to_string().as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown key `defs`"), "{error}");
+    let error = read_policy("todos", "mine(this.id)").unwrap_err();
+    assert!(error.contains("unknown function `mine`"), "{error}");
+    let error = read_policy("todos", "owner = $todo").unwrap_err();
+    assert!(error.contains("unknown column `$todo`"), "{error}");
 }
 
 #[test]
 fn expression_errors_point_at_the_spot_and_suggest() {
-    let error = read_policy(
-        "todos",
-        "exists shares(todo = this.id, usr = session.user)",
-        serde_json::json!({}),
-    )
-    .unwrap_err();
+    let error =
+        read_policy("todos", "exists shares(todo = this.id, usr = session.user)").unwrap_err();
     assert!(
         error.starts_with("jazz.permissions.json: tables.todos.read:"),
         "{error}"
@@ -618,7 +598,7 @@ fn expression_errors_point_at_the_spot_and_suggest() {
             "owner = session.user name = 'x'",
             "join conditions with `and` or `or`",
         ),
-        ("unknownDef(this.id)", "unknown definition `unknownDef`"),
+        ("unknownDef(this.id)", "unknown function `unknownDef`"),
         ("owner < null", "only `=` and `!=` compare with null"),
         ("owner = 'not-a-uuid'", "is not a UUID"),
         (
@@ -637,7 +617,7 @@ fn expression_errors_point_at_the_spot_and_suggest() {
         ("exists (from shares where)", "expected a column"),
         ("", "an empty expression"),
     ] {
-        let error = read_policy("todos", source, serde_json::json!({})).unwrap_err();
+        let error = read_policy("todos", source).unwrap_err();
         assert!(error.contains(message), "{source}: {error}");
     }
 }
@@ -708,18 +688,108 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
 }
 
 #[test]
-fn an_unknown_format_is_refused_before_anything_else() {
+fn an_unknown_version_is_refused_before_anything_else() {
+    // `$schema` carries the version.
     let error = edited_app(|v| {
-        v["format"] = 2.into();
+        v["$schema"] = "https://jazz.tools/schemas/jazz.app.v2.json".into();
         v["something_new"] = true.into();
     });
-    assert!(error.contains("format 2 is not supported"), "{error}");
-    let error = edited_permissions(|v| v["format"] = "1".into());
-    assert!(error.contains("`format` must be the integer 1"), "{error}");
-    let error = edited_app(|v| {
-        v.as_object_mut().unwrap().remove("format");
+    assert!(
+        error.contains("version 2 was written by a newer Jazz"),
+        "{error}"
+    );
+    let error = edited_permissions(|v| {
+        v["$schema"] = "https://example.com/jazz.permissions.v1.json".into();
     });
-    assert!(error.contains("no `format`"), "{error}");
+    assert!(error.contains("`$schema` must be"), "{error}");
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("$schema");
+    });
+    assert!(error.contains("no `$schema`"), "{error}");
+    assert!(error.contains("jazz-tools"), "{error}");
+    // A legacy `format` from a newer Jazz.
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("$schema");
+        v["format"] = 2.into();
+    });
+    assert!(
+        error.contains("version 2 was written by a newer Jazz"),
+        "{error}"
+    );
+    let error = edited_permissions(|v| v["format"] = "1".into());
+    assert!(
+        error.contains("legacy `format` must be the integer 1"),
+        "{error}"
+    );
+}
+
+#[test]
+fn legacy_files_load_as_version_1() {
+    let written = write(shared_todos()).unwrap();
+    let legacy = |text: &str, url: &str, legacy_url: Option<&str>, format: bool| {
+        let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+        let o = v.as_object_mut().unwrap();
+        assert_eq!(o["$schema"], url);
+        o.remove("$schema");
+        let mut out = serde_json::Map::new();
+        if let Some(legacy_url) = legacy_url {
+            out.insert("$schema".into(), legacy_url.into());
+        }
+        if format {
+            out.insert("format".into(), 1.into());
+        }
+        out.extend(o.clone());
+        serde_json::Value::Object(out).to_string()
+    };
+    for (legacy_url, format) in [
+        (true, true),  // what Jazz before alpha.66 wrote
+        (false, true), // `format` alone
+        (true, false), // the old URL alone
+    ] {
+        let app = legacy(
+            &written.app,
+            APP_SCHEMA_URL,
+            legacy_url.then_some(LEGACY_APP_SCHEMA_URL),
+            format,
+        );
+        let permissions = legacy(
+            &written.permissions,
+            PERMISSIONS_SCHEMA_URL,
+            legacy_url.then_some(LEGACY_PERMISSIONS_SCHEMA_URL),
+            format,
+        );
+        load(app.as_bytes(), permissions.as_bytes())
+            .unwrap_or_else(|e| panic!("{legacy_url} {format}: {e}"));
+    }
+}
+
+#[test]
+fn a_legacy_format_takes_any_schema() {
+    let written = write(shared_todos()).unwrap();
+    let versioned = format!("\"$schema\": \"{APP_SCHEMA_URL}\",\n");
+    for schema in [
+        "\"./node_modules/jazz-tools/jazz.app.schema.json\"",
+        "\"http://jazz.tools/schemas/jazz.app.schema.json\"",
+        "null",
+    ] {
+        let legacy = written.app.replacen(
+            &versioned,
+            &format!("\"$schema\": {schema},\n  \"format\": 1,\n"),
+            1,
+        );
+        load(legacy.as_bytes(), written.permissions.as_bytes())
+            .unwrap_or_else(|e| panic!("{schema}: {e}"));
+    }
+    // Without `format`, `$schema` is the version and must be Jazz's.
+    let error = edited_app(|v| v["$schema"] = "./jazz.app.schema.json".into());
+    assert!(error.contains("`$schema` must be"), "{error}");
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("$schema");
+        v["format"] = 0.into();
+    });
+    assert!(error.contains("version 0 is not supported"), "{error}");
+    let error = edited_app(|v| v["$schema"] = "https://jazz.tools/schemas/jazz.app.v0.json".into());
+    assert!(error.contains("version 0 is not supported"), "{error}");
 }
 
 #[test]
@@ -807,7 +877,7 @@ fn malformed_files_are_refused_not_panicked_on() {
     for _ in 0..2_000 {
         long = format!("not ({long})");
     }
-    let _ = read_policy("todos", &long, serde_json::json!({}));
+    let _ = read_policy("todos", &long);
 }
 
 // ---------------------------------------------------------------------------
@@ -1409,8 +1479,7 @@ fn relation_hops_and_nested_exists_round_trip() {
     assert_eq!(
         read_policy(
             "todos",
-            "exists shares(todo = this.id).todoRow(owner = session.user)",
-            serde_json::json!({})
+            "exists shares(todo = this.id).todoRow(owner = session.user)"
         )
         .unwrap(),
         hop
@@ -1420,7 +1489,6 @@ fn relation_hops_and_nested_exists_round_trip() {
     let nested = read_policy(
         "todos",
         "exists shares as s(s.todo = this.id, exists todos as t(t.owner = session.user))",
-        serde_json::json!({}),
     )
     .unwrap();
     assert_eq!(
@@ -1450,12 +1518,7 @@ fn relation_hops_and_nested_exists_round_trip() {
     );
     through_the_permissions_file(&nested);
     // Deeper in, the engine refuses an outer-row reference; so does the reader.
-    let error = read_policy(
-        "todos",
-        "exists shares as s(exists todos(id = s.todo))",
-        serde_json::json!({}),
-    )
-    .unwrap_err();
+    let error = read_policy("todos", "exists shares as s(exists todos(id = s.todo))").unwrap_err();
     assert!(
         error.contains("names only its own row's columns"),
         "{error}"
@@ -1514,7 +1577,6 @@ fn the_writer_refuses_outer_rows_the_engine_refuses() {
     let error = read_policy(
         "todos",
         "exists shares(exists todos(id = session.__jazz_outer_row.todo))",
-        serde_json::json!({}),
     )
     .unwrap_err();
     assert!(
@@ -1612,11 +1674,9 @@ fn epic_drops_hop_prints_as_a_hop() {
     }))
     .unwrap();
     let hop = PolicyExpr::ExistsRel { rel };
-    let defs = expr::Defs::new();
     let context = expr::Context {
         schema: &schema,
         relations: &relations,
-        defs: &defs,
         computed: &expr::ComputedNames::new(),
     };
     let text = expr::print(&hop, &context, "files").unwrap();
@@ -1727,7 +1787,7 @@ fn deep_nesting_is_refused_not_overflowed() {
         ),
     ];
     for (what, source) in deep_sources {
-        let error = read_policy("todos", &source, serde_json::json!({})).unwrap_err();
+        let error = read_policy("todos", &source).unwrap_err();
         assert!(error.contains("nests too deeply"), "{what}: {error}");
     }
 
@@ -2082,24 +2142,14 @@ fn version_names_javascript_would_reorder_are_refused() {
 
 #[test]
 fn the_exact_login_is_session_identity() {
-    let expr = read_policy(
-        "todos",
-        "$createdBy.identity = session.identity",
-        serde_json::json!({}),
-    )
-    .unwrap();
+    let expr = read_policy("todos", "$createdBy.identity = session.identity").unwrap();
     assert_eq!(
         printed("todos", &expr),
         "$createdBy.identity = session.identity"
     );
-    let account = read_policy("todos", "$createdBy = session.user", serde_json::json!({})).unwrap();
+    let account = read_policy("todos", "$createdBy = session.user").unwrap();
     assert_ne!(expr, account);
-    let error = read_policy(
-        "todos",
-        "$createdBy.identity = session.identty",
-        serde_json::json!({}),
-    )
-    .unwrap_err();
+    let error = read_policy("todos", "$createdBy.identity = session.identty").unwrap_err();
     assert!(error.contains("`session.identity`"), "{error}");
 }
 
@@ -2197,11 +2247,18 @@ fn committed(file: &str) -> Vec<std::path::PathBuf> {
 
 #[test]
 fn every_committed_app_file_fits_its_json_schema() {
-    for (file, schema) in [
-        (APP_FILE, "jazz.app.schema.json"),
-        (PERMISSIONS_FILE, "jazz.permissions.schema.json"),
+    for (file, schema, legacy_schema) in [
+        (APP_FILE, "jazz.app.v1.json", "jazz.app.schema.json"),
+        (
+            PERMISSIONS_FILE,
+            "jazz.permissions.v1.json",
+            "jazz.permissions.schema.json",
+        ),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
+        // Legacy files (`format` and/or the unversioned URL) still load, and
+        // the old JSON Schema still describes them.
+        let legacy_validator = jsonschema::validator_for(&json_schema(legacy_schema)).unwrap();
         // `jazz-tools upgrade`'s input fixtures are alpha.64 apps on purpose:
         // their files carry alpha.63's `tsOnly`, which upgrade converts. What
         // upgrade writes from them (`expected/`) is checked like any app.
@@ -2216,6 +2273,15 @@ fn every_committed_app_file_fits_its_json_schema() {
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
             let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let validator = if instance.get("format").is_some()
+                || !instance["$schema"]
+                    .as_str()
+                    .is_some_and(|s| s.ends_with(schema))
+            {
+                &legacy_validator
+            } else {
+                &validator
+            };
             let errors: Vec<String> = validator
                 .iter_errors(&instance)
                 .map(|e| format!("{} at {}", e, e.instance_path()))
@@ -2231,8 +2297,8 @@ fn every_committed_app_file_fits_its_json_schema() {
     // And what the writer writes.
     let written = write(shared_todos()).unwrap();
     for (text, schema) in [
-        (&written.app, "jazz.app.schema.json"),
-        (&written.permissions, "jazz.permissions.schema.json"),
+        (&written.app, "jazz.app.v1.json"),
+        (&written.permissions, "jazz.permissions.v1.json"),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
         let instance: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -2253,15 +2319,16 @@ fn properties(value: &serde_json::Value) -> BTreeSet<String> {
 fn keys(list: &[&str]) -> BTreeSet<String> {
     // `slices` and `tsOnly` load (with a warning) but aren't written any
     // more: the JSON Schema flags them.
+    // `format` is legacy: `$schema` carries the version.
     list.iter()
-        .filter(|k| !matches!(**k, "slices" | "tsOnly"))
+        .filter(|k| !matches!(**k, "slices" | "tsOnly" | "format"))
         .map(|k| k.to_string())
         .collect()
 }
 
 #[test]
 fn the_json_schemas_take_the_keys_the_readers_take() {
-    let app = json_schema("jazz.app.schema.json");
+    let app = json_schema("jazz.app.v1.json");
     let defs = &app["$defs"];
     for (what, schema, reader) in [
         ("the top level", properties(&app), keys(app_file::TOP_KEYS)),
@@ -2298,19 +2365,15 @@ fn the_json_schemas_take_the_keys_the_readers_take() {
     ] {
         assert_eq!(schema, reader, "{what}");
     }
-    let permissions = json_schema("jazz.permissions.schema.json");
-    assert_eq!(
-        properties(&permissions),
-        keys(&["format", "$schema", "defs", "tables"])
-    );
+    let permissions = json_schema("jazz.permissions.v1.json");
+    assert_eq!(properties(&permissions), keys(permissions_file::TOP_KEYS));
 }
 
 #[test]
 fn the_permissions_json_schema_names_every_grammar_construct() {
-    let text = std::fs::read_to_string(
-        repo_root().join("docs/public/schemas/jazz.permissions.schema.json"),
-    )
-    .unwrap();
+    let text =
+        std::fs::read_to_string(repo_root().join("docs/public/schemas/jazz.permissions.v1.json"))
+            .unwrap();
     let words: BTreeSet<&str> = text
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .collect();
@@ -2362,11 +2425,9 @@ fn recursive_relations_with_several_selected_columns_print_and_read_back() {
     let codegen = shared_todos().codegen;
     let relations = codegen.relations();
     let loaded = loaded(shared_todos());
-    let defs = expr::Defs::new();
     let context = expr::Context {
         schema: loaded.current_schema(),
         relations: &relations,
-        defs: &defs,
         computed: &expr::ComputedNames::new(),
     };
     let text = "exists (from recursive(seed: from todos where todos.owner = session.user select todos.id as id, todos.name as name, step: from todos where todos.id = id(frontier) order by todos.name, todos.id select todos.id as id, todos.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: 3) where todos.id = outer.id)";
@@ -2457,9 +2518,7 @@ fn an_index_names_a_stored_column() {
 #[test]
 fn policies_the_dsl_and_the_engine_refused_are_refused() {
     let refused = |table: &str, source: &str, expected: &str| {
-        let error = read_policy(table, source, serde_json::json!({}))
-            .expect_err(source)
-            .to_string();
+        let error = read_policy(table, source).expect_err(source).to_string();
         assert!(error.contains(expected), "{source}:\n{error}");
         error
     };
@@ -2488,13 +2547,8 @@ fn policies_the_dsl_and_the_engine_refused_are_refused() {
                 .find('3')
         );
     }
-    read_policy("todos", "allowedTo.read(shares)", serde_json::json!({})).unwrap();
-    read_policy(
-        "shares",
-        "allowedTo.read(todoRow, maxDepth: 3)",
-        serde_json::json!({}),
-    )
-    .unwrap();
+    read_policy("todos", "allowedTo.read(shares)").unwrap();
+    read_policy("shares", "allowedTo.read(todoRow, maxDepth: 3)").unwrap();
     // A bad `maxDepth`.
     refused(
         "shares",
@@ -2703,7 +2757,19 @@ fn the_policy_corpus_matches_its_fixture() {
             "tables": { table: { "read": read }, other: { "read": "true", "update": "true" } },
         })
     };
-    for &(table, source) in CONSTRUCTS {
+    // Magic columns in both spellings: each is its own DSL key.
+    const MAGIC: &[&str] = &[
+        "$createdBy = session.user",
+        "$createdBy.identity = session.identity",
+        "$updatedBy = session.user",
+        "$updatedBy.account = session.user",
+        "$updatedBy.identity = session.identity",
+        "$deletedBy = session.user",
+        "$deletedBy.account = session.user",
+        "$deletedBy.identity = session.identity",
+    ];
+    let magic: Vec<(&str, &str)> = MAGIC.iter().map(|&source| ("todos", source)).collect();
+    for &(table, source) in CONSTRUCTS.iter().chain(magic.iter()) {
         cases.push(
             serde_json::json!({ "name": source, "permissions": file_for(table, source.into()) }),
         );
@@ -2749,4 +2815,239 @@ fn the_policy_corpus_matches_its_fixture() {
         text, committed,
         "policy-corpus.json differs from its fixture"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `$generated`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn generated_files_carry_a_marker_after_schema_that_loaders_ignore() {
+    let plain = write(shared_todos()).unwrap();
+    let marked = write_generated(shared_todos(), GENERATED_BY_TS).unwrap();
+    for (plain, marked) in [
+        (&plain.app, &marked.app),
+        (&plain.permissions, &marked.permissions),
+    ] {
+        let root = json::parse(marked.as_bytes()).unwrap();
+        let keys: Vec<&str> = root
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .take(2)
+            .collect();
+        assert_eq!(keys, ["$schema", GENERATED_KEY]);
+        let digest = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(plain.as_bytes()))
+        };
+        assert_eq!(
+            root.get(GENERATED_KEY),
+            Some(&Json::object(vec![
+                ("by", Json::string(GENERATED_BY_TS)),
+                ("sha256", Json::string(digest.clone())),
+            ]))
+        );
+        assert_eq!(
+            verify_generated(marked.as_bytes()).unwrap(),
+            GeneratedCheck::Matches(GeneratedMarker {
+                by: GENERATED_BY_TS.into(),
+                sha256: digest,
+            })
+        );
+        assert_eq!(
+            verify_generated(plain.as_bytes()).unwrap(),
+            GeneratedCheck::Unmarked
+        );
+        // Marking again changes nothing.
+        assert_eq!(
+            &mark_generated(marked.as_bytes(), GENERATED_BY_TS).unwrap(),
+            marked
+        );
+    }
+    let loaded_plain = load(plain.app.as_bytes(), plain.permissions.as_bytes()).unwrap();
+    let loaded_marked = load(marked.app.as_bytes(), marked.permissions.as_bytes()).unwrap();
+    assert_eq!(loaded_plain.bundle(), loaded_marked.bundle());
+    assert_eq!(loaded_plain.current_hash(), loaded_marked.current_hash());
+    load_client(marked.app.as_bytes()).unwrap();
+    for (text, schema) in [
+        (&marked.app, "jazz.app.v1.json"),
+        (&marked.permissions, "jazz.permissions.v1.json"),
+        (&marked.app, "jazz.app.schema.json"),
+        (&marked.permissions, "jazz.permissions.schema.json"),
+    ] {
+        let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
+        let instance: serde_json::Value = serde_json::from_str(text).unwrap();
+        if schema.ends_with("v1.json") {
+            let errors: Vec<String> = validator
+                .iter_errors(&instance)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "{schema}: {errors:?}");
+        } else {
+            // The unversioned schemas describe `$generated` too.
+            let marker = serde_json::json!({ "$generated": instance[GENERATED_KEY].clone() });
+            let generated = &json_schema(schema)["$defs"]["generated"];
+            let validator = jsonschema::validator_for(generated).unwrap();
+            assert!(validator.is_valid(&marker[GENERATED_KEY]), "{schema}");
+        }
+    }
+}
+
+#[test]
+fn an_edited_generated_file_mismatches_but_reformatting_does_not() {
+    let marked = write_generated(shared_todos(), GENERATED_BY_TS).unwrap();
+    let reformatted = marked.app.replace('\n', "\r\n").replace("  ", "    ");
+    assert!(matches!(
+        verify_generated(reformatted.as_bytes()).unwrap(),
+        GeneratedCheck::Matches(_)
+    ));
+    let mut edited = serde_json::from_str::<serde_json::Value>(&marked.permissions).unwrap();
+    edited["tables"]["todos"]["read"] = "true".into();
+    let edited = serde_json::to_string(&edited).unwrap();
+    let GeneratedCheck::Mismatch { marker, actual } = verify_generated(edited.as_bytes()).unwrap()
+    else {
+        panic!("an edit should mismatch");
+    };
+    assert_ne!(marker.sha256, actual);
+}
+
+#[test]
+fn a_malformed_marker_is_refused() {
+    let written = write(shared_todos()).unwrap();
+    for marker in [
+        serde_json::json!("x"),
+        serde_json::json!({ "by": "me" }),
+        serde_json::json!({ "by": "me", "sha256": "ABC" }),
+        serde_json::json!({ "by": 1, "sha256": "0".repeat(64) }),
+        serde_json::json!({ "by": "me", "sha256": "0".repeat(64), "at": "now" }),
+    ] {
+        let mut app = serde_json::from_str::<serde_json::Value>(&written.app).unwrap();
+        app[GENERATED_KEY] = marker.clone();
+        let app = app.to_string();
+        let error = load(app.as_bytes(), written.permissions.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("$generated"), "{marker}: {error}");
+        assert!(verify_generated(app.as_bytes()).is_err(), "{marker}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rewriting readable files
+// ---------------------------------------------------------------------------
+
+/// Readable files as an author (or the TS tooling) might write them: loose
+/// formatting, a migration name, comments, and policies spelled the long
+/// way round.
+fn readable_files() -> (String, String) {
+    let written = write(shared_todos()).unwrap();
+    let mut app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    app["migrations"][0]
+        .as_object_mut()
+        .unwrap()
+        .insert("name".into(), "rename title".into());
+    let permissions = serde_json::json!({
+        "format": 1,
+        "$comment": "hand-written",
+        "tables": {
+            "todos": {
+                "read": { "anyOf": [
+                    "session.user = owner",
+                    { "allOf": ["name in ['a', 'b']", "tags contains 'x'"] },
+                    "exists shares(todo = this.id, user = session.user)"
+                ] },
+                "insert": "owner = session.user and session.claims.role in ['admin', 'editor']",
+                "update": { "old": "owner = session.user", "new": "((owner = session.user))" },
+                "delete": { "allOf": ["owner = session.user", "not owner = null"] }
+            },
+            "shares": { "read": "allowedTo.read(todoRow)", "update": "true" }
+        }
+    });
+    (
+        serde_json::to_string(&app).unwrap(),
+        serde_json::to_string(&permissions).unwrap(),
+    )
+}
+
+#[test]
+fn rewriting_readable_files_gives_the_canonical_text() {
+    let (app, permissions) = readable_files();
+    let rewritten = rewrite(app.as_bytes(), permissions.as_bytes(), None).unwrap();
+    assert_eq!(
+        rewritten.permissions,
+        r#"{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "shares": { "read": "allowedTo.read(todoRow)", "update": "true" },
+    "todos": {
+      "read": {
+        "anyOf": [
+          "owner = session.user",
+          { "allOf": ["name in ['a', 'b']", "tags contains 'x'"] },
+          "exists shares(todo = this.id, user = session.user)"
+        ]
+      },
+      "insert": { "allOf": ["owner = session.user", "session.claims.role in ['admin', 'editor']"] },
+      "update": "owner = session.user",
+      "delete": { "allOf": ["owner = session.user", "not owner = null"] }
+    }
+  }
+}
+"#
+    );
+    let root = json::parse(rewritten.app.as_bytes()).unwrap();
+    assert_eq!(
+        root.get("migrations")
+            .and_then(|m| match m {
+                Json::Array(items) => items.first(),
+                _ => None,
+            })
+            .and_then(|m| m.as_object())
+            .map(|m| m[0].clone()),
+        Some(("name".to_string(), Json::string("rename title")))
+    );
+    // The same app as the files given.
+    let given = load(app.as_bytes(), permissions.as_bytes()).unwrap();
+    let again = load(rewritten.app.as_bytes(), rewritten.permissions.as_bytes()).unwrap();
+    assert_eq!(given.bundle(), again.bundle());
+    assert_eq!(given.permissions(), again.permissions());
+}
+
+#[test]
+fn rewriting_is_idempotent_with_and_without_the_marker() {
+    let (app, permissions) = readable_files();
+    for by in [None, Some(GENERATED_BY_TS)] {
+        let once = rewrite(app.as_bytes(), permissions.as_bytes(), by).unwrap();
+        let twice = rewrite(once.app.as_bytes(), once.permissions.as_bytes(), by).unwrap();
+        assert_eq!(once, twice, "{by:?}");
+        if by.is_some() {
+            for text in [&once.app, &once.permissions] {
+                assert!(matches!(
+                    verify_generated(text.as_bytes()).unwrap(),
+                    GeneratedCheck::Matches(_)
+                ));
+            }
+        }
+    }
+    // The writer's own output is already canonical.
+    let written = write(shared_todos()).unwrap();
+    assert_eq!(
+        rewrite(written.app.as_bytes(), written.permissions.as_bytes(), None).unwrap(),
+        written
+    );
+}
+
+#[test]
+fn rewriting_refuses_what_load_refuses() {
+    let (app, _) = readable_files();
+    let error = rewrite(
+        app.as_bytes(),
+        br#"{ "format": 1, "tables": { "todos": { "read": "ownr = session.user" } } }"#,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.file(), PERMISSIONS_FILE);
+    assert!(error.message().contains("did you mean `owner`"), "{error}");
 }

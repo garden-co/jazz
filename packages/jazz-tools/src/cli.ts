@@ -365,7 +365,9 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     return null;
   }
   const file = relative(process.cwd(), result.file) || result.file;
-  console.log(`Wrote the migration ${file}${result.snapshot ? ` and the snapshot ${relative(process.cwd(), result.snapshot) || result.snapshot}` : ""}.`);
+  console.log(
+    `Wrote the migration ${file}${result.snapshot ? ` and the snapshot ${relative(process.cwd(), result.snapshot) || result.snapshot}` : ""}.`,
+  );
   if (result.todos.length > 0) {
     console.log("");
     console.log(

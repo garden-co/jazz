@@ -98,7 +98,7 @@ export async function startLocalJazzServer(
   }
   if (options.schema !== undefined && options.permissions == null) {
     throw new Error(
-      'startLocalJazzServer requires permissions when schema is provided: the app\'s jazz.permissions.json (`{ "format": 1, "tables": {} }` denies all access).',
+      'startLocalJazzServer requires permissions when schema is provided: the app\'s jazz.permissions.json (`{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }` denies all access).',
     );
   }
   const host = validateServerHost(options.host);

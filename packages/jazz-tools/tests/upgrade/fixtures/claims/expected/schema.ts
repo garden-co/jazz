@@ -18,7 +18,7 @@ const roleInAdminOrMember = isIn(session.claims.role, ["admin", "member"]);
 
 const roleIsAdmin = eq(session.claims.role, "admin");
 
-const createdByMe = { $createdBy: session.user };
+const createdByMe = { "$createdBy.account": session.user };
 
 export const permissions = definePermissions({
   messages: {

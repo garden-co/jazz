@@ -12,8 +12,7 @@ A simple schema with three tables linked by foreign keys. A project has tasks, a
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "projects": {
       "columns": {
@@ -53,8 +52,7 @@ Use `allowedTo` to inherit access from the parent row. If you can read a project
 
 ```json title="jazz.permissions.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
   "tables": {
     "projects": {
       "$comment": "Only the creator.",
