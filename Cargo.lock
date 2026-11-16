@@ -2118,7 +2118,9 @@ dependencies = [
  "jazz-codegen",
  "jazz-native-transport",
  "jazz-server",
+ "jazz-text",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -2126,6 +2128,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]
