@@ -70,7 +70,8 @@ fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
         ))
     };
     let bindings = bindings.strip_prefix('\u{feff}').unwrap_or(bindings);
-    if !bindings.trim_start().starts_with(ts::HEADER) {
+    let first = bindings.trim_start();
+    if !first.starts_with(ts::HEADER) && !first.starts_with(ts::LEGACY_HEADER) {
         return Err(refuse(
             "not a module jazz-tools generated (its first line differs)",
         ));
