@@ -78,3 +78,26 @@ fn the_rest_of_the_crate_comes_through() {
     let open = |config: jazz_app_support::Config| jazz_app::open(config);
     let _ = open;
 }
+
+/// App code that globs the bindings still writes std's two-parameter
+/// `Result`: the crate's alias defaults its error, it doesn't fix it.
+#[path = "bindings/todos.rs"]
+mod todos_app;
+
+mod glob_users {
+    use super::todos_app::*;
+
+    pub fn std_shaped() -> Result<(), String> {
+        Err("a std error".into())
+    }
+
+    pub fn crate_shaped() -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_glob_import_keeps_std_result_usable() {
+    assert_eq!(glob_users::std_shaped(), Err("a std error".to_owned()));
+    assert!(glob_users::crate_shaped().is_ok());
+}
