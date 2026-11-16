@@ -19,7 +19,7 @@ use super::super::local_first;
 use super::super::position::{Accepted, Position};
 use super::super::records::KeyColumns;
 use super::super::records::account::{
-    AccountAction, AccountKind, AccountRoot, LEDGER_VERSION, PublicAccountSuccessor,
+    AccountAction, AccountKind, AccountRoot, DeviceKeysRow, LEDGER_VERSION, PublicAccountSuccessor,
     PublicDeviceApproval, RecoveryRoot,
 };
 use super::super::signing;
@@ -372,13 +372,14 @@ impl<'a> AccountReplay<'a> {
         if !local_first::derives_account(&self.domain, public_key, &root.row.account_id) {
             return Ok(Some(RootRejection::KeyMismatch));
         }
-        let keys = device_keys(self.ledger)?;
-        let device = keys
-            .get(&root.row.device_id)
-            .ok_or(ProtocolError::Intrinsic(
-                IntrinsicContradiction::MissingRootKey,
-            ))?;
-        let Ok(bytes) = root.row.signed_bytes(&self.application, device) else {
+        // The signature binds the root device's published keys, accepted
+        // at or before the root. A root naming a device without them cannot
+        // verify, so it is rejected like any other row that fails its own
+        // check; only a valid root can be a contradiction.
+        let Some(device) = root_device_keys(self.ledger, root)? else {
+            return Ok(Some(RootRejection::DeviceKeysMissing));
+        };
+        let Ok(bytes) = root.row.signed_bytes(&self.application, &device) else {
             return Ok(Some(RootRejection::Malformed));
         };
         if local_first::verify(self.registry, public_key, &bytes, signature)? {
@@ -945,11 +946,30 @@ impl Run<'_, '_> {
     }
 }
 
+/// The keys of `root`'s device accepted at or before the root, if any. Two
+/// rows of the device with different keys are a contradiction.
+fn root_device_keys(
+    view: &PublicAccountLedger,
+    root: &Accepted<AccountRoot>,
+) -> ProtocolResult<Option<KeyColumns>> {
+    let mut keys =
+        collect_keys(view.keys.iter().filter(|row| {
+            row.position <= root.position && row.row.device_id == root.row.device_id
+        }))?;
+    Ok(keys.remove(&root.row.device_id))
+}
+
 /// The account's device keys by device ID. Two rows of one device with
 /// different keys are a contradiction.
 fn device_keys(view: &PublicAccountLedger) -> ProtocolResult<BTreeMap<String, KeyColumns>> {
+    collect_keys(view.keys.iter())
+}
+
+fn collect_keys<'a>(
+    rows: impl Iterator<Item = &'a Accepted<DeviceKeysRow>>,
+) -> ProtocolResult<BTreeMap<String, KeyColumns>> {
     let mut keys: BTreeMap<String, KeyColumns> = BTreeMap::new();
-    for row in &view.keys {
+    for row in rows {
         if row.row.validate().is_err() {
             continue;
         }

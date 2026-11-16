@@ -61,6 +61,9 @@ pub enum RootRejection {
     ForeignAccount,
     /// A `local-first` root whose public key does not derive the account ID.
     KeyMismatch,
+    /// A `local-first` root whose device has no published keys at or
+    /// before the root, so its signature cannot verify.
+    DeviceKeysMissing,
     /// A `local-first` root whose signature does not verify.
     SignatureInvalid,
     /// An `app` root of an account that has a valid `local-first` root.
@@ -76,6 +79,7 @@ impl RootRejection {
             Self::Malformed => "root-malformed",
             Self::ForeignAccount => "root-foreign-account",
             Self::KeyMismatch => "root-key-mismatch",
+            Self::DeviceKeysMissing => "root-device-keys-missing",
             Self::SignatureInvalid => "root-signature-invalid",
             Self::KindMismatch => "root-kind-mismatch",
             Self::Unchained => "root-unchained",

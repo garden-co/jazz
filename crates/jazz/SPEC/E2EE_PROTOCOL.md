@@ -910,15 +910,20 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    - it is malformed (`root-malformed`) or names another account
      (`root-foreign-account`);
    - it is `local-first` and its public key does not derive the account ID
-     (`root-key-mismatch`) or its signature over the bytes of §2.3, with the
-     root device's published keys, does not verify
-     (`root-signature-invalid`); a root device without keys is the
-     contradiction `missing-root-key`;
+     (`root-key-mismatch`), its device has no published keys accepted at or
+     before the root (`root-device-keys-missing`), or its signature over the
+     bytes of §2.3, with those keys, does not verify
+     (`root-signature-invalid`). Anyone can copy an account's public key into
+     a row naming a device without keys; such a row is rejected like any
+     other forgery and never stops replay;
    - it is `app` and the read has a valid `local-first` root of the account
      (`root-kind-mismatch`): a local-first account's roots of every
      generation are signed by its identity, so its kind cannot be
-     downgraded, and a later generation of it is only ever written by the
-     secret's holder.
+     downgraded, and replay accepts a later generation of it only if the
+     account's local-first key signed it (§2.11).
+
+   Every per-row check is decided before any contradiction: only a valid
+   root can be one.
 
    The roots that pass form a chain. Generation 0's **counting roots** are
    its valid roots; generation `g > 0`'s are its valid roots accepted
@@ -930,11 +935,24 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    generation) is ignored for the current state (§2.11). Another counting
    root of any generation of the chain that differs from that generation's
    canonical root in device or epoch is an intrinsic contradiction
-   (`conflicting-roots`), so a contradiction of generation 0 fails the
-   current state after a reset as it fails every state as of a later
-   position. Conflicting device-key rows, or a root device without keys, are
-   intrinsic contradictions. Rejected roots never fail replay; the runtime
-   reports them like unreadable rows (§4.3).
+   (`conflicting-roots`). Only valid roots count toward it, as only valid
+   rows take part in the same-transaction rule (step 3), so a forged or
+   malformed row cannot raise it. Conflicting device-key rows, and a valid
+   canonical root whose device has no keys in the view (possible only for
+   an `app` root, which nothing signs), are intrinsic contradictions.
+   Rejected roots never fail replay; the runtime reports them like
+   unreadable rows (§4.3).
+
+   **Conflicting generation-0 roots fail closed, permanently.** Two
+   different valid roots of generation 0 can only come from the account's
+   own sessions or the server: the server accepts at most one bootstrap
+   (§0 item 5), so no legitimate flow produces them. They are a detectable
+   integrity failure, not a state to resolve: the conflict fails the current
+   state and every state as of a position after both roots, and a later
+   reset does not escape it (the chain is checked at every generation). The
+   account is unusable for E2EE; the remedy is a new account. The runtime
+   surfaces `conflicting-roots` loudly, as a security alert like
+   `root-not-mine`, never as an ordinary sync error (§7, §8).
 
 2. **Grants within an epoch.** Public approvals of the current epoch strictly
    after the epoch's position are applied in batches of equal position. An
@@ -1355,15 +1373,17 @@ bootstrap (§2.3) refuses an account with history.
 application's own sign-in (for example WorkOS or Better Auth), and only when
 the application opts in with `"allowAccountReset": true` in the top-level
 `encryption` object of `jazz.app.json` (§1.5; off by default; carried in the
-deploy request). It is never
-available to a local-first account: there the account secret is the account,
-and losing it is losing the account. The server enforces both: R5 refuses an
-identity of generation above 0 from a local-first session, for an account
-founded by a local-first identity (also when it signs in through a linked
-identity of the application), or when the deployed configuration does not
-allow reset. Clients enforce the local-first part themselves: a root of a
-local-first account counts only if its identity signed it (§2.4 step 1), so
-nobody without the secret can reset it.
+deploy request). A local-first account has no reset without its secret:
+there the account secret is the account, and losing it is losing the
+account. The SDK never offers a reset for one; a holder of the secret
+restores access by recovery (§2.9) instead, which needs no new generation.
+The server enforces both: R5 refuses an identity of generation above 0 from
+a local-first session, for an account founded by a local-first identity
+(also when it signs in through a linked identity of the application), or
+when the deployed configuration does not allow reset. Clients enforce the
+local-first part themselves: replay accepts a later generation of a
+local-first account only if the account's local-first key signed its root
+(§2.4 step 1), so nobody without the secret can reset it.
 
 Stage `account-reset`. Preconditions, read at one cut: the account has a
 canonical root of generation `g`; this device has a request whose keys match
@@ -2895,8 +2915,11 @@ flattened into a bare `refused`. The data-error codes are exactly
 `account-reset` and `reset-approval-needed` (§2.11) and key requests to
 answer (§3.4). Account roots that do not count are reported with
 `root-malformed`, `root-foreign-account`, `root-key-mismatch`,
-`root-signature-invalid`, `root-kind-mismatch` or `root-unchained` (§2.4
-step 1); they never fail replay. `root-not-mine` (§2.4) is a security alert
+`root-device-keys-missing`, `root-signature-invalid`, `root-kind-mismatch`
+or `root-unchained` (§2.4 step 1); they never fail replay.
+`conflicting-roots` of generation 0 (§2.4 step 1) makes the account
+permanently unusable for E2EE (the remedy is a new account) and is surfaced
+as a security alert, like `root-not-mine`. `root-not-mine` (§2.4) is a security alert
 the SDK surfaces to the user: the account's root is not the one its own
 devices know. `stale-state` (§2.4, "Floors") refuses evidence older than
 state the device already verified.
@@ -3077,6 +3100,17 @@ Non-goals and explicit limits:
   group key until a key manager approves it (§2.11), so the forgery gains no
   content without that approval. A local-first account cannot be reset this
   way: every generation's root must be signed by its identity (§2.4 step 1).
+- **A second generation-0 root ends the account's E2EE.** Two different
+  valid roots of generation 0 can only be written by the account's own
+  sessions or by the server, since the server accepts at most one bootstrap;
+  for a local-first account both must be signed by its identity. Clients
+  fail closed with `conflicting-roots` (§2.4 step 1): every client refuses
+  the account's state, at every later generation, so a reset does not
+  escape it. The account is unusable for E2EE and the remedy is a new
+  account. This is a detectable integrity failure, not a silent one: the
+  SDK surfaces it loudly with its code, like `root-not-mine`. Whoever can
+  write as an app account (or the server) can therefore deny it E2EE
+  service this way, which gains it no content.
 - **Self-only reads hide metadata from other users, not from the server.**
   The server stores and evaluates every E2EE row, so it sees who is a
   recipient or member of which space and group, who manages them, and when

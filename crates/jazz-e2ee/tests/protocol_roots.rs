@@ -246,6 +246,53 @@ fn forged_local_first_roots_do_not_count() {
     );
 }
 
+/// A row that copies the account's public key and signature but names a
+/// device without published keys cannot verify: it is rejected and
+/// reported, and replay of the genuine root proceeds. So is a root whose
+/// device's keys were accepted only after it.
+#[test]
+fn local_first_root_without_device_keys_is_rejected() {
+    let (env, ledger, mut rng, laptop) = local_first_ledger(108);
+    let genuine = ledger.public.roots[0].clone();
+    let ghost = ids::random_v4(&mut rng).unwrap();
+
+    let mut forged = Ledger::new(&env.account);
+    forged.public = ledger.public.clone();
+    forged.private = ledger.private.clone();
+    let copy = AccountRoot {
+        id: ids::random_v4(&mut rng).unwrap(),
+        device_id: ghost.clone(),
+        ..genuine.row.clone()
+    };
+    forged
+        .public
+        .roots
+        .insert(0, Accepted::new(Position(0), copy.clone()));
+    let state = forged.state(&env);
+    assert_eq!(state.root, genuine);
+    assert_eq!(
+        rejection(&forged, &env, &copy.id),
+        Some(RootRejection::DeviceKeysMissing)
+    );
+    assert_eq!(
+        RootRejection::DeviceKeysMissing.code(),
+        "root-device-keys-missing"
+    );
+    assert!(forged.acquire(&env, &laptop).is_ok());
+
+    // The device's keys accepted only after the root do not count for it.
+    let mut late = Ledger::new(&env.account);
+    late.public = ledger.public.clone();
+    let root_at = late.public.roots[0].position;
+    late.public.keys[0].position = Position(root_at.0 + 1);
+    late.public.through = Position(root_at.0 + 1);
+    assert!(late.replay(&env).current().unwrap().is_none());
+    assert_eq!(
+        rejection(&late, &env, &genuine.row.id),
+        Some(RootRejection::DeviceKeysMissing)
+    );
+}
+
 /// A later generation of a local-first account counts only if it is signed
 /// by the same identity: an app reset root is rejected, a signed one counts.
 /// The builders never reset a local-first account.
@@ -412,6 +459,58 @@ fn conflicting_roots_fail_at_every_generation() {
             .unwrap_err(),
         conflict
     );
+}
+
+/// Two different valid generation-0 roots fail closed for good: a reset
+/// accepted after both does not escape the conflict. Only valid roots count
+/// toward it: a malformed or foreign generation-0 row naming another device
+/// is rejected and reported instead.
+#[test]
+fn generation_zero_conflict_survives_a_later_reset() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(109);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let phone_at = ledger.request(&phone, &mut rng);
+    ledger.request(&tablet, &mut rng);
+    ledger.root(&env, &tablet, 1, &mut rng);
+    assert_eq!(ledger.state(&env).generation, 1);
+
+    let mut second = ledger.public.roots[0].clone();
+    second.row.id = ids::random_v4(&mut rng).unwrap();
+    second.row.device_id = phone.id.clone();
+    second.row.epoch_id = ids::random_v4(&mut rng).unwrap();
+    second.position = phone_at;
+    let conflict = ProtocolError::Intrinsic(IntrinsicContradiction::ConflictingRoots);
+
+    let mut conflicting = ledger.public.clone();
+    conflicting.roots.push(second.clone());
+    let replay = AccountReplay::new(&conflicting, &env.domain, &env.registry).unwrap();
+    assert_eq!(replay.current().unwrap_err(), conflict);
+    assert_eq!(replay.as_of(conflicting.through).unwrap_err(), conflict);
+    assert_eq!(conflict.code(), Some("conflicting-roots"));
+    // Before the second root, the account was fine.
+    assert_eq!(replay.as_of(phone_at).unwrap().unwrap().generation, 0);
+
+    // Invalid rows do not count toward the conflict.
+    let mut malformed = second.clone();
+    malformed.row.epoch_id = "not-an-id".into();
+    let mut foreign = second.clone();
+    foreign.row.account_id = "mallory".into();
+    for (row, reason) in [
+        (malformed, RootRejection::Malformed),
+        (foreign, RootRejection::ForeignAccount),
+    ] {
+        let mut view = Ledger::new("alice");
+        view.public = ledger.public.clone();
+        view.public.roots.push(row.clone());
+        assert_eq!(view.state(&env).generation, 1);
+        assert_eq!(rejection(&view, &env, &row.row.id), Some(reason));
+    }
 }
 
 /// Successors of one epoch at one position were written in one
