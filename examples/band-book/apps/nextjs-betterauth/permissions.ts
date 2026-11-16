@@ -1,26 +1,61 @@
 import { schema as s } from "jazz-tools";
 import { schema } from "./schema";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
+import { PAGE_TREE_MAX_DEPTH } from "./src/lib/limits";
 
 const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
 
-const isMember = (workspaceId: s.Uuid) =>
-  exists.members({ workspaceId, account: session.user, role: ["owner"] });
+type WorkspaceRole = "owner" | "member" | "viewer" | "guest";
+type Page = s.Row<typeof schema, "pages">;
 
-const isMember2 = (workspaceId: s.Uuid) =>
-  exists.members({ workspaceId, account: session.user, role: ["owner", "member"] });
+const WORKSPACE_READERS: WorkspaceRole[] = ["owner", "member", "viewer"];
+const WORKSPACE_EDITORS: WorkspaceRole[] = ["owner", "member"];
 
-const accountIsMe = { account: session.user };
+const depth = { maxDepth: PAGE_TREE_MAX_DEPTH };
 
-const isMember3 = (workspaceId: s.Uuid) => exists.members({ workspaceId, account: session.user });
+const isWorkspaceMember = (workspaceId: s.Uuid) =>
+  exists.members({ workspaceId, account: session.user });
 
-const isPageGrant = (pageId: s.Uuid) =>
+const hasRole = (workspaceId: s.Uuid, role: WorkspaceRole[]) =>
+  exists.members({ workspaceId, account: session.user, role });
+
+const isGrantedEditor = (pageId: s.Uuid) =>
   exists.pageGrants({ pageId, account: session.user, role: "editor" });
 
-const authorIsMe = { author: session.user };
+const mine = { account: session.user };
+
+const authoredByMe = { author: session.user };
+
+const sameWorkspaceParent = (page: Page) =>
+  anyOf({ parentId: null }, page.parent.where({ workspaceId: page.workspaceId }));
+
+// Access that flows down the tree: a workspace role, or edit access to the
+// parent (which itself may come from a grant further up).
+const editsFromAbove = (page: Page) =>
+  anyOf(hasRole(page.workspaceId, WORKSPACE_EDITORS), allowedTo.update(page.parent, depth));
+
+// Owners and band members share pages; grant holders see their own grants.
+// Invite links are redeemed by the server, which checks the token itself.
+const sharesPage = (grant: s.Row<typeof schema, "pageGrants">) =>
+  allOf(
+    hasRole(grant.workspaceId, WORKSPACE_EDITORS),
+    grant.page.where({ workspaceId: grant.workspaceId }),
+  );
+
+// Workspace invites are for owners; page invites for anyone who shares.
+const managesInvite = (invite: s.Row<typeof schema, "invites">) =>
+  anyOf(
+    allOf({ pageId: null, role: ["member", "viewer"] }, hasRole(invite.workspaceId, ["owner"])),
+    allOf(
+      { role: ["editor", "viewer"] },
+      hasRole(invite.workspaceId, WORKSPACE_EDITORS),
+      invite.page.where({ workspaceId: invite.workspaceId }),
+    ),
+  );
 
 export const permissions = definePermissions({
   ...betterAuthPermissions,
+  // Blocks and attachments inherit everything from their page.
   attachments: {
     read: (attachment) => allowedTo.read(attachment.page),
     insert: (attachment) =>
@@ -49,34 +84,10 @@ export const permissions = definePermissions({
     delete: (block) => allowedTo.update(block.page),
   },
   invites: {
-    read: (invite) =>
-      anyOf(
-        allOf({ pageId: null, role: ["member", "viewer"] }, isMember(invite.workspaceId)),
-        allOf(
-          { role: ["editor", "viewer"] },
-          isMember2(invite.workspaceId),
-          invite.page.where({ workspaceId: invite.workspaceId }),
-        ),
-      ),
-    insert: (invite) =>
-      anyOf(
-        allOf({ pageId: null, role: ["member", "viewer"] }, isMember(invite.workspaceId)),
-        allOf(
-          { role: ["editor", "viewer"] },
-          isMember2(invite.workspaceId),
-          invite.page.where({ workspaceId: invite.workspaceId }),
-        ),
-      ),
+    read: managesInvite,
+    insert: managesInvite,
     update: false,
-    delete: (invite) =>
-      anyOf(
-        allOf({ pageId: null, role: ["member", "viewer"] }, isMember(invite.workspaceId)),
-        allOf(
-          { role: ["editor", "viewer"] },
-          isMember2(invite.workspaceId),
-          invite.page.where({ workspaceId: invite.workspaceId }),
-        ),
-      ),
+    delete: managesInvite,
   },
   issues: {
     read: (issue) => allowedTo.read(issue.page),
@@ -104,160 +115,126 @@ export const permissions = definePermissions({
     delete: (issue) => allowedTo.update(issue.page),
   },
   members: {
-    read: (member) => anyOf(accountIsMe, isMember3(member.workspaceId)),
+    // Anyone in a workspace, guests included, can see who else is in it: the
+    // roster is what issue assignees and sharing dialogs are picked from.
+    read: (member) => anyOf(mine, isWorkspaceMember(member.workspaceId)),
     insert: (member) =>
       anyOf(
-        isMember(member.workspaceId),
+        hasRole(member.workspaceId, ["owner"]),
+        // The creator of a workspace makes themselves its first owner.
         allOf(
           { account: session.user, role: "owner" },
-          member.workspace.where({ $createdBy: session.user }),
+          member.workspace.where({ "$createdBy.account": session.user }),
         ),
       ),
-    updateIf: (member) => isMember(member.workspaceId),
+    updateIf: (member) => hasRole(member.workspaceId, ["owner"]),
     updateTo: (member) =>
       allOf(
-        isMember(member.workspaceId),
+        hasRole(member.workspaceId, ["owner"]),
         exists.members({ id: member.id, workspaceId: member.workspaceId, account: member.account }),
       ),
-    delete: (member) => anyOf(isMember(member.workspaceId), accountIsMe),
+    delete: (member) => anyOf(hasRole(member.workspaceId, ["owner"]), mine),
   },
   pageGrants: {
-    read: (pageGrant) =>
-      anyOf(
-        accountIsMe,
-        allOf(
-          isMember2(pageGrant.workspaceId),
-          pageGrant.page.where({ workspaceId: pageGrant.workspaceId }),
-        ),
-      ),
-    insert: (pageGrant) =>
+    read: (grant) => anyOf(mine, sharesPage(grant)),
+    insert: sharesPage,
+    updateIf: sharesPage,
+    updateTo: (grant) =>
       allOf(
-        isMember2(pageGrant.workspaceId),
-        pageGrant.page.where({ workspaceId: pageGrant.workspaceId }),
+        sharesPage(grant),
+        exists.pageGrants({ id: grant.id, pageId: grant.pageId, account: grant.account }),
       ),
-    updateIf: (pageGrant) =>
-      allOf(
-        isMember2(pageGrant.workspaceId),
-        pageGrant.page.where({ workspaceId: pageGrant.workspaceId }),
-      ),
-    updateTo: (pageGrant) =>
-      allOf(
-        allOf(
-          isMember2(pageGrant.workspaceId),
-          pageGrant.page.where({ workspaceId: pageGrant.workspaceId }),
-        ),
-        exists.pageGrants({
-          id: pageGrant.id,
-          pageId: pageGrant.pageId,
-          account: pageGrant.account,
-        }),
-      ),
-    delete: (pageGrant) =>
-      anyOf(
-        allOf(
-          isMember2(pageGrant.workspaceId),
-          pageGrant.page.where({ workspaceId: pageGrant.workspaceId }),
-        ),
-        accountIsMe,
-      ),
+    delete: (grant) => anyOf(sharesPage(grant), mine),
   },
   pages: {
     read: (page) =>
       anyOf(
-        exists.members({
-          workspaceId: page.workspaceId,
-          account: session.user,
-          role: ["owner", "member", "viewer"],
-        }),
+        hasRole(page.workspaceId, WORKSPACE_READERS),
         exists.pageGrants({ pageId: page.id, account: session.user }),
-        allowedTo.read(page.parent, { maxDepth: 8 }),
+        allowedTo.read(page.parent, depth),
       ),
-    insert: (page) =>
-      allOf(
-        anyOf({ parentId: null }, page.parent.where({ workspaceId: page.workspaceId })),
-        anyOf(isMember2(page.workspaceId), allowedTo.update(page.parent, { maxDepth: 8 })),
-      ),
-    updateIf: (page) =>
-      anyOf(
-        anyOf(isMember2(page.workspaceId), allowedTo.update(page.parent, { maxDepth: 8 })),
-        isPageGrant(page.id),
-      ),
+    insert: (page) => allOf(sameWorkspaceParent(page), editsFromAbove(page)),
+    updateIf: (page) => anyOf(editsFromAbove(page), isGrantedEditor(page.id)),
     updateTo: (page, old) =>
       allOf(
+        // A page never changes workspace or kind.
         exists.pages({ id: page.id, workspaceId: page.workspaceId, kind: page.kind }),
-        anyOf({ parentId: null }, page.parent.where({ workspaceId: page.workspaceId })),
+        sameWorkspaceParent(page),
         anyOf(
-          anyOf(isMember2(page.workspaceId), allowedTo.update(page.parent, { maxDepth: 8 })),
-          allOf(isPageGrant(page.id), { parentId: old.parentId }),
+          // Moving is allowed into any page the editor can edit from above.
+          editsFromAbove(page),
+          // The root page of an editor grant can be renamed, not moved away.
+          allOf(isGrantedEditor(page.id), { parentId: old.parentId }),
         ),
       ),
-    delete: (page) =>
-      anyOf(isMember2(page.workspaceId), allowedTo.update(page.parent, { maxDepth: 8 })),
+    // Deleting needs edit access from above, so a grant holder cannot delete
+    // the page they were invited to.
+    delete: editsFromAbove,
   },
+  // The sheet's text belongs to its page. Anyone who can read the page can
+  // comment and be seen there; comments are changed by their author or by
+  // the page's editors, and presence rows only by their own account.
   sheetComments: {
-    read: (sheetComment) => allowedTo.read(sheetComment.page),
-    insert: (sheetComment) =>
+    read: (comment) => allowedTo.read(comment.page),
+    insert: (comment) =>
       allOf(
-        authorIsMe,
-        allowedTo.read(sheetComment.page),
-        sheetComment.page.where({ workspaceId: sheetComment.workspaceId, kind: "song" }),
+        authoredByMe,
+        allowedTo.read(comment.page),
+        comment.page.where({ workspaceId: comment.workspaceId, kind: "song" }),
       ),
-    updateIf: (sheetComment) => anyOf(authorIsMe, allowedTo.update(sheetComment.page)),
-    updateTo: (sheetComment) =>
+    updateIf: (comment) => anyOf(authoredByMe, allowedTo.update(comment.page)),
+    updateTo: (comment) =>
       allOf(
-        allowedTo.read(sheetComment.page),
+        allowedTo.read(comment.page),
         exists.sheetComments({
-          id: sheetComment.id,
-          pageId: sheetComment.pageId,
-          workspaceId: sheetComment.workspaceId,
-          author: sheetComment.author,
+          id: comment.id,
+          pageId: comment.pageId,
+          workspaceId: comment.workspaceId,
+          author: comment.author,
         }),
       ),
-    delete: (sheetComment) => anyOf(authorIsMe, allowedTo.update(sheetComment.page)),
+    delete: (comment) => anyOf(authoredByMe, allowedTo.update(comment.page)),
   },
   sheetPresence: {
-    read: (sheetPresence) => allowedTo.read(sheetPresence.page),
-    insert: (sheetPresence) =>
+    read: (presence) => allowedTo.read(presence.page),
+    insert: (presence) =>
       allOf(
-        accountIsMe,
-        allowedTo.read(sheetPresence.page),
-        sheetPresence.page.where({ workspaceId: sheetPresence.workspaceId, kind: "song" }),
+        mine,
+        allowedTo.read(presence.page),
+        presence.page.where({ workspaceId: presence.workspaceId, kind: "song" }),
       ),
-    updateIf: accountIsMe,
-    updateTo: (sheetPresence) =>
+    updateIf: mine,
+    updateTo: (presence) =>
       allOf(
-        accountIsMe,
+        mine,
         exists.sheetPresence({
-          id: sheetPresence.id,
-          pageId: sheetPresence.pageId,
-          workspaceId: sheetPresence.workspaceId,
+          id: presence.id,
+          pageId: presence.pageId,
+          workspaceId: presence.workspaceId,
         }),
       ),
-    delete: (sheetPresence) => anyOf(accountIsMe, allowedTo.update(sheetPresence.page)),
+    // Page editors can clear presence too, so deleting a page leaves nothing.
+    delete: (presence) => anyOf(mine, allowedTo.update(presence.page)),
   },
   songSheets: {
-    read: (songSheet) => allowedTo.read(songSheet.page),
-    insert: (songSheet) =>
+    read: (sheet) => allowedTo.read(sheet.page),
+    insert: (sheet) =>
       allOf(
-        allowedTo.update(songSheet.page),
-        songSheet.page.where({ workspaceId: songSheet.workspaceId, kind: "song" }),
+        allowedTo.update(sheet.page),
+        sheet.page.where({ workspaceId: sheet.workspaceId, kind: "song" }),
       ),
-    updateIf: (songSheet) => allowedTo.update(songSheet.page),
-    updateTo: (songSheet) =>
+    updateIf: (sheet) => allowedTo.update(sheet.page),
+    updateTo: (sheet) =>
       allOf(
-        allowedTo.update(songSheet.page),
-        exists.songSheets({
-          id: songSheet.id,
-          pageId: songSheet.pageId,
-          workspaceId: songSheet.workspaceId,
-        }),
+        allowedTo.update(sheet.page),
+        exists.songSheets({ id: sheet.id, pageId: sheet.pageId, workspaceId: sheet.workspaceId }),
       ),
-    delete: (songSheet) => allowedTo.update(songSheet.page),
+    delete: (sheet) => allowedTo.update(sheet.page),
   },
   workspaces: {
-    read: (workspace) => isMember3(workspace.id),
+    read: (workspace) => isWorkspaceMember(workspace.id),
     insert: true,
-    update: (workspace) => isMember(workspace.id),
-    delete: (workspace) => isMember(workspace.id),
+    update: (workspace) => hasRole(workspace.id, ["owner"]),
+    delete: (workspace) => hasRole(workspace.id, ["owner"]),
   },
 });

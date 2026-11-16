@@ -16,22 +16,28 @@ export const schema = s.defineSchema({
   ),
 });
 
+// #endregion default-stack-schema
+
+// #region default-stack-permissions
 const { definePermissions, session, anyOf, allOf, eq } = schema;
 
-const roleIsAdmin = eq(session.claims.role, "admin");
+const isAdmin = eq(session.claims.role, "admin");
+
+const inAnnouncements = { chat_id: "announcements" };
+const inGeneralChat = { chat_id: "chat-01" };
+
+const createdByMe = { "$createdBy.account": session.user };
 
 export const permissions = definePermissions({
   ...betterauthPermissions,
   messages: {
-    read: anyOf({ chat_id: "announcements" }, { chat_id: "chat-01" }),
-    insert: anyOf(allOf({ chat_id: "announcements" }, roleIsAdmin), { chat_id: "chat-01" }),
-    update: anyOf(allOf({ chat_id: "announcements" }, roleIsAdmin), {
-      chat_id: "chat-01",
-      $createdBy: session.user,
-    }),
-    delete: anyOf(allOf({ chat_id: "announcements" }, roleIsAdmin), {
-      chat_id: "chat-01",
-      $createdBy: session.user,
-    }),
+    read: anyOf(inAnnouncements, inGeneralChat),
+    insert: anyOf(allOf(inAnnouncements, isAdmin), inGeneralChat),
+    // `update` checks the same room/role predicate on both the old and new row,
+    // so a General-message creator cannot satisfy the old-row rule and then
+    // move the message into Announcements.
+    update: anyOf(allOf(inAnnouncements, isAdmin), { ...inGeneralChat, ...createdByMe }),
+    delete: anyOf(allOf(inAnnouncements, isAdmin), { ...inGeneralChat, ...createdByMe }),
   },
 });
+// #endregion default-stack-permissions

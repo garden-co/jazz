@@ -1,6 +1,7 @@
 import { schema as s } from "jazz-tools";
 import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 import { ART, HUES } from "./app-extras";
+import { MAX_LINE_QUANTITY } from "./src/store/limits";
 
 export const schema = s.defineSchema({
   ...betterAuthSchema,
@@ -144,9 +145,15 @@ export const schema = s.defineSchema({
 
 const { definePermissions, allowedTo, session, allOf, gte, lte } = schema;
 
-const shopperIsMe = { shopper: session.user };
+// A cart belongs to exactly one account. Guests have a device account
+// too, so the same rule covers a guest cart and a signed-in cart; linking a
+// provider identity keeps the account, and with it the cart.
+const mine = { shopper: session.user };
+
+const sensibleQuantity = allOf({ quantity: gte(0) }, { quantity: lte(MAX_LINE_QUANTITY) });
 
 export const permissions = definePermissions({
+  // Better Auth rows are owned by the trusted auth route (backend authority).
   better_auth_account: {
     read: false,
     insert: false,
@@ -177,27 +184,32 @@ export const permissions = definePermissions({
     update: false,
     delete: false,
   },
+  // Cart lines inherit from their cart. The new row must still point at a
+  // cart the shopper owns, so a line cannot be moved into someone else's cart.
   cartLines: {
     read: (cartLine) => allowedTo.read(cartLine.cart),
-    insert: (cartLine) =>
-      allOf(allowedTo.update(cartLine.cart), allOf({ quantity: gte(0) }, { quantity: lte(20) })),
+    insert: (cartLine) => allOf(allowedTo.update(cartLine.cart), sensibleQuantity),
     updateIf: (cartLine) => allowedTo.update(cartLine.cart),
-    updateTo: (cartLine) =>
-      allOf(allowedTo.update(cartLine.cart), allOf({ quantity: gte(0) }, { quantity: lte(20) })),
+    updateTo: (cartLine) => allOf(allowedTo.update(cartLine.cart), sensibleQuantity),
     delete: (cartLine) => allowedTo.update(cartLine.cart),
   },
   carts: {
-    read: shopperIsMe,
-    insert: shopperIsMe,
-    update: shopperIsMe,
-    delete: shopperIsMe,
+    read: mine,
+    insert: mine,
+    update: mine,
+    delete: mine,
   },
+  // The catalogue and stock levels are public. Only the backend writes them:
+  // it seeds the catalogue and decrements stock inside checkout.
   categories: {
     read: true,
     insert: false,
     update: false,
     delete: false,
   },
+  // Orders and everything hanging off them are readable by their shopper and
+  // written only by the backend: placing an order, recording a payment and
+  // shipping are backend decisions, never client writes.
   orderEvents: {
     read: (orderEvent) => allowedTo.read(orderEvent.order),
     insert: false,
@@ -211,7 +223,7 @@ export const permissions = definePermissions({
     delete: false,
   },
   orders: {
-    read: shopperIsMe,
+    read: mine,
     insert: false,
     update: false,
     delete: false,

@@ -82,60 +82,77 @@ export const schema = s.defineSchema({
 
 const { definePermissions, exists, session, anyOf, allOf } = schema;
 
-const ownerIsMe = { ownerId: session.user };
+const isBandMember = (bandId: s.Uuid) => exists.members({ bandId, userId: session.user });
 
-const isMember = (bandId: s.Uuid) => exists.members({ bandId, userId: session.user });
+const isBandOwner = (bandId: s.Uuid) => exists.bands({ id: bandId, ownerId: session.user });
+
+const ownedByMe = { ownerId: session.user };
 
 const mine = { userId: session.user };
 
+// A band's venue is managed by the band's current members (a creator who
+// leaves loses it); a venue without a band belongs to its creator.
+const managesVenue = (bandId: s.Uuid) =>
+  anyOf({ bandId: null, ownerId: session.user }, isBandMember(bandId));
+
 export const permissions = definePermissions({
+  // Invites: visible to and managed by the band owner only.
   bandInvites: {
-    read: (bandInvite) => bandInvite.band.where(ownerIsMe),
-    insert: (bandInvite) => bandInvite.band.where(ownerIsMe),
-    delete: (bandInvite) => bandInvite.band.where(ownerIsMe),
+    read: (invite) => isBandOwner(invite.bandId),
+    insert: (invite) => isBandOwner(invite.bandId),
+    delete: (invite) => isBandOwner(invite.bandId),
   },
+  // Bands: the name is public. Members can rename the band; only the owner
+  // deletes it, and nobody can hand ownership to someone else by editing the row.
   bands: {
     read: true,
-    insert: ownerIsMe,
-    updateIf: (band) => isMember(band.id),
-    updateTo: (band, old) => allOf(isMember(band.id), { ownerId: old.ownerId }),
-    delete: ownerIsMe,
+    insert: ownedByMe,
+    updateIf: (band) => isBandMember(band.id),
+    updateTo: (band, old) => allOf(isBandMember(band.id), { ownerId: old.ownerId }),
+    delete: ownedByMe,
   },
+  // Members: you can only ever add yourself, either as the owner bootstrapping
+  // the band or with a current invite code. The owner can remove anyone;
+  // members can leave.
   members: {
-    read: (member) => anyOf(mine, isMember(member.bandId)),
+    read: (member) => anyOf(mine, isBandMember(member.bandId)),
     insert: (member) =>
       allOf(
         mine,
         anyOf(
-          member.band.where(ownerIsMe),
+          isBandOwner(member.bandId),
           exists.bandInvites({ bandId: member.bandId, code: member.inviteCode }),
         ),
       ),
-    delete: (member) => anyOf(mine, member.band.where(ownerIsMe)),
+    delete: (member) => anyOf(mine, isBandOwner(member.bandId)),
   },
+  // Private notes: band members only, and always attached to one of their stops.
   stopNotes: {
-    read: (stopNote) => isMember(stopNote.bandId),
-    insert: (stopNote) =>
-      allOf(isMember(stopNote.bandId), stopNote.stop.where({ bandId: stopNote.bandId })),
-    updateIf: (stopNote) => isMember(stopNote.bandId),
-    updateTo: (stopNote) =>
-      allOf(isMember(stopNote.bandId), stopNote.stop.where({ bandId: stopNote.bandId })),
-    delete: (stopNote) => isMember(stopNote.bandId),
+    read: (note) => isBandMember(note.bandId),
+    insert: (note) => allOf(isBandMember(note.bandId), note.stop.where({ bandId: note.bandId })),
+    updateIf: (note) => isBandMember(note.bandId),
+    updateTo: (note) => allOf(isBandMember(note.bandId), note.stop.where({ bandId: note.bandId })),
+    delete: (note) => isBandMember(note.bandId),
   },
+  // Stops: the public sees confirmed dates; the band sees and edits everything.
+  // A stop's venue must be one of its band's venues, so no other band can move
+  // or delete it from under the stop.
   stops: {
-    read: (stop) => anyOf({ status: "confirmed" }, isMember(stop.bandId)),
-    insert: (stop) => allOf(isMember(stop.bandId), stop.venue.where({ bandId: stop.bandId })),
-    updateIf: (stop) => isMember(stop.bandId),
-    updateTo: (stop) => allOf(isMember(stop.bandId), stop.venue.where({ bandId: stop.bandId })),
-    delete: (stop) => isMember(stop.bandId),
+    read: (stop) => anyOf({ status: "confirmed" }, isBandMember(stop.bandId)),
+    insert: (stop) => allOf(isBandMember(stop.bandId), stop.venue.where({ bandId: stop.bandId })),
+    updateIf: (stop) => isBandMember(stop.bandId),
+    updateTo: (stop) => allOf(isBandMember(stop.bandId), stop.venue.where({ bandId: stop.bandId })),
+    delete: (stop) => isBandMember(stop.bandId),
   },
+  // Venues: public places.
   venues: {
     read: true,
-    insert: (venue) => allOf(ownerIsMe, anyOf({ bandId: null }, isMember(venue.bandId))),
-    updateIf: (venue) => anyOf({ bandId: null, ownerId: session.user }, isMember(venue.bandId)),
+    insert: (venue) => allOf(ownedByMe, anyOf({ bandId: null }, isBandMember(venue.bandId))),
+    updateIf: (venue) => managesVenue(venue.bandId),
     updateTo: (venue) =>
       allOf(
-        anyOf({ bandId: null, ownerId: session.user }, isMember(venue.bandId)),
+        managesVenue(venue.bandId),
+        // Neither the creator nor the band can be changed by an update.
         anyOf(
           exists.venues({ id: venue.id, ownerId: venue.ownerId, bandId: venue.bandId }),
           allOf(
@@ -144,6 +161,6 @@ export const permissions = definePermissions({
           ),
         ),
       ),
-    delete: (venue) => anyOf({ bandId: null, ownerId: session.user }, isMember(venue.bandId)),
+    delete: (venue) => managesVenue(venue.bandId),
   },
 });

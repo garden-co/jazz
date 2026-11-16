@@ -31,6 +31,9 @@ export const schema = s.defineSchema({
 
 const { definePermissions } = schema;
 
+// Tasks can only be changed while their scenario (branch) is still open.
+const isOpen = { status: "open" } as const;
+
 export const permissions = definePermissions({
   scenarios: {
     read: true,
@@ -40,8 +43,8 @@ export const permissions = definePermissions({
   },
   tasks: {
     read: true,
-    insert: (task) => task.scenario.where({ status: "open" }),
-    update: (task) => task.scenario.where({ status: "open" }),
-    delete: (task) => task.scenario.where({ status: "open" }),
+    insert: (task) => task.scenario.where(isOpen),
+    update: (task) => task.scenario.where(isOpen),
+    delete: (task) => task.scenario.where(isOpen),
   },
 });

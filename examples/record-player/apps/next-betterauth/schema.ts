@@ -78,25 +78,53 @@ export const schema = s.defineSchema({
 
 const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
 
-const createdByMe = { $createdBy: session.user };
+const createdByMe = { "$createdBy.account": session.user };
 
-const isInvitation = (playlist_id: s.Uuid) =>
+const hasEditorInvitation = (playlist_id: s.Uuid) =>
   exists.invitations({ playlist_id, subject: session.user, role: "editor", status: "accepted" });
+
+const canReadPlaylist = (playlist_id: s.Uuid) =>
+  anyOf(
+    createdByMe,
+    exists.invitations({
+      playlist_id,
+      // This column carries Jazz's issuer-scoped canonical session user, not a
+      // provider-local Better Auth user id. It stays stable across tokens
+      // and avoids conflating external account storage with row authorship.
+      subject: session.user,
+      status: "accepted",
+    }),
+  );
+
+const canEditPlaylist = (playlist_id: s.Uuid) =>
+  anyOf(createdByMe, hasEditorInvitation(playlist_id));
+
+const ownsPlaylist = (invitation: s.Row<typeof schema, "invitations">) =>
+  invitation.playlist.where(createdByMe);
 
 export const permissions = definePermissions({
   ...betterAuthPermissions,
+  // RecordPlayer deliberately models a shared public catalogue: every
+  // authenticated listener can publish album metadata and audio tracks, and
+  // everyone can browse them. A production catalog would ordinarily replace
+  // the album and track insert rules with a label/artist membership relation.
   albums: {
     read: true,
     insert: createdByMe,
   },
   invitations: {
-    read: (invitation) => anyOf({ subject: session.user }, invitation.playlist.where(createdByMe)),
-    insert: (invitation) => invitation.playlist.where(createdByMe),
+    read: (invitation) => anyOf({ subject: session.user }, ownsPlaylist(invitation)),
+    insert: ownsPlaylist,
+    // Recipients may perform the one-way pending -> accepted transition; every
+    // other invitation change (including revoke) remains owner-controlled.
+    // Keep both alternatives in one rule: separate update rules would silently
+    // form an old/new cross product. The recipient's persisted pending row and
+    // accepted new row are both required.
     updateIf: (invitation) =>
-      anyOf(invitation.playlist.where(createdByMe), { subject: session.user, status: "pending" }),
+      anyOf(ownsPlaylist(invitation), { subject: session.user, status: "pending" }),
     updateTo: (invitation) =>
       anyOf(
-        invitation.playlist.where(createdByMe),
+        ownsPlaylist(invitation),
         allOf(
           exists.invitations({
             id: invitation.id,
@@ -108,7 +136,7 @@ export const permissions = definePermissions({
           { subject: session.user, status: "accepted" },
         ),
       ),
-    delete: (invitation) => invitation.playlist.where(createdByMe),
+    delete: ownsPlaylist,
   },
   playback_positions: {
     read: createdByMe,
@@ -117,21 +145,18 @@ export const permissions = definePermissions({
     delete: createdByMe,
   },
   playlist_entries: {
-    read: (playlistEntry) => allowedTo.read(playlistEntry.playlist),
-    insert: (playlistEntry) =>
-      anyOf(allowedTo.update(playlistEntry.playlist), isInvitation(playlistEntry.playlist_id)),
-    update: (playlistEntry) => anyOf(createdByMe, isInvitation(playlistEntry.playlist_id)),
-    delete: (playlistEntry) => anyOf(createdByMe, isInvitation(playlistEntry.playlist_id)),
+    read: (entry) => allowedTo.read(entry.playlist),
+    insert: (entry) =>
+      anyOf(allowedTo.update(entry.playlist), hasEditorInvitation(entry.playlist_id)),
+    update: (entry) => canEditPlaylist(entry.playlist_id),
+    delete: (entry) => canEditPlaylist(entry.playlist_id),
   },
   playlists: {
-    read: (playlist) =>
-      anyOf(
-        createdByMe,
-        exists.invitations({ playlist_id: playlist.id, subject: session.user, status: "accepted" }),
-      ),
+    read: (playlist) => canReadPlaylist(playlist.id),
     insert: true,
     update: createdByMe,
   },
+  // Shared public catalogue, like albums.
   tracks: {
     read: true,
     insert: createdByMe,

@@ -133,23 +133,58 @@ export const schema = s.defineSchema({
 
 const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
 
+/**
+ * PosterShop authorization (#1926). Every child table spells out its own role
+ * predicate against `canvasMembers`; nothing inherits the unconditional
+ * canvas insert rule.
+ *
+ * | table         | read   | insert           | update               | delete          |
+ * | ------------- | ------ | ---------------- | -------------------- | --------------- |
+ * | canvases      | member | never (server)   | admin                | admin           |
+ * | canvasMembers | member | admin            | admin                | admin, self     |
+ * | layers        | member | editor, admin    | editor, admin        | editor, admin * |
+ * | shapes        | member | editor, admin *  | editor, admin *      | editor, admin * |
+ * | assets        | member | editor, admin    | never (immutable)    | editor, admin   |
+ * | cursors       | member | own row, member  | own row, member      | own row         |
+ * | checkpoints   | member | admin            | never (immutable)    | never           |
+ * | canvasInvites | admin  | admin            | never                | admin           |
+ *
+ * `*` also requires the layer to belong to the same canvas and be unlocked.
+ */
+
+// Child rows carry `canvasId`, so each rule below correlates on that column.
 const isCanvasMember = (canvasId: s.Uuid) =>
-  exists.canvasMembers({ canvasId, memberAuthor: session.user, role: ["editor", "admin"] });
-
-const isCanvasMemberAdmin = (canvasId: s.Uuid) =>
-  exists.canvasMembers({ canvasId, memberAuthor: session.user, role: "admin" });
-
-const isCanvasMember2 = (canvasId: s.Uuid) =>
   exists.canvasMembers({ canvasId, memberAuthor: session.user });
 
-const authorIsMe = { author: session.user };
+const canEditCanvas = (canvasId: s.Uuid) =>
+  exists.canvasMembers({ canvasId, memberAuthor: session.user, role: ["editor", "admin"] });
+
+const isCanvasAdmin = (canvasId: s.Uuid) =>
+  exists.canvasMembers({ canvasId, memberAuthor: session.user, role: "admin" });
+
+const mine = { author: session.user };
+
+// Shape admission has two independently correlated proofs over the row
+// being written: the selected layer belongs to this shape's canvas (and is
+// unlocked), and the current user is an editor or admin of that same
+// canvas. Keeping both predicates explicit prevents an editor on one canvas
+// from attaching a shape to a layer on another.
+const canWriteShape = (shape: s.Row<typeof schema, "shapes">) =>
+  allOf(
+    // A shape may only sit on an unlocked layer of its own canvas. Checking this
+    // on the row being written denies both cross-canvas attachment and edits on
+    // a locked layer.
+    shape.layer.where({ canvasId: shape.canvasId, locked: false }),
+    canEditCanvas(shape.canvasId),
+  );
 
 export const permissions = definePermissions({
+  // Asset bytes are immutable once uploaded; a replacement is a new asset.
   assets: {
     read: (asset) => allowedTo.read(asset.canvas),
-    insert: (asset) => isCanvasMember(asset.canvasId),
+    insert: (asset) => canEditCanvas(asset.canvasId),
     update: false,
-    delete: (asset) => isCanvasMember(asset.canvasId),
+    delete: (asset) => canEditCanvas(asset.canvasId),
   },
   better_auth_account: {
     read: false,
@@ -181,60 +216,62 @@ export const permissions = definePermissions({
     update: false,
     delete: false,
   },
+  // Invites are visible to, and issued and revoked by, admins only. Redeeming
+  // one happens server-side with backend authority (app/api/join).
   canvasInvites: {
-    read: (canvasInvite) => isCanvasMemberAdmin(canvasInvite.canvasId),
-    insert: (canvasInvite) => isCanvasMemberAdmin(canvasInvite.canvasId),
+    read: (invite) => isCanvasAdmin(invite.canvasId),
+    insert: (invite) => isCanvasAdmin(invite.canvasId),
     update: false,
-    delete: (canvasInvite) => isCanvasMemberAdmin(canvasInvite.canvasId),
+    delete: (invite) => isCanvasAdmin(invite.canvasId),
   },
   canvasMembers: {
-    read: (canvasMember) => allowedTo.read(canvasMember.canvas),
-    insert: (canvasMember) => allowedTo.update(canvasMember.canvas),
-    update: (canvasMember) => allowedTo.update(canvasMember.canvas),
-    delete: (canvasMember) =>
-      anyOf(allowedTo.update(canvasMember.canvas), { memberAuthor: session.user }),
+    read: (member) => allowedTo.read(member.canvas),
+    // Admins may add members directly; everyone else joins through the invite
+    // route, which inserts the membership with backend authority.
+    insert: (member) => allowedTo.update(member.canvas),
+    update: (member) => allowedTo.update(member.canvas),
+    delete: (member) => anyOf(allowedTo.update(member.canvas), { memberAuthor: session.user }),
   },
   canvases: {
-    read: (canvas) => isCanvasMember2(canvas.id),
+    read: (canvas) => isCanvasMember(canvas.id),
+    // Canvases (and their first admin membership) are only ever created by the
+    // server-side bootstrap in src/lib/bootstrap.ts, which writes with backend
+    // authority and bypasses these rules. No client may create a canvas, so
+    // there is no unconditional insert rule for child tables to inherit.
     insert: false,
-    update: (canvas) => isCanvasMemberAdmin(canvas.id),
-    delete: (canvas) => isCanvasMemberAdmin(canvas.id),
+    update: (canvas) => isCanvasAdmin(canvas.id),
+    delete: (canvas) => isCanvasAdmin(canvas.id),
   },
+  // Checkpoints are admin-owned, immutable named snapshots, not cursor history.
   checkpoints: {
     read: (checkpoint) => allowedTo.read(checkpoint.canvas),
-    insert: (checkpoint) => isCanvasMemberAdmin(checkpoint.canvasId),
+    insert: (checkpoint) => isCanvasAdmin(checkpoint.canvasId),
     update: false,
     delete: false,
   },
+  // Presence is replaceable ephemera owned by its author. Any member, viewers
+  // included, may publish exactly their own cursor on a canvas they belong
+  // to; nobody may write or remove another member's cursor.
   cursors: {
     read: (cursor) => allowedTo.read(cursor.canvas),
-    insert: (cursor) => allOf(authorIsMe, isCanvasMember2(cursor.canvasId)),
-    updateIf: authorIsMe,
-    updateTo: (cursor) => allOf(authorIsMe, isCanvasMember2(cursor.canvasId)),
-    delete: authorIsMe,
+    insert: (cursor) => allOf(mine, isCanvasMember(cursor.canvasId)),
+    updateIf: mine,
+    updateTo: (cursor) => allOf(mine, isCanvasMember(cursor.canvasId)),
+    delete: mine,
   },
+  // Layers: editors and admins create, rename, reorder, hide and lock them.
+  // Both the old and the new row must belong to a canvas the user edits, so a
+  // layer cannot be moved onto someone else's canvas.
   layers: {
     read: (layer) => allowedTo.read(layer.canvas),
-    insert: (layer) => isCanvasMember(layer.canvasId),
-    update: (layer) => isCanvasMember(layer.canvasId),
-    delete: (layer) => allOf(isCanvasMember(layer.canvasId), { locked: false }),
+    insert: (layer) => canEditCanvas(layer.canvasId),
+    update: (layer) => canEditCanvas(layer.canvasId),
+    delete: (layer) => allOf(canEditCanvas(layer.canvasId), { locked: false }),
   },
   shapes: {
     read: (shape) => allowedTo.read(shape.canvas),
-    insert: (shape) =>
-      allOf(
-        shape.layer.where({ canvasId: shape.canvasId, locked: false }),
-        isCanvasMember(shape.canvasId),
-      ),
-    update: (shape) =>
-      allOf(
-        shape.layer.where({ canvasId: shape.canvasId, locked: false }),
-        isCanvasMember(shape.canvasId),
-      ),
-    delete: (shape) =>
-      allOf(
-        shape.layer.where({ canvasId: shape.canvasId, locked: false }),
-        isCanvasMember(shape.canvasId),
-      ),
+    insert: canWriteShape,
+    update: canWriteShape,
+    delete: canWriteShape,
   },
 });

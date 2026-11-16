@@ -1,4 +1,5 @@
 import { schema as s } from "jazz-tools";
+import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "./constants.js";
 
 export const schema = s.defineSchema({
   messages: s.table(
@@ -14,26 +15,24 @@ export const schema = s.defineSchema({
 
 const { definePermissions, session, anyOf, allOf, eq, isIn } = schema;
 
-const roleInAdminOrMember = isIn(session.claims.role, ["admin", "member"]);
+const isAdmin = eq(session.claims.role, "admin");
+const isMemberOrAdmin = isIn(session.claims.role, ["admin", "member"]);
 
-const roleIsAdmin = eq(session.claims.role, "admin");
+const inAnnouncements = { chat_id: ANNOUNCEMENTS_CHAT_ID };
+const inGeneralChat = { chat_id: CHAT_ID };
 
-const createdByMe = { $createdBy: session.user };
+const createdByMe = { "$createdBy.account": session.user };
+
+// Members may change their own generic-chat messages; admins may change any.
+const canMutateGenericChat = anyOf(createdByMe, isAdmin);
 
 export const permissions = definePermissions({
   messages: {
-    read: anyOf({ chat_id: "announcements" }, allOf({ chat_id: "chat-01" }, roleInAdminOrMember)),
-    insert: anyOf(
-      allOf({ chat_id: "announcements" }, roleIsAdmin),
-      allOf({ chat_id: "chat-01" }, roleInAdminOrMember),
-    ),
-    update: anyOf(
-      allOf({ chat_id: "announcements" }, roleIsAdmin),
-      allOf({ chat_id: "chat-01" }, anyOf(createdByMe, roleIsAdmin)),
-    ),
-    delete: anyOf(
-      allOf({ chat_id: "announcements" }, roleIsAdmin),
-      allOf({ chat_id: "chat-01" }, anyOf(createdByMe, roleIsAdmin)),
-    ),
+    read: anyOf(inAnnouncements, allOf(inGeneralChat, isMemberOrAdmin)),
+    insert: anyOf(allOf(inAnnouncements, isAdmin), allOf(inGeneralChat, isMemberOrAdmin)),
+    // One symmetric predicate checks both the old and new row. Members may
+    // update their own generic-chat messages; announcements require an admin.
+    update: anyOf(allOf(inAnnouncements, isAdmin), allOf(inGeneralChat, canMutateGenericChat)),
+    delete: anyOf(allOf(inAnnouncements, isAdmin), allOf(inGeneralChat, canMutateGenericChat)),
   },
 });

@@ -110,108 +110,126 @@ export const schema = s.defineSchema({
   ),
 });
 
+/**
+ * Who can do what in StagePlan:
+ *
+ * - The crew chief (the account that created a show) manages the show, its
+ *   invite link and its crew.
+ * - Crew members (anyone with a showCrew row) see the show and can add, edit
+ *   and move its tasks, comment and log activity.
+ * - Everyone else sees nothing of the show: not the show, its tasks,
+ *   comments, activity or crew list.
+ * - Checklist items are private to their owner.
+ */
 const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
 
-const isShowCrew = (showId: s.Uuid) => exists.showCrew({ showId, account: session.user });
+const isChief = (showId: s.Uuid) => exists.shows({ id: showId, chiefAccount: session.user });
 
-const chiefAccountIsMe = { chiefAccount: session.user };
+// The chief counts as crew even before their own showCrew row syncs.
+const isCrew = (showId: s.Uuid) =>
+  anyOf(exists.showCrew({ showId, account: session.user }), isChief(showId));
 
-const accountIsMe = { account: session.user };
+const isMyProfile = (crewId: s.Uuid) => exists.crew({ id: crewId, account: session.user });
 
-const ownerAccountIsMe = { ownerAccount: session.user };
+// A task is assigned to nobody or to someone on the show's crew.
+const assigneeIsCrew = (showId: s.Uuid, assigneeId: s.Uuid) =>
+  anyOf({ assigneeId: null }, exists.showCrew({ showId, crewId: assigneeId }));
 
-const isShowCrew2 = (showId: s.Uuid, crewId: s.Uuid) => exists.showCrew({ showId, crewId });
+const mine = { account: session.user };
+
+const iAmChief = { chiefAccount: session.user };
+
+const ownedByMe = { ownerAccount: session.user };
 
 export const permissions = definePermissions({
+  // Activity is an append-only log per show.
   activity: {
-    read: (activity) => anyOf(isShowCrew(activity.showId), activity.show.where(chiefAccountIsMe)),
-    insert: (activity) =>
-      allOf(
-        anyOf(isShowCrew(activity.showId), activity.show.where(chiefAccountIsMe)),
-        activity.actor.where(accountIsMe),
-      ),
+    read: (entry) => isCrew(entry.showId),
+    insert: (entry) => allOf(isCrew(entry.showId), isMyProfile(entry.actorId)),
   },
+  // A personal checklist.
   checklistItems: {
-    read: ownerAccountIsMe,
-    insert: ownerAccountIsMe,
-    update: ownerAccountIsMe,
-    delete: ownerAccountIsMe,
+    read: ownedByMe,
+    insert: ownedByMe,
+    update: ownedByMe,
+    delete: ownedByMe,
   },
+  // Comments follow their task; authors delete their own.
   comments: {
     read: (comment) => allowedTo.read(comment.task),
-    insert: (comment) => allOf(allowedTo.read(comment.task), comment.author.where(accountIsMe)),
-    delete: (comment) => comment.author.where(accountIsMe),
+    insert: (comment) => allOf(allowedTo.read(comment.task), isMyProfile(comment.authorId)),
+    delete: (comment) => isMyProfile(comment.authorId),
   },
+  // Crew profiles: names are shared, only you edit yours.
   crew: {
     read: true,
-    insert: accountIsMe,
-    update: accountIsMe,
+    insert: mine,
+    update: mine,
   },
   showCrew: {
-    read: (showCrew) => anyOf(isShowCrew(showCrew.showId), showCrew.show.where(chiefAccountIsMe)),
-    insert: (showCrew) =>
+    read: (member) => isCrew(member.showId),
+    insert: (member) =>
       anyOf(
+        // The chief adds themselves when creating the show.
         allOf(
           { account: session.user, role: "chief" },
-          showCrew.show.where(chiefAccountIsMe),
-          showCrew.crew.where(accountIsMe),
+          isChief(member.showId),
+          isMyProfile(member.crewId),
         ),
+        // Anyone holding the current invite code can join as crew.
         allOf(
           { account: session.user, role: "crew" },
-          showCrew.crew.where(accountIsMe),
-          exists.showInvites({ showId: showCrew.showId, code: showCrew.inviteCode }),
+          isMyProfile(member.crewId),
+          exists.showInvites({ showId: member.showId, code: member.inviteCode }),
         ),
       ),
-    updateIf: accountIsMe,
-    updateTo: (showCrew, old) =>
+    // Two updates, each keeping the row on the same show and profile:
+    // - once the server has accepted a membership, the joiner clears its invite
+    //   code, so other crew can't read the code;
+    // - the chief rewrites their own membership when a repair from another tab
+    //   lands on the same row (it has a stable id).
+    updateIf: mine,
+    updateTo: (member, old) =>
       allOf(
         { account: session.user, inviteCode: null },
-        showCrew.crew.where(accountIsMe),
+        isMyProfile(member.crewId),
         anyOf(
           allOf(
             { role: "crew" },
-            exists.showCrew({ id: showCrew.id, showId: showCrew.showId, role: "crew" }),
+            exists.showCrew({ id: member.id, showId: member.showId, role: "crew" }),
           ),
-          allOf({ role: "chief" }, showCrew.show.where(chiefAccountIsMe), { showId: old.showId }),
+          allOf({ role: "chief" }, isChief(member.showId), { showId: old.showId }),
         ),
       ),
-    delete: (showCrew) => anyOf(accountIsMe, showCrew.show.where(chiefAccountIsMe)),
+    // Members leave on their own; the chief can remove anyone.
+    delete: (member) => anyOf(mine, isChief(member.showId)),
   },
+  // Invite codes are bearer secrets: only the chief reads or rotates them. A
+  // joiner's membership carries the code until they clear it (see showCrew).
   showInvites: {
-    read: (showInvite) => showInvite.show.where(chiefAccountIsMe),
-    insert: (showInvite) => showInvite.show.where(chiefAccountIsMe),
-    updateIf: (showInvite) => showInvite.show.where(chiefAccountIsMe),
-    updateTo: (showInvite, old) =>
-      allOf(showInvite.show.where(chiefAccountIsMe), { showId: old.showId }),
-    delete: (showInvite) => showInvite.show.where(chiefAccountIsMe),
+    read: (invite) => isChief(invite.showId),
+    insert: (invite) => isChief(invite.showId),
+    // A repair of the first invite from another tab rewrites the same row.
+    updateIf: (invite) => isChief(invite.showId),
+    updateTo: (invite, old) => allOf(isChief(invite.showId), { showId: old.showId }),
+    delete: (invite) => isChief(invite.showId),
   },
   shows: {
-    read: (show) =>
-      anyOf(isShowCrew(show.id), exists.shows({ id: show.id, chiefAccount: session.user })),
-    insert: chiefAccountIsMe,
-    update: chiefAccountIsMe,
-    delete: chiefAccountIsMe,
+    read: (show) => isCrew(show.id),
+    insert: iAmChief,
+    update: iAmChief,
+    delete: iAmChief,
   },
+  // Any crew member edits tasks; the chief or the task's creator deletes them.
   tasks: {
-    read: (task) => anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
-    insert: (task) =>
-      allOf(
-        anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
-        anyOf({ assigneeId: null }, isShowCrew2(task.showId, task.assigneeId)),
-      ),
-    updateIf: (task) => anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
-    updateTo: (task) =>
-      allOf(
-        anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
-        anyOf({ assigneeId: null }, isShowCrew2(task.showId, task.assigneeId)),
-      ),
+    read: (task) => isCrew(task.showId),
+    insert: (task) => allOf(isCrew(task.showId), assigneeIsCrew(task.showId, task.assigneeId)),
+    updateIf: (task) => isCrew(task.showId),
+    updateTo: (task) => allOf(isCrew(task.showId), assigneeIsCrew(task.showId, task.assigneeId)),
     delete: (task) =>
       anyOf(
-        task.show.where(chiefAccountIsMe),
-        allOf(
-          { $createdBy: session.user },
-          anyOf(isShowCrew(task.showId), task.show.where(chiefAccountIsMe)),
-        ),
+        isChief(task.showId),
+        allOf({ "$createdBy.account": session.user }, isCrew(task.showId)),
       ),
   },
 });

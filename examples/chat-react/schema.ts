@@ -72,7 +72,7 @@ const isChatMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: se
 
 const mine = { userId: session.user };
 
-const createdByMe = { $createdBy: session.user };
+const createdByMe = { "$createdBy.account": session.user };
 
 export const permissions = definePermissions({
   canvases: {
@@ -98,6 +98,7 @@ export const permissions = definePermissions({
       anyOf({ isPublic: true }, isChatMember(chat.id), { joinCode: session.claims.join_code }),
     insert: createdByMe,
     updateIf: (chat) => isChatMember(chat.id),
+    // Members may update only non-protected fields: `isPublic` cannot change.
     updateTo: (chat, old) => allOf(isChatMember(chat.id), { isPublic: old.isPublic }),
   },
   messages: {

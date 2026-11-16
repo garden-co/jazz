@@ -136,20 +136,28 @@ export const schema = s.defineSchema({
 
 const { definePermissions, allowedTo, session, anyOf, allOf } = schema;
 
-const ownerAccountIsMe = { ownerAccount: session.user };
+// A workspace belongs to one Jazz account: rows carry their owner's account.
+const mine = { ownerAccount: session.user };
 
+/**
+ * The browser may start conversations, write the user's own turns and attach
+ * audio to them. Only the server (backend authority) writes assistant turns,
+ * tool calls and the seeded booking data, so a client can never forge an
+ * agent reply.
+ */
 export const permissions = definePermissions({
   artists: {
-    read: ownerAccountIsMe,
+    read: mine,
   },
   attachments: {
     read: (attachment) => allowedTo.read(attachment.conversation),
     insert: (attachment) =>
       allOf(
-        attachment.conversation.where(ownerAccountIsMe),
+        attachment.conversation.where(mine),
         attachment.turn.where({ conversationId: attachment.conversationId, role: "user" }),
       ),
   },
+  // Better Auth's rows are written only by the backend.
   better_auth_account: {
     read: false,
     insert: false,
@@ -181,21 +189,22 @@ export const permissions = definePermissions({
     delete: false,
   },
   calendarEvents: {
-    read: ownerAccountIsMe,
+    read: mine,
   },
+  // A conversation may only name an artist from the same workspace: the agent
+  // reads that artist's data with backend authority.
   conversations: {
-    read: ownerAccountIsMe,
-    insert: (conversation) => allOf(ownerAccountIsMe, conversation.artist.where(ownerAccountIsMe)),
-    updateIf: ownerAccountIsMe,
-    updateTo: (conversation) =>
-      allOf(ownerAccountIsMe, conversation.artist.where(ownerAccountIsMe)),
-    delete: ownerAccountIsMe,
+    read: mine,
+    insert: (conversation) => allOf(mine, conversation.artist.where(mine)),
+    updateIf: mine,
+    updateTo: (conversation) => allOf(mine, conversation.artist.where(mine)),
+    delete: mine,
   },
   profiles: {
     read: { accountId: session.user },
   },
   songs: {
-    read: ownerAccountIsMe,
+    read: mine,
   },
   toolCalls: {
     read: (toolCall) => allowedTo.read(toolCall.conversation),
@@ -205,11 +214,13 @@ export const permissions = definePermissions({
     insert: (turn) =>
       allOf(
         { role: "user", status: "complete" },
-        turn.conversation.where(ownerAccountIsMe),
+        turn.conversation.where(mine),
+        // A turn continues its conversation: its parent, if any, is a turn of
+        // the same conversation.
         anyOf({ parentId: null }, turn.parent.where({ conversationId: turn.conversationId })),
       ),
   },
   venues: {
-    read: ownerAccountIsMe,
+    read: mine,
   },
 });
