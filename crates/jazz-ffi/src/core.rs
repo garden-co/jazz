@@ -314,9 +314,6 @@ impl Core {
                 "for_user needs the user's id, as the main backend's authenticate names it",
             ));
         }
-        // jazz-app asks the main backend (reqwest) on the caller's thread,
-        // which needs a Tokio runtime: a host's thread has none.
-        let _runtime = io_runtime()?.enter();
         let jazz = match block_on(self.open_jazz()?.for_user(user_id, claims)) {
             Ok(jazz) => jazz,
             Err(jazz_app::Error::Refused(reason)) => {
@@ -1245,28 +1242,6 @@ impl Core {
             delivery.send(Some(Event::Error(JazzError::Closed)));
         }
     }
-}
-
-/// A Tokio runtime for the jazz-app calls that do their I/O on the
-/// caller's thread (`for_user`), driven by a thread of its own.
-fn io_runtime() -> Result<&'static tokio::runtime::Handle> {
-    static RUNTIME: std::sync::OnceLock<std::result::Result<tokio::runtime::Handle, String>> =
-        std::sync::OnceLock::new();
-    RUNTIME
-        .get_or_init(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("cannot start an I/O runtime: {error}"))?;
-            let handle = runtime.handle().clone();
-            std::thread::Builder::new()
-                .name("jazz-ffi-io".into())
-                .spawn(move || runtime.block_on(std::future::pending::<()>()))
-                .map_err(|error| format!("cannot start the I/O runtime's thread: {error}"))?;
-            Ok(handle)
-        })
-        .as_ref()
-        .map_err(|error| FfiError::Io(error.clone()))
 }
 
 /// A forwarder's sender that, dropped before the forwarder ended on its
