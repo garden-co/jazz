@@ -15,25 +15,22 @@ export const schema = s.defineSchema({
 
 const { definePermissions, session, anyOf, allOf, eq, isIn } = schema;
 
-const chatIdAndRoleInAdminOrMember = allOf(
-  { chat_id: CHAT_ID },
-  isIn(session.claims.role, ["admin", "member"]),
-);
+const rule1 = allOf({ chat_id: CHAT_ID }, isIn(session.claims.role, ["admin", "member"]));
 
 const roleIsAdmin = eq(session.claims.role, "admin");
 
-const chatIdAndRoleIsAdmin = allOf({ chat_id: ANNOUNCEMENTS_CHAT_ID }, roleIsAdmin);
+const rule2 = allOf({ chat_id: ANNOUNCEMENTS_CHAT_ID }, roleIsAdmin);
 
-const chatIdAndRoleIsAdminOrMore = anyOf(
-  chatIdAndRoleIsAdmin,
+const rule3 = anyOf(
+  rule2,
   allOf({ chat_id: CHAT_ID }, anyOf({ "$createdBy.account": session.user }, roleIsAdmin)),
 );
 
 export const permissions = definePermissions({
   messages: {
-    read: anyOf({ chat_id: ANNOUNCEMENTS_CHAT_ID }, chatIdAndRoleInAdminOrMember),
-    insert: anyOf(chatIdAndRoleIsAdmin, chatIdAndRoleInAdminOrMember),
-    update: chatIdAndRoleIsAdminOrMore,
-    delete: chatIdAndRoleIsAdminOrMore,
+    read: anyOf({ chat_id: ANNOUNCEMENTS_CHAT_ID }, rule1),
+    insert: anyOf(rule2, rule1),
+    update: rule3,
+    delete: rule3,
   },
 });

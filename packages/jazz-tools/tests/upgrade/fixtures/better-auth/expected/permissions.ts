@@ -16,35 +16,34 @@ const isMembershipAdminOrEditor = (organizationId: s.Uuid) =>
     isMembershipWithRole(organizationId, "editor"),
   );
 
-const personWithUserId = (membership: s.Row<typeof schema, "memberships">) =>
-  membership.person.where({ userId: membership.userId });
+const personMatches = (personId: s.Uuid, userId: s.Uuid) => exists.people({ id: personId, userId });
 
 const mine = { userId: session.user };
 
-const isMembershipAdminAndMore = (releaseAssignment: s.Row<typeof schema, "releaseAssignments">) =>
+const releaseMatches = (releaseId: s.Uuid, organizationId: s.Uuid) =>
+  exists.releases({ id: releaseId, organizationId });
+
+const membershipMatches = (membershipId: s.Uuid, organizationId: s.Uuid) =>
+  exists.memberships({ id: membershipId, organizationId });
+
+const rule1 = (organizationId: s.Uuid, releaseId: s.Uuid, membershipId: s.Uuid) =>
   allOf(
-    isMembershipWithRole(releaseAssignment.organizationId, "admin"),
-    releaseAssignment.release.where({ organizationId: releaseAssignment.organizationId }),
-    releaseAssignment.membership.where({ organizationId: releaseAssignment.organizationId }),
+    isMembershipWithRole(organizationId, "admin"),
+    releaseMatches(releaseId, organizationId),
+    membershipMatches(membershipId, organizationId),
   );
 
-const isMembershipAdminOrEditorAndMore = (release: s.Row<typeof schema, "releases">) =>
+const teamMatches = (teamId: s.Uuid, organizationId: s.Uuid) =>
+  exists.teams({ id: teamId, organizationId });
+
+const rule2 = (organizationId: s.Uuid, artistId: s.Uuid, catalogueId: s.Uuid) =>
   allOf(
-    isMembershipAdminOrEditor(release.organizationId),
+    isMembershipAdminOrEditor(organizationId),
     allOf(
-      release.artist.where({ organizationId: release.organizationId }),
-      anyOf(
-        { catalogueId: null },
-        release.catalogue.where({ organizationId: release.organizationId }),
-      ),
+      exists.artists({ id: artistId, organizationId }),
+      anyOf({ catalogueId: null }, exists.catalogues({ id: catalogueId, organizationId })),
     ),
   );
-
-const teamWithOrganizationId = (teamAssignment: s.Row<typeof schema, "teamAssignments">) =>
-  teamAssignment.team.where({ organizationId: teamAssignment.organizationId });
-
-const membershipWithOrganizationId = (teamAssignment: s.Row<typeof schema, "teamAssignments">) =>
-  teamAssignment.membership.where({ organizationId: teamAssignment.organizationId });
 
 export const permissions = definePermissions({
   ...betterAuthPermissions,
@@ -65,14 +64,14 @@ export const permissions = definePermissions({
     insert: (membership) =>
       allOf(
         isMembershipWithRole(membership.organizationId, "admin"),
-        personWithUserId(membership),
+        personMatches(membership.personId, membership.userId),
         anyOf({ role: "editor" }, { role: "viewer" }),
       ),
     updateIf: (membership) => isMembershipWithRole(membership.organizationId, "admin"),
     updateTo: (membership) =>
       allOf(
         isMembershipWithRole(membership.organizationId, "admin"),
-        personWithUserId(membership),
+        personMatches(membership.personId, membership.userId),
         anyOf({ role: "admin" }, { role: "editor" }, { role: "viewer" }),
       ),
     delete: (membership) => isMembershipWithRole(membership.organizationId, "admin"),
@@ -97,10 +96,20 @@ export const permissions = definePermissions({
   },
   releaseAssignments: {
     read: (releaseAssignment) => allowedTo.read(releaseAssignment.release),
-    insert: (releaseAssignment) => isMembershipAdminAndMore(releaseAssignment),
+    insert: (releaseAssignment) =>
+      rule1(
+        releaseAssignment.organizationId,
+        releaseAssignment.releaseId,
+        releaseAssignment.membershipId,
+      ),
     updateIf: (releaseAssignment) =>
       isMembershipWithRole(releaseAssignment.organizationId, "admin"),
-    updateTo: (releaseAssignment) => isMembershipAdminAndMore(releaseAssignment),
+    updateTo: (releaseAssignment) =>
+      rule1(
+        releaseAssignment.organizationId,
+        releaseAssignment.releaseId,
+        releaseAssignment.membershipId,
+      ),
     delete: (releaseAssignment) => isMembershipWithRole(releaseAssignment.organizationId, "admin"),
   },
   releaseTeams: {
@@ -108,17 +117,17 @@ export const permissions = definePermissions({
     insert: (releaseTeam) =>
       allOf(
         isMembershipAdminOrEditor(releaseTeam.organizationId),
-        releaseTeam.release.where({ organizationId: releaseTeam.organizationId }),
-        releaseTeam.team.where({ organizationId: releaseTeam.organizationId }),
+        releaseMatches(releaseTeam.releaseId, releaseTeam.organizationId),
+        teamMatches(releaseTeam.teamId, releaseTeam.organizationId),
       ),
     update: false,
     delete: (releaseTeam) => isMembershipAdminOrEditor(releaseTeam.organizationId),
   },
   releases: {
     read: (release) => isMembership(release.organizationId),
-    insert: (release) => isMembershipAdminOrEditorAndMore(release),
+    insert: (release) => rule2(release.organizationId, release.artistId, release.catalogueId),
     updateIf: (release) => isMembershipAdminOrEditor(release.organizationId),
-    updateTo: (release) => isMembershipAdminOrEditorAndMore(release),
+    updateTo: (release) => rule2(release.organizationId, release.artistId, release.catalogueId),
     delete: (release) => isMembershipWithRole(release.organizationId, "admin"),
   },
   teamAssignments: {
@@ -126,15 +135,15 @@ export const permissions = definePermissions({
     insert: (teamAssignment) =>
       allOf(
         allowedTo.insert(teamAssignment.team),
-        teamWithOrganizationId(teamAssignment),
-        membershipWithOrganizationId(teamAssignment),
+        teamMatches(teamAssignment.teamId, teamAssignment.organizationId),
+        membershipMatches(teamAssignment.membershipId, teamAssignment.organizationId),
       ),
     updateIf: (teamAssignment) => allowedTo.update(teamAssignment.team),
     updateTo: (teamAssignment) =>
       allOf(
         allowedTo.update(teamAssignment.team),
-        teamWithOrganizationId(teamAssignment),
-        membershipWithOrganizationId(teamAssignment),
+        teamMatches(teamAssignment.teamId, teamAssignment.organizationId),
+        membershipMatches(teamAssignment.membershipId, teamAssignment.organizationId),
       ),
     delete: (teamAssignment) => allowedTo.delete(teamAssignment.team),
   },

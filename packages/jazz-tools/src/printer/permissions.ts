@@ -154,6 +154,14 @@ interface Frag {
   hint?: string;
   /** A name for it inside another helper's name (its literals too: `isMembershipAdmin`). */
   label?: string;
+  /**
+   * How to print it inline in a rule, when that differs: a forward relation's
+   * check is `row.rel.where(…)` there, and `exists.t({ id: value, … })` in a
+   * helper, which then takes the value and serves every table.
+   */
+  inline?: Frag;
+  /** A helper's call. */
+  call?: boolean;
 }
 
 /** A candidate helper occurrence, recorded in pass 1. */
@@ -261,8 +269,9 @@ interface Selection {
 }
 
 /** Parameters from a helper's uses: row values always, literals where they differ. */
-function paramsOf(uses: Arg[][]): Helper["params"] {
-  const first = uses[0] ?? [];
+function paramsOf(all: Arg[][]): Helper["params"] {
+  const first = all[0] ?? [];
+  const uses = all.filter((u) => u.length === first.length);
   return first.map((arg, i) => {
     if (arg.literal && uses.every((u) => u[i]?.text === arg.text)) return { fixed: arg.text };
     return { name: arg.name, type: arg.type };
@@ -323,6 +332,7 @@ function selectHelpers(occurrences: Occurrence[], taken: Set<string>): Selection
     drafts.push({ base, qualifiers: fixed, helper });
   }
   // Names: the base; helpers sharing one are told apart by their fixed literals.
+  let generic = 0;
   const counts = new Map<string, number>();
   for (const d of drafts) counts.set(d.base, (counts.get(d.base) ?? 0) + 1);
   for (const d of drafts) {
@@ -330,6 +340,10 @@ function selectHelpers(occurrences: Occurrence[], taken: Set<string>): Selection
     if ((counts.get(d.base) ?? 0) > 1 && d.qualifiers.length)
       name += `With${d.qualifiers.join("And")}`;
     if (name.length > 40) name = d.base;
+    // A name too long to read (or a guess like `…AndMore`) is worse than a
+    // short one for the author to rename.
+    const words = name.replace(/^(is|can|has)(?=[A-Z])/, "").split(/(?=[A-Z])/).length;
+    if (words > 4 || /More|Rule$|Rules$/.test(name)) name = `rule${++generic}`;
     d.helper.name = fresh(name, taken);
   }
   return { byKey: helpers, keyOf: occurrences.map((o) => o.key) };
@@ -382,12 +396,18 @@ function join(parts: Frag[], render: (texts: string[]) => string): Frag {
       return PLACEHOLDER(at);
     }),
   );
-  return {
+  const joined: Frag = {
     text: render(texts),
     args,
     old: parts.some((p) => p.old),
     occ: parts.flatMap((p) => p.occ),
   };
+  if (parts.some((p) => p.inline))
+    joined.inline = join(
+      parts.map((p) => p.inline ?? p),
+      render,
+    );
+  return joined;
 }
 
 /** Number placeholders by first appearance; fold `row.col` into a `row` argument. */
@@ -471,8 +491,11 @@ class Printer {
           .filter((a) => a.literal)
           .map((a) => pascal(a.text.replace(/"/g, "")))
           .join("");
-    if (!helper) return { ...c, occ: [...frag.occ, id], hint, label };
     this.seen.set(shape, [...(this.seen.get(shape) ?? []), c.args]);
+    // A use that doesn't line up with the helper (its arguments shifted by an inner one) stays inline.
+    if (!helper || helper.params.length !== c.args.length) {
+      return { ...c, occ: [...frag.occ, id], hint, label, inline: frag.inline };
+    }
     if (!this.bodies.has(helper)) {
       this.bodies.set(helper, c.text);
       this.helperOrder.push(helper);
@@ -493,6 +516,7 @@ class Printer {
     return {
       text,
       args,
+      call: true,
       occ: [id],
       hint: helper.name,
       label: helper.name.replace(/With[A-Z]\w*$/, "") + passed,
@@ -531,9 +555,10 @@ class Printer {
       this.unsupported.push({ path, text: error.text, reason: error.reason });
       return "false";
     }
-    const text = fill(frag);
+    const shown = frag.inline ?? frag;
+    const text = fill(shown);
     const body = text.startsWith("{") ? `(${text})` : text;
-    const usesRow = frag.args.some((a) => !a.literal);
+    const usesRow = shown.args.some((a) => !a.literal);
     if (frag.old) return `(${ctx.row}, old) => ${body}`;
     if (usesRow) return `(${ctx.row}) => ${body}`;
     return text;
@@ -793,9 +818,36 @@ class Printer {
           if (conds && conds.extras.length === 0) {
             const where = conds.object ?? lit("{}");
             const row: Frag = { text: PLACEHOLDER(0), args: [this.rowArg(ctx)], occ: [] };
-            const frag = join([row, where], ([r, w]) => `${member(r!, rel[0])}.where(${w})`);
-            const hint = `${camel(rel[0])}${where.hint ? `With${pascal(where.hint)}` : ""}`;
-            return this.shaped(frag, hint, ctx.table);
+            const inline = join([row, where], ([r, w]) => `${member(r!, rel[0])}.where(${w})`);
+            // The same check by value, for helpers: `exists.shows({ id: showId, … })`.
+            this.tools.add("exists");
+            const id: Frag = {
+              text: PLACEHOLDER(0),
+              args: [{ ...this.columnArg(ctx, column), name: column }],
+              occ: [],
+            };
+            const entries: [string, Frag][] = [["id", id], ...conds.entries];
+            const byValue = join(
+              entries.map(([, v]) => v),
+              (texts) =>
+                `${member("exists", ast.table)}(${objectText(entries.map(([k], i) => [k, texts[i]!]))})`,
+            );
+            // `isChief` for a check of the session's user (`chiefAccount = session.user`),
+            // `releaseMatches` for one comparing the target with the row.
+            const mine = conds.entries.find(([, v]) => v.text === "session.user");
+            const role = mine && camel(mine[0].replace(/(Account|User|UserId|Id)$/, ""));
+            const plainUser = mine && /^(account|user|userId|owner|ownerId)$/.test(mine[0]);
+            const hint =
+              mine && (plainUser || !role)
+                ? `isMy${pascal(singular(ast.table))}`
+                : role
+                  ? `is${pascal(role)}`
+                  : conds.entries.length === 0
+                    ? `has${pascal(singular(ast.table))}`
+                    : `${camel(singular(ast.table))}Matches`;
+            const shaped = this.shaped(byValue, hint);
+            // A helper's call stays a call; otherwise the rule reads the relation.
+            return shaped.call ? shaped : { ...shaped, inline };
           }
         }
       }
@@ -848,7 +900,7 @@ class Printer {
     items: Ast[],
     ctx: RuleCtx,
     scope: Scope,
-  ): { object: Frag | undefined; extras: Frag[] } | undefined {
+  ): { object: Frag | undefined; extras: Frag[]; entries: [string, Frag][] } | undefined {
     const flat: Ast[] = [];
     for (const item of items) {
       if (item.kind === "and") flat.push(...item.items);
@@ -862,14 +914,14 @@ class Printer {
       else entries.push(cond);
     }
     const extras = extraItems.map((item) => this.expr(item, ctx, scope));
-    if (entries.length === 0) return { object: undefined, extras };
+    if (entries.length === 0) return { object: undefined, extras, entries };
     // A constant object may be a helper used elsewhere (`msg.sender.where(mine)`).
     const constant = entries.every(([, v]) => v.args.every((a) => a.literal));
     const object = constant
       ? this.conditionObject(entries, { table: scope.table })
       : objectFrag(entries);
     object.hint ??= conditionHint(entries);
-    return { object, extras };
+    return { object, extras, entries };
   }
 
   private isInnerColumn(op: Operand, scope: Scope): boolean {
@@ -903,8 +955,18 @@ class Printer {
           right = ast.left;
           op = FLIP[op];
         }
-        const value = this.value(right, ctx, scope, this.kindOf(scope.table, left), left);
+        const value = this.value(
+          right,
+          ctx,
+          scope,
+          this.kindOf(scope.table, left),
+          left,
+          this.enumType(scope.table, left),
+        );
         if (!value) return undefined;
+        // A value from the checked row takes the name of the column it is compared with:
+        // `exists.members({ bandId })`, not `{ bandId: id }`.
+        value.args = value.args.map((a) => (a.literal ? a : { ...a, name: left }));
         if (right.kind === "null") {
           if (op === "=") return [left, value];
           if (op === "!=") return [left, wrap(value, (t) => this.fn("ne", t))];
@@ -1169,6 +1231,13 @@ class Printer {
     return `${name}(${arg})`;
   }
 
+  /** An enum column's values as a TS union, for helper parameters. */
+  private enumType(table: string, column: string): string | undefined {
+    const spec = this.app.tables[table]?.columns[column];
+    if (typeof spec !== "object" || !spec.enum) return undefined;
+    return spec.enum.map((v) => JSON.stringify(v)).join(" | ");
+  }
+
   private kindOf(table: string, column: string): string | undefined {
     if (column === "id") return "uuid";
     return columnKind(this.app.tables[table]?.columns[column]);
@@ -1197,6 +1266,7 @@ class Printer {
     scope: Scope,
     kind: string | undefined,
     key = "value",
+    type?: string,
   ): Frag | undefined {
     switch (op.kind) {
       case "string":
@@ -1219,7 +1289,7 @@ class Printer {
         const name = camel(key.replace(/^\$/, "").replace(/\./g, " ")) || "value";
         return {
           text: PLACEHOLDER(0),
-          args: [{ text, name, type: valueType(valueKind), literal: true }],
+          args: [{ text, name, type: type ?? valueType(valueKind), literal: true }],
           occ: [],
         };
       }
@@ -1248,7 +1318,11 @@ function valueType(kind: string | undefined): string {
 
 /** `value` inside `render(…)`, keeping its placeholders. */
 function wrap(value: Frag, render: (text: string) => string): Frag {
-  return { ...value, text: render(value.text) };
+  return {
+    ...value,
+    text: render(value.text),
+    ...(value.inline ? { inline: wrap(value.inline, render) } : {}),
+  };
 }
 
 function objectFrag(entries: [string, Frag][]): Frag {

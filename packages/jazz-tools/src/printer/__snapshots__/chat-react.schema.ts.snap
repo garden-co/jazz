@@ -56,9 +56,11 @@ const isChatMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: se
 
 const mine = { userId: session.user };
 
+const chatMatches = (chatId: s.Uuid) => exists.chats({ id: chatId, isPublic: true });
+
 const createdByMe = { "$createdBy.account": session.user };
 
-const senderWithMine = (message: s.Row<typeof schema, "messages">) => message.sender.where(mine);
+const isMyProfile = (senderId: s.Uuid) => exists.profiles({ id: senderId, userId: session.user });
 
 export const permissions = definePermissions({
   canvases: {
@@ -69,7 +71,7 @@ export const permissions = definePermissions({
     read: (chatMember) => anyOf(mine, isChatMember(chatMember.chatId)),
     insert: (chatMember) =>
       anyOf(
-        allOf(mine, chatMember.chat.where({ isPublic: true })),
+        allOf(mine, chatMatches(chatMember.chatId)),
         allOf(mine, chatMember.chat.where(createdByMe)),
         allOf(
           mine,
@@ -87,9 +89,9 @@ export const permissions = definePermissions({
     updateTo: (chat, old) => allOf(isChatMember(chat.id), { isPublic: old.isPublic }),
   },
   messages: {
-    read: (message) => anyOf(message.chat.where({ isPublic: true }), isChatMember(message.chatId)),
-    insert: (message) => allOf(isChatMember(message.chatId), senderWithMine(message)),
-    delete: (message) => senderWithMine(message),
+    read: (message) => anyOf(chatMatches(message.chatId), isChatMember(message.chatId)),
+    insert: (message) => allOf(isChatMember(message.chatId), isMyProfile(message.senderId)),
+    delete: (message) => isMyProfile(message.senderId),
   },
   profiles: {
     read: true,
