@@ -1345,7 +1345,8 @@ impl JazzClient {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
-            let prepared = self.prepare(&read)?;
+            // A transaction opened for a session reads as that session.
+            let (prepared, session) = self.prepare_read(&read)?;
             let db = self.db()?;
             // A client's serializable read hydrates from the authority,
             // which needs ticks to answer. A branch view composes over the
@@ -1355,7 +1356,7 @@ impl JazzClient {
                 .settle(db.tx_ref(transaction_id).all_prepared_in(
                     &prepared,
                     false,
-                    None,
+                    session,
                     ReadTier::LocalFirst,
                     &opts.read_view.source,
                 ))
@@ -1378,20 +1379,11 @@ impl JazzClient {
         } else {
             let (prepared, session) = self.prepare_read(&read)?;
             let db = self.db()?;
-            let read_local = || {
-                crate::db::block_on(async {
-                    let roots = match &session {
-                        Some(author) => {
-                            db.all_for_identity(&prepared, opts.clone(), author.clone())
-                                .await
-                        }
-                        None => db.all(&prepared, opts.clone()).await,
-                    }?;
-                    // Array relations nest in their parents' cells, as a
-                    // subscription's rows carry them.
-                    db.nest_relations(&prepared, roots)
-                })
-            };
+            // Array relations nest in their parents' cells, as a
+            // subscription's rows carry them, read as the same session as
+            // the roots.
+            let read_local =
+                || crate::db::block_on(db.all_nested(&prepared, opts.clone(), session));
             // A row whose large values are still being fetched answers once
             // their chunks arrive, while the upstream that will send them is
             // connected.

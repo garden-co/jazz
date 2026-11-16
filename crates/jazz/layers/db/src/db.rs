@@ -3172,6 +3172,31 @@ impl Db {
 
     /// Root rows with each array relation nested in a cell under its
     /// column name ([`ResultNode::into_nested_row`]).
+    /// A one-shot read with array relations nested in their parents' cells,
+    /// as a subscription nests them: roots and related rows alike read as
+    /// `identity` (its read policy applies to both; `None`: unchecked), at
+    /// the one read position `opts` gives.
+    pub async fn all_nested(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        identity: Option<AuthorSubject>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.fetching(|| {
+            // Resolved on every attempt: a chunk wait may outlive a policy
+            // revision.
+            let prepared = match identity {
+                Some(_) => self.execution_query(prepared),
+                None => std::borrow::Cow::Borrowed(prepared),
+            };
+            let inner = self.inner();
+            let read = ReadSpec::of(&opts, &inner)?;
+            let roots = inner.run(&prepared, identity, &read)?;
+            inner.nest_relations(&prepared, identity, &read, roots)
+        })
+        .await
+    }
+
     pub fn nest_relations(
         &self,
         prepared: &PreparedQuery,
