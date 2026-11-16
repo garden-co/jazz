@@ -32,13 +32,13 @@ export function exampleAppDirs(cwd = root) {
 }
 
 /**
- * A Swift package of the Jazz Swift runtime (a Package.swift naming
- * jazz-swift): its bindings are JazzApp.swift, which jazz-codegen's golden
+ * A Swift package of the Jazz Swift runtime (a Package.swift using its
+ * `Jazz` product): its bindings are JazzApp.swift, which jazz-codegen's golden
  * test and dev/gates/jazz-swift.sh check while the npm CLI has Swift off.
  */
 function isSwiftPackage(dir) {
   const manifest = join(dir, "Package.swift");
-  return existsSync(manifest) && readFileSync(manifest, "utf8").includes("jazz-swift");
+  return existsSync(manifest) && usesJazzSwift(readFileSync(manifest, "utf8"));
 }
 
 /** `generate --check` in each app; the failures, as `dir: last line of output`. */
@@ -77,4 +77,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit(1);
   }
   console.log(`example bindings: ${checked} apps pass \`jazz-tools generate --check\`.`);
+}
+
+/** As jazz-codegen's `swift::is_app_manifest`: the `Jazz` product, or the jazz-swift package. */
+function usesJazzSwift(manifest) {
+  return /\.product\(\s*name:\s*"Jazz"/.test(manifest) || /["/]jazz-swift(\.git)?"/.test(manifest);
 }
