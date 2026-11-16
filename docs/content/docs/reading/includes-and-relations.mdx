@@ -34,7 +34,7 @@ export const schema = s.defineSchema({
 });
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
@@ -44,6 +44,12 @@ export const schema = s.defineSchema({
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-includes-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-includes-rust
+    </include>
+
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
@@ -110,7 +116,7 @@ relation.
 
 Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
@@ -120,6 +126,12 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-select-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-select-rust
+    </include>
+
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
@@ -259,7 +271,7 @@ hidden by permissions. The included field is `null`. A nullable, unset reference
 Use `.requireIncludes()` when every included, non-nullable forward reference must resolve. It drops
 a source row if one of those required targets is unavailable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-require-includes-ts
@@ -269,6 +281,12 @@ a source row if one of those required targets is unavailable.
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-require-includes-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-require-includes-rust
+    </include>
+
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
@@ -312,8 +330,24 @@ Depth is counted from the start relation: `maxDepth: 0` returns only the start r
 `maxDepth: 1` may also return rows reached by one `step` hop. A zero bound never performs an
 implicit first hop.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-recursive-rust
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#reading-recursive-go
+    </include>
+
+  </Tab>
+</Tabs>
 
 This starts from all incomplete todos, then follows each todo's `parentId` &rarr; `parent` relation up to 10 levels deep, returning the full lineage.

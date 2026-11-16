@@ -50,9 +50,25 @@ A one-shot query runs once against the database without subscribing to changes.
 To read a single row, use `db.one`. It runs the query with a limit of one and resolves to the
 first matching row, or `null` if no row matches or you aren't allowed to read it.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-one-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-one-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-one-rust
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#reading-one-go
+    </include>
+
+  </Tab>
+</Tabs>
 
 ## Subscriptions
 
