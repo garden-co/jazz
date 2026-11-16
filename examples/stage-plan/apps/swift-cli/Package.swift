@@ -8,12 +8,12 @@ let package = Package(
     name: "stage-plan-swift",
     platforms: [.macOS(.v13)],
     dependencies: [
-        .package(name: "jazz-swift", path: "../../../../packages/jazz-swift")
+        .package(name: "jazz", path: "../../../..")
     ],
     targets: [
         .target(
             name: "StagePlan",
-            dependencies: [.product(name: "Jazz", package: "jazz-swift")],
+            dependencies: [.product(name: "Jazz", package: "jazz")],
             path: ".",
             sources: ["JazzApp.swift", "Sources/StagePlan"],
             resources: [.copy("jazz.permissions.json")]
