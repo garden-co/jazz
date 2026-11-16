@@ -90,7 +90,7 @@ public class Jazz internal constructor(
                 if (config.serverUrl != null && config.auth == null) {
                     throw JazzException.Refused(
                         "connecting to ${config.serverUrl} needs JazzConfig.auth (a device account, or your backend's sign-in). " +
-                            "Kotlin is a client; run your backend in TypeScript, Rust or Go.",
+                            "Kotlin is for apps; your app's main backend runs in TypeScript.",
                     )
                 }
                 val json = config.toJson(app)

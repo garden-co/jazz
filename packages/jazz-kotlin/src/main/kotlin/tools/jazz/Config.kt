@@ -38,8 +38,7 @@ public enum class Storage {
 /**
  * How to open an app: locally (no [serverUrl]), or as an end user of your
  * backend's Jazz endpoint ([serverUrl], e.g. `https://app.example/jazz`,
- * signed in with [auth]). Kotlin is a client: run your backend in
- * TypeScript, Rust or Go.
+ * signed in with [auth]). Kotlin is for apps: your app's main backend runs in TypeScript.
  */
 public data class JazzConfig(
     val appId: String? = null,

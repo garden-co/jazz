@@ -32,7 +32,7 @@ class StagePlanTest {
      * StagePlan's backend for the test: a Jazz server (`jazz-tools server`)
      * and `jazz-app-test-relay`, which publishes StagePlan's permissions and
      * stands in for the backend's Jazz endpoint. A test harness, not a backend
-     * to copy: real backends are TypeScript, Rust or Go.
+     * to copy: an app's main backend runs in TypeScript.
      */
     @BeforeTest
     fun startBackend() {

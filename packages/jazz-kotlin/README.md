@@ -1,6 +1,6 @@
 # jazz-kotlin
 
-The Kotlin runtime for Jazz apps (JVM and Android clients; backends run in TypeScript, Rust or Go): `suspend` calls and `Flow` subscriptions over
+The Kotlin runtime for Jazz apps (JVM and Android apps; your app's main backend runs in TypeScript): `suspend` calls and `Flow` subscriptions over
 [`jazz-ffi`](../../crates/jazz-ffi) (UniFFI, through JNA), for the typed bindings
 `jazz-tools generate` writes to `src/main/kotlin/JazzApp.kt` beside a `build.gradle.kts`.
 

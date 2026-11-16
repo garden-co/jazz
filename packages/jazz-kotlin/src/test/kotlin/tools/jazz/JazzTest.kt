@@ -97,7 +97,7 @@ class JazzTest {
     @Test
     fun a_server_without_auth_is_refused_kotlin_is_a_client(): Unit = runBlocking {
         val error = assertFailsWith<JazzException.Refused> { Jazz.open("{}", JazzConfig(serverUrl = "https://app/jazz")) }
-        assertTrue(error.message!!.contains("Kotlin is a client"), error.message)
+        assertTrue(error.message!!.contains("Kotlin is for apps"), error.message)
     }
 
     @Test
