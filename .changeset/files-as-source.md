@@ -7,14 +7,14 @@
 
 Breaking: `jazz.app.json` and `jazz.permissions.json` are now an app's only source of its schema, migrations and permissions, in TypeScript as in every other language. `schema.ts`, `permissions.ts` and `migrations/` are gone, and so is the TypeScript schema DSL.
 
-**Upgrade:** run `npx jazz-tools@2.0.0-alpha.66 upgrade` in each app _before_ you bump `jazz-tools` in its `package.json`, then review the diff. Upgrade reads your schema.ts types through your installed alpha.65 copy, and it refuses files alpha.65's `validate --check` would refuse, so run alpha.65's `jazz-tools validate` first if they are stale. It then:
+**Upgrade:** run `npx jazz-tools@2.0.0-alpha.66 upgrade` in each app _before_ you bump `jazz-tools` in its `package.json`, then review the diff. Upgrade reads your schema.ts types through your installed alpha.65 (or alpha.64) copy, and it refuses files alpha.65's `validate --check` would refuse, so run your installed version's `jazz-tools validate` first if they are stale. It then:
 
 - moves `s.computed` fields and `.transform` columns into `jazz.app.json` (`computed` per table, top-level `transforms`), with their callbacks in a new `jazz.computed.ts`;
 - checks that `jazz.app.json` already carries the history and migrations of `migrations/`;
 - deletes `schema.ts`, `permissions.ts` and `migrations/`;
 - rewrites imports (`./schema` becomes `./jazz.generated`, and backends import `./jazz.permissions.json`) and every `app.slice(...)`;
 - rewrites `jazz-tools validate` in your package.json scripts to `jazz-tools generate`;
-- generates `jazz.generated.ts` (`src/jazz_app.rs` for a `jazz-app` Rust crate) and typechecks the app, reporting what is left to fix.
+- generates `jazz.generated.ts` (`src/jazz_app.rs` for a `jazz-app-support` Rust crate) and typechecks the app, reporting what is left to fix.
 
 Upgrade refuses, before writing anything, a transform with `dependsOn` or a computed field read from another computed field (the files can't express them yet), and permissions that read `process.env`/`import.meta.env`: policies are data, so a per-deployment value belongs in `session.claims`.
 
@@ -29,6 +29,6 @@ Upgrade refuses, before writing anything, a transform with `dependsOn` or a comp
   - `jazz-tools/testing` adds `testApp(appJson)` and `testPermissions(app, permissionsJson)` for apps a test defines inline.
   - `appMigrations` and `defineShippedApp` are gone.
 
-**Removed:** `schema`/`s`, `migration`/`m`, `defineApp`, `defineSchema`, `definePermissions` and `jazz-tools/permissions`, `defineMigration`, `renameTableFrom`, `schemaToWasm`, `{ migrations: "none" }`, and schema slicing (`defineSliceableApp`, `app.slice(...)`), which only existed to relieve TypeScript inference. They throw `JAZZ_API_REMOVED` errors pointing at `jazz-tools upgrade`. `validate --strict-provenance`, `migrations create --fromHash/--toHash/--migrations-dir` and the Better Auth adapter's schema.ts generator are gone too: Better Auth's `generate` now writes its tables into `jazz.app.json`. See "Upgrading from alpha.65" in the docs.
+**Removed:** `schema`/`s`, `migration`/`m`, `defineApp`, `defineSchema`, `definePermissions` and `jazz-tools/permissions`, `defineMigration`, `renameTableFrom`, `schemaToWasm`, `{ migrations: "none" }`, and schema slicing (`defineSliceableApp`, `app.slice(...)`), which only existed to relieve TypeScript inference. They throw `JAZZ_API_REMOVED` errors pointing at `jazz-tools upgrade`. `validate --strict-provenance`, `migrations create --fromHash/--toHash/--migrations-dir` and the Better Auth adapter's schema.ts generator are gone too: Better Auth's `generate` now writes its tables into `jazz.app.json`. See "Upgrading from alpha.64" in the docs.
 
 jazz-napi exports Jazz's code generator and loaders: `generate`, `compileApp`, `schemaSourceHash`, `migrationsCreate`, `validateBindings` and `loadBackendApp`. Backends and `deploy` publish the deployment the Rust loader builds; the TypeScript deployment builder and schema hash are gone.

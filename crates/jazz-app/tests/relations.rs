@@ -6,7 +6,7 @@ mod bindings;
 
 use bindings::{NewProject, NewTodo, Project, Todo, TodoUpdate, projects, todos};
 use futures::StreamExt;
-use jazz_app::{
+use jazz_app_support::{
     AppId, Backend, Config, Error, Jazz, Order, Partial, Query, Row, Rows, Step, Timestamp, Version,
 };
 use jazz_server::JazzServer;
@@ -96,8 +96,9 @@ async fn server() -> (JazzServer, ConfigFn) {
 }
 
 /// `query`'s rows, as the server holds them.
-async fn remote<R: Row>(jazz: &Jazz, query: Query<R>) -> jazz_app::Result<Vec<R>> {
-    jazz.all_with(query, jazz_app::ReadTier::Remote).await
+async fn remote<R: Row>(jazz: &Jazz, query: Query<R>) -> jazz_app_support::Result<Vec<R>> {
+    jazz.all_with(query, jazz_app_support::ReadTier::Remote)
+        .await
 }
 
 /// `query`'s rows once there are `count`, as the server holds them.
@@ -394,7 +395,7 @@ async fn include_deleted_reads_deleted_rows() {
     let with_options: Vec<Todo> = jazz
         .all_with_options(
             todos::query().include_deleted(),
-            jazz_app::ReadOptions::default(),
+            jazz_app_support::ReadOptions::default(),
         )
         .await
         .unwrap();
@@ -404,7 +405,7 @@ async fn include_deleted_reads_deleted_rows() {
         .all(
             todos::query()
                 .include_deleted()
-                .select((todos::title(), jazz_app::deleted_at())),
+                .select((todos::title(), jazz_app_support::deleted_at())),
         )
         .await
         .unwrap();
@@ -525,7 +526,7 @@ async fn history_lists_a_rows_accepted_versions() {
 
 /// The rows a subscription holds, once `done` says they are complete.
 async fn until<T: Row + Clone>(
-    changes: &mut jazz_app::Subscription<T>,
+    changes: &mut jazz_app_support::Subscription<T>,
     rows: &mut Rows<T>,
     done: impl Fn(&[T]) -> bool,
 ) -> Vec<T> {
@@ -566,7 +567,7 @@ async fn history_subscriptions_follow_accepted_versions() {
             todos::history()
                 .id(f.milk.id)
                 .order_by_accepted_at(Order::Asc),
-            jazz_app::ReadTier::Remote,
+            jazz_app_support::ReadTier::Remote,
         )
         .await
         .unwrap();
@@ -678,7 +679,7 @@ async fn unsupported_combinations_are_refused_as_in_typescript() {
     let reason = unsupported(jazz.all(union().include_deleted()).await.unwrap_err());
     assert!(reason.contains("include_deleted()"), "{reason}");
     // Part of a value can't be read through a union, a history read or a hop.
-    let part = || jazz_app::ValuePart::TextUtf16 { from: 0, to: 2 };
+    let part = || jazz_app_support::ValuePart::TextUtf16 { from: 0, to: 2 };
     let reason = unsupported(
         jazz.all(union().part(todos::title(), part()))
             .await
@@ -815,8 +816,8 @@ async fn relations_and_history_through_a_server() {
 /// read through the low-level client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn untyped_queries_lower_the_same_way() {
-    use jazz_app::jazz::query::{self as q, OrderDirection};
-    use jazz_app::untyped::{self, GatherStep, Hop, Table};
+    use jazz_app_support::jazz::query::{self as q, OrderDirection};
+    use jazz_app_support::untyped::{self, GatherStep, Hop, Table};
 
     let jazz = local().await;
     let f = fixture(&jazz).await;
@@ -827,17 +828,17 @@ async fn untyped_queries_lower_the_same_way() {
         )
     };
     let projects_table = Table::new("projects", ["name"]);
-    let by_id = |id: jazz_app::ObjectId| {
+    let by_id = |id: jazz_app_support::ObjectId| {
         q::eq(
             q::col("id"),
-            q::lit(jazz_app::jazz::records::Value::Uuid(*id.uuid())),
+            q::lit(jazz_app_support::jazz::records::Value::Uuid(*id.uuid())),
         )
     };
     let read = |query: untyped::Query| {
         let deleted = query.reads_deleted();
         let query = query.into_core();
         jazz.with_client(move |client| async move {
-            let mut opts = jazz_app::jazz::db::ReadOpts::default();
+            let mut opts = jazz_app_support::jazz::db::ReadOpts::default();
             opts.read_view.include_deleted = deleted;
             let rows = client.query_with_opts(query?, opts).await?;
             Ok::<_, Error>(
@@ -872,7 +873,7 @@ async fn untyped_queries_lower_the_same_way() {
         projects,
         [format!(
             "{:?}",
-            jazz_app::jazz::tools::Value::Text("Home".into())
+            jazz_app_support::jazz::tools::Value::Text("Home".into())
         )]
     );
 
@@ -903,7 +904,9 @@ async fn untyped_queries_lower_the_same_way() {
     .unwrap_err();
     assert!(unsupported(refused).contains("arms must read todos"));
 
-    assert!(untyped::accepted_at(&jazz_app::jazz::tools::Value::Text("x".into())).is_none());
+    assert!(
+        untyped::accepted_at(&jazz_app_support::jazz::tools::Value::Text("x".into())).is_none()
+    );
     let _ = (&f.home, &f.milk);
     jazz.shutdown().await.unwrap();
 }

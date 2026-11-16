@@ -1111,3 +1111,41 @@ fn value_json_shape_is_pinned() {
         postcard::Error::SerdeDeCustom
     );
 }
+
+/// A column type 2.0.0-alpha.64 accepted, an enum whose cases carry fields,
+/// still decodes from a stored schema and hashes as .64 hashed it (these
+/// are .64's cross-runtime fixture hashes), so a store whose catalogue
+/// holds such a version opens.
+#[test]
+fn legacy_payload_enum_columns_hash_as_alpha_64_did() {
+    let cases = [
+        (
+            r#"{"type":"EnumPayload","cases":[{"name":"created","fields":[{"name":"title","column_type":{"type":"Text"},"nullable":false}]},{"name":"deleted","fields":[]}]}"#,
+            "2556ae3abd5c72c359507a583419b0eec11d12f0d4fc9dd6bd06f7276097281f",
+        ),
+        (
+            r#"{"type":"EnumPayload","cases":[{"name":"deleted","fields":[]},{"name":"created","fields":[{"name":"title","column_type":{"type":"Text"},"nullable":false}]}]}"#,
+            "89165a453f1d1805ffa2af2eaaf4d7014399a8d44ef0be690c538a610f1ea135",
+        ),
+        (
+            r#"{"type":"EnumPayload","cases":[{"name":"created","fields":[{"name":"title","column_type":{"type":"Text"},"nullable":true}]},{"name":"deleted","fields":[]}]}"#,
+            "a820544a5c3f8e7632d9f578344fccfcf4e6ced02aae9b977359b53fc977bb3f",
+        ),
+        (
+            r#"{"type":"Array","element":{"type":"Row","columns":[{"name":"path","column_type":{"type":"Text"},"nullable":false},{"name":"entries","column_type":{"type":"Array","element":{"type":"Row","columns":[{"name":"score","column_type":{"type":"Double"},"nullable":false},{"name":"kind","column_type":{"type":"Enum","variants":["a","b"]},"nullable":true}]}},"nullable":false},{"name":"event","column_type":{"type":"EnumPayload","cases":[{"name":"changed","fields":[{"name":"by","column_type":{"type":"Uuid"},"nullable":false},{"name":"diff","column_type":{"type":"Bytea"},"nullable":true}]}]},"nullable":true}]}}"#,
+            "e19e301349458093efd4c414b765d50e7f4bdff4bf5150874e9551aa9266f398",
+        ),
+    ];
+    for (json, hash) in cases {
+        let column_type: ColumnType = serde_json::from_str(json).expect(json);
+        // It writes back as it was read.
+        assert_eq!(
+            serde_json::to_value(&column_type).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("values").column("value", column_type))
+            .build();
+        assert_eq!(SchemaHash::compute(&schema).to_hex(), hash, "{json}");
+    }
+}

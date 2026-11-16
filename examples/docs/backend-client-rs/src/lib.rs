@@ -5,37 +5,49 @@ use todo_server_docs::jazz_app;
 
 /// Connects to the main backend's `/jazz` as a scoped machine, reads, and
 /// closes.
-pub async fn backend_client() -> ::jazz_app::Result<()> {
+pub async fn backend_client() -> ::jazz_app_support::Result<()> {
     // #region backend-client-connect-rust
-    use ::jazz_app::{AppId, Config, Storage, TokenReason};
+    use ::jazz_app_support::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage, TokenReason};
     use jazz_app::todos; // the generated bindings
 
     // The main backend trusts this workload in `backendClients`, with
     // `trustWorkload({ issuer, audience, claims, as })`.
-    let config = Config::new(AppId::from_name("todos"))
-        .server("https://app.example/jazz") // the main backend's Jazz endpoint
-        .storage(Storage::Memory)
-        .credential(|_reason: TokenReason| async move {
-            // The workload's OIDC token, read fresh each time it is asked for.
-            std::fs::read_to_string("/var/run/secrets/jazz/token")
-                .map(|token| Some(token.trim().to_owned()))
-                .map_err(|e| ::jazz_app::Error::Config(format!("reading the workload token: {e}")))
-        });
-    let jazz = jazz_app::open(config).await?;
+    let app_id = std::env::var("JAZZ_APP_ID").unwrap_or_default(); // the main backend's `jazz.appId`
+    let config = Config::new(
+        AppId::from_string(&app_id)
+            .map_err(|_| ::jazz_app_support::Error::Config("JAZZ_APP_ID".into()))?,
+    )
+    .server("https://app.example/jazz") // the main backend's Jazz endpoint
+    .storage(Storage::Memory)
+    .credential(|_reason: TokenReason| async move {
+        // The workload's OIDC token, read fresh each time it is asked for.
+        std::fs::read_to_string("/var/run/secrets/jazz/token")
+            .map(|token| Some(token.trim().to_owned()))
+            .map_err(|e| {
+                ::jazz_app_support::Error::Config(format!("reading the workload token: {e}"))
+            })
+    });
+    // A backend client opens with the app's permissions too, as TypeScript's
+    // `createJazzClient` does: the generated bindings embed only the schema.
+    let files = AppFiles::new(jazz_app::APP, None)
+        // your app's jazz.permissions.json
+        .with_permissions(include_bytes!("../../todo-server-rs/jazz.permissions.json").as_slice());
+    let jazz = Jazz::open(files, config).await?;
     let open = jazz
         .all(todos::query().filter(todos::done().eq(false)))
         .await?;
     println!("{} open todos", open.len());
-    jazz.shutdown().await?;
+    // Waits up to 10 seconds for queued writes to reach the main backend.
+    jazz.close(CLOSE_TIMEOUT).await?;
     // #endregion backend-client-connect-rust
     Ok(())
 }
 
 /// A trusted backend client: what it is trusted as, acting for a user, and
 /// closing once its writes have arrived.
-pub async fn trusted(job: ::jazz_app::Jazz) -> ::jazz_app::Result<()> {
+pub async fn trusted(job: ::jazz_app_support::Jazz) -> ::jazz_app_support::Result<()> {
     // #region backend-client-trusted-rust
-    use ::jazz_app::BackendClientKind;
+    use ::jazz_app_support::BackendClientKind;
 
     // `job` is opened with `Config::credential`, as above. The main backend
     // decides what the credential is trusted as.
@@ -49,7 +61,7 @@ pub async fn trusted(job: ::jazz_app::Jazz) -> ::jazz_app::Result<()> {
     // #endregion backend-client-trusted-rust
 
     // #region backend-client-for-user-rust
-    use ::jazz_app::Error;
+    use ::jazz_app_support::Error;
     use jazz_app::NewTodo;
 
     // A trusted client acting for one of the app's users: its reads and
@@ -68,7 +80,7 @@ pub async fn trusted(job: ::jazz_app::Jazz) -> ::jazz_app::Result<()> {
     // #endregion backend-client-for-user-rust
 
     // #region backend-client-close-rust
-    use ::jazz_app::CLOSE_TIMEOUT;
+    use ::jazz_app_support::CLOSE_TIMEOUT;
 
     // Waits up to 10 seconds for queued writes to reach the server, then
     // stops the client. With `Storage::Memory`, writes still queued are lost.

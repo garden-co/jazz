@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "245a29888b185efdefc0cc6acf9524395087f4dea86035379dedc05916dc53bd"
+  },
   "tables": {
     "artists": { "read": "ownerAccount = session.user" },
     "attachments": {

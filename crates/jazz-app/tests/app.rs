@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use bindings::{NewProject, NewTodo, Todo, TodoUpdate, projects, todos};
 use futures::StreamExt;
-use jazz_app::{AppFiles, AppId, Backend, Config, Error, Jazz, Order, ReadTier, Rows, Storage};
+use jazz_app_support::{
+    AppFiles, AppId, Backend, Config, Error, Jazz, Order, ReadTier, Rows, Storage,
+};
 use jazz_server::JazzServer;
 
 fn files() -> AppFiles {
@@ -185,7 +187,7 @@ async fn transactions_commit_or_roll_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_and_restore() {
     let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
-    let id = jazz_app::ObjectId::new();
+    let id = jazz_app_support::ObjectId::new();
     let first = jazz.upsert(id, new_todo("first")).await.unwrap();
     assert_eq!((first.id, first.title.as_str()), (id, "first"));
     let second = jazz.upsert(id, NewTodo::new("second", true)).await.unwrap();
@@ -199,7 +201,7 @@ async fn upsert_and_restore() {
     // Without a server there is nothing to wait for.
     jazz.wait_for_sync().await.unwrap();
     let refused = jazz
-        .durable(jazz_app::DurabilityTier::GlobalServer)
+        .durable(jazz_app_support::DurabilityTier::GlobalServer)
         .insert(new_todo("nowhere to go"))
         .await;
     assert!(matches!(refused, Err(Error::Config(_))), "{refused:?}");
@@ -287,7 +289,7 @@ async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
     // covers the plain writes made before it.
     let plain = writer.insert(new_todo("Plain")).await.unwrap();
     let written = writer
-        .durable(jazz_app::DurabilityTier::GlobalServer)
+        .durable(jazz_app_support::DurabilityTier::GlobalServer)
         .insert(new_todo("Synced"))
         .await
         .unwrap();
@@ -345,7 +347,7 @@ async fn refuses_what_it_cannot_do() {
     assert!(matches!(broken, Err(Error::App(_))), "{broken:?}");
 }
 
-async fn next(changes: &mut jazz_app::Subscription<Todo>) -> jazz_app::Delta<Todo> {
+async fn next(changes: &mut jazz_app_support::Subscription<Todo>) -> jazz_app_support::Delta<Todo> {
     tokio::time::timeout(Duration::from_secs(5), changes.next())
         .await
         .expect("a delta")
@@ -391,7 +393,7 @@ async fn shutdown_refuses_calls_made_while_it_drains() {
 async fn a_panicking_call_reports_it_and_the_client_runs_on() {
     let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
     let panicked = jazz
-        .with_client(|_| async { panic!("boom") as jazz_app::Result<()> })
+        .with_client(|_| async { panic!("boom") as jazz_app_support::Result<()> })
         .await;
     assert!(
         matches!(&panicked, Err(Error::Panicked(message)) if message == "boom"),
@@ -399,7 +401,9 @@ async fn a_panicking_call_reports_it_and_the_client_runs_on() {
     );
     // A closure that panics before it returns its future.
     let panicked = jazz
-        .with_client(|_| -> std::future::Ready<jazz_app::Result<()>> { panic!("sync boom") })
+        .with_client(|_| -> std::future::Ready<jazz_app_support::Result<()>> {
+            panic!("sync boom")
+        })
         .await;
     assert!(
         matches!(&panicked, Err(Error::Panicked(message)) if message == "sync boom"),
@@ -469,7 +473,7 @@ async fn query_helpers() {
         ["Buy milk"]
     );
     let newest_first = jazz
-        .all(todos::query().order_by(jazz_app::created_at(), Order::Desc))
+        .all(todos::query().order_by(jazz_app_support::created_at(), Order::Desc))
         .await
         .unwrap();
     assert_eq!(titles(newest_first), ["Buy bread", "Buy milk"]);
@@ -486,7 +490,7 @@ async fn query_helpers() {
 /// `Remote` read asks the server. What can't be answered is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_options_with_a_server() {
-    use jazz_app::ReadOptions;
+    use jazz_app_support::ReadOptions;
     let app_id = AppId::random();
     let server = JazzServer::builder()
         .with_app_id(app_id)
@@ -508,7 +512,7 @@ async fn read_options_with_a_server() {
     };
     let writer = open().await.unwrap();
     let written = writer
-        .durable(jazz_app::DurabilityTier::GlobalServer)
+        .durable(jazz_app_support::DurabilityTier::GlobalServer)
         .insert(new_todo("on the server"))
         .await
         .unwrap();
@@ -574,7 +578,7 @@ async fn mergeable_and_serializable_transactions() {
         let todo = jazz.insert(new_todo("contended")).await.unwrap();
         let id = todo.id;
         let other = jazz.clone();
-        let body = move |tx: jazz_app::Transaction| async move {
+        let body = move |tx: jazz_app_support::Transaction| async move {
             let seen = tx.get::<Todo>(id).await?.expect("the row");
             // Someone else renames it meanwhile.
             other

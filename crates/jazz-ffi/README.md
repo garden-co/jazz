@@ -1,6 +1,6 @@
 # jazz-ffi
 
-A dynamic, JSON-in/JSON-out layer over [`jazz-app`](../jazz-app), so the
+A dynamic, JSON-in/JSON-out layer over [`jazz-app-support`](../jazz-app), so the
 Swift, Kotlin and Go bindings only (de)serialize JSON. Two surfaces over one
 handle:
 
@@ -67,8 +67,11 @@ backend decides what the client is, reported by `backend_client()` /
   returns a handle acting as one of the app's users, under their
   permissions. That never creates an account: `NoAccount` (kind
   `"noAccount"`, with `userId`) when the user has none yet, `Permission`
-  when the main backend refuses the identity (its 403). Closing such a
-  handle leaves its parent open.
+  when the main backend refuses the identity (its 403), and
+  `BundleMismatch` (kind `"bundleMismatch"`, with `own` and `served`, the
+  two bundle ids) when the client's `permissions` aren't the ones the main
+  backend serves: reopen it with the app's published
+  `jazz.permissions.json`. Closing such a handle leaves its parent open.
 - `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
   kind `"refused"`), as on a `for_user` handle or any other app.
 
@@ -101,6 +104,41 @@ rejected, lastError, synced}`). Anonymous users are not supported (as in TS).
 
 Without `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
+
+## Sessions (TS's `JazzSession`)
+
+A session follows who is signed in, and hands out a client for that user,
+replacing it when the user changes. UniFFI `Session.open(config, tokens?)`,
+C `jazz_session_open(config, token_cb, ctx, err)`. The config is the app's,
+with `serverUrl` (the app's `/jazz`), `appId`, `storage` / `dataDir` (each
+account's store under `dataDir/<account>/`, the device key in
+`dataDir/device.key`), `"auth": {"bearer": true}` with a token provider,
+and `"initial"`: `"backend"` (follow the bearer; the default, which needs
+one), `"device"` or `"signed-out"`. `"linkGuest"` (default `true`, as TS):
+a user the bearer names who has no account yet takes over the device
+guest's account; `false` leaves the guest until `link_device_account()`.
+Linking reopens the account on the bearer: `clientEpoch` moves on.
+
+- `snapshot()` / `"snapshot"`: `{"status": "starting"|"ready"|"signed-out"|
+"transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
+{"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
+- `jazz()` / `jazz_session_jazz`: a `JazzHandle` for the user signed in now
+  (`NoUser`, kind `"noUser"` with `"status"`, while there is none). Once the
+  user changes (or signs out) every call on it fails with `Replaced` (kind
+  `"replaced"`; `Closed` without contract 2): fetch the new one when
+  `clientEpoch` changes. Its `shutdown` / `jazz_close` leaves the session
+  open.
+- `refresh()` (the app's auth changed: ask the bearer and follow),
+  `create_device_account()`, `restore_device_account(key)`,
+  `reopen_device_account()`, `link_device_account()`,
+  `export_device_key()`, `sign_out()` (the session stays, signed out),
+  `retry()` (as `recovery` says); C `jazz_session_call(s, method, args)`.
+- `watch(listener)` / `jazz_session_watch`: each snapshot, the current one
+  first, and a last `{"kind": "closed"}` when the session closes.
+- `shutdown()` / `jazz_session_close`: closes the session; its handles fail
+  `Closed`, its watches end, and no token callback runs after.
+
+Not yet: deleting a session account's store through its handle (refused).
 
 ## Lifecycle (as TS's)
 
@@ -238,7 +276,7 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   lost to another write; retry it). UniFFI: `JazzError.Permission`,
   `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
   these as `refused`, as before.
-- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app's
+- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app-support's
   `untyped` builder, as the typed Rust API and TS lower them):
   - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
 …], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
@@ -251,7 +289,7 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
     as TS's union: a row matched by two arms comes twice, and `limit` /
     `offset` count every occurrence; arms read one table, with `where` only.
     Subscribing to a union whose arms overlap can mis-apply removals (deltas
-    name rows by id), as in jazz-app.
+    name rows by id), as in jazz-app-support.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
     versions the server accepted, each row with `"$history":
 {"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
@@ -305,5 +343,5 @@ yet":
 Computed columns and transforms are the language bindings' job: this layer
 reads and writes the stored values.
 
-Writes are local-first, as in jazz-app. A write that the server's permissions
+Writes are local-first, as in jazz-app-support. A write that the server's permissions
 refuse is not refused by the call. It just never syncs.

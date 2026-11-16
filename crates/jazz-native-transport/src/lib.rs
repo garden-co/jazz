@@ -645,6 +645,10 @@ impl WireTransport for WebSocketTransport {
         let frame = inbound.try_recv().ok();
         frame.map(|frame| frame.bytes)
     }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.features
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -2304,6 +2308,57 @@ mod tests {
                 assert!(!error.is_retryable());
                 assert!(error.to_string().contains("scope_isolated_client_relay"));
             }
+            server.await.unwrap();
+        }
+    }
+
+    /// The transport a client attaches reports what its `Hello` negotiated:
+    /// the database sends a serializable commit that read through a branch
+    /// view only over a link with the feature (jazz#5806), so a transport
+    /// that forgot to report it would refuse those commits for good.
+    #[tokio::test]
+    async fn the_attached_transport_reports_its_negotiated_features() {
+        for offered in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _prelude = socket.next().await.unwrap().unwrap();
+                let _hello = socket.next().await.unwrap().unwrap();
+                let mut features = current_wire_features();
+                if !offered {
+                    features &= !jazz::wire::FEATURE_SERIALIZABLE_BRANCH_READS;
+                }
+                let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+                    WirePeerRole::Core,
+                    features,
+                )))
+                .unwrap();
+                socket
+                    .send(Message::Binary(
+                        postcard::to_allocvec(&vec![hello]).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+            });
+            let connected = NativeWebSocketConnector
+                .connect(NativeTransportRequest {
+                    requested_link: NativeTransportLink::OrdinarySession,
+                    server_url: format!("http://{address}"),
+                    app_id: AppId::random(),
+                    peer_identity: AuthorSubject::SYSTEM,
+                    auth: AuthConfig::default(),
+                    authorization: None,
+                    bundle: None,
+                    wake: Arc::new(|| {}),
+                })
+                .await
+                .expect("handshake");
+            assert_eq!(
+                connected.transport.features() & jazz::wire::FEATURE_SERIALIZABLE_BRANCH_READS != 0,
+                offered
+            );
             server.await.unwrap();
         }
     }

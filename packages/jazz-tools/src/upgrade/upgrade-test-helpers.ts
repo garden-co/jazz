@@ -1,12 +1,11 @@
 /**
- * Fixture apps for `jazz-tools upgrade`'s tests. Each is a .64-era app
- * (schema.ts, permissions.ts, migrations/, and the jazz.app.json /
- * jazz.permissions.json the old validate wrote) read with the published
- * jazz-tools@2.0.0-alpha.63, which has the same DSL surface as alpha.65.
- * The tests never touch the workspace DSL: each fixture runs in a scratch
- * copy whose node_modules is an npm install of tests/upgrade/legacy-package.json.
+ * Fixture apps for `jazz-tools upgrade`'s tests. Each is an alpha.65 app
+ * (schema.ts with `defineApp`, permissions.ts, migrations/, and the
+ * jazz.app.json / jazz.permissions.json its validate wrote), checked with the
+ * published jazz-tools@2.0.0-alpha.65. Each runs in a scratch copy whose
+ * node_modules is an npm install of tests/upgrade/legacy-package.json.
  */
-import { execFileSync, execSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -26,7 +25,7 @@ export const UPGRADE_TESTS = join(here, "..", "..", "tests", "upgrade");
 export const FIXTURES = join(UPGRADE_TESTS, "fixtures");
 const LEGACY = join(UPGRADE_TESTS, ".legacy-modules");
 
-/** node_modules with jazz-tools@2.0.0-alpha.63 (aliased), its jazz-napi and typescript, installed once. */
+/** node_modules with jazz-tools@2.0.0-alpha.65, its jazz-napi and typescript, installed once. */
 export function legacyModules(): string {
   const modules = join(LEGACY, "node_modules");
   if (
@@ -81,22 +80,9 @@ export function projectFiles(dir: string): Record<string, string> {
   return out;
 }
 
-/**
- * jazz.generated.ts from jazz.app.json: jazz-napi's `generate`, or the
- * binary JAZZ_UPGRADE_TEST_GENERATOR names (a jazz-codegen build) where the
- * installed jazz-napi predates it. Undefined when neither exists.
- */
-export async function testGenerator(): Promise<((appJson: string) => string) | undefined> {
-  const binary = process.env.JAZZ_UPGRADE_TEST_GENERATOR;
-  if (binary)
-    return (appJson) => execFileSync(binary, ["ts"], { input: appJson, encoding: "utf8" });
-  try {
-    const napi = (await import("jazz-napi")) as unknown as {
-      generate?: (lang: string, app: string) => string;
-    };
-    if (typeof napi.generate === "function") return (appJson) => napi.generate!("ts", appJson);
-  } catch {
-    // No native binding in this environment.
-  }
-  return undefined;
+/** Step 6 for the tests: this workspace's `generate`, on the converted app. */
+export async function testGenerate(schemaDir: string): Promise<void> {
+  const { generateApp } = await import("../dev/project.js");
+  // alpha.65's JSON files carry no `$generated` marker: replacing them is the point.
+  await generateApp({ cwd: schemaDir, force: true });
 }

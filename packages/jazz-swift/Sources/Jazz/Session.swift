@@ -18,7 +18,7 @@ public enum Auth: Sendable {
 public enum TokenReason: String, Sendable { case connect, renew, expired, refresh }
 
 /// A new device account key (`jazz-auth-v1:…`).
-public func generateDeviceKey() throws(JazzError) -> String {
+public func generateDeviceKey() throws -> String {
     do {
         return try JazzFFI.generateDeviceKey()
     } catch {
@@ -109,16 +109,32 @@ public enum Link: Decodable, Hashable, Sendable {
 /// Why the link is offline, as TS's `OfflineReason`.
 public enum OfflineReason: String, Decodable, Hashable, Sendable {
     case network, auth, stopped, disconnected
+    /// The server serves another history than this client's local store
+    /// (its store was recreated, or it is another app's server): nothing
+    /// syncs with it until the local store is deleted and the client opened
+    /// again, or the old server is back and the client reconnects.
+    case authorityChanged = "authority-changed"
 }
 
 /// Something that went wrong with sync, as TS's `SyncError`.
 public struct SyncError: Decodable, Hashable, Sendable {
-    /// `rejected`, `network`, `auth` or `stopped`.
+    /// `rejected`, `network`, `auth`, `stopped` or `authority-changed`.
     public var kind: String
     /// The rejection's code, for `rejected`.
     public var code: String?
     public var message: String
     public var at: Date
+}
+
+/// A write the server refused (`Client.mutationErrors`).
+public struct MutationError: Decodable, Hashable, Sendable {
+    /// The refused transaction's id.
+    public var transaction: String
+    public var message: String
+    /// Refused by the app's permissions (rather than, say, a conflict).
+    public var denied: Bool
+    /// From a serializable transaction.
+    public var serializable: Bool
 }
 
 final class Tokens: TokenProvider, @unchecked Sendable {
@@ -129,7 +145,7 @@ final class Tokens: TokenProvider, @unchecked Sendable {
 
     // Called by jazz-ffi on a thread of its own, which may block. Returning
     // nil signs the user out; throwing is a failed fetch: the session stays
-    // signed in and jazz-app retries on its own backoff.
+    // signed in and jazz-app-support retries on its own backoff.
     func token(reason: String) throws -> String? {
         let reason = TokenReason(rawValue: reason) ?? .connect
         let result = Box()
@@ -171,7 +187,7 @@ final class States: StateListener, @unchecked Sendable {
 
 extension Client {
     /// The session's current state (`nil` for a backend or a local client).
-    public func sessionState() async throws(JazzError) -> SessionState? {
+    public func sessionState() async throws -> SessionState? {
         try await Self.typed {
             guard let json = try await Self.run({ try self.handle.sessionState() }) else { return nil }
             return try SessionState(json: json)
@@ -181,10 +197,10 @@ extension Client {
     /// The session's state each time it changes, the current one first. It
     /// fails with `JazzError.closed` once the app closes.
     public var session: AsyncThrowingStream<SessionState, any Error> {
-        watch { listener in try self.handle.watchSession(listener: listener) } decode: { try SessionState(json: $0) }
+        Self.watch { listener in try self.handle.watchSession(listener: listener) } decode: { try SessionState(json: $0) }
     }
 
-    public func syncStatus() async throws(JazzError) -> SyncStatus {
+    public func syncStatus() async throws -> SyncStatus {
         try await Self.typed {
             let json = try await Self.run { try self.handle.syncStatus() }
             return try Coding.decode(SyncStatus.self, json)
@@ -194,31 +210,62 @@ extension Client {
     /// The sync status each time it changes, the current one first. It fails
     /// with `JazzError.closed` once the app closes.
     public var syncChanges: AsyncThrowingStream<SyncStatus, any Error> {
-        watch { listener in try self.handle.watchSync(listener: listener) } decode: {
+        Self.watch { listener in try self.handle.watchSync(listener: listener) } decode: {
             try Coding.decode(SyncStatus.self, $0)
         }
     }
 
     /// Asks `Auth.bearer` for a fresh token now.
-    public func refresh() async throws(JazzError) {
+    public func refresh() async throws {
         try await Self.typed { try await Self.run { try self.handle.refresh() } }
     }
 
     /// Signs out and closes the app.
-    public func signOut() async throws(JazzError) {
+    public func signOut() async throws {
         try await Self.typed { try await Self.run { try self.handle.signOut() } }
     }
 
     /// Links this device account to the app's sign-in (`bearer` is its
     /// token), returning the user it now acts as.
-    public func link(bearer: String) async throws(JazzError) -> User {
+    public func link(bearer: String) async throws -> User {
         try await Self.typed {
             let json = try await Self.run { try self.handle.link(bearer: bearer) }
             return try Coding.decode(User.self, json)
         }
     }
 
-    func watch<T: Sendable>(
+    /// Leaves the server (TS's `disconnect`): local reads and writes go
+    /// on, and sync resumes with `reconnect`. Without a server it does
+    /// nothing.
+    public func disconnect() async throws {
+        try await Self.typed { try await Self.run { try self.handle.disconnect() } }
+    }
+
+    /// Resumes sync after `disconnect` (TS's `reconnect`).
+    public func reconnect() async throws {
+        try await Self.typed { try await Self.run { try self.handle.reconnect() } }
+    }
+
+    /// Rolls back open transactions, closes the app and deletes its local
+    /// store (TS's `deleteClientStorage`): the next open starts empty and
+    /// syncs again. Writes the server hasn't accepted yet are lost. Throws
+    /// `JazzError.refused`, leaving the app open (open transactions are
+    /// still rolled back), while another open app holds the same `dataDir`.
+    public func deleteClientStorage() async throws {
+        try await Self.typed { try await Self.run { try self.handle.deleteClientStorage() } }
+    }
+
+    /// Each write the server refused that no durable wait (a `.global`
+    /// tier, `waitForSync`) reported (TS's `onMutationError`). Refusals
+    /// from before the first iteration come first. It fails with
+    /// `JazzError.closed` once the app closes.
+    public var mutationErrors: AsyncThrowingStream<MutationError, any Error> {
+        Self.watch { listener in try self.handle.watchMutationErrors(listener: listener) } decode: {
+            try Coding.decode(MutationError.self, $0)
+        }
+    }
+
+    static func watch<T: Sendable>(
         _ start: @escaping @Sendable (StateListener) throws -> Watch,
         decode: @escaping @Sendable (String) throws -> T
     ) -> AsyncThrowingStream<T, any Error> {
@@ -252,7 +299,7 @@ extension Client {
     /// Writes the row with this id: an insert if there's none, else all its
     /// columns replaced by `row`'s.
     @discardableResult
-    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws(JazzError) -> I.Row {
+    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
             let stored = try await Self.run { try self.handle.upsert(table: I.Row.table, id: id, rowJson: json) }
@@ -262,7 +309,7 @@ extension Client {
 
     /// Brings back deleted row `id` as it was, or with `row` as its content.
     @discardableResult
-    public func restore<R: Row>(_ type: R.Type, id: Jazz.ID) async throws(JazzError) -> R {
+    public func restore<R: Row>(_ type: R.Type, id: Jazz.ID) async throws -> R {
         try await Self.typed {
             let stored = try await Self.run { try self.handle.restore(table: R.table, id: id, patchJson: nil) }
             return try Coding.decode(R.self, stored, userInfo)
@@ -270,7 +317,7 @@ extension Client {
     }
 
     @discardableResult
-    public func restore<I: Insert>(_ id: Jazz.ID, as row: I) async throws(JazzError) -> I.Row {
+    public func restore<I: Insert>(_ id: Jazz.ID, as row: I) async throws -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
             let stored = try await Self.run { try self.handle.restore(table: I.Row.table, id: id, patchJson: json) }
@@ -281,7 +328,7 @@ extension Client {
 
 extension Transaction {
     @discardableResult
-    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws(JazzError) -> I.Row {
+    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws -> I.Row {
         try await Client.typed {
             let json = try Coding.json(row, userInfo)
             let stored = try await Client.run { try self.ffi.upsert(table: I.Row.table, id: id, rowJson: json) }
@@ -290,7 +337,7 @@ extension Transaction {
     }
 
     @discardableResult
-    public func restore<R: Row>(_ type: R.Type, id: Jazz.ID) async throws(JazzError) -> R {
+    public func restore<R: Row>(_ type: R.Type, id: Jazz.ID) async throws -> R {
         try await Client.typed {
             let stored = try await Client.run { try self.ffi.restore(table: R.table, id: id, patchJson: nil) }
             return try Coding.decode(R.self, stored, userInfo)

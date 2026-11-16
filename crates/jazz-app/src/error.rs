@@ -54,6 +54,29 @@ pub enum Error {
     #[error("closed with {pending} write(s) the server never got, lost with the memory store")]
     Unsynced { pending: usize },
 
+    /// A [`crate::JazzSession`] has no usable client now: it is `status`
+    /// (starting, signed out, switching users, failed or closed).
+    #[error("no signed-in user: the session is {status}")]
+    NoUser {
+        status: crate::jazz_session::SessionStatus,
+    },
+
+    /// This [`crate::Jazz`] was replaced: its [`crate::JazzSession`]'s
+    /// user signed out or changed (TS's `DbReplacedError`). Fetch the
+    /// current one with [`crate::JazzSession::jazz`].
+    #[error("this client was replaced: the session's user signed out or changed")]
+    Replaced,
+
+    /// A trusted backend client's permissions are not the ones its main
+    /// backend serves, so it acts for no user ([`crate::Jazz::for_user`]):
+    /// it would evaluate their reads by the wrong policies. Open it with
+    /// the app's published `jazz.permissions.json`. TS's `bundle_mismatch`.
+    #[error(
+        "this client's permissions (bundle {own}) are not the ones the main backend serves \
+         (bundle {served}); open it with the app's published jazz.permissions.json"
+    )]
+    BundleMismatch { own: String, served: String },
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),

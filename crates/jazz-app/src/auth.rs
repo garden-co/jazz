@@ -34,7 +34,7 @@ impl Auth {
     ///
     /// ```no_run
     /// # async fn access_token(_fresh: bool) -> Option<String> { None }
-    /// let auth = jazz_app::Auth::bearer(|reason: jazz_app::TokenReason| async move {
+    /// let auth = jazz_app_support::Auth::bearer(|reason: jazz_app_support::TokenReason| async move {
     ///     Ok(access_token(reason.is_fresh()).await)
     /// });
     /// ```
@@ -162,6 +162,40 @@ impl DeviceKey {
         getrandom::fill(&mut seed)
             .map_err(|error| Error::Config(format!("no randomness for a device key: {error}")))?;
         Ok(Self(seed))
+    }
+
+    /// Writes the key to the file at `path` (readable by this user only),
+    /// replacing what it held: written whole beside it, then renamed into
+    /// place.
+    pub(crate) fn write_to(&self, path: &std::path::Path) -> Result<()> {
+        let io = |error: std::io::Error| {
+            Error::Config(format!("device key at {}: {error}", path.display()))
+        };
+        let dir = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir).map_err(io)?;
+        let temp = dir.join(format!(
+            ".device-key.{}.tmp",
+            identity::derive_user_id(&self.0)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let written = options.open(&temp).and_then(|mut file| {
+            // A stale temp file keeps its mode: set it whatever it was.
+            #[cfg(unix)]
+            file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+            std::io::Write::write_all(&mut file, self.to_string().as_bytes())?;
+            file.sync_all()
+        });
+        let renamed = written.and_then(|()| std::fs::rename(&temp, path));
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        renamed.map_err(io)
     }
 
     /// The key kept in the file at `path`, or a new one written there

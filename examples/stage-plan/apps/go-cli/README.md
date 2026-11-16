@@ -5,8 +5,8 @@ StagePlan's stage-prep board in a terminal, written in Go with
 signs in through the app's Jazz endpoint, its main backend's `/jazz`, with a
 token from the app's auth provider, exactly as a browser client does. It
 opens StagePlan's own `jazz.app.json` (and keeps `jazz.permissions.json`, the
-main backend's), byte-identical copies of `../react-localfirst`'s; a test
-checks that they still match.
+main backend's): its `schema.ts` re-exports `../react-localfirst`'s, and
+`npx jazz-tools generate` writes both files from it.
 
 ```sh
 export JAZZ_SERVER_URL=https://my-stageplan.example/jazz   # the main backend's /jazz
@@ -21,10 +21,10 @@ go run . move <task-id> doing    # todo, doing, done or blocked
 `-data` (before the command) is where rows are kept, by default `.jazz`.
 
 `go test ./...` runs the board flow, the docs snippets and every feature
-against a real Jazz core (`jazz-tools server`) behind jazz-app's test relay,
+against a real Jazz core (`jazz-tools server`) behind jazz-app-support's test relay,
 the stand-in for a main backend's `/jazz`: from the repository root, build
 them with `cargo build -p jazz-ffi -p jazz-cli` and
-`cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay`.
+`cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay`.
 
 `JAZZ_MAIN_BACKEND=ts go test ./...` runs the same suite with StagePlan's
 real main backend in TypeScript as the server (`ts-main/jazz.server.ts`,

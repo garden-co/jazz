@@ -118,6 +118,56 @@ export function createCliFixtures(moduleUrl: string) {
     }
   }
 
+  /**
+   * A TS app (alpha.66): `schema.ts` with `projects` and `todos`, and (unless
+   * `permissions` is null) its permissions, in schema.ts or `permissions.ts`.
+   */
+  async function writeTsApp(
+    dir: string,
+    options: {
+      columns?: string;
+      permissions?: string | null;
+      permissionsFile?: "schema.ts" | "permissions.ts";
+    } = {},
+  ): Promise<void> {
+    await mkdir(dir, { recursive: true });
+    const columns = options.columns ?? "title: s.string(), ownerId: s.string()";
+    const permissions =
+      options.permissions === undefined
+        ? [
+            "  projects: { read: false },",
+            "  todos: { read: (todo) => ({ ownerId: session.identity.subject }) },",
+          ].join("\n")
+        : options.permissions;
+    const schema = [
+      'import { schema as s } from "jazz-tools";',
+      "",
+      "export const schema = s.defineSchema({",
+      "  projects: s.table({ name: s.string() }, {}),",
+      `  todos: s.table({ ${columns} }, {}),`,
+      "});",
+      "",
+    ];
+    const definition = [
+      "const { definePermissions, session } = schema;",
+      "",
+      "export const permissions = definePermissions({",
+      permissions ?? "",
+      "});",
+      "",
+    ];
+    if (permissions !== null && (options.permissionsFile ?? "schema.ts") === "schema.ts") {
+      schema.push(...definition);
+    }
+    await writeFile(join(dir, "schema.ts"), schema.join("\n"));
+    if (permissions !== null && options.permissionsFile === "permissions.ts") {
+      await writeFile(
+        join(dir, "permissions.ts"),
+        ['import { schema } from "./schema";', ...definition].join("\n"),
+      );
+    }
+  }
+
   /** `projects` and `todos`, the app most CLI tests run on. */
   function todosApp() {
     return {
@@ -215,6 +265,7 @@ export function createCliFixtures(moduleUrl: string) {
   }
 
   return {
+    writeTsApp,
     distCliPath,
     binPath,
     tmpBase,

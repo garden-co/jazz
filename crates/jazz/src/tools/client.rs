@@ -164,6 +164,10 @@ struct State {
     /// How many times the server refused the credential: each refusal,
     /// even one that leaves the status as it was.
     auth_refusals: u64,
+    /// Why the database dropped the upstream link on its own
+    /// ([`crate::db::Db::upstream_refusal`]), until an explicit reconnect
+    /// admits a new one.
+    upstream_refusal: Option<CoreError>,
     link_status: Option<LinkStatus>,
     /// Consecutive recoverable tick failures.
     tick_failures: u32,
@@ -571,6 +575,13 @@ async fn keep_upstream(
 ) {
     let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
     let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
+    // Each tick may leave the database refusing the upstream on its own (a
+    // server serving another history): the link then stops, as a binding
+    // host stops it, instead of keeping a socket nothing syncs over.
+    let mut progress = match shared.upgrade() {
+        Some(shared) => shared.progress.subscribe(),
+        None => return,
+    };
     loop {
         for action in std::mem::take(&mut keeper.actions) {
             match action {
@@ -627,6 +638,7 @@ async fn keep_upstream(
                             return;
                         };
                         attach(&shared, link.transport).await;
+                        shared.state().upstream_refusal = None;
                         keeper.live = Some((attempt, link.terminal));
                         LinkInput::Admitted(attempt)
                     }
@@ -648,6 +660,30 @@ async fn keep_upstream(
                     detach(&shared);
                 }
                 LinkInput::Ended(attempt, terminal_failure(stopped))
+            }
+            changed = progress.changed(), if keeper.live.is_some() => {
+                if changed.is_err() {
+                    return;
+                }
+                let Some(shared) = shared.upgrade() else {
+                    return;
+                };
+                let refusal = {
+                    let state = shared.state.borrow();
+                    state
+                        .upstream
+                        .as_ref()
+                        .and_then(|upstream| shared.db.upstream_refusal(upstream))
+                };
+                let Some(refusal) = refusal else {
+                    continue;
+                };
+                tracing::warn!(%refusal, "jazz client upstream refused by the database");
+                let (attempt, _) = keeper.live.take().expect("guarded");
+                detach(&shared);
+                let message = refusal.to_string();
+                shared.state().upstream_refusal = Some(refusal);
+                LinkInput::Ended(attempt, LinkFailure::Fatal(message))
             }
             () = async { timer.as_mut().expect("guarded").1.as_mut().await },
                 if timer.is_some() =>
@@ -1278,13 +1314,20 @@ impl JazzClient {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
-            self.reject_branch("a read inside a transaction")?;
             let prepared = self.prepare(&read)?;
             let db = self.db()?;
             // A client's serializable read hydrates from the authority,
-            // which needs ticks to answer.
+            // which needs ticks to answer. A branch view composes over the
+            // staged writes of a mergeable transaction; a serializable one
+            // refuses it (its read set is the root view's alone).
             self.shared
-                .settle(db.tx_ref(transaction_id).all_prepared(&prepared))
+                .settle(db.tx_ref(transaction_id).all_prepared_in(
+                    &prepared,
+                    false,
+                    None,
+                    ReadTier::LocalFirst,
+                    &opts.read_view.source,
+                ))
                 .await?
                 .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
@@ -2078,6 +2121,16 @@ impl JazzClient {
         self.shared.db.upload_status()
     }
 
+    /// Why the database stopped the upstream link on its own, until a new
+    /// link is admitted: [`crate::db::ErrorCode::AuthorityChanged`] when the
+    /// server serves another history than this store (its store was
+    /// recreated, or it is another app's server). The link is then
+    /// [`crate::link::LinkPhase::Stopped`]; local reads and writes go on, and
+    /// unsynced writes are kept.
+    pub fn upstream_refusal(&self) -> Option<CoreError> {
+        self.shared.state.borrow().upstream_refusal.clone()
+    }
+
     /// How many times the server has refused this client's credential. A
     /// refusal of a renewed credential leaves [`Self::upstream_status`] as
     /// it was; this tells the two apart.
@@ -2109,7 +2162,7 @@ impl JazzClient {
     /// values of the table's `branchBy` columns (an unbranched table's rows
     /// are shared by every branch, so they land in the root).
     ///
-    /// Build the selectors with [`JazzClient::branch_selector`]. Reads inside a transaction,
+    /// Build the selectors with [`JazzClient::branch_selector`]. Reads inside a serializable transaction,
     /// streaming inserts and byte-range reads through a branch are not
     /// supported yet, and fail.
     pub fn on_branch(&self, head: BranchSelector, base: Option<BranchViewBase>) -> JazzClient {
@@ -2318,8 +2371,9 @@ impl JazzClient {
         detached
     }
 
-    /// Resume sync after [`JazzClient::disconnect`] (TS's
-    /// `db.reconnect()`), waiting until the link is attached. Returns
+    /// Resume sync after [`JazzClient::disconnect`], or restart a link
+    /// that stopped (TS's `db.reconnect()`), waiting until the link is
+    /// attached. Returns
     /// whether there was anything to reattach: without a server there is
     /// nothing, and it returns `false` at once.
     pub async fn reconnect(&self) -> Result<bool> {
@@ -2329,9 +2383,13 @@ impl JazzClient {
         // An attempt the keeper started before this call (a retry during an
         // outage) may still fail after it: only attempts started from here
         // on answer it.
-        let (started, attached) = {
+        let (started, attached, stopped) = {
             let state = self.shared.state.borrow();
-            (state.connect_started, state.upstream.is_some())
+            let stopped = state
+                .link_status
+                .as_ref()
+                .is_some_and(|status| status.phase == crate::link::LinkPhase::Stopped);
+            (state.connect_started, state.upstream.is_some(), stopped)
         };
         // Neither detached nor reconnecting: nothing to reattach.
         let resumed = self
@@ -2340,6 +2398,14 @@ impl JazzClient {
             .send_if_modified(|paused| std::mem::replace(paused, false));
         if !resumed && attached {
             return Ok(false);
+        }
+        // A link that stopped (the database refused the server's history, a
+        // fatal failure) restarts, as TS's `db.reconnect()` restarts it; one
+        // backing off during an outage keeps its own retry going.
+        if !resumed && stopped {
+            self.shared
+                .upstream_paused
+                .send_modify(|paused| *paused = false);
         }
         // The first attempt either attaches or fails; the keeper retries
         // after a failure on its own.
@@ -2361,7 +2427,7 @@ impl JazzClient {
 
     /// Keep the writes the server refuses, for
     /// [`JazzClient::take_mutation_errors`] (TS's `onMutationError`).
-    /// Owned by `jazz-app`, like that: not public API.
+    /// Owned by `jazz-app-support`, like that: not public API.
     #[doc(hidden)]
     pub fn track_mutation_errors(&self) {
         self.shared.db.track_upstream_rejections();
@@ -2371,7 +2437,7 @@ impl JazzClient {
     /// [`JazzClient::track_mutation_errors`] on), oldest first. Each is
     /// reported once; their payloads are released.
     ///
-    /// Destructive, and owned by `jazz-app`: its reporter takes these for
+    /// Destructive, and owned by `jazz-app-support`: its reporter takes these for
     /// `Jazz::mutation_errors`, so another caller (say through
     /// `Jazz::with_client`) would steal refusals from it. Not public API.
     #[doc(hidden)]

@@ -113,7 +113,7 @@ fn a_mergeable_transaction_commits_beside_concurrent_writes() {
 /// `mutationErrors` watch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disconnect_reconnect_and_refused_writes() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
@@ -164,7 +164,7 @@ fn delete_client_storage_empties_the_store() {
     let dir = std::env::temp_dir().join(format!("jazz-ffi-delete-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let config = json!({ "app": STAGE_PLAN_APP, "storage": "persistent",
-        "dataDir": dir.to_str().unwrap(), "appId": jazz_app::AppId::random().to_string(),
+        "dataDir": dir.to_str().unwrap(), "appId": jazz_app_support::AppId::random().to_string(),
         "contract": 2 })
     .to_string();
     let jazz = JazzHandle::open(config.clone()).unwrap();
@@ -193,6 +193,27 @@ fn delete_client_storage_empties_the_store() {
         jazz.all(json!({ "table": "shows" }).to_string()),
         Err(JazzError::Closed)
     ));
+    // Nothing is left behind, not even the store's lock file on unix
+    // (jazz#5856).
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .collect()
+        })
+        .unwrap_or_default();
+    // Windows keeps the lock file: deleting it there could orphan another
+    // app's live lock (jazz#5856).
+    let expected: Vec<std::ffi::OsString> = if cfg!(unix) {
+        Vec::new()
+    } else {
+        vec!["jazz.lock".into()]
+    };
+    assert!(
+        left.iter().all(|name| expected.contains(name)),
+        "left in the dataDir: {left:?}"
+    );
     let reopened = JazzHandle::open(config).unwrap();
     assert_eq!(
         parse(
@@ -244,7 +265,7 @@ fn watches_end_when_the_app_closes() {
     let _ = std::fs::remove_dir_all(&dir);
     let jazz = JazzHandle::open(
         json!({ "app": STAGE_PLAN_APP, "storage": "persistent",
-            "dataDir": dir.to_str().unwrap(), "appId": jazz_app::AppId::random().to_string() })
+            "dataDir": dir.to_str().unwrap(), "appId": jazz_app_support::AppId::random().to_string() })
         .to_string(),
     )
     .unwrap();

@@ -3,7 +3,7 @@ title: Swift
 description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from jazz.app.json."
 ---
 
-For apps: run your backend in TypeScript, Rust or Go.
+For apps: run your backend in TypeScript.
 
 A Swift app is an end-user client of your app. It opens the same `jazz.app.json` as every other
 language, with typed bindings generated from it, signs a user in, and syncs through your backend's
@@ -22,7 +22,7 @@ it once from a checkout at the same release tag (this needs Rust and Swift 6.0 o
 pkg-config at it:
 
 ```bash
-git clone --depth 1 --branch v2.0.0-alpha.65 https://github.com/garden-co/jazz
+git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
 jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only   # builds libjazz_ffi.a and jazz_ffi.pc
 export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
 ```
@@ -32,7 +32,7 @@ checkout), and build with `PKG_CONFIG_PATH` set:
 
 ```swift title="Package.swift"
 dependencies: [
-    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.65")
+    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.66")
 ],
 targets: [
     .target(
@@ -101,6 +101,30 @@ only its user can read, or with a bearer token, and creates a show, lists, adds 
 A device key is the account: keep it as a password in the Keychain on Apple platforms, and in a
 file only its user can read on Linux. The Jazz Swift package has no helper for either yet.
 
+## Sessions
+
+`JazzSession` follows who is signed in, as TypeScript's `JazzSession`: it hands out a `Client` for
+the user signed in now and replaces it when the user changes. Start it as a device account (a guest
+who needs no sign-in), from your sign-in's bearer token, or signed out:
+
+<include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
+  ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-session
+</include>
+
+`session.snapshots` yields a `SessionSnapshot` (`status`: `.starting`, `.ready`, `.signedOut`,
+`.transitioning`, `.error` or `.closed`; `user`; `clientEpoch`; `error` and `recovery`) each time it
+changes, and ends with `JazzError.closed` when the session closes. `session.client()` gives the same
+client until `clientEpoch` changes; a client kept from before throws `JazzError.replaced`, and while
+no one is signed in `client()` throws `JazzError.noUser`.
+
+When your sign-in changes, call `session.refresh()`: the session asks `bearer` again and follows
+the user it names (`nil`: signed out). With `linkGuest` (the default, as TypeScript), a user who has
+no account yet takes over the device account signed in before; with `linkGuest: false`, call
+`linkDeviceAccount()` for that. `createDeviceAccount()`, `restoreDeviceAccount(key:)`,
+`reopenDeviceAccount()`, `exportDeviceKey()`, `signOut()` (the session stays open, signed out),
+`retry()` (as `recovery` says) and `close()` complete it. Each account's store is under
+`dataDir/<account>/`, and the device account's key in `dataDir/device.key`.
+
 ## Computed fields and transforms
 
 If `jazz.app.json` declares computed fields or transforms, the bindings declare a
@@ -131,10 +155,12 @@ On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live resu
 // tasks.rows, tasks.isLoading, tasks.error
 ```
 
-Every call `throws(JazzError)`. The cases are `refused` (validation, permissions or not supported
-yet), `io`, `closed`, `decoding`, `cancelled` (the calling task was cancelled),
-`permissionDenied` (your backend's permissions refused it, seen when waiting for the `global` tier),
-`notSupported` and `conflict` (a serializable transaction lost to another write: retry it).
+Every call throws a `JazzError` (catch it with `catch let error as JazzError`). The cases are
+`refused` (validation, permissions or not supported yet), `io`, `closed`, `decoding`,
+`cancelled` (the calling task was cancelled), `permissionDenied` (your backend's permissions
+refused it, seen when waiting for the `global` tier), `notSupported`, `conflict` (a serializable
+transaction lost to another write: retry it), and for a `JazzSession`'s clients `replaced` and
+`noUser`.
 
 ## Relations, transactions and tiers
 
@@ -144,8 +170,12 @@ query: `JazzApp.shows.tasks.orderBy(JazzApp.tasks.rank).limit(3)`, plus a nested
 `.required()`. `query.select(columns…)` reads only some columns into a `Decodable` type of yours,
 with `jazz.all(selection, as: MyType.self)`.
 
-`jazz.transaction(commit:) { tx in … }` runs a serializable transaction. It commits when the
-closure returns, rolls back when the closure throws, and rethrows that error. Reads take a
+`jazz.transaction(commit:) { tx in … }` runs a mergeable transaction, as TypeScript's
+`db.transaction`: it commits when the closure returns, rolls back when the closure throws, and
+rethrows that error. Its writes merge with concurrent ones, so its commit is never a conflict.
+`jazz.serializableTransaction(commit:) { tx in … }` is TypeScript's `db.serializableTransaction`:
+the server accepts it only if nothing it read changed meanwhile, else it throws
+`JazzError.conflict`. Reads take a
 `tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
 `jazz.waitForSync(.global)` waits until everything written so far has reached the server.
 
@@ -189,7 +219,7 @@ Not supported yet:
 - Prebuilt `libjazz_ffi` and XCFrameworks: build the library from the release's source, as above.
 - A SwiftUI `Binding` for `JazzText`.
 - Running a backend in Swift (publishing permissions, acting for users) or serving the app's Jazz
-  endpoint: run your backend in TypeScript, Rust or Go.
+  endpoint: run your backend in TypeScript.
 - Keychain (or file) storage for device keys: keep the key from `Jazz.generateDeviceKey()` with
   your own code.
 - An `@Observable` session model for SwiftUI: follow `jazz.session`. (`JazzQuery` exists for Apple
@@ -207,4 +237,12 @@ Not supported yet:
 
 A write that the server's permissions refuse doesn't throw by default. Writes are local-first, so
 it stays in the local store and never syncs. Write with `tier: .global` (or call
-`waitForSync(.global)`) to get `JazzError.permissionDenied` instead.
+`waitForSync(.global)`) to get `JazzError.permissionDenied` instead, or follow
+`jazz.mutationErrors` (TypeScript's `onMutationError`), which reports each refused write nothing
+waited on.
+
+`jazz.disconnect()` leaves the server while local reads and writes go on, and `jazz.reconnect()`
+resumes sync. `jazz.deleteClientStorage()` rolls back open transactions, closes the app and deletes its local
+store (writes the server hasn't accepted are lost). While another open app holds the same `dataDir`,
+it throws `JazzError.refused` and the app stays open (its open transactions are still rolled back). The `session`, `syncChanges` and `mutationErrors` streams end with
+`JazzError.closed` when the app closes.

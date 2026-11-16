@@ -2354,6 +2354,9 @@ importers:
       '@vercel/sandbox':
         specifier: '>=3.9.0'
         version: 3.9.1
+      esbuild:
+        specifier: ^0.27.0
+        version: 0.27.4
       expo:
         specifier: '>=54'
         version: 57.0.7(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.4(react@19.2.4))(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
@@ -2433,9 +2436,6 @@ importers:
       effect:
         specifier: 4.0.0-rc.118
         version: 4.0.0-rc.118
-      esbuild:
-        specifier: ^0.27.0
-        version: 0.27.4
       fake-indexeddb:
         specifier: ^5.0.2
         version: 5.0.2
@@ -2448,6 +2448,9 @@ importers:
       libsodium-wrappers:
         specifier: 0.8.3
         version: 0.8.3
+      prettier:
+        specifier: ^3.9.5
+        version: 3.9.5
       prosemirror-markdown:
         specifier: ^1.13.9
         version: 1.13.9

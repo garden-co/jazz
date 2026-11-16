@@ -1,6 +1,6 @@
 /**
  * Null passes through a column transform: Jazz never calls `from` or `to`
- * with null, so an alpha.65 transform's null branch (kept as is by
+ * with null, so an alpha.64 transform's null branch (kept as is by
  * `jazz-tools upgrade`) is never reached, and null reads and writes as null.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";

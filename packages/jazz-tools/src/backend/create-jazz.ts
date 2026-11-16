@@ -41,6 +41,7 @@ import {
 import { resolveSchemaSource } from "../schema-source.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
+import { BUNDLE_HEADER } from "./admission.js";
 import { boundApp } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { publishLoadedDeployment } from "../dev/catalogue.js";
@@ -444,7 +445,8 @@ export interface AuthenticatedUser extends JazzUser {
  * (`import permissions from "./jazz.permissions.json" with { type: "json" }`).
  * Jazz's Rust loader reads and checks it against the app's bindings.
  */
-export type AppPermissionsFile = { readonly format: number } & Readonly<Record<string, unknown>>;
+export type AppPermissionsFile = ({ readonly $schema: string } | { readonly format: number }) &
+  Readonly<Record<string, unknown>>;
 
 export interface CreateJazzOptions {
   /** The app, as `jazz.generated.ts` exports it. */
@@ -3055,7 +3057,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       new Uint8Array(0),
       "backend",
     );
-    return new Response(null, { status: response.status === 204 ? 204 : 502 });
+    if (response.status !== 204) return new Response(null, { status: 502 });
+    // The bundle this backend pins the client's socket to (see
+    // `pinnedSocket`): a client that evaluates its users' reads against its
+    // own permissions checks they are the ones published here (jazz#5808).
+    return new Response(null, {
+      status: 204,
+      headers: pin === undefined ? undefined : { [BUNDLE_HEADER]: pin },
+    });
   }
 
   /**
@@ -3711,7 +3720,11 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
   provideCodegenNapi(jazzNapi);
   if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
   const permissions = options.permissions as unknown;
-  if (!isRecord(permissions) || typeof permissions.format !== "number") {
+  // `$schema` names the file's version; a legacy (pre-alpha.66) file has `format`.
+  if (
+    !isRecord(permissions) ||
+    (typeof permissions.$schema !== "string" && typeof permissions.format !== "number")
+  ) {
     throw new Error(
       'createJazz: `permissions` must be the app\'s jazz.permissions.json, imported as JSON: `import permissions from "./jazz.permissions.json" with { type: "json" }`.',
     );
@@ -3751,7 +3764,7 @@ function boundAppOf(app: BackendSchemaInput) {
   if (!bound) {
     throw new Error(
       'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`); ' +
-        "run `npx jazz-tools generate` to generate it, or `npx jazz-tools upgrade` for an alpha.65 app.",
+        "run `npx jazz-tools generate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
     );
   }
   return bound;

@@ -65,9 +65,9 @@ struct TestServerError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
-/// The app's Jazz endpoint for end users, as a TS, Rust or Go backend's
+/// The app's Jazz endpoint for end users, as the TypeScript backend's
 /// `createJazz` handler serves it: a `jazz-app-test-relay` (`cargo build -p
-/// jazz-app --features test-relay --bin jazz-app-test-relay`, or
+/// jazz-app-support --features test-relay --bin jazz-app-test-relay`, or
 /// `$JAZZ_TEST_RELAY_BIN`) in front of its own `TestServer`, publishing the
 /// app's permissions (StagePlan's unless given). It authenticates
 /// `Bearer token-<user>` as `<user>`.
@@ -92,7 +92,7 @@ final class TestRelay {
             if ProcessInfo.processInfo.environment["CI"] != nil {
                 throw TestServerError("no jazz-app-test-relay at \(binary)")
             }
-            throw XCTSkip("no jazz-app-test-relay at \(binary): cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay")
+            throw XCTSkip("no jazz-app-test-relay at \(binary): cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay")
         }
         let work = FileManager.default.temporaryDirectory.appendingPathComponent("jazz-relay-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)

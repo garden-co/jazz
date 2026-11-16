@@ -79,7 +79,7 @@ impl From<Lang> for Selected {
 
 /// The languages `dir`'s app is written in: those given, or else each that
 /// [`Lang::detected_in`] finds there (a `package.json`; a `Cargo.toml` of
-/// a crate depending on `jazz-app`; a `Package.swift` depending on Jazz;
+/// a crate depending on `jazz-app-support`; a `Package.swift` depending on Jazz;
 /// a `go.mod` requiring `jazz-go`) or
 /// whose bindings are committed there.
 pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
@@ -138,7 +138,7 @@ pub fn languages_or(
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, the Cargo.toml of a crate depending on jazz-app, a Package.swift depending on Jazz (jazz-swift), or a go.mod requiring jazz-go); pass --lang",
+             (a package.json, the Cargo.toml of a crate depending on jazz-app-support, a Package.swift depending on Jazz (jazz-swift), a build.gradle.kts or build.gradle depending on jazz-kotlin, or a go.mod requiring jazz-go); pass --lang",
             shown(&dir),
         ));
     }
@@ -159,6 +159,9 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
         artifact::load(&app_json, permissions.as_bytes()).map_err(|error| error.to_string())?;
     }
     let mut stale = Vec::new();
+    // Current by their source and format; plain `generate` still rewrites
+    // those whose generated output changed (a generator fix).
+    let mut refresh = Vec::new();
     let mut skipped = Vec::new();
     let mut current = 0;
     for &selected in langs {
@@ -166,6 +169,10 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
         let path = bindings_path(dir, lang);
         let committed = read_optional(&path)?;
         match bindings::staleness(&app, lang, committed.as_deref()).map_err(|e| e.to_string())? {
+            None if !check => {
+                current += 1;
+                refresh.push((selected, path, committed.unwrap_or_default()));
+            }
             None => {
                 current += 1;
                 outcome.current.push(lang.file().to_string());
@@ -210,6 +217,22 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
             });
         }
         generated.push((selected.lang, path, text));
+    }
+    for (selected, path, committed) in refresh {
+        let text = crate::generate_app(selected.lang, &app)
+            .map_err(|error| format!("{}: {error}", shown(&path)))?;
+        if bindings::output_changed(selected.lang, &committed, &text) {
+            outcome.notes.push(format!(
+                "{}: this jazz-tools generates it differently; rewriting it",
+                shown(&path)
+            ));
+            generated.push((selected.lang, path, text));
+        } else {
+            outcome.current.push(selected.lang.file().to_string());
+            outcome
+                .notes
+                .push(format!("{} is up to date", shown(&path)));
+        }
     }
     if !skipped.is_empty() {
         // Some other language must be the app's.
@@ -311,6 +334,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Plain `generate` rewrites TS bindings an older generator wrote (another
+    /// output digest) and keeps ones a formatter reformatted (the same
+    /// digest); `--check` passes on both, as their source and format match.
+    #[test]
+    fn generate_rewrites_what_the_generator_now_writes_differently() {
+        let dir = dir();
+        std::fs::write(dir.join(APP_FILE), V1).unwrap();
+        let ts = Lang::TypeScript;
+        generate(&dir, &[ts.into()], false).unwrap();
+        let path = dir.join(ts.file());
+        let written = std::fs::read_to_string(&path).unwrap();
+        let digest = bindings::output_digest(ts, &written).unwrap();
+
+        // Reformatted: kept.
+        let reformatted = written.replace("\n\n", "\n\n\n");
+        std::fs::write(&path, &reformatted).unwrap();
+        let outcome = generate(&dir, &[ts.into()], false).unwrap();
+        assert_eq!(outcome.current, vec![ts.file().to_string()]);
+        assert!(outcome.written.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), reformatted);
+
+        // From an older generator (another digest, or none yet): `--check`
+        // passes, plain `generate` rewrites it.
+        for older in [
+            written.replace(&digest, "0123456789abcdef"),
+            written.replace(&format!(" Output {digest}."), ""),
+        ] {
+            std::fs::write(&path, &older).unwrap();
+            assert!(
+                generate(&dir, &[ts.into()], true)
+                    .unwrap()
+                    .written
+                    .is_empty()
+            );
+            let outcome = generate(&dir, &[ts.into()], false).unwrap();
+            assert_eq!(outcome.written, vec![ts.file().to_string()]);
+            assert!(
+                outcome
+                    .notes
+                    .iter()
+                    .any(|n| n.contains("generates it differently")),
+                "{outcome:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -416,7 +487,33 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    const RUST_APP: &str = "[package]\nname = \"todos\"\n\n[dependencies]\njazz-app = \"0.1\"\n";
+    #[test]
+    fn a_kotlin_app_is_found_by_either_build_script() {
+        let dir = dir();
+        let kotlin =
+            || languages(&dir, &[]).map(|l| l.iter().any(|s| s.lang == Lang::Kotlin && s.detected));
+        // Groovy, as an Android app's on Maven Central.
+        std::fs::write(
+            dir.join("build.gradle"),
+            "dependencies {\n    implementation 'tools.jazz:jazz-kotlin-android:2.0.0-alpha.66'\n}\n",
+        )
+        .unwrap();
+        assert_eq!(kotlin(), Ok(true));
+        // A Kotlin DSL script beside it that doesn't depend on jazz-kotlin
+        // doesn't hide it.
+        std::fs::write(
+            dir.join("build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") }\n",
+        )
+        .unwrap();
+        assert_eq!(kotlin(), Ok(true));
+        std::fs::write(dir.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        assert!(kotlin().is_err_and(|e| e.contains("build.gradle.kts or build.gradle")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const RUST_APP: &str =
+        "[package]\nname = \"todos\"\n\n[dependencies]\njazz-app-support = \"0.1\"\n";
 
     #[test]
     fn a_rust_app_generates_checks_and_migrates() {

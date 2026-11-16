@@ -33,6 +33,8 @@ type Delta[R any] struct {
 type subscriber struct {
 	mu     sync.Mutex
 	closed bool
+	// ended: jazz-ffi sent its last callback (an error, closed included).
+	ended bool
 	// deliver queues the raw callback; it never blocks Jazz's thread.
 	queue []event
 	wake  chan struct{}
@@ -62,6 +64,9 @@ func onSubscription(ctx, kind, text uintptr) {
 	s.mu.Lock()
 	if !s.closed {
 		s.queue = append(s.queue, e)
+	}
+	if e.kind == "error" || e.kind == "closed" {
+		s.ended = true
 	}
 	s.mu.Unlock()
 	select {
@@ -161,12 +166,12 @@ func stream[T any](ctx context.Context, db *DB, decode func(event) (v T, last, s
 	}
 	db.streamsMu.Lock()
 	if db.streams == nil {
-		db.streams = map[uint64]func(){}
+		db.streams = map[uint64]*openStream{}
 	}
-	db.streams[id] = func() {
+	db.streams[id] = &openStream{sub: s, end: func() {
 		stop()
 		closeOnce.Do(func() { close(closing) })
-	}
+	}}
 	db.streamsMu.Unlock()
 	started, err := start(id)
 	db.mu.RUnlock()
