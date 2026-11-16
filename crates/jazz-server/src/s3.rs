@@ -336,7 +336,7 @@ impl S3ChunkStore {
     /// forbids the prefix, a prefix another store owns), so a server never
     /// runs with large values that can only stay on its own disk. A bucket
     /// that is unreachable, failing or slow (network, 5xx, over
-    /// `STARTUP_CHECK_TIMEOUT`, 3 s) is only logged: the store retries.
+    /// `STARTUP_CHECK_TIMEOUT`) is only logged: the store retries.
     pub async fn check_at_startup(&self) -> Result<(), String> {
         if !matches!(self.inner.options.credentials, S3Credentials::Static(_)) {
             return Ok(());
