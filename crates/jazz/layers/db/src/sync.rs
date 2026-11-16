@@ -5158,8 +5158,13 @@ impl Inner {
             .await
             .map_err(storage)?;
         if history {
-            self.prune_history(&image.table, RowUuid::from_bytes(image.id), &image.key)
-                .await?;
+            self.prune_history(
+                self.retention_of(self.owner_version).contains(&image.table),
+                &image.table,
+                RowUuid::from_bytes(image.id),
+                &image.key,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -6709,6 +6714,7 @@ impl Inner {
         &self,
         (node, tx): ([u8; 16], u64),
         ops: &[PreparedWrite],
+        retention: &BTreeSet<String>,
     ) -> Result<(), Error> {
         if self.retention().is_empty() {
             return Ok(());
@@ -6728,7 +6734,7 @@ impl Inner {
         let latest_only = !ops.is_empty()
             && !is_origin_node(node)
             && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
-            && ops.iter().all(|op| self.prunes(op.op.table()));
+            && ops.iter().all(|op| retention.contains(op.op.table()));
         let waiting: Option<i64> = self
             .conn
             .sql()
@@ -8076,7 +8082,8 @@ impl Db {
             }
             ops
         };
-        self.record_stored_upload(ops, seq, kind, relayed).await
+        self.record_stored_upload(ops, seq, kind, relayed, None)
+            .await
     }
 
     /// [`Db::record_upload`] of ops already named by stored names.
@@ -8086,6 +8093,7 @@ impl Db {
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        retention: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.sql_borrow_mut().await;
         if inner.client.is_none() {
@@ -8264,7 +8272,8 @@ impl Db {
                 let reorder = client.pending.later_on(&rows, seq, order);
                 drop(inner);
                 if reorder {
-                    self.rebase(Some(rows.into_iter().collect())).await?;
+                    self.rebase(Some(rows.into_iter().collect()), retention)
+                        .await?;
                 }
             }
             Err(error) => {
@@ -8281,14 +8290,18 @@ impl Db {
                     expected: None,
                 });
                 drop(inner);
-                let _ = self.settle_locally(seq).await;
+                let _ = self.settle_locally(seq, retention).await;
             }
         }
         Ok(())
     }
 
     /// A transaction that cannot upload is rejected at once.
-    async fn settle_locally(&self, tx: u64) -> Result<(), Error> {
+    async fn settle_locally(
+        &self,
+        tx: u64,
+        retention: Option<&BTreeSet<String>>,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.sql_borrow_mut().await;
         let mut rows = HashSet::new();
         if let Some(client) = inner.client.as_mut() {
@@ -8302,7 +8315,7 @@ impl Db {
             client.pending.remove(tx);
         }
         drop(inner);
-        self.rebase(Some(rows)).await
+        self.rebase(Some(rows), retention).await
     }
 
     /// Remote reads ship the query's rows plus its supporting rows (single
@@ -9057,7 +9070,10 @@ impl Db {
         let governed = inner.governed_view(&active_schema.clone(), index);
         let active_schema = governed;
         let applied = match inner.prepare_write(active_schema, op) {
-            Ok(prepared) => inner.apply_as(&prepared, who, seq).await.map(drop),
+            Ok(prepared) => inner
+                .apply_as(&prepared, who, seq, None, None)
+                .await
+                .map(drop),
             Err(error) => Err(error),
         };
         inner.changed.borrow_mut().truncate(mark);
@@ -9732,7 +9748,7 @@ impl Db {
             }
         }
         if rebase {
-            self.rebase(changed).await?;
+            self.rebase(changed, None).await?;
             self.inner
                 .sql_borrow_mut()
                 .await
@@ -9937,7 +9953,11 @@ impl Db {
     /// it went in (but for its local `$updatedAt` stamp): leaving it keeps
     /// settling a write proportional to the rows it touches, not to every
     /// write still pending.
-    async fn rebase(&self, changed: Option<HashSet<RowKey>>) -> Result<(), Error> {
+    async fn rebase(
+        &self,
+        changed: Option<HashSet<RowKey>>,
+        retention: Option<&BTreeSet<String>>,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.sql_borrow_mut().await;
         let Some(client) = inner.client.as_mut() else {
             return Ok(());
@@ -10019,7 +10039,7 @@ impl Db {
                             for op in ops.iter().filter(|op| shown(op)) {
                                 let prepared =
                                     inner.admit_stored_write(active_schema.clone(), op.clone())?;
-                                (match inner.apply(&prepared, tx).await {
+                                (match inner.apply(&prepared, tx, retention).await {
                                     // A part of a cross-shard commit that landed before its fate
                                     // (another shard answered first) already holds its row. The
                                     // writer's version overlays that baseline as it overlays any
@@ -10045,7 +10065,7 @@ impl Db {
                                         };
                                         let at = image.at;
                                         inner.drop_row(table, *row, key, at).await?;
-                                        inner.apply(&prepared, tx).await.map(drop)
+                                        inner.apply(&prepared, tx, retention).await.map(drop)
                                     }
                                     other => other.map(drop),
                                 })?;
@@ -13670,8 +13690,10 @@ impl Db {
                 // sessions prune nothing. A relay's link carries its
                 // sessions' commits, which prune by the link's version (a
                 // known limit: a relay serves one deployment's schema).
-                let written = self.inner.sql_borrow().await.written_version(index);
-                let prior = self.inner.sql_borrow().await.set_writing(written);
+                let retention = {
+                    let inner = self.inner.sql_borrow().await;
+                    inner.retention_of(inner.written_version(index).unwrap_or(inner.owner_version))
+                };
                 let decided: Result<_, Error> = async {
                     Ok(match known {
                         // A resend's writer may not hold what the commit made of
@@ -13739,6 +13761,7 @@ impl Db {
                                     (node, tx),
                                     clock,
                                     possession,
+                                    &retention,
                                 )
                                 .await
                             })
@@ -13774,7 +13797,6 @@ impl Db {
                     })
                 }
                 .await;
-                self.inner.sql_borrow().await.restore_writing(prior);
                 let (result, rows, echoable) = decided?;
                 let mut inner = self.inner.sql_borrow_mut().await;
                 // An accepted commit's fate carries the seq it landed at (a
@@ -14247,6 +14269,7 @@ impl Db {
         id: ([u8; 16], u64),
         clock: u64,
         possession: crate::large::Possession,
+        retention: &BTreeSet<String>,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         let active_schema = self.operation_schema();
         // A clock past what this store counts (its own plus the offset
@@ -14521,7 +14544,7 @@ impl Db {
                 let () = (async {
                     let () = (async {
                         for op in &prepared {
-                            inner.apply_as(op, who, seq).await?;
+                            inner.apply_as(op, who, seq, None, Some(retention)).await?;
                         }
                         Ok::<(), Error>(())
                     })
@@ -14566,7 +14589,7 @@ impl Db {
                 .await?;
                 match relay {
                     true => Ok(()),
-                    false => inner.prune_transactions(id, &prepared).await,
+                    false => inner.prune_transactions(id, &prepared, retention).await,
                 }
             })
             .await;
@@ -14605,6 +14628,7 @@ impl Db {
                             clock,
                             bases,
                         }),
+                        Some(retention),
                     )
                     .await
                 } else {
