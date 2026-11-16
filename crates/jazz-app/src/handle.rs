@@ -55,7 +55,7 @@ pub struct Jazz {
     pub(crate) commands: mpsc::UnboundedSender<Command>,
     pub(crate) info: Arc<Info>,
     /// The user one of the endpoint's handles acts for
-    /// ([`crate::Endpoint::for_user`]): its reads and writes run as their
+    /// (`Endpoint::for_user`): its reads and writes run as their
     /// session, under their permissions, on the endpoint's trusted link.
     pub(crate) scope: Option<Arc<Session>>,
     /// Whether this handle acts for one of the backend's users.
@@ -65,6 +65,7 @@ pub struct Jazz {
     pub(crate) durability: Option<DurabilityTier>,
 }
 
+#[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
 pub(crate) struct Info {
     bundle: Option<String>,
     account: Option<AccountId>,
@@ -76,7 +77,7 @@ pub(crate) struct Info {
     /// An end user's session ([`Config::user`]).
     pub(crate) session: Option<UserSession>,
     pub(crate) sync: watch::Receiver<SyncStatus>,
-    /// What a backend holds to vouch for its users ([`crate::Endpoint`]).
+    /// What a backend holds to vouch for its users (`Endpoint`).
     pub(crate) backend: Option<BackendLink>,
     /// How this backend was opened, for the trusted client its endpoint
     /// acts for its users with.
@@ -85,6 +86,7 @@ pub(crate) struct Info {
 
 /// A backend's way to the core, for the endpoint it serves its users with.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
 pub(crate) struct BackendLink {
     pub server: String,
     pub app_id: jazz::tools::AppId,
@@ -121,10 +123,11 @@ impl Jazz {
     }
 
     /// The client a backend's endpoint acts for its users with
-    /// ([`crate::Endpoint::for_user`]), as `createJazz`'s backend session:
+    /// (`Endpoint::for_user`), as `createJazz`'s backend session:
     /// its link states only the backend's secret and the bundle it is pinned
     /// to, so the core trusts it to act for the sessions its calls name, and
     /// its schema carries the permissions, so their reads evaluate here too.
+    #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
     pub(crate) async fn open_for_users(&self) -> Result<Self> {
         let Some((files, config)) = self.info.opened_with.clone() else {
             return Err(Error::Config(
@@ -261,6 +264,7 @@ impl Jazz {
 
     /// This backend's handle, acting as `session`'s user: the same client,
     /// with every read and write run as them and their permissions.
+    #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
     pub(crate) fn scoped(&self, session: Session) -> Self {
         Self {
             commands: self.commands.clone(),
@@ -418,8 +422,8 @@ impl Jazz {
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
     ///
-    /// On a handle acting for a user ([`crate::Endpoint::for_user`]) it does
-    /// nothing: [`crate::Endpoint::shutdown`] stops the client it shares.
+    /// On a handle acting for a user (`Endpoint::for_user`) it does
+    /// nothing: `Endpoint::shutdown` stops the client it shares.
     pub async fn shutdown(&self) -> Result<()> {
         if self.for_user {
             return Ok(());
@@ -471,6 +475,7 @@ pub(crate) fn decode_result<T: Table>(
 
 /// Which link a backend opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
 enum Link {
     /// Its own: the session of the user it acts as, pinned to its bundle.
     Own,
