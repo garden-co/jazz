@@ -74,7 +74,7 @@ function expectGolden(
   // Snapshots `generate` writes are stamped with the time: compare them by hash.
   const files = Object.fromEntries(
     Object.entries(projectFiles(dir)).map(([path, text]) => [
-      path.replace(/(migrations\/snapshots\/)\d{8}T\d{6}-/, "$1<stamp>-"),
+      path.replace(/(migrations\/snapshots\/)\d{8}T\d{6}-/, "$1STAMP-"),
       text,
     ]),
   );
