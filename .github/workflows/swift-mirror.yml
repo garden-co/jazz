@@ -164,9 +164,23 @@ jobs:
           SWIFT
           cp packages/jazz-swift/mirror/Smoke.swift "$consumer/Sources/Smoke/Smoke.swift"
           (cd "$consumer" && swift run Smoke)
-          # The mirror package's scheme (jazz-swift): compiles the sources and
-          # resolves the XCFramework's iOS simulator slice.
-          (cd "$verify" && xcodebuild build -scheme jazz-swift -destination 'generic/platform=iOS Simulator' -quiet)
+      - name: Test on macOS and the iOS simulator
+        run: |
+          # The package's own tests (packages/jazz-swift/Tests), run against
+          # the release's XCFramework: the core on macOS and on an iOS
+          # simulator, and JazzQuery, SwiftUI's live query, on both.
+          verify="$RUNNER_TEMP/verify"
+          cp -R packages/jazz-swift/Tests "$verify/Tests"
+          perl -0pi -e 's/(\n        jazzFFI,\n    \])/\n        jazzFFI,\n        .testTarget(name: "JazzTests", dependencies: ["Jazz"], path: "Tests\/JazzTests"),\n    ]/' "$verify/Package.swift"
+          grep -n testTarget "$verify/Package.swift"
+          (cd "$verify" && swift test)
+          # The newest available iPhone simulator.
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = [d for runtime, ds in json.load(sys.stdin)["devices"].items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")]
+          print(devices[-1]["udid"])')
+          echo "iOS simulator: $udid"
+          (cd "$verify" && xcodebuild test -scheme jazz-swift -destination "platform=iOS Simulator,id=$udid" -quiet)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-swift-mirror
