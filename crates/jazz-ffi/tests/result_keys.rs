@@ -178,3 +178,39 @@ async fn history_subscriptions_follow_accepted_versions() {
     .await
     .unwrap();
 }
+
+/// An unlabelled union arm is labelled by what it reads, not by where it
+/// stands: the same arms in the other order give each row the same keys
+/// (`jazz.union-arm-label.v2`, as every client labels it).
+#[test]
+fn a_union_s_keys_do_not_depend_on_arm_order() {
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    let gala = parse(&jazz.insert("shows".into(), show(nil_uuid())).unwrap())["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    jazz.insert("tasks".into(), task(&gala, "Doors", 1.0))
+        .unwrap();
+    jazz.insert("tasks".into(), task(&gala, "Rig", 2.0))
+        .unwrap();
+    let doors =
+        json!({ "table": "tasks", "where": [{ "column": "title", "op": "eq", "value": "Doors" }] });
+    let all =
+        json!({ "table": "tasks", "where": [{ "column": "showId", "op": "eq", "value": gala }] });
+    let keys_of = |arms: Value| {
+        let (sender, deltas) = mpsc::channel();
+        let subscription = jazz
+            .subscribe(
+                json!({ "union": arms }).to_string(),
+                Arc::new(Collect(Mutex::new(sender))),
+            )
+            .unwrap();
+        let reset = deltas.recv_timeout(Duration::from_secs(5)).unwrap();
+        subscription.cancel();
+        keys(&reset["added"]).into_iter().collect::<HashSet<_>>()
+    };
+    let forward = keys_of(json!([doors, all]));
+    assert_eq!(forward.len(), 3);
+    assert_eq!(keys_of(json!([all, doors])), forward);
+    jazz.shutdown().unwrap();
+}
