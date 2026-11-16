@@ -264,6 +264,40 @@ owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
    closure later needs steps 2 to 4 for that crate alone. Until then, the
    workflow fails for it with a message naming the missing token.
 
+## Kotlin on Maven Central
+
+`jazz-kotlin` (the JVM jar, with every platform's `libjazz_ffi` inside) and
+`jazz-kotlin-android` (the AAR) publish to Maven Central as
+`tools.jazz:jazz-kotlin` and `tools.jazz:jazz-kotlin-android`, at jazz-tools'
+version (the Gradle builds read it from `packages/jazz-tools/package.json`).
+`.github/workflows/publish-jazz-kotlin.yml` runs `dev/scripts/publish-kotlin.sh`.
+
+1. **After "Attach language artifacts" and the GitHub Release are published,**
+   dispatch "Publish jazz-kotlin" with `mode=dry-run`, `tag=v<version>`. It
+   builds `refs/tags/v<version>`'s commit (never a branch of that name) with
+   the pinned JDK and Gradle 8.14.3: the jar from the release's
+   `libjazz_ffi-<platform>.tar.gz` (checked against `SHA256SUMS-languages`,
+   their build-provenance attestations, and `libjazz_ffi-source.txt` naming
+   that commit) and the AAR. It signs both with a throwaway key and checks
+   every file, POM and signature. Its artifact is what Central would get.
+2. **Publish:** dispatch it with `mode=publish`, `tag=v<version>`. The `publish`
+   environment's reviewer approves; it reads `MAVEN_CENTRAL_USERNAME` and
+   `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token) and
+   `MAVEN_SIGNING_KEY` / `MAVEN_SIGNING_KEY_PASSWORD`. One Gradle run builds,
+   signs and uploads; the same checks then run on those files. The two
+   deployments wait, validated, on central.sonatype.com → Publish →
+   Deployments: once the run is green, check them and press Publish.
+3. A published version can't be replaced or deleted on Central. A failed run
+   publishes nothing; drop any deployment it left in the portal.
+
+The artifacts are signed by the release key, RSA 4096, `Jazz Releases
+<releases@jazz.tools>`, fingerprint
+`A23F 5FC8 350C E279 A2DF  0C99 3682 3E73 6D53 8486`, which expires 2028-11-15.
+Its public key is on keyserver.ubuntu.com and keys.openpgp.org; the private
+key and passphrase are backed up in AWS Secrets Manager (shared-services,
+us-east-2, `jazz/release/maven-signing-key`). Extend the expiry before then and
+re-upload the public key; the fingerprint stays.
+
 ## Release branch lifecycle and alpha55 migration
 
 `main` remains the development branch and `.changeset/config.json` keeps

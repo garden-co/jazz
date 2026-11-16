@@ -21,7 +21,14 @@ name: Attach language artifacts
 # add assets of their own and leave these unchanged.
 # and once: jazz-ffi-bindings.tar.gz (swift/, kotlin/),
 # jazz-kotlin-<version>.jar (every platform's library inside, for JNA),
-# jazz-kotlin-android-<version>.aar, and SHA256SUMS over all of them.
+# jazz-kotlin-android-<version>.aar, libjazz_ffi-source.txt (the commit they
+# were built from), and SHA256SUMS-languages over all of them. Not
+# SHA256SUMS: that name is the release's server binaries' ("Publish
+# jazz-tools alpha"), and both upload with --clobber. A real run also attests
+# every asset's build provenance (`gh attestation verify <file> --repo
+# garden-co/jazz --signer-workflow
+# garden-co/jazz/.github/workflows/attach-language-artifacts.yml`), as
+# releases here aren't immutable.
 on:
   # A change to this workflow proves itself: a dry run of the PR's head.
   pull_request:
@@ -276,7 +283,7 @@ jobs:
             exit 0
           fi
           bash dev/scripts/build-kotlin-dist.sh natives kotlin-dist --android
-          # Its own checksums join the release's SHA256SUMS.
+          # Its own checksums join the release's SHA256SUMS-languages.
           rm -f kotlin-dist/SHA256SUMS
           ls -l kotlin-dist
 
@@ -308,6 +315,9 @@ jobs:
             cmp "${source}" built/source-linux-x86_64.txt
           done
           mkdir -p dist
+          # The commit every platform's library was built from, for
+          # consumers to check against the commit they build.
+          cp built/source-linux-x86_64.txt dist/libjazz_ffi-source.txt
           # Reproducible: sorted, no owners, one fixed mtime.
           pack() {
             tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
@@ -324,8 +334,30 @@ jobs:
             cp "${kotlin[@]}" dist/
           fi
           cd dist
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
+          sha256sum * > SHA256SUMS-languages
+          cat SHA256SUMS-languages
+
+      # The release's own SHA256SUMS (the server binaries') must never be
+      # replaced by this workflow's: dist/* uploads with --clobber.
+      - name: Check the checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          if [ -e SHA256SUMS ]; then
+            echo "::error::dist/SHA256SUMS would replace the release's server-binary checksums."
+            exit 1
+          fi
+          if grep -Eq ' (jazz-tools-linux-[^ ]*|SHA256SUMS-languages)$' SHA256SUMS-languages; then
+            echo "::error::SHA256SUMS-languages lists jazz-tools binaries or itself."
+            exit 1
+          fi
+          for file in *; do
+            [ "${file}" = SHA256SUMS-languages ] && continue
+            awk -v f="${file}" '$2 == f {found=1} END {exit !found}' SHA256SUMS-languages || {
+              echo "::error::SHA256SUMS-languages doesn't list ${file}."
+              exit 1
+            }
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -342,6 +374,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      # Build-provenance attestations of the assets, only here: a real run.
+      attestations: write
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -351,9 +386,10 @@ jobs:
           name: language-artifacts
           path: dist
 
-      # Checked right before uploading: replacing assets is safe only on a
-      # draft.
-      - name: Upload to the draft release
+      # Replacing assets is safe only on a draft: checked before attesting
+      # (so a published release gets no stray attestations) and again right
+      # before uploading.
+      - name: Check the release is a draft
         run: |
           if ! is_draft=$(gh release view "v${VERSION}" --json isDraft --jq .isDraft); then
             echo "::error::No release v${VERSION}; create its draft with the GitHub release workflow first."
@@ -361,6 +397,17 @@ jobs:
           fi
           if [ "${is_draft}" != true ]; then
             echo "::error::v${VERSION} is published; its language assets are never replaced."
+            exit 1
+          fi
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Upload to the draft release
+        run: |
+          if [ "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" != true ]; then
+            echo "::error::v${VERSION} was published meanwhile; its language assets are never replaced."
             exit 1
           fi
           gh release upload "v${VERSION}" dist/* --clobber

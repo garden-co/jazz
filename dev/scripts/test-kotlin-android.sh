@@ -52,7 +52,10 @@ install_zip() {
   echo "$sha256" >"$dest/.jazz-sha256"
 }
 
-if ! command -v java >/dev/null; then
+# KOTLIN_TOOLCHAIN=pinned uses the pinned ones even when PATH has others
+# (dev/scripts/publish-kotlin.sh: a runner's Gradle 9 breaks AGP 8).
+pinned="${KOTLIN_TOOLCHAIN:-}"
+if [ "$pinned" = pinned ] || ! command -v java >/dev/null; then
   if [ ! -x "$cache/jdk-$jdk_version/bin/java" ]; then
     mkdir -p "$cache/jdk-$jdk_version"
     fetch "$jdk_url" "$cache/jdk.tar.gz" "$jdk_sha256"
@@ -62,7 +65,7 @@ if ! command -v java >/dev/null; then
   export JAVA_HOME="$cache/jdk-$jdk_version"
   export PATH="$JAVA_HOME/bin:$PATH"
 fi
-if ! command -v gradle >/dev/null; then
+if [ "$pinned" = pinned ] || ! command -v gradle >/dev/null; then
   if [ ! -x "$cache/gradle-$gradle_version/bin/gradle" ]; then
     mkdir -p "$cache"
     fetch "$gradle_url" "$cache/gradle.zip" "$gradle_sha256"
@@ -77,7 +80,9 @@ install_zip "$platform_url" "$platform_sha256" "$sdk/platforms/android-36"
 install_zip "$build_tools_url" "$build_tools_sha256" "$sdk/build-tools/36.0.0"
 install_zip "$ndk_url" "$ndk_sha256" "$sdk/ndk/$ndk_revision"
 grep -qx "Pkg.Revision = $ndk_revision" "$sdk/ndk/$ndk_revision/source.properties"
-export ANDROID_HOME="$sdk" ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
+# ANDROID_SDK_ROOT too: a runner image may set it to its own SDK, and AGP refuses
+# two different SDK paths.
+export ANDROID_HOME="$sdk" ANDROID_SDK_ROOT="$sdk" ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
 
 rustup target add "${rust_targets[@]}"
 if ! "$cache/cargo/bin/cargo-ndk" --version 2>/dev/null | grep -q " $cargo_ndk_version\$"; then
@@ -85,8 +90,11 @@ if ! "$cache/cargo/bin/cargo-ndk" --version 2>/dev/null | grep -q " $cargo_ndk_v
 fi
 export PATH="$cache/cargo/bin:$PATH"
 
+# KOTLIN_ANDROID_TASKS: more tasks to run with the build (dev/scripts/publish-kotlin.sh's
+# publishToMavenLocal, publishToMavenCentral).
+read -ra extra_tasks <<<"${KOTLIN_ANDROID_TASKS:-}"
 gradle --no-daemon --console=plain -p packages/jazz-kotlin-android \
-  -PcargoProfile="${CARGO_PROFILE:-dev}" assembleRelease
+  -PcargoProfile="${CARGO_PROFILE:-dev}" assembleRelease "${extra_tasks[@]}"
 
 # The AAR must carry jazz-ffi for every ABI, and the library's classes.
 aar=packages/jazz-kotlin-android/build/outputs/aar/jazz-kotlin-android-release.aar
