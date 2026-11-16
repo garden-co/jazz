@@ -166,10 +166,9 @@ fn transactions_through_the_c_abi() {
         show_id
     );
 
-    assert_eq!(
-        call(h, "txBegin", json!({ "serializable": false })).unwrap_err()["kind"],
-        "notSupported"
-    );
+    // "serializable": false begins a mergeable transaction (TS's default).
+    let mergeable = call(h, "txBegin", json!({ "serializable": false })).unwrap()["tx"].clone();
+    call(h, "txRollback", json!({ "tx": mergeable })).unwrap();
     let tx = call(h, "txBegin", json!({})).unwrap()["tx"].clone();
     assert!(
         call(

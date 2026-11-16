@@ -28,7 +28,7 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
   "--benches",
 ]);
 export const RUST_CI_FEATURES =
-  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/axum";
+  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/axum,jazz-app/test-relay";
 
 // CI setup supplies this one coordination input. Every other JAZZ_* variable
 // is a test, fixture, benchmark, timeout, or assertion control and would make
@@ -325,8 +325,27 @@ export const ciPartitions = Object.freeze({
     command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
   ]),
   // The Go bindings and the StagePlan Go example (installs Go when the
-  // image has none).
-  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
+  // image has none). go-cli's suite also runs against StagePlan's main
+  // backend in TypeScript (createJazz), so it needs a jazz-tools build.
+  go: Object.freeze([
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
+    command("admitted Jazz Tools build for the Go e2e", "node", [
+      "dev/gates/run-correctness-consumer.mjs",
+      "--",
+      "pnpm",
+      "exec",
+      "turbo",
+      "run",
+      "build",
+      "--filter=jazz-tools",
+      "--only",
+    ]),
+    command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
+      env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
+    }),
+  ]),
 });
 
 export const focusedCommands = Object.freeze([

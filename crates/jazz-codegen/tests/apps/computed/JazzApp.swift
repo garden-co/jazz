@@ -40,9 +40,8 @@ public enum JazzApp {
 }
 """#
 
-    /// Opens the app. A backend (`config.permissions` set to its
-    /// `jazz.permissions.json`) first publishes the app's permissions bundle
-    /// and pins the session it acts in to it.
+    /// Opens the app as an end-user client (`.client(…)`, signed in through
+    /// the app's Jazz endpoint) or a local one (`.local()`).
     public static func open(_ config: Jazz.Config, computed: some Computed) async throws -> Jazz.Client {
         try await Jazz.Client.open(app: app, config: config, implementations: computed)
     }

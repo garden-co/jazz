@@ -71,7 +71,7 @@ Every framework provides a hook to access the database handle, and query hooks r
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
@@ -85,6 +85,12 @@ Mutations are methods on the database handle. All three take a table as their fi
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-crud-swift
     </include>
 
   </Tab>
@@ -151,7 +157,7 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
@@ -165,6 +171,12 @@ Required fields cannot be set to `null`.
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-nullable-update-swift
     </include>
 
   </Tab>
@@ -353,7 +365,7 @@ try {
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
@@ -370,8 +382,16 @@ try {
     </include>
 
   </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-durability-tier-swift
+    </include>
+  </Tab>
   <Tab value="Go">
-    Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-durability-tier-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -468,7 +488,7 @@ A mutation can fail when you call it or while you wait:
   `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
   `WriteRejected`) on the thin client.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -478,6 +498,12 @@ A mutation can fail when you call it or while you wait:
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
     </include>
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#writing-mutation-errors-go
+    </include>
+
   </Tab>
 </Tabs>
 

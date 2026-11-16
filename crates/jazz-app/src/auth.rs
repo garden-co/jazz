@@ -22,6 +22,10 @@ pub enum Auth {
     /// The app's own sign-in: its backend (`createJazz`'s `authenticate`)
     /// names the user from the bearer this provider gives.
     Bearer(Bearer),
+    /// A backend client's machine credential (an OIDC workload token): the
+    /// app's main backend trusts it as a trusted machine or as one user
+    /// ([`crate::Config::credential`]).
+    Credential(Bearer),
 }
 
 impl Auth {
