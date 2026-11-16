@@ -516,6 +516,38 @@ async fn the_backend_acts_as_a_request_user() {
     app.stop().await;
 }
 
+/// A user's handle shares the backend's trusted client: it can't
+/// disconnect it for every user, see every user's refusals, or delete
+/// the backend's store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_handle_refuses_the_clients_lifecycle() {
+    let app = App::start().await;
+    app.endpoint.create_account_for("bob").await.unwrap();
+    let as_bob = Request::new("POST", "/").header("authorization", "Bearer token-bob");
+    let bob = app.endpoint.for_user(&as_bob).await.unwrap();
+
+    #[track_caller]
+    fn unsupported(result: Result<(), Error>) {
+        assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
+    }
+    unsupported(bob.disconnect().await);
+    unsupported(bob.reconnect().await);
+    unsupported(bob.mutation_errors().await.map(drop));
+    unsupported(bob.delete_client_storage().await);
+
+    // The shared client is still connected, and still runs.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        bob.durable(DurabilityTier::GlobalServer)
+            .insert(NewTodo::new("still synced", false)),
+    )
+    .await
+    .expect("the shared client is still connected")
+    .unwrap();
+    assert!(app.backend.all(todos::query()).await.is_ok());
+    app.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_endpoint_refuses_what_it_should() {
     let app = App::start().await;

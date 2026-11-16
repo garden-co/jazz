@@ -1,7 +1,7 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 2. Regenerate it after changing jazz.app.json.
+// Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
-#![allow(dead_code, clippy::all)]
+#![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
 pub const SOURCE: &str = "sha256:1adfb9c805c18f17655799f7003dd9ac6f75950914995d9c25b0fbcaad7a545f";
@@ -122,6 +122,7 @@ pub struct ActivityUpdate {
 
 impl ::jazz_app::Table for Activity {
     const NAME: &'static str = "activity";
+    const COLUMNS: &'static [&'static str] = &["showId", "taskId", "actorId", "kind", "detail"];
     type New = NewActivity;
     type Update = ActivityUpdate;
 
@@ -203,6 +204,11 @@ pub mod activity {
     /// Every row of `activity`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Activity> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `activity`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Activity>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -293,6 +299,7 @@ pub struct ChecklistItemUpdate {
 
 impl ::jazz_app::Table for ChecklistItem {
     const NAME: &'static str = "checklistItems";
+    const COLUMNS: &'static [&'static str] = &["title", "done", "ownerAccount"];
     type New = NewChecklistItem;
     type Update = ChecklistItemUpdate;
 
@@ -362,6 +369,11 @@ pub mod checklist_items {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `checklistItems`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ChecklistItem>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<ChecklistItem, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -428,6 +440,7 @@ pub struct CommentUpdate {
 
 impl ::jazz_app::Table for Comment {
     const NAME: &'static str = "comments";
+    const COLUMNS: &'static [&'static str] = &["taskId", "authorId", "body"];
     type New = NewComment;
     type Update = CommentUpdate;
 
@@ -497,6 +510,11 @@ pub mod comments {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `comments`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Comment>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<Comment, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -563,6 +581,7 @@ pub struct CrewUpdate {
 
 impl ::jazz_app::Table for Crew {
     const NAME: &'static str = "crew";
+    const COLUMNS: &'static [&'static str] = &["account", "name"];
     type New = NewCrew;
     type Update = CrewUpdate;
 
@@ -623,6 +642,11 @@ pub mod crew {
     /// Every row of `crew`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Crew> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `crew`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Crew>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -707,6 +731,7 @@ pub struct ShowCrewUpdate {
 
 impl ::jazz_app::Table for ShowCrew {
     const NAME: &'static str = "showCrew";
+    const COLUMNS: &'static [&'static str] = &["showId", "crewId", "account", "role", "inviteCode"];
     type New = NewShowCrew;
     type Update = ShowCrewUpdate;
 
@@ -790,6 +815,11 @@ pub mod show_crew {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `showCrew`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ShowCrew>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<ShowCrew, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -869,6 +899,7 @@ pub struct ShowInviteUpdate {
 
 impl ::jazz_app::Table for ShowInvite {
     const NAME: &'static str = "showInvites";
+    const COLUMNS: &'static [&'static str] = &["showId", "code"];
     type New = NewShowInvite;
     type Update = ShowInviteUpdate;
 
@@ -929,6 +960,11 @@ pub mod show_invites {
     /// Every row of `showInvites`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<ShowInvite> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `showInvites`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<ShowInvite>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -1002,6 +1038,7 @@ pub struct ShowUpdate {
 
 impl ::jazz_app::Table for Show {
     const NAME: &'static str = "shows";
+    const COLUMNS: &'static [&'static str] = &["name", "venue", "date", "doors", "chiefAccount"];
     type New = NewShow;
     type Update = ShowUpdate;
 
@@ -1083,6 +1120,11 @@ pub mod shows {
     /// Every row of `shows`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Show> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `shows`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Show>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -1193,6 +1235,7 @@ pub struct TaskUpdate {
 
 impl ::jazz_app::Table for Task {
     const NAME: &'static str = "tasks";
+    const COLUMNS: &'static [&'static str] = &["showId", "title", "status", "assigneeId", "notes", "rank"];
     type New = NewTask;
     type Update = TaskUpdate;
 
@@ -1283,6 +1326,11 @@ pub mod tasks {
         ::jazz_app::Query::all()
     }
 
+    /// Every accepted version of `tasks`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Task>> {
+        ::jazz_app::Query::history()
+    }
+
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
     pub fn id() -> ::jazz_app::Column<Task, ::jazz_app::ObjectId> {
         ::jazz_app::id()
@@ -1324,7 +1372,7 @@ pub mod tasks {
     }
 
     /// Relation `assignee`: the `crew` row `assigneeId` references.
-    pub fn assignee() -> ::jazz_app::One<Task, Crew> {
+    pub fn assignee() -> ::jazz_app::One<Task, Crew, ::jazz_app::Nullable> {
         ::jazz_app::One::new("assigneeId")
     }
 
