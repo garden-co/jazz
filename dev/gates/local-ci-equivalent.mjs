@@ -123,6 +123,19 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // jazz-app-support's docs are its Rust API reference: broken intra-doc
+    // links (a gated `Endpoint` linked from the default build) only show in
+    // rustdoc, which nothing else runs. Both the default build and the
+    // feature-gated endpoint, the two docs.rs and contributors see.
+    command("jazz-app-support rustdoc", "cargo", ["doc", "-p", "jazz-app-support", "--no-deps"], {
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    }),
+    command(
+      "jazz-app-support rustdoc (unstable-endpoint)",
+      "cargo",
+      ["doc", "-p", "jazz-app-support", "--no-deps", "--features", "unstable-endpoint"],
+      { env: { RUSTDOCFLAGS: "-D warnings" } },
+    ),
     // Cold-load phase attribution is opt-in and off in every other build, so
     // without this its cfg'd spans and counters would rot unnoticed.
     command("cold-settle attribution compile", "cargo", [
