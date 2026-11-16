@@ -340,6 +340,15 @@ async fn include_deleted_reads_deleted_rows() {
     let with_deleted: Vec<Todo> = jazz.all(todos::query().include_deleted()).await.unwrap();
     assert!(with_deleted.iter().any(|todo| todo.id == f.loose.id));
     assert_eq!(with_deleted.len(), current.len() + 1);
+    // Read options keep it too.
+    let with_options: Vec<Todo> = jazz
+        .all_with_options(
+            todos::query().include_deleted(),
+            jazz_app::ReadOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_options.len(), with_deleted.len());
 
     let deleted: Vec<_> = jazz
         .all(
@@ -495,6 +504,30 @@ async fn unsupported_combinations_are_refused_as_in_typescript() {
     assert!(reason.contains("include(...)"), "{reason}");
     let reason = unsupported(jazz.all(union().include_deleted()).await.unwrap_err());
     assert!(reason.contains("include_deleted()"), "{reason}");
+    // Part of a value can't be read through a union, a history read or a hop.
+    let part = || jazz_app::ValuePart::TextUtf16 { from: 0, to: 2 };
+    let reason = unsupported(
+        jazz.all(union().part(todos::title(), part()))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("part(...)"), "{reason}");
+    let reason = unsupported(
+        jazz.all(todos::history().id(f.milk.id).part(todos::title(), part()))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("part(...)"), "{reason}");
+    let reason = unsupported(
+        jazz.all(
+            todos::query()
+                .part(todos::title(), part())
+                .hop_to(todos::project_relation()),
+        )
+        .await
+        .unwrap_err(),
+    );
+    assert!(reason.contains("part(...)"), "{reason}");
     let reason = unsupported(
         jazz.all(union().gather(todos::parent_relation(), 3))
             .await
@@ -723,6 +756,9 @@ async fn hop_to_follows_an_array_relation() {
     impl task_bindings::Computed for NoComputed {
         fn tasks_urgent(&self, _: i32, _: task_bindings::TaskPriority) -> bool {
             false
+        }
+        fn tasks_title_len(&self, title: String) -> i32 {
+            title.chars().count() as i32
         }
         fn iso_date_view(&self, stored: Timestamp) -> String {
             stored.0.to_string()
