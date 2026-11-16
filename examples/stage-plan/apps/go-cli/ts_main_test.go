@@ -146,7 +146,6 @@ func TestBackendClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer asAlice.Close()
 	show, err := ensureShow(ctx, asAlice, "Backend Night")
 	if err != nil {
 		t.Fatal(err)
@@ -154,9 +153,14 @@ func TestBackendClient(t *testing.T) {
 	if _, err := addTask(ctx, asAlice, show.ID, "Doors"); err != nil {
 		t.Fatal(err)
 	}
-	if err := asAlice.WaitForSync(ctx, jazz.WriteGlobal); err != nil {
-		t.Fatal(err)
+	// Shutdown drains the writes made for alice too.
+	if err := trusted.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
+	if _, err := asAlice.Account(ctx); !errors.Is(err, jazz.ErrClosed) {
+		t.Fatalf("a ForUser DB after its parent's Shutdown = %v, want ErrClosed", err)
+	}
+	asAlice.Close()
 	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(200 * time.Millisecond) {
 		shows, err := jazzapp.Shows.Query().Where(jazzapp.Shows.ID.Eq(show.ID)).Tier(jazz.ReadRemote).All(ctx, alice)
 		if err == nil && len(shows) == 1 {
@@ -165,9 +169,6 @@ func TestBackendClient(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("alice's app never saw the show the backend client wrote for her: %v, %v", shows, err)
 		}
-	}
-	if err := trusted.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown: %v", err)
 	}
 
 	scoped := openBackendClient(t, srv, tokens.Scoped)

@@ -47,9 +47,8 @@ func (db *DB) BackendClient(ctx context.Context) (BackendKind, error) {
 // an account: a user without one is ErrNoAccount; a user the main
 // backend won't let it act for (its 403) is ErrPermission; a scoped
 // client, or a DB ForUser returned, gets ErrRefused. Close the result
-// when done (db stays open); db must stay open meanwhile (after db
-// closes, the result's calls return ErrClosed). Call WaitForSync on it
-// before db's Shutdown: Shutdown doesn't drain its writes yet.
+// when done (db stays open); after db closes, the result's calls return
+// ErrClosed. db's Shutdown drains the result's writes too.
 func (db *DB) ForUser(ctx context.Context, userID string, claims map[string]any) (*DB, error) {
 	if ffi.forUser == nil {
 		return nil, &Error{Kind: KindNotSupported, Message: "ForUser is not supported yet by this libjazz_ffi"}
