@@ -48,6 +48,13 @@ var ffi struct {
 	forUser     func(h uintptr, userID, claims *byte, err *uintptr) uintptr
 	closeWithin func(h uintptr, timeoutMs uint64, err *uintptr) int32
 
+	// Sessions, nil with a libjazz_ffi that predates them.
+	sessionOpen  func(config *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
+	sessionCall  func(s uintptr, method, args *byte, err *uintptr) uintptr
+	sessionJazz  func(s uintptr, err *uintptr) uintptr
+	sessionWatch func(s uintptr, cb uintptr, ctx uintptr, err *uintptr) uintptr
+	sessionClose func(s uintptr)
+
 	// The C callbacks, made once: each gets a Go id as its ctx.
 	subscriptionCallback, tokenCallback uintptr
 }
@@ -83,7 +90,12 @@ func bind() error {
 		}
 		purego.RegisterFunc(fn, sym)
 	}
-	for name, fn := range map[string]any{"jazz_for_user": &ffi.forUser, "jazz_close_within": &ffi.closeWithin} {
+	for name, fn := range map[string]any{
+		"jazz_for_user": &ffi.forUser, "jazz_close_within": &ffi.closeWithin,
+		"jazz_session_open": &ffi.sessionOpen, "jazz_session_call": &ffi.sessionCall,
+		"jazz_session_jazz": &ffi.sessionJazz, "jazz_session_watch": &ffi.sessionWatch,
+		"jazz_session_close": &ffi.sessionClose,
+	} {
 		if sym, err := purego.Dlsym(lib, name); err == nil {
 			purego.RegisterFunc(fn, sym)
 		}

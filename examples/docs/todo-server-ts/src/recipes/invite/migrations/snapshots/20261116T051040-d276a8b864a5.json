@@ -1,0 +1,83 @@
+{
+  "chatInvites": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "chatId",
+        "nullable": false,
+        "references": "chats"
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "code",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Boolean"
+        },
+        "name": "singleUse",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "chat": {
+        "kind": "forward",
+        "table": "chats",
+        "column": "chatId"
+      }
+    }
+  },
+  "chatMembers": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "chatId",
+        "nullable": false,
+        "references": "chats"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "user_id",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "inviteId",
+        "nullable": true
+      }
+    ],
+    "relations": {
+      "chat": {
+        "kind": "forward",
+        "table": "chats",
+        "column": "chatId"
+      }
+    }
+  },
+  "chats": {
+    "columns": [],
+    "relations": {
+      "invites": {
+        "kind": "reverse",
+        "table": "chatInvites",
+        "relation": "chat"
+      },
+      "members": {
+        "kind": "reverse",
+        "table": "chatMembers",
+        "relation": "chat"
+      }
+    }
+  }
+}

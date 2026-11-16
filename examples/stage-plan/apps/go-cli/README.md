@@ -5,8 +5,8 @@ StagePlan's stage-prep board in a terminal, written in Go with
 signs in through the app's Jazz endpoint, its main backend's `/jazz`, with a
 token from the app's auth provider, exactly as a browser client does. It
 opens StagePlan's own `jazz.app.json` (and keeps `jazz.permissions.json`, the
-main backend's), byte-identical copies of `../react-localfirst`'s; a test
-checks that they still match.
+main backend's): its `schema.ts` re-exports `../react-localfirst`'s, and
+`npx jazz-tools generate` writes both files from it.
 
 ```sh
 export JAZZ_SERVER_URL=https://my-stageplan.example/jazz   # the main backend's /jazz

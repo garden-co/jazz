@@ -84,7 +84,7 @@ enum Commands {
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
         /// The bindings' language (repeatable); by default each whose
-        /// marker (package.json, Cargo.toml, Package.swift, go.mod) sits beside jazz.app.json.
+        /// marker (package.json, Cargo.toml, Package.swift, build.gradle(.kts), go.mod) sits beside jazz.app.json.
         #[arg(long)]
         lang: Vec<String>,
         /// Fail when the files or bindings are stale; change nothing.
@@ -309,7 +309,7 @@ enum MigrationsAction {
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
         /// The bindings' language (repeatable); by default each whose
-        /// marker (package.json, Cargo.toml, Package.swift, go.mod) sits beside jazz.app.json.
+        /// marker (package.json, Cargo.toml, Package.swift, build.gradle(.kts), go.mod) sits beside jazz.app.json.
         #[arg(long)]
         lang: Vec<String>,
     },
@@ -333,6 +333,84 @@ fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
         }
     };
     std::process::exit(code)
+}
+
+/// Where a TS app keeps its `schema.ts`, relative to the app's directory
+/// (jazz-tools' `SCHEMA_ROOTS`, `packages/jazz-tools/src/upgrade/project.ts`).
+const SCHEMA_ROOTS: &[&str] = &[".", "src", "src/lib"];
+
+/// The app's `schema.ts`, when it is authored in TypeScript.
+fn ts_schema(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    SCHEMA_ROOTS
+        .iter()
+        .map(|root| dir.join(root).join("schema.ts"))
+        .find(|path| path.is_file())
+}
+
+/// Refuse to write an app's files when it is authored in TypeScript: there
+/// `jazz.app.json` and `jazz.permissions.json` are generated from
+/// `schema.ts` by `npx jazz-tools generate`, which this binary can't run.
+fn refuse_ts_authored(dir: &std::path::Path, command: &str) -> Result<(), String> {
+    let Some(schema) = ts_schema(dir) else {
+        return Ok(());
+    };
+    Err(format!(
+        "{} exists: this app is authored in TypeScript, and its jazz.app.json and \
+         jazz.permissions.json are generated from it. Run `npx jazz-tools {command}` instead \
+         (the standalone binary can't read TypeScript)",
+        schema.display()
+    ))
+}
+
+/// `generate` in `dir`. For an app authored in TypeScript only `--check`
+/// runs: it checks the committed files (their validity and their
+/// `$generated` digests) and the bindings against them, but can't check
+/// that the files are fresh from the TypeScript.
+fn generate(
+    dir: &std::path::Path,
+    names: &[String],
+    check: bool,
+) -> Result<jazz_cli::app_files::Outcome, String> {
+    let ts = ts_schema(dir);
+    if ts.is_some() && !check {
+        refuse_ts_authored(dir, "generate")?;
+    }
+    if ts.is_some() {
+        check_generated_digests(dir)?;
+    }
+    let mut outcome = jazz_cli::app_files::generate(dir, &langs(dir, names)?, check)?;
+    if let Some(schema) = ts {
+        outcome.notes.push(format!(
+            "note: {} exists: checked the bindings against the committed jazz.app.json and \
+             jazz.permissions.json, not that those are fresh from the TypeScript; run `npx \
+             jazz-tools generate --check` for that",
+            schema.display()
+        ));
+    }
+    Ok(outcome)
+}
+
+/// Refuse a committed file whose `$generated` digest no longer matches: it
+/// was edited by hand since `npx jazz-tools generate` wrote it.
+fn check_generated_digests(dir: &std::path::Path) -> Result<(), String> {
+    use jazz::tools::deployment::artifact::{self, GeneratedCheck};
+    for file in [artifact::APP_FILE, artifact::PERMISSIONS_FILE] {
+        let path = dir.join(file);
+        let Ok(text) = std::fs::read(&path) else {
+            continue;
+        };
+        match artifact::verify_generated(&text).map_err(|error| format!("{file}: {error}"))? {
+            GeneratedCheck::Unmarked | GeneratedCheck::Matches(_) => {}
+            GeneratedCheck::Mismatch { .. } => {
+                return Err(format!(
+                    "{file} was edited since `npx jazz-tools generate` wrote it (its \
+                     `$generated` digest doesn't match): edit the TypeScript and run `npx \
+                     jazz-tools generate`"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn langs(
@@ -392,9 +470,7 @@ async fn run() {
             dir,
             lang: name,
             check,
-        } => finish_app_files(
-            langs(&dir, &name).and_then(|langs| jazz_cli::app_files::generate(&dir, &langs, check)),
-        ),
+        } => finish_app_files(generate(&dir, &name, check)),
         Commands::Migrations {
             action:
                 MigrationsAction::Create {
@@ -403,7 +479,8 @@ async fn run() {
                     lang: language,
                 },
         } => finish_app_files(
-            langs(&dir, &language)
+            refuse_ts_authored(&dir, "migrations create")
+                .and_then(|()| langs(&dir, &language))
                 .and_then(|langs| jazz_cli::app_files::migrations_create(&dir, &langs, &name)),
         ),
         Commands::Create { resource } => match resource {

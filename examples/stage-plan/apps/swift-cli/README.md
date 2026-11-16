@@ -1,9 +1,9 @@
 # StagePlan from Swift
 
-A command-line tool over StagePlan's app, written in Swift. `jazz.app.json`
-and `jazz.permissions.json` are byte-identical copies of
-`../react-localfirst`'s (CI checks this: copy them, never edit them here), and
-`JazzApp.swift` is what `jazz-tools generate` writes from them.
+A command-line tool over StagePlan's app, written in Swift. Its `schema.ts`
+re-exports `../react-localfirst`'s, `npx jazz-tools generate` writes
+`jazz.app.json` and `jazz.permissions.json` from it, and `JazzApp.swift` is
+what `jazz-tools generate` writes from those.
 
 An end-user client of StagePlan (Swift apps are clients; StagePlan's backend
 runs in TypeScript). It signs in to the app's Jazz endpoint

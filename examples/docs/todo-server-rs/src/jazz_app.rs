@@ -4,7 +4,7 @@
 #![allow(dead_code, unused_variables, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:216aa1e42ad99c20ff335ba1d6525b15381752a751a374ba20b7b1fa1aa5e4c0";
+pub const SOURCE: &str = "sha256:c5bf64c4399924fc53f170f60878f0d83c712d91477365064bcf3c9b4e522397";
 
 /// A row of `projects`.
 #[derive(Debug, Clone, PartialEq)]
@@ -315,8 +315,11 @@ pub mod todos {
 /// The app's `jazz.app.json`: its schema, every earlier version and the
 /// migrations between them.
 pub const APP: &str = r#"{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "253d694a8edcc4f39371934b17c154b41e4a6b1f9a33c82c60273a5b9b0ad697"
+  },
   "tables": {
     "projects": {
       "columns": { "name": "string" },

@@ -9535,7 +9535,18 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
+    /// The view it read through.
+    through: ReadThrough,
     rows: Vec<(RowUuid, sync::Rank)>,
+}
+
+/// The view a transaction's read goes through: the root view, or a branch
+/// view, resolved (`view`) and as the reader named it (`source`, for the
+/// authority to resolve again).
+#[derive(Clone, Debug)]
+struct ReadThrough {
+    view: Option<View>,
+    source: ReadViewSourceSpec,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -10174,6 +10185,7 @@ impl Db {
                 for read in reads {
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
+                        view: read.through.view.clone(),
                         ..ReadSpec::default()
                     };
                     let now = inner.read_versions(&read.prepared, None, &spec)?;
@@ -10217,6 +10229,7 @@ impl Db {
                                     (*row.0.as_bytes(), by, seq)
                                 })
                                 .collect(),
+                            view: read.through.source.clone(),
                         })
                     })
                     .collect::<Result<Vec<_>, Error>>()?;
@@ -10248,6 +10261,7 @@ impl Db {
             for read in reads {
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
+                    view: read.through.view.clone(),
                     ..ReadSpec::default()
                 };
                 if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
@@ -10665,6 +10679,7 @@ impl Db {
         include_deleted: bool,
         prefix: usize,
         identity: Option<AuthorSubject>,
+        through: ReadThrough,
     ) -> Result<(), Error> {
         // A mergeable read records nothing: peek without the store gate,
         // so the batch's cached overlay stays for its next stage or read.
@@ -10687,9 +10702,13 @@ impl Db {
         else {
             return Ok(());
         };
+        // A branch read records the rows of its view: the head's, or the
+        // base's it inherits, so a change to either (or a head row masking
+        // a base one) conflicts.
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
+            view: through.view.clone(),
             ..ReadSpec::default()
         };
         let rows = inner.read_versions(prepared, None, &read)?;
@@ -10704,6 +10723,7 @@ impl Db {
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
+                through,
                 rows,
             });
         }
@@ -10884,20 +10904,25 @@ impl TxRef<'_> {
                     "Reading a snapshot inside a transaction is not supported yet",
                 ));
             }
-            ReadViewSourceSpec::BranchView { .. } => {
-                if matches!(
-                    self.db.inner.staging().batches.get(&self.id),
-                    Some(Batch {
-                        kind: BatchKind::Serializable { .. },
+            // A live base needs nothing from the store; only a frozen one
+            // resolves its snapshot, under the store gate (which applies
+            // the staged writes of open transactions, so it is not taken
+            // for every branch read).
+            ReadViewSourceSpec::BranchView {
+                head,
+                base: None | Some(BranchViewBase::Current(_)),
+            } => Some(View {
+                head: head.clone(),
+                base: match source {
+                    ReadViewSourceSpec::BranchView {
+                        base: Some(BranchViewBase::Current(base)),
                         ..
-                    })
-                ) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "Reading through a branch view inside a serializable transaction is not \
-                         supported yet",
-                    ));
-                }
+                    } => Some(base.clone()),
+                    _ => None,
+                },
+                base_cut: None,
+            }),
+            ReadViewSourceSpec::BranchView { .. } => {
                 let opts = ReadOpts {
                     read_view: ReadViewSpec {
                         source: source.clone(),
@@ -10927,7 +10952,12 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix, view);
+        let through = ReadThrough {
+            view,
+            source: source.clone(),
+        };
+        let reading =
+            self.read_admitted(prepared, include_deleted, identity, tier, prefix, through);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -10964,7 +10994,7 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
         prefix: BatchPrefix,
-        view: Option<View>,
+        through: ReadThrough,
     ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
@@ -11040,7 +11070,7 @@ impl TxRef<'_> {
                     None,
                     None,
                     tier == ReadTier::Remote,
-                    &ReadViewSourceSpec::Current,
+                    &through.source,
                 )
                 .await?;
             if let Some(Batch {
@@ -11075,7 +11105,7 @@ impl TxRef<'_> {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
-                        view: view.clone(),
+                        view: through.view.clone(),
                         ..ReadSpec::default()
                     };
                     let roots = inner.run(&prepared, identity, &read)?;
@@ -11084,8 +11114,14 @@ impl TxRef<'_> {
                 Ok((rows, prepared))
             })
             .await?;
-        self.db
-            .record_read(self.id, &prepared, include_deleted, prefix.ops, identity)?;
+        self.db.record_read(
+            self.id,
+            &prepared,
+            include_deleted,
+            prefix.ops,
+            identity,
+            through,
+        )?;
         Ok(rows)
     }
 
