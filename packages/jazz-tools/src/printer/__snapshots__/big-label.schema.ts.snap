@@ -1,0 +1,356 @@
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  artists: s.table(
+    {
+      organizationId: s.uuid(),
+      name: s.string(),
+      genre: s.string(),
+      status: s.string(),
+      searchKey: s.string(),
+    },
+    {
+      organization: s.rel("organizations", "organizationId"),
+      releasesViaArtist: s.reverse("releases", "artist"),
+    },
+  ),
+  better_auth_account: s.table(
+    {
+      accountId: s.string(),
+      providerId: s.string(),
+      userId: s.uuid(),
+      accessToken: s.string().optional(),
+      refreshToken: s.string().optional(),
+      idToken: s.string().optional(),
+      accessTokenExpiresAt: s.timestamp().optional(),
+      refreshTokenExpiresAt: s.timestamp().optional(),
+      scope: s.string().optional(),
+      password: s.string().optional(),
+      createdAt: s.timestamp(),
+      updatedAt: s.timestamp(),
+    },
+    {
+      user: s.rel("better_auth_user", "userId"),
+    },
+  ),
+  better_auth_jwks: s.table({
+    publicKey: s.string(),
+    privateKey: s.string(),
+    createdAt: s.timestamp(),
+    expiresAt: s.timestamp().optional(),
+    alg: s.string().optional(),
+    crv: s.string().optional(),
+  }),
+  better_auth_session: s.table(
+    {
+      expiresAt: s.timestamp(),
+      token: s.string(),
+      createdAt: s.timestamp(),
+      updatedAt: s.timestamp(),
+      ipAddress: s.string().optional(),
+      userAgent: s.string().optional(),
+      userId: s.uuid(),
+    },
+    {
+      user: s.rel("better_auth_user", "userId"),
+    },
+  ),
+  better_auth_user: s.table(
+    {
+      name: s.string(),
+      email: s.string(),
+      emailVerified: s.boolean(),
+      image: s.string().optional(),
+      createdAt: s.timestamp(),
+      updatedAt: s.timestamp(),
+    },
+    {
+      better_auth_accountViaUser: s.reverse("better_auth_account", "user"),
+      better_auth_sessionViaUser: s.reverse("better_auth_session", "user"),
+    },
+  ),
+  better_auth_verification: s.table({
+    identifier: s.string(),
+    value: s.string(),
+    expiresAt: s.timestamp(),
+    createdAt: s.timestamp(),
+    updatedAt: s.timestamp(),
+  }),
+  catalogues: s.table(
+    { organizationId: s.uuid(), name: s.string(), code: s.string() },
+    {
+      organization: s.rel("organizations", "organizationId"),
+      releasesViaCatalogue: s.reverse("releases", "catalogue"),
+    },
+  ),
+  memberships: s.table(
+    { organizationId: s.uuid(), personId: s.uuid(), userId: s.uuid(), role: s.string() },
+    {
+      organization: s.rel("organizations", "organizationId"),
+      person: s.rel("people", "personId"),
+      releaseAssignmentsViaMembership: s.reverse("releaseAssignments", "membership"),
+      teamAssignmentsViaMembership: s.reverse("teamAssignments", "membership"),
+    },
+  ),
+  organizations: s.table(
+    { name: s.string(), slug: s.string() },
+    {
+      artistsViaOrganization: s.reverse("artists", "organization"),
+      cataloguesViaOrganization: s.reverse("catalogues", "organization"),
+      membershipsViaOrganization: s.reverse("memberships", "organization"),
+      releaseAssignmentsViaOrganization: s.reverse("releaseAssignments", "organization"),
+      releaseTeamsViaOrganization: s.reverse("releaseTeams", "organization"),
+      releasesViaOrganization: s.reverse("releases", "organization"),
+      teamAssignmentsViaOrganization: s.reverse("teamAssignments", "organization"),
+      teamsViaOrganization: s.reverse("teams", "organization"),
+    },
+  ),
+  people: s.table(
+    { userId: s.uuid(), name: s.string() },
+    {
+      membershipsViaPerson: s.reverse("memberships", "person"),
+      personEmailsViaPerson: s.reverse("personEmails", "person"),
+    },
+  ),
+  personEmails: s.table(
+    { personId: s.uuid(), email: s.string() },
+    {
+      person: s.rel("people", "personId"),
+    },
+  ),
+  releaseAssignments: s.table(
+    { organizationId: s.uuid(), releaseId: s.uuid(), membershipId: s.uuid(), role: s.string() },
+    {
+      membership: s.rel("memberships", "membershipId"),
+      organization: s.rel("organizations", "organizationId"),
+      release: s.rel("releases", "releaseId"),
+    },
+  ),
+  releaseTeams: s.table(
+    { organizationId: s.uuid(), releaseId: s.uuid(), teamId: s.uuid() },
+    {
+      organization: s.rel("organizations", "organizationId"),
+      release: s.rel("releases", "releaseId"),
+      team: s.rel("teams", "teamId"),
+    },
+  ),
+  releases: s.table(
+    {
+      organizationId: s.uuid(),
+      artistId: s.uuid(),
+      catalogueId: s.uuid().optional(),
+      catalogNumber: s.string(),
+      catalogSequence: s.int().optional(),
+      title: s.string(),
+      format: s.string(),
+      releaseDate: s.timestamp(),
+      status: s.string(),
+      searchKey: s.string(),
+    },
+    {
+      artist: s.rel("artists", "artistId"),
+      catalogue: s.rel("catalogues", "catalogueId"),
+      organization: s.rel("organizations", "organizationId"),
+      releaseAssignmentsViaRelease: s.reverse("releaseAssignments", "release"),
+      releaseTeamsViaRelease: s.reverse("releaseTeams", "release"),
+    },
+  ),
+  teamAssignments: s.table(
+    { organizationId: s.uuid(), teamId: s.uuid(), membershipId: s.uuid(), role: s.string() },
+    {
+      membership: s.rel("memberships", "membershipId"),
+      organization: s.rel("organizations", "organizationId"),
+      team: s.rel("teams", "teamId"),
+    },
+  ),
+  teams: s.table(
+    { organizationId: s.uuid(), name: s.string() },
+    {
+      organization: s.rel("organizations", "organizationId"),
+      releaseTeamsViaTeam: s.reverse("releaseTeams", "team"),
+      teamAssignmentsViaTeam: s.reverse("teamAssignments", "team"),
+    },
+  ),
+});
+
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
+
+const isMembership = (organizationId: s.Uuid) =>
+  exists.memberships({ organizationId, userId: session.user });
+
+const isMembershipWithRole = (organizationId: s.Uuid, role: s.Value<"string">) =>
+  exists.memberships({ organizationId, userId: session.user, role });
+
+const isMembershipAdminOrEditor = (organizationId: s.Uuid) =>
+  anyOf(
+    isMembershipWithRole(organizationId, "admin"),
+    isMembershipWithRole(organizationId, "editor"),
+  );
+
+const personMatches = (personId: s.Uuid, userId: s.Uuid) => exists.people({ id: personId, userId });
+
+const mine = { userId: session.user };
+
+const releaseMatches = (releaseId: s.Uuid, organizationId: s.Uuid) =>
+  exists.releases({ id: releaseId, organizationId });
+
+const membershipMatches = (membershipId: s.Uuid, organizationId: s.Uuid) =>
+  exists.memberships({ id: membershipId, organizationId });
+
+const rule1 = (organizationId: s.Uuid, releaseId: s.Uuid, membershipId: s.Uuid) =>
+  allOf(
+    isMembershipWithRole(organizationId, "admin"),
+    releaseMatches(releaseId, organizationId),
+    membershipMatches(membershipId, organizationId),
+  );
+
+const teamMatches = (teamId: s.Uuid, organizationId: s.Uuid) =>
+  exists.teams({ id: teamId, organizationId });
+
+const rule2 = (organizationId: s.Uuid, artistId: s.Uuid, catalogueId: s.Uuid) =>
+  allOf(
+    isMembershipAdminOrEditor(organizationId),
+    allOf(
+      exists.artists({ id: artistId, organizationId }),
+      anyOf({ catalogueId: null }, exists.catalogues({ id: catalogueId, organizationId })),
+    ),
+  );
+
+export const permissions = definePermissions({
+  artists: {
+    read: (artist) => isMembership(artist.organizationId),
+    insert: (artist) => isMembershipAdminOrEditor(artist.organizationId),
+    update: (artist) => isMembershipAdminOrEditor(artist.organizationId),
+    delete: (artist) => isMembershipWithRole(artist.organizationId, "admin"),
+  },
+  better_auth_account: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_jwks: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_session: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_user: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_verification: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  catalogues: {
+    read: (catalogue) => isMembership(catalogue.organizationId),
+    insert: (catalogue) => isMembershipWithRole(catalogue.organizationId, "admin"),
+    update: (catalogue) => isMembershipWithRole(catalogue.organizationId, "admin"),
+    delete: (catalogue) => isMembershipWithRole(catalogue.organizationId, "admin"),
+  },
+  memberships: {
+    read: (membership) => isMembership(membership.organizationId),
+    insert: (membership) =>
+      allOf(
+        isMembershipWithRole(membership.organizationId, "admin"),
+        personMatches(membership.personId, membership.userId),
+        anyOf({ role: "editor" }, { role: "viewer" }),
+      ),
+    updateIf: (membership) => isMembershipWithRole(membership.organizationId, "admin"),
+    updateTo: (membership) =>
+      allOf(
+        isMembershipWithRole(membership.organizationId, "admin"),
+        personMatches(membership.personId, membership.userId),
+        anyOf({ role: "admin" }, { role: "editor" }, { role: "viewer" }),
+      ),
+    delete: (membership) => isMembershipWithRole(membership.organizationId, "admin"),
+  },
+  organizations: {
+    read: (organization) => isMembership(organization.id),
+    insert: false,
+    update: (organization) => isMembershipWithRole(organization.id, "admin"),
+    delete: (organization) => isMembershipWithRole(organization.id, "admin"),
+  },
+  people: {
+    read: (person) => anyOf(mine, allowedTo.read(person.membershipsViaPerson)),
+    insert: false,
+    update: mine,
+    delete: false,
+  },
+  personEmails: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  releaseAssignments: {
+    read: (releaseAssignment) => allowedTo.read(releaseAssignment.release),
+    insert: (releaseAssignment) =>
+      rule1(
+        releaseAssignment.organizationId,
+        releaseAssignment.releaseId,
+        releaseAssignment.membershipId,
+      ),
+    updateIf: (releaseAssignment) =>
+      isMembershipWithRole(releaseAssignment.organizationId, "admin"),
+    updateTo: (releaseAssignment) =>
+      rule1(
+        releaseAssignment.organizationId,
+        releaseAssignment.releaseId,
+        releaseAssignment.membershipId,
+      ),
+    delete: (releaseAssignment) => isMembershipWithRole(releaseAssignment.organizationId, "admin"),
+  },
+  releaseTeams: {
+    read: (releaseTeam) => isMembership(releaseTeam.organizationId),
+    insert: (releaseTeam) =>
+      allOf(
+        isMembershipAdminOrEditor(releaseTeam.organizationId),
+        releaseMatches(releaseTeam.releaseId, releaseTeam.organizationId),
+        teamMatches(releaseTeam.teamId, releaseTeam.organizationId),
+      ),
+    update: false,
+    delete: (releaseTeam) => isMembershipAdminOrEditor(releaseTeam.organizationId),
+  },
+  releases: {
+    read: (release) => isMembership(release.organizationId),
+    insert: (release) => rule2(release.organizationId, release.artistId, release.catalogueId),
+    updateIf: (release) => isMembershipAdminOrEditor(release.organizationId),
+    updateTo: (release) => rule2(release.organizationId, release.artistId, release.catalogueId),
+    delete: (release) => isMembershipWithRole(release.organizationId, "admin"),
+  },
+  teamAssignments: {
+    read: (teamAssignment) => allowedTo.read(teamAssignment.team),
+    insert: (teamAssignment) =>
+      allOf(
+        allowedTo.insert(teamAssignment.team),
+        teamMatches(teamAssignment.teamId, teamAssignment.organizationId),
+        membershipMatches(teamAssignment.membershipId, teamAssignment.organizationId),
+      ),
+    updateIf: (teamAssignment) => allowedTo.update(teamAssignment.team),
+    updateTo: (teamAssignment) =>
+      allOf(
+        allowedTo.update(teamAssignment.team),
+        teamMatches(teamAssignment.teamId, teamAssignment.organizationId),
+        membershipMatches(teamAssignment.membershipId, teamAssignment.organizationId),
+      ),
+    delete: (teamAssignment) => allowedTo.delete(teamAssignment.team),
+  },
+  teams: {
+    read: (team) => isMembership(team.organizationId),
+    insert: (team) => isMembershipWithRole(team.organizationId, "admin"),
+    update: (team) => isMembershipWithRole(team.organizationId, "admin"),
+    delete: (team) => isMembershipWithRole(team.organizationId, "admin"),
+  },
+});

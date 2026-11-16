@@ -1,5 +1,8 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "b6b4d018d87d3bab66cc3b7665b963e99a921bfe40b9c5586db72c960fa08553"
+  },
   "tables": { "receipts": { "columns": { "label": "string" } } }
 }

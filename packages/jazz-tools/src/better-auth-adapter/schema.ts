@@ -195,13 +195,11 @@ export function buildJazzSchemaFromTables(args: {
 }
 
 // ---------------------------------------------------------------------------
-// jazz.app.json generation, for Better Auth's `generate` command.
+// schema-better-auth/schema.ts generation, for Better Auth's `generate` command.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_APP_FILE_PATH = "./jazz.app.json";
-const APP_FILE_SCHEMA_URL = "https://jazz.tools/schemas/jazz.app.schema.json";
+const DEFAULT_SCHEMA_FILE_PATH = "./schema-better-auth/schema.ts";
 const APP_FILE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const MAX_LINE = 100;
 
 /** A column of `jazz.app.json`, in its readable form (SPEC §10.10). */
 export type AppFileColumn = string | Record<string, unknown>;
@@ -331,241 +329,116 @@ export function buildBetterAuthAppTables(args: {
   return result;
 }
 
-/**
- * A Better Auth table merged over the app's existing one: Better Auth owns
- * the columns; relations the app added stay while their column does, and the
- * generated forward relation is only added for a column no relation names yet.
- */
-function mergeTable(existing: unknown, generated: AppFileTable): AppFileTable {
-  if (typeof existing !== "object" || existing === null || Array.isArray(existing)) {
-    return generated;
-  }
-  const { columns: _old, relations: oldRelations, indexes, ...rest } = existing as AppFileTable;
-  const columns = generated.columns;
-  const relations: NonNullable<AppFileTable["relations"]> = {};
-  const covered = new Set<string>();
-  for (const [name, relation] of Object.entries(oldRelations ?? {})) {
-    if ("column" in relation) {
-      if (!(relation.column in columns)) continue;
-      covered.add(relation.column);
-    }
-    relations[name] = relation;
-  }
-  for (const [name, relation] of Object.entries(generated.relations ?? {})) {
-    if ("column" in relation && !covered.has(relation.column) && !(name in relations)) {
-      relations[name] = relation;
-    }
-  }
-  const keptIndexes = Array.isArray(indexes)
-    ? indexes.filter((index: unknown) =>
-        (Array.isArray(index) ? index : [index]).every(
-          (column) => typeof column === "string" && (column.startsWith("$") || column in columns),
-        ),
-      )
-    : undefined;
-  return {
-    columns,
-    ...(Object.keys(relations).length > 0 ? { relations } : {}),
-    ...(keptIndexes && keptIndexes.length > 0 ? { indexes: keptIndexes } : {}),
-    ...rest,
-  };
+/** A key of an object literal: bare when it can be. */
+function objectKey(name: string): string {
+  return APP_FILE_IDENTIFIER.test(name) ? name : JSON.stringify(name);
 }
 
-/** Where a JSON value starting at `start` ends (exclusive). Expects valid JSON. */
-function skipJsonValue(text: string, start: number): number {
-  let depth = 0;
-  let i = start;
-  do {
-    const c = text[i]!;
-    if (c === '"') {
-      i++;
-      while (text[i] !== '"') i += text[i] === "\\" ? 2 : 1;
-    } else if (c === "{" || c === "[") depth++;
-    else if (c === "}" || c === "]") depth--;
-    else if (depth === 0) {
-      // A scalar at the top: runs until a delimiter.
-      while (i < text.length && !/[\s,}\]]/.test(text[i]!)) i++;
-      return i;
-    }
-    i++;
-  } while (depth > 0);
-  return i;
+/** A readable column type as the `s.*` builder expression that declares it. */
+function columnExpression(column: AppFileColumn): string {
+  if (typeof column === "string") {
+    const optional = column.endsWith("?");
+    const base = optional ? column.slice(0, -1) : column;
+    return `${scalarExpression(base)}${optional ? ".optional()" : ""}`;
+  }
+  const { optional, ...type } = column as Record<string, unknown> & { optional?: boolean };
+  return `${typeExpression(type)}${optional ? ".optional()" : ""}`;
 }
 
-function skipSpace(text: string, i: number): number {
-  while (/\s/.test(text[i] ?? "")) i++;
-  return i;
+function scalarExpression(type: string): string {
+  if (!["string", "uuid", "int", "float", "bigint", "boolean", "timestamp", "bytes"].includes(type))
+    throw new Error(`unsupported column type ${type}`);
+  return `s.${type}()`;
 }
 
-/** The entries of the JSON object at `start`, with each value's source span. */
-function objectEntries(text: string, start: number) {
-  const entries: { key: string; valueStart: number; valueEnd: number }[] = [];
-  let i = skipSpace(text, start + 1);
-  while (text[i] !== "}") {
-    const keyEnd = skipJsonValue(text, i);
-    const key = JSON.parse(text.slice(i, keyEnd)) as string;
-    const valueStart = skipSpace(text, skipSpace(text, keyEnd) + 1);
-    const valueEnd = skipJsonValue(text, valueStart);
-    entries.push({ key, valueStart, valueEnd });
-    i = skipSpace(text, valueEnd);
-    if (text[i] === ",") i = skipSpace(text, i + 1);
-  }
-  return { entries, end: i + 1 };
-}
-
-/** A value as the app-file writer lays it out: on one line when it fits, expanded otherwise. */
-function formatJson(value: unknown, indent: number, prefix: number): string {
-  const inline = formatInline(value);
-  if (indent + prefix + inline.length <= MAX_LINE || typeof value !== "object" || value === null) {
-    return inline;
-  }
-  const pad = " ".repeat(indent + 2);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return "[]";
-    const items = value.map((item) => pad + formatJson(item, indent + 2, 1));
-    return `[\n${items.join(",\n")}\n${" ".repeat(indent)}]`;
-  }
-  const entries = Object.entries(value);
-  if (entries.length === 0) return "{}";
-  const lines = entries.map(([key, item]) => {
-    const head = `${JSON.stringify(key)}: `;
-    return pad + head + formatJson(item, indent + 2, head.length + 1);
-  });
-  return `{\n${lines.join(",\n")}\n${" ".repeat(indent)}}`;
-}
-
-function formatInline(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(formatInline).join(", ")}]`;
-  if (typeof value === "object" && value !== null) {
-    const entries = Object.entries(value);
-    if (entries.length === 0) return "{}";
-    return `{ ${entries.map(([k, v]) => `${JSON.stringify(k)}: ${formatInline(v)}`).join(", ")} }`;
-  }
-  return JSON.stringify(value);
+function typeExpression(type: unknown): string {
+  if (typeof type === "string") return scalarExpression(type);
+  const object = type as Record<string, unknown>;
+  if (Array.isArray(object.enum))
+    return `s.enum(${(object.enum as string[]).map((variant) => JSON.stringify(variant)).join(", ")})`;
+  if (object.json !== undefined)
+    return object.json === true ? "s.json()" : `s.json(${JSON.stringify(object.json)})`;
+  if (object.array !== undefined) return `s.array(${typeExpression(object.array)})`;
+  if (typeof object.type === "string") return scalarExpression(object.type);
+  throw new Error(`unsupported column type ${JSON.stringify(type)}`);
 }
 
 /**
- * `jazz.app.json` with the Better Auth tables written into it.
- *
- * Each Better Auth table replaces the app's table of that name (its columns
- * become exactly what Better Auth writes; see {@link mergeTable} for what the
- * app keeps). Every other table and every other key (`history`, `migrations`,
- * …) is kept as written; tables stay sorted by name. A Better Auth table the
- * app has but Better Auth no longer generates is kept. With no file yet, it
- * writes a new one holding only the Better Auth tables.
- *
- * The tables get no entry in `jazz.permissions.json`: a table without
- * policies denies every read and write, which is what Better Auth's tables
- * need (only the backend's adapter touches them).
+ * The Better Auth tables as `schema-better-auth/schema.ts`: `tables` (to
+ * spread into the app's `s.defineSchema({ ...betterAuth.tables, … })`) and
+ * `permissions` denying every client read and write (to spread into
+ * `definePermissions({ ...betterAuth.permissions, … })`): only the backend's
+ * adapter touches these tables. Each operation is `false` rather than left
+ * out, as the files have always held them.
  */
-export function mergeBetterAuthTables(args: {
-  appFile: string | null;
+export function buildBetterAuthSchemaSource(args: {
   tables: BetterAuthDBSchema;
   getModelName: (model: string) => string;
   getFieldName: ({ model, field }: { model: string; field: string }) => string;
 }): string {
-  const generated = buildBetterAuthAppTables(args);
-  const formatTables = (tables: Record<string, string>) => {
-    const names = Object.keys(tables).sort();
-    if (names.length === 0) return "{}";
-    return `{\n${names.map((name) => `    ${JSON.stringify(name)}: ${tables[name]}`).join(",\n")}\n  }`;
-  };
-  const formatTable = (name: string, table: AppFileTable) =>
-    formatJson(table, 4, JSON.stringify(name).length + 2);
-
-  if (args.appFile === null) {
-    const tables = Object.fromEntries(
-      Object.entries(generated).map(([name, table]) => [name, formatTable(name, table)]),
+  const tables = buildBetterAuthAppTables(args);
+  const names = Object.keys(tables).sort();
+  const blocks = names.map((name) => {
+    const table = tables[name]!;
+    const columns = Object.entries(table.columns).map(
+      ([column, type]) => `      ${objectKey(column)}: ${columnExpression(type)},`,
     );
-    return `{\n  "$schema": ${JSON.stringify(APP_FILE_SCHEMA_URL)},\n  "format": 1,\n  "tables": ${formatTables(tables)}\n}\n`;
-  }
-
-  const text = args.appFile.replace(/\r\n/g, "\n");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`jazz.app.json is not valid JSON: ${(error as Error).message}`);
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("jazz.app.json must hold an object.");
-  }
-  const tablesValue = (parsed as { tables?: unknown }).tables;
-  if (typeof tablesValue !== "object" || tablesValue === null || Array.isArray(tablesValue)) {
-    throw new Error('jazz.app.json has no "tables" object.');
-  }
-
-  // Splice: only the `tables` object is rewritten, and within it only the
-  // Better Auth tables, so the rest of the file stays exactly as written and
-  // regenerating unchanged tables gives back the same bytes.
-  const top = objectEntries(text, skipSpace(text, 0));
-  const tablesEntry = top.entries.find((entry) => entry.key === "tables")!;
-  const existing = objectEntries(text, tablesEntry.valueStart);
-  const tables: Record<string, string> = {};
-  for (const entry of existing.entries) {
-    tables[entry.key] = text.slice(entry.valueStart, entry.valueEnd);
-  }
-  for (const [name, table] of Object.entries(generated)) {
-    const merged = mergeTable((tablesValue as Record<string, unknown>)[name], table);
-    tables[name] = formatTable(name, merged);
-  }
-  const result =
-    text.slice(0, tablesEntry.valueStart) + formatTables(tables) + text.slice(existing.end);
-  return result.endsWith("\n") ? result : `${result}\n`;
-}
-
-/**
- * What the adapter's `createSchema` gives Better Auth's `generate` command:
- * the app's `jazz.app.json` (`file`, default `./jazz.app.json`) with the
- * Better Auth tables written into it.
- */
-export async function createJazzAppFile(args: {
-  file?: string;
-  tables: BetterAuthDBSchema;
-  getModelName: (model: string) => string;
-  getFieldName: ({ model, field }: { model: string; field: string }) => string;
-}): Promise<DBAdapterSchemaCreation> {
-  const path = args.file ?? DEFAULT_APP_FILE_PATH;
-  const { readFile } = await import("node:fs/promises");
-  let appFile: string | null = null;
-  try {
-    appFile = await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const code = mergeBetterAuthTables({ ...args, appFile });
-  console.log(betterAuthAppFileNotes(Object.keys(buildBetterAuthAppTables(args))));
-  return { path, overwrite: true, code };
-}
-
-/**
- * What the user does after `generate` wrote the tables (JSON has no comments
- * to carry it), with the `jazz.permissions.json` entries to paste.
- */
-export function betterAuthAppFileNotes(tableNames: readonly string[]): string {
-  const deny = '{ "read": "false", "insert": "false", "update": "false", "delete": "false" }';
+    const relations = Object.entries(table.relations ?? {}).map(([relation, target]) =>
+      "rel" in target
+        ? `      ${objectKey(relation)}: s.rel(${JSON.stringify(target.rel)}, ${JSON.stringify(target.column)}),`
+        : `      ${objectKey(relation)}: s.reverse(${JSON.stringify(target.reverse)}, ${JSON.stringify(target.relation)}),`,
+    );
+    return [
+      `  ${objectKey(name)}: s.table(`,
+      "    {",
+      ...columns,
+      "    },",
+      relations.length > 0 ? ["    {", ...relations, "    },"].join("\n") : "    {},",
+      "  ),",
+    ].join("\n");
+  });
+  const deny = "{ read: false, insert: false, update: false, delete: false }";
   return [
-    `Jazz: wrote the Better Auth tables (${tableNames.join(", ")}) into jazz.app.json.`,
+    "// Generated by Better Auth's `generate` command through the Jazz adapter: rerun it",
+    "// rather than editing. Spread both exports into your schema.ts:",
+    "//   s.defineSchema({ ...betterAuth.tables, … })",
+    "//   definePermissions({ ...betterAuth.permissions, … })",
+    'import { schema as s } from "jazz-tools";',
     "",
-    "Next, run `npx jazz-tools generate`. If it says the schema changed, run",
-    "`npx jazz-tools migrations create --name <name>` and review the migration it writes.",
+    "export const tables = {",
+    ...blocks,
+    "};",
     "",
-    "Only the backend's adapter touches these tables: a table without policies denies every client",
-    "read and write. To say so explicitly (and silence the deploy warning about tables without",
-    'policies), paste these under "tables" in jazz.permissions.json:',
-    "",
-    ...tableNames.map(
-      (name, i) => `    ${JSON.stringify(name)}: ${deny}${i < tableNames.length - 1 ? "," : ""}`,
-    ),
+    "// Only the backend's adapter reads and writes these tables.",
+    "export const permissions = {",
+    ...names.map((name) => `  ${objectKey(name)}: ${deny},`),
+    "} as const;",
     "",
   ].join("\n");
 }
 
-export function mergeBetterAuthTablesFromTables(args: {
-  appFile: string | null;
+export function buildBetterAuthSchemaSourceFromTables(args: {
   tables: BetterAuthDBSchema;
   usePlural?: boolean;
 }): string {
   const resolvers = createSchemaNameResolvers({ tables: args.tables, usePlural: args.usePlural });
-  return mergeBetterAuthTables({ ...args, ...resolvers });
+  return buildBetterAuthSchemaSource({ tables: args.tables, ...resolvers });
+}
+
+/**
+ * What the adapter's `createSchema` gives Better Auth's `generate` command:
+ * `schema-better-auth/schema.ts` (or `file`), to import from the app's
+ * schema.ts. Then `npx jazz-tools generate` writes the app's files.
+ */
+export function createJazzSchemaSourceFile(args: {
+  file?: string;
+  tables: BetterAuthDBSchema;
+  getModelName: (model: string) => string;
+  getFieldName: ({ model, field }: { model: string; field: string }) => string;
+}): DBAdapterSchemaCreation {
+  return {
+    path: args.file ?? DEFAULT_SCHEMA_FILE_PATH,
+    overwrite: true,
+    code: buildBetterAuthSchemaSource(args),
+  };
 }

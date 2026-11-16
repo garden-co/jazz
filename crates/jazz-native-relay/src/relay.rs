@@ -517,8 +517,11 @@ impl NativeRelay {
         })
     }
 
-    fn begin_socket_upstream(&self) -> Result<(u64, NativeRelayWire), RelayError> {
-        self.run(|worker| Ok(worker.begin_socket_upstream()))
+    fn begin_socket_upstream(
+        &self,
+        features: jazz::wire::WireFeatures,
+    ) -> Result<(u64, NativeRelayWire), RelayError> {
+        self.run(move |worker| Ok(worker.begin_socket_upstream(features)))
     }
 
     fn retire_socket_upstream(&self, generation: u64) -> Result<(), RelayError> {
@@ -1139,6 +1142,8 @@ impl RelayWorker {
             .accept_subscriber(identity.author, claims)
             .map_err(RelayError::Host)?;
         let link = binding.connect_upstream();
+        // The foreground store and this relay run the same build.
+        link.set_features(jazz::wire::current_wire_features());
         self.next_client += 1;
         let id = self.next_client;
         self.clients.insert(
@@ -1196,7 +1201,10 @@ impl RelayWorker {
 
     /// Connect the relay's upstream through a fresh host-carried wire,
     /// replacing any earlier connection.
-    fn begin_socket_upstream(&mut self) -> (u64, NativeRelayWire) {
+    fn begin_socket_upstream(
+        &mut self,
+        features: jazz::wire::WireFeatures,
+    ) -> (u64, NativeRelayWire) {
         self.refusal = None;
         if let Some(mut previous) = self.upstream.take() {
             previous.link.close();
@@ -1204,6 +1212,8 @@ impl RelayWorker {
         }
         self.generation += 1;
         let link = self.persistent.connect_upstream();
+        // What the server negotiated it can take (jazz#5806).
+        link.set_features(features);
         let wire = NativeRelayWire::default();
         self.upstream = Some(UpstreamConnection {
             generation: self.generation,
@@ -1234,7 +1244,10 @@ impl RelayWorker {
     fn host_upstream(&mut self) -> NativeRelayWire {
         match &self.upstream {
             Some(upstream) => upstream.wire.clone(),
-            None => self.begin_socket_upstream().1,
+            // The host negotiates this wire's features itself and does not
+            // report them yet: none, so branch-read serializable commits are
+            // refused here rather than validated as root reads.
+            None => self.begin_socket_upstream(jazz::wire::FEATURE_NONE).1,
         }
     }
 
@@ -1365,6 +1378,9 @@ impl RelayWorker {
                 .accept_subscriber(author, claims.clone())
                 .map_err(|error| error.to_string())?;
             client.link = client.binding.connect_upstream();
+            client
+                .link
+                .set_features(jazz::wire::current_wire_features());
             client.dirty.set(true);
         }
         self.persistent_dirty.set(true);
@@ -2668,7 +2684,7 @@ async fn connect_and_bridge(
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
         }
-        match relay.begin_socket_upstream() {
+        match relay.begin_socket_upstream(connected.transport.features()) {
             Ok(installed) => break installed,
             Err(RelayError::OwnerQueueFull) => {
                 tokio::time::sleep(Duration::from_millis(1)).await;

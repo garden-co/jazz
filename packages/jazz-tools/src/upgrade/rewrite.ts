@@ -152,9 +152,12 @@ function rewriteModule(
       edits.push({ start: decl.getStart(source), end: decl.getEnd(), text: rewritten });
       changes.push(`${at(decl)}: permissions now come from jazz.permissions.json`);
       importsJson = true;
-    } else if (project.migrationsDir && isWithin(target, project.migrationsDir)) {
+    } else if (
+      project.migrationsDir &&
+      /^index\.[cm]?[jt]s$/.test(relative(project.migrationsDir, target))
+    ) {
       manual.push(
-        `${at(decl)}: imports migrations/, which upgrade deletes; the app's history and migrations are in jazz.app.json now`,
+        `${at(decl)}: imports migrations/index.ts, which upgrade deletes; \`generate\` builds the app's history from the migrations themselves`,
       );
     } else if (input.deleted.has(target)) {
       manual.push(
@@ -204,13 +207,9 @@ function rewriteModule(
       const imported = (element.propertyName ?? element.name).text;
       if (imported === "schema")
         dslImports.push({ decl: statement, element, local: element.name.text });
-      if (
-        imported === "definePermissions" ||
-        imported === "defineMigration" ||
-        imported === "migration"
-      ) {
+      if (imported === "definePermissions" && from === "jazz-tools/permissions") {
         manual.push(
-          `${at(element)}: uses \`${imported}\` from ${from}, which alpha.65 removes; move this code to jazz.app.json / jazz.permissions.json`,
+          `${at(element)}: uses the callback \`definePermissions\` from ${from}, which alpha.66 removes; write these rules with \`schema.definePermissions\` (see schema.ts)`,
         );
       }
     }
@@ -344,15 +343,8 @@ function rewriteModule(
   };
   visit(source);
 
-  if (remainingDsl.length > 0) {
-    const first = remainingDsl[0]!;
-    const usage = ts.isPropertyAccessExpression(first.parent)
-      ? first.parent.getText(source)
-      : first.getText(source);
-    manual.push(
-      `${at(first)}: still builds with the schema DSL (\`${usage.replace(/\s+/g, " ").slice(0, 60)}\`), which alpha.65 removes; upgrade converts schema.ts only, so move this to app files by hand`,
-    );
-  } else {
+  // Code still building with the schema DSL keeps its import: alpha.66 has the DSL.
+  if (remainingDsl.length === 0) {
     for (const { decl, element } of dslImports) {
       edits.push(...removeImportElement(ts, source, decl, element));
       changes.push(`${at(decl)}: dropped the schema DSL import`);
@@ -636,11 +628,6 @@ function relativeSpecifier(file: string, target: string, _project: Project, js =
     .replace(/\.ts$/, js ? ".js" : "");
   if (!path.startsWith(".")) path = `./${path}`;
   return path;
-}
-
-function isWithin(path: string, dir: string): boolean {
-  const rel = relative(dir, path);
-  return rel !== "" && !rel.startsWith("..");
 }
 
 function lineOf(text: string, position: number): number {

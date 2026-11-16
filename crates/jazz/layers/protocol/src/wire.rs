@@ -54,6 +54,11 @@ pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
 /// advertised this, so a client whose platform hides WebSocket pings (a
 /// browser) can tell a link that went silently dead from a quiet one.
 pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
+/// The peer validates (an authority) or forwards (a relay) serializable
+/// commits whose reads went through a branch view: a client sends a commit
+/// whose reads name their views (`WireKind::SerializableViews` in the sync
+/// layer) only over a link that negotiated this (jazz#5806).
+pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -827,6 +832,7 @@ fn default_transport_compression_features() -> WireFeatures {
 pub fn current_wire_features() -> WireFeatures {
     FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+        | FEATURE_SERIALIZABLE_BRANCH_READS
         | runtime_transport_compression_features()
 }
 
@@ -862,6 +868,11 @@ pub trait WireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError>;
     /// Pull the next encoded [`WireFrame`] staged by the binding, if any.
     fn try_recv_frame(&mut self) -> Option<Vec<u8>>;
+    /// The optional features this link negotiated in its `Hello`, once the
+    /// binding knows them. None by default.
+    fn features(&self) -> WireFeatures {
+        FEATURE_NONE
+    }
 }
 
 impl WireTransport for Box<dyn WireTransport + Send> {
@@ -871,6 +882,10 @@ impl WireTransport for Box<dyn WireTransport + Send> {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         (**self).try_recv_frame()
+    }
+
+    fn features(&self) -> WireFeatures {
+        (**self).features()
     }
 }
 
