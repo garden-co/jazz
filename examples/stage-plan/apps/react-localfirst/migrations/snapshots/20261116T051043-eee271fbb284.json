@@ -28,14 +28,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "created",
-            "moved",
-            "assigned",
-            "renamed",
-            "commented",
-            "deleted"
-          ]
+          "variants": ["created", "moved", "assigned", "renamed", "commented", "deleted"]
         },
         "name": "kind",
         "nullable": false
@@ -188,10 +181,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "chief",
-            "crew"
-          ]
+          "variants": ["chief", "crew"]
         },
         "name": "role",
         "nullable": false
@@ -324,12 +314,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "todo",
-            "doing",
-            "done",
-            "blocked"
-          ]
+          "variants": ["todo", "doing", "done", "blocked"]
         },
         "name": "status",
         "nullable": false

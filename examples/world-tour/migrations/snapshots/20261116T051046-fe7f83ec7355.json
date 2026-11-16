@@ -168,11 +168,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "confirmed",
-            "tentative",
-            "cancelled"
-          ]
+          "variants": ["confirmed", "tentative", "cancelled"]
         },
         "name": "status",
         "nullable": false

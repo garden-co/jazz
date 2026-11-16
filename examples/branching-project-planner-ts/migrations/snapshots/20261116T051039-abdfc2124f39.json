@@ -26,11 +26,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "open",
-            "approved",
-            "archived"
-          ]
+          "variants": ["open", "approved", "archived"]
         },
         "name": "status",
         "nullable": false
@@ -55,9 +51,7 @@
     }
   },
   "tasks": {
-    "branchBy": [
-      "scenario_id"
-    ],
+    "branchBy": ["scenario_id"],
     "columns": [
       {
         "column_type": {

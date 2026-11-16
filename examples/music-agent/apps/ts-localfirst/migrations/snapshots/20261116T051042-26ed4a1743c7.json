@@ -124,11 +124,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "user",
-            "assistant",
-            "tool"
-          ]
+          "variants": ["user", "assistant", "tool"]
         },
         "name": "role",
         "nullable": false

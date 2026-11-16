@@ -37,9 +37,7 @@
         "nullable": true
       }
     ],
-    "indexed_columns": [
-      "title"
-    ],
+    "indexed_columns": ["title"],
     "relations": {
       "tracksViaAlbum": {
         "kind": "reverse",
@@ -326,10 +324,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "listener",
-            "editor"
-          ]
+          "variants": ["listener", "editor"]
         },
         "name": "role",
         "nullable": false
@@ -337,11 +332,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "pending",
-            "accepted",
-            "revoked"
-          ]
+          "variants": ["pending", "accepted", "revoked"]
         },
         "name": "status",
         "nullable": false
@@ -420,10 +411,7 @@
         "nullable": false
       }
     ],
-    "indexed_columns": [
-      "playlist_id",
-      "position"
-    ],
+    "indexed_columns": ["playlist_id", "position"],
     "relations": {
       "playlist": {
         "kind": "forward",
@@ -518,10 +506,7 @@
         "nullable": true
       }
     ],
-    "indexed_columns": [
-      "album_id",
-      "ordinal"
-    ],
+    "indexed_columns": ["album_id", "ordinal"],
     "relations": {
       "album": {
         "kind": "forward",

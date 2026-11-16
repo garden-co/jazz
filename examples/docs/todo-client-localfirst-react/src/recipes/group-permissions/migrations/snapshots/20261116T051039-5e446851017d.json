@@ -52,12 +52,7 @@
       {
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "reader",
-            "writer",
-            "contributor",
-            "admin"
-          ]
+          "variants": ["reader", "writer", "contributor", "admin"]
         },
         "name": "role",
         "nullable": false
