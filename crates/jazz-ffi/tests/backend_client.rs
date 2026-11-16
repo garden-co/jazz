@@ -146,6 +146,9 @@ async fn backend_clients_open_as_the_main_backend_trusts_them() {
             .insert("shows".into(), show(&alice_account))
             .unwrap();
         as_alice.wait_for_sync("global".into()).unwrap();
+        // She reads it back as herself, by the app's permissions.
+        let hers = parse(&as_alice.all(shows()).unwrap());
+        assert_eq!(hers.as_array().map(Vec::len), Some(1), "{hers}");
         // A show chiefed by someone else is refused under her permissions.
         let theirs = as_alice.insert_at("shows".into(), show(nil_uuid()), "global".into());
         assert!(
@@ -200,6 +203,13 @@ async fn backend_clients_open_as_the_main_backend_trusts_them() {
         secret["backendSecret"] = json!("s");
         assert!(matches!(
             JazzHandle::open_with_tokens(secret.to_string(), Arc::new(Machine("machine-trusted"))),
+            Err(JazzError::Refused { .. })
+        ));
+        // And the app's permissions, as createJazzClient takes them.
+        let mut bare = parse(&credential);
+        bare.as_object_mut().unwrap().remove("permissions");
+        assert!(matches!(
+            JazzHandle::open_with_tokens(bare.to_string(), Arc::new(Machine("machine-trusted"))),
             Err(JazzError::Refused { .. })
         ));
         // A credential needs a provider.

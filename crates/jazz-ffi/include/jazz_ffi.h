@@ -151,7 +151,8 @@ typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
  * A backend client (a machine syncing through the app's main backend, as
  * TS's createJazzClient with a credential) opens here with
  * "auth": {"credential": true}, "serverUrl": the main backend's /jazz, and
- * "permissions": the app's bundle (not published). cb gives the machine's
+ * "permissions" (required): the app's jazz.permissions.json, not published
+ * but how the client checks the users it acts for. cb gives the machine's
  * own token (its workload's OIDC token), fresh for each request and
  * socket. The main backend decides what it is: "trusted" (acting as the
  * system, with jazz_for_user) or "scoped" (acting as one user); a token it

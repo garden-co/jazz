@@ -54,8 +54,9 @@ with small smoke programs ([`tests/kotlin`](tests/kotlin),
 `credential`, see `docs/content/docs/setup/backend-client.mdx`): a trusted
 machine that syncs through the app's main backend, the TS `createJazz` that
 lists it in `backendClients`. `"serverUrl"` is that backend's `/jazz`,
-`"auth": {"credential": true}`, and `"permissions"` the app's bundle (not
-published). The host's token callback gives the machine's own token (its
+`"auth": {"credential": true}`, and `"permissions"` (required) the app's
+`jazz.permissions.json`, as `createJazzClient` takes it: not published, but
+how the client checks the users it acts for. The host's token callback gives the machine's own token (its
 workload's OIDC token), fresh for each request and socket (UniFFI
 `open_with_tokens(config, TokenProvider)`, C `jazz_open_user`). The main
 backend decides what the client is, reported by `backend_client()` /
