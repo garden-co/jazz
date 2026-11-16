@@ -54,10 +54,9 @@ export const VALIDATE_RENAMED =
 const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
 
 const MIGRATE_ALPHA59_MOVED =
-  "`jazz-tools migrate-alpha59` moved to `jazz-alpha59-alpha60-import`, a native binary attached to each " +
-  "GitHub release next to `jazz-alpha59-alpha60-export`. Download both for your platform from " +
-  "https://github.com/garden-co/jazz/releases and run `jazz-alpha59-alpha60-import import --dump <dump> " +
-  "--data-dir <dir> --app-id <app id>`.";
+  "`jazz-tools migrate-alpha59` was removed. Move alpha.59 data with the exporter and importer from " +
+  "https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65 (`jazz-alpha59-alpha60-export-<platform>` " +
+  "and `jazz-alpha59-alpha60-import-<platform>`), then upgrade from alpha.65.";
 
 function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
