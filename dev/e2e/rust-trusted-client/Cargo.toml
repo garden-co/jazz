@@ -1,0 +1,14 @@
+[package]
+name = "trusted-client"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+jazz-app = { path = "../../../crates/jazz-app" }
+serde_json = "1"
+uuid = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+[build-dependencies]
+jazz-codegen = { path = "../../../crates/jazz-codegen" }
