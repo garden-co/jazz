@@ -165,8 +165,9 @@ pub struct CodegenTable {
     #[serde(default)]
     pub transforms: BTreeMap<String, String>,
     /// .63's `tsOnly` (the TS DSL's `s.computed` and `.transform` fields).
-    /// The .63 writer still emits it and loaders accept it with a warning,
-    /// so `jazz-tools upgrade` can turn it into `computed` and `transforms`.
+    /// The .63 writer still emits it and loaders accept it with a warning
+    /// that it is ignored: those fields are declared in schema.ts with
+    /// `s.computed(…)` or `.transform(…)`.
     #[serde(default)]
     pub ts_only: Vec<TsOnlyColumn>,
 }

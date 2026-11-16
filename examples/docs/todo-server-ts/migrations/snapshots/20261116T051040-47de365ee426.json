@@ -1,0 +1,85 @@
+{
+  "projects": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "todos": {
+        "kind": "reverse",
+        "table": "todos",
+        "relation": "project"
+      }
+    }
+  },
+  "todos": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "title",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Boolean"
+        },
+        "name": "done",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "description",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "parentId",
+        "nullable": true,
+        "references": "todos"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "projectId",
+        "nullable": true,
+        "references": "projects"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "owner_id",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "parent": {
+        "kind": "forward",
+        "table": "todos",
+        "column": "parentId"
+      },
+      "children": {
+        "kind": "reverse",
+        "table": "todos",
+        "relation": "parent"
+      },
+      "project": {
+        "kind": "forward",
+        "table": "projects",
+        "column": "projectId"
+      }
+    }
+  }
+}

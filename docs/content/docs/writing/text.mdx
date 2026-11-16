@@ -13,23 +13,17 @@ keeps both changes.
 Opt a string column into a text merge strategy. Use Markdown for prose unless you have a reason not
 to:
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-  "tables": {
-    "notes": {
-      "columns": {
-        "title": "string",
-        "body": { "type": "string", "merge": "markdown" }
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  notes: s.table({ title: s.string(), body: s.string().merge("markdown") }),
+});
 ```
 
 `title` keeps one value: a concurrent edit replaces it whole. `body` merges.
 
-`"merge": "text"` and `"merge": "html"` are the other two strategies. They differ in which pieces a
+`.merge("text")` and `.merge("html")` are the other two strategies. They differ in which pieces a
 merge keeps whole: words and punctuation for all three, plus markup runs and link targets for
 Markdown, and whole tags and entities for HTML. See
 [Column types](/docs/schemas/column-types#mergeable-text-columns) for the full rules and for optional

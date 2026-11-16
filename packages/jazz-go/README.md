@@ -9,8 +9,9 @@ subscriptions and `encoding/json` for rows.
 `db.transaction`; `db.Tx(ctx, fn, jazz.Serializable())` is a serializable
 one, whose commit fails with `jazz.ErrConflict` if its reads changed.
 
-Apps don't use it on its own. `jazz-tools generate` writes typed bindings,
-a `jazzapp` package, beside a `go.mod` that requires this module. See
+Apps don't use it on its own: author the app's `schema.ts` beside a `go.mod`
+that requires this module, and `npx jazz-tools generate` writes typed
+bindings there, a `jazzapp` package. See
 [examples/stage-plan/apps/go-cli](../../examples/stage-plan/apps/go-cli)
 and the [Go setup page](https://jazz.tools/docs/setup/go).
 

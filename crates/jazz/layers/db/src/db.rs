@@ -863,6 +863,9 @@ struct Inner {
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
+    /// Whether `_jazz_pruned_txs` exists, as last read (see
+    /// `sync::has_pruned_txs`).
+    pruned_txs: std::cell::Cell<Option<sync::Known>>,
 }
 
 /// Whether a read decodes its rows' projected cells.
@@ -2041,6 +2044,7 @@ impl Db {
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
+                pruned_txs: std::cell::Cell::new(None),
             })),
         };
         {
