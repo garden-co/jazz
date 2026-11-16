@@ -17,9 +17,12 @@ const TOP_LEVEL = [
 
 // alpha.66 brought the `schema` and `migration` namespaces back as the TS
 // authoring DSL; only the top-level names stay removed.
-const stubs: [name: string, stub: unknown][] = TOP_LEVEL.map(
-  (name) => [name, root[name]] as [string, unknown],
-);
+const stubs: [name: string, stub: unknown][] = [
+  ...TOP_LEVEL.map((name) => [name, root[name]] as [string, unknown]),
+  ...(["defineApp", "defineSliceableApp", "definePermissions"] as const).map(
+    (name) => [`schema.${name}`, root.schema[name]] as [string, unknown],
+  ),
+];
 
 function thrownBy(run: () => unknown): unknown {
   try {
@@ -48,9 +51,7 @@ describe("the schema DSL alpha.65 removed", () => {
       expect(thrown, name).toBeInstanceOf(Error);
       expect(thrown, name).toMatchObject({ code: "JAZZ_API_REMOVED" });
       const { message } = thrown as Error;
-      expect(
-        message.startsWith(`[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.65`),
-      ).toBe(true);
+      expect(message.startsWith(`[JAZZ_API_REMOVED] ${name} was removed`), message).toBe(true);
       expect(message).toContain("`npx jazz-tools upgrade`");
       expect(message).toContain(UPGRADE_FROM_ALPHA_64_URL);
     }
@@ -58,7 +59,7 @@ describe("the schema DSL alpha.65 removed", () => {
 
   it("throws when constructed", () => {
     expect(() => new (root.defineApp as unknown as new () => unknown)()).toThrow(
-      /\[JAZZ_API_REMOVED\] defineApp was removed in jazz-tools alpha\.65/,
+      /\[JAZZ_API_REMOVED\] defineApp was removed: define the schema/,
     );
   });
 
@@ -70,8 +71,20 @@ describe("the schema DSL alpha.65 removed", () => {
     expect(() => enumColumn("a", "b")).not.toThrow();
   });
 
-  it("names the files that replaced it", () => {
-    expect(() => (root.definePermissions as unknown as () => unknown)()).toThrow(
+  it("names what replaced the alpha.64 wiring", () => {
+    const app = {};
+    expect(() =>
+      (root.definePermissions as unknown as (...args: unknown[]) => unknown)(app, () => {}),
+    ).toThrow(
+      /permissions use the new DSL: `const \{ definePermissions \} = schema; export const permissions = definePermissions\(/,
+    );
+    expect(() => (root.schema.defineApp as unknown as (...args: unknown[]) => unknown)({})).toThrow(
+      /schema\.defineApp was removed: define the schema with `export const schema = s\.defineSchema\(\{ … \}\)`/,
+    );
+    expect(() =>
+      (root.schema.definePermissions as unknown as (...args: unknown[]) => unknown)(app, () => {}),
+    ).toThrow(/schema\.definePermissions was removed: permissions use the new DSL/);
+    expect(() => (root.schemaToWasm as unknown as () => unknown)()).toThrow(
       /jazz\.app\.json and jazz\.permissions\.json are now the app's schema, migrations and permissions/,
     );
   });

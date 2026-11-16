@@ -8,7 +8,7 @@
  * the `jazz-tools` binary. Node only.
  */
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { APP_FILE, PERMISSIONS_FILE, readAppProject } from "./app-files.js";
 import {
@@ -96,48 +96,82 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
     [APP_FILE, files.app],
     [PERMISSIONS_FILE, files.permissions],
   ];
-  const stale: string[] = [];
+  // Every check runs before anything is written.
+  const stale: { file: string; text: string; previous: string | null }[] = [];
   for (const [file, text] of targets) {
     const path = join(app.dir, file);
     const existing = existsSync(path) ? await readFile(path, "utf8") : null;
-    if (existing === text) continue;
-    stale.push(file);
-    if (options.check) continue;
-    if (existing !== null && !options.force && (await verifyGenerated(existing)) === "mismatch") {
+    if (existing !== null && sameJson(existing, text)) continue;
+    stale.push({ file, text, previous: existing });
+    if (options.check || existing === null || options.force) continue;
+    const marker = await verifyGenerated(existing);
+    if (marker === "mismatch")
       throw new Error(
         `${shown(app.dir, file)} was edited by hand since it was generated: it is generated from your TS, so edit schema.ts instead. ` +
           "Run `jazz-tools generate --force` to overwrite it.",
       );
-    }
+    if (marker === "none")
+      throw new Error(
+        `${shown(app.dir, file)} was not written by \`jazz-tools generate\` (it has no \`$generated\` marker) and differs from what your TS makes. ` +
+          "Run `jazz-tools generate --force` to replace it (`jazz-tools upgrade` does, for an alpha.65 app).",
+      );
   }
   if (options.check && stale.length > 0) {
     throw Object.assign(
       new Error(
-        `${stale.map((file) => shown(app.dir, file)).join(" and ")} ${stale.length === 1 ? "is" : "are"} out of date with the app's TS: run \`jazz-tools generate\` and commit the result.`,
+        `${stale.map(({ file }) => shown(app.dir, file)).join(" and ")} ${stale.length === 1 ? "is" : "are"} out of date with the app's TS: run \`jazz-tools generate\` and commit the result.`,
       ),
       { code: "JAZZ_FILES_STALE" },
     );
   }
-  if (!options.check) {
-    for (const [file, text] of targets) {
-      if (stale.includes(file)) await writeFile(join(app.dir, file), text);
-    }
-    await ensureFirstSnapshot(app, options.loadModule);
-  }
-  // Running the npm CLI says the app is a Node one, unless the directory
-  // names another language (a Package.swift, go.mod, …).
-  const outcome = await generateForDir(app.dir, {
-    check: options.check ?? false,
+  const bindingsOptions = {
     fallback: "ts",
     ...(options.lang?.length ? { lang: options.lang } : {}),
-  });
+  };
+  if (options.check) {
+    // Running the npm CLI says the app is a Node one, unless the directory
+    // names another language (a Package.swift, go.mod, …).
+    const outcome = await generateForDir(app.dir, { ...bindingsOptions, check: true });
+    return {
+      dir: app.dir,
+      wroteFiles: false,
+      wrote: false,
+      bindings: [...outcome.current, ...outcome.written],
+      warnings: [...outcome.warnings, ...warnings],
+    };
+  }
+  // The bindings are checked against the new jazz.app.json (a schema edited
+  // without `migrations create` is refused there), so it is written first;
+  // if the bindings refuse, both files go back to what they were.
+  let outcome: Awaited<ReturnType<typeof generateForDir>>;
+  try {
+    for (const { file, text } of stale) await writeFile(join(app.dir, file), text);
+    outcome = await generateForDir(app.dir, { ...bindingsOptions, check: false });
+    await ensureFirstSnapshot(app, options.loadModule);
+  } catch (error) {
+    for (const { file, previous } of stale) {
+      const path = join(app.dir, file);
+      if (previous === null) await rm(path, { force: true });
+      else await writeFile(path, previous);
+    }
+    throw error;
+  }
   return {
     dir: app.dir,
-    wroteFiles: !options.check && stale.length > 0,
+    wroteFiles: stale.length > 0,
     wrote: outcome.written.length > 0,
     bindings: [...outcome.current, ...outcome.written],
     warnings: [...outcome.warnings, ...warnings],
   };
+}
+
+/** Whether two JSON texts hold the same value, keys in the same order (line endings and layout aside). */
+function sameJson(left: string, right: string): boolean {
+  try {
+    return JSON.stringify(JSON.parse(left)) === JSON.stringify(JSON.parse(right));
+  } catch {
+    return false;
+  }
 }
 
 /**

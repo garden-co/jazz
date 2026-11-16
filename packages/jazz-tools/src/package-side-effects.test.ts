@@ -100,6 +100,8 @@ const REVIEWED_CALLS = new Set([
   "dsl.ts: DropBuilder",
   "permissions/dsl.ts: comparison",
   "permissions/dsl.ts: TYPED",
+  // The alpha.64 names in the `schema` namespace, as throwing stubs.
+  "schema-builders.ts: removedSchemaApi",
   "upgrade/index.ts: join",
   "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",

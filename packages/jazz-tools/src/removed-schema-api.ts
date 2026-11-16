@@ -17,14 +17,42 @@ const FILES_AS_SOURCE =
   "jazz.app.json and jazz.permissions.json are now the app's schema, migrations and permissions, " +
   "with typed bindings in jazz.generated.ts. Run `npx jazz-tools upgrade` to convert an alpha.64 app";
 
+/**
+ * What replaces each alpha.64 name in alpha.66's TS authoring (`schema.ts`
+ * with `s.defineSchema` and `schema.definePermissions`). Names not here
+ * have no replacement.
+ */
+const AUTHORING_REPLACEMENTS: Readonly<Record<string, string>> = {
+  defineApp:
+    "define the schema with `export const schema = s.defineSchema({ … })` in schema.ts; runtime code imports `app` from ./jazz.generated",
+  "schema.defineApp":
+    "define the schema with `export const schema = s.defineSchema({ … })` in schema.ts; runtime code imports `app` from ./jazz.generated",
+  defineSliceableApp:
+    "schema slicing is gone: define the schema with `export const schema = s.defineSchema({ … })` and import `app` from ./jazz.generated",
+  "schema.defineSliceableApp":
+    "schema slicing is gone: define the schema with `export const schema = s.defineSchema({ … })` and import `app` from ./jazz.generated",
+  defineSchema: 'use `s.defineSchema({ … })` (`import { schema as s } from "jazz-tools"`)',
+  definePermissions:
+    "permissions use the new DSL: `const { definePermissions } = schema; export const permissions = definePermissions({ <table>: { read, insert, update, delete } })`",
+  "schema.definePermissions":
+    "permissions use the new DSL: `const { definePermissions } = schema; export const permissions = definePermissions({ <table>: { read, insert, update, delete } })`",
+  defineMigration:
+    'use `migration.defineMigration({ … })` (`import { migration as m } from "jazz-tools"`)',
+  renameTableFrom:
+    'use `migration.renameTableFrom(…)` (`import { migration as m } from "jazz-tools"`)',
+  table: "use `s.table(columns, relations)` inside `s.defineSchema({ … })`",
+  anyOf: "use the schema's own `anyOf` (`const { anyOf } = schema`)",
+  allOf: "use the schema's own `allOf` (`const { allOf } = schema`)",
+  createSessionContext: "use the schema's own `session` (`const { session } = schema`)",
+};
+
 /** The error a removed DSL export throws. `code` is `JAZZ_API_REMOVED`. */
 export function removedSchemaApiError(name: string): Error {
-  return Object.assign(
-    new Error(
-      `[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.65: ${FILES_AS_SOURCE}. See ${UPGRADE_FROM_ALPHA_64_URL}`,
-    ),
-    { code: "JAZZ_API_REMOVED" },
-  );
+  const replacement = AUTHORING_REPLACEMENTS[name];
+  const message = replacement
+    ? `[JAZZ_API_REMOVED] ${name} was removed: ${replacement}. Run \`npx jazz-tools upgrade\` to convert an alpha.64 or alpha.65 app. See ${UPGRADE_FROM_ALPHA_64_URL}`
+    : `[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.65: ${FILES_AS_SOURCE}. See ${UPGRADE_FROM_ALPHA_64_URL}`;
+  return Object.assign(new Error(message), { code: "JAZZ_API_REMOVED" });
 }
 
 /** @internal A stub for a removed DSL export: throws when called or constructed. */
