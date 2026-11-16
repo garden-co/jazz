@@ -661,6 +661,11 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
         .await
         .unwrap();
     assert_eq!(remote_todos(&alice, 2).await.len(), 2);
+    // Closing drains what users' handles wrote too, not only the job's own.
+    let digest = as_alice
+        .insert(NewTodo::new("Another digest", false))
+        .await
+        .unwrap();
     // A handle acting for a user acts for no one else.
     assert!(matches!(
         as_alice.for_user("bob", serde_json::Value::Null).await,
@@ -668,6 +673,7 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
     ));
 
     job.close(jazz_app::CLOSE_TIMEOUT).await.expect("drained");
+    assert!(remote_todos(&alice, 3).await.contains(&digest));
     assert!(matches!(job.all(todos::query()).await, Err(Error::Stopped)));
     alice.shutdown().await.unwrap();
     app.stop().await;
