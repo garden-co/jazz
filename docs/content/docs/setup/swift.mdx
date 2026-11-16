@@ -216,6 +216,7 @@ it stays in the local store and never syncs. Write with `tier: .global` (or call
 waited on.
 
 `jazz.disconnect()` leaves the server while local reads and writes go on, and `jazz.reconnect()`
-resumes sync. `jazz.deleteClientStorage()` closes the app and deletes its local store (writes the
-server hasn't accepted are lost). The `session`, `syncChanges` and `mutationErrors` streams end with
+resumes sync. `jazz.deleteClientStorage()` rolls back open transactions, closes the app and deletes its local
+store (writes the server hasn't accepted are lost). While another open app holds the same `dataDir`,
+it throws `JazzError.refused` and the app stays open (its open transactions are still rolled back). The `session`, `syncChanges` and `mutationErrors` streams end with
 `JazzError.closed` when the app closes.

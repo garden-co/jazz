@@ -18,21 +18,87 @@ final class LifecycleTests: XCTestCase {
         try await app.jazz.close()
     }
 
+    /// Both bodies have read before either commits.
+    actor Barrier {
+        var waiting: [CheckedContinuation<Void, Never>] = []
+        let count: Int
+        init(count: Int) { self.count = count }
+        func arrive() async {
+            if waiting.count + 1 == count {
+                waiting.forEach { $0.resume() }
+                waiting = []
+                return
+            }
+            await withCheckedContinuation { waiting.append($0) }
+        }
+    }
+
+    /// Two clients of the same user each move the same task in a
+    /// transaction, both reading it before either commits.
+    func concurrentMoves(serializable: Bool) async throws -> [Result<Void, any Error>] {
+        let relay = try await TestRelay()
+        let first = try await relay.user()
+        let show = try await first.show(named: "Concurrent")
+        let task = try await first.addTask("Rig lights", to: show)
+        var second = try await relay.user()
+        second.readTier = .remote
+        _ = try await second.tasks(of: show)
+        let barrier = Barrier(count: 2)
+        func move(_ jazz: Jazz.Client, to rank: Double) async -> Result<Void, any Error> {
+            do {
+                let body: (Jazz.Transaction) async throws -> Void = { tx in
+                    let read = try await tx.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+                    XCTAssertNotNil(read)
+                    try await tx.update(task.id, JazzApp.TaskPatch(rank: .set(rank)))
+                    await barrier.arrive()
+                }
+                if serializable {
+                    try await jazz.serializableTransaction(commit: .global, body)
+                } else {
+                    try await jazz.transaction(commit: .global, body)
+                }
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        async let a = move(first.jazz, to: 5)
+        async let b = move(second.jazz, to: 7)
+        let results = await [a, b]
+        try await first.jazz.close()
+        try await second.jazz.close()
+        return results
+    }
+
+    func testConcurrentSerializableTransactionsConflict() async throws {
+        let results = try await concurrentMoves(serializable: true)
+        let conflicts = results.filter {
+            if case .failure(let error) = $0, case .conflict? = error as? JazzError { return true }
+            return false
+        }
+        XCTAssertEqual(results.filter { if case .success = $0 { return true } else { return false } }.count, 1, "\(results)")
+        XCTAssertEqual(conflicts.count, 1, "\(results)")
+    }
+
     func testDisconnectedWritesSyncAfterReconnect() async throws {
         let relay = try await TestRelay()
         let app = try await relay.user()
         let show = try await app.show(named: "Offline")
+        // Another client of the same user, reading from the server.
+        var other = try await relay.user()
+        other.readTier = .remote
         try await app.jazz.disconnect()
         let task = try await app.jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Written offline", status: .todo, rank: 1))
+        // Time it would take to sync, were the app connected.
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        let whileDisconnected = try await other.tasks(of: show)
+        XCTAssertEqual(whileDisconnected.map(\.id), [], "the write reached the server while disconnected")
         try await app.jazz.reconnect()
         try await app.jazz.waitForSync(.global)
-        // A fresh client of the same user reads it from the server.
-        var again = try await relay.user()
-        again.readTier = .remote
-        let synced = try await again.tasks(of: show)
-        XCTAssertEqual(synced.map(\.id), [task.id])
-        try await again.jazz.close()
+        let afterReconnect = try await other.tasks(of: show)
+        XCTAssertEqual(afterReconnect.map(\.id), [task.id])
+        try await other.jazz.close()
         try await app.jazz.close()
     }
 
@@ -82,6 +148,29 @@ final class LifecycleTests: XCTestCase {
         let after = try await reopened.jazz.all(named, tier: .local)
         XCTAssertEqual(after.count, 0)
         try await reopened.jazz.close()
+    }
+
+    func testDeleteClientStorageIsRefusedWhileAnotherAppHoldsTheStore() async throws {
+        let relay = try await TestRelay()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stage-plan-held-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let key = try Jazz.generateDeviceKey()
+        let app = try await StagePlanApp.open(
+            endpoint: relay.endpoint, appId: relay.appId, auth: .deviceKey(key), dataDir: dir)
+        let holder = try await StagePlanApp.open(
+            endpoint: relay.endpoint, appId: relay.appId, auth: .deviceKey(key), dataDir: dir)
+        do {
+            try await app.jazz.deleteClientStorage()
+            XCTFail("deleting a store another app holds should be refused")
+        } catch let error as JazzError {
+            guard case .refused = error else { return XCTFail("\(error)") }
+        }
+        // The app stays open.
+        let show = try await app.show(named: "Still open")
+        XCTAssertEqual(show.name, "Still open")
+        try await holder.jazz.close()
+        try await app.jazz.close()
     }
 
     func testMutationErrorsFailClosedWhenTheAppCloses() async throws {
