@@ -3,7 +3,15 @@
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type SessionMemberRole = "owner" | "editor" | "viewer";
-export type TrackInstrument = "kick" | "snare" | "clap" | "closed_hat" | "open_hat" | "tom" | "bass" | "lead";
+export type TrackInstrument =
+  | "kick"
+  | "snare"
+  | "clap"
+  | "closed_hat"
+  | "open_hat"
+  | "tom"
+  | "bass"
+  | "lead";
 
 export type BetterAuthAccount = {
   readonly id: string;

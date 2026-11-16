@@ -32,8 +32,7 @@ export type Chat = {
   readonly id: string;
 };
 
-export type ChatInsert = {
-};
+export type ChatInsert = {};
 
 interface Types extends AppTypes {
   chatInvites: {

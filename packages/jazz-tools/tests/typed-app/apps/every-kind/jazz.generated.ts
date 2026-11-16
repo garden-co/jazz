@@ -1,6 +1,12 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
-import { bindApp, type AppTypes, type ComputedImpl, type JsonValue, type TransformImpl } from "jazz-tools";
+import {
+  bindApp,
+  type AppTypes,
+  type ComputedImpl,
+  type JsonValue,
+  type TransformImpl,
+} from "jazz-tools";
 import { computed, transforms } from "./jazz.computed.js";
 
 export type ThingStatus = "todo" | "done";
@@ -128,7 +134,10 @@ interface Types extends AppTypes {
     };
     computed: {
       summary: { from: { text: string; int: number }; value: string };
-      maybeLabel: { from: { id: string; maybeStatus: ThingMaybeStatus | null; shouted: string }; value: ThingMaybeLabel };
+      maybeLabel: {
+        from: { id: string; maybeStatus: ThingMaybeStatus | null; shouted: string };
+        value: ThingMaybeLabel;
+      };
       score: { from: { float: number }; value: number | null };
     };
     transforms: {
