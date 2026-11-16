@@ -14,7 +14,9 @@
 //! - `{ "table", "history": true, "where"?, "orderBy"?, "limit"? }`: the
 //!   table's versions, each row with `"$history": { "transactionId",
 //!   "acceptedAt" }`.
-//! - `"includeDeleted": true` on any of them reads deleted rows too.
+//! - `"includeDeleted": true` on any of them reads deleted rows too. Rows
+//!   carry no deleted marker yet, and in a subscription a row's deletion
+//!   arrives as an `updated` row.
 
 use jazz_app::jazz::query::{self as q, OrderDirection};
 use jazz_app::jazz::tools::{QueryResult, Schema, TableSchema};
@@ -33,7 +35,36 @@ pub(crate) struct Lowered {
 }
 
 /// Whether `query_json` is one of these queries.
+/// `query_json` reading at most `limit` rows: on a hop's target rows
+/// (`after`), else on the query's own.
+pub(crate) fn with_limit(query_json: &Json, limit: usize) -> Json {
+    let mut query = query_json.clone();
+    let narrow = |object: &mut Map<String, Json>| {
+        let current = object
+            .get("limit")
+            .and_then(Json::as_u64)
+            .map(|l| l as usize);
+        object.insert(
+            "limit".into(),
+            json!(current.map_or(limit, |l| l.min(limit))),
+        );
+    };
+    if let Json::Object(top) = &mut query {
+        if top.get("hopTo").is_some_and(|h| !h.is_null()) {
+            let after = top.entry("after").or_insert_with(|| json!({}));
+            if let Json::Object(after) = after {
+                narrow(after);
+            }
+        } else {
+            narrow(top);
+        }
+    }
+    query
+}
+
 pub(crate) fn is_relational(query_json: &Json) -> bool {
+    // `history` and `includeDeleted` must be booleans; anything but `false`
+    // goes here, where a non-boolean is refused by name.
     ["hopTo", "gather", "union", "history", "includeDeleted"]
         .iter()
         .any(|key| {
@@ -211,6 +242,10 @@ pub(crate) fn lower(schema: &Schema, relations: &Relations, json: &Json) -> Resu
         .ok_or_else(|| refused("the query needs a \"table\""))?;
     let (table, untyped_table) = table_of(schema, name)?;
 
+    match top.get("history") {
+        None | Some(Json::Null) | Some(Json::Bool(_)) => {}
+        Some(_) => return Err(refused("\"history\" must be true or false")),
+    }
     if top.get("history").is_some_and(|h| *h == json!(true)) {
         only(
             top,

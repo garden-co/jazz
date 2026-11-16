@@ -70,7 +70,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *               "id"?, "row"?}                               -> true|false|null
  *              (advisory: true does not promise the write succeeds; null =
  *              unknown, e.g. no server; not available inside a transaction)
- *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
+ *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names)
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
  *   "uploadPush"   {"upload", "bytes": base64}                -> null
@@ -137,7 +138,10 @@ typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 /*
  * Opens an app as an end user signing in with the app's bearer
  * ("auth": {"bearer": true}); cb and ctx stay valid, from any thread, until
- * jazz_close returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
+ * jazz_close (or a "signOut" call) returns: that waits for a fetch in
+ * progress, and then the callback is never called again. Called from inside
+ * the callback, jazz_close returns at once and the callback stops once that
+ * call returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
  */
 JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
                            char **err);
