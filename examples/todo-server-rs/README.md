@@ -1,5 +1,8 @@
 # todo-server-rs
 
+> [!WARNING]
+> **Experimental: client only; backends are TypeScript.** See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+
 An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app-support` crate. It is a **backend client** of the app's TypeScript main backend (`createJazz`): it syncs through the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. It uses SQLite storage and the native WebSocket transport, with no Node, NAPI or WASM.
 
 ## What it demonstrates
