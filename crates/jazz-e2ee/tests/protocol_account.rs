@@ -1294,3 +1294,35 @@ fn removal_retires_every_root_a_device_recovered_with() {
     assert!(state.retired_recovery_roots.contains_key(&second.root_id));
     assert!(state.recovery_roots.is_empty());
 }
+
+/// Retiring a mechanism is breaking by design: once the signing mechanism
+/// is removed from the allow-list, an account chain signed with it is
+/// unverifiable (an unsupported capability), with no grace path.
+#[test]
+fn retired_signing_mechanism_leaves_the_chain_unverifiable() {
+    let env = Env::new("alice");
+    let mut rng = TestRandom(32);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new("alice");
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    assert!(ledger.state(&env).is_active(&phone.id));
+
+    let retired = env
+        .registry
+        .allowing(&jazz_e2ee::agility::MechanismAllowList {
+            signature: Vec::new(),
+            ..Default::default()
+        })
+        .unwrap();
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&ledger.public, &env.domain, &retired)
+            .unwrap();
+    assert_eq!(
+        replay.current().unwrap_err(),
+        ProtocolError::Unsupported(UnsupportedCapability::SigningMechanism)
+    );
+}

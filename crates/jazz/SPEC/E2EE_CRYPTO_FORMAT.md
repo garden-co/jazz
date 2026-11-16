@@ -6,7 +6,9 @@
 > [E2EE protocol](E2EE_PROTOCOL.md). The earlier TypeScript implementation
 > and the libsodium N-API primitives (`crates/jazz-napi/src/e2ee_crypto.rs`)
 > are historical and not normative. Sections marked _historical_ describe that
-> implementation and its qualification only.
+> implementation and its qualification only. The formats have changed since
+> that experimental TypeScript layer, so records it wrote do not decrypt or
+> verify with this one; nothing shipped data on it.
 
 This companion specifies the context and envelope codecs and the built-in
 mechanisms. Byte-level fixtures pin the encoding independently of the
@@ -231,8 +233,11 @@ are the default implementations.
   compiled-in mechanisms, restricted to the application's per-role
   allow-list (`MechanismAllowList`, default: the built-ins;
   `Registry::allowing`). An unregistered or unlisted mechanism is
-  `unsupported-format`, never `invalid-ciphertext`; retiring a mechanism is
-  removing it from the list.
+  `unsupported-format`, never `invalid-ciphertext`. Retiring a mechanism is
+  removing it from the list, and is a breaking change by design: records
+  and signed chains that depend on it become unreadable or unverifiable at
+  once, with no grace path, so the developer rotates and re-encrypts onto
+  the replacement before retiring (the protocol's mechanism agility rules).
 - **Advertisement.** Public keys carry their mechanism: the advertised form
   is `env(mechanism, publicKey)`. Each identity (a device, a recovery root, a
   group epoch) has exactly one sealing key and one signing key, fixed at
@@ -273,9 +278,13 @@ A mechanism is accepted once it passes the conformance kit
 (`jazz_e2ee::conformance`, feature `conformance`): round trips, key and
 context binding, rejection of tampered, truncated and extended input
 (streams also of reordered, duplicated and dropped segments), routing by its
-own header, authentication of its header (output relabelled to the same
-algorithm under a sibling ID or version must decode and then fail
-authentication, `check_*_header_binding`), exact reproduction of the vectors
+own header, authentication of its header (`check_*_header_binding`: the kit
+derives two siblings of the mechanism under test itself, its ID with the
+last character changed and its version changed by one, and builds each
+with the author's relabelling constructor, after checking that relabelling
+to the mechanism's own ID and version reproduces the implementation byte
+for byte; output relabelled to a sibling must decode and then fail
+authentication), exact reproduction of the vectors
 it declares, and, per role,
 provider failure: a mechanism whose provider fails must surface
 `CryptoFailure` through the registry and the record helpers, never

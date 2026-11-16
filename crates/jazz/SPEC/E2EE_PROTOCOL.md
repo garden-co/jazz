@@ -86,14 +86,22 @@ protocol:
 - Readers route by each envelope's mechanism and accept a registered
   mechanism only if the application's **allow-list** names it for that role
   (`encryption.mechanisms.allowed` in `jazz.app.json`, per role; default:
-  the built-ins). An envelope of any other mechanism is `unsupported-format`
-  (§4.3, §7), never decrypted, opened or verified, even if its
-  implementation is compiled in. Records written under an earlier selection
-  stay readable while their mechanism stays listed. **Retiring** a mechanism
-  (for example after a weakness is found) is removing it from the list;
-  records that use only it then report `unsupported-format`, so a retirement
-  follows the rotations that replace them. Writers can select only listed
-  mechanisms.
+  the built-ins). The client runtime reads the key and builds the reader's
+  registry from it (`Registry::allowing` in `crates/jazz-e2ee`); the crate
+  itself reads no configuration. An envelope of any other mechanism is
+  `unsupported-format` (§4.3, §7), never decrypted, opened or verified, even
+  if its implementation is compiled in. Records written under an earlier
+  selection stay readable while their mechanism stays listed.
+- **Retiring a mechanism is a breaking change, by design.** Retiring (for
+  example after a weakness is found) is removing the mechanism from the
+  allow-list, and it takes effect at once: every record that depends on it
+  becomes unreadable (`unsupported-format`) and every signed chain that
+  depends on it unverifiable (an unsupported capability, §2.4 step 4, §7),
+  for every reader of the application. There is no grace period, fallback
+  or partial acceptance. Before retiring, the developer migrates: switches
+  the selection (below), lets every space, group and account rotate onto the
+  new mechanism, re-encrypts content that must stay readable, and only then
+  removes the old mechanism. Writers can select only listed mechanisms.
 - **No delivery can be downgraded.** Every delivered key is bound by its
   sender to the bytes of its envelope, or authenticated before use by a
   marker only a holder of the key can make, so nobody without the key (the

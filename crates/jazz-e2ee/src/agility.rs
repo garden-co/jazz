@@ -326,7 +326,9 @@ impl Default for MechanismConfig {
 /// An envelope of a mechanism that is not listed is refused as
 /// [`Error::UnsupportedFormat`] even if its implementation is compiled in, so
 /// retiring a mechanism (for example after a weakness) is removing it from
-/// the list. Defaults to the built-ins.
+/// the list. Retiring is breaking by design: records and signed chains that
+/// depend on the mechanism become unreadable or unverifiable at once, with
+/// no grace path. Defaults to the built-ins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MechanismAllowList {
     pub cell: Vec<MechanismId>,
