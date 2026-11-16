@@ -33,3 +33,10 @@ tabs can sit on main before its examples are ready.
 Put language tabs and `<BindingsExcerpt>` in pages only, not in
 `content/partials`: an included partial doesn't pass through the plugin, so a
 test refuses them there.
+
+## Experimental languages
+
+`experimental: true` on a language in `LANGUAGES` makes the build put an
+`<ExperimentalBadge>` at the top of each of its tabs and of its setup page,
+linking to its tab on Language Support (`#jazz-environment-<language>`).
+Remove the flag to drop the labels.

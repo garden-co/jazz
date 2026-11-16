@@ -4,52 +4,83 @@ description: "What each language does in a Jazz app, and what it doesn't support
 ---
 
 Every language works from your app's TypeScript schema and permissions: `npx jazz-tools generate`
-writes each language's typed bindings from them. Your app's main backend runs in TypeScript ([Vercel](/docs/setup/deployment/vercel) or
-[your own server](/docs/setup/deployment/own-server)). Rust and Go run as
-[backend clients](/docs/setup/backend-client) of it, and Swift, Kotlin and Go are for apps. Each tab
-lists what that language doesn't support yet, compared with TypeScript.
+writes each language's typed bindings from them. Your app's main backend runs in TypeScript
+([Vercel](/docs/setup/deployment/vercel) or [your own server](/docs/setup/deployment/own-server)).
 
-<Tabs groupId="jazz-environment" items={["Rust", "Go"]} persist updateAnchor>
+Rust, Swift, Kotlin and Go are **experimental**: they are clients of that TypeScript backend. Swift,
+Kotlin and Go are for apps, signed in as one of your users; Rust and Go also run as
+[backend clients](/docs/setup/backend-client), services that act with a machine credential. None of
+them runs a main backend yet. Each tab lists what that language supports and what it doesn't yet,
+compared with TypeScript.
+
+<Tabs groupId="jazz-environment" items={["Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="Rust">
-    Rust is a backend client: a service that reads and writes your app's data through your main
-    backend's `/jazz`, trusted or scoped, with `for_user` on a trusted client. It doesn't run your
-    app's main backend (serving its `/jazz` and publishing its permissions): use TypeScript's
-    `createJazz` for that, and connect Rust services to it as backend clients.
+    **Experimental.** Rust is a backend client: a service that reads and writes your app's data
+    through your TypeScript main backend's `/jazz`, trusted or scoped, with `for_user` on a trusted
+    client. See [Backend Client](/docs/setup/backend-client).
+
+    It doesn't support yet:
+
+    - running your app's main backend (serving its `/jazz` and publishing its permissions): run it
+      in TypeScript with `createJazz`;
+    - partial reads of large values (use `jazz.with_client(…)` for the low-level client).
+
+  </Tab>
+  <Tab value="Swift">
+    **Experimental.** Swift is for apps: a client of your app, signed in as one of its users through
+    your TypeScript main backend's `/jazz`. It has queries with includes, hops, unions and history
+    reads, writes and uploads, mergeable and serializable transactions, subscriptions (`subscribe`
+    and `watch`), mergeable text (`JazzText`), permission advice (`canInsert`…), device accounts and
+    bearer sign-in, and sync status. See [Swift](/docs/setup/swift).
+
+    It doesn't support yet:
+
+    - running a backend in Swift (publishing permissions, acting for users) or serving the app's
+      Jazz endpoint: run your backend in TypeScript;
+    - tested iOS, iPadOS and macOS UI apps (each release builds for the iOS simulator and runs a
+      macOS command-line app), and watchOS, tvOS and visionOS builds;
+    - a prebuilt core on Linux;
+    - a SwiftUI `Binding` for `JazzText`, and an `@Observable` session model;
+    - Keychain (or file) storage for device keys;
+    - anonymous (guest) users;
+    - subscribing to history queries;
+    - parts of large values inside includes, `offset` in an include, and `required` on reverse
+      relations or optional references;
+    - payload enums, nested rows and other column types the bindings can't type;
+    - non-finite floats (`NaN`, infinities), which read back as `null`;
+    - positions in subscription deltas.
+
+  </Tab>
+  <Tab value="Kotlin">
+    **Experimental.** Kotlin is for apps, on Android and the JVM: a client of your app, signed in as
+    one of its users through your TypeScript main backend's `/jazz`. See [Kotlin](/docs/setup/kotlin).
+
+    It doesn't support yet:
+
+    - running a backend in Kotlin: run your backend in TypeScript;
+    - reading part of a large value inside an include (root queries only);
+    - subscribing to history queries;
+    - guest (anonymous) users;
+    - nested rows and catalogue enums in bindings;
+    - Kotlin Multiplatform targets other than the JVM and Android;
+    - Maven Central: install the jar or AAR from the GitHub release;
+    - non-finite doubles (`NaN`, infinities);
+    - `limit` and `offset` with `watch`: use them with `all`.
 
   </Tab>
   <Tab value="Go">
-    Go is for apps, and runs as a backend client: a Go program can be a client of your app, signed
-    in as one of its users, or a service that reads and writes through your main backend's `/jazz`
-    with a machine credential. It doesn't run a main backend. It doesn't support yet:
+    **Experimental.** Go is for apps, and runs as a backend client: a Go program can be a client of
+    your app, signed in as one of its users, or a service that reads and writes through your
+    TypeScript main backend's `/jazz` with a machine credential. See [Go](/docs/setup/go) and
+    [Backend Client](/docs/setup/backend-client).
 
-    - guest (anonymous) users;
-    - history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
-      select columns or be subscribed to yet;
-    - nested rows and catalogue enums;
-    - subscription deltas carry no positions: `q.Live(ctx, db)` keeps a query's rows in order for you;
+    It doesn't support yet:
+
+    - running your main backend in Go (publishing permissions, serving `/jazz`): run it in
+      TypeScript with `createJazz`;
     - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
       reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
-      column. In a subscription, such a row ends it with an error delta.
-
-    Open the app as one of its users, through your backend's `/jazz`, as a browser does:
-
-    ```go
-    db, err := jazzapp.Open(ctx, jazz.Config{
-    	AppID:     appID,
-    	ServerURL: "https://app.example/jazz",
-    	Storage:   jazz.StoragePersistent,
-    	DataDir:   "./jazz-data",
-    	// A local-first device account, created on first open; or
-    	// jazz.Token(func(ctx context.Context, reason jazz.TokenReason) (string, error) { … })
-    	// to sign in with a JWT from your auth provider.
-    	Auth: jazz.DeviceAccount(jazz.FileStore("./jazz-data/device-key")),
-    })
-    ```
-
-    `db.Session(ctx)` is who is signed in, `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of
-    their changes, and `db.Refresh(ctx)` and `db.SignOut(ctx)` do what they say. Keep a device key like a
-    password: `jazz.FileStore` keeps it in a file only its owner can read; implement `jazz.SecretStore`
-    to keep it in the OS keychain.
+      column.
 
   </Tab>
 </Tabs>
