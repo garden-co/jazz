@@ -354,3 +354,93 @@ fn a_session_is_sent_a_policys_support_row_made_readable_by_a_variant_tagged_lat
         "the session was not sent the seat it may now read"
     );
 }
+
+/// An update that moves an existing row into the untagged variant (its
+/// first store) wakes a query filtered on it.
+#[test]
+fn an_update_into_a_variant_tagged_after_it_subscribed_wakes_its_filter() {
+    let db = open(schema(None), 1);
+    keep_variant(&db, "archived");
+    doc(&db, 0, "todo");
+    doc(&db, 1, "done");
+    let query = Query::from("docs").filter(eq(col("status"), lit(text("archived"))));
+    let mut lives = vec![subscribe(&db, "archived", query, None)];
+    check(&db, &mut lives, "subscribe");
+    update(&db, "docs", id(DOC, 0), &[("status", text("archived"))]);
+    check(&db, &mut lives, "first doc moved into archived");
+    update(&db, "docs", id(DOC, 1), &[("status", text("archived"))]);
+    check(&db, &mut lives, "second doc moved into archived");
+}
+
+/// Wakes of `db`'s live results for `writes`.
+fn wakes(db: &Db, writes: impl FnOnce()) -> u64 {
+    let before = db.fanout_stats().woken;
+    writes();
+    db.fanout_stats().woken - before
+}
+
+/// A filter on a name that is no variant (and not one the store keeps)
+/// matches no row ever: it stays keyed by that name, so writes of other
+/// rows do not wake it, in a plain store and in one that keeps a variant.
+#[test]
+fn a_filter_on_a_name_that_is_no_variant_is_not_woken_by_other_rows() {
+    for keeps in [false, true] {
+        let db = open(schema(None), 1);
+        if keeps {
+            keep_variant(&db, "archived");
+        }
+        let query = Query::from("docs").filter(eq(col("status"), lit(text("typo"))));
+        let mut lives = vec![subscribe(&db, "typo", query, None)];
+        check(&db, &mut lives, "subscribe");
+        let woken = wakes(&db, || {
+            for n in 0..6 {
+                doc(&db, n, if n % 2 == 0 { "todo" } else { "done" });
+            }
+        });
+        check(&db, &mut lives, "other rows");
+        assert_eq!(woken, 0, "keeps a variant: {keeps}");
+    }
+}
+
+/// A read policy pinning the root to a claim, the claim naming no variant:
+/// no row is readable, and writes of rows do not wake the result.
+#[test]
+fn a_policy_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_rows() {
+    let db = open(schema(Some(session_eq("status", &["claims", "role"]))), 1);
+    db.set_authority();
+    db.set_identity_claims(
+        user(0),
+        BTreeMap::from([("\0claims:role".to_owned(), Value::String("admin".into()))]),
+    );
+    let mut lives = vec![subscribe(&db, "role", Query::from("docs"), Some(user(0)))];
+    check(&db, &mut lives, "subscribe");
+    let woken = wakes(&db, || {
+        for n in 0..6 {
+            doc(&db, n, if n % 2 == 0 { "todo" } else { "done" });
+        }
+    });
+    check(&db, &mut lives, "other rows");
+    assert_eq!(woken, 0);
+}
+
+/// An EXISTS pinned to a claim naming no variant: writes of evidence rows
+/// with other kinds do not wake the reader's result.
+#[test]
+fn an_exists_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_flags() {
+    let db = open(flagged(), 1);
+    db.set_authority();
+    db.set_identity_claims(
+        user(0),
+        BTreeMap::from([("\0claims:role".to_owned(), Value::String("admin".into()))]),
+    );
+    doc(&db, 0, "todo");
+    let mut lives = vec![subscribe(&db, "role", Query::from("docs"), Some(user(0)))];
+    check(&db, &mut lives, "subscribe");
+    let woken = wakes(&db, || {
+        for n in 0..6 {
+            flag(&db, n, if n % 2 == 0 { "todo" } else { "done" });
+        }
+    });
+    check(&db, &mut lives, "other flags");
+    assert_eq!(woken, 0);
+}
