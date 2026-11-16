@@ -10,7 +10,7 @@ a `jazzapp` package, beside a `go.mod` that requires this module. See
 [examples/stage-plan/apps/go-cli](../../examples/stage-plan/apps/go-cli)
 and the [Go setup page](https://jazz.tools/docs/setup/go).
 
-Install it with `go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65`
+Install it with `go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.66`
 and build as usual. Its versions are Jazz's, in lockstep (each release tags
 `packages/jazz-go/v<version>`).
 
