@@ -3032,7 +3032,12 @@ Non-goals and explicit limits:
 
 - **App account roots are trusted on first use.** A local-first account's
   root is signed by the key its account ID derives from, so no one without
-  the secret can forge or replace it, or reset the account (§2.3, §2.4). An
+  the secret can forge or replace it, or reset the account (§2.3, §2.4),
+  once a client has seen that signed root. A client meeting the account for
+  the first time cannot tell from the account ID alone that it is
+  local-first, so a server can show it an app-kind root instead; from the
+  first signed root a client verifies, its floor and the no-downgrade rule
+  protect it. An
   app account has nothing a client can check its root against: whoever can
   write as the account, the server included, can write its first root, and
   a server can show a different root (another device and key) to clients
