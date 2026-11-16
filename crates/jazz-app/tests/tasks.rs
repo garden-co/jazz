@@ -17,6 +17,10 @@ impl Computed for App {
         score > 5 || priority == TaskPriority::High
     }
 
+    fn tasks_title_len(&self, title: String) -> i32 {
+        title.chars().count() as i32
+    }
+
     fn iso_date_view(&self, stored: Timestamp) -> String {
         // Days since 1970-01-01 is all this test needs.
         format!("day-{}", stored.0 / DAY_MS)
@@ -765,4 +769,146 @@ async fn streaming_in_a_transaction() {
         .map(|task| task.title)
         .collect();
     assert!(!titles.iter().any(|title| title == "Endless"), "{titles:?}");
+}
+
+/// Read options: waiting for the server's first answer (offline it answers
+/// at once), and splices of a column's changes on subscription updates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_options() {
+    use futures::StreamExt;
+    use jazz_app::ReadOptions;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask::new("abc", 0, Vec::new()))
+        .await
+        .unwrap();
+
+    let rows = jazz
+        .all_with_options(
+            tasks::query(),
+            ReadOptions::default().wait_for_remote(std::time::Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![task.clone()]);
+
+    let mut changes = jazz
+        .subscribe_with_options(
+            tasks::query(),
+            ReadOptions::default().splices(tasks::title()),
+        )
+        .await
+        .unwrap();
+    let first = changes.next().await.unwrap().unwrap();
+    assert_eq!(first.added.len(), 1);
+    jazz.update(
+        task.id,
+        bindings::TaskUpdate {
+            title: Some("abXc".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let update = loop {
+        let delta = changes.next().await.unwrap().unwrap();
+        if let Some(updated) = delta.updated.into_iter().next() {
+            break updated;
+        }
+    };
+    assert_eq!(update.row.unwrap().title, "abXc");
+    let (column, splices) = &update.splices[0];
+    assert_eq!(column, "title");
+    assert_eq!(splices.len(), 1);
+    assert_eq!(
+        (
+            splices[0].at,
+            splices[0].delete,
+            splices[0].insert.as_slice()
+        ),
+        (2, 0, b"X".as_slice())
+    );
+}
+
+/// A query can read a large value only in part: a text range, or a json
+/// subtree, of the full row or of a selection.
+#[tokio::test]
+async fn partial_reads() {
+    use jazz_app::ValuePart;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            meta: Some(Json(
+                serde_json::json!({ "owner": { "name": "ops" }, "tags": ["a"] }),
+            )),
+            r#type: Some("Partial reads".into()),
+            ..NewTask::new("héllo wörld", 0, Vec::new())
+        })
+        .await
+        .unwrap();
+    let head = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .part(tasks::r#type(), ValuePart::TextUtf8 { from: 0, to: 7 }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.r#type.as_deref(), Some("Partial"));
+
+    // A column a computed field is computed from is read whole, so the
+    // computed field is right (as TS re-reads it in full).
+    let computed = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .part(tasks::title(), ValuePart::TextUtf8 { from: 0, to: 3 }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (computed.title.as_str(), computed.title_len),
+        ("héllo wörld", 11)
+    );
+
+    // Inside an include, the included rows' column is read in part.
+    let boxed = jazz
+        .insert(bindings::NewBox {
+            task: Some(task.id),
+            ..bindings::NewBox::new("crate")
+        })
+        .await
+        .unwrap();
+    let (_, included) = jazz
+        .one(
+            bindings::boxes::query()
+                .id(boxed.id)
+                .include(bindings::boxes::task_relation().with(
+                    tasks::query().part(tasks::r#type(), ValuePart::TextUtf8 { from: 0, to: 4 }),
+                )),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(included.unwrap().r#type.as_deref(), Some("Part"));
+    let owner = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .select(tasks::meta())
+                .part(tasks::meta(), ValuePart::JsonPointer("/owner".into())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner.values.unwrap().0,
+        serde_json::json!({ "name": "ops" })
+    );
 }
