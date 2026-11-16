@@ -1,4 +1,4 @@
-import { useDb, useAll, useSession } from "jazz-tools/react";
+import { useDb, useAll, useJazzSession } from "jazz-tools/react";
 import { LockIcon, MessageSquarePlusIcon } from "lucide-react";
 import { ChatListItem } from "@/components/chat-list/ChatListItem";
 import { Button } from "@/components/ui/button";
@@ -10,8 +10,8 @@ import { DurabilityTier } from "jazz-tools";
 
 export const ChatList = () => {
   const db = useDb();
-  const session = useSession();
-  const userId = session?.user ?? null;
+  const session = useJazzSession();
+  const userId = session.user?.accountId ?? null;
   const sharedWriteOptions: { tier: DurabilityTier } = {
     tier: db.getConfig().serverUrl ? "global" : "local",
   };
