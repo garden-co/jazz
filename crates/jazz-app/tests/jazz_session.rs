@@ -222,8 +222,8 @@ async fn device_accounts_are_created_reopened_restored_and_linked() {
     assert_eq!(other.snapshot().user.unwrap().account, guest.account);
     other.close().await.unwrap();
 
-    // The guest signs up: linked, the session goes on as the user, with
-    // the same client and account.
+    // The guest signs up: linked, the session goes on as the user, on the
+    // same account and store, reopened on the app's bearer.
     *token.lock().unwrap() = Some("token-carol".to_owned());
     let epoch = session.snapshot().client_epoch;
     session.link_device_account().await.unwrap();
@@ -234,8 +234,20 @@ async fn device_accounts_are_created_reopened_restored_and_linked() {
         (UserKind::Backend, "carol")
     );
     assert_eq!(user.account, guest.account);
-    assert_eq!(carol.client_epoch, epoch);
-    jazz.all(todos::query()).await.unwrap();
+    assert!(carol.client_epoch > epoch);
+    assert!(matches!(
+        jazz.all(todos::query()).await,
+        Err(Error::Replaced)
+    ));
+    assert_eq!(
+        session
+            .jazz()
+            .unwrap()
+            .all_with(todos::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap(),
+        vec![written]
+    );
 
     session.close().await.unwrap();
     app.stop().await;
@@ -357,7 +369,7 @@ async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {
     assert_eq!(kept.client_epoch, guest.client_epoch);
 
     // Gil signs up (no account yet): the guest is linked to him, and goes
-    // on as him with its data and client.
+    // on as him with its data.
     *token.lock().unwrap() = Some("token-gil".to_owned());
     session.refresh().await.unwrap();
     let gil = session.snapshot();
@@ -367,15 +379,24 @@ async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {
         (UserKind::Backend, "gil")
     );
     assert_eq!(user.account, guest.user.unwrap().account);
-    assert_eq!(gil.client_epoch, guest.client_epoch);
-    assert!(jazz.all(todos::query()).await.unwrap().contains(&written));
+    assert!(
+        session
+            .jazz()
+            .unwrap()
+            .all(todos::query())
+            .await
+            .unwrap()
+            .contains(&written)
+    );
 
     // Following again keeps him as he is.
+    let epoch = session.snapshot().client_epoch;
     session.refresh().await.unwrap();
-    assert_eq!(session.snapshot().client_epoch, guest.client_epoch);
+    assert_eq!(session.snapshot().client_epoch, epoch);
+    drop(jazz);
     session.close().await.unwrap();
 
-    // With guest linking off, a new user gets an account of their own.
+    // With guest linking off, the guest stays, for the app to link.
     let token = bearer(None);
     let unlinked = JazzSession::open(
         client_files(),
@@ -388,9 +409,11 @@ async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {
     let guest = unlinked.snapshot().user.unwrap();
     *token.lock().unwrap() = Some("token-hal".to_owned());
     unlinked.refresh().await.unwrap();
+    assert_eq!(unlinked.snapshot().user.unwrap(), guest);
+    unlinked.link_device_account().await.unwrap();
     let hal = unlinked.snapshot().user.unwrap();
     assert_eq!(hal.subject, "hal");
-    assert_ne!(hal.account, guest.account);
+    assert_eq!(hal.account, guest.account);
     unlinked.close().await.unwrap();
     app.stop().await;
 }
@@ -434,6 +457,120 @@ async fn each_account_keeps_a_store_of_its_own() {
         let store = dir.path().join(user.account.0.to_string());
         assert!(store.join("jazz.sqlite").exists(), "{store:?}");
     }
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// TS's "signs the user in instead, once, when the backend refuses the
+/// guest's link": the user gets their own account, and the refused link is
+/// never tried again for that guest and user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_guest_link_signs_the_user_in_instead_once() {
+    let app = App::start().await;
+    app.relay
+        .links
+        .lock()
+        .unwrap()
+        .refused
+        .insert("lee".to_owned());
+    let token = bearer(None);
+    let session = JazzSession::open(client_files(), app.session(&token).initial(Initial::Device))
+        .await
+        .unwrap();
+    let guest = session.snapshot().user.unwrap();
+    let key = session.export_device_key().unwrap();
+
+    *token.lock().unwrap() = Some("token-lee".to_owned());
+    session.refresh().await.unwrap();
+    let lee = session.snapshot().user.unwrap();
+    assert_eq!((lee.kind, lee.subject.as_str()), (UserKind::Backend, "lee"));
+    assert_ne!(lee.account, guest.account);
+    assert_eq!(app.relay.links.lock().unwrap().attempts, 1);
+
+    // The guest again, and Lee still named: no second link, Lee is signed
+    // in on his account.
+    session.restore_device_account(&key).await.unwrap();
+    assert_eq!(session.snapshot().user.unwrap().account, guest.account);
+    session.refresh().await.unwrap();
+    assert_eq!(session.snapshot().user.unwrap(), lee);
+    assert_eq!(app.relay.links.lock().unwrap().attempts, 1);
+
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// TS's "signs in to the account that appeared while the link ran (409)".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_that_appeared_while_linking_is_signed_in_to() {
+    let app = App::start().await;
+    app.relay
+        .links
+        .lock()
+        .unwrap()
+        .appear
+        .insert("mo".to_owned());
+    let token = bearer(None);
+    let session = JazzSession::open(client_files(), app.session(&token).initial(Initial::Device))
+        .await
+        .unwrap();
+    let guest = session.snapshot().user.unwrap();
+    *token.lock().unwrap() = Some("token-mo".to_owned());
+    session.refresh().await.unwrap();
+    let mo = session.snapshot().user.unwrap();
+    assert_eq!(mo.subject, "mo");
+    assert_ne!(mo.account, guest.account);
+    // Her account is the one that appeared: signing in elsewhere finds it.
+    let elsewhere = JazzSession::open(client_files(), app.session(&bearer(Some("token-mo"))))
+        .await
+        .unwrap();
+    assert_eq!(elsewhere.snapshot().user.unwrap().account, mo.account);
+    elsewhere.close().await.unwrap();
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// A backend that retires the guest's key on linking (`guestKeyAfterLink:
+/// "revoke"`): the session goes on as the user on the app's bearer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linking_survives_a_retired_guest_key() {
+    let app = App::start().await;
+    app.relay.links.lock().unwrap().revoke = true;
+    let token = bearer(None);
+    let session = JazzSession::open(client_files(), app.session(&token).initial(Initial::Device))
+        .await
+        .unwrap();
+    let guest = session.snapshot().user.unwrap();
+    session
+        .jazz()
+        .unwrap()
+        .insert(NewTodo::new("Before linking", false))
+        .await
+        .unwrap();
+    *token.lock().unwrap() = Some("token-nia".to_owned());
+    session.refresh().await.unwrap();
+    let nia = session.snapshot().user.unwrap();
+    assert_eq!((nia.subject.as_str(), nia.account), ("nia", guest.account));
+    let written = session
+        .jazz()
+        .unwrap()
+        .insert(NewTodo::new("After linking", false))
+        .await
+        .unwrap();
+    let synced = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let rows = app
+                .backend
+                .all_with(todos::query(), ReadTier::Remote)
+                .await
+                .unwrap();
+            if rows.contains(&written) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(synced.is_ok(), "the linked user syncs on the app's bearer");
     session.close().await.unwrap();
     app.stop().await;
 }

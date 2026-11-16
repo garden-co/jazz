@@ -9,7 +9,7 @@
   - The same user keeps the same `Jazz`.
   - Another user gets their own, and the old one fails with `Error::Replaced`; its subscriptions end.
   - No user signs out a backend user, but keeps a device guest.
-  - A user who has no account yet, while a guest is signed in, gets the guest linked to them, keeping its data (`link_guest`, on by default, as TypeScript's `linkGuest`).
+  - A user who has no account yet, while a guest is signed in, gets the guest linked to them, keeping its data (`link_guest`, on by default, as TypeScript's `linkGuest`). A link the backend refuses for good signs them in on their own account instead, once. With `link_guest(false)`, the guest stays for the app to link with `link_device_account`.
 - **Device accounts:** `create_device_account`, `restore_device_account(key)`, `reopen_device_account`, `link_device_account` and `export_device_key`.
 - **State and lifecycle** (status strings as TypeScript's: `signed-out`):
   - `snapshot()` and `changes()` give the status (`starting | ready | signed-out | transitioning | error | closed`), the user, a `clientEpoch`, and a failed operation's `error` and `recovery`.
