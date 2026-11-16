@@ -266,6 +266,13 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
   ([jazz#5635](https://github.com/garden-co/jazz/pull/5635)). Deltas carry no
   positions, so an ordered subscription re-sorts locally. A row that only
   moved is left out.
+- **Result keys:** each `added` and `updated` row carries `"$key"`, an
+  opaque string naming that result, and `"removedKeys"` runs beside
+  `removed` (same order). One row can be several results: each version of a
+  history subscription (which carries `$history`), or each arm of a union
+  that matches it (UNION ALL). A host that holds such results applies
+  `updated` and `removedKeys` by `$key`; elsewhere the key and the `id`
+  name the same result, and applying by `id` stays correct.
 
 Every way a subscription ends, other than being cancelled, ends with one
 last error, after which no callback comes: a rejection (`Refused`), or
