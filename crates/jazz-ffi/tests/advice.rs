@@ -24,6 +24,7 @@ async fn can_answers_as_the_server_would() {
         let alice = JazzHandle::open(alice).unwrap();
         let bob = JazzHandle::open(bob).unwrap();
         let account = alice.account().unwrap().unwrap();
+        assert!(alice.bundle().unwrap().is_some());
         let show_id = parse(
             &alice
                 .insert_at("shows".into(), show(&account), "global".into())
