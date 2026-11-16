@@ -4,12 +4,11 @@
  * bindings are what `jazz-tools generate` writes from its TS (schema.ts):
  * `generate --check` in each directory that commits a jazz.app.json (apps,
  * the docs' recipe apps beside them, Rust crates (src/jazz_app.rs), Go
- * modules and Swift packages (JazzApp.swift), whose language the
- * directory names). For the Kotlin CLI, which the npm CLI doesn't generate
- * yet, only the JSON (jazz-codegen's golden test checks JazzApp.kt). StagePlan's go-cli, rust-cli and swift-cli re-export
- * react-localfirst's TS, so this also keeps their JSON StagePlan's.
- * A stale file otherwise only shows when a backend starts. Runs against the
- * jazz-tools CLI the TypeScript partition built.
+ * modules, Swift packages (JazzApp.swift) and Gradle projects (JazzApp.kt),
+ * whose language the directory names). StagePlan's go-cli, rust-cli,
+ * swift-cli and kotlin-cli re-export react-localfirst's TS, so this also keeps
+ * their JSON StagePlan's. A stale file otherwise only shows when a backend
+ * starts. Runs against the jazz-tools CLI the TypeScript partition built.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -48,19 +47,7 @@ export function checkBindings(dirs, { cwd = root, run = defaultRun } = {}) {
   return { failures, checked: dirs.length };
 }
 
-/** A Gradle project (the Kotlin CLI): the npm CLI doesn't generate Kotlin yet. */
-function isKotlinApp(dir) {
-  return existsSync(join(dir, "build.gradle.kts"));
-}
-
 function defaultRun(dir) {
-  // Kotlin bindings are jazz-codegen's golden tests'; here only the JSON.
-  if (isKotlinApp(dir)) {
-    return spawnSync(process.execPath, [join(root, "dev", "gates", "app-files-current.mjs"), dir], {
-      cwd: dir,
-      encoding: "utf8",
-    });
-  }
   return spawnSync(process.execPath, [cli, "generate", "--check", "--schema-dir", dir], {
     cwd: dir,
     encoding: "utf8",
