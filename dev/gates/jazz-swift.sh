@@ -3,9 +3,11 @@
 # JazzApp.swift is what the Swift back end writes from its jazz.app.json, and
 # the Jazz Swift package and the example build and pass their tests against
 # libjazz_ffi built from this tree. The example's tests start a jazz-tools
-# server each; then the CLI demo runs against one. Whether that JSON is current
-# with the example's schema.ts (a re-export of StagePlan's) is
-# dev/gates/example-bindings.mjs's `jazz-tools generate --check`.
+# server each; then the CLI demo runs against one. The docs' Swift snippets
+# (examples/docs/todo-client-swift, over the docs todo app) pass their tests
+# too. Whether each example's JSON is current with its schema.ts (a re-export
+# of StagePlan's, or of the docs todo app's) is dev/gates/example-bindings.mjs's
+# `jazz-tools generate --check`.
 # Uses the swift on PATH if it is 6.0 or newer, else downloads a pinned one.
 set -euo pipefail
 
@@ -20,6 +22,7 @@ cleanup() {
 }
 trap cleanup EXIT
 example="$root/examples/stage-plan/apps/swift-cli"
+docs_example="$root/examples/docs/todo-client-swift"
 
 swift_major=$(swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9]*\)\..*/\1/p' | head -1 || true)
 if [[ -z "$swift_major" || "$swift_major" -lt 6 ]]; then
@@ -37,6 +40,7 @@ cd "$root"
 cargo test -q -p jazz-codegen --test golden -- swift
 cargo build -q -p jazz-tools --bin jazz-tools
 "$root/target/debug/jazz-tools" generate --check --dir "$example"
+"$root/target/debug/jazz-tools" generate --check --dir "$docs_example"
 # The app endpoint the end-user tests sign in through.
 cargo build -q -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 # The committed UniFFI sources match what uniffi-bindgen generates from
@@ -51,6 +55,7 @@ export CI="${CI:-1}"
 # The root Package.swift is the Jazz Swift package.
 (cd "$root" && swift test)
 (cd "$example" && swift test)
+(cd "$docs_example" && swift test)
 
 # The CLI as an end user: a sync server, and in front of it the app's
 # endpoint (the test relay standing in for the TypeScript backend's
