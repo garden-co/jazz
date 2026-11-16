@@ -761,6 +761,13 @@ export interface VerifyTokenResult {
 }
 
 /**
+ * A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+ * `tables` of a `jazz.app.json` `history` version (no relations, computed
+ * fields or transforms), as JSON text.
+ */
+export declare function versionTables(engineSchemaJson: string): string
+
+/**
  * Build the `jazz.app.json` and `jazz.permissions.json` texts from what
  * `jazz-tools validate` compiled (an
  * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as

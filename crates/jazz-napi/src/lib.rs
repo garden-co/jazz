@@ -290,6 +290,15 @@ pub fn migration_diff(from_json: String, to_json: String) -> js::Result<String> 
         .map_err(codegen_error)
 }
 
+/// A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+/// `tables` of a `jazz.app.json` `history` version (no relations, computed
+/// fields or transforms), as JSON text.
+#[napi(js_name = "versionTables")]
+pub fn version_tables(engine_schema_json: String) -> js::Result<String> {
+    jazz::tools::deployment::artifact::version_tables_json(engine_schema_json.as_bytes())
+        .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
 /// What `migrationsCreate` wrote.
 #[napi(object)]
 pub struct CreatedMigration {
