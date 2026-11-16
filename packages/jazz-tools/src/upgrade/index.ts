@@ -32,7 +32,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, extname, join, relative } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import type * as TS from "typescript";
 import { printPermissions, type AppJson, type PermissionsJson } from "../printer/index.js";
 import { formatTs, layout, loadPrettier } from "../printer/format.js";
@@ -40,7 +40,12 @@ import { expandDefs } from "../printer/defs.js";
 import { isObject, parseAppJson, tsOnlyMarkers } from "./app-json.js";
 import { UpgradeRefusal, notSupportedYet } from "./errors.js";
 import { convertExtras } from "./extras.js";
-import { checkLegacyFiles, dslAlpha, findLegacyJazzTools } from "./fresh.js";
+import {
+  checkLegacyFiles,
+  checkLegacyFilesWithDefs,
+  dslAlpha,
+  findLegacyJazzTools,
+} from "./fresh.js";
 import { readGeneratedNames } from "./names.js";
 import { createProgram, typeErrors } from "./program.js";
 import {
@@ -51,6 +56,8 @@ import {
   runningPackageRoot,
   type Project,
 } from "./project.js";
+import { JsonOnlyApp } from "./project.js";
+import { upgradeJsonOnly } from "./json-only.js";
 import { environmentReads, refuseDroppedConditions } from "./permissions-check.js";
 import { refusePayloadEnums } from "./payload-enums.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
@@ -109,7 +116,31 @@ export interface ArtifactIdentity {
 }
 
 export async function upgradeProject(options: UpgradeOptions = {}): Promise<UpgradeReport> {
-  const project = locateProject(options.dir ?? process.cwd(), options.schemaDir);
+  const root = resolve(options.dir ?? process.cwd());
+  let project: Project;
+  try {
+    project = locateProject(root, options.schemaDir);
+  } catch (error) {
+    if (!(error instanceof JsonOnlyApp)) throw error;
+    // An app whose JSON is its source: its TS is printed from it.
+    const report = await upgradeJsonOnly(error.dir, root, {
+      dryRun: options.dryRun,
+      generate: options.generate ?? runGenerate,
+      identity: artifactIdentity,
+      differences: identityDifferences,
+    });
+    return {
+      dir: root,
+      written: report.written,
+      deleted: [],
+      rewrites: [],
+      manual: [],
+      notes: report.notes,
+      typeErrors: [],
+      preexistingTypeErrors: [],
+      typechecked: false,
+    };
+  }
   const { ts } = project;
   const rel = (path: string) => relative(project.root, path) || path;
   const notes: string[] = [];
@@ -128,7 +159,22 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   // 1. The JSON files must be fresh: the permissions are printed from them.
   if (!options.skipFreshCheck) {
     const legacy = findLegacyJazzTools(project);
-    notes.push(...checkLegacyFiles(project, legacy));
+    const committed = (
+      existsSync(project.permissionsJsonFile) && existsSync(project.appFile)
+        ? JSON.parse(readFileSync(project.permissionsJsonFile, "utf8"))
+        : {}
+    ) as PermissionsJson;
+    // Hand-written `defs` aren't what the old validate writes: compare by what deploys instead.
+    notes.push(
+      ...(committed.defs
+        ? await checkLegacyFilesWithDefs(
+            project,
+            legacy,
+            JSON.stringify(expandDefs(committed)),
+            artifactIdentity,
+          )
+        : checkLegacyFiles(project, legacy)),
+    );
   }
   const scan = scanImports(project);
   const envReads = environmentReads(project, schemaSources(project, scan));
