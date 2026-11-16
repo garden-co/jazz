@@ -616,6 +616,15 @@ export interface RestoreOptions {
 export declare function schemaHash(engineSchemaJson: string): string
 
 /**
+ * Whether rows pass unchanged between two schemas in the engine's JSON form
+ * (`{ "tables": … }`), so a deployment connects them without a migration:
+ * the rule `migrations create` follows to decide whether to write one.
+ * Indexes, history retention, merge strategies, column order and defaults
+ * of columns outside `branchBy` don't count; everything else does.
+ */
+export declare function schemasAreCompatible(leftJson: string, rightJson: string): boolean
+
+/**
  * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
  * `source` generated bindings record.
  */

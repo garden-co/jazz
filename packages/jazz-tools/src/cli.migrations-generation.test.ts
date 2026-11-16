@@ -119,7 +119,10 @@ describe("migrations create", () => {
     expect(await stubs(root)).toEqual([]);
   });
 
-  it("needs no stub to add enum variants, and refuses dropping one", async () => {
+  // Whether a stub is needed is Rust's `schemasAreCompatible`: the rule a
+  // deployment connects versions by. Rows of an enum gaining variants pass
+  // unchanged, but the deployment needs the (empty) migration to reach them.
+  it("writes an empty stub to add enum variants, and refuses dropping one", async () => {
     const root = await baseline({
       todos: 's.table({ title: s.string(), status: s.enum("todo", "done") }, {})',
     });
@@ -127,13 +130,34 @@ describe("migrations create", () => {
       todos: 's.table({ title: s.string(), status: s.enum("todo", "done", "archived") }, {})',
     });
     const added = await createAppMigration({ cwd: root, name: "archived" });
-    expect(added.file).toBeUndefined();
-    expect(await stubs(root)).toEqual([]);
+    expect(added.file).toMatch(/archived/);
+    expect(added.todos).toEqual([]);
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations).toHaveLength(1);
 
     await writeSchema(root, {
       todos: 's.table({ title: s.string(), status: s.enum("todo", "archived") }, {})',
     });
     await expect(createAppMigration({ cwd: root, name: "drop-done" })).rejects.toThrow(/status/);
+  });
+
+  it("writes a stub when a table gains branchBy, not for a default outside it", async () => {
+    const notes = (options: { branchBy: boolean; titleDefault: string }) =>
+      `s.table({ title: s.string().default(${JSON.stringify(options.titleDefault)}), ` +
+      `branch: s.string().default("main") }, {})` +
+      (options.branchBy ? '.branchBy("branch")' : "");
+    const root = await baseline({ notes: notes({ branchBy: false, titleDefault: "x" }) });
+
+    await writeSchema(root, { notes: notes({ branchBy: false, titleDefault: "y" }) });
+    const titleDefault = await createAppMigration({ cwd: root, name: "title-default" });
+    expect(titleDefault.file).toBeUndefined();
+    expect(titleDefault.snapshot).toBeDefined();
+
+    await writeSchema(root, { notes: notes({ branchBy: true, titleDefault: "y" }) });
+    const branched = await createAppMigration({ cwd: root, name: "branch-by" });
+    expect(branched.file).toMatch(/branch-by/);
+    expect(await stubs(root)).toHaveLength(1);
   });
 
   it("writes createTables and dropTables for added and removed tables", async () => {

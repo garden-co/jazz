@@ -10,14 +10,19 @@ import {
 } from "../schema-dsl/readable-app.js";
 import { compileApp } from "./codegen-napi.js";
 
-/** The engine's hash of a schema in its JSON form (`{ "tables": … }`), through jazz-napi. */
-async function schemaHashOf(engineSchemaJson: string): Promise<string> {
+/** The jazz-napi functions this module calls, on schemas in the engine's JSON form (`{ "tables": … }`). */
+async function jazzNapi(): Promise<{
+  schemaHash(engineSchemaJson: string): string;
+  schemasAreCompatible(leftJson: string, rightJson: string): boolean;
+}> {
   // A specifier bundlers can't follow: this module is Node tooling only.
   const specifier = "jazz-napi";
-  const napi = (await import(/* @vite-ignore */ specifier)) as {
-    schemaHash(engineSchemaJson: string): string;
-  };
-  return napi.schemaHash(engineSchemaJson);
+  return import(/* @vite-ignore */ specifier);
+}
+
+/** The engine's hash of a schema in its JSON form (`{ "tables": … }`), through jazz-napi. */
+async function schemaHashOf(engineSchemaJson: string): Promise<string> {
+  return (await jazzNapi()).schemaHash(engineSchemaJson);
 }
 import type {
   ColumnDescriptor,
@@ -1114,25 +1119,16 @@ function normalizeMigrationName(name: string): string {
   return normalized;
 }
 
-/** Whether rows of `from` need a step to read as `to` (tables or columns differ beyond enum additions). */
-function requiresMigration(from: WasmSchema, to: WasmSchema): boolean {
-  const names = (schema: WasmSchema) => Object.keys(schema).sort().join("\0");
-  if (names(from) !== names(to)) return true;
-  return Object.keys(from).some((table) => {
-    const left = new Map(from[table]!.columns.map((c) => [c.name, c]));
-    const right = to[table]!.columns;
-    if (left.size !== right.length) return true;
-    return right.some((column) => {
-      const source = left.get(column.name);
-      if (!source) return true;
-      if (source.nullable !== column.nullable || source.references !== column.references)
-        return true;
-      return (
-        columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type) &&
-        !onlyAddsEnumVariants(source.column_type, column.column_type)
-      );
-    });
-  });
+/**
+ * Whether `to` needs a migration from `from`: Rust's `schemasAreCompatible`
+ * (jazz-napi), the rule a deployment uses to connect versions without one.
+ */
+async function requiresMigration(from: WasmSchema, to: WasmSchema): Promise<boolean> {
+  const napi = await jazzNapi();
+  return !napi.schemasAreCompatible(
+    JSON.stringify({ tables: from }),
+    JSON.stringify({ tables: to }),
+  );
 }
 
 function snapshotText(schema: WasmSchema): string {
@@ -1199,7 +1195,7 @@ export async function createMigration(options: {
     return { changed: true, initial: true, toHash: current.hash, snapshot: await writeSnapshot() };
   }
   if (baseline.hash === current.hash) return { changed: false };
-  if (!requiresMigration(baseline.schema, current.schema)) {
+  if (!(await requiresMigration(baseline.schema, current.schema))) {
     return {
       changed: true,
       migrationRequired: false,
