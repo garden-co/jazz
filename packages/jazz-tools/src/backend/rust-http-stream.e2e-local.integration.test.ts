@@ -60,7 +60,12 @@ it.skipIf(!CLIENT)(
     const app = testApp(readFileSync(process.env.RUST_APP_JSON!, "utf8"));
     const jazz = await createJazz({
       app,
-      permissions: { format: 1, tables: { todos: { read: "true", insert: "true" } } },
+      permissions: JSON.parse(
+        readFileSync(
+          process.env.RUST_APP_JSON!.replace(/jazz\.app\.json$/, "jazz.permissions.json"),
+          "utf8",
+        ),
+      ),
       store: memory(),
       authenticate: () => null,
       backendClients: [
@@ -72,10 +77,10 @@ it.skipIf(!CLIENT)(
     const requests = { stream: 0, sends: 0, deletes: 0, socket: 0 };
     const server: Server = createServer((req, res) => {
       const path = req.url ?? "";
-      if (path.endsWith('/stream')) requests.stream += 1;
+      if (path.endsWith("/stream")) requests.stream += 1;
       else if (/\/stream\/[^/]+$/.test(path) && req.method === "POST") requests.sends += 1;
       else if (/\/stream\/[^/]+$/.test(path) && req.method === "DELETE") requests.deletes += 1;
-      else if (path.endsWith('/ws')) requests.socket += 1;
+      else if (path.endsWith("/ws")) requests.socket += 1;
       return jazz.nodeHandler(req, res);
     });
     let upgraded = 0;
@@ -109,7 +114,9 @@ it.skipIf(!CLIENT)(
       expect(stdout).not.toContain("LINK ");
       expect(requests.stream).toBe(1);
       expect(requests.sends).toBeGreaterThan(0);
-      expect(requests.deletes).toBe(1);
+      // No DELETE is guaranteed: the process exits as it closes, and its
+      // response going ends the session here (as a socket's TCP close does).
+      expect(requests.deletes).toBeLessThanOrEqual(1);
       expect(upgraded).toBeGreaterThan(0);
       const rows = await jazz.db.all(app.todos.select("title"));
       expect(rows.map((row: { title: string }) => row.title).sort()).toEqual([

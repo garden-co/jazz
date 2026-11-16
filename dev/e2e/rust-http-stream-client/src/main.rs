@@ -8,7 +8,9 @@ mod jazz_app {
 
 use std::time::Duration;
 
-use ::jazz_app::{AppId, CLOSE_TIMEOUT, Config, Link, ObjectId, Storage, TokenReason};
+use ::jazz_app::{
+    AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Link, ObjectId, Storage, TokenReason,
+};
 use futures::StreamExt;
 use jazz_app::NewTodo;
 
@@ -28,7 +30,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let token = token.clone();
             async move { Ok(Some(token)) }
         });
-    let job = jazz_app::open(config).await?;
+    // A backend client needs the app's permissions, as createJazzClient does.
+    let files = AppFiles::new(jazz_app::APP, None)
+        .with_permissions(include_bytes!("../jazz.permissions.json").to_vec());
+    let job = Jazz::open(files, config).await?;
     println!("KIND {:?}", job.backend_client());
     let mut changes = job.sync_changes();
     tokio::time::timeout(Duration::from_secs(15), async {
