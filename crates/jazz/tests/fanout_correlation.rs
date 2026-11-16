@@ -121,8 +121,15 @@ pub(crate) fn subscribe_with(
 /// Applies queued deltas to the maintained result; returns the ids the
 /// deltas reported as added or updated.
 pub(crate) fn apply(live: &mut Live) -> BTreeSet<RowUuid> {
+    let events: Vec<SubscriptionEvent> =
+        std::iter::from_fn(|| live.stream.try_next_event()).collect();
+    apply_events(live, events)
+}
+
+/// [`apply`] for events already taken from the stream.
+fn apply_events(live: &mut Live, events: Vec<SubscriptionEvent>) -> BTreeSet<RowUuid> {
     let mut reported = BTreeSet::new();
-    while let Some(event) = live.stream.try_next_event() {
+    for event in events {
         let SubscriptionEvent::Delta {
             reset,
             added,
@@ -1931,6 +1938,131 @@ fn r7_a_relation_named_like_a_column_keeps_the_column() {
     assert_eq!(
         reported[0],
         BTreeSet::from([id(MESSAGES, 0), id(MESSAGES, 1)])
+    );
+}
+
+/// The events `live` has been sent since it last read, without applying
+/// them.
+fn pending(live: &mut Live) -> Vec<SubscriptionEvent> {
+    std::iter::from_fn(|| live.stream.try_next_event()).collect()
+}
+
+/// R8. A re-check followed by a re-nest (an edit of a root row another
+/// root's relation holds) reaches a member as one delta: the edited row
+/// and the row quoting it change together, never one without the other.
+///
+/// ```
+/// thread: messages WHERE chat = 0, reply (messages)
+/// writer ──edit m0 (m1 quotes it)──► one delta: m0 and m1
+/// ```
+#[test]
+fn r8_a_recheck_and_its_renest_reach_a_member_as_one_delta() {
+    let db = open(chat_schema(None), 1);
+    chat(&db, 0, "c0");
+    chat(&db, 9, "c9");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, Some(0));
+    message(&db, 2, 0, 2, None);
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(reply()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let before = db.fanout_stats();
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("body", text("edited"))],
+    );
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran - before.reran, after.renested - before.renested),
+        (0, 1),
+        "a re-check and a re-nest: {after:?}"
+    );
+    let events = pending(&mut lives[0]);
+    let [
+        SubscriptionEvent::Delta {
+            reset: false,
+            added,
+            updated,
+            removed,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one delta for one commit, got {events:?}");
+    };
+    assert!(added.is_empty() && removed.is_empty(), "{events:?}");
+    let ids: Vec<(RowUuid, Option<usize>, usize)> = updated
+        .iter()
+        .map(|row| (row.row_uuid(), row.previous_index, row.index))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![(id(MESSAGES, 0), Some(0), 0), (id(MESSAGES, 1), Some(1), 1)]
+    );
+    // Applied as a member applies it, the delta is the fresh read.
+    apply_events(&mut lives[0], events);
+    check(&db, &mut lives, "m0 edited");
+    // The same with the edit moving m0 out of the thread: m0 leaves and
+    // m1's reply empties, in one delta.
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("chat", uuid(id(CHATS, 9)))],
+    );
+    let events = pending(&mut lives[0]);
+    assert_eq!(events.len(), 1, "one delta for one commit, got {events:?}");
+    apply_events(&mut lives[0], events);
+    check(&db, &mut lives, "m0 moved out");
+}
+
+/// R9. A re-check that fails (a read error, not missing chunks) ends the
+/// subscription: no re-nest follows it, and nothing is sent after the
+/// rejection.
+#[test]
+fn r9_no_renest_follows_a_rejected_recheck() {
+    let db = open(chat_schema(None), 1);
+    chat(&db, 0, "c0");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, Some(0));
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(reply()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let before = db.fanout_stats();
+    jazz::db::fail_rechecks_for_test(1);
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("body", text("edited"))],
+    );
+    jazz::db::fail_rechecks_for_test(0);
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran - before.reran, after.renested - before.renested),
+        (0, 0),
+        "no re-nest, no re-run after the rejection: {after:?}"
+    );
+    let events = pending(&mut lives[0]);
+    assert!(
+        matches!(events.as_slice(), [SubscriptionEvent::Rejected { .. }]),
+        "the rejection, and nothing after it: {events:?}"
     );
 }
 
