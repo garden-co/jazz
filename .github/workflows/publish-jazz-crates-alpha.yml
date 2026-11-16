@@ -73,11 +73,17 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          RC=false
           if [ "${EVENT}" = "workflow_dispatch" ] && [ "${DRY_RUN}" = "true" ]; then
             SHA="${DISPATCH_SHA}"
           elif [ "${EVENT}" = "workflow_dispatch" ]; then
-            if ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+$ ]]; then
-              echo "::error::A real publish needs tag=v2.0.0-alpha.N, got '${TAG}'."
+            # A release candidate (v2.0.0-alpha.N.K-rc.M, named to sort
+            # below 2.0.0-alpha.N+1) is never on npm: its crates publish
+            # without waiting for jazz-tools there. Every other check holds.
+            if [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              RC=true
+            elif ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+$ ]]; then
+              echo "::error::A real publish needs tag=v2.0.0-alpha.N (or v2.0.0-alpha.N.K-rc.M), got '${TAG}'."
               exit 1
             fi
             SHA=$(gh api "repos/${REPO}/commits/${TAG}" --jq .sha)
@@ -112,6 +118,10 @@ jobs:
             # registry can lag the npm job by minutes, so wait for it.
             listed=false
             for _ in $(seq 1 30); do
+              if [ "${RC}" = "true" ]; then
+                listed=true
+                break
+              fi
               if curl -sfo /dev/null --max-time 20 "https://registry.npmjs.org/jazz-tools/${VERSION}"; then
                 listed=true
                 break
