@@ -161,6 +161,9 @@ impl From<jazz_app::Error> for JazzErrorKind {
             E::App(_) | E::Config(_) | E::Decode { .. } | E::Refused(_) => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
+            // Another open app holds the store (deleteClientStorage): a
+            // refusal, not a failure to retry.
+            E::StoreHeld(_) => Self::Refused(message),
             E::NoAccount(user_id) => Self::NoAccount {
                 user_id,
                 reason: message,

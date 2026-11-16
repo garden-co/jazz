@@ -84,7 +84,7 @@ enum Commands {
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
         /// The bindings' language (repeatable); by default each whose
-        /// marker (package.json, Cargo.toml, go.mod) sits beside jazz.app.json.
+        /// marker (package.json, Cargo.toml, Package.swift, go.mod) sits beside jazz.app.json.
         #[arg(long)]
         lang: Vec<String>,
         /// Fail when the files or bindings are stale; change nothing.
@@ -309,7 +309,7 @@ enum MigrationsAction {
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
         /// The bindings' language (repeatable); by default each whose
-        /// marker (package.json, Cargo.toml, go.mod) sits beside jazz.app.json.
+        /// marker (package.json, Cargo.toml, Package.swift, go.mod) sits beside jazz.app.json.
         #[arg(long)]
         lang: Vec<String>,
     },

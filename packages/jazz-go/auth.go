@@ -37,13 +37,21 @@ const (
 // auth provider) keeps the session: Jazz asks again later.
 type TokenProvider func(ctx context.Context, reason TokenReason) (string, error)
 
-type tokenAuth struct{ provider TokenProvider }
+type tokenAuth struct {
+	provider   TokenProvider
+	credential bool
+}
 
 // Token signs in with the bearer tokens provider gets, asking again on
 // renewal and when one is refused.
-func Token(provider TokenProvider) Auth { return tokenAuth{provider} }
+func Token(provider TokenProvider) Auth { return tokenAuth{provider: provider} }
 
-func (tokenAuth) authJSON() (map[string]any, error) { return map[string]any{"bearer": true}, nil }
+func (a tokenAuth) authJSON() (map[string]any, error) {
+	if a.credential {
+		return map[string]any{"credential": true}, nil
+	}
+	return map[string]any{"bearer": true}, nil
+}
 
 type deviceAuth struct {
 	key   string
@@ -281,8 +289,18 @@ func (db *DB) OnSyncStatus(ctx context.Context) (<-chan SyncStatus, error) {
 	})
 }
 
+// watch runs a jazz-ffi watch of what. decode's bool says the event isn't
+// a state (an error, or the watch closing): the channel then closes
+// without it.
 func watch[T any](ctx context.Context, db *DB, what string, decode func(event) (T, bool)) (<-chan T, error) {
-	return stream(ctx, db, decode, func(id uint64) (func(), error) {
+	states := func(e event) (T, bool, bool) {
+		v, end := decode(e)
+		if end || e.kind == "closed" {
+			return v, true, true
+		}
+		return v, false, false
+	}
+	return stream(ctx, db, states, func(id uint64) (func(), error) {
 		var cerr uintptr
 		w := ffi.watch(db.handle, cstr(what), ffi.subscriptionCallback, uintptr(id), &cerr)
 		if err := takeError(cerr); err != nil || w == 0 {
