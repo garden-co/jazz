@@ -60,6 +60,9 @@ enum Step {
     /// Refuse the attempt's credential, as Core refuses an expired bearer
     /// (`AuthFailed`, `WireRetry::Never`).
     RejectAuth,
+    /// Answer before hello that the server is still starting
+    /// (`NotReady`, `WireRetry::Later`).
+    NotReady,
 }
 
 /// Plays [`Step`]s in order and records each attempt's bearer; further
@@ -119,6 +122,13 @@ impl NativeTransportConnector for ScriptedConnector {
                 Some(Step::RejectAuth) => Err(NativeTransportError::AuthRejected(
                     "websocket rejected: AuthFailed: token expired".into(),
                 )),
+                Some(Step::NotReady) => {
+                    Err(NativeTransportError::Wire(jazz::wire::WireError::new(
+                        jazz::wire::WireErrorCode::NotReady,
+                        jazz::wire::WireRetry::Later,
+                        "server is still starting",
+                    )))
+                }
                 None => std::future::pending().await,
             }
         })
@@ -301,6 +311,45 @@ fn a_refused_connection_is_surfaced_and_retried() {
     assert_eq!(connector.bearers().len(), 2, "the same request was retried");
     assert!(host.private_scope_terminal_error(&scope).is_none());
     assert_eq!(tick_events(&mut host, alice), (None, None));
+    assert_eq!(host.tick_foreground(alice), Ok(()));
+}
+
+/// The server is still starting and answers alice's first attempt with
+/// `NotReady` before its hello. The worker retries without publishing an
+/// outage, and alice's reads keep waiting on the attempt rather than
+/// giving up on the server, as on the web and Node transports (#5927 R10:
+/// the shared link classifies the wire error; before, this host read it as
+/// a network failure and reads stopped waiting).
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge   NotReady (still starting)
+///                 │                      (link Attempting, no failure)
+///                 │ ══socket══► edge     (connected)
+/// ```
+#[test]
+fn a_server_still_starting_keeps_reads_waiting_and_is_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let connector = ScriptedConnector::new([Step::NotReady, Step::ConnectWhenReleased(released)]);
+    let (mut host, _, alice) =
+        scripted_foreground(root.path(), "not-ready-upstream", connector.clone());
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "the attempt is retried", |_| {
+        connector.bearers().len() == 2
+    });
+    assert_eq!(tick_events(&mut host, alice), (None, None), "not a failure");
+    assert!(host.private_scope_terminal_error(&scope).is_none());
+    host.sync_foreground_remote_link(alice);
+    assert_eq!(
+        host.foregrounds[&alice].remote_link_hint,
+        Some(RemoteLinkHint::Attempting),
+        "reads keep waiting for a server that is still starting"
+    );
+
+    release.send(()).unwrap();
+    wait_for(&host, "the retried connection lands", |host| {
+        connected(host, &scope)
+    });
     assert_eq!(host.tick_foreground(alice), Ok(()));
 }
 
