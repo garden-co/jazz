@@ -375,6 +375,9 @@ export function ownJazzSession<Config, Client>(
         publish();
       })
       .catch((cause) => {
+        // Settled before the failure shows: a retry() its observers call
+        // starts again instead of joining this failed attempt.
+        if (pending === task) pending = undefined;
         failure = toError(cause);
         publish();
         throw cause;
