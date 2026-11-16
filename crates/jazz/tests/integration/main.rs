@@ -143,6 +143,8 @@ mod recheck_sync;
 mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
+#[path = "../relation_literal_types.rs"]
+mod relation_literal_types;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_policy_validation.rs"]

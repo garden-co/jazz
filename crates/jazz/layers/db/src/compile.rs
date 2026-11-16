@@ -2812,6 +2812,16 @@ impl<'a> Ctx<'a> {
             RelationValueRef::SessionRef(path) if is_claim(path) => {
                 self.claim_term(scope.session, path, ty)
             }
+            // A bare string reads as the column's type, as the schema compile
+            // reads it (`coerce_literal_for_column_type`): UUID-shaped text
+            // compared with a text column stays text. `json_value` alone would
+            // make it a UUID, which never equals text, so `!=` would admit
+            // every row.
+            RelationValueRef::Literal(serde_json::Value::String(text))
+                if ty.is_some_and(|ty| *ty != ValueType::Uuid) =>
+            {
+                self.value_term(&Value::String(text.clone()))
+            }
             value => self.rel_value(value, rel, scope),
         }
     }
