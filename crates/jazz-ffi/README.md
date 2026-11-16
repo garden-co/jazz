@@ -102,6 +102,30 @@ rejected, lastError, synced}`). Anonymous users are not supported (as in TS).
 Without `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
+## Lifecycle (as TS's)
+
+- `begin_mergeable()` / `txBegin {"serializable": false}`: a mergeable
+  transaction (TS's default `transaction`). Its writes commit together and
+  merge with concurrent ones, and its commit is never refused as a
+  conflict. `begin()` / `txBegin {}` stays serializable.
+- `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
+  the server, with local reads and writes going on, then resume sync.
+- `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
+  deletes its local store, so the next open starts empty. It is refused,
+  and the app left open, while another open app holds the same `dataDir`.
+  On the C ABI, free the handle with `jazz_close` afterwards, as after
+  `signOut`.
+- `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
+  each write the server refused that no durable wait (a `global` tier,
+  `wait_for_sync`) reported, as TS's `onMutationError`:
+  `{"transaction", "message", "denied", "serializable"}`. Refusals from
+  before the first watch come first.
+- Every watch (session, sync, mutation errors) ends when the app closes,
+  whichever way (`shutdown`, `sign_out`, `delete_client_storage`): a last
+  state `{"kind": "closed", "message"}` (UniFFI), or a last callback with
+  kind `"error"` and `{"kind": "closed", …}` (C), after which nothing
+  comes.
+
 ## Values, queries, rows, deltas
 
 Values are plain JSON, typed by the schema:

@@ -27,14 +27,24 @@ type TxOption func(*txOptions)
 
 type txOptions struct {
 	serializable bool
+	mergeable    bool
 	tier         WriteTier
 }
 
 // Serializable says the transaction is serializable: its reads are checked
 // at commit, which fails with ErrConflict if they changed meanwhile, and
-// is not retried. Every Jazz transaction is serializable, so this only
+// is not retried. A Tx without Mergeable is serializable, so this only
 // documents it at the call.
-func Serializable() TxOption { return func(o *txOptions) { o.serializable = true } }
+func Serializable() TxOption {
+	return func(o *txOptions) { o.serializable, o.mergeable = true, false }
+}
+
+// Mergeable makes the transaction mergeable, as TS's default transaction:
+// its writes merge with concurrent ones, and its commit never fails with
+// ErrConflict.
+func Mergeable() TxOption {
+	return func(o *txOptions) { o.mergeable, o.serializable = true, false }
+}
 
 // CommitAt makes the commit return once the transaction has reached tier.
 func CommitAt(tier WriteTier) TxOption { return func(o *txOptions) { o.tier = tier } }
@@ -57,6 +67,9 @@ func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (
 	begin := map[string]any{}
 	if o.serializable {
 		begin["serializable"] = true
+	}
+	if o.mergeable {
+		begin["serializable"] = false
 	}
 	if err := db.call(ctx, "txBegin", begin, &begun); err != nil {
 		return err

@@ -65,6 +65,9 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "backendClient" {}  -> "trusted" | "scoped" | null (not a backend
  *                          client; a jazz_for_user handle: its parent's)
  *   "txBegin"    {"serializable"?: true}      -> {"tx": "<id>"}
+ *              ("serializable": false begins a mergeable transaction, TS's
+ *              default: its writes merge with concurrent ones, and its
+ *              commit is never refused as a conflict)
  *   "txCommit"   {"tx", "tier"?}              -> null
  *   "txRollback" {"tx"}                       -> null
  *   "editText" {"table", "id", "column", "editedFrom", "text"} -> null
@@ -90,6 +93,13 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "link"     {"bearer"} -> the user (links a device account to the app's
  *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
+ *   "disconnect" {} -> null (leaves the server; local reads and writes go
+ *                     on; TS's disconnect)
+ *   "reconnect"  {} -> null (resumes sync after disconnect)
+ *   "deleteClientStorage" {} -> null (closes the app and deletes its local
+ *                     store; the next open starts empty. Refused while
+ *                     another open app holds the same dataDir. Free the
+ *                     handle with jazz_close after, as after signOut)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
@@ -165,7 +175,14 @@ typedef struct JazzWatch JazzWatch;
 
 /*
  * Calls cb with kind "session" or "sync" and each state's JSON, the
- * current one first, on a thread of its own, until jazz_unwatch.
+ * current one first, on a thread of its own, until jazz_unwatch. With
+ * what "mutationErrors", cb gets kind "mutationErrors" and each write the
+ * server refused that no durable wait reported (TS's onMutationError):
+ * {"transaction", "message", "denied", "serializable"}; refusals from
+ * before the first such watch come first. When the app closes (jazz_close,
+ * signOut, deleteClientStorage), cb gets a last call with kind "error" and
+ * {"kind":"closed",...}, after which no callback comes; free the watch
+ * with jazz_unwatch, before or after.
  */
 JazzWatch *jazz_watch(JazzHandle *handle, const char *what, JazzCallback cb, void *ctx,
                       char **err);
