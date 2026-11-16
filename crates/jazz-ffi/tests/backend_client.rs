@@ -129,9 +129,15 @@ async fn backend_clients_open_as_the_main_backend_trusts_them() {
         let alice =
             JazzHandle::open_with_tokens(alice_config, Arc::new(Machine("token-alice"))).unwrap();
         let alice_account = alice.account().unwrap().expect("alice's account");
-        let as_alice = job
-            .for_user("alice".into(), json!({ "org": "acme" }).to_string())
-            .expect("act for alice");
+        // From a plain thread with no Tokio runtime, as Swift, Kotlin or Go
+        // call it.
+        let as_alice = std::thread::scope(|scope| {
+            scope
+                .spawn(|| job.for_user("alice".into(), json!({ "org": "acme" }).to_string()))
+                .join()
+                .unwrap()
+        })
+        .expect("act for alice");
         assert_eq!(
             as_alice.account().unwrap().as_deref(),
             Some(alice_account.as_str())
@@ -383,11 +389,45 @@ async fn a_c_host_opens_a_trusted_backend_client_and_acts_for_a_user() {
             json!({ "table": "shows", "row": parse(&show(account.as_str().unwrap())) }),
         )
         .unwrap();
+        // A transaction id works only on the handle that began it: a user's
+        // handle can't write in the system's transaction, nor the system in
+        // the user's.
+        let job_tx = call(job, "txBegin", json!({})).unwrap()["tx"].clone();
+        let alice_tx = call(as_alice, "txBegin", json!({})).unwrap()["tx"].clone();
+        let row = parse(&show(nil_uuid()));
+        for (handle, tx) in [(as_alice, &job_tx), (job, &alice_tx)] {
+            let escaped = call(
+                handle,
+                "insert",
+                json!({ "table": "shows", "row": row, "tx": tx }),
+            );
+            assert_eq!(escaped.unwrap_err()["kind"], "refused");
+            for method in ["txCommit", "txRollback"] {
+                let escaped = call(handle, method, json!({ "tx": tx }));
+                assert_eq!(escaped.unwrap_err()["kind"], "refused", "{method}");
+            }
+        }
+        // Each still works on its own handle; alice's is left open, for her
+        // handle's close to roll back.
+        call(
+            as_alice,
+            "insert",
+            json!({ "table": "shows",
+            "row": parse(&show(account.as_str().unwrap())), "tx": alice_tx }),
+        )
+        .unwrap();
+        call(job, "txRollback", json!({ "tx": job_tx })).unwrap();
         // A scoped user's handle can't act for others.
         let bob = jazz_for_user(as_alice, c("bob").as_ptr(), ptr::null(), &mut err);
         assert!(bob.is_null());
         assert_eq!(take(err)["kind"], "refused");
         jazz_close(as_alice);
+        // Her handle's close rolled back her open transaction: the job can't
+        // reach it either way.
+        assert_eq!(
+            call(job, "txCommit", json!({ "tx": alice_tx })).unwrap_err()["kind"],
+            "refused"
+        );
         // The job goes on, then drains and is freed.
         assert_eq!(call(job, "backendClient", json!({})), Ok(json!("trusted")));
         let closed = jazz_close_within(job, 10_000, &mut err);

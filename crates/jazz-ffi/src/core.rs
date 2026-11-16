@@ -39,6 +39,11 @@ pub(crate) struct Core {
     /// A trusted backend client's handle acting for a user (`for_user`): it
     /// shares its parent's client, so closing it leaves that client running.
     derived: bool,
+    /// The transactions and uploads this handle began: they share the
+    /// client's thread-local tables with every handle on that client (a
+    /// trusted client's `for_user` handles), so an id only works on the
+    /// handle that made it.
+    owned: Mutex<std::collections::HashSet<u64>>,
 }
 
 /// How a call runs: inside a transaction, and/or at a durability or read
@@ -256,6 +261,7 @@ impl Core {
             contract,
             close_hook: Mutex::new(None),
             derived,
+            owned: Mutex::new(Default::default()),
         }
     }
 
@@ -266,6 +272,27 @@ impl Core {
             jazz_app::BackendClientKind::Trusted => "trusted",
             jazz_app::BackendClientKind::Scoped => "scoped",
         }))
+    }
+
+    fn owned(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<u64>> {
+        self.owned.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Refuses an id this handle didn't begin, as if it weren't open.
+    fn own(&self, id: u64, what: &str) -> Result<()> {
+        if self.owned().contains(&id) {
+            Ok(())
+        } else {
+            Err(refused(format!("{what} {id} is not open")))
+        }
+    }
+
+    /// The transaction a call runs in, if this handle began it.
+    fn tx_of(&self, opts: &Opts) -> Result<Option<u64>> {
+        if let Some(tx) = opts.tx {
+            self.own(tx, "transaction")?;
+        }
+        Ok(opts.tx)
     }
 
     /// On a trusted backend client, a handle acting as `user_id` (the id the
@@ -287,6 +314,9 @@ impl Core {
                 "for_user needs the user's id, as the main backend's authenticate names it",
             ));
         }
+        // jazz-app asks the main backend (reqwest) on the caller's thread,
+        // which needs a Tokio runtime: a host's thread has none.
+        let _runtime = io_runtime()?.enter();
         let jazz = match block_on(self.open_jazz()?.for_user(user_id, claims)) {
             Ok(jazz) => jazz,
             Err(jazz_app::Error::Refused(reason)) => {
@@ -390,7 +420,10 @@ impl Core {
             None => query,
         };
         let lowered = crate::relational::lower(&self.schema, &self.relations, query)?;
-        let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
+        let (tx, tier) = (
+            self.tx_of(opts)?,
+            opts.read_tier.unwrap_or(ReadTier::LocalFirst),
+        );
         let core_query = lowered.query.clone();
         let reads_deleted = lowered.reads_deleted;
         let results = block_on(self.open_jazz()?.with_client(move |client| async move {
@@ -412,7 +445,10 @@ impl Core {
         opts: &Opts,
     ) -> Result<Vec<Json>> {
         let jazz = self.open_jazz()?;
-        let (tx, tier) = (opts.tx, opts.read_tier.unwrap_or(ReadTier::LocalFirst));
+        let (tx, tier) = (
+            self.tx_of(opts)?,
+            opts.read_tier.unwrap_or(ReadTier::LocalFirst),
+        );
         let results = block_on(jazz.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             Ok(client.query(query, tier).await?)
@@ -446,7 +482,7 @@ impl Core {
         let cells: HashMap<String, Value> = cells.into_iter().collect();
         let name = table_name.to_owned();
         let jazz = self.open_jazz()?;
-        let (tx, tier) = (opts.tx, opts.write_tier);
+        let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = block_on(jazz.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let (id, values, committed) =
@@ -486,7 +522,7 @@ impl Core {
             return Err(refused("the row's id must be the upserted id"));
         }
         let name = table_name.to_owned();
-        let (tx, tier) = (opts.tx, opts.write_tier);
+        let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
@@ -521,7 +557,7 @@ impl Core {
             None => None,
         };
         let name = table_name.to_owned();
-        let (tx, tier) = (opts.tx, opts.write_tier);
+        let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.restore(&name, id, cells)?;
@@ -544,7 +580,7 @@ impl Core {
             return Ok(());
         }
         let name = table_name.to_owned();
-        let (tx, tier) = (opts.tx, opts.write_tier);
+        let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.update(&name, id, cells)?;
@@ -580,7 +616,7 @@ impl Core {
         };
         let edits = convert::edits(table, table_name, &convert::parse(edits_json, "the edits")?)?;
         let name = table_name.to_owned();
-        let (tx, tier) = (opts.tx, opts.write_tier);
+        let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let edits = whole_pages(&client, &name, id, edits).await?;
@@ -607,7 +643,7 @@ impl Core {
         let id = convert::parse_id(id, "the id")?;
         self.table(table_name)?;
         let name = table_name.to_owned();
-        let (tx, tier) = (opts.tx, opts.write_tier);
+        let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.delete(&name, id)?;
@@ -867,11 +903,13 @@ impl Core {
             });
             Ok(())
         }))?;
+        self.owned().insert(upload_id);
         Ok(upload_id.to_string())
     }
 
     /// Feeds the next piece of an upload.
     pub fn upload_push(&self, upload: u64, bytes: Vec<u8>) -> Result<()> {
+        self.own(upload, "upload")?;
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let mut entry = UPLOADS
                 .with(|u| u.borrow_mut().0.remove(&upload))
@@ -888,6 +926,7 @@ impl Core {
     /// Finishes an upload, committing the row with its value; returns the
     /// row.
     pub fn upload_finish(&self, upload: u64, opts: &Opts) -> Result<String> {
+        self.own(upload, "upload")?;
         self.reachable(opts.write_tier)?;
         let tier = opts.write_tier;
         let row = block_on(self.open_jazz()?.with_client(move |client| async move {
@@ -899,18 +938,24 @@ impl Core {
                 .await?;
             settle(&client, Some(committed), tier).await?;
             read_back(&client, &entry.table, &entry.name, id).await
-        }))?;
+        }));
+        // Finished or failed, the upload has ended.
+        self.owned().remove(&upload);
+        let row = row?;
         Ok(row.to_string())
     }
 
     /// Abandons an upload: nothing is written.
     pub fn upload_abort(&self, upload: u64) -> Result<()> {
-        block_on(self.open_jazz()?.with_client(move |client| async move {
+        self.own(upload, "upload")?;
+        let aborted = block_on(self.open_jazz()?.with_client(move |client| async move {
             let entry = UPLOADS
                 .with(|u| u.borrow_mut().0.remove(&upload))
                 .ok_or_else(|| jazz_app::Error::Config(format!("upload {upload} is not open")))?;
             Ok(client.abort_streaming_upload(entry.upload).await?)
-        }))?;
+        }));
+        self.owned().remove(&upload);
+        aborted?;
         Ok(())
     }
 
@@ -928,19 +973,21 @@ impl Core {
             TRANSACTIONS.with(|t| t.borrow_mut().0.insert(tx, (transaction, false)));
             Ok(())
         }))?;
+        self.owned().insert(tx);
         Ok(tx.to_string())
     }
 
     /// Commits a transaction, waiting for `tier` if given. A transaction
     /// that wrote nothing just ends.
     pub fn tx_commit(&self, tx: u64, tier: Option<DurabilityTier>) -> Result<()> {
+        self.own(tx, "transaction")?;
         if let Err(error) = self.reachable(tier) {
             // Refused before committing: the transaction ends, as on any
             // failed commit.
             let _ = self.tx_rollback(tx);
             return Err(error);
         }
-        block_on(self.open_jazz()?.with_client(move |client| async move {
+        let committed = block_on(self.open_jazz()?.with_client(move |client| async move {
             let (transaction, wrote) = take_tx(tx)?;
             if !wrote {
                 transaction.rollback()?;
@@ -957,7 +1004,10 @@ impl Core {
                 }
             };
             settle(&client, Some(committed), tier).await
-        }))?;
+        }));
+        // Committed or failed, the transaction has ended.
+        self.owned().remove(&tx);
+        committed?;
         Ok(())
     }
 
@@ -992,10 +1042,13 @@ impl Core {
     }
 
     pub fn tx_rollback(&self, tx: u64) -> Result<()> {
-        block_on(self.open_jazz()?.with_client(move |_| async move {
+        self.own(tx, "transaction")?;
+        let rolled_back = block_on(self.open_jazz()?.with_client(move |_| async move {
             take_tx(tx)?.0.rollback()?;
             Ok(())
-        }))?;
+        }));
+        self.owned().remove(&tx);
+        rolled_back?;
         Ok(())
     }
 
@@ -1146,7 +1199,23 @@ impl Core {
             return Ok(());
         }
         if self.derived {
-            // The parent's client goes on (its transactions included).
+            // The parent's client goes on: only this handle's own
+            // transactions roll back and its uploads abort.
+            let owned: Vec<u64> = self.owned().drain().collect();
+            let _ = block_on(self.jazz.with_client(move |client| async move {
+                for id in owned {
+                    if let Some((transaction, _)) =
+                        TRANSACTIONS.with(|t| t.borrow_mut().0.remove(&id))
+                    {
+                        let _ = transaction.rollback();
+                    }
+                    let upload = UPLOADS.with(|u| u.borrow_mut().0.remove(&id));
+                    if let Some(entry) = upload {
+                        let _ = client.abort_streaming_upload(entry.upload).await;
+                    }
+                }
+                Ok(())
+            }));
             self.end_subscriptions();
             return Ok(());
         }
@@ -1176,6 +1245,28 @@ impl Core {
             delivery.send(Some(Event::Error(JazzError::Closed)));
         }
     }
+}
+
+/// A Tokio runtime for the jazz-app calls that do their I/O on the
+/// caller's thread (`for_user`), driven by a thread of its own.
+fn io_runtime() -> Result<&'static tokio::runtime::Handle> {
+    static RUNTIME: std::sync::OnceLock<std::result::Result<tokio::runtime::Handle, String>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("cannot start an I/O runtime: {error}"))?;
+            let handle = runtime.handle().clone();
+            std::thread::Builder::new()
+                .name("jazz-ffi-io".into())
+                .spawn(move || runtime.block_on(std::future::pending::<()>()))
+                .map_err(|error| format!("cannot start the I/O runtime's thread: {error}"))?;
+            Ok(handle)
+        })
+        .as_ref()
+        .map_err(|error| FfiError::Io(error.clone()))
 }
 
 /// A forwarder's sender that, dropped before the forwarder ended on its
