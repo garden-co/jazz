@@ -28,14 +28,6 @@
           "optional": true
         },
         "extra": { "json": true, "optional": true },
-        "review": {
-          "enum": {
-            "pending": {},
-            "approved": { "by": "uuid", "note": "string?" },
-            "rejected": { "reason": "string" }
-          },
-          "optional": true
-        },
         "assigneeIds": { "array": "uuid" }
       },
       "relations": {

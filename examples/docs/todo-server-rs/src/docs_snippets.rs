@@ -8,15 +8,10 @@
 //! Permissions are the app's `jazz.permissions.json`.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
-
 use ::jazz_app::jazz;
 use ::jazz_app::{DurabilityTier, Jazz, ObjectId, Order, ReadTier, Subscription, Timestamp};
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
-use jazz::db::{Db, UpdateOptions};
-use jazz::ids::RowUuid;
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Gather, Query, col, eq, lit};
-use jazz::records::Value as DbValue;
 use jazz::tools::{JazzClient, Session, Value};
 
 use crate::jazz_app::{NewTodo, Todo, TodoUpdate, projects, todos};
@@ -223,7 +218,8 @@ pub async fn group_todo_writes(
     existing_todo_id: ObjectId,
 ) -> ::jazz_app::Result<ObjectId> {
     // Committed together if the closure returns `Ok`, rolled back if it
-    // returns `Err`. Reads inside it see the transaction's snapshot.
+    // returns `Err`. Mergeable: reads inside it see local data with its own
+    // staged writes, and each write merges with concurrent ones.
     jazz.transaction(move |tx| async move {
         let created = tx.insert(NewTodo::new("Write transaction docs", false))?;
         tx.update(
@@ -240,19 +236,27 @@ pub async fn group_todo_writes(
 // #endregion writing-transaction-rust
 
 // #region writing-serializable-transaction-rust
-pub async fn finish_todo_serializably(db: &Db, todo_id: RowUuid) -> Result<(), jazz::db::Error> {
-    let tx = db.serializable_tx().await?;
-    let _todo = tx.read("todos", todo_id).await?;
-
-    tx.update(
-        "todos",
-        todo_id,
-        BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
-        UpdateOptions::default(),
-    )
-    .await?;
-    let _transaction_id = tx.commit().await?;
-    Ok(())
+pub async fn finish_todo_serializably(jazz: &Jazz, todo_id: ObjectId) -> ::jazz_app::Result<bool> {
+    // Reads see the data as of the transaction's start; the server applies
+    // the commit only if nothing it read or wrote changed meanwhile, and
+    // refuses it otherwise.
+    jazz.serializable_transaction(move |tx| async move {
+        let Some(todo) = tx.get::<Todo>(todo_id).await? else {
+            return Ok(false);
+        };
+        if todo.done {
+            return Ok(false);
+        }
+        tx.update(
+            todo_id,
+            TodoUpdate {
+                done: Some(true),
+                ..Default::default()
+            },
+        )?;
+        Ok(true)
+    })
+    .await
 }
 // #endregion writing-serializable-transaction-rust
 

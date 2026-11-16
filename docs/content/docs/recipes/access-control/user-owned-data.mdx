@@ -16,7 +16,10 @@ There's no need to add an explicit owner column&hairsp;—&hairsp;Jazz tracks wh
   "format": 1,
   "tables": {
     "todos": {
-      "columns": { "title": "string", "done": "boolean" }
+      "columns": {
+        "title": "string",
+        "done": "boolean"
+      }
     }
   }
 }
@@ -79,7 +82,11 @@ If ownership can be transferred after creation, use an explicit `owner_id` colum
   "format": 1,
   "tables": {
     "todos": {
-      "columns": { "title": "string", "done": "boolean", "owner_id": "uuid" }
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "owner_id": "uuid"
+      }
     }
   }
 }

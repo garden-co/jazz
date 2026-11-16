@@ -38,6 +38,11 @@ pub enum Error {
     #[error("signed out")]
     SignedOut,
 
+    /// The user has no Jazz account yet: they get one when they sign in
+    /// from a client, or with `Endpoint::create_account_for` (feature `unstable-endpoint`).
+    #[error("user {0:?} has no Jazz account yet")]
+    NoAccount(String),
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
@@ -49,6 +54,11 @@ pub enum Error {
     /// The call panicked on the client's thread. The client runs on.
     #[error("the call panicked: {0}")]
     Panicked(String),
+
+    /// The local store is in use by another open app (in this process or
+    /// another), so it can't be deleted (TS's `StoreHeldByAnotherTabError`).
+    #[error("the local store is held: {0}")]
+    StoreHeld(String),
 
     /// The client's worker thread stopped.
     #[error("the Jazz client stopped")]

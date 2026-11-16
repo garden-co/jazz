@@ -2107,22 +2107,28 @@ dependencies = [
 name = "jazz-app"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.9",
  "base64 0.22.1",
  "futures",
  "futures-core",
  "futures-util",
  "getrandom 0.3.4",
+ "hmac",
  "jazz",
  "jazz-codegen",
  "jazz-native-transport",
  "jazz-server",
+ "jazz-text",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]

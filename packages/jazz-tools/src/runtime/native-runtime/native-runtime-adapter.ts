@@ -256,6 +256,17 @@ type NativeDb = {
   waitForPendingWrites?(
     tier: string,
     cancelled?: Promise<void>,
+    /** WASM: wait as `waitForSync` (see `waitForSync` below). */
+    forSync?: boolean,
+  ): NativeReadResult | Promise<NativeReadResult | void>;
+  /**
+   * NAPI: `waitForSync` for `writer`'s writes (a trusted session's author,
+   * or none for the database's own), failing also with a rejection of
+   * theirs that settled before and no wait reported.
+   */
+  waitForSync?(
+    tier: string,
+    writer?: Uint8Array | null,
   ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -3361,10 +3372,19 @@ export class NativeRuntimeAdapter implements Runtime {
    * reported outage fails the wait; `throughOutage` keeps it pending until a
    * terminal failure, as a write's own Global wait does (#3923). `signal`
    * ends the wait with its reason; the writes are unaffected.
+   *
+   * `sync` makes it `waitForSync`: it waits for the writes of the session
+   * `sync.writeContext` names (none: this runtime's own) and also fails with a rejection of theirs
+   * that settled before the call and nothing reported yet. Without it, as
+   * graceful shutdown waits, such earlier rejections are not this wait's.
    */
   async waitForPendingWrites(
     tier = "global",
-    options: { throughOutage?: boolean; signal?: AbortSignal } = {},
+    options: {
+      throughOutage?: boolean;
+      signal?: AbortSignal;
+      sync?: { writeContext?: string | null };
+    } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier, options);
     if (!this.db.waitForPendingWrites)
@@ -3388,10 +3408,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const forwardAbort = () => stop.abort(signal?.reason);
     signal?.addEventListener("abort", forwardAbort, { once: true });
     try {
+      const { sync } = options;
+      const native = !sync
+        ? this.db.waitForPendingWrites(tier, cancelled)
+        : this.db.waitForSync
+          ? this.db.waitForSync(
+              tier,
+              this.trustedWriteIdentity(sessionFromWriteContext(sync.writeContext)) ?? null,
+            )
+          : this.db.waitForPendingWrites(tier, cancelled, true);
       const wait = this.awaitNativeRead(
-        Promise.resolve(this.db.waitForPendingWrites(tier, cancelled)).then(
-          (result) => result ?? new Uint8Array(),
-        ),
+        Promise.resolve(native).then((result) => result ?? new Uint8Array()),
         undefined,
         stop.signal,
       );
@@ -6081,22 +6108,6 @@ function coerceQueryPredicate(
           : coerceQueryLiteral(table, filter.column, filter.value, schema),
     };
   }
-  if (filter.op === "EnumMatch") {
-    const columnType = resolveQueryTable(schema, table)?.columns.find(
-      (entry) => entry.name === filter.column,
-    )?.column_type;
-    if (columnType?.type !== "EnumPayload") {
-      throw new Error(`enum match requires payload enum column "${filter.column}"`);
-    }
-    const entry = columnType.cases.find((candidate) => candidate.name === filter.case);
-    if (!entry) {
-      throw new Error(`unknown payload enum case "${filter.case}"`);
-    }
-    return {
-      ...filter,
-      payload: coerceEnumPayloadPredicate(filter.payload, entry.fields),
-    };
-  }
   if (filter.op === "IsNull" || filter.op === "IsNotNull") return filter;
   if (isQueryPredicateCmp(filter)) {
     return {
@@ -6105,49 +6116,6 @@ function coerceQueryPredicate(
     };
   }
   throw new Error(`unsupported query predicate ${JSON.stringify(filter)}`);
-}
-
-function coerceEnumPayloadPredicate(
-  predicate: QueryPredicate,
-  fields: ColumnDescriptor[],
-): QueryPredicate {
-  if (predicate.op === "All" || predicate.op === "Any") {
-    return {
-      ...predicate,
-      predicates: predicate.predicates.map((child) => coerceEnumPayloadPredicate(child, fields)),
-    };
-  }
-  if (predicate.op === "Not") {
-    return {
-      ...predicate,
-      predicate: coerceEnumPayloadPredicate(predicate.predicate, fields),
-    };
-  }
-  if (predicate.op === "EnumMatch") {
-    throw new Error("payload enum matches cannot be nested");
-  }
-  if (!("column" in predicate)) {
-    throw new Error("payload enum predicate must target a payload field");
-  }
-  const field = fields.find((candidate) => candidate.name === predicate.column);
-  if (!field) {
-    throw new Error(`unknown payload enum field "${predicate.column}"`);
-  }
-  if (predicate.op === "In") {
-    return {
-      ...predicate,
-      values: predicate.values.map((value) =>
-        coerceLiteralForColumnType(value, field.column_type, field.nullable),
-      ),
-    };
-  }
-  if (predicate.op === "Contains" || isQueryPredicateCmp(predicate)) {
-    return {
-      ...predicate,
-      value: coerceLiteralForColumnType(predicate.value, field.column_type, field.nullable),
-    };
-  }
-  return predicate;
 }
 
 function isQueryPredicateCmp(
@@ -6621,19 +6589,6 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
   if (record.Not) {
     const predicate = predicateToFilterTree(record.Not);
     return predicate ? [{ op: "Not", predicate }] : null;
-  }
-  const enumMatch = record.EnumMatch;
-  if (enumMatch && typeof enumMatch === "object") {
-    const match = enumMatch as {
-      column?: unknown;
-      case?: unknown;
-      payload?: unknown;
-    };
-    const column = readColumnRef(match.column);
-    const payload = predicateToFilterTree(match.payload);
-    return column && typeof match.case === "string" && payload
-      ? [{ column, op: "EnumMatch", case: match.case, payload }]
-      : null;
   }
   const isNull = record.IsNull;
   if (isNull && typeof isNull === "object") {
@@ -7228,8 +7183,6 @@ function decodeBytes(
     case "Enum":
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
-    case "EnumPayload":
-      return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
@@ -7260,49 +7213,6 @@ function decodeBytes(
       return value;
     }
   }
-}
-
-function decodePayloadEnumBytes(
-  type: Extract<ColumnType, { type: "EnumPayload" }>,
-  bytes: Uint8Array,
-  storageType: ValueType | undefined,
-  nestedRowCarrier: NestedRowCarrier,
-): Value {
-  if (bytes.byteLength < 4) throw new Error("invalid Enum payload value");
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const nameLength = view.getUint32(0, true);
-  if (bytes.byteLength < 4 + nameLength) throw new Error("invalid Enum payload case");
-  const caseName = textDecoder.decode(bytes.subarray(4, 4 + nameLength));
-  const entry = type.cases.find((candidate) => candidate.name === caseName);
-  if (!entry) throw new Error("unknown Enum payload case");
-  const enumStorage = nonNullableStorageType(storageType);
-  const payloadDescriptor =
-    enumStorage?.tag === 17
-      ? enumStorage.enumSchema?.cases?.find((candidate) => candidate.name === caseName)?.payload
-      : undefined;
-  if (!payloadDescriptor || payloadDescriptor.length !== entry.fields.length) {
-    throw new Error("Enum payload descriptor mismatch");
-  }
-  const raw = bytes.subarray(4 + nameLength);
-  const decodeRecord = createRecordValueDecoder(payloadDescriptor);
-  return {
-    type: "Enum",
-    value: {
-      case: caseName,
-      values: entry.fields.map((field, index) => {
-        const fieldBytes = decodeRecord(raw, index);
-        return fieldBytes == null
-          ? { type: "Null" }
-          : decodeBytes(
-              field.column_type,
-              fieldBytes,
-              field.name,
-              payloadDescriptor[index]?.valueType,
-              nestedRowCarrier,
-            );
-      }),
-    },
-  };
 }
 
 function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
@@ -7627,19 +7537,6 @@ function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
     return {
       type: "Row",
       value: runtimeSubscriptionNestedRow(value.value, type.columns),
-    };
-  }
-  if (type.type === "EnumPayload" && value.type === "Enum") {
-    const payload = type.cases.find((entry) => entry.name === value.value.case)?.fields;
-    if (!payload) return value;
-    return {
-      type: "Enum",
-      value: {
-        case: value.value.case,
-        values: value.value.values.map((entry, index) =>
-          payload[index] ? runtimeSubscriptionValue(entry, payload[index]!.column_type) : entry,
-        ),
-      },
     };
   }
   return value;

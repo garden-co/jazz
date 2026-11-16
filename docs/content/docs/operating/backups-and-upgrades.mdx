@@ -350,8 +350,8 @@ a store: on Android that also deletes SecureStore, and with it a device account.
 Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
 
 - **Jazz runs inside your backend.** Clients no longer talk to a Jazz server with a JWT. Add a main
-  backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and have it point at Jazz
-  Cloud with `remote()` if that's where your data is. The core admits only its own app's backend, so
+  backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and, if your data is on Jazz
+  Cloud (deprecated), have it point there with `remote()`. The core admits only its own app's backend, so
   browsers can't connect to it directly any more.
 - **Auth moves into `authenticate`.** Your backend decides who each request is. To keep returning
   users on their old accounts, return the old token's `sub` as `userId` (see
@@ -360,7 +360,7 @@ Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bum
   Ship the new client in the same release as the new backend. A client left on alpha.59 looks
   healthy: its session reports ready and local writes succeed, but nothing syncs and nothing is
   logged. Against a `createJazz` backend, queries and waits that need the server reject with a bare
-  `Error: [object Event]`, and a reloaded alpha.59 tab never signs in. Against Jazz Cloud, the first query that waits for the server rejects with "this Jazz
+  `Error: [object Event]`, and a reloaded alpha.59 tab never signs in. Against Jazz Cloud (deprecated), the first query that waits for the server rejects with "this Jazz
   client speaks wire protocol 3..=3, older than this server's 6".
 - **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
 
@@ -403,7 +403,7 @@ starts:
   `jazz.createAccountFor(userId)` in your sign-in route; see
   [Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
 
-### Data on Jazz Cloud
+### Data on Jazz Cloud (deprecated)
 
 Jazz Cloud moves your app's data to alpha.60 for you. The move keeps every row with its history,
 authors and timestamps, your current schema and permissions, and every account. It also links each
