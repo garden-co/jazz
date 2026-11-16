@@ -33,13 +33,25 @@ pub struct Added<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Updated<T> {
     pub id: ObjectId,
     pub old_index: usize,
     pub new_index: usize,
     /// The row's new value; `None` when it only moved.
     pub row: Option<T>,
+    /// Per column named in [`crate::ReadOptions::splices`], the edits that
+    /// turn the value the previous delta showed into this one, in order.
+    /// A column without an entry has none to offer: read its new value.
+    pub splices: Vec<(String, Vec<ValueSplice>)>,
 }
+
+/// One edit of a large value in a subscription update: replace `delete`
+/// bytes at byte offset `at` with `insert` (UTF-8 for text). Text edits
+/// also carry the same edit in UTF-16 code units (`at_utf16`,
+/// `delete_utf16`), for hosts whose strings count those (Swift, Kotlin,
+/// JavaScript).
+pub use jazz::db::LargeValueDeltaSplice as ValueSplice;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removed {
@@ -175,6 +187,7 @@ fn typed<T: Row>(delta: OrderedRowDelta, implementations: &Implementations) -> R
                         .row
                         .map(|row| table::decode(id, row.fields, implementations))
                         .transpose()?,
+                    splices: updated.splices,
                 })
             })
             .collect::<Result<_>>()?,
