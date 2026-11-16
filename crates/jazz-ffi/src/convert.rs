@@ -86,13 +86,6 @@ pub(crate) fn to_value(
             }
             Value::Text(text.to_owned())
         }
-        // The engine's client can't write them yet (its public values have
-        // no payload enum).
-        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
-            return Err(unsupported(format!(
-                "writing an enum with payloads ({path})"
-            )));
-        }
         ColumnType::Integer => {
             let int = json.as_i64().ok_or_else(|| wrong("an integer"))?;
             Value::Integer(i32::try_from(int).map_err(|_| wrong("a 32-bit integer"))?)
@@ -143,7 +136,7 @@ pub(crate) fn parse_id(text: &str, path: &str) -> Result<ObjectId> {
 }
 
 /// An engine value as plain JSON; `column_type` says how to read text
-/// (json columns hold JSON text) and payload enums.
+/// (json columns hold JSON text) and array elements.
 pub(crate) fn to_json(value: Value, column_type: Option<&ColumnType>) -> Json {
     match value {
         Value::Null => Json::Null,
@@ -171,26 +164,6 @@ pub(crate) fn to_json(value: Value, column_type: Option<&ColumnType>) -> Json {
                     .map(|value| to_json(value, element))
                     .collect(),
             )
-        }
-        // A payload enum reads as `{ "case": …, "fields": { … } }`.
-        Value::Enum { case, values } => {
-            let fields = match column_type {
-                Some(
-                    ColumnType::EnumPayload { cases }
-                    | ColumnType::CatalogueEnumPayload { cases, .. },
-                ) => cases
-                    .iter()
-                    .find(|c| c.name == case)
-                    .map(|c| c.fields.as_slice()),
-                _ => None,
-            };
-            let mut object = Map::new();
-            for (at, value) in values.into_iter().enumerate() {
-                let field = fields.and_then(|fields| fields.get(at));
-                let name = field.map_or_else(|| at.to_string(), |f| f.name.as_str().to_owned());
-                object.insert(name, to_json(value, field.map(|f| &f.column_type)));
-            }
-            json!({ "case": case, "fields": object })
         }
         Value::Row { values, .. } => Json::Array(
             values
@@ -354,7 +327,7 @@ impl Relations {
         Self(relations)
     }
 
-    fn get(&self, table: &str, name: &str) -> Option<&Relation> {
+    pub(crate) fn get(&self, table: &str, name: &str) -> Option<&Relation> {
         self.0
             .get(table)?
             .iter()
@@ -424,6 +397,7 @@ pub(crate) fn query(
     query.offset = parts.offset;
     query.select = parts.select;
     query.array_subqueries = parts.includes;
+    query.partial = parts.partial;
     Ok((table_name.to_owned(), query, shape))
 }
 
@@ -436,6 +410,7 @@ struct Parts {
     offset: usize,
     select: Option<Vec<String>>,
     includes: Vec<q::ArraySubquery>,
+    partial: Vec<q::PartialSelect>,
 }
 
 fn level(
@@ -528,34 +503,103 @@ fn level(
     }
 
     // `select`: these columns (and `id`, always) instead of all of them.
-    // `"*"` among them selects every column, as no `select` does.
-    let every = object
-        .get("select")
-        .and_then(Json::as_array)
-        .is_some_and(|names| names.iter().any(|n| n == "*"));
-    if let Some(select) = object.get("select").filter(|s| !s.is_null() && !every) {
+    // `"*"` among them selects every column, as no `select` does. An object
+    // reads part of a large value: `{ "column", "from", "to", "units":
+    // "bytes"|"utf8"|"utf16" }` or `{ "column", "at": "<JSON pointer>" }`.
+    if let Some(select) = object.get("select").filter(|s| !s.is_null()) {
         let select = select
             .as_array()
             .ok_or_else(|| refused(format!("{path}\"select\" must be an array of column names")))?;
-        let mut chosen = Vec::new();
-        for (at, name) in select.iter().enumerate() {
-            let name = name
-                .as_str()
-                .ok_or_else(|| refused(format!("{path}select[{at}] must be a column name")))?;
+        let every = select.iter().any(|n| n == "*");
+        let mut chosen: Vec<String> = Vec::new();
+        for (at, entry) in select.iter().enumerate() {
+            let at = format!("{path}select[{at}]");
+            let name = match entry {
+                Json::String(name) if name == "*" => continue,
+                Json::String(name) => name.as_str(),
+                Json::Object(spec) => {
+                    if !root {
+                        return Err(unsupported(format!(
+                            "reading part of a value in an include ({at})"
+                        )));
+                    }
+                    let name = spec
+                        .get("column")
+                        .and_then(Json::as_str)
+                        .ok_or_else(|| refused(format!("{at} needs a \"column\"")))?;
+                    let info = column(table, table_name, name)?;
+                    let range = |key: &str| -> Result<u64> {
+                        spec.get(key).and_then(Json::as_u64).ok_or_else(|| {
+                            refused(format!("{at}.{key} must be a non-negative integer"))
+                        })
+                    };
+                    let part = match (spec.get("at"), spec.get("units").and_then(Json::as_str)) {
+                        (Some(pointer), _) => {
+                            if !matches!(info.column_type.as_ref(), ColumnType::Json { .. }) {
+                                return Err(refused(format!(
+                                    "{at}: \"at\" reads a json column; {name} isn't one"
+                                )));
+                            }
+                            q::Part::JsonPointer(
+                                pointer
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        refused(format!("{at}.at must be a JSON pointer"))
+                                    })?
+                                    .to_owned(),
+                            )
+                        }
+                        (None, Some("bytes")) => q::Part::Bytes {
+                            from: range("from")?,
+                            to: range("to")?,
+                        },
+                        (None, Some("utf16")) => q::Part::TextUtf16 {
+                            from: range("from")?,
+                            to: range("to")?,
+                        },
+                        (None, Some("utf8") | None) => q::Part::TextUtf8 {
+                            from: range("from")?,
+                            to: range("to")?,
+                        },
+                        (None, Some(other)) => {
+                            return Err(refused(format!(
+                                "{at}.units must be \"bytes\", \"utf8\" or \"utf16\", not {other:?}"
+                            )));
+                        }
+                    };
+                    parts.partial.push(q::PartialSelect {
+                        column: name.to_owned(),
+                        part,
+                    });
+                    name
+                }
+                _ => return Err(refused(format!("{at} must be a column name or a part"))),
+            };
             if name == "id" {
                 continue;
             }
-            let info = column(table, table_name, name)?;
+            column(table, table_name, name)?;
             if name.starts_with('$') {
-                return Err(unsupported(format!(
-                    "selecting {name} ({path}select[{at}])"
-                )));
+                return Err(unsupported(format!("selecting {name} ({at})")));
             }
-            if !chosen.iter().any(|(n, _): &(String, ColumnType)| n == name) {
-                chosen.push((name.to_owned(), info.column_type.into_owned()));
+            if !chosen.iter().any(|n| n == name) {
+                chosen.push(name.to_owned());
             }
         }
-        parts.select = Some(chosen.into_iter().map(|(n, _)| n).collect());
+        // A column read in part and also whole is ambiguous: refused.
+        if let Some(both) = parts.partial.iter().find(|part| {
+            select
+                .iter()
+                .any(|entry| entry.as_str() == Some(part.column.as_str()))
+        }) {
+            return Err(refused(format!(
+                "{path}select names {} both whole and in part",
+                both.column
+            )));
+        }
+        if !every {
+            parts.select = Some(chosen);
+        }
     }
 
     let mut shape = Shape::of(table.clone());
@@ -707,7 +751,7 @@ fn child_shape_columns(
     Ok(columns)
 }
 
-fn predicate(
+pub(crate) fn predicate(
     table: &TableSchema,
     table_name: &str,
     condition: &Json,
@@ -722,15 +766,6 @@ fn predicate(
         .and_then(Json::as_str)
         .ok_or_else(|| refused(format!("{path} needs an \"op\"")))?;
     let column = column(table, table_name, name)?;
-    if matches!(
-        column.column_type.as_ref(),
-        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. }
-    ) && !matches!(op, "isNull" | "isNotNull")
-    {
-        return Err(unsupported(format!(
-            "comparing {name}, an enum with payloads ({path})"
-        )));
-    }
     let value = condition.get("value");
     let path = format!("{path}.value");
     let literal = || -> Result<q::Operand> {

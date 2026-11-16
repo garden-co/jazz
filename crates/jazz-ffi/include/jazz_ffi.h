@@ -66,6 +66,25 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *               "edits": [{"pos", "delete", "insert"}]}       -> null
  *   "edit"     {"table", "id", "patch"?, "edits": [...]}      -> null
  *              (edits: text / splice / jsonSet, see the README)
+ *   "can"      {"table", "op": "read"|"insert"|"update"|"delete",
+ *               "id"?, "row"?}                               -> true|false|null
+ *              (advisory: true does not promise the write succeeds; null =
+ *              unknown, e.g. no server; not available inside a transaction)
+ *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names)
+ *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
+ *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
+ *   "uploadPush"   {"upload", "bytes": base64}                -> null
+ *   "uploadFinish" {"upload", "tier"?}                        -> the row
+ *   "uploadAbort"  {"upload"}                                 -> null
+ *   "session"  {}  -> {"status": "signedIn"|"expired"|"signedOut", "user"?}
+ *                     | null (a local app or a backend)
+ *   "syncStatus" {} -> {"link": ...}
+ *   "refresh"  {}  -> null (asks the token callback for a fresh token)
+ *   "link"     {"bearer"} -> the user (links a device account to the app's
+ *                            own sign-in; the session becomes that user's)
+ *   "signOut"  {}  -> null (signs out and closes the app)
+ *   "bundle"   {}  -> "<published permissions bundle>" | null (a backend's)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
@@ -105,6 +124,42 @@ void jazz_unsubscribe(JazzSubscription *subscription);
  * jazz_unsubscribe, before or after this call.
  */
 void jazz_close(JazzHandle *handle);
+
+/*
+ * An end user's token callback: called on a thread of its own (it may
+ * block) with reason "connect" | "renew" | "expired" | "refresh". Return 0
+ * with *token set to the token as a malloc'ed string (Go: C.CString), which
+ * jazz frees, or to NULL when no one is signed in (the app stops). Return
+ * non-zero when the fetch failed (e.g. a network blip): the session stays
+ * signed in and asks again; *token may hold the failure's message.
+ */
+typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
+
+/*
+ * Opens an app as an end user signing in with the app's bearer
+ * ("auth": {"bearer": true}); cb and ctx stay valid, from any thread, until
+ * jazz_close (or a "signOut" call) returns: that waits for a fetch in
+ * progress, and then the callback is never called again. Called from inside
+ * the callback, jazz_close returns at once and the callback stops once that
+ * call returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
+ */
+JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
+                           char **err);
+
+typedef struct JazzWatch JazzWatch;
+
+/*
+ * Calls cb with kind "session" or "sync" and each state's JSON, the
+ * current one first, on a thread of its own, until jazz_unwatch.
+ */
+JazzWatch *jazz_watch(JazzHandle *handle, const char *what, JazzCallback cb, void *ctx,
+                      char **err);
+
+/* Ends and frees a watch: when it returns no callback is running. */
+void jazz_unwatch(JazzWatch *watch);
+
+/* A new device account's key ("jazz-auth-v1:..."); keep it as a password. */
+char *jazz_generate_device_key(char **err);
 
 /* Frees a string returned by, or stored in *err by, this API. */
 void jazz_string_free(char *text);

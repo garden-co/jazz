@@ -28,7 +28,7 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
   "--benches",
 ]);
 export const RUST_CI_FEATURES =
-  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test";
+  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/axum";
 
 // CI setup supplies this one coordination input. Every other JAZZ_* variable
 // is a test, fixture, benchmark, timeout, or assertion control and would make
@@ -48,6 +48,7 @@ export const ciPartitionJobs = Object.freeze({
   "next-trace": "test-next-trace",
   "react-native": "test-react-native",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
+  go: "test-go",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -315,12 +316,17 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
-  // run against the library (needs a JDK and swiftc: the runner image).
+  // run against the library (needs a JDK and swiftc: the runner image); then
+  // the Jazz Swift package and the StagePlan Swift example on top of it.
   "jazz-ffi-bindings": Object.freeze([
     command("jazz-ffi Kotlin and Swift bindings", "bash", [
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
+    command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
   ]),
+  // The Go bindings and the StagePlan Go example (installs Go when the
+  // image has none).
+  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
 });
 
 export const focusedCommands = Object.freeze([

@@ -25,16 +25,20 @@ fn committed_bindings_are_generated() {
     }
 }
 
+/// An app declaring an enum whose cases carry fields is refused when it
+/// loads, naming the column: Jazz has no such columns (jazz#5758).
 #[test]
-fn payload_enums_are_not_supported_yet() {
-    let file = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../jazz/fixtures/app-artifact/shared-todos/jazz.app.json"
-    ))
-    .unwrap();
-    let error = jazz_codegen::generate(Lang::Rust, &file).unwrap_err();
-    assert!(error.is_unsupported(), "{error}");
-    assert!(error.message().contains("enum-with-payload"), "{error}");
+fn an_app_with_enum_cases_carrying_fields_is_refused() {
+    let file = br#"{ "format": 1, "tables": { "todos": { "columns": { "status": { "enum": { "open": {}, "done": { "at": "timestamp" } } } } } } }"#;
+    let error = jazz_codegen::generate(Lang::Rust, file)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("todos"), "{error}");
+    assert!(error.contains("status"), "{error}");
+    assert!(
+        error.contains("enum cases with fields are not supported"),
+        "{error}"
+    );
 }
 
 /// `jazz-tools generate` reads committed Rust bindings back: what they

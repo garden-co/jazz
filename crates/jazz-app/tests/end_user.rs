@@ -320,61 +320,66 @@ async fn an_end_user_needs_someone_signed_in_and_the_apps_endpoint() {
     app.stop().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_account_links_to_the_users_provider_account() {
-    let app = App::start().await;
-    let key = DeviceKey::generate().unwrap();
-    let device = Jazz::open(client_files(), app.user(Auth::Device(key.clone())))
-        .await
-        .unwrap();
-    connected(&device).await;
-    let written = device
-        .insert(NewTodo::new("Before signing up", false))
-        .await
-        .unwrap();
-    let session = device.session().unwrap().clone();
-
-    // Carol signs up with the app's own auth, and keeps her device's data.
-    let carol = session
-        .link("token-carol")
-        .await
-        .expect("link the device account");
-    assert_eq!(carol.account, key.account(app.app_id));
-    assert_eq!(carol.kind, UserKind::Backend);
-    assert_eq!(carol.subject, "carol");
-    assert_eq!(
-        session.state(),
-        SessionState::SignedIn {
-            user: carol.clone()
+/// The status once `done` holds for it.
+async fn sync_until(
+    jazz: &Jazz,
+    done: impl Fn(&jazz_app::SyncStatus) -> bool,
+) -> jazz_app::SyncStatus {
+    let mut changes = jazz.sync_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(status) = changes.next().await {
+            if done(&status) {
+                return status;
+            }
         }
-    );
-    // Linking needs someone signed in.
-    assert!(matches!(
-        session.link("not-a-token").await,
-        Err(Error::SignedOut)
-    ));
+        panic!("the status stream ended");
+    })
+    .await
+    .expect("the sync status gets there")
+}
 
-    // Signed in with her bearer elsewhere, she reaches the same account.
-    let laptop = Jazz::open(
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_status_counts_uploads_until_the_server_has_them() {
+    let app = App::start().await;
+    let jazz = Jazz::open(
         client_files(),
-        app.user(Auth::bearer(|_| async {
-            Ok(Some("token-carol".to_owned()))
-        })),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
     )
     .await
     .unwrap();
-    assert_eq!(laptop.account(), Some(carol.account));
-    assert_eq!(remote_todos(&laptop, 1).await, vec![written]);
+    jazz.insert(NewTodo::new("Uploaded", false)).await.unwrap();
+    let synced = sync_until(&jazz, |status| status.synced).await;
+    assert_eq!(synced.link, Link::Connected);
+    assert_eq!(synced.pending_uploads, 0);
+    assert_eq!(synced.oldest_pending_at, None);
+    let json = serde_json::to_value(&synced).unwrap();
+    assert_eq!(json["link"], serde_json::json!({ "state": "connected" }));
+    assert_eq!(json["pendingUploads"], 0);
+    assert_eq!(json["synced"], true);
+    jazz.shutdown().await.unwrap();
 
-    // A bearer's session has no device key to link.
-    let bearer_session = laptop.session().unwrap();
-    assert!(matches!(
-        bearer_session.link("token-carol").await,
-        Err(Error::Config(_))
-    ));
-
-    laptop.shutdown().await.unwrap();
-    device.shutdown().await.unwrap();
+    // Nobody answers at this endpoint: the client opens offline, and its
+    // writes wait.
+    let unused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/jazz", unused.local_addr().unwrap());
+    drop(unused);
+    let offline = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server(endpoint)
+            .user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .expect("an unreachable server only means offline");
+    offline
+        .insert(NewTodo::new("Waiting", false))
+        .await
+        .unwrap();
+    let waiting = sync_until(&offline, |status| status.pending_uploads == 1).await;
+    assert!(!waiting.synced);
+    assert!(waiting.oldest_pending_at.is_some());
+    assert_ne!(waiting.link, Link::Connected);
+    offline.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -515,5 +520,163 @@ async fn a_slow_provider_does_not_hold_up_signing_out() {
             .unwrap()
             .is_err()
     );
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_status_reports_rejections_and_link_failures_as_typescript_does() {
+    // No server: local-only, and synced.
+    let local = Jazz::open(client_files(), Config::new(AppId::random()))
+        .await
+        .unwrap();
+    let json = serde_json::to_value(local.sync_status()).unwrap();
+    assert_eq!(json["link"], serde_json::json!({ "state": "local-only" }));
+    assert_eq!(json["synced"], true);
+    assert_eq!(json["lastError"], serde_json::Value::Null);
+    local.shutdown().await.unwrap();
+
+    let app = App::start().await;
+    let token = Arc::new(Mutex::new("token-erin".to_owned()));
+    let provider = {
+        let token = token.clone();
+        move |_: TokenReason| {
+            let token = token.lock().unwrap().clone();
+            async move { Ok(Some(token)) }
+        }
+    };
+    let erin = Jazz::open(client_files(), app.user(Auth::bearer(provider)))
+        .await
+        .unwrap();
+    connected(&erin).await;
+
+    // Projects may be inserted, not updated: the server rejects the update.
+    let project = erin
+        .insert(bindings::NewProject::new("Plans"))
+        .await
+        .unwrap();
+    erin.update(
+        project.id,
+        bindings::ProjectUpdate {
+            name: Some("Other plans".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let rejected = sync_until(&erin, |status| status.rejected == 1).await;
+    let Some(jazz_app::SyncError::Rejected { code, .. }) = &rejected.last_error else {
+        panic!("a rejection: {rejected:?}");
+    };
+    assert!(!code.is_empty());
+    let json = serde_json::to_value(&rejected).unwrap();
+    assert_eq!(json["lastError"]["kind"], "rejected");
+
+    // The backend refuses her bearer for good: the link is offline for auth,
+    // and that failure, being later, is the last error.
+    app.relay.refuse("token-erin", "account revoked");
+    app.relay.kick();
+    let refused = sync_until(&erin, |status| {
+        matches!(
+            status.link,
+            Link::Offline {
+                reason: jazz_app::Offline::Auth,
+                ..
+            }
+        )
+    })
+    .await;
+    let json = serde_json::to_value(&refused).unwrap();
+    assert_eq!(json["link"]["state"], "offline");
+    assert_eq!(json["link"]["reason"], "auth");
+    assert_eq!(json["link"]["retrying"], false);
+    assert_eq!(json["link"]["auth"], "revoked");
+    assert_eq!(json["lastError"]["kind"], "auth");
+    assert!(
+        json["lastError"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("revoked")
+    );
+    assert!(!refused.synced);
+
+    erin.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_account_links_to_the_users_provider_account() {
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let device = Jazz::open(client_files(), app.user(Auth::Device(key.clone())))
+        .await
+        .unwrap();
+    connected(&device).await;
+    let written = device
+        .insert(NewTodo::new("Before signing up", false))
+        .await
+        .unwrap();
+    let session = device.session().unwrap().clone();
+
+    // Carol signs up with the app's own auth, and keeps her device's data.
+    let carol = session
+        .link("token-carol")
+        .await
+        .expect("link the device account");
+    assert_eq!(carol.account, key.account(app.app_id));
+    assert_eq!(carol.kind, UserKind::Backend);
+    assert_eq!(carol.subject, "carol");
+    assert_eq!(
+        session.state(),
+        SessionState::SignedIn {
+            user: carol.clone()
+        }
+    );
+    // Linking needs someone signed in.
+    assert!(matches!(
+        session.link("not-a-token").await,
+        Err(Error::SignedOut)
+    ));
+
+    // Dave already has an account of his own: the backend refuses to link
+    // him to another device's, for good, not as a server failure.
+    let dave = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-dave".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    let other = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await
+    .unwrap();
+    let refused = other.session().unwrap().link("token-dave").await;
+    assert!(matches!(refused, Err(Error::Refused(_))), "{refused:?}");
+    other.shutdown().await.unwrap();
+    dave.shutdown().await.unwrap();
+
+    // Signed in with her bearer elsewhere, she reaches the same account.
+    let laptop = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-carol".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(laptop.account(), Some(carol.account));
+    assert_eq!(remote_todos(&laptop, 1).await, vec![written]);
+
+    // A bearer's session has no device key to link.
+    let bearer_session = laptop.session().unwrap();
+    assert!(matches!(
+        bearer_session.link("token-carol").await,
+        Err(Error::Config(_))
+    ));
+
+    laptop.shutdown().await.unwrap();
+    device.shutdown().await.unwrap();
     app.stop().await;
 }
