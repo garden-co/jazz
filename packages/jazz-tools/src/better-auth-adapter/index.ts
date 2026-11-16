@@ -11,11 +11,10 @@ import { createJazzSchemaSourceFile } from "./schema.js";
 import { readTableIndexes } from "./indexes.js";
 import type { JazzBuiltCondition, JazzRowRecord, JazzSortBy } from "./types.js";
 import {
-  filterListByWhere,
+  matchesResidual,
   paginateList,
-  sortListByField,
+  planBetterAuthQuery,
   assertNativeJoinsDisabled,
-  isQuerySupported,
   createQueryBuilder,
 } from "./utils.js";
 
@@ -146,7 +145,6 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           sortBy?: JazzSortBy;
           limit?: number;
           offset?: number;
-          forceClientSide?: boolean;
         } = {},
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
@@ -161,42 +159,33 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             }
           : undefined;
 
-        const querySupportedByJazz = isQuerySupported(wasmSchema[table]!, options.where);
+        const { conditions, residual } = planBetterAuthQuery(
+          table,
+          wasmSchema[table]!,
+          options.where,
+        );
+        const storedResidual = residual.map((condition) => ({
+          ...condition,
+          field: getFieldName({ model, field: condition.field }),
+        }));
+        // Without a residual the engine filters, sorts and pages. With one
+        // (`starts_with`/`ends_with`), the engine still filters by `contains`
+        // and sorts; only the exact prefix/suffix check and paging run here.
+        const pageInEngine = storedResidual.length === 0;
+        const qb = createQueryBuilder(table, wasmSchema, {
+          conditions: conditions.map((condition) => toQueryCondition(model, condition)),
+          orderBy: storedSortBy,
+          limit: pageInEngine ? options.limit : undefined,
+          offset: pageInEngine ? options.offset : undefined,
+        });
 
-        if (querySupportedByJazz) {
-          // Preserve ordering semantics: until sorting is lowered, pagination
-          // must remain after the client-side sort. Predicate-only bounded reads
-          // (including mutation/uniqueness warmups) can be bounded by the engine.
-          const lowerPagination = storedSortBy === undefined;
-          const qb = createQueryBuilder(table, wasmSchema, {
-            conditions: (options.where ?? []).map((condition) =>
-              toQueryCondition(model, condition),
-            ),
-            limit: lowerPagination ? options.limit : undefined,
-            offset: lowerPagination ? options.offset : undefined,
-          });
-
-          let rows = (await readAll(qb)) as JazzRowRecord[];
-          rows = sortListByField(rows, storedSortBy);
-          if (!lowerPagination) {
-            rows = paginateList(rows, options.limit, options.offset);
-          }
-          return rows;
-        } else {
-          console.warn(
-            `Query not supported yet by Jazz engine: ${JSON.stringify(options.where?.map((c) => ({ ...c, value: typeof c.value === "string" ? "..." : c.value })))}`,
-          );
-        }
-
-        const qb = createQueryBuilder(table, wasmSchema);
-
-        let rows = (await readAll(qb)) as JazzRowRecord[];
-
-        rows = filterListByWhere(rows, options.where);
-        rows = sortListByField(rows, storedSortBy);
-        rows = paginateList(rows, options.limit, options.offset);
-
-        return rows;
+        const rows = (await readAll(qb)) as JazzRowRecord[];
+        if (pageInEngine) return rows;
+        return paginateList(
+          rows.filter((row) => matchesResidual(row, storedResidual)),
+          options.limit,
+          options.offset,
+        );
       };
 
       const findByJazzRowId = async (model: string, jazzRowId: string) => {
