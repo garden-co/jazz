@@ -81,15 +81,8 @@ export function projectFiles(dir: string): Record<string, string> {
   return out;
 }
 
-/**
- * Step 6 for the tests: this workspace's `generate`, on the converted app.
- * TODO(ts-authoring-core): call the TS `generate` once it is merged; until
- * then the JSON stays as it was and only the bindings are written.
- */
+/** Step 6 for the tests: this workspace's `generate`, on the converted app. */
 export async function testGenerate(schemaDir: string): Promise<void> {
-  const napi = (await import("jazz-napi")) as unknown as {
-    generate(lang: string, app: string): string;
-  };
-  const app = readFileSync(join(schemaDir, "jazz.app.json"), "utf8");
-  writeFileSync(join(schemaDir, "jazz.generated.ts"), napi.generate("ts", app));
+  const { generateApp } = await import("../dev/project.js");
+  await generateApp({ cwd: schemaDir });
 }

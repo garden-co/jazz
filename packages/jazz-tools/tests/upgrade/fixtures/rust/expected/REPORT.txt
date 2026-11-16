@@ -4,6 +4,7 @@ Wrote:
   jazz.permissions.json
   src/jazz_app.rs
 Deleted:
+  migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts
   migrations/index.ts
   permissions.ts
 Rewrote:
@@ -11,5 +12,6 @@ Rewrote:
   schema.ts:2: dropped the import of migrations/index.ts
 Notes:
   The permissions were printed from jazz.permissions.json: repeated conditions became helpers (`isChatMember`, `rule1`, …). Rename them, and bring back what the old permissions.ts said in comments or constants.
+  Deleted migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts: it migrates from a01f5c72ec47, a version no snapshot and no jazz.app.json history holds, so it never shipped.
   The schema hashes and the bundle id (b0e7c3029eb1) are unchanged.
   This is a Rust app: run `cargo check` to typecheck it against the new bindings.

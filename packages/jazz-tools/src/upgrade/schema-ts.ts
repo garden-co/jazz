@@ -453,6 +453,10 @@ export function codemodSpreadModule(input: {
       if (isExportedNode(ts, statement)) dropped.push(name);
     }
   }
+  // A module without permissions gets them, so the app spreads them like Better Auth's own.
+  if (!permissionsDone && input.permissionsText) {
+    edits.push({ start: text.length, end: text.length, text: `${text.endsWith("\n") ? "" : "\n"}\n${input.permissionsText}\n` });
+  }
   const out = applyEdits(text, edits);
   const renamed = input.exported === "tables" ? out : renameIdentifier(ts, file, out, input.exported, "tables", true);
   return { text: renamed.replace(/\n{3,}/g, "\n\n"), hadPermissions, dropped };
