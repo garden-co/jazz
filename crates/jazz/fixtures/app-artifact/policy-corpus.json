@@ -467,6 +467,24 @@
       }
     },
     {
+      "name": "update.new comparing several columns with the old row",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "true",
+            "update": {
+              "new": "exists todos(id = this.id, name = this.name, owner = this.owner)",
+              "old": "owner = session.user"
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "every policy variant",
       "permissions": {
         "tables": {

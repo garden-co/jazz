@@ -131,7 +131,10 @@ describe("printed TS compiles to the same engine policies", () => {
         const namespace = join(__dirname, "..", "schema-namespace.ts");
         writeFileSync(
           join(dir, "schema.ts"),
-          printed.files["schema.ts"]!.replace('from "jazz-tools"', `from ${JSON.stringify(namespace)}`),
+          printed.files["schema.ts"]!.replace(
+            'from "jazz-tools"',
+            `from ${JSON.stringify(namespace)}`,
+          ),
         );
         const loads = await engine(c.app, c.permissions).then(
           () => true,
@@ -153,10 +156,14 @@ describe("printed TS compiles to the same engine policies", () => {
         }
         const compiled = await compile(dir);
         // The permissions, against the original app (whose history TS keeps elsewhere).
-        expect(await engine(c.app, compiled.permissions)).toEqual(await engine(c.app, c.permissions));
+        expect(await engine(c.app, compiled.permissions)).toEqual(
+          await engine(c.app, c.permissions),
+        );
         // The tables: the same current schema.
         const original = (await engine(c.app, c.permissions)).current;
-        expect((await engine(compiled.app, EMPTY_PERMISSIONS(compiled.app))).current).toBe(original);
+        expect((await engine(compiled.app, EMPTY_PERMISSIONS(compiled.app))).current).toBe(
+          original,
+        );
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

@@ -21,7 +21,6 @@
  *
  * Every refusal before step 6 comes before the first write.
  */
-import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -55,6 +54,7 @@ import { environmentReads, refuseDroppedConditions } from "./permissions-check.j
 import { refusePayloadEnums } from "./payload-enums.js";
 import { resolveImport, rewriteProject } from "./rewrite.js";
 import { codemodSchema, codemodSpreadModule } from "./schema-ts.js";
+import { collectConstants, constantImports } from "./constants.js";
 import { PackageAliases } from "./aliases.js";
 import { specifierLike } from "./edits.js";
 
@@ -220,7 +220,23 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     writes.push([spread.file, await formatSpread(edited.text, spread.file, prettier)]);
     codemod.changes.push(`${rel(spread.file)}: exports \`tables\` and \`permissions\``);
   }
-  const printed = printPermissions(app, permissions, { spreads: spreadPermissions, skipTables });
+  // The old permissions' named values keep their names; what came from the environment gets a TODO.
+  const oldSource =
+    codemod.inlinePermissions || !project.permissionsFile
+      ? project.schemaFile
+      : project.permissionsFile;
+  const constants = collectConstants(ts, oldSource, (spec, from) =>
+    resolveImport(project, spec, from),
+  );
+  const printed = printPermissions(app, permissions, {
+    spreads: spreadPermissions,
+    skipTables,
+    constants: constants.byValue,
+    notes: envReads.map(
+      (read) =>
+        `TODO: ${read.replace(/: reads /, " read ")}; the value it had when \`validate\` ran is printed below.`,
+    ),
+  });
   if (printed.unsupported.length > 0) {
     throw new UpgradeRefusal(
       `the TS DSL can't express these permissions of ${rel(project.permissionsJsonFile)} yet:\n` +
@@ -236,7 +252,17 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     !codemod.inlinePermissions;
   const deleted = new Set<string>(project.permissionsSources);
   if (separate) deleted.delete(project.permissionsFile!);
-  const permissionsBody = await format(printed.code, project.schemaFile);
+  const permissionsOut = separate ? project.permissionsFile! : project.schemaFile;
+  const named = constantImports(
+    constants,
+    printed.constantsUsed,
+    permissionsOut,
+    scan.jsExtensions,
+  );
+  const permissionsBody = await format(
+    [...named.declarations, ...(named.declarations.length ? [""] : []), printed.code].join("\n"),
+    project.schemaFile,
+  );
   let newSchema: string;
   if (separate) {
     newSchema = withImports(ts, project.schemaFile, codemod.text, []);
@@ -245,17 +271,18 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
       `import { schema as s } from "jazz-tools";`,
       `import { schema } from ${JSON.stringify(schemaSpecifier)};`,
       ...spreadImports,
+      ...named.imports,
     ].join("\n");
     writes.push([project.permissionsFile!, `${head}\n\n${permissionsBody}`]);
     notes.push(
       `${rel(project.permissionsFile!)} was long: the printed permissions stay in their own file.`,
     );
   } else {
-    newSchema = `${withImports(ts, project.schemaFile, codemod.text, spreadImports)}\n${permissionsBody}`;
+    newSchema = `${withImports(ts, project.schemaFile, codemod.text, [...spreadImports, ...named.imports])}\n${permissionsBody}`;
   }
   writes.unshift([project.schemaFile, newSchema]);
   notes.push(
-    "The permissions were printed from jazz.permissions.json: repeated conditions became helpers (`isChatMember`, `rule1`, …). Rename them, and bring back what the old permissions.ts said in comments or constants.",
+    "The permissions were printed from jazz.permissions.json: repeated checks became helpers named for what they check, and the old permissions.ts's named values kept their names. Its comments didn't survive: bring back what they said.",
   );
 
   // 5. migrations/index.ts goes; the stubs and snapshots stay.
@@ -372,7 +399,8 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
         writeFileSync(path, text);
       }
     }
-    for (const path of appFiles(project.schemaDir)) if (!filesBefore.has(path)) rmSync(path, { force: true });
+    for (const path of appFiles(project.schemaDir))
+      if (!filesBefore.has(path)) rmSync(path, { force: true });
   };
   for (const [path, text] of writes) writeFileSync(path, text);
   for (const path of deleted) rmSync(path, { force: true });
@@ -730,7 +758,10 @@ function scanImports(project: Project): ImportScan {
         if (target) {
           targets.add(target);
           if (target === project.schemaFile && !project.permissionsSources.includes(file)) {
-            if (spec.text.startsWith(".")) spec.text.endsWith(".js") ? js++ : plain++;
+            if (spec.text.startsWith(".")) {
+              if (spec.text.endsWith(".js")) js++;
+              else plain++;
+            }
             if (ts.isImportDeclaration(node)) {
               const bindings = node.importClause?.namedBindings;
               if (bindings && ts.isNamedImports(bindings)) {

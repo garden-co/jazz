@@ -630,11 +630,6 @@ function relativeSpecifier(file: string, target: string, _project: Project, js =
   return path;
 }
 
-function isWithin(path: string, dir: string): boolean {
-  const rel = relative(dir, path);
-  return rel !== "" && !rel.startsWith("..");
-}
-
 function lineOf(text: string, position: number): number {
   let line = 1;
   for (let i = 0; i < position && i < text.length; i++) if (text.charCodeAt(i) === 10) line++;

@@ -74,6 +74,8 @@ const mine = { userId: session.user };
 
 const createdByMe = { "$createdBy.account": session.user };
 
+const senderWithMine = (message: s.Row<typeof schema, "messages">) => message.sender.where(mine);
+
 export const permissions = definePermissions({
   canvases: {
     read: (canvas) => allowedTo.read(canvas.chat),
@@ -102,8 +104,8 @@ export const permissions = definePermissions({
   },
   messages: {
     read: (message) => anyOf(message.chat.where({ isPublic: true }), isChatMember(message.chatId)),
-    insert: (message) => allOf(isChatMember(message.chatId), message.sender.where(mine)),
-    delete: (message) => message.sender.where(mine),
+    insert: (message) => allOf(isChatMember(message.chatId), senderWithMine(message)),
+    delete: (message) => senderWithMine(message),
   },
   profiles: {
     read: true,

@@ -2774,6 +2774,23 @@ fn the_policy_corpus_matches_its_fixture() {
             serde_json::json!({ "name": source, "permissions": file_for(table, source.into()) }),
         );
     }
+    // `updateTo`'s `old`: one condition object compares several columns with
+    // the old row's, in one self-`exists`.
+    cases.push(serde_json::json!({
+        "name": "update.new comparing several columns with the old row",
+        "permissions": {
+            "tables": {
+                "todos": {
+                    "read": "true",
+                    "update": {
+                        "old": "owner = session.user",
+                        "new": "exists todos(id = this.id, name = this.name, owner = this.owner)",
+                    },
+                },
+                "shares": { "read": "true", "update": "true" },
+            },
+        },
+    }));
     let variant = every_policy_variant();
     let mut exprs = vec![("every policy variant".to_string(), variant.clone())];
     if let PolicyExpr::And(items) | PolicyExpr::Or(items) = &variant {

@@ -16,5 +16,5 @@ Rewrote:
   tsconfig.json: dropped "permissions.ts" from include
   package.json: script "build": `jazz-tools validate` → `jazz-tools generate`
 Notes:
-  The permissions were printed from jazz.permissions.json: repeated conditions became helpers (`isChatMember`, `rule1`, …). Rename them, and bring back what the old permissions.ts said in comments or constants.
+  The permissions were printed from jazz.permissions.json: repeated checks became helpers named for what they check, and the old permissions.ts's named values kept their names. Its comments didn't survive: bring back what they said.
   The schema hashes and the bundle id (3ad46fc9a1e6) are unchanged.

@@ -97,6 +97,49 @@ describe("the permissions printer", () => {
     expect(out.code).toContain("read: true,\ninsert: false,");
   });
 
+  it("factors any repeated check into one helper, literals that differ as parameters", () => {
+    const shows = app({
+      crew: { columns: { showId: "uuid", userId: "uuid", role: "string" } },
+      notes: { columns: { showId: "uuid" } },
+      cues: { columns: { showId: "uuid" } },
+    });
+    const crewOrChief = (role: string) =>
+      `exists crew(showId = this.showId, userId = session.user) or exists crew(showId = this.showId, userId = session.user, role = '${role}')`;
+    const out = print(shows, {
+      notes: {
+        read: crewOrChief("chief"),
+        insert: crewOrChief("chief"),
+        delete: crewOrChief("lead"),
+      },
+      cues: { read: crewOrChief("chief") },
+    });
+    expect(out.unsupported).toEqual([]);
+    // One helper for the whole check; the role that differs between uses is a parameter.
+    expect(out.code).toContain(
+      'const isCrewOrChiefWithRole = (showId: s.Uuid, role: s.Value<"string">) => anyOf(exists.crew({ showId, userId: session.user }), exists.crew({ showId, userId: session.user, role }));',
+    );
+    expect(out.code).toContain('read: (cue) => isCrewOrChiefWithRole(cue.showId, "chief"),');
+    expect(out.code).toContain('delete: (note) => isCrewOrChiefWithRole(note.showId, "lead"),');
+  });
+
+  it("prints named values by name", () => {
+    const out = printPermissions(
+      app({ chats: { columns: { kind: "string", role: "string" } } }),
+      {
+        format: 1,
+        tables: { chats: { read: "kind = 'announcements' and role in ['admin', 'editor']" } },
+      },
+      {
+        constants: new Map([
+          ['"announcements"', "ANNOUNCEMENTS"],
+          ['["admin", "editor"]', "editors"],
+        ]),
+      },
+    );
+    expect(out.code).toContain("read: { kind: ANNOUNCEMENTS, role: editors },");
+    expect(out.constantsUsed.sort()).toEqual(["ANNOUNCEMENTS", "editors"]);
+  });
+
   it("prints the relation IR", () => {
     const out = print(todos, {
       todos: {
