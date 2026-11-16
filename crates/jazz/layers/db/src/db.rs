@@ -9,8 +9,7 @@ use std::task::{Poll, Waker};
 
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
-    BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
-    ReadViewSpec, SchemaVersion,
+    BranchSelector, BranchViewBase, LensOp, MigrationLens, ReadViewSourceSpec, ReadViewSpec,
 };
 use crate::query::Query;
 use crate::records::{Value, ValueType};
@@ -606,13 +605,6 @@ pub struct RuntimeStats {
     pub active_shape_params: usize,
 }
 
-/// A schema lineage step authored for publication.
-#[derive(Clone, Debug)]
-pub struct SchemaPublication {
-    version: SchemaVersion,
-    lens: MigrationLens,
-}
-
 struct Inner {
     conn: Connection,
     /// One-way, owner-wide fence for new application mutations during close.
@@ -788,7 +780,6 @@ struct Inner {
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
-    publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
     /// A replica whose store does not outlive it (a foreground over a
@@ -2004,7 +1995,6 @@ impl Db {
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
                 tx: None,
-                publications: Vec::new(),
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
@@ -3695,38 +3685,6 @@ impl Db {
 
     // ---- schema evolution -------------------------------------------------
 
-    pub fn author_schema_lineage_publication(
-        &self,
-        version: SchemaVersion,
-        lens: MigrationLens,
-    ) -> Result<SchemaPublication, Error> {
-        Ok(SchemaPublication { version, lens })
-    }
-
-    pub async fn publish_schema_with_lens(
-        &self,
-        publication: SchemaPublication,
-    ) -> Result<(), Error> {
-        self.inner().publications.push(publication);
-        Ok(())
-    }
-
-    /// Make a published version current with the lens it was published
-    /// with (see [`Db::activate_schema_with_lenses`]).
-    pub async fn activate_catalogue_schema_for_test(
-        &self,
-        current: CurrentWriteSchema,
-    ) -> Result<(), Error> {
-        let publication = self
-            .inner()
-            .publications
-            .iter()
-            .find(|publication| publication.version.id == current.schema)
-            .cloned()
-            .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        self.activate(publication.version.schema, &[publication.lens], None)
-    }
-
     /// Make `schema` the current schema. The stored tables grow to hold it:
     /// new tables, new columns (`ADD COLUMN ... DEFAULT`, no rows rewritten)
     /// and new indexes. Columns other schemas added stay, so older clients
@@ -3747,19 +3705,6 @@ impl Db {
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
         self.activate(schema, lenses, None)
-    }
-
-    /// [`Db::activate_schema_with_lenses`] as permissions revision
-    /// `revision` of the store's catalogue (see [`crate::catalogue`]): its
-    /// row records the schema and policies, and when they took effect. A
-    /// store without a server numbers its activations itself.
-    pub async fn activate_schema_at_revision(
-        &self,
-        revision: u64,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-    ) -> Result<(), Error> {
-        self.activate(schema, lenses, Some(revision))
     }
 
     /// Admit `schema` without making it current: the stored tables grow to
