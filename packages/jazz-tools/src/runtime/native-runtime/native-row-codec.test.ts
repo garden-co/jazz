@@ -393,6 +393,18 @@ describe("native row codec", () => {
     }
   });
 
+  // #5928: a pre-1970 Date used to wrap around to a far-future u64.
+  it("rejects timestamps before 1970 and keeps the epoch", () => {
+    const column = [{ name: "at", column_type: { type: "Timestamp" as const }, nullable: false }];
+    for (const value of [-1, -86_400_000]) {
+      expect(() => encodeNativeRowValues(column, [{ type: "Timestamp", value }])).toThrow(
+        "Timestamp value must be a non-negative safe integer",
+      );
+    }
+    const epoch = encodeNativeRowValues(column, [{ type: "Timestamp", value: 0 }]);
+    expect(decodeNativeRowValues(column, epoch)).toEqual([{ type: "Timestamp", value: 0 }]);
+  });
+
   it("requires exact numeric BigInt values while preserving signed i64 boundaries", () => {
     const bigintColumn = [
       { name: "value", column_type: { type: "BigInt" as const }, nullable: false },
