@@ -124,7 +124,10 @@ public class Jazz internal constructor(
 
     private fun <T> stateFlow(sync: Boolean, initial: T, parse: (String) -> T): MutableStateFlow<T> {
         val flow = MutableStateFlow(initial)
-        watches += native.watch(sync) { json -> flow.value = parse(json) }
+        watches += native.watch(sync) { json ->
+            // A closing app ends each watch with {"kind":"closed"}: not a state.
+            if (!isClosedNotice(json)) flow.value = parse(json)
+        }
         return flow
     }
 
@@ -146,9 +149,18 @@ public class Jazz internal constructor(
      * Collecting starts watching.
      */
     public val mutationErrors: Flow<MutationError> get() = callbackFlow {
-        val cancel = withContext(dispatcher) { native.watchMutationErrors { json -> trySend(MutationError.parse(json)) } }
+        val cancel = withContext(dispatcher) {
+            native.watchMutationErrors { json ->
+                // The app closing ends the watch: the Flow completes.
+                if (isClosedNotice(json)) close() else trySend(MutationError.parse(json))
+            }
+        }
         awaitClose { cancel() }
     }.buffer(Channel.UNLIMITED)
+
+    private fun isClosedNotice(json: String): Boolean =
+        json.contains("\"kind\"") &&
+            ((jazzJson.parseToJsonElement(json) as? JsonObject)?.get("kind") as? JsonPrimitive)?.content == "closed"
 
     /** Asks the [JazzAuth.Bearer] provider for a fresh token ([TokenReason.Refresh]), e.g. after an `Expired` session. */
     public suspend fun refreshSession(): Unit = io { native.refresh() }
