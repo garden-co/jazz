@@ -8,11 +8,12 @@
 >   includes and hops, subscriptions (`AsyncSequence`), writes at a durability
 >   tier, mergeable and serializable transactions, mergeable text, uploads,
 >   history reads, device accounts and your sign-in's bearer tokens, sync
->   status, on Linux (tested in CI). It should work on macOS, but isn't
->   tested there yet.
-> - **Not supported yet:** running a backend or serving `/jazz`, iOS and
->   macOS UI apps (not built or tested yet), Keychain storage for device keys,
->   guest users, history subscriptions, payload enums and nested rows.
+>   status. Tested on Linux in CI; each release's package runs a command-line
+>   app on macOS and builds for the iOS simulator.
+> - **Not supported yet:** running a backend or serving `/jazz`, a prebuilt
+>   core on Linux, iOS and macOS UI apps (not tested yet), Keychain storage
+>   for device keys, guest users, history subscriptions, payload enums and
+>   nested rows.
 >
 > The full list is the Swift setup page's "Not supported yet"
 > (docs/content/docs/setup/swift.mdx) and
@@ -65,8 +66,9 @@ surface; `build-ffi.sh --check` (run by `dev/gates/jazz-swift.sh` in CI)
 fails when they're stale.
 
 Built and tested on Linux in CI (`dev/gates/jazz-swift.sh`, in the required
-`jazz-ffi-bindings` partition). Needs Swift 6.0 or newer. macOS should work
-the same way but isn't tested in CI yet; iOS apps aren't supported yet (no
-XCFramework). See `examples/stage-plan/apps/swift-cli` for a complete
+`jazz-ffi-bindings` partition). Needs Swift 6.0 or newer. Each release's
+published package (`.github/workflows/swift-mirror.yml`) is checked on macOS,
+where a command-line app builds and runs against the prebuilt XCFramework,
+and built for the iOS simulator; UI apps aren't tested yet. See `examples/stage-plan/apps/swift-cli` for a complete
 command-line tool, and the docs' Swift setup page for what's not supported
 yet.
