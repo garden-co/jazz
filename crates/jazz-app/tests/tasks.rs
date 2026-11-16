@@ -211,7 +211,7 @@ async fn text_edits_merge() {
 /// `update(table, id, data, { editedFrom })`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_edit_with_other_columns() {
-    use jazz_app::EditedFrom;
+    use jazz_app::Edits;
     let jazz = bindings::open(Config::new(AppId::random()), App)
         .await
         .unwrap();
@@ -241,7 +241,7 @@ async fn text_edit_with_other_columns() {
             score: Some(7),
             ..Default::default()
         },
-        EditedFrom::new().column(tasks::notes(), "hello world"),
+        Edits::new().edited_from(tasks::notes(), "hello world"),
     )
     .await
     .unwrap();
@@ -259,7 +259,7 @@ async fn text_edit_with_other_columns() {
                 score: Some(8),
                 ..Default::default()
             },
-            EditedFrom::new().column(tasks::notes(), "hello brave world!"),
+            Edits::new().edited_from(tasks::notes(), "hello brave world!"),
         )
     })
     .await
@@ -272,7 +272,7 @@ async fn text_edit_with_other_columns() {
             title: Some("Done".into()),
             ..Default::default()
         },
-        EditedFrom::new().column(tasks::notes(), "bye"),
+        Edits::new().edited_from(tasks::notes(), "bye"),
     )
     .await
     .unwrap();
@@ -291,7 +291,7 @@ async fn text_edit_with_other_columns() {
                 score: Some(1),
                 ..Default::default()
             },
-            EditedFrom::new().column(tasks::notes(), "bye now"),
+            Edits::new().edited_from(tasks::notes(), "bye now"),
         )
         .await;
     assert!(matches!(unset, Err(Error::Config(_))), "{unset:?}");
@@ -305,7 +305,7 @@ async fn text_edit_with_other_columns() {
                 score: Some(2),
                 ..Default::default()
             },
-            EditedFrom::new().column(tasks::title(), "Done"),
+            Edits::new().edited_from(tasks::title(), "Done"),
         )
         .await;
     assert!(plain.is_err(), "{plain:?}");
@@ -316,7 +316,7 @@ async fn text_edit_with_other_columns() {
                 notes: Some(Some("x".into())),
                 ..Default::default()
             },
-            EditedFrom::new().column(tasks::notes(), ""),
+            Edits::new().edited_from(tasks::notes(), ""),
         )
         .await;
     assert!(
@@ -325,6 +325,135 @@ async fn text_edit_with_other_columns() {
     );
     let task = jazz.get::<Task>(id).await.unwrap().unwrap();
     assert_eq!((task.title.as_str(), task.score), ("Done", 8));
+}
+
+/// Splices and json sets together with other column sets and a text edit,
+/// in one update: TS's `update(table, id, data, { applyDiffs, editedFrom })`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diffs_with_other_columns() {
+    use jazz_app::{Edits, Page, Splice};
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask {
+            notes: Some("hello".into()),
+            attachment: Some(vec![0; 8]),
+            meta: Some(Json(serde_json::json!({ "owner": "ops", "n": 1 }))),
+            ..NewTask::new("Diffs", 1, Vec::new())
+        })
+        .await
+        .unwrap();
+    let id = task.id;
+    jazz.update_edited(
+        id,
+        TaskUpdate {
+            title: Some("Diffed".into()),
+            score: Some(5),
+            notes: Some(Some("hello!".into())),
+            ..Default::default()
+        },
+        Edits::new()
+            .edited_from(tasks::notes(), "hello")
+            .splice(
+                tasks::attachment(),
+                Page::Bytes { from: 0, to: 8 },
+                vec![Splice {
+                    at: 0,
+                    delete: 1,
+                    insert: vec![9, 9],
+                }],
+            )
+            .json_set(
+                tasks::meta(),
+                [("/owner".to_owned(), serde_json::json!("dev"))],
+            ),
+    )
+    .await
+    .unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Diffed", 5));
+    assert_eq!(task.notes.as_deref(), Some("hello!"));
+    assert_eq!(
+        task.attachment.as_deref().map(|a| &a[..3]),
+        Some(&[9, 9, 0][..])
+    );
+    assert_eq!(
+        task.meta.unwrap().0,
+        serde_json::json!({ "owner": "dev", "n": 1 })
+    );
+
+    // In a transaction, closure and open forms.
+    jazz.transaction(move |tx| async move {
+        tx.update_edited(
+            id,
+            TaskUpdate {
+                score: Some(6),
+                ..Default::default()
+            },
+            Edits::new().json_set(tasks::meta(), [("/n".to_owned(), serde_json::json!(2))]),
+        )
+    })
+    .await
+    .unwrap();
+    let open = jazz.begin_transaction().await.unwrap();
+    open.update_edited(
+        id,
+        TaskUpdate {
+            title: Some("Open".into()),
+            ..Default::default()
+        },
+        Edits::new().splice(
+            tasks::attachment(),
+            Page::Bytes { from: 0, to: 2 },
+            vec![Splice {
+                at: 0,
+                delete: 2,
+                insert: vec![1],
+            }],
+        ),
+    )
+    .await
+    .unwrap();
+    open.commit().await.unwrap();
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!((task.title.as_str(), task.score), ("Open", 6));
+    assert_eq!(
+        task.attachment.as_deref().map(|a| &a[..2]),
+        Some(&[1, 0][..])
+    );
+    assert_eq!(task.meta.unwrap().0["n"], serde_json::json!(2));
+
+    // A column both set and diffed is refused, as TS refuses it.
+    let both = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                meta: Some(Some(Json(serde_json::json!({})))),
+                ..Default::default()
+            },
+            Edits::new().json_set(tasks::meta(), [("/n".to_owned(), serde_json::json!(3))]),
+        )
+        .await;
+    assert!(matches!(both, Err(Error::Config(_))), "{both:?}");
+    // A failing diff writes none of the update's sets.
+    let failing = jazz
+        .update_edited(
+            id,
+            TaskUpdate {
+                title: Some("Not written".into()),
+                ..Default::default()
+            },
+            Edits::new().json_set(
+                tasks::meta(),
+                [("/missing/deep".to_owned(), serde_json::json!(1))],
+            ),
+        )
+        .await;
+    assert!(failing.is_err(), "{failing:?}");
+    let task = jazz.get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!(task.title, "Open");
+    assert_eq!(task.meta.unwrap().0["n"], serde_json::json!(2));
 }
 
 /// Large values: a bytes cell inserted from a stream, spliced in place, and a json cell edited by pointer.
