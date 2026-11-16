@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { legacyEnvironment } from "./legacy.js";
 import {
   countTypeErrors,
   formatReport,
@@ -298,10 +299,10 @@ describe("jazz-tools upgrade: refusals", () => {
     execFileSync(
       process.execPath,
       [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
-      {
-        cwd: dir,
-        stdio: "pipe",
-      },
+      // The app's own engine, as upgrade's check runs it: inherited
+      // JAZZ_CORRECTNESS_* / NAPI_RS_* overrides would run alpha.63's
+      // validate on this release's writer, whose files alpha.63 then refuses.
+      { cwd: dir, stdio: "pipe", env: legacyEnvironment(process.env) },
     );
     await refused(dir, /`true` inside anyOf\/allOf at tables\.messages\.read\.anyOf\[0\]/);
   });
@@ -322,10 +323,10 @@ describe("jazz-tools upgrade: refusals", () => {
     execFileSync(
       process.execPath,
       [join(dir, "node_modules", "jazz-tools", "bin", "jazz-tools.js"), "validate"],
-      {
-        cwd: dir,
-        stdio: "pipe",
-      },
+      // The app's own engine, as upgrade's check runs it: inherited
+      // JAZZ_CORRECTNESS_* / NAPI_RS_* overrides would run alpha.63's
+      // validate on this release's writer, whose files alpha.63 then refuses.
+      { cwd: dir, stdio: "pipe", env: legacyEnvironment(process.env) },
     );
     await refused(
       dir,

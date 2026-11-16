@@ -12,7 +12,7 @@ name = "todo-server"
 path = "src/main.rs"
 
 [dependencies]
-jazz-app = { path = "../../crates/jazz-app" }
+jazz-app-support = { path = "../../crates/jazz-app" }
 axum = "0.7"
 futures-util = "0.3"
 mimalloc = { version = "0.1", default-features = false }

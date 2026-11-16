@@ -107,8 +107,8 @@ describe("createJazz's bindings check", () => {
   });
 });
 
-/** A crate using `jazz-app`: what makes a Cargo.toml a Rust app's, for the npm CLI as for the binary. */
-const JAZZ_APP_CRATE = '[package]\nname = "app"\n\n[dependencies]\njazz-app = "0.1"\n';
+/** A crate using `jazz-app-support`: what makes a Cargo.toml a Rust app's, for the npm CLI as for the binary. */
+const JAZZ_APP_CRATE = '[package]\nname = "app"\n\n[dependencies]\njazz-app-support = "0.1"\n';
 
 describe("generate in a Rust crate", () => {
   it("writes src/jazz_app.rs beside the TS bindings of a crate that has them", async () => {
@@ -131,7 +131,7 @@ describe("generate in a Rust crate", () => {
   });
 });
 
-describe("generate beside a Cargo.toml that isn't a jazz-app crate", () => {
+describe("generate beside a Cargo.toml that isn't a jazz-app-support crate", () => {
   it("writes only the TS bindings, as the binary does", async () => {
     const dir = await project();
     await generateApp({ cwd: dir });
