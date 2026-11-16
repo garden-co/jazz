@@ -1,0 +1,8 @@
+{
+  "name": "upgrade-fixture-chat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "jazz-tools generate && vite build"
+  }
+}
