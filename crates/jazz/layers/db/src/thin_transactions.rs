@@ -22,13 +22,16 @@
 //!   refusal that rejected it; never at the local commit.
 //! - Open transactions end with the session ([`ThinTransactions::release`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use jazz_model::model::transaction::OpenTransactionId;
 use jazz_model::query::{Query, col, eq, lit};
 use jazz_model::tx::DurabilityTier;
 use jazz_protocol::protocol::{BranchSelector, BranchViewBase};
-use jazz_protocol::thin::{ThinBody, ThinOp};
+use jazz_protocol::thin::{
+    ThinAssembler, ThinBody, ThinOp, ThinRequest, ThinResponse, thin_wire_frames,
+};
+use jazz_protocol::wire::{WireFrame, decode_frame, decode_postcard_frame, encode_frame};
 use jazz_types::ids::{AuthorSubject, RowUuid};
 use jazz_types::records::Value;
 
@@ -90,22 +93,10 @@ impl ThinTransactions {
     /// an upload begun in one.
     pub fn serves(&self, op: &ThinOp) -> bool {
         match op {
-            ThinOp::Begin { .. } | ThinOp::Commit { .. } | ThinOp::Rollback { .. } => true,
-            ThinOp::Query { transaction, .. }
-            | ThinOp::Insert { transaction, .. }
-            | ThinOp::Update { transaction, .. }
-            | ThinOp::Upsert { transaction, .. }
-            | ThinOp::Delete { transaction, .. }
-            | ThinOp::Restore { transaction, .. }
-            | ThinOp::UpdateLargeValues { transaction, .. }
-            | ThinOp::BeginStream { transaction, .. } => transaction.is_some(),
             ThinOp::StreamChunk { stream, .. }
             | ThinOp::FinishStream { stream }
             | ThinOp::AbortStream { stream } => self.streams.contains_key(stream),
-            ThinOp::Schema { .. }
-            | ThinOp::Subscribe { .. }
-            | ThinOp::Unsubscribe { .. }
-            | ThinOp::CaptureSnapshot => false,
+            op => names_transaction(op),
         }
     }
 
@@ -658,4 +649,125 @@ fn stream_options(options: &serde_json::Value) -> Result<StreamOptions, ThinBody
         return Err(argument("streaming mutation base requires a branch head"));
     }
     Ok((updated_at_ms, head, base))
+}
+
+/// Whether request `op` belongs to a transaction, ignoring uploads (see
+/// [`ThinRouter`]): it begins, commits or rolls one back, or names one.
+pub fn names_transaction(op: &ThinOp) -> bool {
+    match op {
+        ThinOp::Begin { .. } | ThinOp::Commit { .. } | ThinOp::Rollback { .. } => true,
+        ThinOp::Query { transaction, .. }
+        | ThinOp::Insert { transaction, .. }
+        | ThinOp::Update { transaction, .. }
+        | ThinOp::Upsert { transaction, .. }
+        | ThinOp::Delete { transaction, .. }
+        | ThinOp::Restore { transaction, .. }
+        | ThinOp::UpdateLargeValues { transaction, .. }
+        | ThinOp::BeginStream { transaction, .. } => transaction.is_some(),
+        ThinOp::StreamChunk { .. }
+        | ThinOp::FinishStream { .. }
+        | ThinOp::AbortStream { .. }
+        | ThinOp::Schema { .. }
+        | ThinOp::Subscribe { .. }
+        | ThinOp::Unsubscribe { .. }
+        | ThinOp::CaptureSnapshot => false,
+    }
+}
+
+/// One thin connection's client-to-core frames, split between the core
+/// and the session's backend: the backend serves the session's transaction
+/// requests ([`ThinTransactions`]) and passes everything else to the core
+/// unchanged. Carrier-agnostic: the caller moves the frames.
+///
+/// A split request (its [`ThinPart`]s) is joined before it is routed, and
+/// goes on as the same parts when it is the core's.
+#[derive(Debug, Default)]
+pub struct ThinRouter {
+    assembler: ThinAssembler,
+    /// The parts of the request being joined, as they came.
+    parts: Vec<Vec<u8>>,
+    /// Uploads begun in a transaction, by the id of the request that began
+    /// them: their chunks, finish and abort are the backend's too.
+    streams: BTreeSet<u64>,
+}
+
+/// Where a batch of client frames goes.
+#[derive(Debug, Default, PartialEq)]
+pub struct Routed {
+    /// Frames for the core, in order, unchanged.
+    pub to_core: Vec<Vec<u8>>,
+    /// Requests the backend serves, in order.
+    pub to_backend: Vec<ThinRequest>,
+}
+
+impl ThinRouter {
+    /// Route the frames of one client message. `Err` for a frame that does
+    /// not decode or a part that does not join: the connection is broken.
+    pub fn route(&mut self, frames: Vec<Vec<u8>>) -> Result<Routed, String> {
+        let mut routed = Routed::default();
+        for frame in frames {
+            match decode_frame(&frame).map_err(|error| format!("undecodable frame: {error}"))? {
+                WireFrame::ThinPart(part) => {
+                    self.parts.push(frame);
+                    let Some(joined) = self.assembler.push(part)? else {
+                        continue;
+                    };
+                    let parts = std::mem::take(&mut self.parts);
+                    match decode_postcard_frame(&joined)
+                        .map_err(|error| format!("undecodable joined frame: {error}"))?
+                    {
+                        WireFrame::ThinRequest(request) if self.is_backends(&request) => {
+                            routed.to_backend.push(request);
+                        }
+                        _ => routed.to_core.extend(parts),
+                    }
+                }
+                WireFrame::ThinRequest(request) if self.is_backends(&request) => {
+                    routed.to_backend.push(request);
+                }
+                _ => routed.to_core.push(frame),
+            }
+        }
+        Ok(routed)
+    }
+
+    /// Whether the backend serves `request`, noting the uploads it begins
+    /// (whatever the backend answers: a refused one's chunks are refused
+    /// there too) or ends.
+    fn is_backends(&mut self, request: &ThinRequest) -> bool {
+        match &request.op {
+            ThinOp::StreamChunk { stream, .. } => self.streams.contains(stream),
+            ThinOp::FinishStream { stream } | ThinOp::AbortStream { stream } => {
+                self.streams.remove(stream)
+            }
+            ThinOp::BeginStream {
+                transaction: Some(_),
+                ..
+            } => {
+                self.streams.insert(request.id);
+                true
+            }
+            op => names_transaction(op),
+        }
+    }
+}
+
+/// The client frames that carry the backend's `answer`: a whole frame, or
+/// its parts when it is larger than one. An answer past
+/// [`jazz_protocol::thin::MAX_THIN_MESSAGE_BYTES`] is answered with that
+/// error instead.
+pub fn answer_frames(answer: ThinResponse) -> Vec<Vec<u8>> {
+    let id = answer.id;
+    let encode = |response: &ThinResponse| {
+        encode_frame(&WireFrame::ThinResponse(response.clone())).expect("a thin answer encodes")
+    };
+    match thin_wire_frames(encode(&answer)) {
+        Ok(frames) => frames,
+        Err(size) => vec![encode(&ThinResponse {
+            id,
+            body: argument(format!(
+                "the answer of {size} bytes is over the most one may take"
+            )),
+        })],
+    }
 }
