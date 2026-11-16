@@ -88,6 +88,51 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal("bob's refused write was never reported")
 	}
 
+	// Close ends a DB's watches and subscriptions: their channels close.
+	carol := openTest(t, srv, "carol")
+	errs, err := carol.OnMutationError(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := carol.OnSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := jazzapp.Shows.Query().Live(ctx, carol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := carol.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, closed := range []func() bool{
+		func() bool { _, ok := <-errs; return !ok },
+		func() bool {
+			for range sessions {
+			}
+			return true
+		},
+	} {
+		done := make(chan bool, 1)
+		go func() { done <- closed() }()
+		select {
+		case ok := <-done:
+			if !ok {
+				t.Fatal("a watch sent a value after Close")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a watch's channel stayed open after Close")
+		}
+	}
+	select {
+	case <-live.Done():
+		if !errors.Is(live.Err(), jazz.ErrClosed) {
+			t.Fatalf("live after Close: %v", live.Err())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a Live stayed open after Close")
+	}
+
 	// Deleting a local app's store: the next open starts empty.
 	dir := t.TempDir()
 	appID := randomUUID(t)

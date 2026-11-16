@@ -289,8 +289,18 @@ func (db *DB) OnSyncStatus(ctx context.Context) (<-chan SyncStatus, error) {
 	})
 }
 
+// watch runs a jazz-ffi watch of what. decode's bool says the event isn't
+// a state (an error, or the watch closing): the channel then closes
+// without it.
 func watch[T any](ctx context.Context, db *DB, what string, decode func(event) (T, bool)) (<-chan T, error) {
-	return stream(ctx, db, decode, func(id uint64) (func(), error) {
+	states := func(e event) (T, bool, bool) {
+		v, end := decode(e)
+		if end || e.kind == "closed" {
+			return v, true, true
+		}
+		return v, false, false
+	}
+	return stream(ctx, db, states, func(id uint64) (func(), error) {
 		var cerr uintptr
 		w := ffi.watch(db.handle, cstr(what), ffi.subscriptionCallback, uintptr(id), &cerr)
 		if err := takeError(cerr); err != nil || w == 0 {
