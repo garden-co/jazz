@@ -1879,3 +1879,135 @@ fn binding_configs_have_no_chunk_store() {
     assert!(db_config.chunk_store.is_none());
     assert!(!db_config.host_chunk_io);
 }
+
+/// Bindings over a table branched by `branch_id`.
+fn branched(node: u8, authority: bool) -> Binding {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let identity = if authority {
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        }
+    } else {
+        identity(node)
+    };
+    let config = DbConfig::new(schema, identity);
+    let db = if authority {
+        block_on(Db::open_history_complete(config))
+    } else {
+        block_on(Db::open(config))
+    }
+    .unwrap();
+    Binding::new(db, identity, authority)
+}
+
+fn branch(byte: u8) -> jazz::protocol::BranchSelector {
+    jazz::protocol::BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([byte; 16])),
+    )])
+}
+
+/// On the host's links (postcard frames, as napi and wasm carry them),
+/// Alice's serializable transaction reads her draft over main and inserts
+/// into the draft; then she commits and waits for the server's verdict.
+fn commit_a_draft_read(features: Option<jazz::wire::WireFeatures>) -> Result<(), jazz::db::Error> {
+    let server = branched(0, true);
+    let client = branched(0xa1, false);
+    let upstream = client.connect_upstream();
+    if let Some(features) = features {
+        upstream.set_features(features);
+    }
+    let subscriber = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
+    let links = [(&upstream, &subscriber)];
+    let put = |db: &Db, on: jazz::protocol::BranchSelector, title: &str| {
+        block_on(db.insert(
+            "todos",
+            std::collections::BTreeMap::from([(
+                "title".to_owned(),
+                Value::String(title.to_owned()),
+            )]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(on),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    };
+    put(&server.db, branch(1), "Intro");
+    // Another branch's row: a root read would list it, the draft's view not.
+    put(&server.db, branch(3), "Elsewhere");
+    let tx = OpenTransactionId::new();
+    drive(&links, client.db.begin_serializable(tx)).unwrap();
+    let view = ReadOpts::default().branch_view(
+        branch(2),
+        Some(jazz::protocol::BranchViewBase::current(branch(1))),
+    );
+    let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let read = drive(
+        &links,
+        client
+            .db
+            .all_serialized_query(&query, view, Some(tx), None, None),
+    )
+    .unwrap();
+    assert!(matches!(read, jazz::db::SerializedReadResult::Rows(rows) if rows.len() == 1));
+    drive(
+        &links,
+        client.db.tx_ref(tx).insert(
+            "todos",
+            std::collections::BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("Notes".to_owned()),
+            )]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(branch(2)),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    let receipt = drive(&links, client.db.commit_serializable_handle(tx))?;
+    drive(
+        &links,
+        client
+            .db
+            .wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+    )
+    .map(drop)
+}
+
+/// The host hands an upstream link what its `Hello` negotiated
+/// (`connectUpstreamWithSession` does): with the feature, a serializable
+/// commit that read through a branch view crosses real frames and the
+/// server validates it through the view (jazz#5806).
+#[test]
+fn a_link_given_its_features_commits_a_serializable_branch_read() {
+    commit_a_draft_read(Some(jazz::wire::current_wire_features())).unwrap();
+}
+
+/// A link the host never told its features (`connectUpstream` without a
+/// session) reports none: the commit is refused rather than sent to a
+/// server that would check the read as a root read.
+#[test]
+fn a_link_without_features_refuses_a_serializable_branch_read() {
+    let error = commit_a_draft_read(None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not supported yet by this server"),
+        "{error}"
+    );
+}

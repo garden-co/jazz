@@ -1229,7 +1229,7 @@ pub struct WireRead {
 /// link that negotiated [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`]
 /// carries.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(from = "WireKindRepr", into = "WireKindRepr")]
+#[serde(try_from = "WireKindRepr", into = "WireKindRepr")]
 pub enum WireKind {
     Mergeable,
     /// `own`: the sender's own commits (by local seq) that were unsettled
@@ -1302,9 +1302,13 @@ impl From<WireKind> for WireKindRepr {
     }
 }
 
-impl From<WireKindRepr> for WireKind {
-    fn from(repr: WireKindRepr) -> Self {
-        match repr {
+impl TryFrom<WireKindRepr> for WireKind {
+    type Error = String;
+
+    /// `SerializableViews` names exactly one view per read: any other count
+    /// is malformed, not a read through the root view.
+    fn try_from(repr: WireKindRepr) -> Result<Self, String> {
+        Ok(match repr {
             WireKindRepr::Mergeable => Self::Mergeable,
             WireKindRepr::Serializable {
                 snapshot,
@@ -1315,14 +1319,19 @@ impl From<WireKindRepr> for WireKind {
                 reads,
                 own,
             },
-            // A view list shorter than the reads leaves the rest `Current`;
-            // the authority validates each read through the view it names.
             WireKindRepr::SerializableViews {
                 snapshot,
                 mut reads,
                 own,
                 views,
             } => {
+                if views.len() != reads.len() {
+                    return Err(format!(
+                        "a serializable commit names {} views for its {} reads",
+                        views.len(),
+                        reads.len()
+                    ));
+                }
                 for (read, view) in reads.iter_mut().zip(views) {
                     read.view = view;
                 }
@@ -1332,7 +1341,7 @@ impl From<WireKindRepr> for WireKind {
                     own,
                 }
             }
-        }
+        })
     }
 }
 
@@ -15484,6 +15493,26 @@ mod tests {
         };
         assert_eq!(reads[0].view, draft_over_main());
         assert!(postcard::from_bytes::<OldWireKind>(&bytes).is_err());
+
+        // A views list that does not match the reads is malformed.
+        let WireKindRepr::SerializableViews {
+            snapshot,
+            reads,
+            own,
+            mut views,
+        } = WireKindRepr::from(serializable(draft_over_main()))
+        else {
+            panic!("not SerializableViews");
+        };
+        views.push(ReadViewSourceSpec::Current);
+        let malformed = postcard::to_allocvec(&WireKindRepr::SerializableViews {
+            snapshot,
+            reads,
+            own,
+            views,
+        })
+        .unwrap();
+        assert!(postcard::from_bytes::<WireKind>(&malformed).is_err());
     }
 
     fn holds(message: &SyncMessage) -> (u64, Vec<[u8; 16]>, Vec<[u8; 16]>) {
