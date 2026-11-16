@@ -66,9 +66,9 @@
      `jazz.app.json`. Replace every `"TODO: …"` it leaves, then run `generate` again
      (/docs/schemas/migrations). Never delete or move the store to get past a schema error: it means
      a migration is missing, and the user's data is in that store.
-   - An alpha.64 app with `schema.ts` and `permissions.ts`: run
-     `npx jazz-tools@2.0.0-alpha.65 upgrade` first, before bumping the dependency, and review the
-     diff (/docs/operating/backups-and-upgrades#upgrading-from-alpha64).
+   - An alpha.65 app with `schema.ts` and `permissions.ts`: run
+     `npx jazz-tools@2.0.0-alpha.66 upgrade` first, before bumping the dependency, and review the
+     diff (/docs/operating/backups-and-upgrades#upgrading-from-alpha65).
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata
