@@ -165,9 +165,9 @@ was. Each says what to do, with `file:line` where there is one:
   `npx jazz-tools migrations create --name <name>` first, commit, then upgrade.
 - **The wrong `jazz-tools` installed:** `upgrade` needs the app's alpha.65 (or older) installed to
   check the files, and `typescript` to read `schema.ts`.
-- **Computed fields and transforms** in an app with `schema.ts` (``computed columns and transforms
-  is not supported yet by `jazz-tools upgrade` ``). `upgrade` doesn't convert them yet: take them
-  out, upgrade, and add them back as in
+- **Computed fields and transforms** in an app with `schema.ts`, refused with
+  ``computed columns and transforms is not supported yet by `jazz-tools upgrade` ``. `upgrade`
+  doesn't convert them yet: take them out, upgrade, and add them back as in
   [Computed fields and transforms](#computed-fields-and-transforms). An app without `schema.ts` is
   converted with them.
 - **Permissions the new DSL can't express yet**, listed with the policy and the reason.
@@ -231,7 +231,10 @@ so the schema hashes and the bundle id don't change, and `upgrade` still checks 
    } satisfies AppComputed;
 
    export const transforms = {
-     isoDate: { from: (stored: Date) => stored.toISOString(), to: (view: string) => new Date(view) },
+     isoDate: {
+       from: (stored: Date) => stored.toISOString(),
+       to: (view: string) => new Date(view),
+     },
      tags: { from: (stored: string) => stored.split(","), to: (view: string[]) => view.join(",") },
    } satisfies AppTransforms;
    ```
