@@ -35,7 +35,7 @@ pub(super) fn override_for(
     }
     match &index.kind {
         SpecialisedIndexKind::Text { fields, .. } => Some(Box::new(Words {
-            weights: fields.values().copied().collect(),
+            weights: fields.values().map(|field| field.weight).collect(),
         })),
         SpecialisedIndexKind::Vector { .. } => Some(Box::new(Near)),
         SpecialisedIndexKind::Geo { .. } => None,

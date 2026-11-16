@@ -845,11 +845,16 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   single-column indexes (`indexOnly`); otherwise every column does. An
   object is a specialised index (SPEC 20.1): `name` and exactly one kind
   key, with that kind's options:
-  - `{"name", "text": {<column>: <weight 1–15>, …}, "analyzer", "prefix"?, "serverOnly"?}`;
+  - `{"name", "text": {<column>: <field>, …}, "analyzer", "prefix"?, "serverOnly"?}`,
+    a field being its weight (1–15) or `{"weight", "length"?}` with its
+    reference length in terms (1–4096, default 32);
   - `{"name", "vector": <column>, "metric", "ann"?, "serverOnly"?}`;
   - `{"name", "geo": {"lat": <column>, "lng": <column>}, "serverOnly"?}`.
     The writer puts them after the B-tree indexes, in name order, and leaves
-    out defaults (`prefix: false`, `ann: "exact"`, `serverOnly: false`).
+    out defaults (`prefix: false`, `ann: "exact"`, `serverOnly: false`, a
+    field's default length, which it writes as the bare weight).
+    `"serverOnly": true` is read but refused: server-only indexes are not
+    supported yet (SPEC 20.9).
 - `branchBy`: array of column names.
 - `history`: `"latest"` keeps only each row's newest version; absent keeps
   full history.

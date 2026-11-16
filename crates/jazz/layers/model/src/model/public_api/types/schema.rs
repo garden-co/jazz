@@ -759,11 +759,12 @@ impl TableSchemaBuilder {
         self
     }
 
-    /// Add a text index over `fields` (column, weight 1–15).
-    pub fn text_index<'a>(
+    /// Add a text index over `fields` (column, weight 1–15 or a
+    /// [`TextField`] with its reference length).
+    pub fn text_index<'a, F: Into<TextField>>(
         self,
         name: &str,
-        fields: impl IntoIterator<Item = (&'a str, u8)>,
+        fields: impl IntoIterator<Item = (&'a str, F)>,
         analyzer: &str,
         prefix: bool,
     ) -> Self {
@@ -772,7 +773,7 @@ impl TableSchemaBuilder {
             kind: SpecialisedIndexKind::Text {
                 fields: fields
                     .into_iter()
-                    .map(|(column, weight)| (column.to_owned(), weight))
+                    .map(|(column, field)| (column.to_owned(), field.into()))
                     .collect(),
                 analyzer: analyzer.to_owned(),
                 prefix,

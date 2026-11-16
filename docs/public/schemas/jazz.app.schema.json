@@ -391,11 +391,32 @@
         "text": {
           "type": "object",
           "minProperties": 1,
-          "description": "String column → weight.",
+          "description": "String column → its weight, or { weight, length } with the field's reference length in terms (default 32; about 256 suits long text).",
           "additionalProperties": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 15
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 15
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["weight"],
+                "properties": {
+                  "weight": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 15
+                  },
+                  "length": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4096
+                  }
+                }
+              }
+            ]
           }
         },
         "analyzer": {

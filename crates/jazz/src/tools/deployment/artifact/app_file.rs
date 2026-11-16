@@ -9,7 +9,7 @@ use crate::tools::ObjectId;
 use crate::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, EnumCaseDescriptor, HistoryRetention,
     RowDescriptor, Schema, SchemaHash, SpecialisedIndex, SpecialisedIndexKind, TableName,
-    TablePolicies, TableSchema, Value, VectorAnn, VectorMetric,
+    TablePolicies, TableSchema, TextField, Value, VectorAnn, VectorMetric,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
@@ -91,6 +91,8 @@ pub const VERSION_KEYS: &[&str] = &["tables"];
 pub const INDEX_KIND_KEYS: &[&str] = &["text", "vector", "geo"];
 pub const TEXT_INDEX_KEYS: &[&str] = &["name", "text", "analyzer", "prefix", "serverOnly"];
 pub const VECTOR_INDEX_KEYS: &[&str] = &["name", "vector", "metric", "ann", "serverOnly"];
+/// A text index field's object form: `{ "weight": 4, "length": 256 }`.
+pub const TEXT_FIELD_KEYS: &[&str] = &["weight", "length"];
 pub const GEO_INDEX_KEYS: &[&str] = &["name", "geo", "serverOnly"];
 pub const GEO_POINT_KEYS: &[&str] = &["lat", "lng"];
 
@@ -644,20 +646,54 @@ fn read_specialised_index(item: &Json, path: &str) -> Result<SpecialisedIndex, R
     let kind = match kind {
         "text" => {
             let mut fields = BTreeMap::new();
-            for (column, weight) in object(value, &kind_path)? {
-                let weight_path = format!("{kind_path}.{column}");
+            for (column, field) in object(value, &kind_path)? {
+                let field_path = format!("{kind_path}.{column}");
                 let max = crate::tools::public_schema::TEXT_WEIGHT_MAX;
-                let weight = match weight {
-                    Json::Number(n) => n.parse::<u8>().ok().filter(|w| (1..=max).contains(w)),
-                    _ => None,
-                }
-                .ok_or_else(|| {
+                let max_length = crate::tools::public_schema::TEXT_FIELD_LENGTH_MAX;
+                let weight_of = |value: &Json, path: &str| {
+                    match value {
+                        Json::Number(n) => n.parse::<u8>().ok().filter(|w| (1..=max).contains(w)),
+                        _ => None,
+                    }
+                    .ok_or_else(|| {
+                        refuse(
+                            path,
+                            format!("a field weight is an integer from 1 to {max}"),
+                        )
+                    })
+                };
+                let length_error = || {
                     refuse(
-                        &weight_path,
-                        format!("a field weight is an integer from 1 to {max}"),
+                        format!("{field_path}.length"),
+                        format!("a field's reference length is an integer from 1 to {max_length}"),
                     )
-                })?;
-                fields.insert(column.clone(), weight);
+                };
+                let declared = match field {
+                    Json::Object(entries) => {
+                        only_keys(entries, TEXT_FIELD_KEYS, &field_path)?;
+                        let weight = weight_of(
+                            field.get("weight").ok_or_else(|| {
+                                refuse(
+                                    &field_path,
+                                    "a field object needs `weight`, e.g. { \"weight\": 4, \"length\": 256 }",
+                                )
+                            })?,
+                            &format!("{field_path}.weight"),
+                        )?;
+                        let length = match field.get("length") {
+                            None => crate::tools::public_schema::TEXT_FIELD_LENGTH_DEFAULT,
+                            Some(Json::Number(n)) => n
+                                .parse::<u16>()
+                                .ok()
+                                .filter(|l| (1..=max_length).contains(l))
+                                .ok_or_else(length_error)?,
+                            Some(_) => return Err(length_error()),
+                        };
+                        TextField { weight, length }
+                    }
+                    other => TextField::weight(weight_of(other, &field_path)?),
+                };
+                fields.insert(column.clone(), declared);
             }
             if fields.is_empty() {
                 return Err(refuse(
@@ -782,7 +818,21 @@ fn write_specialised_index(index: &SpecialisedIndex) -> Json {
                 Json::Object(
                     columns
                         .iter()
-                        .map(|(column, weight)| (column.clone(), Json::Number(weight.to_string())))
+                        .map(|(column, field)| {
+                            // A field at the default length is written as its
+                            // bare weight.
+                            let value = if field.length
+                                == crate::tools::public_schema::TEXT_FIELD_LENGTH_DEFAULT
+                            {
+                                Json::Number(field.weight.to_string())
+                            } else {
+                                Json::object(vec![
+                                    ("weight", Json::Number(field.weight.to_string())),
+                                    ("length", Json::Number(field.length.to_string())),
+                                ])
+                            };
+                            (column.clone(), value)
+                        })
                         .collect(),
                 ),
             ));

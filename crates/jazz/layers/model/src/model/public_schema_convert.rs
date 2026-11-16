@@ -18,8 +18,8 @@ use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, Operation, PolicyExpr,
     SPECIALISED_INDEX_NAME_MAX, Schema, SpecialisedIndex, SpecialisedIndexKind, TEXT_ANALYZERS,
-    TEXT_WEIGHT_MAX, TableName, TableSchema, Value, canonical_specialised_index_order,
-    is_specialised_index_name,
+    TEXT_FIELD_LENGTH_MAX, TEXT_WEIGHT_MAX, TableName, TableSchema, Value,
+    canonical_specialised_index_order, is_specialised_index_name,
 };
 use crate::query::{
     RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
@@ -1224,7 +1224,8 @@ fn validate_specialised_indexes(
                         "a text index needs at least one field",
                     ));
                 }
-                for (field, weight) in fields {
+                for (field, declared) in fields {
+                    let weight = &declared.weight;
                     let descriptor = column(field, &format!("text.{field}"))?;
                     if descriptor.column_type != ColumnType::Text {
                         return Err(err(
@@ -1236,6 +1237,14 @@ fn validate_specialised_indexes(
                         return Err(err(
                             format!("{path}.text.{field}"),
                             format!("a field weight is an integer from 1 to {TEXT_WEIGHT_MAX}"),
+                        ));
+                    }
+                    if !(1..=TEXT_FIELD_LENGTH_MAX).contains(&declared.length) {
+                        return Err(err(
+                            format!("{path}.text.{field}.length"),
+                            format!(
+                                "a field's reference length is an integer from 1 to {TEXT_FIELD_LENGTH_MAX}"
+                            ),
                         ));
                     }
                 }
@@ -6728,7 +6737,7 @@ mod tests {
 mod specialised_index_tests {
     use super::*;
     use crate::model::public_api::types::{
-        SchemaBuilder, SchemaHash, TableSchemaBuilder, VectorMetric,
+        SchemaBuilder, SchemaHash, TableSchemaBuilder, TextField, VectorMetric,
     };
 
     fn notes(with: impl FnOnce(TableSchemaBuilder) -> TableSchemaBuilder) -> Schema {
@@ -6843,6 +6852,46 @@ mod specialised_index_tests {
         );
     }
 
+    /// A text field's weight and reference length are part of its
+    /// declaration: changing either is a new version (the index rebuilds),
+    /// while a bare weight means the default length of 32.
+    #[test]
+    fn a_text_fields_weight_and_length_are_its_identity() {
+        let with = |field: TextField| {
+            convert_public_schema(&notes(|table| {
+                table.text_index("search", [("title", field)], "jazz-text/1:en", false)
+            }))
+            .unwrap()
+            .version_id()
+        };
+        let bare = convert_public_schema(&notes(|table| {
+            table.text_index("search", [("title", 4)], "jazz-text/1:en", false)
+        }))
+        .unwrap()
+        .version_id();
+        assert_eq!(
+            bare,
+            with(TextField {
+                weight: 4,
+                length: 32
+            })
+        );
+        assert_ne!(
+            bare,
+            with(TextField {
+                weight: 4,
+                length: 256
+            })
+        );
+        assert_ne!(
+            bare,
+            with(TextField {
+                weight: 5,
+                length: 32
+            })
+        );
+    }
+
     /// `jazz-ix-decl/1` is a durable encoding (the `_jazz_ix.decl` bytes
     /// and part of schema ids): pinned per kind.
     #[test]
@@ -6859,7 +6908,7 @@ mod specialised_index_tests {
         };
         assert_eq!(
             hex("search"),
-            "000000000000000e6a617a7a2d69782d6465636c2f3100000000000000067365617263680000000000000000020000000000000004626f64790100000000000000057469746c6504000000000000000e6a617a7a2d746578742f313a656e0100"
+            "000000000000000e6a617a7a2d69782d6465636c2f3100000000000000067365617263680000000000000000020000000000000004626f647901002000000000000000057469746c65040020000000000000000e6a617a7a2d746578742f313a656e0100"
         );
         assert_eq!(
             hex("similar"),
@@ -6894,7 +6943,7 @@ mod specialised_index_tests {
             "$.notes.specialised_indexes.search: two specialised indexes with the same name"
         );
         assert_eq!(
-            refusal(|t| t.text_index("search", [], "jazz-text/1:en", false)),
+            refusal(|t| t.text_index::<u8>("search", [], "jazz-text/1:en", false)),
             "$.notes.specialised_indexes.search.text: a text index needs at least one field"
         );
         assert_eq!(
@@ -6911,6 +6960,18 @@ mod specialised_index_tests {
                 refusal(|t| t.text_index("search", [("title", weight)], "jazz-text/1:en", false)),
                 "$.notes.specialised_indexes.search.text.title: a field weight is an integer from \
                  1 to 15"
+            );
+        }
+        for length in [0, 4097] {
+            assert_eq!(
+                refusal(|t| t.text_index(
+                    "search",
+                    [("title", TextField { weight: 1, length })],
+                    "jazz-text/1:en",
+                    false
+                )),
+                "$.notes.specialised_indexes.search.text.title.length: a field's reference length \
+                 is an integer from 1 to 4096"
             );
         }
         assert_eq!(

@@ -156,7 +156,10 @@ pub(crate) fn kind_for(
             prefix,
         } => Box::new(text::Text::new(
             analyzer,
-            fields.values().copied().collect(),
+            fields
+                .values()
+                .map(|field| (field.weight, field.length))
+                .collect(),
             *prefix,
         )?),
         SpecialisedIndexKind::Vector { metric, .. } => {

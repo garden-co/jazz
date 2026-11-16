@@ -22,6 +22,40 @@ pub const TEXT_ANALYZERS: &[&str] = &["jazz-text/1:en", "jazz-text/1:simple"];
 /// Highest weight of a text index field.
 pub const TEXT_WEIGHT_MAX: u8 = 15;
 
+/// A text field's reference length in terms when it declares none.
+/// Mirrors `jazz_index::text::DEFAULT_FIELD_LENGTH`.
+pub const TEXT_FIELD_LENGTH_DEFAULT: u16 = 32;
+
+/// Longest reference length a text field may declare. Mirrors
+/// `jazz_index::text::MAX_FIELD_LENGTH`.
+pub const TEXT_FIELD_LENGTH_MAX: u16 = 4096;
+
+/// One field of a text index: its weight and its reference length in terms
+/// (SPEC 20.10.1). `"title": 4` is `{ weight: 4, length: 32 }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TextField {
+    /// 1–[`TEXT_WEIGHT_MAX`].
+    pub weight: u8,
+    /// 1–[`TEXT_FIELD_LENGTH_MAX`].
+    pub length: u16,
+}
+
+impl TextField {
+    /// A field of `weight` with the default reference length.
+    pub fn weight(weight: u8) -> Self {
+        Self {
+            weight,
+            length: TEXT_FIELD_LENGTH_DEFAULT,
+        }
+    }
+}
+
+impl From<u8> for TextField {
+    fn from(weight: u8) -> Self {
+        Self::weight(weight)
+    }
+}
+
 /// Domain tag of [`SpecialisedIndex::canonical_bytes`].
 pub const SPECIALISED_INDEX_DECL_ENCODING: &str = "jazz-ix-decl/1";
 
@@ -48,8 +82,8 @@ fn is_false(value: &bool) -> bool {
 pub enum SpecialisedIndexKind {
     /// Word search over string columns.
     Text {
-        /// Column → weight (1–[`TEXT_WEIGHT_MAX`]).
-        fields: BTreeMap<String, u8>,
+        /// Column → its weight and reference length.
+        fields: BTreeMap<String, TextField>,
         /// One of [`TEXT_ANALYZERS`].
         analyzer: String,
         /// The last query term also matches as a prefix.
@@ -159,7 +193,7 @@ impl SpecialisedIndexKind {
             } => Self::Text {
                 fields: fields
                     .iter()
-                    .map(|(column, weight)| (rename(column), *weight))
+                    .map(|(column, field)| (rename(column), *field))
                     .collect(),
                 analyzer: analyzer.clone(),
                 prefix: *prefix,
@@ -187,8 +221,9 @@ impl SpecialisedIndex {
     /// geo 2), its options, and the `server_only` byte. Strings are
     /// length-prefixed (`u64` big-endian), as in the schema id encoding.
     ///
-    /// - text: field count, then per field (by name) the name and the
-    ///   weight byte; the analyzer; the prefix byte;
+    /// - text: field count, then per field (by name) the name, the
+    ///   weight byte and the reference length (`u16` big-endian); the
+    ///   analyzer; the prefix byte;
     /// - vector: the column; the metric byte (cosine 0, l2 1, dot 2); the
     ///   ann byte (exact 0);
     /// - geo: the lat column, the lng column.
@@ -206,9 +241,10 @@ impl SpecialisedIndex {
             } => {
                 bytes.push(0);
                 put_u64(&mut bytes, fields.len() as u64);
-                for (column, weight) in fields {
+                for (column, field) in fields {
                     put_str(&mut bytes, column);
-                    bytes.push(*weight);
+                    bytes.push(field.weight);
+                    bytes.extend_from_slice(&field.length.to_be_bytes());
                 }
                 put_str(&mut bytes, analyzer);
                 bytes.push(u8::from(*prefix));

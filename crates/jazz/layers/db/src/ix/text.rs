@@ -22,17 +22,18 @@ use crate::values::{Sql, quote, storage};
 pub(super) struct Text {
     pub analyzer: Analyzer,
     /// Each field's weight, in column order.
-    pub weights: Vec<u8>,
+    /// Each field's `(weight, reference length)`, in column order.
+    pub fields: Vec<(u8, u16)>,
     pub prefix: bool,
 }
 
 impl Text {
-    pub(super) fn new(analyzer: &str, weights: Vec<u8>, prefix: bool) -> Result<Self, Error> {
+    pub(super) fn new(analyzer: &str, fields: Vec<(u8, u16)>, prefix: bool) -> Result<Self, Error> {
         let analyzer = Analyzer::parse(analyzer)
             .map_err(|error| Error::new(ErrorCode::Schema, error.to_string()))?;
         Ok(Self {
             analyzer,
-            weights,
+            fields,
             prefix,
         })
     }
@@ -68,11 +69,11 @@ impl Kind for Text {
         let new: BTreeMap<String, u8> = match cells {
             None => BTreeMap::new(),
             Some(cells) => {
-                let fields: Vec<(u8, &str)> = cells
+                let fields: Vec<(u8, u16, &str)> = cells
                     .iter()
-                    .zip(&self.weights)
-                    .filter_map(|(cell, weight)| match cell {
-                        Cell::Text(text) => Some((*weight, text.as_str())),
+                    .zip(&self.fields)
+                    .filter_map(|(cell, (weight, length))| match cell {
+                        Cell::Text(text) => Some((*weight, *length, text.as_str())),
                         _ => None,
                     })
                     .collect();

@@ -12,7 +12,7 @@ use crate::tools::public_schema::{
     OperationPolicy, PolicyExpr, PolicyValue, RowDescriptor, SchemaBuilder, TableName,
 };
 use crate::tools::public_schema::{
-    SpecialisedIndex, SpecialisedIndexKind, VectorAnn, VectorMetric,
+    SpecialisedIndex, SpecialisedIndexKind, TextField, VectorAnn, VectorMetric,
 };
 use std::collections::BTreeSet;
 
@@ -2326,6 +2326,13 @@ fn the_json_schemas_take_the_keys_the_readers_take() {
             keys(app_file::GEO_INDEX_KEYS),
         ),
         (
+            "a text index field",
+            properties(
+                &defs["textIndex"]["properties"]["text"]["additionalProperties"]["anyOf"][1],
+            ),
+            keys(app_file::TEXT_FIELD_KEYS),
+        ),
+        (
             "a geo index's point",
             properties(&defs["geoIndex"]["properties"]["geo"]),
             keys(app_file::GEO_POINT_KEYS),
@@ -2528,7 +2535,16 @@ fn indexed_todos() -> ArtifactInput {
         SpecialisedIndex {
             name: "search".into(),
             kind: SpecialisedIndexKind::Text {
-                fields: BTreeMap::from([("title".into(), 4), ("description".into(), 1)]),
+                fields: BTreeMap::from([
+                    (
+                        "title".into(),
+                        TextField {
+                            weight: 4,
+                            length: 256,
+                        },
+                    ),
+                    ("description".into(), TextField::weight(1)),
+                ]),
                 analyzer: "jazz-text/1:en".into(),
                 prefix: true,
             },
@@ -2573,7 +2589,7 @@ fn specialised_indexes_round_trip_through_the_app_file() {
             { "name": "place", "geo": { "lat": "lat", "lng": "lng" } },
             {
                 "name": "search",
-                "text": { "description": 1, "title": 4 },
+                "text": { "description": 1, "title": { "weight": 4, "length": 256 } },
                 "analyzer": "jazz-text/1:en",
                 "prefix": true
             },
@@ -2633,6 +2649,22 @@ fn malformed_specialised_indexes_are_refused_by_path() {
         (
             serde_json::json!({ "name": "s", "text": { "title": 1 } }),
             "a text index needs `analyzer`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "weight": 1, "length": 0 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title.length: a field's reference length is an integer from 1 to 4096",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "weight": 1, "length": 5000 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title.length: a field's reference length is an integer from 1 to 4096",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "length": 64 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title: a field object needs `weight`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "weight": 1, "len": 64 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title: unknown key `len`",
         ),
         (
             serde_json::json!({ "name": "s", "text": { "title": 1 }, "analyzer": "jazz-text/1:fr" }),

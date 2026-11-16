@@ -10,8 +10,9 @@ pub use crate::model::public_api::types::{
 };
 pub use crate::model::public_api::types::{
     SPECIALISED_INDEX_DECL_ENCODING, SPECIALISED_INDEX_NAME_MAX, SpecialisedIndex,
-    SpecialisedIndexKind, SpecialisedIndexKindName, TEXT_ANALYZERS, TEXT_WEIGHT_MAX, VectorAnn,
-    VectorMetric, canonical_specialised_index_order, is_specialised_index_name,
+    SpecialisedIndexKind, SpecialisedIndexKindName, TEXT_ANALYZERS, TEXT_FIELD_LENGTH_DEFAULT,
+    TEXT_FIELD_LENGTH_MAX, TEXT_WEIGHT_MAX, TextField, VectorAnn, VectorMetric,
+    canonical_specialised_index_order, is_specialised_index_name,
 };
 pub use crate::model::transaction::{OpenTransactionId, TransactionId};
 /// Relation-backed policies (`PolicyExpr::ExistsRel`) use the query relation IR.

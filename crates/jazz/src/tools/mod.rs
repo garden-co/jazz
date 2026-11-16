@@ -39,7 +39,8 @@ pub use public_schema::{
     TableSchema, TableSchemaBuilder, TransactionId, Value, WriteContext, permissions, policy_expr,
 };
 pub use public_schema::{
-    SpecialisedIndex, SpecialisedIndexKind, SpecialisedIndexKindName, VectorAnn, VectorMetric,
+    SpecialisedIndex, SpecialisedIndexKind, SpecialisedIndexKindName, TextField, VectorAnn,
+    VectorMetric,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;

@@ -12,7 +12,7 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{IndexOp, MatchMode, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder, VectorMetric};
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder, TextField, VectorMetric};
 
 use crate::common::{allow_all_policies, compile_schema};
 
@@ -20,6 +20,11 @@ use crate::common::{allow_all_policies, compile_schema};
 /// (weight 4) and about (1), `near` over lat/lng and `similar` over the
 /// embedding (cosine).
 fn schema_with(name_weight: u8) -> JazzSchema {
+    schema_with_fields(TextField::weight(name_weight), TextField::weight(1))
+}
+
+/// [`schema_with`] with each text field's weight and reference length.
+fn schema_with_fields(name: TextField, about: TextField) -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -32,7 +37,7 @@ fn schema_with(name_weight: u8) -> JazzSchema {
                     .policies(allow_all_policies())
                     .text_index(
                         "search",
-                        [("name", name_weight), ("about", 1)],
+                        [("name", name), ("about", about)],
                         "jazz-text/1:en",
                         true,
                     )
@@ -458,4 +463,50 @@ fn text_search_any_returns_rows_with_some_terms_ranked_by_how_many() {
     assert_eq!(ids(&db, &text("berlin harbour")), Vec::<u8>::new());
     assert_eq!(ids(&db, &any("palaces berlin")), [1, 2]);
     assert_eq!(ids(&db, &any("nowhere")), Vec::<u8>::new());
+}
+
+/// A text field's reference length is part of its declaration: a store
+/// reopened with another length records a new declaration and rebuilds the
+/// index over every row.
+#[test]
+fn a_changed_field_length_rebuilds_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("places.sqlite");
+    let open_with = |about: TextField| {
+        block_on(Db::open_at(
+            config(schema_with_fields(TextField::weight(4), about)),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let any = |words: &str| {
+        Query::from("places").search(
+            "search",
+            IndexOp::Match {
+                text: words.into(),
+                mode: MatchMode::Any,
+            },
+        )
+    };
+    let decl = || -> Vec<u8> {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT decl FROM _jazz_ix WHERE name = 'search'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let db = open_with(TextField::weight(1));
+    seed(&db);
+    let ranked = ids(&db, &any("palaces harbour"));
+    drop(db);
+    let before = decl();
+    let db = open_with(TextField {
+        weight: 1,
+        length: 1,
+    });
+    assert_ne!(decl(), before, "a new declaration, rebuilt");
+    assert_eq!(ids(&db, &any("palaces harbour")).len(), ranked.len());
+    assert_eq!(ids(&db, &text("berlin")), [1, 2], "every row indexed again");
 }
