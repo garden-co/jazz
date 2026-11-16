@@ -505,9 +505,9 @@ fn kotlin_tables_may_be_named_as_stdlib_and_runtime_types() {
 }
 
 #[test]
-fn kotlin_is_a_cli_language() {
-    assert_eq!(Lang::parse("kotlin").unwrap(), Lang::Kotlin);
-    assert!(Lang::ALL.contains(&Lang::Kotlin));
+fn kotlin_is_switched_off_in_the_cli() {
+    assert!(Lang::parse("kotlin").unwrap_err().is_unsupported());
+    assert!(!Lang::ALL.contains(&Lang::Kotlin));
 }
 
 #[test]

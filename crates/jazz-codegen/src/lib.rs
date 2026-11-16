@@ -102,9 +102,12 @@ impl Lang {
             "go" | "golang" => Err(CodegenError::unsupported(
                 "generating bindings in Go is not available yet; supported: ts, rust",
             )),
-            "kotlin" | "kt" => Ok(Lang::Kotlin),
+            // Kotlin isn't in this release.
+            "kotlin" | "kt" => Err(CodegenError::unsupported(
+                "Kotlin bindings are not available yet",
+            )),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust, kotlin"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
             ))),
         }
     }
@@ -113,7 +116,7 @@ impl Lang {
     /// Go are not available yet: [`Lang::Swift`] and [`Lang::Go`] are
     /// generated only by direct calls, so no `Package.swift` or `go.mod`
     /// selects them.)
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Kotlin];
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
