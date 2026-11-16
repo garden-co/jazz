@@ -133,9 +133,8 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
     embeds only the schema, so open with
     `Jazz::open(AppFiles::new(jazz_app::APP, None).with_permissions(…), config)`.
 
-    A read that names no tier waits for the main backend's answer (`ReadTier::Remote`), as in Node.
-    To read local data, pass `ReadTier::LocalFirst` to `all_with`. If your main backend can't upgrade
-    sockets, the client falls back to its HTTP stream, as TypeScript clients do.
+    If your main backend can't upgrade sockets, the client falls back to its HTTP stream, as
+    TypeScript clients do.
 
     <include cwd lang="rust" meta='title="src/main.rs"'>
       ../examples/docs/backend-client-rs/src/lib.rs#backend-client-trusted-rust
@@ -162,6 +161,13 @@ identity can hold at most 4 sync sockets at a time for now, so keep to four work
 identity.
 While your main backend is unreachable, `createJazzClient` waits without logging anything, so give a job
 its own timeout.
+
+A backend client reads from your main backend by default: `db.all(query)` (TypeScript) and
+`jazz.all(query)` (Rust) ask the server, so a job sees what other clients wrote. While the main
+backend is unreachable, such a read, and a subscription's first result, waits until it's back; it
+doesn't fail or answer from the local store. Give a job its own timeout, or read local data
+explicitly when an answer now matters more than a fresh one: `db.all(query, { tier: "local-first" })`
+in TypeScript, `jazz.all_with(query, ReadTier::LocalFirst)` in Rust.
 
 The session opens as whatever your main backend trusts the token as: with backend authority for a
 trusted machine, or signed in as its user for a scoped one. Your main backend's API routes see the
