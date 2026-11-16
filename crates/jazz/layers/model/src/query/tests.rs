@@ -2085,9 +2085,18 @@ mod tests {
                 (
                     IndexOp::Match {
                         text: "garden".into(),
+                        mode: MatchMode::Any,
                     },
-                    r#"{"Search":{"index":"s","op":{"Match":{"text":"garden"}}}}"#,
-                    "0d0173000667617264656e",
+                    r#"{"Search":{"index":"s","op":{"Match":{"text":"garden","mode":"Any"}}}}"#,
+                    "0d0173000667617264656e00",
+                ),
+                (
+                    IndexOp::Match {
+                        text: "garden".into(),
+                        mode: MatchMode::All,
+                    },
+                    r#"{"Search":{"index":"s","op":{"Match":{"text":"garden","mode":"All"}}}}"#,
+                    "0d0173000667617264656e01",
                 ),
                 (
                     IndexOp::Nearest {
@@ -2132,6 +2141,21 @@ mod tests {
                     predicate
                 );
             }
+        }
+
+        /// A match mode is `Any` or `All`; any other is refused on decode.
+        #[test]
+        fn unknown_match_modes_are_refused() {
+            assert!(
+                postcard::from_bytes::<Predicate>(&hex::decode("0d0173000667617264656e02").unwrap())
+                    .is_err()
+            );
+            assert!(
+                serde_json::from_str::<Predicate>(
+                    r#"{"Search":{"index":"s","op":{"Match":{"text":"g","mode":"Most"}}}}"#
+                )
+                .is_err()
+            );
         }
 
         #[test]

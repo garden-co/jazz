@@ -642,10 +642,13 @@ pub struct IndexSearch {
 /// What a search asks its index.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum IndexOp {
-    /// Rows whose analyzed fields contain every query term.
+    /// Rows whose analyzed fields contain the query's terms: any of them
+    /// or all of them, by `mode`.
     Match {
         /// The query text, analyzed like the indexed fields.
         text: String,
+        /// Whether a row needs any query term or all of them.
+        mode: MatchMode,
     },
     /// The `k` rows nearest to a vector, by the index metric.
     Nearest {
@@ -697,6 +700,18 @@ impl IndexOp {
             Self::WithinBox { .. } => "withinBox",
         }
     }
+}
+
+/// How many of a text search's terms a row needs (SPEC 20.4). The prefix
+/// term, if any, counts as one term. Either way a row's score sums the
+/// impacts of the terms it holds, so rows holding more rank higher.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum MatchMode {
+    /// At least one term.
+    #[default]
+    Any,
+    /// Every term.
+    All,
 }
 
 /// The reserved order column of a search's score (SPEC 20.4), best first.

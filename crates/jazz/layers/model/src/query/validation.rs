@@ -2476,7 +2476,7 @@ pub fn validate_search(table: &TableSchema, search: &IndexSearch) -> Result<(), 
         }
     };
     match &search.op {
-        IndexOp::Match { text } => {
+        IndexOp::Match { text, .. } => {
             if text.trim().is_empty() {
                 return Err(invalid("the search text is empty".into()));
             }

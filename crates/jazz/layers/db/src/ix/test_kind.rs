@@ -111,7 +111,7 @@ impl Kind for Words {
         op: &IndexOp,
         bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
-        let IndexOp::Match { text } = op else {
+        let IndexOp::Match { text, mode } = op else {
             return Err(Error::new(ErrorCode::Query, "words: not a match"));
         };
         let mut terms: Vec<String> = words(text).collect();
@@ -127,10 +127,13 @@ impl Kind for Words {
         let json = bind(Sql::Text(
             serde_json::to_string(&terms).unwrap().into_bytes(),
         ));
-        let n = bind(Sql::Integer(terms.len() as i64));
+        let n = bind(Sql::Integer(match mode {
+            crate::query::MatchMode::Any => 1,
+            crate::query::MatchMode::All => terms.len() as i64,
+        }));
         Ok(Candidates::Sql(format!(
             "SELECT p.rid AS rid, -sum(p.impact) AS score FROM json_each({json}) AS q \
-             JOIN {post} AS p ON p.term = q.value GROUP BY p.rid HAVING count(DISTINCT p.term) = {n}"
+             JOIN {post} AS p ON p.term = q.value GROUP BY p.rid HAVING count(DISTINCT p.term) >= {n}"
         )))
     }
 }

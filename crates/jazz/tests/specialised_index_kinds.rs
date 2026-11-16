@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{IndexOp, Query};
+use jazz::query::{IndexOp, MatchMode, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder, VectorMetric};
@@ -150,7 +150,13 @@ fn try_ids(db: &Db, query: &Query) -> Result<Vec<u8>, jazz::db::Error> {
 }
 
 fn text(words: &str) -> Query {
-    Query::from("places").search("search", IndexOp::Match { text: words.into() })
+    Query::from("places").search(
+        "search",
+        IndexOp::Match {
+            text: words.into(),
+            mode: MatchMode::All,
+        },
+    )
 }
 
 /// Text matches every query term in some field, after analysis
@@ -387,7 +393,13 @@ fn a_migration_renaming_an_indexed_column_keeps_its_index() {
     let search = |db: &Db, words: &str| {
         ids(
             db,
-            &Query::from("notes").search("search", IndexOp::Match { text: words.into() }),
+            &Query::from("notes").search(
+                "search",
+                IndexOp::Match {
+                    text: words.into(),
+                    mode: MatchMode::All,
+                },
+            ),
         )
     };
     let db = block_on(Db::open_at(with(&v1), &path, FileOptions::default())).unwrap();
@@ -422,4 +434,28 @@ fn a_migration_renaming_an_indexed_column_keeps_its_index() {
     ))
     .unwrap();
     assert_eq!(search(&db, "garden"), [1, 2]);
+}
+
+/// The real text kind under both modes: `Any` returns every row holding a
+/// query term, ranked by the impacts it holds; `All` only rows holding all.
+#[test]
+fn text_search_any_returns_rows_with_some_terms_ranked_by_how_many() {
+    let db = open();
+    seed(&db);
+    let any = |words: &str| {
+        Query::from("places").search(
+            "search",
+            IndexOp::Match {
+                text: words.into(),
+                mode: MatchMode::Any,
+            },
+        )
+    };
+    // Berlin: "berlin" in its name (weight 4). Hamburg: "harbour", the one
+    // word of its description, outranks Potsdam's "berlin", one of three
+    // words in its own (a shorter field gives a term more impact).
+    assert_eq!(ids(&db, &any("berlin harbour")), [1, 3, 2]);
+    assert_eq!(ids(&db, &text("berlin harbour")), Vec::<u8>::new());
+    assert_eq!(ids(&db, &any("palaces berlin")), [1, 2]);
+    assert_eq!(ids(&db, &any("nowhere")), Vec::<u8>::new());
 }

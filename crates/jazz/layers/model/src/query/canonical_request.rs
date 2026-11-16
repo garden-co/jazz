@@ -368,9 +368,13 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
             bytes.push(b's');
             put_str(&mut bytes, &search.index);
             match &search.op {
-                IndexOp::Match { text } => {
+                IndexOp::Match { text, mode } => {
                     bytes.push(0);
                     put_str(&mut bytes, text);
+                    bytes.push(match mode {
+                        MatchMode::Any => 0,
+                        MatchMode::All => 1,
+                    });
                 }
                 IndexOp::Nearest { vector, k } => {
                     bytes.push(1);

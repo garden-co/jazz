@@ -140,7 +140,7 @@ impl Kind for Text {
         op: &IndexOp,
         bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
-        let IndexOp::Match { text } = op else {
+        let IndexOp::Match { text, mode } = op else {
             return Err(Error::new(
                 ErrorCode::Query,
                 "a text index answers `match` only",
@@ -186,12 +186,17 @@ impl Kind for Text {
                  WHERE t.term = {exact} OR {range}"
             ));
         }
-        let n = bind(Sql::Integer(slots as i64));
+        // `Any` needs one slot, `All` every slot (SPEC 20.5).
+        let needed = match mode {
+            crate::query::MatchMode::Any => 1,
+            crate::query::MatchMode::All => slots,
+        };
+        let n = bind(Sql::Integer(needed as i64));
         // Larger impacts are better: the score is their negated sum, so
         // every kind's score is smaller-better.
         Ok(Candidates::Sql(format!(
             "SELECT p.rid AS rid, -sum(p.impact) AS score FROM ({}) AS q \
-             JOIN {post} AS p ON p.tid = q.tid GROUP BY p.rid HAVING count(DISTINCT q.slot) = {n}",
+             JOIN {post} AS p ON p.tid = q.tid GROUP BY p.rid HAVING count(DISTINCT q.slot) >= {n}",
             sources.join(" UNION ALL ")
         )))
     }

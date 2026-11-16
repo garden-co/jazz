@@ -20,7 +20,7 @@ use jazz::db::{
     SyncMessage, Transport, TransportError, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{IndexOp, OrderDirection, Query, col, eq, lit};
+use jazz::query::{IndexOp, MatchMode, OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
@@ -214,7 +214,10 @@ fn update(db: &Db, id: u8, column: &str, value: Value) {
 }
 
 fn text(words: &str) -> IndexOp {
-    IndexOp::Match { text: words.into() }
+    IndexOp::Match {
+        text: words.into(),
+        mode: MatchMode::All,
+    }
 }
 
 fn nearest(vector: &[f32], k: u32) -> IndexOp {
@@ -814,4 +817,86 @@ fn an_evicted_row_leaves_the_replicas_index() {
     pump(&server, &[&bob]);
     assert_eq!(ids(&bob, &Query::from("notes")), [2], "evicted");
     assert_eq!(ids(&bob, &search("garden")), [2]);
+}
+
+fn search_any(words: &str) -> Query {
+    Query::from("notes").search(
+        "search",
+        IndexOp::Match {
+            text: words.into(),
+            mode: MatchMode::Any,
+        },
+    )
+}
+
+/// A text search's mode says how many of its terms a row needs: `Any`
+/// (the default) at least one, `All` every one. Either way a row ranks by
+/// the summed impacts of the terms it holds, so a row holding more of them
+/// ranks higher.
+#[test]
+fn a_text_search_matches_any_or_all_of_its_terms() {
+    let db = seeded();
+    // Row 1: "garden" 2 + 1 = 3; row 2: "soup" 2; row 3: "garden" 2.
+    assert_eq!(ids(&db, &search_any("garden soup")), [1, 2, 3]);
+    assert_eq!(ids(&db, &search("garden soup")), Vec::<u8>::new());
+    // Row 3 holds both terms: 2 + 2 = 4, above row 1's 3.
+    assert_eq!(ids(&db, &search_any("garden tools")), [3, 1]);
+    assert_eq!(ids(&db, &search("garden tools")), [3]);
+    assert_eq!(
+        IndexOp::Match {
+            text: String::new(),
+            mode: Default::default()
+        },
+        IndexOp::Match {
+            text: String::new(),
+            mode: MatchMode::Any
+        },
+        "Any is the default"
+    );
+}
+
+/// A live `Any` search re-checks a row that gains a second query term and
+/// moves it up by its new score, as the query re-run would order it.
+#[test]
+fn a_live_any_search_moves_a_row_up_when_it_gains_a_term() {
+    let db = seeded();
+    let prepared = db.prepare_query(&search_any("garden soup")).unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.tick()).unwrap();
+    while stream.try_next_event().is_some() {}
+    let before = db.fanout_stats();
+    // Row 3 gains "soup" in its body: 2 + 1 = 3, tied with row 1 (by id).
+    update(
+        &db,
+        3,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("soup".into())))),
+    );
+    // And row 2 gains "garden": 2 + 1 = 3 too, ahead of row 3 by id.
+    update(
+        &db,
+        2,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("garden".into())))),
+    );
+    block_on(db.tick()).unwrap();
+    assert!(db.fanout_stats().rechecked > before.rechecked);
+    let mut updated = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Delta { updated: u, .. } = event {
+            updated.extend(u.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+        }
+    }
+    updated.sort();
+    assert_eq!(updated, [2, 3]);
+    assert_eq!(ids(&db, &search_any("garden soup")), [1, 2, 3]);
+    // Row 3 gains "garden" twice more: 2 + 1 + 2 = 5, first.
+    update(
+        &db,
+        3,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("soup garden garden".into())))),
+    );
+    block_on(db.tick()).unwrap();
+    assert_eq!(ids(&db, &search_any("garden soup")), [3, 1, 2]);
 }
