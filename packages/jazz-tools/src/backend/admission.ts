@@ -13,6 +13,18 @@ const RETRY_AFTER_MAX_MS = 30_000;
 // Statuses a gateway or a still-booting core return before any decision.
 const WAKING_STATUSES = new Set([502, 503, 504]);
 
+/**
+ * On a trusted backend client's admission, the main backend names the
+ * permissions bundle it pins the client's socket to (lowercase hex).
+ */
+export const BUNDLE_HEADER = "x-jazz-bundle";
+
+/** What an admission answered with. */
+export interface BackendAdmission {
+  /** The bundle the main backend pins this client to; absent from an older main backend or a bare core. */
+  bundle?: string;
+}
+
 export interface BackendAdmissionOptions {
   fetch?: typeof fetch;
   wakeBudgetMs?: number;
@@ -65,7 +77,7 @@ export async function admitBackendSecret(
   url: string,
   backendSecret: string,
   options: BackendAdmissionOptions = {},
-): Promise<void> {
+): Promise<BackendAdmission> {
   // Reject inputs fetch would refuse before retrying anything, and never echo
   // the secret: Node includes an invalid header value in its error message.
   let parsed: URL;
@@ -96,7 +108,10 @@ export async function admitBackendSecret(
         backendSecret,
         Math.min(attemptTimeoutMs, remaining),
       );
-      if (response.status === 204) return;
+      if (response.status === 204) {
+        const bundle = response.headers.get(BUNDLE_HEADER)?.trim().toLowerCase();
+        return bundle ? { bundle } : {};
+      }
       failure = Object.assign(new Error(`Backend admission failed (${response.status})`), {
         status: response.status,
       });
