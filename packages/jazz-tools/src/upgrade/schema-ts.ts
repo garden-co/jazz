@@ -17,7 +17,7 @@
 import { relative } from "node:path";
 import type * as TS from "typescript";
 import { applyEdits, type TextEdit } from "./edits.js";
-import { notSupportedYet } from "./errors.js";
+import { UpgradeRefusal, notSupportedYet } from "./errors.js";
 import type { MovedExport } from "./extras.js";
 
 type Ts = typeof TS;
@@ -61,7 +61,7 @@ export interface SchemaCodemod {
 export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
   // `import { schema } from "jazz-tools"`: the new export needs the name, so the
   // namespace becomes `s` (`schema.table(…)` → `s.table(…)`) first.
-  const bare = bareSchemaImport(input.ts, input.file, input.text);
+  const bare = bareSchemaImport(input.ts, input.file, input.text, input.root);
   if (bare) {
     const result = codemodSchema({ ...input, text: bare.text });
     result.changes.unshift(
@@ -72,13 +72,22 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
   return codemodSchemaText(input);
 }
 
-/** The text with a bare `schema` import from jazz-tools renamed `s`, or undefined when there's none (or `s` is taken). */
+/**
+ * The text with a bare `schema` import from jazz-tools renamed `s`, or
+ * undefined when there's none. Only references to the namespace change: a
+ * property key stays (`{ schema }` becomes `{ schema: s }`). Refuses what
+ * the rename can't keep: a re-export of the namespace (alpha.66's schema.ts
+ * exports its own `schema`), or an `s` the file already binds or uses.
+ */
 function bareSchemaImport(
   ts: Ts,
   file: string,
   text: string,
+  root: string,
 ): { text: string; line: number } | undefined {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const where = (node: TS.Node) =>
+    `${relative(root, file) || file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`;
   let element: TS.ImportSpecifier | undefined;
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier))
@@ -89,17 +98,69 @@ function bareSchemaImport(
     element ??= named.elements.find((e) => !e.propertyName && e.name.text === "schema");
   }
   if (!element) return undefined;
-  let taken = false;
+
+  /** A name's use as a value or type, not as a property name or key. */
+  const isReference = (node: TS.Identifier): boolean => {
+    const parent = node.parent;
+    if (ts.isPropertyAccessExpression(parent) && parent.name === node) return false;
+    if (ts.isQualifiedName(parent) && parent.right === node) return false;
+    if (
+      (ts.isPropertyAssignment(parent) ||
+        ts.isPropertySignature(parent) ||
+        ts.isPropertyDeclaration(parent) ||
+        ts.isMethodDeclaration(parent) ||
+        ts.isMethodSignature(parent) ||
+        ts.isGetAccessor(parent) ||
+        ts.isSetAccessor(parent) ||
+        ts.isEnumMember(parent)) &&
+      parent.name === node
+    )
+      return false;
+    if (ts.isImportSpecifier(parent) && parent.propertyName === node) return false;
+    if (ts.isExportSpecifier(parent) && parent.name === node && parent.propertyName) return false;
+    if (ts.isBindingElement(parent) && parent.propertyName === node) return false;
+    if (ts.isLabeledStatement(parent) || ts.isBreakOrContinueStatement(parent)) return false;
+    return true;
+  };
+
+  const edits: TextEdit[] = [
+    { start: element.getStart(source), end: element.getEnd(), text: "schema as s" },
+  ];
+  let takenAt: TS.Node | undefined;
+  let reexport: TS.Node | undefined;
   const visit = (node: TS.Node) => {
-    if (ts.isIdentifier(node) && node.text === "s") taken = true;
+    if (ts.isIdentifier(node) && node !== element!.name && isReference(node)) {
+      if (node.text === "s") takenAt ??= node;
+      if (node.text === "schema") {
+        const parent = node.parent;
+        if (ts.isExportSpecifier(parent)) reexport ??= parent;
+        else if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
+          // The identifier is the key too: keep it.
+          edits.push({ start: node.getStart(source), end: node.getEnd(), text: "schema: s" });
+        } else {
+          edits.push({ start: node.getStart(source), end: node.getEnd(), text: "s" });
+        }
+      }
+    }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  if (taken) return undefined;
+  if (reexport) {
+    throw new UpgradeRefusal(
+      "schema.ts re-exports jazz-tools' `schema` namespace, but alpha.66's schema.ts exports its own `schema` (the tables): " +
+        "import the namespace from jazz-tools where it's used instead, then run upgrade again",
+      where(reexport),
+    );
+  }
+  if (takenAt) {
+    throw new UpgradeRefusal(
+      "schema.ts imports `schema` from jazz-tools bare and already uses `s`, the name upgrade gives it: " +
+        "import it as `schema as s` (or another name) yourself, then run upgrade again",
+      where(takenAt),
+    );
+  }
   const line = source.getLineAndCharacterOfPosition(element.getStart(source)).line + 1;
-  const withAlias =
-    text.slice(0, element.getStart(source)) + "schema as s" + text.slice(element.getEnd());
-  return { text: renameIdentifier(ts, file, withAlias, "schema", "s"), line };
+  return { text: applyEdits(text, edits), line };
 }
 
 function codemodSchemaText(input: SchemaCodemodInput): SchemaCodemod {
