@@ -731,7 +731,7 @@ export declare function validateSchema(schema: Uint8Array): void
  * or `"mismatch"` (edited since; formatting alone doesn't count). Throws
  * when the text isn't a JSON object or the marker is malformed.
  */
-export declare function verifyGenerated(text: string): string
+export declare function verifyGenerated(text: string): "none" | "match" | "mismatch"
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 

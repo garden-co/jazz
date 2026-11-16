@@ -36,6 +36,7 @@ import { dirname, extname, join, relative } from "node:path";
 import type * as TS from "typescript";
 import { printPermissions, type AppJson, type PermissionsJson } from "../printer/index.js";
 import { formatTs, layout, loadPrettier } from "../printer/format.js";
+import { expandDefs } from "../printer/defs.js";
 import { isObject, parseAppJson, tsOnlyMarkers } from "./app-json.js";
 import { UpgradeRefusal, notSupportedYet } from "./errors.js";
 import { convertExtras } from "./extras.js";
@@ -146,8 +147,19 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     throw notSupportedYet("computed columns and transforms", rel(project.appFile));
   }
   const app = JSON.parse(appText) as AppJson;
-  const permissions = JSON.parse(permissionsText) as PermissionsJson;
-  const before = await artifactIdentity(appText, permissionsText);
+  const written = JSON.parse(permissionsText) as PermissionsJson;
+  // `defs` (alpha.63–65, refused from alpha.66): expanded where they are called,
+  // as the old loader read them. The printer's helpers usually bring them back.
+  const permissions = written.defs ? expandDefs(written) : written;
+  if (written.defs) {
+    notes.push(
+      `jazz.permissions.json's \`defs\` (${Object.keys(written.defs).join(", ")}) were expanded where they are called; repeated checks became helpers again.`,
+    );
+  }
+  const before = await artifactIdentity(
+    appText,
+    written.defs ? JSON.stringify(permissions) : permissionsText,
+  );
 
   // 2. schema.ts.
   const generatedText = await napiGenerate(appText);

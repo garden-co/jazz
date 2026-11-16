@@ -965,6 +965,18 @@ class Parser {
   }
 }
 
+/** The tokens of an expression, with their source spans (for text-level rewrites). */
+export function tokens(
+  source: string,
+): { kind: Tok["t"]; value?: string; start: number; end: number }[] {
+  const toks = lex(source);
+  return toks.map((t, i) => {
+    let end = i + 1 < toks.length ? toks[i + 1]!.start : source.length;
+    while (end > t.start && /\s/.test(source[end - 1]!)) end--;
+    return { kind: t.tok.t, value: "v" in t.tok ? t.tok.v : undefined, start: t.start, end };
+  });
+}
+
 /** Parse an expression string of `jazz.permissions.json`. */
 export function parseExpr(source: string): Ast {
   const tokens = lex(source);

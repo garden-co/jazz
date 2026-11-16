@@ -32,6 +32,14 @@ pub fn read(
         .as_object()
         .ok_or_else(|| refuse("(top)", "must be an object"))?;
     for (key, _) in top {
+        if key == "defs" {
+            return Err(refuse(
+                "defs",
+                "`defs` was removed in alpha.66: inline each definition where it is \
+                 called, or author the app in schema.ts, where helpers are plain \
+                 functions (`npx jazz-tools upgrade` does this for an alpha.65 app)",
+            ));
+        }
         if key != "$comment" && !TOP_KEYS.contains(&key.as_str()) {
             return Err(refuse(
                 "(top)",
