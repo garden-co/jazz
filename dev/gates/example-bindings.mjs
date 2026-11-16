@@ -7,7 +7,8 @@
  * modules, Swift packages (JazzApp.swift) and Gradle projects (JazzApp.kt),
  * whose language the directory names). StagePlan's go-cli, rust-cli,
  * swift-cli and kotlin-cli re-export react-localfirst's TS, so this also keeps
- * their JSON StagePlan's. A stale file otherwise only shows when a backend
+ * their JSON StagePlan's (and examples/docs/todo-client-kotlin's the docs
+ * todo app's). A stale file otherwise only shows when a backend
  * starts. Runs against the jazz-tools CLI the TypeScript partition built.
  */
 import { spawnSync } from "node:child_process";
