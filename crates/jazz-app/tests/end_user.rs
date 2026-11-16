@@ -990,6 +990,24 @@ async fn a_server_with_another_history_is_reported_as_authority_changed() {
     assert_eq!(json["link"]["reason"], "authority-changed");
     assert_eq!(json["lastError"]["kind"], "authority-changed");
 
+    // Reconnecting tries the server again (as TS's `db.reconnect()`), and
+    // finds it serving another history still.
+    tokio::time::timeout(Duration::from_secs(10), phone.reconnect())
+        .await
+        .expect("reconnect returns after an authority change")
+        .unwrap();
+    let again = sync_until(&phone, |status| {
+        matches!(
+            status.link,
+            Link::Offline {
+                reason: jazz_app::Offline::AuthorityChanged,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(!again.synced);
+
     // Local data stays usable, and nothing is reset.
     assert_eq!(
         phone

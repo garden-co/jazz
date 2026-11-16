@@ -2364,8 +2364,9 @@ impl JazzClient {
         detached
     }
 
-    /// Resume sync after [`JazzClient::disconnect`] (TS's
-    /// `db.reconnect()`), waiting until the link is attached. Returns
+    /// Resume sync after [`JazzClient::disconnect`], or restart a link
+    /// that stopped (TS's `db.reconnect()`), waiting until the link is
+    /// attached. Returns
     /// whether there was anything to reattach: without a server there is
     /// nothing, and it returns `false` at once.
     pub async fn reconnect(&self) -> Result<bool> {
@@ -2375,9 +2376,13 @@ impl JazzClient {
         // An attempt the keeper started before this call (a retry during an
         // outage) may still fail after it: only attempts started from here
         // on answer it.
-        let (started, attached) = {
+        let (started, attached, stopped) = {
             let state = self.shared.state.borrow();
-            (state.connect_started, state.upstream.is_some())
+            let stopped = state
+                .link_status
+                .as_ref()
+                .is_some_and(|status| status.phase == crate::link::LinkPhase::Stopped);
+            (state.connect_started, state.upstream.is_some(), stopped)
         };
         // Neither detached nor reconnecting: nothing to reattach.
         let resumed = self
@@ -2386,6 +2391,14 @@ impl JazzClient {
             .send_if_modified(|paused| std::mem::replace(paused, false));
         if !resumed && attached {
             return Ok(false);
+        }
+        // A link that stopped (the database refused the server's history, a
+        // fatal failure) restarts, as TS's `db.reconnect()` restarts it; one
+        // backing off during an outage keeps its own retry going.
+        if !resumed && stopped {
+            self.shared
+                .upstream_paused
+                .send_modify(|paused| *paused = false);
         }
         // The first attempt either attaches or fails; the keeper retries
         // after a failure on its own.
