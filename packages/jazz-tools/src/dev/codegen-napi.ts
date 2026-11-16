@@ -212,7 +212,7 @@ export async function compileApp(appJson: string): Promise<Record<string, unknow
 /**
  * A `jazz.permissions.json`, as imported or written inline: `$schema` names its
  * version (`https://jazz.tools/schemas/jazz.permissions.v1.json`); a legacy
- * (.63/.64) file carries `format: 1` instead.
+ * (pre-alpha.66) file carries `format: 1` instead.
  */
 export type PermissionsFile = ({ readonly $schema: string } | { readonly format: number }) &
   Readonly<Record<string, unknown>>;

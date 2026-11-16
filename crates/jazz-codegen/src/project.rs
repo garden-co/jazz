@@ -150,7 +150,7 @@ pub fn languages_or(
 /// from), which is refused before any file is written.
 pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, String> {
     let mut outcome = Outcome::default();
-    // Legacy files (.63/.64: `"format": 1`, an unversioned `$schema`) load
+    // Legacy files (before alpha.66: `"format": 1`, an unversioned `$schema`) load
     // as version 1; `generate` rewrites them in the versioned form, and
     // `--check` only warns, so they keep passing until the next `generate`.
     for file in [APP_FILE, PERMISSIONS_FILE] {

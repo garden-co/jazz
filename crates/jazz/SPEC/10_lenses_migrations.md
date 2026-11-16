@@ -817,7 +817,7 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   for fields this version doesn't know. A file without `$schema` is refused
   with a hint to run `jazz-tools generate`; any other URL is refused.
   There is no `format` field.
-- **Legacy files.** .63 and .64 wrote `"format": 1` and the unversioned
+- **Legacy files.** Jazz before alpha.66 wrote `"format": 1` and the unversioned
   `https://jazz.tools/schemas/jazz.app.schema.json`, resp.
   `jazz.permissions.schema.json`. A file carrying `"format": 1` and/or the
   unversioned URL still loads, as version 1 (another `format` is refused like

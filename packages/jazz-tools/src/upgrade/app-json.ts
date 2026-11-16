@@ -272,7 +272,7 @@ export const APP_SCHEMA_URL = "https://jazz.tools/schemas/jazz.app.v1.json";
 
 /**
  * The file in the versioned form: `$schema` first, naming the version, and
- * no `format` (.63/.64 wrote `"format": 1` and an unversioned `$schema`).
+ * no `format` (Jazz before alpha.66 wrote `"format": 1` and an unversioned `$schema`).
  */
 export function versionedAppJson(value: JsonObject): JsonObject {
   const rest = entriesOf(value).filter(([key]) => key !== "format" && key !== "$schema");
@@ -284,7 +284,7 @@ export const PERMISSIONS_SCHEMA_URL = "https://jazz.tools/schemas/jazz.permissio
 const LEGACY_PERMISSIONS_SCHEMA_URL = "https://jazz.tools/schemas/jazz.permissions.schema.json";
 
 /**
- * A .64 jazz.permissions.json's text in the versioned form, edited in place
+ * A pre-alpha.66 jazz.permissions.json's text in the versioned form, edited in place
  * so the rest keeps its bytes; the text unchanged when it is versioned already
  * or laid out unlike a tool-written file (`jazz-tools generate` rewrites it).
  */

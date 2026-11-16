@@ -77,7 +77,7 @@ describe("createJazz takes jazz.permissions.json in every form a project may hol
     ).resolves.toBeTruthy();
   });
 
-  it("starts with a legacy (alpha.63/64) file: format and the unversioned URL", async () => {
+  it("starts with a legacy (pre-alpha.66) file: format and the unversioned URL", async () => {
     await inProject();
     await expect(
       startWith({

@@ -50,7 +50,7 @@ pub const PERMISSIONS_FILE: &str = "jazz.permissions.json";
 /// The JSON Schemas the files name in `$schema`, which carries their version.
 pub const APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.v1.json";
 pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permissions.v1.json";
-/// The unversioned URLs .63 and .64 wrote, next to `"format": 1`. Such files
+/// The unversioned URLs Jazz before alpha.66 wrote, next to `"format": 1`. Such files
 /// still load, as version 1; `jazz-tools generate` rewrites them.
 pub const LEGACY_APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.schema.json";
 pub const LEGACY_PERMISSIONS_SCHEMA_URL: &str =
@@ -755,7 +755,7 @@ fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
 /// than for the fields this version doesn't know.
 ///
 /// `$schema` carries the version: `https://jazz.tools/schemas/<file>.v<N>.json`.
-/// Legacy files (.63/.64) carry `"format": 1` and/or the unversioned
+/// Legacy files (before alpha.66) carry `"format": 1` and/or the unversioned
 /// `<file>.schema.json` URL instead; they read as version 1.
 fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
     let refuse = |message: String| ArtifactError::in_file(file, message);
@@ -807,7 +807,7 @@ fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> 
             .map(str::to_string)
     };
     match get("$schema") {
-        // A legacy file: before .65 `$schema` was only an editor hint, so any
+        // A legacy file: before alpha.66 `$schema` was only an editor hint, so any
         // value (a relative path, another URL, null) loaded next to `format`.
         // Only a versioned URL naming another version contradicts it.
         Some(Json::String(s)) if format.is_some() && versioned(s).is_none() => Ok(root),
@@ -841,7 +841,7 @@ fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> 
     }
 }
 
-/// A legacy (.63/.64) `jazz.app.json` or `jazz.permissions.json` rewritten in
+/// A legacy (pre-alpha.66) `jazz.app.json` or `jazz.permissions.json` rewritten in
 /// the versioned form: `"format": 1` dropped and `$schema` set to the
 /// versioned URL, first. `Ok(None)` when the file isn't legacy. The edit is
 /// textual, so the rest of the file keeps its bytes (and a tool-written file

@@ -758,7 +758,7 @@ fn legacy_files_load_as_version_1() {
         serde_json::Value::Object(out).to_string()
     };
     for (legacy_url, format) in [
-        (true, true),  // what .63/.64 wrote
+        (true, true),  // what Jazz before alpha.66 wrote
         (false, true), // `format` alone
         (true, false), // the old URL alone
     ] {
@@ -798,7 +798,7 @@ fn generate_rewrites_legacy_files_byte_for_byte() {
     ] {
         assert_eq!(upgrade_legacy(file, text).unwrap(), None, "{file}");
         let versioned = format!("\"$schema\": \"{url}\",\n");
-        // What .63/.64 wrote, and `format` alone.
+        // What Jazz before alpha.66 wrote, and `format` alone.
         for legacy in [
             text.replacen(
                 &versioned,

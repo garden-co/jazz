@@ -49,7 +49,7 @@ pub struct AppFile {
 // The keys each object of the file takes (besides `$comment`), which the
 // JSON Schema in docs/public/schemas/ must list too.
 pub const TOP_KEYS: &[&str] = &[
-    // Legacy (.63/.64): `$schema` carries the version now.
+    // Legacy (before alpha.66): `$schema` carries the version now.
     "format",
     "$schema",
     "tables",

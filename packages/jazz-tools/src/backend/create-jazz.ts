@@ -3712,7 +3712,7 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
   provideCodegenNapi(jazzNapi);
   if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
   const permissions = options.permissions as unknown;
-  // `$schema` names the file's version; a legacy (.63/.64) file has `format`.
+  // `$schema` names the file's version; a legacy (pre-alpha.66) file has `format`.
   if (
     !isRecord(permissions) ||
     (typeof permissions.$schema !== "string" && typeof permissions.format !== "number")
