@@ -1,5 +1,5 @@
 import { Utf8Decoder } from "../utf8.js";
-import { bytesToHex, formatUuidAt } from "../hex.js";
+import { bytesToHex, formatUuidAt, parseUuidBytes } from "../hex.js";
 import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { concatBytes, isValidUtf8 } from "../util.js";
@@ -740,6 +740,13 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       if (value.type !== "Timestamp" || !Number.isSafeInteger(value.value)) {
         throw new Error(`expected ${type.type} value`);
       }
+      // Stored as u64 Unix milliseconds, as Rust's `Value::Timestamp`: a
+      // pre-1970 date would wrap around to a far-future one (#5928).
+      if (value.value < 0) {
+        throw new Error(
+          `Timestamp value must be a non-negative safe integer (dates before 1970 are not supported), got ${value.value}`,
+        );
+      }
       const bytes = new Uint8Array(8);
       new DataView(bytes.buffer).setBigUint64(0, BigInt(value.value), true);
       return bytes;
@@ -821,11 +828,9 @@ export function encodeU32Le(value: number): Uint8Array {
 }
 
 function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`invalid UUID value ${value}`);
-  }
-  return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`invalid UUID value ${value}`);
+  return bytes;
 }
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
