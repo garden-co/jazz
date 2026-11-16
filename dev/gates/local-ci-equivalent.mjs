@@ -116,6 +116,8 @@ export const ciPartitions = Object.freeze({
     ]),
     // npm packages, published Rust crates and the Go module share one version.
     command("lockstep versions", "node", ["dev/scripts/check-lockstep-versions.mjs"]),
+    // Every tracked path must check out on Windows (the windows-x86_64 release jobs clone the repo).
+    command("Windows-valid paths", "node", ["dev/gates/windows-paths.mjs"]),
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),

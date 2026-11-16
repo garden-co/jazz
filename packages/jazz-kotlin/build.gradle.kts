@@ -8,10 +8,15 @@ plugins {
     kotlin("jvm") version "2.2.21"
     kotlin("plugin.serialization") version "2.2.21"
     `java-library`
+    // 0.35.0: the last release for Gradle 8 (0.36 needs Gradle 9).
+    id("com.vanniktech.maven.publish") version "0.35.0"
 }
 
+val repo = rootDir.resolve("../..").canonicalFile
+
 group = "tools.jazz"
-version = "2.0.0-alpha.66"
+// Lockstep with every Jazz package: jazz-tools' version.
+version = (groovy.json.JsonSlurper().parse(repo.resolve("packages/jazz-tools/package.json")) as Map<*, *>)["version"] as String
 
 repositories { mavenCentral() }
 
@@ -34,7 +39,6 @@ kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
-val repo = rootDir.resolve("../..").canonicalFile
 val withFfi = (findProperty("jazzFfi") as String?) != "skip"
 val cargoProfile = (findProperty("cargoProfile") as String?) ?: "debug"
 val ffiLib = repo.resolve(
@@ -71,6 +75,8 @@ if (withFfi) {
         kotlin.srcDir(uniffiOut)
     }
     tasks.named("compileKotlin") { dependsOn(generateUniffi) }
+    // The sources jar (Maven Central) packs the generated bindings too.
+    tasks.withType<Jar>().configureEach { dependsOn(generateUniffi) }
     // JNA loads libjazz_ffi from the classpath, at <os>-<arch>/ (linux-x86-64,
     // linux-aarch64, darwin-aarch64, darwin-x86-64, win32-x86-64). A
     // distribution jar bundles every platform's from -PnativeLibs=<dir>, laid
@@ -134,4 +140,50 @@ tasks.named("test") { dependsOn("compileEdgesKotlin"); finalizedBy(goldenTests) 
 tasks.test {
     useJUnitPlatform()
     systemProperty("jna.library.path", ffiLib.parentFile.path)
+}
+
+// Maven Central (dev/scripts/publish-kotlin.sh, .github/workflows/publish-jazz-kotlin.yml):
+// the jar (with every platform's libjazz_ffi from -PnativeLibs), sources, an
+// empty javadoc jar, signed. Credentials and the key come as Gradle
+// properties: mavenCentralUsername, mavenCentralPassword, signingInMemoryKey,
+// signingInMemoryKeyPassword.
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
+    configure(
+        com.vanniktech.maven.publish.KotlinJvm(
+            javadocJar = com.vanniktech.maven.publish.JavadocJar.Empty(),
+            sourcesJar = true,
+        ),
+    )
+    coordinates("tools.jazz", "jazz-kotlin", version.toString())
+    pom {
+        name.set("jazz-kotlin")
+        description.set("Jazz for Kotlin on the JVM: an end-user client of a Jazz app whose backend runs in TypeScript (experimental).")
+        jazzPom()
+    }
+}
+
+fun org.gradle.api.publish.maven.MavenPom.jazzPom() {
+    url.set("https://jazz.tools")
+    inceptionYear.set("2026")
+    licenses {
+        license {
+            name.set("MIT License")
+            url.set("https://github.com/garden-co/jazz/blob/main/LICENSE")
+            distribution.set("repo")
+        }
+    }
+    developers {
+        developer {
+            id.set("garden-co")
+            name.set("Garden Computing, Inc.")
+            url.set("https://github.com/garden-co")
+        }
+    }
+    scm {
+        url.set("https://github.com/garden-co/jazz")
+        connection.set("scm:git:https://github.com/garden-co/jazz.git")
+        developerConnection.set("scm:git:ssh://git@github.com/garden-co/jazz.git")
+    }
 }

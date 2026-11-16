@@ -1345,7 +1345,8 @@ impl JazzClient {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
-            let prepared = self.prepare(&read)?;
+            // A transaction opened for a session reads as that session.
+            let (prepared, session) = self.prepare_read(&read)?;
             let db = self.db()?;
             // A client's serializable read hydrates from the authority,
             // which needs ticks to answer. A branch view composes over the
@@ -1355,7 +1356,7 @@ impl JazzClient {
                 .settle(db.tx_ref(transaction_id).all_prepared_in(
                     &prepared,
                     false,
-                    None,
+                    session,
                     ReadTier::LocalFirst,
                     &opts.read_view.source,
                 ))
@@ -1378,20 +1379,11 @@ impl JazzClient {
         } else {
             let (prepared, session) = self.prepare_read(&read)?;
             let db = self.db()?;
-            let read_local = || {
-                crate::db::block_on(async {
-                    let roots = match &session {
-                        Some(author) => {
-                            db.all_for_identity(&prepared, opts.clone(), author.clone())
-                                .await
-                        }
-                        None => db.all(&prepared, opts.clone()).await,
-                    }?;
-                    // Array relations nest in their parents' cells, as a
-                    // subscription's rows carry them.
-                    db.nest_relations(&prepared, roots)
-                })
-            };
+            // Array relations nest in their parents' cells, as a
+            // subscription's rows carry them, read as the same session as
+            // the roots.
+            let read_local =
+                || crate::db::block_on(db.all_nested(&prepared, opts.clone(), session));
             // A row whose large values are still being fetched answers once
             // their chunks arrive, while the upstream that will send them is
             // connected.
@@ -1989,6 +1981,38 @@ impl JazzClient {
             .closed_transactions
             .insert(transaction_id, ClosedTransaction::RolledBack);
         Ok(true)
+    }
+
+    /// The transactions of the thin session this client stands in for
+    /// (SPEC 8.14): a client a thin session's backend opened in memory,
+    /// linked to the core as that session, serves the session's
+    /// transaction requests ([`crate::thin_transactions`]).
+    pub fn thin_transactions(&self) -> Result<crate::thin_transactions::ThinTransactions> {
+        crate::thin_transactions::ThinTransactions::new(self.shared.identity.author)
+            .map_err(|error| JazzError::Connection(error.message))
+    }
+
+    /// Serve one of the thin session's transaction requests: a commit
+    /// answers once the core accepted its upload.
+    pub async fn serve_thin_transaction(
+        &self,
+        transactions: &mut crate::thin_transactions::ThinTransactions,
+        request: &crate::thin::ThinRequest,
+    ) -> Result<crate::thin::ThinBody> {
+        let db = self.db()?;
+        self.shared
+            .settle(transactions.serve(db, request.id, &request.op))
+            .await
+    }
+
+    /// End the thin session's open transactions and uploads: nothing of
+    /// them reached the core.
+    pub async fn release_thin_transactions(
+        &self,
+        transactions: crate::thin_transactions::ThinTransactions,
+    ) -> Result<()> {
+        let db = self.db()?;
+        self.shared.settle(transactions.release(db)).await
     }
 
     /// How many of this client's commits await the server's verdict.

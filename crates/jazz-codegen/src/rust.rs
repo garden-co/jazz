@@ -194,7 +194,16 @@ impl<'a> Writer<'a> {
         // `generate --check` doesn't find it stale. (Stable Rust takes
         // rustfmt's skip only in this form.)
         out.push_str("#![cfg_attr(rustfmt, rustfmt_skip)]\n");
-        out.push_str("#![allow(dead_code, unused_variables, clippy::all)]\n\n");
+        out.push_str("#![allow(dead_code, unused_imports, unused_variables, clippy::all)]\n\n");
+        // One namespace for app code: `jazz_app::Jazz`, `jazz_app::Result`.
+        // A glob import never clashes with the module's own items: a table
+        // `errors` (`Error`) or `queries` (`Query`) shadows the crate's.
+        out.push_str(
+            "/// Everything `jazz-app-support` exports, so app code needs only this module:\n\
+             /// `jazz_app::Jazz`, `jazz_app::Config`, `jazz_app::Result`. The items below\n\
+             /// take precedence where a name is the same (a table `errors` is `Error`).\n",
+        );
+        let _ = writeln!(out, "pub use {RT}::*;\n");
         out.push_str("/// The `jazz.app.json` these bindings were generated from.\n");
         let _ = writeln!(out, "{SOURCE_PREFIX}{:?};\n", self.app.source);
         for (name, (variants, what)) in &self.enums {

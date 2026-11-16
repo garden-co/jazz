@@ -103,4 +103,7 @@ pub enum Error {
     Jazz(#[from] JazzError),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+/// A result whose error is this crate's [`Error`] unless named. The default
+/// keeps std's two-parameter form working where the crate (or the generated
+/// bindings, which re-export it) is glob-imported: `Result<(), String>`.
+pub type Result<T, E = Error> = std::result::Result<T, E>;

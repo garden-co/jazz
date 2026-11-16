@@ -23,11 +23,11 @@ use std::process::ExitCode;
 
 use std::time::Duration;
 
-use ::jazz_app_support::{
+use serde_json::{Value, json};
+use stage_plan_rust_cli::jazz_app::{
     AppId, BackendClientKind, CLOSE_TIMEOUT, Config, DurabilityTier, Jazz, ObjectId, ReadTier,
     Storage, TokenReason,
 };
-use serde_json::{Value, json};
 use stage_plan_rust_cli::{
     ShowDetails, add_task, ensure_show, jazz_app, move_task, parse_status, tasks_of, tasks_of_with,
 };
@@ -190,7 +190,7 @@ impl Target {
                     .token()
                     .await
                     .map(Some)
-                    .map_err(::jazz_app_support::Error::Config)
+                    .map_err(jazz_app::Error::Config)
             }
         };
         let mut config = Config::new(self.app_id)
@@ -204,7 +204,7 @@ impl Target {
         }
         // A backend client checks the users it acts for by the app's
         // permissions, so it opens with them (as TS createJazzClient does).
-        let files = ::jazz_app_support::AppFiles::new(jazz_app::APP, None)
+        let files = jazz_app::AppFiles::new(jazz_app::APP, None)
             .with_permissions(include_bytes!("../jazz.permissions.json").as_slice());
         let jazz = Jazz::open(files, config).await?;
         let expected = match self.mode {

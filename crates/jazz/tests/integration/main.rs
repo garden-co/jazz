@@ -245,6 +245,8 @@ mod text_splices;
 mod thin_origin_entry_ages;
 #[path = "../thin_origin_writes.rs"]
 mod thin_origin_writes;
+#[path = "../thin_transactions.rs"]
+mod thin_transactions;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]

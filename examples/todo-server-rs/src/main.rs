@@ -25,11 +25,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::net::SocketAddr;
 
-use ::jazz_app_support::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use std::future::IntoFuture;
 use std::time::Duration;
 
 use futures_util::FutureExt;
+use todo_server::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use todo_server::{credential::Credential, jazz_app, router_until};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
