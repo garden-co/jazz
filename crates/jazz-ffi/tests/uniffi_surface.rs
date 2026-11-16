@@ -27,6 +27,17 @@ fn next(deltas: &mpsc::Receiver<Result<Value, String>>) -> Value {
         .expect("not an error")
 }
 
+/// A delta's rows without their result keys (`$key`, checked where results
+/// share an id: tests/result_keys.rs), to compare with written rows.
+fn unkeyed(rows: &Value) -> Value {
+    let mut rows = rows.clone();
+    for row in rows.as_array_mut().unwrap() {
+        assert!(row["$key"].is_string(), "{row}");
+        row.as_object_mut().unwrap().remove("$key");
+    }
+    rows
+}
+
 fn refused(result: Result<impl std::fmt::Debug, JazzError>) -> String {
     match result {
         Err(JazzError::Refused { reason }) => reason,
@@ -253,7 +264,7 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     let reset = next(&deltas);
     assert_eq!(reset["reset"], true);
     assert_eq!(reset["coalesced"], false);
-    assert_eq!(reset["added"], json!([first]));
+    assert_eq!(unkeyed(&reset["added"]), json!([first]));
 
     let second = parse(
         &jazz
@@ -262,7 +273,7 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     );
     let added = next(&deltas);
     assert_eq!(added["reset"], false);
-    assert_eq!(added["added"], json!([second]));
+    assert_eq!(unkeyed(&added["added"]), json!([second]));
 
     let first_id = first["id"].as_str().unwrap().to_owned();
     jazz.update(

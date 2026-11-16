@@ -1,5 +1,7 @@
-//! The StagePlan slice end to end: the app's backend, acting as a signed-in
-//! user against an in-process Jazz server, under StagePlan's own
+//! The StagePlan slice end to end, in-process: main-backend mode against
+//! `jazz-server` stands in for the TypeScript main backend (the CLI itself is
+//! a backend client: `examples/rust-backend-clients` runs it against
+//! `createJazz`), acting as a signed-in user under StagePlan's own
 //! permissions.
 
 use std::time::Duration;

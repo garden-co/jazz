@@ -2,8 +2,8 @@
 //!
 //! The docs include each `#region` by name. Most use the typed API the
 //! generated bindings (`crate::jazz_app`) give the [`Jazz`] handle. What it
-//! doesn't cover yet (per-request sessions, includes, select, recursive
-//! queries, files, serializable transactions with reads) uses the
+//! doesn't cover yet (includes, select, recursive queries, files,
+//! serializable transactions with reads) uses the
 //! low-level `JazzClient`, either directly or through [`Jazz::with_client`].
 //! Permissions are the app's `jazz.permissions.json`.
 #![allow(dead_code)]
@@ -12,54 +12,10 @@ use ::jazz_app_support::jazz;
 use ::jazz_app_support::{
     DurabilityTier, Jazz, ObjectId, Order, ReadTier, Subscription, Timestamp,
 };
-use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Gather, Query, col, eq, lit};
-use jazz::tools::{JazzClient, Session, Value};
+use jazz::tools::{JazzClient, Value};
 
 use crate::jazz_app::{NewTodo, Todo, TodoUpdate, projects, todos};
-
-fn verify_jwt_and_extract_claims(_token: &str) -> (String, String, serde_json::Value) {
-    unimplemented!("replace with your auth provider's JWT verification logic")
-}
-
-// #region backend-request-session-rust
-pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, StatusCode> {
-    let auth = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let (issuer, user_id, claims) = verify_jwt_and_extract_claims(token);
-    Ok(Session::new(issuer, user_id).with_claims(claims))
-}
-// #endregion backend-request-session-rust
-
-// #region backend-request-scoped-client-rust
-pub fn scoped_client_for_session(client: &JazzClient, session: Session) -> JazzClient {
-    client.for_session(session)
-}
-// #endregion backend-request-scoped-client-rust
-
-// #region backend-request-handler-rust
-pub async fn list_todos_for_request(headers: &HeaderMap, jazz: &Jazz) -> Result<usize, StatusCode> {
-    let session = requester_session_from_headers(headers)?;
-    // The typed handle acts as the backend's own user; a request's user
-    // reads through the low-level client, scoped to their session.
-    jazz.with_client(move |client| async move {
-        let user_client = client.for_session(session);
-        let rows = user_client
-            .query(todos::query().into_untyped()?, ReadTier::LocalFirst)
-            .await?;
-        Ok(rows.len())
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-// #endregion backend-request-handler-rust
 
 // #region reading-oneshot-rust
 pub async fn read_todos_oneshot(jazz: &Jazz) -> ::jazz_app_support::Result<Vec<Todo>> {

@@ -258,6 +258,18 @@ pub unsafe extern "C" fn jazz_call(
                 core.sign_out()?;
                 "null".into()
             }
+            "disconnect" => {
+                core.disconnect()?;
+                "null".into()
+            }
+            "reconnect" => {
+                core.reconnect()?;
+                "null".into()
+            }
+            "deleteClientStorage" => {
+                core.delete_client_storage()?;
+                "null".into()
+            }
             "upsert" => core.upsert(
                 &string("table")?,
                 &string("id")?,
@@ -647,7 +659,12 @@ pub unsafe extern "C" fn jazz_watch(
             what,
             Box::new(move |state| {
                 let ctx = &ctx;
-                let json = CString::new(state).unwrap_or_default();
+                // The app closed: a last "error" callback, kind "closed".
+                let (kind, json) = match state {
+                    Some(state) => (kind.as_c_str(), state),
+                    None => (c"error", error_json(&JazzError::Closed)),
+                };
+                let json = CString::new(json).unwrap_or_default();
                 // SAFETY: per `jazz_watch`'s contract.
                 unsafe { cb(ctx.0, kind.as_ptr(), json.as_ptr()) };
             }),

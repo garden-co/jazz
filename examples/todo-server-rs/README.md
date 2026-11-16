@@ -82,6 +82,6 @@ cargo test -p todo-server
 The tests drive the real router:
 
 - CRUD, persistence across restarts and the SSE stream run on a local app.
-- Resync runs against an in-process Jazz server: one backend publishes the bundle and writes as Alice, and a second backend with an empty store reads the write as Bob.
+- Resync runs against an in-process Jazz server. Two clients in main-backend mode stand in for the TypeScript main backend there: one publishes the bundle and writes as Alice, and a second with an empty store reads the write as Bob.
 
 The documentation copy in `examples/docs/todo-server-rs` (`todo-server-docs`) is the same service, plus the Rust snippets the docs include.
