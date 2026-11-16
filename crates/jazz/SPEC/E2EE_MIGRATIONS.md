@@ -217,9 +217,12 @@ returned.
 - A row in a space with no root yet: the first conversion or encrypted write
   stages the space creation (spec §3.2) in the same transaction as the row
   write, and the authority accepts it only from a session that may read and
-  update the space row. A refusal fails that transaction alone, and the
-  device's later encrypted writes to the space are refused `space-pending`
-  until an updater creates it (spec §3.2). Within one transaction the row is never
+  update the space row. A refusal fails that transaction alone. A refusal
+  of the root itself suppresses automatic creation of that space on the
+  device, so its later encrypted writes to the space are refused
+  `space-pending` until a valid root exists or the suppression is lifted
+  (an explicit `createSpace`, or a visible change of the account's member
+  rows or the space row, spec §3.2). Within one transaction the row is never
   observable encrypted under a space that was not accepted.
 - A decrypt writes plaintext. It is refused unless the deploy confirmed the
   decrypt (§5).
@@ -243,9 +246,13 @@ overwrite. A sweeper starts at a random row of its space, so several sweepers
 rarely collide. Sweeping needs Jazz update permission on the rows; a sweeper
 without it skips them and they appear in progress. A sweeper that may update
 a space row without a space creates the space in its first conversion
-transaction (§3.4). The client does not evaluate permissions: a sweeper
-learns that it may not create or convert from refusals, and stops
-sweeping a space after one.
+transaction (§3.4), unless creation of that space is suppressed on its
+device (spec §3.2). The client does not evaluate permissions: a sweeper
+learns that it may not create or convert from refusals. After a refused
+conversion it stops sweeping the space; after a refused creation it follows
+the creation suppression of spec §3.2. The repair of a refused or lost
+creation (spec §3.2) uses the same serializable, bounded, re-reading
+pattern as this sweep.
 
 A sweep starts only when the authority's active schema is the converting
 version or later (§3.7). It pauses when the session goes offline; conversions
@@ -366,10 +373,14 @@ app therefore moves in two deploys:
    write its member rows, while the read rule stays as it is (the deploy
    warns). The app then writes the member rows: for each space row, one row
    per account that should keep reading it, typically from its own
-   membership data, from a client of an updater or a trusted backend.
+   membership data, from a client of an updater or a trusted backend. A
+   space row's creator may also add itself (spec R12).
 2. Change the space table's read rule to `exists __e2ee_members(...)` (spec
    §1.5) and add the encrypted columns. Accounts without a member row lose
-   read access to the space row at this deploy.
+   read access to the space row at this deploy. From then on, a client that
+   creates a space row adds its own first member row by the creator clause
+   (spec §1.5, R12), and the space table's insert rule must not need a
+   member row of the new row.
 
 Permissions that read the column's value are refused by the deploy: once
 encrypted, the server sees only bytes.

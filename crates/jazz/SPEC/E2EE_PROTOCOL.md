@@ -21,8 +21,10 @@ opens the whole history. Members' clients derive all key work from tables
 they can read: a key holder delivers the newest key to every member that
 lacks it, sealed to that member's account, and a key held by an account that
 is no longer a member marks the space as needing a new key. Only sessions
-that may update the space row change its members, create the space or rotate
-its key. Encryption keeps content unreadable outside Jazz's permissions; it
+that may read and update the space row change its members, create the space
+or rotate its key, with two exceptions for membership: the account that
+created the space row may always add itself, and any member may leave.
+Encryption keeps content unreadable outside Jazz's permissions; it
 adds no access rule of its own (§8).
 
 **Precedence.** This document governs protocol behaviour (records, replay,
@@ -314,6 +316,10 @@ replay. "Before `p`" always means strictly earlier position.
   create the space and rotate its key. The space row's read rule comes from
   the members table (R13), so every updater is a member. Jazz permissions
   alone decide both.
+- **Space creator.** The account that created the space row (its
+  `$createdBy.account`). It may add itself as a member at any time, even
+  without update permission and even after it was removed (R12), so it is
+  a permanent owner of the space's membership.
 - **Key version.** A space's key history is a chain: the root version, then
   one per **rotation** (a successor). Each version has an epoch ID and a
   random 32-byte key, and wraps the previous version's key, so the newest key
@@ -322,9 +328,12 @@ replay. "Before `p`" always means strictly earlier position.
   after it.
 - **Delivery.** One key version sealed to one member's account sealing key
   (§2.12), written by a member that holds it (§3.4).
-- **Key holder.** An account that holds a version: it wrote the root or
-  successor of that version (its `accountEnvelope`), or a delivery of it to
-  the account was accepted.
+- **Key holder.** An account that holds a version, as the accepted records
+  show it: it wrote the root or successor of that version (its
+  `accountEnvelope`), or a delivery of it to the account was accepted. This
+  is conservative evidence from envelope metadata, not proof of possession:
+  the server checks no envelope, so an accepted delivery whose envelope does
+  not open still counts (§3.5).
 - **Held key.** A space key this device has authenticated and stores in its
   private store (§6). A held key is sufficient to read and write.
 
@@ -392,12 +401,12 @@ application's encryption declarations (§1.4); the application writes no
 policy for them. Every row carries the space's address, `scopeId` and
 `identifier`, through which its policies reach the space row.
 
-| Table                     | Columns                                                                                                                                                                              | Row ID | Meaning and writer                                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------- |
-| `__e2ee_members`          | `scopeId`, `identifier`, `accountId`                                                                                                                                                 | random | `accountId` is a member of the space. Inserted by an updater; deleted by an updater or by `accountId` itself (R12). |
-| `__e2ee_spaces`           | `scopeId`, `identifier`, `creatorAccountId`, `deviceId`, `accountEpochId`, `epochId`, `mechanism`, `version`, `verification`, `accountEnvelope`, `signature`                         | random | A space root candidate: the first key version. Written by an updater (§3.2).                                        |
-| `__e2ee_space_successors` | `scopeId`, `identifier`, `predecessor`, `historyEpochId`, `epochId`, `authorAccountId`, `authorDeviceId`, `authorEpochId`, `verification`, `history`, `accountEnvelope`, `signature` | random | A rotation: the next key version, linked to the previous one. Written by an updater (§3.5).                         |
-| `__e2ee_space_deliveries` | `scopeId`, `identifier`, `keyEpochId`, `senderAccountId`, `recipientAccountId`, `recipientAccountEpochId`, `envelope`                                                                | random | A key version sealed to a member's account. Written by a member that holds it, to a member (§3.4).                  |
+| Table                     | Columns                                                                                                                                                                              | Row ID | Meaning and writer                                                                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `__e2ee_members`          | `scopeId`, `identifier`, `accountId`                                                                                                                                                 | random | `accountId` is a member of the space. Inserted by an updater, or by the space creator for itself; deleted by an updater or by `accountId` itself (R12). |
+| `__e2ee_spaces`           | `scopeId`, `identifier`, `creatorAccountId`, `deviceId`, `accountEpochId`, `epochId`, `mechanism`, `version`, `verification`, `accountEnvelope`, `signature`                         | random | A space root candidate: the first key version. Written by an updater (§3.2).                                                                            |
+| `__e2ee_space_successors` | `scopeId`, `identifier`, `predecessor`, `historyEpochId`, `epochId`, `authorAccountId`, `authorDeviceId`, `authorEpochId`, `verification`, `history`, `accountEnvelope`, `signature` | random | A rotation: the next key version, linked to the previous one. Written by an updater (§3.5).                                                             |
+| `__e2ee_space_deliveries` | `scopeId`, `identifier`, `keyEpochId`, `senderAccountId`, `recipientAccountId`, `recipientAccountEpochId`, `envelope`                                                                | random | A key version sealed to a member's account. Written by a member that holds it, to a member (§3.4).                                                      |
 
 **The members table** is the one internal table the application uses
 directly. It appears in generated client code; the application reads it (for
@@ -442,9 +451,12 @@ All E2EE tables:
   policies, so core refuses these updates and deletes for every writer, as a
   system-table rule outside the policies ([core hooks](E2EE_CORE_HOOKS.md)
   H7).
-- R2. Every row's author, sender or creator column (`accountId`,
-  `creatorAccountId`, `authorAccountId`, `senderAccountId` as applicable)
-  equals the session account and `$createdBy.account`.
+- R2. Every row's author, sender or creator column (`accountId` of the
+  account tables, `creatorAccountId`, `authorAccountId`, `senderAccountId`
+  as applicable) equals the session account and `$createdBy.account`. The
+  `accountId` of `__e2ee_members` is not an author column: it names the
+  member being added, which may be any account. Only R12's creator clause
+  requires it to be the session account.
 
 Account and device tables (fixed policies):
 
@@ -515,24 +527,68 @@ passes nothing. Below:
   update). This is not the single clause the existing `Inherits` node uses
   for an update. The row image is the space row as the
   checking transaction leaves it: its committed state plus the
-  transaction's own writes, so a space row inserted or updated in the same
-  transaction as the root is checked as written. A policy that requires an
+  transaction's own writes once each has passed its own checks (Jazz's
+  grounding rule, [authorization](7_authorization.md)), so a space row
+  inserted or updated in the same transaction as the root is checked as
+  written. No write is evidence for its own check (R12). A policy that requires an
   actual change of a column (an old-to-new transition) therefore admits no
   member change, creation or rotation; the deploy warns when it can see one.
 
 Both are evaluated by the authority at the operation's commit, against its
 state then. **member(a)** means: the members table has a row with the
 checked row's `scopeId` and `identifier` and `accountId = a` (an `Exists`
-over the members table, correlated with the checked row).
+over the members table, correlated with the checked row). **creator(row)**
+means: the space row exists, not deleted, as the checking transaction sees
+it, and its `$createdBy.account` is the session account (an `Exists` over
+the space table reached through the same `(scopeId, identifier)` link; it
+reads the space row as raw evidence and does not apply the space table's
+read policy).
 
 - R12. **Members.** A member row is readable iff its `accountId` is the
   session account or member(session account): members see the space's
-  other members. Insert iff read(row) and update(row). Delete iff
-  `accountId` is the session account (anyone may leave a space), or
-  read(row) and update(row). A delete is checked against the state before
-  the transaction's own writes (its pre-state). Leaving is a removal like
-  any other: the leaver still holds the current key, so the space needs
-  rotation (§3.5).
+  other members. Insert iff read(row) and update(row), **or**
+  `accountId` is the session account and creator(row) (the **creator
+  clause**). Delete iff `accountId` is the session account (anyone may
+  leave a space), or read(row) and update(row). A delete is checked against
+  the state before the transaction's own writes (its pre-state). Leaving is
+  a removal like any other: it deletes every member row of the account for
+  the space (§1.3), and the leaver still holds the current key, so the space
+  needs rotation (§3.5).
+
+  **Why the creator clause.** A new space's first member cannot be admitted
+  by read(row): read(row) needs a member row (R13), and Jazz never lets a
+  write be the evidence for its own check. Within a transaction, a written
+  row becomes evidence only after its own checks pass, and the row under
+  check never counts for itself ([authorization](7_authorization.md),
+  "Policy evidence inside a transaction"). So a space row and its first
+  member row, in any order and in any kind of transaction, are refused if
+  the member row can pass only through read(row). The creator clause does
+  not read the members table: once the space row has passed its own insert
+  check it is evidence, and the creator's member row passes on it.
+
+  **The creator is a permanent owner.** `$createdBy` never changes, so the
+  space row's creator can add itself at any time: after it was removed, and
+  whether or not it may update the space row. Removing the creator's member
+  rows therefore does not exclude it for good. It may add only itself by
+  this clause, never another account. An application that needs a creator
+  who can be removed creates its space rows, with their first member rows,
+  from a trusted backend: the space row's creator is then not a client
+  account, and only updaters add members.
+
+  Required tests: a fresh space row and its creator's member row in one
+  transaction are accepted, in both insert orders, in mergeable,
+  serializable and handle transactions; the same transaction with the
+  member row admissible only through read(row) and update(row) (the creator
+  clause removed) is refused, pinning the grounding rule; a session that is
+  neither the creator nor an updater adding itself to an existing space is
+  refused; the creator adding another account by the creator clause alone
+  is refused; a removed creator re-adding itself is accepted (the
+  documented consequence); a member that may not update the space row
+  deletes its own member rows, including when a further read conjunct
+  (R13) hides the space row from it, and is accepted; such a member deleting
+  another account's member row is refused; an updater deleting its own
+  member row is accepted.
+
 - R13. **Space row read rule.** Every space table that any encrypted table
   with at least one encrypted column names as its `scope` has a read
   (`select`) policy that is `M(T)` or a conjunction that has `M(T)` as one of its conjuncts, where
@@ -556,9 +612,11 @@ accountId = session.user)` (`table_id` is T's catalogue identity, [core
   update(row).
 - R17. **Deliver.** Insert into `__e2ee_space_deliveries` iff
   member(session account) and member(`recipientAccountId`).
-- R18. Application tables keep their own read and write policies. The space
-  row's read rule is the confidentiality rule of everything in the space
-  (§1.5, §8).
+- R18. Application tables keep their own read and write policies.
+  Membership (R12, through `M(T)` in R13) is the cryptographic entitlement
+  to everything in the space: every member receives the keys. Further
+  conjuncts of the space row's read rule narrow which members Jazz sends the
+  rows to, not which members can decrypt them (§1.5, §8).
 
 Nothing else is checked by the server: not that a root is the first of its
 address, that a successor's author holds the key, that a delivery names a
@@ -589,14 +647,22 @@ members, creates and rotates:
 ```json
 "projects": {
   "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)",
+  "insert": "$createdBy.account = session.user",
   "update": "ownerId = session.user"
 }
 ```
 
 An application creating a project inserts the project row and its creator's
-member row in one transaction; R12 checks the member row against the
-transaction's end state, in which the creator may read and update the
-project.
+member row in one transaction. The project passes its own insert rule, which
+must not need a member row of the new project (no member row can ground it,
+R12). The member row then passes R12's creator clause on the project as
+written; it cannot pass through read and update of the project, which need
+the member row itself. If the same transaction also carries the space root
+(§3.2), the root passes R15 once the member row has passed, so the project,
+its first member and its root can be one transaction. The creator remains a
+permanent owner (R12): an application that must be able to remove a
+project's creator creates projects and their first member rows from a
+trusted backend. Every other account is added by an updater.
 
 - **Column entries.** A `columns` value is either a type string (`"title":
 "string"`) or, during a schema conversion, an object with `type` and the
@@ -620,6 +686,11 @@ project.
   encrypted row but is not a member receives the ciphertext and never a
   key, so it reports the row `key-unavailable`. It cannot decide either
   comparison in general and does not claim to.
+- **Space row insert rule.** A space table's insert rule must be satisfiable
+  without a member row of the row being inserted (for example
+  `$createdBy.account = session.user`): such a member row cannot ground it
+  (R12). The deploy warns when it can see an insert rule of a space table
+  that reads `__e2ee_members` for the row being inserted.
 
 Application-wide encryption settings live in an optional top-level
 `encryption` object of `jazz.app.json`, beside `tables`: `allowAccountReset`
@@ -1398,32 +1469,92 @@ is created only:
   the runtime first reads the address's roots, so it does not stage a root
   for a space that already has one;
 - **explicitly**, by `db.encryption.createSpace(row)`: one transaction
-  holding only the root (stage `create`), which waits for Global acceptance;
+  holding only the root (stage `create`), which waits for Global
+  acceptance. Online it first reads the address's roots and returns the
+  existing space if one has a valid root. It always attempts otherwise,
+  even after an earlier refusal on this device (it lifts the creation
+  suppression, below), except while this device has a creation of the
+  space whose outcome is pending or unknown: it then reconciles that
+  creation and returns its outcome instead of staging a second root;
 - **for members without one**: a member's runtime that sees member rows of
   a space with no valid root (the account's own member rows are readable to
-  it, R12) creates the space after a random delay, as `createSpace`, so that
-  usually one updater does;
+  it, R12) creates the space after a random delay, in a transaction holding
+  only the root like `createSpace`, so that usually one updater does. This
+  background attempt respects the creation suppression (below); it never
+  lifts it;
 - by a conversion sweep, in its first conversion transaction for the space
-  ([migrations](E2EE_MIGRATIONS.md) §3.5).
+  ([migrations](E2EE_MIGRATIONS.md) §3.5), which also respects the
+  suppression.
 
 **Creation is optimistic.** A Jazz replica evaluates no write policy, and
 the runtime does not try to predict the authority's decision: it stages a
 root whenever it needs a space that has none, online or offline, and the
-authority decides (R15). A refusal fails only the transaction that carried
-the root, with the authority's refusal; when the refused row is the root,
-the SDK reports it as a publication error of stage `create` with code
-`space-create-refused`, naming the space. A device tries at most once per
-space: after a refusal it never stages a root for that space again, and
-later encrypted writes to the space fail with `space-pending` and reads of
-it report the space `space-pending` (§4.3) until a valid root exists, which
-an updater's runtime creates when it sees the space's member rows. A member
-that may not update the space row therefore cannot create it. Before a root
-is staged, the runtime prepares it: online it reads the address's roots,
-and it generates `K₀`, writes the root and stores `K₀` as an `unpublished`
-held key (§5.4). The write then stages the prepared root. Inside a
-transaction callback the staging call awaits this like an acquisition
-(§5.6). If a root was missed (offline, or not yet synced), the new one is a
-lost creation (below).
+authority decides (R15). Before a root is staged, the runtime prepares it:
+online it reads the address's roots, and it generates `K₀`, writes the root
+and stores `K₀` as an `unpublished` held key (§5.4). The write then stages
+the prepared root. Inside a transaction callback the staging call awaits
+this like an acquisition (§5.6). If a root was missed (offline, or not yet
+synced), the new one is a lost creation (below). A member that may not
+update the space row cannot create it.
+
+**Outcomes of a creation attempt.** The runtime tells four outcomes apart:
+
+- **Creation refused**: the authority refused the root row itself (R15).
+  The SDK reports a publication error of stage `create` with code
+  `space-create-refused`, naming the space, and the device records a
+  creation suppression for the space (below). A refusal of a transaction
+  that holds only the root (`createSpace`, the background creation) is
+  always this outcome.
+- **Transaction failed otherwise**: the transaction that carried the root
+  failed definitively for another reason: another of its rows was refused,
+  it conflicted, or a refusal does not name the root. The transaction's own
+  error is reported, and no suppression is recorded: the failure says
+  nothing about this device's right to create. The next write that needs
+  the space prepares a fresh root.
+- **Cancelled before submission**: nothing reached the authority. Only the
+  cancellation is reported, and no suppression is recorded.
+- **Unknown**: the outcome is reconciled by the transaction's durable
+  identity (§5.4, §5.6), never by staging another root. While it is pending
+  or unknown, no path, `createSpace` included, stages a second root for the
+  space on this device.
+
+Whatever the outcome, a key whose root did not become the space's root
+follows §5.4 and is repaired as below.
+
+**Creation suppression.** After a creation refused, the runtime's automatic
+paths (the first encrypted write, the background creation for members and
+a conversion sweep) stage no root for that space on this device: encrypted
+writes to the space fail with `space-pending`, and reads report it
+`space-pending` (§4.3), until a valid root exists or the suppression is
+lifted. The runtime never retries in a loop. The suppression is lifted:
+
+- by an explicit `createSpace(row)`, which attempts at once (a further
+  refusal records the suppression again);
+- for the background creation only, when the device sees a change that can
+  change the authority's answer: its account's own member rows for the space
+  differ from those recorded with the suppression (a row added, or removed
+  and added again), or the space row differs from the version recorded with
+  it (members read it, R13). Each such change allows one new background
+  attempt, after a random delay. The failure of an unrelated operation, a
+  reconnection or a restart is no such change.
+
+Permission changes the device cannot see (for example a role kept in
+another table, or a newly deployed permissions bundle) lift nothing: an
+application that grants update rights that way calls `createSpace`. The
+suppression is per device and is kept in the private store (§6.1), so a
+restart does not retry; it is removed once a valid root of the space is
+known.
+
+Required tests: after a creation refused, an encrypted write fails
+`space-pending` without staging a root, and an explicit `createSpace`
+attempts and, once the session may update the space row, creates the
+space; a member that was refused and is then given update permission
+through a change of the space row creates the space once by the background
+path; an unrelated failed operation, a reconnection and a restart cause no
+new attempt; a transaction that fails because another of its rows is
+refused, and a cancellation before submission, record no suppression; a
+`createSpace` while an earlier creation's outcome is unknown reconciles it
+and stages no second root.
 
 **Several roots.** The server does not limit roots per address (R15).
 Concurrent creators, offline creators, and a creator whose root clients
@@ -1437,25 +1568,54 @@ only on account state as of the root's position, so every client picks the
 same root, and an invalid first root never blocks a valid later one. A root
 that is not the space's root is a **lost creation**.
 
-**Refused and lost creations.** A creation that is definitively refused, or
-that is accepted but lost, leaves this device with a key no one else will
-use. The transaction that carried a refused root wrote nothing. Later
+**Refused and lost creations.** A creation whose root does not become the
+space's root (refused, failed, cancelled before possible submission, or
+accepted but lost) leaves this device with a key no one else will use. The
+transaction that carried a root that was not accepted wrote nothing. Later
 transactions that encrypted under its key, which do not depend on the
 creation, may have been accepted by Jazz; their cells name an epoch that is
 not in the space's chain, so every other member reports them
 `invalid-ciphertext`. The device keeps the key, marked `refused` (§6.2),
 while it repairs its own rows:
 
-- if its account is a member, the runtime obtains the space's real key
-  (by delivery, §3.4, once a valid root exists), then re-encrypts, under
-  that key, the rows it wrote under the refused or lost key (it reads the
-  space's rows and selects cells naming that epoch, a cost proportional to
-  the space), and then discards the key (§5.4);
-- if it is not a member, those rows stay unreadable to everyone else, and
-  the key is discarded: Jazz no longer serves the device the space's rows.
+- if its account is a member, the runtime obtains the space's real key (by
+  delivery, §3.4, once a valid root exists), then repairs the rows it wrote
+  under the losing key (below) and then discards that key (§5.4);
+- if it is not a member, or the session can no longer read the space row,
+  those rows stay unreadable to everyone else, and the key is discarded:
+  Jazz no longer serves the device the space's rows.
 
-Re-encryption is an ordinary update and needs Jazz update permission on the
-rows; rows the device may no longer update stay unreadable to others.
+**Repair** is an online background task of the runtime, built like the
+conversion sweep ([migrations](E2EE_MIGRATIONS.md) §3.5). It finds the
+space's rows with a cell naming the losing epoch (it reads the space's rows,
+a cost proportional to the space), and rewrites them in serializable
+transactions of bounded size (default 100 rows). Each transaction reads
+every row it repairs, including the row's space coordinate and the exact
+cells it rewrites; it decrypts the cells that still name the losing epoch,
+and only those, and writes the same plaintext re-encrypted under the newest
+held version of the space's chain (§5.2), with fresh equality tags. Other
+cells are not written. Read-set validation (§0 item 5) refuses the
+transaction if any row it read changed after its cut, so a concurrent edit,
+move or delete is never overwritten: the runtime re-reads and repairs only
+the cells that still name the losing epoch. A cell a later write replaced is
+left as it is. Repair never replays an application callback or source; its
+transactions are runtime publications, retried internally after a conflict
+(§7). It needs Jazz update permission on the rows: a row whose repair is
+refused is skipped and stays unreadable to others. It does not run offline.
+
+**Key retention.** The losing key is kept, marked `refused`, until a pass
+over the space's rows, made while the real key is held, finds no cell
+naming the losing epoch other than in rows whose repair was refused. A
+conflict, an interruption or a restart before then keeps the key, and the
+next pass starts again from the rows themselves (no cursor is needed). Only
+then is the key discarded (§5.4).
+
+Required tests: device A wrote row R under the losing key with value `old`;
+after the space's root is known, another member writes `new` to R under the
+real key; A's repair, which read `old`, conflicts, re-reads and leaves
+`new` untouched; a repair interrupted between batches keeps the key and
+finishes after a restart; a row whose repair is refused stays unreadable to
+others and the key is then discarded.
 
 ### 3.3 Key chain and acquiring a key
 
@@ -1536,12 +1696,20 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   looks delivered to everyone else, nobody delivers again, so the device
   emits an `invalid-delivery` encryption event `{space, sender, keyEpochId}`
   once per delivery (the sender is `senderAccountId`, which every member
-  can see, R14), and its runtime rotates the space (§3.5), which gives
-  every member a fresh delivery; the authority accepts that rotation only
-  from an updater. Otherwise the member stays `key-pending` until an
-  updater rotates. A member is trusted with the key anyway (it could
-  disclose it); the application's remedy for a member that delivers badly
-  is to remove it.
+  can see, R14). The cure is a rotation, which gives every member a fresh
+  delivery, and a rotation needs an updater whose device holds the current
+  version (§3.5). The receiving runtime attempts one rotation for the
+  event only when its own device holds the current version; then the
+  authority accepts it only if the account is an updater. A device that
+  lacks the version the bad delivery named, which is the usual case and
+  always the case for a newly added updater's first delivery, cannot
+  rotate (`rotation-needs-key`) and makes no attempt: it stays
+  `key-pending` until an updater that does hold the current version
+  rotates. The application relays the event to such an updater (members
+  can see who holds which version, R14), which calls
+  `db.encryption.rotate(space)`. A member is trusted with the key anyway
+  (it could disclose it); the application's remedy for a member that
+  delivers badly is to remove it.
 - **Not a member.** A device whose account has no member row for the space
   (its own member rows are readable to it, R12) reports what it cannot
   decrypt `key-unavailable`: nobody will deliver to it.
@@ -1551,8 +1719,12 @@ holder; a delivery naming an epoch of another space is never written; a
 delivery to an account without a member row is refused (R17); a reset member
 receives the current version again; a delivery whose recipient's account
 rotates between the holder's read and its commit is refused and redone
-against the new epoch; a member that receives a delivery that fails to open reports
-`invalid-delivery` and its runtime attempts a rotation.
+against the new epoch; a member that receives a delivery that fails to open
+reports `invalid-delivery`; a newly added updater whose first delivery
+fails to open makes no rotation attempt (it would fail
+`rotation-needs-key`) and stays `key-pending`; an explicit rotation by an
+updater that holds the current version then gives that member a fresh
+delivery, which it opens.
 
 ### 3.5 Rotation and removal
 
@@ -1581,13 +1753,43 @@ writes with the newest one it holds (§5.2).
 **Needs rotation.** A space **needs rotation** when its current version is
 held (§1.1) by an account that is no longer a member, or was sealed to an
 account epoch that a later `remove-device` account successor (§2.8)
-superseded, so that a removed device can open it. The mark is derived from
-tables every member can read (members, roots, successors, deliveries and the
-public account successors, R10, R12, R14); nobody writes it, nobody can
-forget or forge it, and the next rotation clears it, since the new version is
-delivered to current members' current account epochs only. Each member's
-runtime evaluates it when the space's members, deliveries or chain change,
-at a cost proportional to the members and the current version's envelopes.
+superseded, so that a removed device can open it. "Later" means anywhere
+after that epoch in the account's chain, even with other successors in
+between. The mark is derived from tables every member can read (members,
+roots, successors, deliveries and the public account successors, R10, R12,
+R14); nobody writes it and nobody can forget it.
+
+The mark is conservative evidence from the accepted records' envelope
+metadata, not authenticated proof that anyone holds a key: the server checks
+no envelope (§1.4) and R17 checks only membership. A current member can
+therefore insert a delivery with a junk envelope that names the current
+version and an account epoch of another member that a `remove-device`
+successor already superseded; the space is then marked although no key was
+transferred. This reveals no key to anyone who is not a member; it costs a
+rotation, and the member can repeat it for each new version. It is a
+member-induced availability and cost limit, like bad deliveries (§3.4, §8).
+A rotation clears the mark it answers, since the new version is delivered
+to current members' current account epochs only, unless such a record is
+written again for the new version.
+
+Each member's runtime evaluates the mark when the space's members,
+deliveries or chain change, and when the public account history of an
+account holding the current version changes (a new account successor, in
+particular a `remove-device`), even when no space table changed, at a cost
+proportional to the members and the current version's envelopes. These are
+the subscriptions of [core hooks](E2EE_CORE_HOOKS.md) H6.
+
+Reactions to the mark are bounded: it never triggers a rotation by itself.
+A marked space is rotated only on the occasions below, at most once per
+mark of the current version, so a forged record causes at most one rotation
+per version it names and never an automatic loop.
+
+Required tests: a `remove-device` account successor of a member that holds
+the current version, with no change to any space table, marks the space;
+so does one separated from the envelope's account epoch by other
+successors; a raw delivery with an invalid envelope naming a superseded
+account epoch of another member marks the space, and the next encrypted
+write by an updater makes exactly one rotation.
 
 **Rotation is lazy and coalesced; never per write.** A space that needs
 rotation is rotated:
@@ -1629,7 +1831,8 @@ space (§8).
 row's read rule comes from members, R13), no delivery to it is accepted
 (R17), and the space needs rotation, which happens lazily as above. The
 removed account keeps every key it already held, which stay usable for
-content of their versions (§8). Removing a device of an account is handled
+content of their versions (§8). The space row's creator cannot be removed
+for good: it may add itself again (R12). Removing a device of an account is handled
 through the same mark: revoke its sign-in, then the space is rotated (§2.8).
 
 ### 3.6 New devices, recovery and account changes
@@ -1651,9 +1854,9 @@ author's account-history predicate (active device, not removed, keys and
 mechanisms matching). Space creation may be offline, staged in the same
 transaction as the encrypted write that needs it, exactly as online (§3.2,
 §5.4). Member rows written offline are ordinary writes, submitted on
-reconnection. Deliveries and rotation are online only. On reconnection,
-Jazz permissions decide acceptance; a refused or lost creation is repaired
-as in §3.2.
+reconnection. Deliveries, rotation and repair are online only. On
+reconnection, Jazz permissions decide acceptance; a refused or lost creation
+is repaired as in §3.2 once the device is online and holds the real key.
 
 ## 4. Reads
 
@@ -1744,16 +1947,16 @@ An ordinary query or subscription leaves out a row with an undecryptable
 encrypted cell and returns the rest; no partial plaintext is returned. Report
 `{table, id, column, code, space}`:
 
-| Code                 | Meaning                                                                                                                                 |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `invalid-ciphertext` | Authentication failed; the cell belongs to another row, table, column or space; malformed; no such epoch in the space's chain           |
-| `unsupported-format` | Unknown envelope mechanism or version                                                                                                   |
-| `key-unavailable`    | This device lacks that version's key and its account is not a member of the space (§3.4)                                                |
-| `key-pending`        | Per space, not per row: this account is a member and lacks a version it needs; a member's delivery is awaited (§3.4)                    |
-| `space-pending`      | Per space, like `key-pending`: the space row has no valid root yet, and this device's creation was refused or not yet made (§3.2)       |
-| `empty-cell`         | The stored cell is the empty byte string; the row is returned with the column's default (§4.1)                                          |
-| `superseded`         | The cell holds the cleared marker (§4.1) and this reader's declaration names no conversion for the column                               |
-| `stale-space`        | The cell was sealed under another space of the same row's history; it was read and needs repair ([migrations](E2EE_MIGRATIONS.md) §3.9) |
+| Code                 | Meaning                                                                                                                                        |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid-ciphertext` | Authentication failed; the cell belongs to another row, table, column or space; malformed; no such epoch in the space's chain                  |
+| `unsupported-format` | Unknown envelope mechanism or version                                                                                                          |
+| `key-unavailable`    | This device lacks that version's key and its account is not a member of the space (§3.4)                                                       |
+| `key-pending`        | Per space, not per row: this account is a member and lacks a version it needs; a member's delivery is awaited (§3.4)                           |
+| `space-pending`      | Per space, like `key-pending`: the space row has no valid root yet, and this device's creation was refused (suppressed) or not yet made (§3.2) |
+| `empty-cell`         | The stored cell is the empty byte string; the row is returned with the column's default (§4.1)                                                 |
+| `superseded`         | The cell holds the cleared marker (§4.1) and this reader's declaration names no conversion for the column                                      |
+| `stale-space`        | The cell was sealed under another space of the same row's history; it was read and needs repair ([migrations](E2EE_MIGRATIONS.md) §3.9)        |
 
 A `key-pending` or `space-pending` report carries `{table, space, code}` with
 no `id` or `column`, and is deduplicated by `(table, space)`; it is not repeated for
@@ -1896,15 +2099,17 @@ a second root for a space while it holds an unpublished key for it.
 The creation's outcome decides the key's fate:
 
 - **Accepted, and the space's root** (§3.2): the mark is cleared.
-- **Refused** (at Local or Global, or cancelled before possible submission),
-  or **accepted but lost** to an earlier valid root: the record is rewritten
-  with the mark `refused`. The key stays usable by this device for reading
-  its own rows and for the repair of §3.2 (obtaining the real key and
-  re-encrypting its rows written under this one), and is never used for a
-  new write. When the repair is done, or the session cannot read the space
-  row, the epoch is fenced in memory, leases are erased, and only the record
-  matching this device and exactly that root, epoch and signature is
-  removed.
+- **Not accepted** (the root was refused, or its transaction failed
+  otherwise, at Local or Global, or was cancelled before possible
+  submission, §3.2), or **accepted but lost** to an earlier valid root: the
+  record is rewritten with the mark `refused`. Only a refusal of the root
+  itself also records the creation suppression (§3.2). The key stays usable
+  by this device for reading its own rows and for the repair of §3.2
+  (obtaining the real key and rewriting the cells it wrote under this one),
+  and is never used for a new write. When the repair is complete (§3.2,
+  "Key retention"), or the session cannot read the space row, the epoch is
+  fenced in memory, leases are erased, and only the record matching this
+  device and exactly that root, epoch and signature is removed.
 - **Unknown**: the mark is kept.
 
 After a restart the runtime reconciles each `unpublished` record by its
@@ -1912,7 +2117,7 @@ stored transaction identity: accepted clears the mark (or marks it
 `refused` when another root won), refused marks it `refused`, pending and
 unknown keep it; if the identity is unknown to the store and a valid root of
 the address is readable, the mark is cleared when it is this record's root
-and set to `refused` otherwise.
+and set to `refused` otherwise. Reconciliation never stages another root.
 
 ### 5.5 Streaming large values
 
@@ -1938,7 +2143,7 @@ source.
   instead fails such a staging call with `key-pending` and aborts the
   transaction; the application acquires keys first with
   `db.encryption.acquire(space)` (which also prepares a missing space's
-  root, §3.2, and makes a pending rotation, §3.5) and runs the transaction
+  root unless its creation is suppressed on this device, §3.2, and makes a pending rotation, §3.5) and runs the transaction
   again.
 - Unknown outcomes are reconciled by the original transaction's identity, not
   by resubmitting.
@@ -1948,9 +2153,12 @@ source.
 ### 6.1 Store
 
 Private state is kept in a store separate from authentication storage. Per
-scope `Dₐ(account)` it holds one device document and one held-key document
-per space the device holds keys for, so storing a key rewrites
-only that space's document:
+scope `Dₐ(account)` it holds one device document, one held-key document per
+**space root** the device holds keys for, and one creation-suppression
+document. Held keys are kept per root, not per address, so the key of a
+lost or refused root under repair (§3.2) and the keys of the address's real
+root are durable side by side. Storing a key rewrites only that root's
+document:
 
 ```text
 device document:
@@ -1962,10 +2170,22 @@ device document:
 held-key document (one per space root):
 { "format": "jazz-e2ee-held-space-v1", "revision": n,
   "lineage": <lineage record>, "keys": [ held-key record … ] }
+
+creation-suppression document (one per scope):
+{ "format": "jazz-e2ee-create-suppressed-v1", "revision": n,
+  "spaces": [ { scopeId, identifier, memberRowIds: [..],
+                spaceRowVersion } … ] }
 ```
 
 `devices` holds at most one device, the one of the document's scope. An
-unknown format is refused and never overwritten.
+unknown format is refused and never overwritten. The creation-suppression
+document lists the spaces whose creation the authority refused to this
+device (§3.2), with the evidence the background creation compares against:
+the IDs of the account's own member rows for the space and the version of
+the space row (its `$updatedAt`) as the device read them at the refusal. It
+holds no secret and only gates automatic retries; an entry is removed once a
+valid root of its space is known, and the document is wiped with the held
+keys (§6.4).
 
 Device private keys are never stored in the clear:
 
@@ -2117,24 +2337,24 @@ space whose conversion or tag backfill is unfinished fails with the query
 error `conversion-pending` ([migrations](E2EE_MIGRATIONS.md) §3.3), which
 names the table, column, space and pending count.
 
-| Outcome                     | Codes                                                                                                                                                                                            | Must                                                                                                | Must not                                                                                       |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Device approval pending     | None                                                                                                                                                                                             | Show "waiting for approval or keys"; complete approval or recovery                                  | Re-approve, or treat the account as signed out                                                 |
-| Key pending                 | `key-pending`                                                                                                                                                                                    | Report the space `key-pending`; subscriptions wait one bounded episode, then emit and keep watching | Poll, fail the read, or report each row `key-unavailable`                                      |
-| Key unavailable             | `key-unavailable`                                                                                                                                                                                | Return what held keys decrypt; report the rest                                                      | Write plaintext, or wait for a delivery                                                        |
-| Space pending               | `space-pending`                                                                                                                                                                                  | Refuse the write `space-pending`; report the read; watch for the root                               | Retry the refused creation on this device, or write plaintext                                  |
-| Superseded / stale space    | `superseded`, `stale-space`                                                                                                                                                                      | Report; leave a `superseded` row out; return a `stale-space` row                                    | Report either as `invalid-ciphertext`                                                          |
-| Permission refusal          | Publication outcome `refused`, with its specific code                                                                                                                                            | Report; reflect in local state                                                                      | Treat key possession as overriding it                                                          |
-| Authentication failure      | `invalid-ciphertext`                                                                                                                                                                             | Leave the row out (ordinary reads) or fail (strict reads)                                           | Return unverified plaintext                                                                    |
-| Unsupported format          | `unsupported-format`                                                                                                                                                                             | Report                                                                                              | Treat as invalid ciphertext                                                                    |
-| Encryption failed           | `encryption-failed`                                                                                                                                                                              | Fail the write                                                                                      | Submit plaintext                                                                               |
-| Provider failure            | The mechanism's `CryptoFailure` (distinct from `InvalidCiphertext`, `InvalidInput`, `NoKeyForMechanism` and a `false` verification), and a writer's failure to read back output it just produced | Fail the operation loudly; preserve the error                                                       | Report it as key unavailable, corrupted ciphertext or an invalid proof; try the next candidate |
-| Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`                                                                                                                                         | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
-| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `conflicting-account-key`, `missing-root-key`, `missing-recipient-key`, `missing-signer-key`                                                     | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
-| Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
-| Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
-| Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                  | Fall back to a scan                                                                            |
-| Timeout / cancellation      | Timeout, cancellation                                                                                                                                                                            | Erase owned secrets; stop unsubmitted work                                                          | Claim a submitted operation failed                                                             |
+| Outcome                     | Codes                                                                                                                                                                                            | Must                                                                                                                     | Must not                                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| Device approval pending     | None                                                                                                                                                                                             | Show "waiting for approval or keys"; complete approval or recovery                                                       | Re-approve, or treat the account as signed out                                                 |
+| Key pending                 | `key-pending`                                                                                                                                                                                    | Report the space `key-pending`; subscriptions wait one bounded episode, then emit and keep watching                      | Poll, fail the read, or report each row `key-unavailable`                                      |
+| Key unavailable             | `key-unavailable`                                                                                                                                                                                | Return what held keys decrypt; report the rest                                                                           | Write plaintext, or wait for a delivery                                                        |
+| Space pending               | `space-pending`                                                                                                                                                                                  | Refuse the write `space-pending`; report the read; watch for the root and for a change that lifts the suppression (§3.2) | Retry a refused creation automatically without such a change, or write plaintext               |
+| Superseded / stale space    | `superseded`, `stale-space`                                                                                                                                                                      | Report; leave a `superseded` row out; return a `stale-space` row                                                         | Report either as `invalid-ciphertext`                                                          |
+| Permission refusal          | Publication outcome `refused`, with its specific code                                                                                                                                            | Report; reflect in local state                                                                                           | Treat key possession as overriding it                                                          |
+| Authentication failure      | `invalid-ciphertext`                                                                                                                                                                             | Leave the row out (ordinary reads) or fail (strict reads)                                                                | Return unverified plaintext                                                                    |
+| Unsupported format          | `unsupported-format`                                                                                                                                                                             | Report                                                                                                                   | Treat as invalid ciphertext                                                                    |
+| Encryption failed           | `encryption-failed`                                                                                                                                                                              | Fail the write                                                                                                           | Submit plaintext                                                                               |
+| Provider failure            | The mechanism's `CryptoFailure` (distinct from `InvalidCiphertext`, `InvalidInput`, `NoKeyForMechanism` and a `false` verification), and a writer's failure to read back output it just produced | Fail the operation loudly; preserve the error                                                                            | Report it as key unavailable, corrupted ciphertext or an invalid proof; try the next candidate |
+| Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`                                                                                                                                         | Leave the dependent state unresolved                                                                                     | Treat the record as invalid                                                                    |
+| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `conflicting-account-key`, `missing-root-key`, `missing-recipient-key`, `missing-signer-key`                                                     | Fail current replay; skip only a candidate decided at a fixed signed cutoff                                              | Pick one of the conflicting rows                                                               |
+| Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                                       | Resubmit blindly or replay a callback or source                                                |
+| Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                                                   | Attach private material to the error                                                           |
+| Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                                       | Fall back to a scan                                                                            |
+| Timeout / cancellation      | Timeout, cancellation                                                                                                                                                                            | Erase owned secrets; stop unsubmitted work                                                                               | Claim a submitted operation failed                                                             |
 
 Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 `approval`, `account-rotation`, `account-key`, `recovery-root`,
@@ -2144,39 +2364,40 @@ Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 Serialization and transaction conflicts are retried internally only by
 operations that are safe to repeat because they re-read their evidence and
 stage fresh rows: the runtime's own publications (space creation outside an
-application transaction, rotation and deliveries), conversion
-sweeps, and a staging call retried after "needs key" before submission
+application transaction, rotation, deliveries and the repair of refused or
+lost creations, §3.2), conversion sweeps, and a staging call retried after "needs key" before submission
 (§5.6). A public mutation or transaction callback is never retried or
 replayed: its conflict is returned to the caller, and an unknown outcome is
 reconciled by its transaction identity.
 
 Refusal codes:
 
-| Code                            | Refusal                                                                                                                                           |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `account-has-history`           | Bootstrap found existing account evidence (§2.3).                                                                                                 |
-| `device-identity-conflict`      | A device request or key row exists with different keys (§2.2).                                                                                    |
-| `device-keys-mismatch`          | The device's keys do not match its accepted request.                                                                                              |
-| `no-device-request`             | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                             |
-| `reset-device-active`           | An account reset by a device that is still active in the current generation (§2.11).                                                              |
-| `device-not-active`             | The acting device is not an active device of the account.                                                                                         |
-| `device-removed`                | The device was removed and needs a new device ID.                                                                                                 |
-| `stale-challenge`               | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                         |
-| `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                   |
-| `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                           |
-| `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                             |
-| `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                    |
-| `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                  |
-| `space-pending`                 | An encrypted write to a space that has no valid root, after this device's creation of it was refused (§3.2).                                      |
-| `space-create-refused`          | The authority refused the root staged with a write or by `createSpace` (§3.2); only that transaction fails.                                       |
-| `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all. |
-| `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                      |
+| Code                            | Refusal                                                                                                                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `account-has-history`           | Bootstrap found existing account evidence (§2.3).                                                                                                                              |
+| `device-identity-conflict`      | A device request or key row exists with different keys (§2.2).                                                                                                                 |
+| `device-keys-mismatch`          | The device's keys do not match its accepted request.                                                                                                                           |
+| `no-device-request`             | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                          |
+| `reset-device-active`           | An account reset by a device that is still active in the current generation (§2.11).                                                                                           |
+| `device-not-active`             | The acting device is not an active device of the account.                                                                                                                      |
+| `device-removed`                | The device was removed and needs a new device ID.                                                                                                                              |
+| `stale-challenge`               | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                      |
+| `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                                                |
+| `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                                                        |
+| `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                                          |
+| `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                                 |
+| `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                               |
+| `space-pending`                 | An encrypted write to a space that has no valid root, while this device's creation of it is suppressed after a refusal (§3.2).                                                 |
+| `space-create-refused`          | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device suppresses automatic creation of the space. |
+| `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                              |
+| `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                                   |
 
 ## 8. Security properties and limits
 
 **Trust boundary.** Jazz permissions alone decide who may read a space: its
-member rows, from which the space row's read rule must come (R13), and the
-update rule that decides who changes them. E2EE protects content against
+member rows, from which the space row's read rule must come (R13), the
+update rule that decides who changes them, and the space row's creator,
+who may always add itself (R12). E2EE protects content against
 ciphertext leaking outside Jazz: a leaked database or backup, a copied
 replica, or an operator who reads storage. It does not protect against a
 server, an operator or a permission bug that adds a member row (that
@@ -2218,18 +2439,31 @@ Limits:
   by members (and by updaters offline) stays under a key the removed account
   holds; Jazz stops sending it rows, but a database leak would expose that
   content to it.
+- **The space row's creator is a permanent owner.** Its member row passes
+  R12's creator clause, which needs no update permission, so the creator
+  can add itself back at any time after being removed and then receives
+  every key, the history included. Removing it only until it re-adds itself
+  is not exclusion. Applications that must be able to remove a space's
+  creator create the space row and its first member row from a trusted
+  backend (§1.5).
 - **Removal cannot erase copies.** A delivered key is never revoked. Keys,
   plaintext and ciphertext a former member already obtained remain with it,
   and old versions stay readable to whoever holds their keys.
 - **New members get the full history.** The newest key opens every earlier
-  version, so anyone added as a member can decrypt everything ever written
-  in the space. Content that a later member must not see belongs in another
-  space.
+  version, except versions skipped by a recovery rotation (§3.3, §3.5), which
+  only their holders' deliveries give. So anyone added as a member can
+  decrypt everything ever written in the space, apart from content under
+  skipped versions that no member still holds. Content that a later member
+  must not see belongs in another space.
 - **Keys need a key holder's client online.** Nobody delivers keys but
   members' clients (§3.4): a new member, a reset member, or a member who
   missed a rotation's delivery waits, `key-pending`, until a device of a
-  member holding the key is online. A rotation delivers to every current
-  member at once (§3.5), so this wait is mostly for members added later.
+  member holding the key is online. A rotation delivers to at most 100
+  current members in its own transaction and to the rest in later batches
+  from the rotator; members without a valid sealing key, or not yet reached
+  when the rotator went offline, wait for any holder (§3.5). So the wait
+  falls mostly on members added later, on large spaces, and on members
+  whose account has no sealing key yet.
 - **Losing the current key needs a recovery rotation, and loses content.** If
   every holder of the current version loses it before anyone else obtains it
   (for example the rotator loses its only device before any other member
@@ -2264,8 +2498,13 @@ Limits:
   to them or rotates them.
 - **Members can deliver badly.** A member can deliver keys that fail; the
   recipient reports `invalid-delivery` naming the sender, and stays
-  `key-pending` until an updater rotates (§3.4). The application's remedy
-  is removing that member.
+  `key-pending` until an updater that holds the current version rotates
+  (§3.4). The recipient itself usually cannot rotate, even as an updater,
+  since it lacks the version the bad delivery named. A member can also mark
+  the space as needing rotation with a junk delivery naming a superseded
+  account epoch (§3.5), which costs one rotation per version it names. The
+  mark is conservative evidence, not proof of key possession. The
+  application's remedy is removing that member.
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.
