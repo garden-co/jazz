@@ -3948,6 +3948,10 @@ impl Db {
             if make_current {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
+                // Kept checks were compiled under the old policies; drop
+                // them now, before a fallible step below can return
+                // without reaching `reset_everything`.
+                inner.clear_check_plans();
                 // Read policies that changed may read differently from
                 // here: a subscription resuming from before opens fresh.
                 let mut digest = jazz_types::sha256::Hasher::new();
