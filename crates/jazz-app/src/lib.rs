@@ -36,9 +36,11 @@
 //! part of a release yet: `Endpoint`, the app's `/jazz` handler served
 //! natively. Run an app's main backend with TS `createJazz`.
 //!
-//! Not supported yet: partial reads of large values. A bearer session is
-//! renewed by reconnecting with a fresh bearer, as TypeScript's bearer
-//! clients do (in-place renewal is for cookie sessions).
+//! [`Query::part`] reads part of a large value ([`ValuePart`]): a byte
+//! range, a text range or a JSON subtree.
+//!
+//! A bearer session is renewed by reconnecting with a fresh bearer, as
+//! TypeScript's bearer clients do (in-place renewal is for cookie sessions).
 
 mod advice;
 mod app;
