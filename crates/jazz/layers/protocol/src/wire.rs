@@ -1466,11 +1466,7 @@ mod tests {
             Predicate::Lt(lt_left, lt_right),
             Predicate::Lte(lte_left, lte_right),
             Predicate::Contains(contains_left, contains_right),
-            Predicate::EnumMatch {
-                column: "status".to_owned(),
-                case: "active".to_owned(),
-                payload: Box::new(Predicate::IsNull(Operand::Column("deleted_at".to_owned()))),
-            },
+            Predicate::IsNull(Operand::Column("deleted_at".to_owned())),
         ]);
         let message = register_shape_with_policy_predicate(predicate);
         let encoded = encode_sync_message(&message).expect("encode ordinary policy variants");

@@ -92,6 +92,10 @@ path = "tests/client_restart_integration.rs"
 required-features = ["test"]
 
 [[test]]
+name = "generate_languages"
+path = "tests/generate_languages.rs"
+
+[[test]]
 name = "heap_sampler"
 path = "tests/heap_sampler.rs"
 
