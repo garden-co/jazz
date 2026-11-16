@@ -147,7 +147,13 @@ func fromRequestJSON(text string) *http.Request {
 
 // onAuth is jazz-ffi's authenticate callback: a malloc'ed answer, or 0
 // for no one.
-func onAuth(ctx, request uintptr) uintptr {
+func onAuth(ctx, request uintptr) (result uintptr) {
+	// A panicking Authenticate names no one (fails closed).
+	defer func() {
+		if recover() != nil {
+			result = 0
+		}
+	}()
 	value, ok := endpoints.Load(uint64(ctx))
 	if !ok {
 		return 0
@@ -262,6 +268,7 @@ func (e *Endpoint) serveSocket(w http.ResponseWriter, r *http.Request) {
 
 // onSocketMessage is jazz-ffi's on_message: a message for the client.
 func onSocketMessage(ctx, data, n uintptr) {
+	defer func() { _ = recover() }()
 	if value, ok := sockets.Load(uint64(ctx)); ok {
 		value.(*wsConn).write(opBinary, goBytes(data, n))
 	}
@@ -269,6 +276,7 @@ func onSocketMessage(ctx, data, n uintptr) {
 
 // onSocketClosed is jazz-ffi's on_close: the code and reason to close with.
 func onSocketClosed(ctx, code, reason uintptr) {
+	defer func() { _ = recover() }()
 	if value, ok := sockets.Load(uint64(ctx)); ok {
 		value.(*wsConn).close(uint16(code), goString(reason))
 	}

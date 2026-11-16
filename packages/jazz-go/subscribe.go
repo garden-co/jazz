@@ -44,6 +44,8 @@ var (
 
 // onSubscription is jazz-ffi's subscription and watch callback.
 func onSubscription(ctx, kind, text uintptr) {
+	// A panic must not cross into jazz-ffi (it would kill the process).
+	defer func() { _ = recover() }()
 	value, ok := subscribers.Load(uint64(ctx))
 	if !ok {
 		return

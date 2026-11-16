@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,9 +136,17 @@ var (
 
 // onToken is jazz-ffi's token callback: 0 with *token set (NULL: signed
 // out), or non-zero for a failed fetch, *token its message.
-func onToken(ctx, reason, token uintptr) int32 {
+func onToken(ctx, reason, token uintptr) (status int32) {
 	out := (*uintptr)(unsafe.Add(unsafe.Pointer(nil), token))
 	*out = 0
+	// A panicking provider fails closed as a failed fetch: no token, the
+	// session stays, and the panic doesn't cross into jazz-ffi.
+	defer func() {
+		if r := recover(); r != nil {
+			*out = mallocString(fmt.Sprintf("token provider panicked: %v", r))
+			status = 1
+		}
+	}()
 	value, ok := providers.Load(uint64(ctx))
 	if !ok {
 		return 0 // the app closed: signed out

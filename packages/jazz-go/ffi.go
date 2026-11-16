@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -135,20 +136,32 @@ func libraryPath() (string, error) {
 }
 
 // extractEmbedded writes the embedded library once into the user cache
-// dir, named by its hash, and returns its path.
+// dir, named by its hash, and returns its path. The directory must be the
+// user's own and not writable by others, so no one else can swap the
+// library between the check and the load; there is no shared fallback.
 func extractEmbedded() (string, error) {
 	sum := sha256.Sum256(embeddedLibrary)
-	dir, err := os.UserCacheDir()
+	cache, err := os.UserCacheDir()
 	if err != nil {
-		dir = os.TempDir()
+		return "", fmt.Errorf("jazz: no user cache dir to keep Jazz's core in (%v): set JAZZ_FFI_LIBRARY", err)
 	}
-	dir = filepath.Join(dir, "jazz-go", hex.EncodeToString(sum[:8]))
-	path := filepath.Join(dir, libraryFile())
-	if b, err := os.ReadFile(path); err == nil && sha256.Sum256(b) == sum {
-		return path, nil
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dir := filepath.Join(cache, "jazz-go", hex.EncodeToString(sum[:8]))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
+	}
+	if err := private(filepath.Join(cache, "jazz-go")); err != nil {
+		return "", err
+	}
+	if err := private(dir); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, libraryFile())
+	if f, err := os.Open(path); err == nil {
+		b, readErr := io.ReadAll(f)
+		f.Close()
+		if readErr == nil && sha256.Sum256(b) == sum {
+			return path, nil
+		}
 	}
 	tmp, err := os.CreateTemp(dir, ".lib-*")
 	if err != nil {
@@ -159,12 +172,38 @@ func extractEmbedded() (string, error) {
 		os.Remove(tmp.Name())
 		return "", err
 	}
+	if err := tmp.Chmod(0o500); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", err
+	}
 	tmp.Close()
 	if err := os.Rename(tmp.Name(), path); err != nil && !errors.Is(err, os.ErrExist) {
 		os.Remove(tmp.Name())
 		return "", err
 	}
 	return path, nil
+}
+
+// private refuses a directory others may write to (or that isn't ours),
+// tightening one we own.
+func private(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("jazz: %s is not a directory", dir)
+	}
+	if !ownedByUs(info) {
+		return fmt.Errorf("jazz: %s isn't yours: refusing to load Jazz's core from it (set JAZZ_FFI_LIBRARY)", dir)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		if err := os.Chmod(dir, info.Mode().Perm()&^0o022); err != nil {
+			return fmt.Errorf("jazz: %s is writable by others: %v", dir, err)
+		}
+	}
+	return nil
 }
 
 // cstr is s as a NUL-terminated string: keep the slice alive (it is) for

@@ -44,12 +44,14 @@ type Config struct {
 	// (left empty, it is set so).
 	Session *Session `json:"session,omitempty"`
 	// AllowPlaintext lets ServerURL be http:// or ws:// to a host other than
-	// this machine. Credentials then cross the network unencrypted: only for
-	// a private network you trust.
-	AllowPlaintext bool `json:"-"`
+	// this machine (passed to the core as allowInsecureHttp). Credentials
+	// then cross the network unencrypted: only for a private network you
+	// trust.
+	AllowPlaintext bool `json:"allowInsecureHttp,omitempty"`
 }
 
 // String is c without its secrets, so logging a Config never leaks them.
+// (json.Marshal(c), which Open sends to the core, does include them.)
 func (c Config) String() string {
 	redact := func(s string) string {
 		if s == "" {
