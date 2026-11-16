@@ -347,6 +347,41 @@ impl JazzHandle {
     pub fn shutdown(&self) -> Result<()> {
         self.core.surface(self.core.close())
     }
+
+    /// [`Self::shutdown`], first waiting up to `timeout_ms` for the writes
+    /// the client holds to reach the server (TS's `close({ timeoutMs })`,
+    /// 10 000 by default there). With memory storage, writes still unsent
+    /// fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
+    /// the app is closed all the same. `0` closes at once.
+    pub fn shutdown_within(&self, timeout_ms: u64) -> Result<()> {
+        self.core.surface(
+            self.core
+                .close_within(Some(std::time::Duration::from_millis(timeout_ms))),
+        )
+    }
+
+    /// A backend client's kind (`"auth": { "credential": true }`), as the
+    /// main backend decided it: `"trusted"` or `"scoped"`; `None` for any
+    /// other app.
+    pub fn backend_client(&self) -> Result<Option<String>> {
+        self.core
+            .surface(self.core.backend_client())
+            .map(|kind| kind.map(str::to_owned))
+    }
+
+    /// On a trusted backend client, a handle acting as `user_id` (the id the
+    /// main backend's `authenticate` names them by), with `claims_json` (a
+    /// JSON object; empty for `{}`) as the claims its permissions see. It
+    /// never creates an account: `NoAccount` (contract 2) when the user has
+    /// none yet; `Permission` when the main backend refuses the identity.
+    /// Its `shutdown` leaves this handle open; after this handle closes, its
+    /// calls fail with `Closed`.
+    pub fn for_user(&self, user_id: String, claims_json: String) -> Result<Arc<Self>> {
+        let core = self
+            .core
+            .surface(self.core.for_user(&user_id, &claims_json))?;
+        Ok(Arc::new(Self { core }))
+    }
 }
 
 impl JazzHandle {

@@ -36,6 +36,9 @@ pub(crate) struct Core {
     pub(crate) contract: u64,
     /// Run first when the app closes: a C host's callbacks stop here.
     close_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A trusted backend client's handle acting for a user (`for_user`): it
+    /// shares its parent's client, so closing it leaves that client running.
+    derived: bool,
 }
 
 /// How a call runs: inside a transaction, and/or at a durability or read
@@ -221,10 +224,28 @@ impl Core {
         let has_server = config.server_url.is_some();
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
-        Ok(Self {
+        Ok(Self::with(
             jazz,
-            schema: Arc::new(schema),
-            relations: convert::Relations::read(&app_text),
+            Arc::new(schema),
+            convert::Relations::read(&app_text),
+            has_server,
+            contract,
+            false,
+        ))
+    }
+
+    fn with(
+        jazz: Jazz,
+        schema: Arc<Schema>,
+        relations: convert::Relations,
+        has_server: bool,
+        contract: u64,
+        derived: bool,
+    ) -> Self {
+        Self {
+            jazz,
+            schema,
+            relations,
             closed: AtomicBool::new(false),
             subscriptions: Mutex::new(Vec::new()),
             // Ids start at a random point, so a stale id from another
@@ -234,7 +255,55 @@ impl Core {
             has_server,
             contract,
             close_hook: Mutex::new(None),
-        })
+            derived,
+        }
+    }
+
+    /// A backend client's kind, as the main backend decided it: `"trusted"`
+    /// or `"scoped"`; `None` for any other app.
+    pub fn backend_client(&self) -> Result<Option<&'static str>> {
+        Ok(self.open_jazz()?.backend_client().map(|kind| match kind {
+            jazz_app::BackendClientKind::Trusted => "trusted",
+            jazz_app::BackendClientKind::Scoped => "scoped",
+        }))
+    }
+
+    /// On a trusted backend client, a handle acting as `user_id` (the id the
+    /// main backend's `authenticate` names them by), with `claims_json` (an
+    /// object, or empty for `{}`) as the claims permissions see. It never
+    /// creates an account: `NoAccount` when the user has none yet, and
+    /// `Permission` when the main backend refuses the identity (its 403).
+    pub fn for_user(&self, user_id: &str, claims_json: &str) -> Result<Self> {
+        let claims = if claims_json.trim().is_empty() {
+            Json::Object(Default::default())
+        } else {
+            convert::parse(claims_json, "the claims")?
+        };
+        if !claims.is_object() {
+            return Err(refused("the claims must be a JSON object"));
+        }
+        if user_id.is_empty() {
+            return Err(refused(
+                "for_user needs the user's id, as the main backend's authenticate names it",
+            ));
+        }
+        let jazz = match block_on(self.open_jazz()?.for_user(user_id, claims)) {
+            Ok(jazz) => jazz,
+            Err(jazz_app::Error::Refused(reason)) => {
+                return Err(FfiError::Permission(format!(
+                    "the main backend refused to act for {user_id}: {reason}"
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self::with(
+            jazz,
+            self.schema.clone(),
+            self.relations.clone(),
+            self.has_server,
+            self.contract,
+            true,
+        ))
     }
 
     /// An error as this host's contract version names it.
@@ -1058,10 +1127,27 @@ impl Core {
     }
 
     pub fn close(&self) -> Result<()> {
-        // Even when signing out already ended the app: the host's callbacks
-        // stop here.
-        self.run_close_hook();
+        self.close_within(None)
+    }
+
+    /// [`Self::close`], first waiting up to `timeout` for the writes the
+    /// client holds to reach the server: with memory storage, writes still
+    /// unsent then fail it with `Unsynced` (the app closes all the same).
+    /// `None`, or a zero timeout, closes at once.
+    pub fn close_within(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        let drain = timeout.filter(|t| !t.is_zero() && !self.derived);
+        // The host's callbacks stop here, even when signing out already
+        // ended the app; but after draining, which may need a fresh token.
+        if drain.is_none() {
+            self.run_close_hook();
+        }
         if self.closed.swap(true, Ordering::AcqRel) {
+            self.run_close_hook();
+            return Ok(());
+        }
+        if self.derived {
+            // The parent's client goes on (its transactions included).
+            self.end_subscriptions();
             return Ok(());
         }
         // Open transactions roll back while their client still runs.
@@ -1072,15 +1158,23 @@ impl Core {
             }
             Ok(())
         }));
-        let result = block_on(self.jazz.shutdown());
-        // Each open subscription's last event: the app closed.
+        let result = match drain {
+            Some(timeout) => block_on(self.jazz.close(timeout)),
+            None => block_on(self.jazz.shutdown()),
+        };
+        self.run_close_hook();
+        self.end_subscriptions();
+        result?;
+        Ok(())
+    }
+
+    /// Each open subscription's last event: the app closed.
+    fn end_subscriptions(&self) {
         let subscriptions =
             std::mem::take(&mut *self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()));
         for delivery in subscriptions.iter().filter_map(Weak::upgrade) {
             delivery.send(Some(Event::Error(JazzError::Closed)));
         }
-        result?;
-        Ok(())
     }
 }
 
@@ -1460,7 +1554,14 @@ fn config(
             )));
         }
     };
-    let backend = permissions.is_some();
+    // A backend client: a machine syncing through the app's main backend
+    // with its own credential. Its `permissions` are the app's bundle (as
+    // TS's createJazzClient takes them), not published.
+    let credential = matches!(
+        auth.as_ref().and_then(|a| a.get("credential")),
+        Some(Json::Bool(true))
+    );
+    let backend = permissions.is_some() && !credential;
     let app_id = match app_id {
         Some(text) => AppId::from_string(&text)
             .map_err(|_| refused(format!("config.appId must be a UUID, not {text:?}")))?,
@@ -1512,6 +1613,33 @@ fn config(
             return Err(refused(
                 "\"auth\" is for an end user; a backend has a \"session\"",
             ));
+        }
+    } else if credential {
+        if result.server_url.is_none() {
+            return Err(refused(
+                "a backend client (\"auth\": { \"credential\": true }) needs \"serverUrl\": the main backend's /jazz",
+            ));
+        }
+        if auth
+            .as_ref()
+            .and_then(Json::as_object)
+            .is_some_and(|a| a.len() > 1)
+        {
+            return Err(refused(
+                "config.auth is { \"credential\": true } alone for a backend client",
+            ));
+        }
+        if backend_secret.is_some() || admin_secret.is_some() || session.is_some() {
+            return Err(refused(
+                "a backend client's credential decides who it is: leave out backendSecret, adminSecret and session",
+            ));
+        }
+        let tokens = tokens.ok_or_else(|| {
+            refused("\"auth\": { \"credential\": true } needs a token provider: open with one")
+        })?;
+        result = result.credential(Tokens(tokens));
+        if insecure {
+            result = result.allow_insecure_http();
         }
     } else if let Some(auth) = auth {
         // An end user, syncing through the app's Jazz endpoint.

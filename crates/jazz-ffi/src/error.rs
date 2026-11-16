@@ -23,6 +23,14 @@ pub enum JazzError {
     /// retrying it may succeed.
     #[error("{reason}")]
     Conflict { reason: String },
+    /// Contract 2: a trusted backend client acted for a user who has no
+    /// account yet (TS's `NoJazzAccountError`, `code: "no_account"`).
+    #[error("{reason}")]
+    NoAccount { user_id: String, reason: String },
+    /// Contract 2: closing with a timeout left `pending` writes unsent
+    /// (memory storage, where they are lost).
+    #[error("{reason}")]
+    Unsynced { pending: u64, reason: String },
 }
 
 impl JazzError {
@@ -35,7 +43,9 @@ impl JazzError {
         match self {
             Self::Permission { reason }
             | Self::NotSupported { reason }
-            | Self::Conflict { reason } => Self::Refused { reason },
+            | Self::Conflict { reason }
+            | Self::NoAccount { reason, .. } => Self::Refused { reason },
+            Self::Unsynced { reason, .. } => Self::Io { reason },
             other => other,
         }
     }
@@ -49,6 +59,8 @@ impl JazzError {
             Self::Permission { .. } => "permission",
             Self::NotSupported { .. } => "notSupported",
             Self::Conflict { .. } => "conflict",
+            Self::NoAccount { .. } => "noAccount",
+            Self::Unsynced { .. } => "unsynced",
         }
     }
 }
@@ -73,6 +85,8 @@ pub(crate) enum JazzErrorKind {
     Permission(String),
     NotSupported(String),
     Conflict(String),
+    NoAccount { user_id: String, reason: String },
+    Unsynced { pending: u64, reason: String },
 }
 
 impl From<JazzErrorKind> for JazzError {
@@ -84,6 +98,8 @@ impl From<JazzErrorKind> for JazzError {
             JazzErrorKind::Permission(reason) => Self::Permission { reason },
             JazzErrorKind::NotSupported(reason) => Self::NotSupported { reason },
             JazzErrorKind::Conflict(reason) => Self::Conflict { reason },
+            JazzErrorKind::NoAccount { user_id, reason } => Self::NoAccount { user_id, reason },
+            JazzErrorKind::Unsynced { pending, reason } => Self::Unsynced { pending, reason },
         }
     }
 }
@@ -145,6 +161,17 @@ impl From<jazz_app::Error> for JazzErrorKind {
             E::Server(reason) if reason.contains("refused the link") => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
+            E::NoAccount(user_id) => Self::NoAccount {
+                user_id,
+                reason: message,
+            },
+            E::Unsynced { pending } => Self::Unsynced {
+                pending: pending as u64,
+                reason: message,
+            },
+            // The backend refused who the client is (a credential trusted
+            // neither way, a refused link). `for_user` reports its 403 as
+            // `Permission` itself.
             E::Refused(_) => Self::Refused(message),
             // A bearer the backend names no one by (e.g. a rejected link):
             // a refusal, not a network blip to retry.

@@ -8,7 +8,7 @@
 //! during the call.
 
 use std::cell::Cell;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
@@ -30,7 +30,13 @@ pub type JazzCallback =
     Option<unsafe extern "C" fn(ctx: *mut c_void, kind: *const c_char, json: *const c_char)>;
 
 fn error_json(error: &JazzError) -> String {
-    json!({ "kind": error.kind(), "message": error.to_string() }).to_string()
+    let mut json = json!({ "kind": error.kind(), "message": error.to_string() });
+    match error {
+        JazzError::NoAccount { user_id, .. } => json["userId"] = json!(user_id),
+        JazzError::Unsynced { pending, .. } => json["pending"] = json!(pending),
+        _ => {}
+    }
+    json.to_string()
 }
 
 fn into_c(text: String) -> *mut c_char {
@@ -344,6 +350,7 @@ pub unsafe extern "C" fn jazz_call(
                 "null".into()
             }
             "account" => Json::from(core.account()?).to_string(),
+            "backendClient" => Json::from(core.backend_client()?).to_string(),
             other => return Err(refused(format!("unknown method {other:?}"))),
         };
         Ok(into_c(result))
@@ -441,6 +448,70 @@ pub unsafe extern "C" fn jazz_close(handle: *mut JazzHandle) {
         let handle = unsafe { Box::from_raw(handle) };
         let _ = handle.0.close();
     }));
+}
+
+/// [`jazz_close`], first waiting up to `timeout_ms` for the writes the
+/// client holds to reach the server. Returns 0; or -1 with `*err` set when
+/// writes were left unsent (memory storage, kind `"unsynced"` with
+/// `"pending"` under contract 2) or closing failed. The handle is closed and
+/// freed either way. `timeout_ms` 0 closes at once.
+///
+/// # Safety
+/// As [`jazz_close`]; `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_close_within(
+    handle: *mut JazzHandle,
+    timeout_ms: u64,
+    err: *mut *mut c_char,
+) -> c_int {
+    guarded(err, -1, |contract| {
+        if handle.is_null() {
+            return Ok(0);
+        }
+        // SAFETY: per the function's contract.
+        let handle = unsafe { Box::from_raw(handle) };
+        contract.set(handle.0.contract);
+        handle
+            .0
+            .close_within(Some(std::time::Duration::from_millis(timeout_ms)))?;
+        Ok(0)
+    })
+}
+
+/// On a trusted backend client, a new handle acting as `user_id`, with
+/// `claims_json` (a JSON object, or NULL for `{}`) as the claims its
+/// permissions see. Free it with `jazz_close`, which leaves `handle` open;
+/// once `handle` closes, its calls fail with kind `"closed"`. It never
+/// creates an account: kind `"noAccount"` (with `"userId"`, contract 2)
+/// when the user has none yet, `"permission"` when the main backend refuses
+/// the identity, `"refused"` on a scoped client.
+///
+/// # Safety
+/// `handle` comes from `jazz_open_user` and is not closed; the strings are
+/// NUL-terminated (`claims_json` may be NULL); `err` is NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_for_user(
+    handle_ptr: *const JazzHandle,
+    user_id: *const c_char,
+    claims_json: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut JazzHandle {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let core = unsafe { handle(handle_ptr) }?;
+        contract.set(core.contract);
+        // SAFETY: as above.
+        let user_id = unsafe { text(user_id, "user_id") }?;
+        let claims = if claims_json.is_null() {
+            ""
+        } else {
+            // SAFETY: as above.
+            unsafe { text(claims_json, "claims_json") }?
+        };
+        Ok(Box::into_raw(Box::new(JazzHandle(
+            core.for_user(user_id, claims)?,
+        ))))
+    })
 }
 
 /// Frees a string a function of this API returned or stored in `*err`.
