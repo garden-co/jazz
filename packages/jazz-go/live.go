@@ -22,6 +22,7 @@ type Live[R any] struct {
 	change chan struct{}
 	done   chan struct{}
 
+	app   any
 	mu    sync.Mutex
 	rows  map[string]liveRow[R]
 	seq   uint64 // arrival order, for queries without OrderBy
@@ -48,7 +49,8 @@ func (q *Query[R]) Live(ctx context.Context, db *DB) (*Live[R], error) {
 		rows:   map[string]liveRow[R]{},
 		bigint: bigintColumns(reflect.TypeOf((*R)(nil)).Elem()),
 	}
-	events, err := subscribe(ctx, db, q, func(e event) (event, bool) {
+	l.app = db.computed()
+	events, err := subscribe(ctx, db, q.subscription(), func(e event) (event, bool) {
 		return e, e.kind == "error"
 	})
 	if err != nil {
@@ -106,7 +108,7 @@ func (l *Live[R]) apply(e event) error {
 	for _, rows := range [][]json.RawMessage{raw.Added, raw.Updated} {
 		for _, text := range rows {
 			var r liveRow[R]
-			if err := decodeRow(l.table, text, &r.row); err != nil {
+			if err := decodeRow(l.app, l.table, text, &r.row); err != nil {
 				return err
 			}
 			if err := json.Unmarshal(text, &r.fields); err != nil {

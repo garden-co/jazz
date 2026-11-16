@@ -6,6 +6,7 @@
 //! the app as its backend with them (see `main.rs`). `docs_snippets.rs`
 //! holds the Rust snippets the docs include, compiled with the crate.
 
+pub mod credential;
 pub mod docs_snippets;
 pub mod jazz_app;
 mod routes;

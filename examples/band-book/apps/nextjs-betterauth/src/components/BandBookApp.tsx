@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useAll, useJazzSession, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import {
   AppShell,
   Avatar,
@@ -37,8 +37,8 @@ export function BandBookApp({
   settingUp?: boolean;
   setupError?: { message: string; retry: () => void } | null;
 }) {
-  const me = useSession()?.user ?? null;
-  const { refresh } = useJazzSession();
+  const { user, refresh } = useJazzSession();
+  const me = user?.accountId ?? null;
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();

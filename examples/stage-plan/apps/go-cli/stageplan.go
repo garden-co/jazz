@@ -2,39 +2,36 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"errors"
 
-	jazz "github.com/garden-co/jazz/packages/jazz-go"
+	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
 
 	"github.com/garden-co/jazz/examples/stage-plan/apps/go-cli/jazzapp"
 )
 
-//go:embed jazz.permissions.json
-var permissions string
-
-// server is the sync server a backend publishes to and syncs with.
+// server is the app's Jazz endpoint (its main backend's /jazz) and its
+// app id.
 type server struct {
-	appID, url, backendSecret, adminSecret string
+	appID, url string
 }
 
-// openBackend opens StagePlan as a backend acting as user: it publishes
-// the app's permissions to the server, and the server checks every write
-// against them as that user's. An empty dataDir keeps rows in memory.
-func openBackend(ctx context.Context, srv server, user, dataDir string) (*jazz.DB, error) {
+// openUser opens StagePlan as an end user signing in through the app's
+// /jazz with bearer, a token from the app's auth provider: the main
+// backend checks every write against the app's permissions as that
+// user's. An empty dataDir keeps rows in memory.
+func openUser(ctx context.Context, srv server, bearer, dataDir string) (*jazz.DB, error) {
 	storage := jazz.StorageMemory
 	if dataDir != "" {
 		storage = jazz.StoragePersistent
 	}
 	return jazzapp.Open(ctx, jazz.Config{
-		Permissions:   permissions,
-		AppID:         srv.appID,
-		ServerURL:     srv.url,
-		BackendSecret: srv.backendSecret,
-		AdminSecret:   srv.adminSecret,
-		Storage:       storage,
-		DataDir:       dataDir,
-		Session:       &jazz.Session{Subject: user},
+		AppID:     srv.appID,
+		ServerURL: srv.url,
+		Storage:   storage,
+		DataDir:   dataDir,
+		Auth: jazz.Token(func(context.Context, jazz.TokenReason) (string, error) {
+			return bearer, nil
+		}),
 	})
 }
 

@@ -471,6 +471,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -566,8 +582,9 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol JazzHandleProtocol: AnyObject, Sendable {
     
     /**
-     * The account id of the user a backend acts as (`session.user`);
-     * `None` for a client.
+     * The account id of the user this handle acts as (an end user, a
+     * scoped backend client, a `for_user` handle); `None` for a local app
+     * or a trusted backend client (the system).
      */
     func account() throws  -> String?
     
@@ -583,6 +600,13 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func allAt(queryJson: String, tier: String) throws  -> String
     
     /**
+     * A backend client's kind (`"auth": { "credential": true }`), as the
+     * main backend decided it: `"trusted"` or `"scoped"`; `None` for any
+     * other app.
+     */
+    func backendClient() throws  -> String?
+    
+    /**
      * Begins a serializable transaction. Its reads see a snapshot and its
      * own writes; dropping it without `commit` rolls it back.
      */
@@ -596,8 +620,7 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?) throws  -> Upload
     
     /**
-     * The permissions bundle a backend published and is pinned to;
-     * `None` for a client.
+     * Not part of the documented .65 surface; `None` for every client.
      */
     func bundle() throws  -> String?
     
@@ -629,6 +652,18 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * others are kept, as the server merges them.
      */
     func editText(table: String, id: String, column: String, editedFrom: String, text: String) throws 
+    
+    /**
+     * On a trusted backend client, a handle acting as `user_id` (the id the
+     * main backend's `authenticate` names them by), with `claims_json` (a
+     * JSON object; empty for `{}`) as the claims its permissions see. It
+     * never creates an account: `NoAccount` (contract 2) when the user has
+     * none yet; `Permission` when the main backend refuses the identity;
+     * `Refused` on a scoped client, a `for_user` handle or any other app.
+     * Its `shutdown` leaves this handle open; after this handle closes, its
+     * calls fail with `Closed`.
+     */
+    func forUser(userId: String, claimsJson: String) throws  -> JazzHandle
     
     /**
      * Inserts a row; returns it as stored, with its `id`.
@@ -672,7 +707,7 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     /**
      * The end user's session as JSON: `{"status": "signedIn", "user":
      * {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
-     * `None` for a local app or a backend.
+     * `None` for a local app.
      */
     func sessionState() throws  -> String?
     
@@ -681,6 +716,15 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * `close`, which would clash with Kotlin's `AutoCloseable.close`.
      */
     func shutdown() throws 
+    
+    /**
+     * [`Self::shutdown`], first waiting up to `timeout_ms` for the writes
+     * the client holds to reach the server (TS's `close({ timeoutMs })`,
+     * 10 000 by default there). With memory storage, writes still unsent
+     * fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
+     * the app is closed all the same. `0` closes at once.
+     */
+    func shutdownWithin(timeoutMs: UInt64) throws 
     
     /**
      * Signs the end user out and closes the app.
@@ -794,9 +838,10 @@ open class JazzHandle: JazzHandleProtocol, @unchecked Sendable {
 
     
     /**
-     * Opens an app from its config JSON: `{ "app", "permissions"?,
-     * "appId"?, "serverUrl"?, "dataDir"?, "storage"?, "backendSecret"?,
-     * "adminSecret"?, "session"? }`.
+     * Opens an app from its config JSON: `{ "app", "appId"?, "serverUrl"?,
+     * "auth"?, "dataDir"?, "storage"?, "contract"? }` (see the README): a
+     * local client, or an end user with a device key. Bearer users and
+     * backend clients open with [`Self::open_with_tokens`].
      */
 public static func `open`(configJson: String)throws  -> JazzHandle  {
     return try  FfiConverterTypeJazzHandle_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -824,8 +869,9 @@ public static func openWithTokens(configJson: String, tokens: TokenProvider)thro
 
     
     /**
-     * The account id of the user a backend acts as (`session.user`);
-     * `None` for a client.
+     * The account id of the user this handle acts as (an end user, a
+     * scoped backend client, a `for_user` handle); `None` for a local app
+     * or a trusted backend client (the system).
      */
 open func account()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -865,6 +911,20 @@ open func allAt(queryJson: String, tier: String)throws  -> String  {
 }
     
     /**
+     * A backend client's kind (`"auth": { "credential": true }`), as the
+     * main backend decided it: `"trusted"` or `"scoped"`; `None` for any
+     * other app.
+     */
+open func backendClient()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_backend_client(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Begins a serializable transaction. Its reads see a snapshot and its
      * own writes; dropping it without `commit` rolls it back.
      */
@@ -897,8 +957,7 @@ open func beginUpload(table: String, column: String, kind: String, id: String?, 
 }
     
     /**
-     * The permissions bundle a backend published and is pinned to;
-     * `None` for a client.
+     * Not part of the documented .65 surface; `None` for every client.
      */
 open func bundle()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -984,6 +1043,27 @@ open func editText(table: String, id: String, column: String, editedFrom: String
         FfiConverterString.lower(text),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * On a trusted backend client, a handle acting as `user_id` (the id the
+     * main backend's `authenticate` names them by), with `claims_json` (a
+     * JSON object; empty for `{}`) as the claims its permissions see. It
+     * never creates an account: `NoAccount` (contract 2) when the user has
+     * none yet; `Permission` when the main backend refuses the identity;
+     * `Refused` on a scoped client, a `for_user` handle or any other app.
+     * Its `shutdown` leaves this handle open; after this handle closes, its
+     * calls fail with `Closed`.
+     */
+open func forUser(userId: String, claimsJson: String)throws  -> JazzHandle  {
+    return try  FfiConverterTypeJazzHandle_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_for_user(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(userId),
+        FfiConverterString.lower(claimsJson),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1088,7 +1168,7 @@ open func restore(table: String, id: String, patchJson: String?)throws  -> Strin
     /**
      * The end user's session as JSON: `{"status": "signedIn", "user":
      * {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
-     * `None` for a local app or a backend.
+     * `None` for a local app.
      */
 open func sessionState()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -1107,6 +1187,22 @@ open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_li
         uniffiCallStatus in
     uniffi_jazz_ffi_fn_method_jazzhandle_shutdown(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * [`Self::shutdown`], first waiting up to `timeout_ms` for the writes
+     * the client holds to reach the server (TS's `close({ timeoutMs })`,
+     * 10 000 by default there). With memory storage, writes still unsent
+     * fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
+     * the app is closed all the same. `0` closes at once.
+     */
+open func shutdownWithin(timeoutMs: UInt64)throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_shutdown_within(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(timeoutMs),uniffiCallStatus
     )
 }
 }
@@ -2683,6 +2779,18 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case Conflict(reason: String
     )
+    /**
+     * Contract 2: a trusted backend client acted for a user who has no
+     * account yet (TS's `NoJazzAccountError`, `code: "no_account"`).
+     */
+    case NoAccount(userId: String, reason: String
+    )
+    /**
+     * Contract 2: closing with a timeout left `pending` writes unsent
+     * (memory storage, where they are lost).
+     */
+    case Unsynced(pending: UInt64, reason: String
+    )
 
     
 
@@ -2728,6 +2836,14 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
         case 6: return .Conflict(
             reason: try FfiConverterString.read(from: &buf)
             )
+        case 7: return .NoAccount(
+            userId: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 8: return .Unsynced(
+            pending: try FfiConverterUInt64.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2766,6 +2882,18 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
         
         case let .Conflict(reason):
             writeInt(&buf, Int32(6))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .NoAccount(userId,reason):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(userId, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .Unsynced(pending,reason):
+            writeInt(&buf, Int32(8))
+            FfiConverterUInt64.write(pending, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -2864,7 +2992,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_func_generate_device_key() != 27994) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_account() != 26191) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_account() != 39766) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_all() != 27871) {
@@ -2873,13 +3001,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_all_at() != 33191) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_backend_client() != 48647) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_begin() != 20203) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_begin_upload() != 36715) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_bundle() != 7638) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_bundle() != 24631) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_can() != 65067) {
@@ -2895,6 +3026,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_edit_text() != 14218) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_for_user() != 56172) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_insert() != 51342) {
@@ -2918,10 +3052,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_restore() != 374) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_session_state() != 13970) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_session_state() != 35355) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 40246) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 15915) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_sign_out() != 13738) {
@@ -3014,7 +3151,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_watch_cancel() != 64151) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open() != 35588) {
+    if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open() != 17356) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open_with_tokens() != 11789) {

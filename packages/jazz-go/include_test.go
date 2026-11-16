@@ -52,7 +52,7 @@ func TestIncludesNestAsTheContractSays(t *testing.T) {
 	// Rows decode with their included relations; a forward relation that
 	// isn't there is nil.
 	var row incTask
-	err := decodeRow("tasks", json.RawMessage(`{"id":"t","title":"T","rank":1,"show":null,"comments":[{"id":"c","body":"hi","author":{"id":"a","name":"Ann"}}]}`), &row)
+	err := decodeRow(nil, "tasks", json.RawMessage(`{"id":"t","title":"T","rank":1,"show":null,"comments":[{"id":"c","body":"hi","author":{"id":"a","name":"Ann"}}]}`), &row)
 	if err != nil || row.Show != nil || row.Comments[0].Author.Name != "Ann" {
 		t.Fatalf("%+v %v", row, err)
 	}
@@ -75,5 +75,38 @@ func TestSelectReadsIntoYourStruct(t *testing.T) {
 	var jerr *Error
 	if !errors.As(err, &jerr) || !errors.Is(err, ErrRefused) || jerr.Column != "rank" {
 		t.Fatalf("%v", err)
+	}
+}
+
+type hookCrew struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Upper string `json:"-"`
+}
+
+func (c *hookCrew) JazzDecode(app any, fields map[string]json.RawMessage) error {
+	c.Upper = app.(string) + c.Name
+	return nil
+}
+
+type hookComment struct {
+	ID     string    `json:"id"`
+	Author *hookCrew `json:"author,omitempty"`
+}
+
+type hookTask struct {
+	ID       string        `json:"id"`
+	Comments []hookComment `json:"comments,omitempty"`
+	Owner    *hookCrew     `json:"owner,omitempty"`
+}
+
+func TestHooksRunOnIncludedRows(t *testing.T) {
+	var row hookTask
+	err := decodeRow("hi ", "tasks", json.RawMessage(`{"id":"t","owner":{"id":"o","name":"Olu"},"comments":[{"id":"c","author":{"id":"a","name":"Ann"}},{"id":"d","author":null}]}`), &row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Owner.Upper != "hi Olu" || row.Comments[0].Author.Upper != "hi Ann" || row.Comments[1].Author != nil {
+		t.Fatalf("%+v", row)
 	}
 }

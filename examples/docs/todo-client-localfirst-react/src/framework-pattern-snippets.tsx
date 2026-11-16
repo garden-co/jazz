@@ -3,7 +3,6 @@ import {
   useAll,
   useDb,
   useJazzSession,
-  useSession,
   type JazzClientConfig,
 } from "jazz-tools/react";
 import { app } from "../jazz.generated.js";
@@ -55,13 +54,12 @@ export function DbAccessExample() {
 
 // #region session-react
 export function SessionExample() {
-  // Who is signed in: { accountId, kind: "device" | "backend", identity, claims } | null
+  // Who is signed in: { accountId, kind: "device" | "backend", identity, claims } | null.
+  // Your permissions see the same user as `session.user` (the accountId),
+  // `session.identity` and `session.claims`.
   const { user } = useJazzSession();
-  // What your permissions see as `session` (its `user` is the account id).
-  const session = useSession();
 
   void user;
-  void session;
   return null;
 }
 // #endregion session-react
