@@ -3170,8 +3170,6 @@ impl Db {
         .await
     }
 
-    /// Root rows with each array relation nested in a cell under its
-    /// column name ([`ResultNode::into_nested_row`]).
     /// A one-shot read with array relations nested in their parents' cells,
     /// as a subscription nests them: roots and related rows alike read as
     /// `identity` (its read policy applies to both; `None`: unchecked), at
@@ -3197,6 +3195,10 @@ impl Db {
         .await
     }
 
+    /// Root rows with each array relation nested in a cell under its
+    /// column name ([`ResultNode::into_nested_row`]). Related rows are read
+    /// without a policy check, at the default read spec: to read them as an
+    /// identity, use [`Db::all_nested`].
     pub fn nest_relations(
         &self,
         prepared: &PreparedQuery,

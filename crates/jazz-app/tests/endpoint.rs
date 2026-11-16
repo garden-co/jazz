@@ -138,6 +138,10 @@ struct App {
 
 impl App {
     async fn start() -> Self {
+        Self::start_with(|endpoint| endpoint).await
+    }
+
+    async fn start_with(configure: impl FnOnce(Endpoint) -> Endpoint) -> Self {
         let app_id = AppId::random();
         let server = JazzServer::builder()
             .with_app_id(app_id)
@@ -156,7 +160,7 @@ impl App {
         )
         .await
         .expect("open the app's backend");
-        let endpoint = Endpoint::new(&backend, authenticate).unwrap();
+        let endpoint = configure(Endpoint::new(&backend, authenticate).unwrap());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/jazz", listener.local_addr().unwrap());
         let admitted = Arc::new(Mutex::new(Vec::new()));
@@ -1347,5 +1351,477 @@ async fn a_client_naming_another_app_id_syncs_with_the_endpoints_app() {
     .await;
     assert_eq!(seen, vec![todo]);
     uma.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// A thin client's socket through the endpoint, speaking the thin protocol
+/// as `jazz-tools/thin` does.
+struct ThinSocket {
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    next: u64,
+}
+
+impl ThinSocket {
+    /// Sign `user` in (`token-<user>[:admin]`) and open their thin socket,
+    /// bound to the app's schema.
+    async fn open(app: &App, token: &str, user: &str) -> Self {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        let sign_in = app
+            .endpoint
+            .handle(
+                Request::new("POST", app.path("accounts/backend-sign-in"))
+                    .header("authorization", format!("Bearer {token}")),
+            )
+            .await;
+        assert_eq!(sign_in.status, 200);
+        let account = serde_json::from_slice::<Value>(&sign_in.body).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = json!({
+            "account_id": account,
+            "issuer": "jazz:backend",
+            "user_id": user,
+            "claims": {},
+            "authMode": "external",
+        });
+        let peer = serde_json::to_string(&(account.as_str(), "jazz:backend", user)).unwrap();
+        let prelude = json!({
+            "peer_identity": peer,
+            "auth": { "jwt_token": null, "backend_session": session },
+        });
+        let ws = app.url.replacen("http", "ws", 1) + &format!("/apps/{}/ws", app.app_id);
+        let mut request = ws.into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        socket
+            .send(Message::Text(prelude.to_string().into()))
+            .await
+            .unwrap();
+        let hello = jazz_app_support::jazz::wire::WireFrame::Hello(
+            jazz_app_support::jazz::wire::WireHello::current(
+                jazz_app_support::jazz::wire::WirePeerRole::Client,
+                jazz_app_support::jazz::wire::FEATURE_THIN_RESULTS,
+            ),
+        );
+        let hello = jazz_app_support::jazz::wire::encode_frame(&hello).unwrap();
+        socket
+            .send(Message::Binary(
+                jazz_app_support::jazz::wire::encode_websocket_frame_batch(&[hello])
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let mut thin = Self { socket, next: 1 };
+        let schema = app
+            .backend
+            .with_client(|client| async move { Ok(serde_json::to_vec(&client.schema()?).unwrap()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            thin.call(jazz_app_support::jazz::thin::ThinOp::Schema { schema })
+                .await,
+            jazz_app_support::jazz::thin::ThinBody::Ok
+        );
+        thin
+    }
+
+    /// Send a request without waiting for its answer; its id.
+    async fn send(&mut self, op: jazz_app_support::jazz::thin::ThinOp) -> u64 {
+        use jazz_app_support::jazz::wire::{WireFrame, encode_frame, encode_websocket_frame_batch};
+        let id = self.next;
+        self.next += 1;
+        let frame = encode_frame(&WireFrame::ThinRequest(
+            jazz_app_support::jazz::thin::ThinRequest { id, op },
+        ))
+        .unwrap();
+        self.socket
+            .send(Message::Binary(
+                encode_websocket_frame_batch(&[frame]).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        id
+    }
+
+    /// The answers to `ids`, by id, in whatever order they come.
+    async fn answers(
+        &mut self,
+        ids: &[u64],
+    ) -> std::collections::BTreeMap<u64, jazz_app_support::jazz::thin::ThinBody> {
+        use jazz_app_support::jazz::wire::{WireFrame, decode_frame, decode_websocket_frame_batch};
+        let mut answers = std::collections::BTreeMap::new();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while answers.len() < ids.len() {
+                let Some(Ok(Message::Binary(message))) = self.socket.next().await else {
+                    panic!("the socket ended before answering");
+                };
+                for frame in decode_websocket_frame_batch(&message).unwrap() {
+                    if let Ok(WireFrame::ThinResponse(response)) = decode_frame(&frame)
+                        && ids.contains(&response.id)
+                    {
+                        answers.insert(response.id, response.body);
+                    }
+                }
+            }
+        })
+        .await
+        .expect("answered");
+        answers
+    }
+
+    async fn call(
+        &mut self,
+        op: jazz_app_support::jazz::thin::ThinOp,
+    ) -> jazz_app_support::jazz::thin::ThinBody {
+        use jazz_app_support::jazz::wire::{
+            WireFrame, decode_frame, decode_websocket_frame_batch, encode_frame,
+            encode_websocket_frame_batch,
+        };
+        let id = self.next;
+        self.next += 1;
+        let frame = encode_frame(&WireFrame::ThinRequest(
+            jazz_app_support::jazz::thin::ThinRequest { id, op },
+        ))
+        .unwrap();
+        self.socket
+            .send(Message::Binary(
+                encode_websocket_frame_batch(&[frame]).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let Some(Ok(Message::Binary(message))) = self.socket.next().await else {
+                    panic!("the socket ended before answering {id}");
+                };
+                for frame in decode_websocket_frame_batch(&message).unwrap() {
+                    if let Ok(WireFrame::ThinResponse(response)) = decode_frame(&frame)
+                        && response.id == id
+                    {
+                        return response.body;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("answered")
+    }
+}
+
+fn cells(values: &[(&str, jazz_app_support::jazz::records::Value)]) -> Vec<u8> {
+    use jazz_app_support::jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+    let descriptor = RecordDescriptor::new(values.iter().map(|(name, value)| {
+        (
+            name.to_string(),
+            match value {
+                Value::Bool(_) => ValueType::Bool,
+                _ => ValueType::String,
+            },
+        )
+    }));
+    let values: Vec<Value> = values.iter().map(|(_, value)| value.clone()).collect();
+    let record = OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor);
+    jazz_app_support::jazz::binding_codec::encode_named_cells(&record).unwrap()
+}
+
+fn text(value: &str) -> jazz_app_support::jazz::records::Value {
+    jazz_app_support::jazz::records::Value::String(value.to_owned())
+}
+
+fn rows_of(body: jazz_app_support::jazz::thin::ThinBody) -> usize {
+    let jazz_app_support::jazz::thin::ThinBody::Rows { rows, .. } = body else {
+        panic!("expected rows, got {body:?}");
+    };
+    jazz_app_support::jazz::binding_codec::decode_rows(&rows)
+        .unwrap()
+        .iter()
+        .map(|batch| batch.rows.len())
+        .sum()
+}
+
+/// A thin client's transaction runs in the backend, as its user, and the
+/// core takes it only once committed; its other requests reach the core.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_clients_transactions_run_in_the_backend_as_its_user() {
+    use jazz_app_support::jazz::thin::{ThinBody, ThinOp};
+    let app = App::start().await;
+    let seeded = app
+        .backend
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo::new("seeded", false))
+        .await
+        .unwrap();
+    let todo_query =
+        postcard::to_allocvec(&todos::query().id(seeded.id).into_untyped().unwrap()).unwrap();
+    let projects_query = postcard::to_allocvec(&projects::query().into_untyped().unwrap()).unwrap();
+
+    let mut carol = ThinSocket::open(&app, "token-carol:admin", "carol").await;
+    let tx = jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+    let in_tx = Some(tx.clone());
+    assert_eq!(
+        carol
+            .call(ThinOp::Begin {
+                transaction: tx.clone(),
+                kind: "mergeable".into(),
+            })
+            .await,
+        ThinBody::Ok
+    );
+    // A row only the core holds, read in the transaction.
+    let read = carol
+        .call(ThinOp::Query {
+            query: todo_query.clone(),
+            options: Vec::new(),
+            transaction: in_tx.clone(),
+        })
+        .await;
+    assert_eq!(rows_of(read), 1);
+    let staged = carol
+        .call(ThinOp::Update {
+            table: "todos".into(),
+            row: *seeded.id.uuid().as_bytes(),
+            patch: cells(&[("title", text("done by carol"))]),
+            options: Vec::new(),
+            transaction: in_tx.clone(),
+        })
+        .await;
+    assert!(matches!(staged, ThinBody::Staged { .. }), "{staged:?}");
+    let staged = carol
+        .call(ThinOp::Insert {
+            table: "projects".into(),
+            cells: cells(&[("name", text("carol's"))]),
+            options: Vec::new(),
+            transaction: in_tx.clone(),
+        })
+        .await;
+    assert!(matches!(staged, ThinBody::Staged { .. }), "{staged:?}");
+    // Nothing reached the core yet: a read outside the transaction is the
+    // core's, as carol.
+    assert_eq!(
+        rows_of(
+            carol
+                .call(ThinOp::Query {
+                    query: projects_query.clone(),
+                    options: Vec::new(),
+                    transaction: None,
+                })
+                .await
+        ),
+        0
+    );
+    let committed = carol.call(ThinOp::Commit { transaction: tx }).await;
+    assert!(
+        matches!(committed, ThinBody::Written { .. }),
+        "{committed:?}"
+    );
+    // Committed means the core has it: carol's project (hers alone to
+    // read), and the todo, as the backend sees it.
+    assert_eq!(
+        rows_of(
+            carol
+                .call(ThinOp::Query {
+                    query: projects_query.clone(),
+                    options: Vec::new(),
+                    transaction: None,
+                })
+                .await
+        ),
+        1
+    );
+    let todo = app
+        .backend
+        .all_with(todos::query().id(seeded.id), ReadTier::Remote)
+        .await
+        .unwrap();
+    assert_eq!(todo[0].title, "done by carol");
+
+    // Dave is no admin: the core refuses his project when he commits, as
+    // it would refuse dave himself, and nothing of the transaction applies.
+    let mut dave = ThinSocket::open(&app, "token-dave", "dave").await;
+    let tx = jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+    assert_eq!(
+        dave.call(ThinOp::Begin {
+            transaction: tx.clone(),
+            kind: "mergeable".into(),
+        })
+        .await,
+        ThinBody::Ok
+    );
+    dave.call(ThinOp::Insert {
+        table: "todos".into(),
+        cells: cells(&[
+            ("title", text("dave's")),
+            ("done", jazz_app_support::jazz::records::Value::Bool(false)),
+        ]),
+        options: Vec::new(),
+        transaction: Some(tx.clone()),
+    })
+    .await;
+    dave.call(ThinOp::Insert {
+        table: "projects".into(),
+        cells: cells(&[("name", text("not dave's to make"))]),
+        options: Vec::new(),
+        transaction: Some(tx.clone()),
+    })
+    .await;
+    let refused = dave.call(ThinOp::Commit { transaction: tx }).await;
+    assert!(matches!(refused, ThinBody::Error { .. }), "{refused:?}");
+    let todos_now = app
+        .backend
+        .all_with(todos::query(), ReadTier::Remote)
+        .await
+        .unwrap();
+    assert!(todos_now.iter().all(|todo| todo.title != "dave's"));
+
+    app.stop().await;
+}
+
+/// Requests keep the client's order across the backend and the core: a
+/// transaction reads a plain write sent just before it, unawaited, and a
+/// plain read sent right after a commit sees the commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_clients_pipelined_requests_keep_their_order() {
+    use jazz_app_support::jazz::thin::{ThinBody, ThinOp};
+    let app = App::start().await;
+    let mut erin = ThinSocket::open(&app, "token-erin", "erin").await;
+    let row = jazz_app_support::ObjectId::new();
+    let by_id = postcard::to_allocvec(&todos::query().id(row).into_untyped().unwrap()).unwrap();
+    let tx = jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+    let todo = |title: &str| {
+        cells(&[
+            ("title", text(title)),
+            ("done", jazz_app_support::jazz::records::Value::Bool(false)),
+        ])
+    };
+    let inserted = erin
+        .send(ThinOp::Insert {
+            table: "todos".into(),
+            cells: todo("plain"),
+            options: serde_json::to_vec(&json!({ "rowId": row.uuid().as_bytes() })).unwrap(),
+            transaction: None,
+        })
+        .await;
+    let begun = erin
+        .send(ThinOp::Begin {
+            transaction: tx.clone(),
+            kind: "mergeable".into(),
+        })
+        .await;
+    let read_in_tx = erin
+        .send(ThinOp::Query {
+            query: by_id.clone(),
+            options: Vec::new(),
+            transaction: Some(tx.clone()),
+        })
+        .await;
+    let staged = erin
+        .send(ThinOp::Update {
+            table: "todos".into(),
+            row: *row.uuid().as_bytes(),
+            patch: cells(&[("title", text("in the transaction"))]),
+            options: Vec::new(),
+            transaction: Some(tx.clone()),
+        })
+        .await;
+    let committed = erin.send(ThinOp::Commit { transaction: tx }).await;
+    let read_after = erin
+        .send(ThinOp::Query {
+            query: by_id,
+            options: Vec::new(),
+            transaction: None,
+        })
+        .await;
+    let answers = erin
+        .answers(&[inserted, begun, read_in_tx, staged, committed, read_after])
+        .await;
+    assert!(
+        matches!(answers[&inserted], ThinBody::Written { .. }),
+        "{answers:?}"
+    );
+    assert_eq!(
+        rows_of(answers[&read_in_tx].clone()),
+        1,
+        "the transaction reads the write before it"
+    );
+    assert!(
+        matches!(answers[&committed], ThinBody::Written { .. }),
+        "{answers:?}"
+    );
+    let ThinBody::Rows { rows, .. } = answers[&read_after].clone() else {
+        panic!("{answers:?}");
+    };
+    let after = jazz_app_support::jazz::binding_codec::decode_rows(&rows).unwrap();
+    assert_eq!(
+        after[0].rows[0].cells["title"],
+        text("in the transaction"),
+        "the read after the commit sees it"
+    );
+    app.stop().await;
+}
+
+/// A thin session's transaction client ends with its socket, rolling back
+/// what it left open, and only so many run at once: past the cap, a
+/// transaction is refused with `backpressure`, to try again later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_sessions_transaction_client_ends_with_its_socket_and_is_capped() {
+    use jazz_app_support::jazz::thin::{ThinBody, ThinOp};
+    let app = App::start_with(|endpoint| endpoint.max_transaction_clients(1)).await;
+    let begin = |tx: &str| ThinOp::Begin {
+        transaction: tx.to_owned(),
+        kind: "mergeable".into(),
+    };
+    let todo = |tx: &str, title: &str| ThinOp::Insert {
+        table: "todos".into(),
+        cells: cells(&[
+            ("title", text(title)),
+            ("done", jazz_app_support::jazz::records::Value::Bool(false)),
+        ]),
+        options: Vec::new(),
+        transaction: Some(tx.to_owned()),
+    };
+    let new_tx = || jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+
+    let mut frank = ThinSocket::open(&app, "token-frank", "frank").await;
+    let franks = new_tx();
+    assert_eq!(frank.call(begin(&franks)).await, ThinBody::Ok);
+    let staged = frank.call(todo(&franks, "left open")).await;
+    assert!(matches!(staged, ThinBody::Staged { .. }), "{staged:?}");
+    assert_eq!(app.endpoint.transaction_clients(), 1);
+
+    let mut gina = ThinSocket::open(&app, "token-gina", "gina").await;
+    let ginas = new_tx();
+    let refused = gina.call(begin(&ginas)).await;
+    assert!(
+        matches!(&refused, ThinBody::Error { code, .. } if code == "backpressure"),
+        "{refused:?}"
+    );
+
+    // Frank goes away mid-transaction: his client ends, and nothing of the
+    // transaction reaches the core.
+    frank.socket.close(None).await.unwrap();
+    drop(frank);
+    eventually(async || (app.endpoint.transaction_clients() == 0).then_some(())).await;
+    let todos_now = app
+        .backend
+        .all_with(todos::query(), ReadTier::Remote)
+        .await
+        .unwrap();
+    assert!(todos_now.iter().all(|todo| todo.title != "left open"));
+
+    // Room again: gina's transaction goes through.
+    let ginas = new_tx();
+    assert_eq!(gina.call(begin(&ginas)).await, ThinBody::Ok);
+    gina.call(todo(&ginas, "gina's")).await;
+    let committed = gina.call(ThinOp::Commit { transaction: ginas }).await;
+    assert!(
+        matches!(committed, ThinBody::Written { .. }),
+        "{committed:?}"
+    );
     app.stop().await;
 }

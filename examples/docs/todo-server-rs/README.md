@@ -7,7 +7,7 @@ The documentation copy of [`examples/todo-server-rs`](../../todo-server-rs): the
 
 ## Files
 
-- `schema.ts`: the app's tables and relations (`s.defineSchema`) and its permissions (`definePermissions`). This is the file you edit.
+- `schema.ts`: re-exports the schema and permissions of the docs todo app, [`examples/docs/todo-client-localfirst-ts/schema.ts`](../todo-client-localfirst-ts/schema.ts), so every language's snippets use the same app. Edit that file.
 - `migrations/`: the migrations between schema versions, and their snapshots, written by `npx jazz-tools migrations create`.
 - `jazz.app.json`: generated from `schema.ts` and `migrations/` by `npx jazz-tools generate`: the tables, with their history and migrations. The service reads it at runtime. Do not edit it.
 - `jazz.permissions.json`: generated from the permissions in `schema.ts`. The main backend serves it, and this service opens with it as a backend client. Do not edit it.
@@ -17,19 +17,19 @@ The documentation copy of [`examples/todo-server-rs`](../../todo-server-rs): the
 - `src/routes.rs`: CRUD over `/todos` and the `/todos/live` SSE stream.
 - `src/docs_snippets.rs`: the snippets. The docs include each `// #region <name>` by name, so keep the names when you edit them.
 
-Most snippets use the typed API: `jazz.all`, `one`, `get`, `insert`, `update`, `delete`, `transaction` and `subscribe`, with `todos::query()`, `todos::done().eq(false)`, `todos::title().contains("milk")`, `order_by(jazz_app::created_at(), …)`, `projects::todos().of(id)`, `NewTodo::new(title, done)` and `TodoUpdate { parent: Some(None), .. }`. The includes, `select` and files snippets still use the low-level `JazzClient`, either directly or through `Jazz::with_client`, though `jazz-app-support` covers them too now: includes (`Query::include`), `select` (`Partial` rows), `hop_to`, `gather` and `union`, `history()`, large values (`LargeColumn`, streaming inserts, and partial reads with `Query::part` and `ValuePart`) and serializable transactions that read.
+Each snippet is one function over the docs todo app, doing what its TypeScript twin does (see `docs/lib/languages/SNIPPETS.md`), with the typed API: `jazz.all`, `get`, `insert`, `update`, `upsert`, `delete`, `transaction`, `serializable_transaction` and `subscribe`, with `todos::query()`, `todos::done().eq(false)`, `todos::title().contains("docs")`, `include(todos::project())`, `projects::todos().with(…)`, `select(todos::title())`, `gather(todos::parent(), 10)`, `NewTodo::new(title, done)`, `TodoUpdate { owner_id: Some(None), .. }` and `jazz.durable(DurabilityTier::GlobalServer)`. The files snippets still use the low-level `JazzClient`.
 
 ## Schema
 
-From `schema.ts`:
+From the TypeScript example's `schema.ts`:
 
 - **projects**: name; `todos` (its todos)
-- **todos**: title, done, priority (optional), description (optional), parent (a todo, optional), project (optional); `children` (its sub-todos)
+- **todos**: title, done, priority (optional), description (optional), owner_id (optional), parentId (a todo, optional), projectId (optional); `parent`, `project` and `children` (its sub-todos)
 
 ## Changing the schema
 
 ```bash
-# Edit schema.ts, then:
+# Edit ../todo-client-localfirst-ts/schema.ts, then, here:
 npx jazz-tools migrations create --name <name>   # resolve any "TODO: …" it writes
 npx jazz-tools generate                          # writes jazz.app.json, jazz.permissions.json and src/jazz_app.rs
 ```
