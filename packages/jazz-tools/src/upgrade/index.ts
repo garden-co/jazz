@@ -623,7 +623,8 @@ async function rustBindings(appJson: string): Promise<string | { reason: string 
 /** This jazz-tools' `generate`, in the app's directory: the JSON files from the TS, then the bindings. */
 async function runGenerate(schemaDir: string): Promise<void> {
   const { generateApp } = await import("../dev/project.js");
-  await generateApp({ cwd: schemaDir });
+  // alpha.65's JSON files carry no `$generated` marker: replacing them is the point.
+  await generateApp({ cwd: schemaDir, force: true });
 }
 
 /** The table names a spread module's `export const schema = {…}` declares. */

@@ -83,5 +83,6 @@ export function projectFiles(dir: string): Record<string, string> {
 /** Step 6 for the tests: this workspace's `generate`, on the converted app. */
 export async function testGenerate(schemaDir: string): Promise<void> {
   const { generateApp } = await import("../dev/project.js");
-  await generateApp({ cwd: schemaDir });
+  // alpha.65's JSON files carry no `$generated` marker: replacing them is the point.
+  await generateApp({ cwd: schemaDir, force: true });
 }
