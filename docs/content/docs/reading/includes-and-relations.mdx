@@ -10,36 +10,28 @@ Use `include(...)` to load related rows as nested objects in a single query resu
 
 Including a relation adds the resolved object alongside the foreign-key column&hairsp;—&hairsp;it does not replace it. For example, `include({ project: true })` gives you both `projectId` (the FK string) and `project` (the resolved row).
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-  "tables": {
-    "todos": {
-      "columns": {
-        "title": "string",
-        "done": "boolean",
-        "priority": "int?",
-        "description": "string?",
-        "owner_id": "uuid?",
-        "parentId": "uuid?",
-        "projectId": "uuid?"
-      },
-      "relations": {
-        "parent": { "rel": "todos", "column": "parentId" },
-        "project": { "rel": "projects", "column": "projectId" },
-        "children": { "reverse": "todos", "relation": "parent" }
-      }
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      priority: s.int().optional(),
+      description: s.string().optional(),
+      owner_id: s.uuid().optional(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
     },
-    "projects": {
-      "columns": {
-        "name": "string"
-      },
-      "relations": {
-        "todos": { "reverse": "todos", "relation": "project" }
-      }
-    }
-  }
-}
+    {
+      parent: s.rel("todos", "parentId"),
+      project: s.rel("projects", "projectId"),
+      children: s.reverse("todos", "parent"),
+    },
+  ),
+  projects: s.table({ name: s.string() }, { todos: s.reverse("todos", "project") }),
+});
 ```
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
@@ -70,8 +62,8 @@ Including a relation adds the resolved object alongside the foreign-key column&h
 ### Reverse relations
 
 Declare reverse relations explicitly on the target table. For example, if `todos` declares the
-relation `"project": { "rel": "projects", "column": "projectId" }`, `projects` can declare
-`"todos": { "reverse": "todos", "relation": "project" }` and load it with `include({ todos: true })`.
+relation `project: s.rel("projects", "projectId")`, `projects` can declare
+`todos: s.reverse("todos", "project")` and load it with `include({ todos: true })`.
 The reverse relation returns matching source rows as an array. Its name is your choice;
 Jazz does not generate an inverse or infer names from UUID columns.
 

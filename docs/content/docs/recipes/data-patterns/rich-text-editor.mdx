@@ -22,61 +22,66 @@ The document is one Markdown merge column. Comments and presence are ordinary ro
 they point into the text with **anchors** and **ranges** (the text before, the text itself, the
 text after) instead of character offsets, so they survive edits that move the text around.
 
-This is an excerpt of BandBook's
-[jazz.app.json](https://github.com/garden-co/jazz/blob/main/examples/band-book/apps/nextjs-betterauth/jazz.app.json),
-with just these three tables; `workspaces` and `pages` are defined elsewhere in the file.
+This is an excerpt of
+[BandBook](https://github.com/garden-co/jazz/tree/main/examples/band-book/apps/nextjs-betterauth)'s
+`schema.ts`, with just these three tables; `workspaces` and `pages` are defined elsewhere in the file.
 
-```json title="jazz.app.json"
-{
-  "tables": {
-    "songSheets": {
-      "$comment": "A song sheet page is one rich-text document: lyrics, chords and notes as Markdown. The server merges concurrent edits to it, so two people rewriting different lines, online or offline, keep both.",
-      "columns": {
-        "workspaceId": "uuid",
-        "pageId": "uuid",
-        "body": { "type": "string", "merge": "markdown" }
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  // workspaces, pages, ...
+
+  // A song sheet page is one rich-text document: lyrics, chords and notes as Markdown. The server
+  // merges concurrent edits to it, so two people rewriting different lines, online or offline,
+  // keep both.
+  songSheets: s
+    .table(
+      { workspaceId: s.uuid(), pageId: s.uuid(), body: s.string().merge("markdown") },
+      {
+        workspace: s.rel("workspaces", "workspaceId"),
+        page: s.rel("pages", "pageId"),
       },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspaceId" },
-        "page": { "rel": "pages", "column": "pageId" }
+    )
+    .indexOnly(["pageId"]),
+  // Comments sit over a song sheet's text without being part of it: each one stores the text it
+  // covers and the text around it (a jazz-tools text range), and every reader finds it again in
+  // the sheet's current body.
+  sheetComments: s
+    .table(
+      {
+        workspaceId: s.uuid(),
+        pageId: s.uuid(),
+        author: s.uuid(),
+        range: s.json(),
+        text: s.string(),
+        resolved: s.boolean(),
       },
-      "indexes": ["pageId"]
-    },
-    "sheetComments": {
-      "$comment": "Comments sit over a song sheet's text without being part of it: each one stores the text it covers and the text around it (a jazz-tools text range), and every reader finds it again in the sheet's current body.",
-      "columns": {
-        "workspaceId": "uuid",
-        "pageId": "uuid",
-        "author": "uuid",
-        "range": { "json": true },
-        "text": "string",
-        "resolved": "boolean"
+      {
+        workspace: s.rel("workspaces", "workspaceId"),
+        page: s.rel("pages", "pageId"),
       },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspaceId" },
-        "page": { "rel": "pages", "column": "pageId" }
+    )
+    .indexOnly(["pageId"]),
+  // Who has a song sheet open and where their cursor is: one row per open editor, overwritten a
+  // few times a second and refreshed while it stays open. Readers ignore rows whose seenAt is old.
+  // Latest-only: a cursor's past positions are worth nothing, so nodes keep no history of them.
+  sheetPresence: s
+    .table(
+      {
+        workspaceId: s.uuid(),
+        pageId: s.uuid(),
+        account: s.uuid(),
+        cursor: s.json(),
+        selection: s.json().optional(),
+        seenAt: s.float(),
       },
-      "indexes": ["pageId"]
-    },
-    "sheetPresence": {
-      "$comment": "Who has a song sheet open and where their cursor is: one row per open editor, overwritten a few times a second and refreshed while it stays open. Readers ignore rows whose seenAt is old. Latest-only: a cursor's past positions are worth nothing, so nodes keep no history of them.",
-      "columns": {
-        "workspaceId": "uuid",
-        "pageId": "uuid",
-        "account": "uuid",
-        "cursor": { "json": true },
-        "selection": { "json": true, "optional": true },
-        "seenAt": "float"
+      {
+        workspace: s.rel("workspaces", "workspaceId"),
+        page: s.rel("pages", "pageId"),
       },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspaceId" },
-        "page": { "rel": "pages", "column": "pageId" }
-      },
-      "indexes": ["pageId"],
-      "history": "latest"
-    }
-  }
-}
+    )
+    .indexOnly(["pageId"])
+    .history("latest"),
+});
 ```
 
 ## Reading Markdown into the editor
@@ -167,5 +172,6 @@ Comments and presence carry their own `pageId`, so they can follow the page's pe
 having rules of their own: anyone who can read the page may comment and be seen. A comment is
 edited, resolved or removed by its author or by the page's editors, and only its owner moves a
 cursor. See the `songSheets`, `sheetComments`
-and `sheetPresence` policies in BandBook's
-[jazz.permissions.json](https://github.com/garden-co/jazz/blob/main/examples/band-book/apps/nextjs-betterauth/jazz.permissions.json).
+and `sheetPresence` policies in
+[BandBook](https://github.com/garden-co/jazz/tree/main/examples/band-book/apps/nextjs-betterauth)'s
+`schema.ts`.
