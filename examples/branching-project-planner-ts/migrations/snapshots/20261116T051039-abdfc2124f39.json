@@ -1,0 +1,93 @@
+{
+  "scenarios": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "base_scenario_id",
+        "nullable": true,
+        "references": "scenarios"
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "base_snapshot_ref",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Enum",
+          "variants": [
+            "open",
+            "approved",
+            "archived"
+          ]
+        },
+        "name": "status",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "base_scenario": {
+        "kind": "forward",
+        "table": "scenarios",
+        "column": "base_scenario_id"
+      },
+      "scenariosViaBase_scenario": {
+        "kind": "reverse",
+        "table": "scenarios",
+        "relation": "base_scenario"
+      },
+      "tasksViaScenario": {
+        "kind": "reverse",
+        "table": "tasks",
+        "relation": "scenario"
+      }
+    }
+  },
+  "tasks": {
+    "branchBy": [
+      "scenario_id"
+    ],
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "scenario_id",
+        "nullable": false,
+        "references": "scenarios"
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "title",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Integer"
+        },
+        "name": "estimate",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "scenario": {
+        "kind": "forward",
+        "table": "scenarios",
+        "column": "scenario_id"
+      }
+    }
+  }
+}

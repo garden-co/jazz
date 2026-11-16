@@ -1,5 +1,5 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Output 11407cf0cbbe42b4. Formatters may reformat this file, except `app` below.
+// Bindings format 1. Output cbbe2d34b5373440. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type JsonValue } from "jazz-tools";
 
 export type CartShippingMethod = "standard" | "express";
@@ -8,31 +8,8 @@ export type OrderStatus = "placed" | "paid" | "payment_failed" | "shipped";
 export type OrderShippingMethod = "standard" | "express";
 export type PaymentProvider = "sandbox" | "stripe";
 export type PaymentStatus = "requires_payment" | "succeeded" | "failed";
-export type ProductHue =
-  | "gray"
-  | "blue"
-  | "cyan"
-  | "green"
-  | "orange"
-  | "pink"
-  | "purple"
-  | "red"
-  | "teal"
-  | "yellow";
-export type ProductArt =
-  | "guitar"
-  | "bass"
-  | "keys"
-  | "synth"
-  | "drum"
-  | "cymbal"
-  | "mic"
-  | "headphones"
-  | "amp"
-  | "pedal"
-  | "cable"
-  | "strings"
-  | "picks";
+export type ProductHue = "gray" | "blue" | "cyan" | "green" | "orange" | "pink" | "purple" | "red" | "teal" | "yellow";
+export type ProductArt = "guitar" | "bass" | "keys" | "synth" | "drum" | "cymbal" | "mic" | "headphones" | "amp" | "pedal" | "cable" | "strings" | "picks";
 
 export type BetterAuthAccount = {
   readonly id: string;
@@ -545,7 +522,7 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:936857e13f8849f856f85cf0934fe639fc5d84134fa8b9512df749fe171fec8b",
+  "source": "sha256:6d9b73dcca39e5137e3a563e20cf6b3eaf33b85cef584055b5562fb859911ae8",
   "schema": {
     "current": "f7318f0be5fcbf2065324e4f545c96323edfa4e007186fb89eabff519ca370d8",
     "schemas": [
