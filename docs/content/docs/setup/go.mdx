@@ -21,9 +21,6 @@ go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65
 go build ./...
 ```
 
-The module ships Jazz's core for Linux (x86-64 and ARM64) and macOS, so building needs neither a C
-compiler nor Rust, and `CGO_ENABLED=0` works.
-
 ## Generate the bindings
 
 With a `go.mod` that requires `jazz-go/v2` beside `jazz.app.json`, `jazz-tools generate` writes the
@@ -96,5 +93,4 @@ command-line app.
 - running your main backend in Go (publishing permissions, serving `/jazz`): run it in TypeScript
   with `createJazz`;
 - connecting as a backend client with a machine credential (trusted or scoped, `forUser`): see
-  [Backend Client](/docs/setup/backend-client);
-- Windows: the module ships no core for it yet.
+  [Backend Client](/docs/setup/backend-client).
