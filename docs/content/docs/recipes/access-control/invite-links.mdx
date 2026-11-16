@@ -37,12 +37,24 @@ you can audit or revoke individual memberships later.
       }
     },
     "chatMembers": {
-      "columns": { "chatId": "uuid", "user_id": "uuid", "inviteId": "string?" },
-      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+      "columns": {
+        "chatId": "uuid",
+        "user_id": "uuid",
+        "inviteId": "string?"
+      },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" }
+      }
     },
     "chatInvites": {
-      "columns": { "chatId": "uuid", "code": "string", "singleUse": "boolean" },
-      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+      "columns": {
+        "chatId": "uuid",
+        "code": "string",
+        "singleUse": "boolean"
+      },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" }
+      }
     }
   }
 }

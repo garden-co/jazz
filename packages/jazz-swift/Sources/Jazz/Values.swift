@@ -110,9 +110,9 @@ enum Coding {
         String(decoding: try encoder(userInfo).encode(value), as: UTF8.self)
     }
 
-    static func value<T: Encodable>(_ value: T) throws -> JSONValue {
+    static func value<T: Encodable>(_ value: T, _ userInfo: [CodingUserInfoKey: any Sendable] = [:]) throws -> JSONValue {
         // Through an array, so a top-level `nil` or scalar encodes everywhere.
-        let data = try encoder().encode([value])
+        let data = try encoder(userInfo).encode([value])
         let array = try decoder().decode([JSONValue].self, from: data)
         return array[0]
     }
