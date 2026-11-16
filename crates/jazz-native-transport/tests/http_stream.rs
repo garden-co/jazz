@@ -493,3 +493,40 @@ async fn an_upgrade_refused_with_401_is_an_auth_rejection() {
     );
     assert_eq!(served.backend.opened.load(Ordering::SeqCst), 0);
 }
+
+/// A client that shuts down on its own runtime (as jazz-app's does) ends its
+/// stream session before the runtime goes: `settle` waits for the DELETE,
+/// which would otherwise die with the runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settle_ends_the_session_before_the_runtime_goes() {
+    let app_id = AppId::from_name("http-stream-settle");
+    let served = serve(app_id, schema(), Upgrades::StreamInstead).await;
+    let url = served.url.clone();
+    let client_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async move {
+            let connector = Arc::new(HttpStreamFallbackConnector::new());
+            let client =
+                JazzClient::connect_with_native_transport(context(app_id, url), connector.clone())
+                    .await
+                    .expect("connects over the stream");
+            insert_and_read_back(&client, "then shut down").await;
+            client.shutdown().await.expect("shutdown");
+            connector.settle(Duration::from_secs(5)).await;
+        });
+        // The runtime, and every task still on it, goes here.
+    });
+    tokio::task::spawn_blocking(move || client_thread.join().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(served.backend.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        served.backend.deleted.load(Ordering::SeqCst),
+        1,
+        "the session was DELETEd before the client's runtime went"
+    );
+}
