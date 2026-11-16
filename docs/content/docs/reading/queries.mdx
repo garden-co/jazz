@@ -29,13 +29,13 @@ A one-shot query runs once against the database without subscribing to changes.
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-oneshot-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-oneshot-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-oneshot-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-oneshot-kotlin
     </include>
 
   </Tab>
@@ -50,7 +50,7 @@ A one-shot query runs once against the database without subscribing to changes.
 To read a single row, use `db.one`. It runs the query with a limit of one and resolves to the
 first matching row, or `null` if no row matches or you aren't allowed to read it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-one-ts
@@ -59,6 +59,12 @@ first matching row, or `null` if no row matches or you aren't allowed to read it
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-one-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-one-swift
     </include>
 
   </Tab>
@@ -93,13 +99,13 @@ Subscribe to a query to receive updates whenever the underlying data changes.
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-subscriptions-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-subscriptions-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-subscriptions-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-subscriptions-kotlin
     </include>
 
   </Tab>
@@ -167,12 +173,12 @@ These are the only read tiers. Write waits use the separate durability tiers `"l
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-durability-tier-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-durability-tier-swift
     </include>
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-durability-tier-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-durability-tier-kotlin
     </include>
 
   </Tab>

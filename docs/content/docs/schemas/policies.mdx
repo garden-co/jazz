@@ -1006,7 +1006,7 @@ These results are advice, not permission enforcement. A result can become stale,
 means Jazz could not give a definite answer. The authority still makes the final decision when the
 read or write reaches it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#dry-run-permissions-ts
@@ -1023,9 +1023,15 @@ read or write reaches it.
     </include>
 
   </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#dry-run-permissions-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-permission-advice-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-permission-advice-kotlin
     </include>
 
   </Tab>
