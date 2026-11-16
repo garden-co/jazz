@@ -548,8 +548,19 @@ fn kotlin_is_a_cli_language() {
 
 #[test]
 fn the_stage_plan_kotlin_cli_commits_its_bindings_byte_for_byte() {
-    let dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stage-plan/apps/kotlin-cli");
+    kotlin_example_commits_its_bindings_byte_for_byte("examples/stage-plan/apps/kotlin-cli");
+}
+
+#[test]
+fn the_docs_todo_kotlin_client_commits_its_bindings_byte_for_byte() {
+    kotlin_example_commits_its_bindings_byte_for_byte("examples/docs/todo-client-kotlin");
+}
+
+/// A Kotlin example's committed `src/main/kotlin/JazzApp.kt` is what the generator writes.
+fn kotlin_example_commits_its_bindings_byte_for_byte(example: &str) {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(example);
     let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
     let generated = generate(Lang::Kotlin, &app_json).unwrap();
     let path = dir.join(jazz_codegen::kotlin::FILE);

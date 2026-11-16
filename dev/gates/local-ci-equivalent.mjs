@@ -395,8 +395,8 @@ export const ciPartitions = Object.freeze({
       env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
     }),
   ]),
-  // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI end to end
-  // against `jazz-tools server`, on the JVM.
+  // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI and the docs todo
+  // app's Kotlin snippets end to end against `jazz-tools server`, on the JVM.
   kotlin: Object.freeze([
     command("Kotlin runtime and example", "bash", ["dev/scripts/test-kotlin.sh"]),
   ]),
