@@ -7,6 +7,15 @@ description = "Typed, Send + Clone Rust handle for a Jazz app opened from its ja
 [features]
 # `Endpoint::router`: the app's Jazz endpoint as an Axum router.
 axum = ["dep:axum"]
+# A stand-in for an app's Jazz endpoint, for testing bindings' end users:
+# see src/bin/jazz-app-test-relay.rs.
+test-relay = [
+  "dep:futures",
+  "tokio/net",
+  "tokio/io-util",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+]
 
 [dependencies]
 axum = { version = "0.8.9", optional = true, default-features = false, features = [
@@ -27,8 +36,21 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = [
   "connect",
+  "handshake",
   "rustls-tls-native-roots",
 ] }
+# Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
+futures = { version = "0.3", optional = true }
+
+
+[[bin]]
+name = "jazz-app-test-relay"
+path = "src/bin/jazz-app-test-relay.rs"
+required-features = ["test-relay"]
+
+[[test]]
+name = "test_relay_bin"
+required-features = ["test-relay"]
 
 [dev-dependencies]
 hmac = "0.12"
