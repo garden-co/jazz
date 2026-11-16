@@ -13,11 +13,6 @@
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
 //! ```
 //!
-//! An end user's client ([`Config::user`]) signs in with a device account
-//! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
-//! [`Jazz::session`] follows it; [`Session::link`] carries a device account
-//! over to the user's provider sign-in.
-//!
 //! Related rows come with a query's rows through `include` (a tuple per
 //! row: `(Todo, Option<Project>)`), and `select` reads only some columns
 //! (a [`Partial`] row); see [`Query::include`] and [`Query::select`].
@@ -27,12 +22,19 @@
 //! `history()` reads its rows' accepted versions ([`Version`]) and
 //! [`Query::include_deleted`] reads deleted rows too.
 //!
-//! A backend serves its users' clients with an [`Endpoint`]: the app's
-//! `/jazz` handler, as TS `createJazz` serves it, with the app's own
-//! sign-in deciding who each request's user is.
+//! An end user's client ([`Config::user`]) signs in with a device account
+//! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
+//! [`Jazz::session`] follows it; [`Session::link`] carries a device account
+//! over to the user's provider sign-in.
 //!
-//! Not supported yet: subscribing to history, and partial
-//! reads of large values.
+//! Unstable, behind the non-default `unstable-endpoint` feature and not
+//! part of a release yet: `Endpoint`, the app's `/jazz` handler served
+//! natively. Run an app's main backend with TS `createJazz`.
+//!
+//! Not supported yet: subscribing to history, and partial reads of large
+//! values. A bearer session is renewed by reconnecting with a fresh bearer,
+//! as TypeScript's bearer clients do (in-place renewal is for cookie
+//! sessions).
 
 mod advice;
 mod app;
@@ -40,6 +42,7 @@ mod auth;
 mod backend;
 mod config;
 mod edit;
+#[cfg(feature = "unstable-endpoint")]
 pub mod endpoint;
 mod error;
 mod handle;
@@ -62,6 +65,7 @@ pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
+#[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::Jazz;
