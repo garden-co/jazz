@@ -466,27 +466,28 @@ class Printer {
         return undefined;
       return this.outerColumn(c.right, inner);
     };
-    // `{ col: old.col }`: the old row is the same table's row with this id.
-    if (
-      ctx.allowOld &&
-      ast.table === ctx.table &&
-      ast.hops.length === 0 &&
-      ast.conditions.length === 2 &&
-      thisCol(ast.conditions[0], "id") === "id"
-    ) {
-      const c = ast.conditions[1]!;
-      if (
+    // `{ a: old.a, b: old.b }`: the old row is the same table's row with this id,
+    // each condition comparing one of its columns with the new row's.
+    if (ctx.allowOld && ast.table === ctx.table && ast.hops.length === 0) {
+      const idIndex = ast.conditions.findIndex((c) => thisCol(c, "id") === "id");
+      const rest = ast.conditions.filter((_, i) => i !== idIndex);
+      const olds = rest.map((c) =>
         c.kind === "cmp" &&
         c.left.kind === "column" &&
         this.isInnerColumn(c.left, inner) &&
         this.outerColumn(c.right, inner) === c.left.name
-      ) {
+          ? { column: c.left.name, op: FLIP[c.op] }
+          : undefined,
+      );
+      const columns = new Set(olds.map((o) => o?.column));
+      if (idIndex >= 0 && rest.length > 0 && olds.every((o) => o) && columns.size === olds.length) {
         ctx.usesOld = true;
-        const value = member("old", c.left.name);
-        const op = FLIP[c.op];
-        return objectText([
-          [conditionKey(c.left.name), op === "=" ? value : this.fn(OP_FN[op], value)],
-        ]);
+        return objectText(
+          olds.map((o) => {
+            const value = member("old", o!.column);
+            return [conditionKey(o!.column), o!.op === "=" ? value : this.fn(OP_FN[o!.op as Exclude<CmpOp, "=">], value)];
+          }),
+        );
       }
     }
     // `row.rel.where({…})` along a forward relation.
